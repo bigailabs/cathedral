@@ -524,6 +524,19 @@ mod tests {
             .await
             .unwrap();
 
+        sqlx::query(
+            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
+             VALUES (?, ?, ?, ?, ?, datetime('now'))",
+        )
+        .bind("gpu-hw-profile-1")
+        .bind(0i64)
+        .bind("exec1")
+        .bind("miner_1")
+        .bind("NVIDIA A100")
+        .execute(&persistence.pool)
+        .await
+        .unwrap();
+
         let nodes = persistence.get_miner_nodes("miner_1").await.unwrap();
         assert_eq!(nodes.len(), 1);
 

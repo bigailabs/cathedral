@@ -9,12 +9,8 @@ pub struct BiddingConfig {
     pub min_bid_floor_fraction: f64,
     /// RPC timestamp tolerance window in seconds (replay protection)
     pub rpc_timestamp_tolerance_secs: u64,
-    /// Max age for node health checks when accepting bids
-    pub bid_node_freshness_secs: u64,
     /// Health check interval in seconds (returned to miners in RegisterBidResponse)
     pub health_check_interval_secs: u64,
-    /// Number of missed health checks before node is filtered from bid selection
-    pub health_check_miss_threshold: u32,
 }
 
 impl Default for BiddingConfig {
@@ -23,19 +19,12 @@ impl Default for BiddingConfig {
             price_cache_ttl_secs: 60,
             min_bid_floor_fraction: 0.1,
             rpc_timestamp_tolerance_secs: 300,
-            bid_node_freshness_secs: 300,
             health_check_interval_secs: 60,
-            health_check_miss_threshold: 3,
         }
     }
 }
 
 impl BiddingConfig {
-    /// Get the maximum age in seconds for a health check before a node is filtered from bid selection
-    pub fn health_check_ttl_secs(&self) -> u64 {
-        self.health_check_interval_secs * self.health_check_miss_threshold as u64
-    }
-
     pub fn validate(&self) -> Result<()> {
         if !self.min_bid_floor_fraction.is_finite()
             || !(0.0..=1.0).contains(&self.min_bid_floor_fraction)
@@ -52,16 +41,8 @@ impl BiddingConfig {
                 "rpc_timestamp_tolerance_secs must be greater than 0"
             ));
         }
-        if self.bid_node_freshness_secs == 0 {
-            return Err(anyhow!("bid_node_freshness_secs must be greater than 0"));
-        }
         if self.health_check_interval_secs == 0 {
             return Err(anyhow!("health_check_interval_secs must be greater than 0"));
-        }
-        if self.health_check_miss_threshold == 0 {
-            return Err(anyhow!(
-                "health_check_miss_threshold must be greater than 0"
-            ));
         }
         Ok(())
     }
@@ -97,7 +78,6 @@ mod tests {
         let config = BiddingConfig {
             price_cache_ttl_secs: 0,
             rpc_timestamp_tolerance_secs: 0,
-            bid_node_freshness_secs: 0,
             ..BiddingConfig::default()
         };
         assert!(config.validate().is_err());
@@ -110,24 +90,5 @@ mod tests {
             ..BiddingConfig::default()
         };
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_health_check_miss_threshold_zero_invalid() {
-        let config = BiddingConfig {
-            health_check_miss_threshold: 0,
-            ..BiddingConfig::default()
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_health_check_ttl_secs() {
-        let config = BiddingConfig {
-            health_check_interval_secs: 60,
-            health_check_miss_threshold: 3,
-            ..BiddingConfig::default()
-        };
-        assert_eq!(config.health_check_ttl_secs(), 180);
     }
 }

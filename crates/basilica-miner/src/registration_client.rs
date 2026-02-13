@@ -154,11 +154,6 @@ impl RegistrationClient {
         grpc_endpoint: &str,
         node_registrations: Vec<NodeRegistration>,
     ) -> Result<RegistrationState> {
-        if node_registrations.is_empty() {
-            warn!("No nodes to register");
-            return Ok(RegistrationState::default());
-        }
-
         let mut client = self.connect(grpc_endpoint).await?;
 
         // Build and sign request
@@ -179,11 +174,20 @@ impl RegistrationClient {
             node_count = node_count,
             "Registering nodes with validator"
         );
+        if node_count == 0 {
+            warn!("Sending zero-node RegisterBid to deactivate all existing bids");
+        }
 
         let response = client
             .register_bid(request)
             .await
-            .context("RegisterBid RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "RegisterBid RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {
@@ -291,7 +295,13 @@ impl RegistrationClient {
         let response = client
             .health_check(request)
             .await
-            .context("HealthCheck RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "HealthCheck RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {
@@ -338,7 +348,13 @@ impl RegistrationClient {
         let response = client
             .update_bid(request)
             .await
-            .context("UpdateBid RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "UpdateBid RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {
@@ -381,7 +397,13 @@ impl RegistrationClient {
         let response = client
             .remove_bid(request)
             .await
-            .context("RemoveBid RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "RemoveBid RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {

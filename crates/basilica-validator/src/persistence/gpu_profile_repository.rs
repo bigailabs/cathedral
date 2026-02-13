@@ -463,7 +463,7 @@ impl GpuProfileRepository {
         let stale_threshold = Utc::now() - chrono::Duration::minutes(30);
 
         info!(
-            "Cleaning up nodes not validated in the last 30 minutes. since: {}",
+            "Cleaning up nodes with stale validator node checks (>30 minutes). since: {}",
             stale_threshold
         );
 
@@ -473,7 +473,8 @@ impl GpuProfileRepository {
             SELECT id, node_id, miner_id
             FROM miner_nodes
             WHERE status IN ('online', 'verified')
-            AND (last_health_check IS NULL OR datetime(last_health_check) < datetime(?))
+            AND active_rental_id IS NULL
+            AND (last_node_check IS NULL OR datetime(last_node_check) < datetime(?))
         "#;
 
         let stale_nodes = sqlx::query(stale_nodes_query)

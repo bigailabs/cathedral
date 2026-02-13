@@ -101,7 +101,17 @@ impl BidManager {
         let nodes = self.node_manager.list_nodes().await?;
 
         if nodes.is_empty() {
-            warn!("No nodes configured - waiting for shutdown signal");
+            warn!("No nodes configured - publishing zero-node RegisterBid to deactivate existing bids");
+            if let Err(e) = self
+                .registration_client
+                .register_nodes_with_registrations(&grpc_endpoint, vec![])
+                .await
+            {
+                warn!(
+                    error = %e,
+                    "Failed to publish zero-node RegisterBid; stale bids may remain active"
+                );
+            }
             // Still wait for shutdown so we don't cause crash-loop
             loop {
                 if shutdown_rx.changed().await.is_err() || *shutdown_rx.borrow() {
@@ -119,7 +129,6 @@ impl BidManager {
             self.static_prices().len()
         );
 
-        // 1. Register nodes with bid manager prices
         let node_registrations = self.build_node_registrations(&nodes);
         let state = self
             .registration_client

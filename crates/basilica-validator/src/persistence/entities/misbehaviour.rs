@@ -14,6 +14,8 @@ pub enum MisbehaviourType {
     InterruptedRental,
     /// Provided malicious or incorrect results
     MaliciousResult,
+    /// Full validation GPU facts don't match miner-declared bid metadata
+    GpuDeclarationMismatch,
 }
 
 impl MisbehaviourType {
@@ -24,6 +26,7 @@ impl MisbehaviourType {
             Self::HaltedRental => "halted_rental",
             Self::InterruptedRental => "interrupted_rental",
             Self::MaliciousResult => "malicious_result",
+            Self::GpuDeclarationMismatch => "gpu_declaration_mismatch",
         }
     }
 }
@@ -40,6 +43,7 @@ impl FromStr for MisbehaviourType {
             "halted_rental" => Ok(Self::HaltedRental),
             "interrupted_rental" => Ok(Self::InterruptedRental),
             "malicious_result" => Ok(Self::MaliciousResult),
+            "gpu_declaration_mismatch" => Ok(Self::GpuDeclarationMismatch),
             _ => Err(format!("Unknown misbehaviour type: {}", s)),
         }
     }
@@ -60,6 +64,7 @@ mod tests {
         let types = vec![
             MisbehaviourType::DeploymentFailed,
             MisbehaviourType::InterruptedRental,
+            MisbehaviourType::GpuDeclarationMismatch,
         ];
         for t in types {
             let as_str = t.as_str();

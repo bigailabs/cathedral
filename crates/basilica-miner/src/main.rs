@@ -230,7 +230,7 @@ impl MinerState {
                 .run(grpc_endpoint, bid_manager_shutdown_rx)
                 .await
             {
-                error!("BidManager error: {}", e);
+                error!("BidManager error: {:#}", e);
             }
         });
 

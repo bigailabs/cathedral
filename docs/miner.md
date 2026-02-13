@@ -386,8 +386,9 @@ validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 1. **Runs gRPC registration server** listening for `RegisterBid` from miners
 2. **Receives bids** — verifies signature, checks bid floor, checks collateral, upserts nodes into DB
 3. **Returns SSH public key** so the miner can deploy it to nodes
-4. **Tracks health** — expects periodic `HealthCheck` RPCs from the miner (default every 60s)
-5. **Connects directly to nodes via SSH** for validation and rental operations
+4. **Tracks miner heartbeat** — expects periodic `HealthCheck` RPCs from the miner process (default every 60s)
+5. **Tracks node liveness separately** — uses validator SSH verification (`last_node_check`) for node online/offline decisions and stale cleanup
+6. **Connects directly to nodes via SSH** for validation and rental operations
 
 ### Bidding & Registration Protocol
 
@@ -429,6 +430,8 @@ message RegisterBidResponse {
 
 **Validator processing**: Verifies signature → checks timestamp freshness → validates node fields → enforces bid floor → checks collateral → upserts nodes in DB → deactivates any previously-registered nodes not in this request.
 
+**Availability note**: A successful `RegisterBid` does not make a node immediately visible in `GET /nodes` (and therefore `basilica ls`). The node is shown only after at least one successful full validation has populated `gpu_uuid_assignments` for that node. If full validation later fails and assignments are cleaned up, the node is hidden again until a subsequent successful full validation.
+
 #### 2. UpdateBid
 
 Update the hourly rate for a specific node. Can be called at any time after registration.
@@ -468,7 +471,7 @@ message RemoveBidResponse {
 
 #### 4. HealthCheck
 
-Periodic heartbeat to keep registrations active. The interval is returned by `RegisterBidResponse.health_check_interval_secs` (default 60s). If health checks stop arriving, the validator will eventually filter the miner's nodes from bid selection.
+Periodic miner-process heartbeat. The interval is returned by `RegisterBidResponse.health_check_interval_secs` (default 60s). Node bid eligibility/staleness is based on validator SSH verification (`last_node_check`), not heartbeat freshness.
 
 ```protobuf
 rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
@@ -1252,10 +1255,10 @@ This ensures only the **current** validator has SSH access — previous validato
 Every {health_check_interval_secs} seconds (default 60):
   → Build HealthCheckRequest with miner_hotkey, timestamp, signature
   → Send HealthCheck RPC to validator
-  → Validator updates last-seen timestamps for all nodes
+  → Validator updates miner heartbeat timestamps for the miner's nodes
 ```
 
-If health checks stop, the validator filters the miner's nodes from bid selection after `health_check_miss_threshold` (default 3) missed intervals.
+If health checks stop, the miner heartbeat becomes stale, but node online/offline and stale cleanup still depend on validator verification timestamps (`last_node_check`).
 
 #### 6. Validator Connects Directly via SSH
 
