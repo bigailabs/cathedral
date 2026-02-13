@@ -12,6 +12,10 @@ use tracing::{debug, info, warn};
 
 use crate::node_manager::{NodeManager, RegisteredNode};
 
+fn require_selected_validator(selected: Option<ValidatorInfo>) -> Result<ValidatorInfo> {
+    selected.ok_or_else(|| anyhow::anyhow!("No eligible validators found during discovery"))
+}
+
 /// Information about a validator
 #[derive(Debug, Clone)]
 pub struct ValidatorInfo {
@@ -109,9 +113,12 @@ impl ValidatorDiscovery {
         // Get available nodes
         let nodes = self.node_manager.list_nodes().await?;
         info!("Found {} available nodes", nodes.len());
+        let has_nodes = !nodes.is_empty();
 
-        if nodes.is_empty() {
-            anyhow::bail!("No nodes available for assignment");
+        if !has_nodes {
+            warn!(
+                "No nodes available for assignment; continuing discovery to enable zero-node bid deactivation"
+            );
         }
 
         // Run assignment strategy to select the validator (all nodes go to selected validator)
@@ -120,13 +127,19 @@ impl ValidatorDiscovery {
             .select_assignment(validators, nodes)
             .await?;
 
-        let validator = selected_validator
-            .ok_or_else(|| anyhow::anyhow!("No eligible validators found during discovery"))?;
+        let validator = require_selected_validator(selected_validator)?;
 
-        info!(
-            "Assigning all nodes to validator {} (uid: {})",
-            validator.hotkey, validator.uid
-        );
+        if !has_nodes {
+            info!(
+                "Selected validator {} (uid: {}) for zero-node deactivation flow",
+                validator.hotkey, validator.uid
+            );
+        } else {
+            info!(
+                "Assigning all nodes to validator {} (uid: {})",
+                validator.hotkey, validator.uid
+            );
+        }
 
         // Update assignment in NodeManager (single source of truth)
         self.node_manager
@@ -236,5 +249,71 @@ impl AssignmentStrategy for HighestStakeAssignment {
 
         // Take the highest staked validator
         Ok(validators.into_iter().next())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validator(uid: u16, hotkey: &str, stake: u64) -> ValidatorInfo {
+        ValidatorInfo {
+            uid,
+            hotkey: hotkey.to_string(),
+            coldkey: format!("coldkey-{hotkey}"),
+            stake,
+            axon_endpoint: Some("http://127.0.0.1:8080".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn highest_stake_selects_validator_with_empty_nodes() {
+        let strategy = HighestStakeAssignment;
+        let validators = vec![
+            validator(10, "validator-a", 100),
+            validator(11, "validator-b", 250),
+        ];
+
+        let selected = strategy
+            .select_assignment(validators, vec![])
+            .await
+            .expect("strategy selection should succeed");
+
+        let selected = require_selected_validator(selected).expect("validator should be selected");
+        assert_eq!(selected.hotkey, "validator-b");
+    }
+
+    #[tokio::test]
+    async fn no_validators_returns_error() {
+        let strategy = HighestStakeAssignment;
+        let selected = strategy
+            .select_assignment(vec![], vec![])
+            .await
+            .expect("strategy selection should succeed");
+
+        let err = require_selected_validator(selected)
+            .expect_err("selection should fail when no validators are available");
+        assert_eq!(
+            err.to_string(),
+            "No eligible validators found during discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_assignment_not_found_returns_error() {
+        let strategy = FixedAssignment::new("validator-z".to_string());
+        let validators = vec![validator(10, "validator-a", 100)];
+
+        let selected = strategy
+            .select_assignment(validators, vec![])
+            .await
+            .expect("strategy selection should succeed");
+
+        let err = require_selected_validator(selected)
+            .expect_err("selection should fail when fixed validator is not present");
+        assert_eq!(
+            err.to_string(),
+            "No eligible validators found during discovery"
+        );
     }
 }
