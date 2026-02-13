@@ -430,6 +430,8 @@ message RegisterBidResponse {
 
 **Validator processing**: Verifies signature → checks timestamp freshness → validates node fields → enforces bid floor → checks collateral → upserts nodes in DB → deactivates any previously-registered nodes not in this request.
 
+**Availability note**: A successful `RegisterBid` does not make a node immediately visible in `GET /nodes` (and therefore `basilica ls`). The node is shown only after at least one successful full validation has populated `gpu_uuid_assignments` for that node. If full validation later fails and assignments are cleaned up, the node is hidden again until a subsequent successful full validation.
+
 #### 2. UpdateBid
 
 Update the hourly rate for a specific node. Can be called at any time after registration.

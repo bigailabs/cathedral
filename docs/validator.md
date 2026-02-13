@@ -247,6 +247,8 @@ The validator employs a **two-tier verification strategy** that optimizes for bo
 - GPU profiles (list by category)
 - Verification results
 
+**Node discovery visibility contract**: `GET /nodes` only returns nodes that are bid-active, not rented, not offline, and have at least one row in `gpu_uuid_assignments`. Newly registered nodes are hidden until successful full validation stores GPU UUID assignments. Nodes are hidden again if full-validation failure cleanup removes those assignments.
+
 ---
 
 ## Prerequisites

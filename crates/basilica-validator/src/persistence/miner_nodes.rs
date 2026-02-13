@@ -640,6 +640,8 @@ impl SimplePersistence {
         min_gpu_count: Option<u32>,
         location: Option<basilica_common::LocationProfile>,
     ) -> Result<Vec<AvailableNodeData>, anyhow::Error> {
+        // A node is only rentable/visible once we have at least one validated GPU UUID assignment.
+        let effective_min_gpu_count = std::cmp::max(min_gpu_count.unwrap_or(0), 1);
         let mut query_builder = sqlx::QueryBuilder::new(
             "SELECT
                 me.node_id,
@@ -663,6 +665,7 @@ impl SimplePersistence {
             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
             LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
             WHERE me.active_rental_id IS NULL
+                AND me.bid_active = 1
                 AND (me.status IS NULL OR me.status != 'offline')",
         );
 
@@ -689,11 +692,9 @@ impl SimplePersistence {
 
         query_builder.push(" GROUP BY me.node_id");
 
-        if let Some(min_count) = min_gpu_count {
-            query_builder
-                .push(" HAVING COUNT(gua.gpu_uuid) >= ")
-                .push_bind(min_count);
-        }
+        query_builder
+            .push(" HAVING COUNT(DISTINCT gua.gpu_uuid) >= ")
+            .push_bind(effective_min_gpu_count);
 
         // TODO: Consider adding a functional index for LOWER(enp.country/region/city) if this query becomes hot.
         let rows = query_builder.build().fetch_all(self.pool()).await?;
@@ -1833,6 +1834,28 @@ mod tests {
         .expect("failed to insert node");
     }
 
+    async fn insert_gpu_assignment(
+        persistence: &SimplePersistence,
+        miner_id: &str,
+        node_id: &str,
+        gpu_uuid: &str,
+        gpu_index: i64,
+        gpu_name: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
+             VALUES (?, ?, ?, ?, ?, datetime('now'))",
+        )
+        .bind(gpu_uuid)
+        .bind(gpu_index)
+        .bind(node_id)
+        .bind(miner_id)
+        .bind(gpu_name)
+        .execute(persistence.pool())
+        .await
+        .expect("failed to insert gpu assignment");
+    }
+
     #[tokio::test]
     async fn migration_has_split_node_and_miner_health_columns() {
         let persistence = create_test_persistence().await;
@@ -2013,6 +2036,216 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].node_id, node_id);
+    }
+
+    #[tokio::test]
+    async fn get_available_nodes_requires_validated_gpu_assignments_and_bid_active() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+
+        insert_test_miner(&persistence, miner_id).await;
+
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_no_gpu_assignments",
+            "10.0.1.1",
+            "online",
+            1,
+            Some("2025-01-01 00:00:00"),
+            None,
+            None,
+            1000,
+        )
+        .await;
+
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_visible_single_gpu",
+            "10.0.1.2",
+            "online",
+            1,
+            Some("2025-01-01 00:00:00"),
+            None,
+            None,
+            1200,
+        )
+        .await;
+        insert_gpu_assignment(
+            &persistence,
+            miner_id,
+            "node_visible_single_gpu",
+            "gpu-visible-1",
+            0,
+            "NVIDIA A100",
+        )
+        .await;
+
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_bid_inactive",
+            "10.0.1.3",
+            "online",
+            0,
+            Some("2025-01-01 00:00:00"),
+            None,
+            None,
+            900,
+        )
+        .await;
+        insert_gpu_assignment(
+            &persistence,
+            miner_id,
+            "node_bid_inactive",
+            "gpu-inactive-1",
+            0,
+            "NVIDIA A100",
+        )
+        .await;
+
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_offline_with_gpu",
+            "10.0.1.4",
+            "offline",
+            1,
+            Some("2025-01-01 00:00:00"),
+            None,
+            None,
+            900,
+        )
+        .await;
+        insert_gpu_assignment(
+            &persistence,
+            miner_id,
+            "node_offline_with_gpu",
+            "gpu-offline-1",
+            0,
+            "NVIDIA A100",
+        )
+        .await;
+
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_visible_two_gpus",
+            "10.0.1.5",
+            "online",
+            1,
+            Some("2025-01-01 00:00:00"),
+            None,
+            None,
+            1800,
+        )
+        .await;
+        insert_gpu_assignment(
+            &persistence,
+            miner_id,
+            "node_visible_two_gpus",
+            "gpu-visible-2a",
+            0,
+            "NVIDIA H100",
+        )
+        .await;
+        insert_gpu_assignment(
+            &persistence,
+            miner_id,
+            "node_visible_two_gpus",
+            "gpu-visible-2b",
+            1,
+            "NVIDIA H100",
+        )
+        .await;
+
+        let ids_default: HashSet<String> = persistence
+            .get_available_nodes(None, None, None, None)
+            .await
+            .expect("query should succeed")
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(ids_default.contains("node_visible_single_gpu"));
+        assert!(ids_default.contains("node_visible_two_gpus"));
+        assert!(!ids_default.contains("node_no_gpu_assignments"));
+        assert!(!ids_default.contains("node_bid_inactive"));
+        assert!(!ids_default.contains("node_offline_with_gpu"));
+
+        let ids_min_zero: HashSet<String> = persistence
+            .get_available_nodes(None, None, Some(0), None)
+            .await
+            .expect("query should succeed")
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert_eq!(ids_min_zero, ids_default);
+
+        let ids_min_two: HashSet<String> = persistence
+            .get_available_nodes(None, None, Some(2), None)
+            .await
+            .expect("query should succeed")
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert_eq!(ids_min_two.len(), 1);
+        assert!(ids_min_two.contains("node_visible_two_gpus"));
+    }
+
+    #[tokio::test]
+    async fn get_available_nodes_hides_node_after_gpu_assignment_cleanup() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+        let node_id = "node_cleanup_target";
+
+        insert_test_miner(&persistence, miner_id).await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            node_id,
+            "10.0.2.1",
+            "online",
+            1,
+            Some("2025-01-01 00:00:00"),
+            None,
+            None,
+            1300,
+        )
+        .await;
+        insert_gpu_assignment(
+            &persistence,
+            miner_id,
+            node_id,
+            "gpu-cleanup-1",
+            0,
+            "NVIDIA A100",
+        )
+        .await;
+
+        let before: HashSet<String> = persistence
+            .get_available_nodes(None, None, None, None)
+            .await
+            .expect("query should succeed")
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(before.contains(node_id));
+
+        let cleaned = persistence
+            .cleanup_gpu_assignments(node_id, miner_id, None)
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(cleaned, 1);
+
+        let after: HashSet<String> = persistence
+            .get_available_nodes(None, None, None, None)
+            .await
+            .expect("query should succeed")
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(!after.contains(node_id));
     }
 
     #[tokio::test]
