@@ -30,7 +30,6 @@ use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
 use std::collections::HashMap;
-use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -120,40 +119,13 @@ impl RentalOffering {
 #[derive(Debug, Clone)]
 pub struct GpuTarget(pub GpuCategory);
 
-/// Error type for GpuTarget parsing
-#[derive(Debug, Clone)]
-pub struct GpuTargetParseError {
-    value: String,
-}
-
-impl fmt::Display for GpuTargetParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "'{}' is not a valid GPU type (h100, a100, b200, etc...)",
-            self.value
-        )
-    }
-}
-
-impl std::error::Error for GpuTargetParseError {}
-
 impl FromStr for GpuTarget {
-    type Err = GpuTargetParseError;
+    type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let gpu_category =
             GpuCategory::from_str(s).expect("GpuCategory::from_str returns Infallible");
-
-        match gpu_category {
-            GpuCategory::Other(_) => {
-                // Not a known GPU type
-                Err(GpuTargetParseError {
-                    value: s.to_string(),
-                })
-            }
-            _ => Ok(GpuTarget(gpu_category)),
-        }
+        Ok(GpuTarget(gpu_category))
     }
 }
 
