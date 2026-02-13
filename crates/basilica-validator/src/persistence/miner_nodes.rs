@@ -1454,6 +1454,9 @@ impl SimplePersistence {
     /// Upsert a node from RegisterBid request.
     /// Creates the node if it doesn't exist, updates it if it does.
     /// Returns true if the node was created (new), false if updated (existing).
+    /// NOTE: Existing rows must not update validator-controlled liveness fields
+    /// (`status`, `last_node_check`). Those are owned by validator SSH checks.
+    /// New rows start as `online` with `last_node_check = now` at registration time.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_registered_node(
         &self,
@@ -1537,9 +1540,7 @@ impl SimplePersistence {
                     gpu_count = ?,
                     hourly_rate_cents = ?,
                     gpu_category = ?,
-                    status = 'online',
-                    bid_active = 1,
-                    last_node_check = datetime('now')
+                    bid_active = 1
                 WHERE miner_id = ? AND node_id = ?
                 "#,
             )
@@ -2356,6 +2357,29 @@ mod tests {
         assert_eq!(metadata.gpu_category, "A100");
         assert_eq!(metadata.gpu_count, 4);
 
+        let initial_liveness_row = sqlx::query(
+            "SELECT status, last_node_check, last_miner_health_check
+             FROM miner_nodes
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(
+            basilica_common::node_identity::NodeId::new(host)
+                .expect("valid host")
+                .uuid
+                .to_string(),
+        )
+        .fetch_one(persistence.pool())
+        .await
+        .expect("failed to read node liveness fields");
+        let initial_status: String = initial_liveness_row.get("status");
+        let initial_last_node_check: Option<String> = initial_liveness_row.get("last_node_check");
+        let initial_last_miner_health_check: Option<String> =
+            initial_liveness_row.get("last_miner_health_check");
+        assert_eq!(initial_status, "online");
+        assert!(initial_last_node_check.is_some());
+        assert!(initial_last_miner_health_check.is_none());
+
         let updated = persistence
             .upsert_registered_node(miner_id, host, 22, "root", "H100", 8, 2200)
             .await
@@ -2375,6 +2399,132 @@ mod tests {
             .expect("metadata should exist");
         assert_eq!(metadata_after.gpu_category, "H100");
         assert_eq!(metadata_after.gpu_count, 8);
+
+        let updated_liveness_row = sqlx::query(
+            "SELECT status, last_node_check, last_miner_health_check
+             FROM miner_nodes
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(
+            basilica_common::node_identity::NodeId::new(host)
+                .expect("valid host")
+                .uuid
+                .to_string(),
+        )
+        .fetch_one(persistence.pool())
+        .await
+        .expect("failed to read node liveness fields");
+        let updated_status: String = updated_liveness_row.get("status");
+        let updated_last_node_check: Option<String> = updated_liveness_row.get("last_node_check");
+        let updated_last_miner_health_check: Option<String> =
+            updated_liveness_row.get("last_miner_health_check");
+        assert_eq!(updated_status, initial_status);
+        assert_eq!(updated_last_node_check, initial_last_node_check);
+        assert_eq!(
+            updated_last_miner_health_check,
+            initial_last_miner_health_check
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_registered_node_new_nodes_start_online_with_node_check_timestamp() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+        let host = "10.0.1.12";
+        let node_id = basilica_common::node_identity::NodeId::new(host)
+            .expect("valid host")
+            .uuid
+            .to_string();
+
+        insert_test_miner(&persistence, miner_id).await;
+
+        let created = persistence
+            .upsert_registered_node(miner_id, host, 22, "root", "A100", 4, 1200)
+            .await
+            .expect("upsert should succeed");
+        assert!(created);
+
+        let row = sqlx::query(
+            "SELECT status, bid_active, last_node_check, last_miner_health_check
+             FROM miner_nodes
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(&node_id)
+        .fetch_one(persistence.pool())
+        .await
+        .expect("failed to read inserted node");
+
+        let status: String = row.get("status");
+        let bid_active: i64 = row.get("bid_active");
+        let last_node_check: Option<String> = row.get("last_node_check");
+        let last_miner_health_check: Option<String> = row.get("last_miner_health_check");
+
+        assert_eq!(status, "online");
+        assert_eq!(bid_active, 1);
+        assert!(last_node_check.is_some());
+        assert!(last_miner_health_check.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_registered_node_preserves_existing_validator_liveness() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+        let host = "10.0.1.11";
+        let existing_node_id = basilica_common::node_identity::NodeId::new(host)
+            .expect("valid host")
+            .uuid
+            .to_string();
+        let existing_last_node_check = "2001-01-01 00:00:00";
+
+        insert_test_miner(&persistence, miner_id).await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            &existing_node_id,
+            host,
+            "offline",
+            0,
+            Some(existing_last_node_check),
+            Some("2001-01-01 00:05:00"),
+            None,
+            1000,
+        )
+        .await;
+
+        let updated = persistence
+            .upsert_registered_node(miner_id, host, 2222, "root", "H100", 8, 2200)
+            .await
+            .expect("upsert update should succeed");
+        assert!(!updated);
+
+        let row = sqlx::query(
+            "SELECT status, bid_active, last_node_check, ssh_endpoint, hourly_rate_cents, gpu_category, gpu_count
+             FROM miner_nodes
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(&existing_node_id)
+        .fetch_one(persistence.pool())
+        .await
+        .expect("failed to read updated node");
+
+        let status: String = row.get("status");
+        let bid_active: i64 = row.get("bid_active");
+        let last_node_check: Option<String> = row.get("last_node_check");
+        let ssh_endpoint: String = row.get("ssh_endpoint");
+        let hourly_rate_cents: i64 = row.get("hourly_rate_cents");
+        let gpu_category: Option<String> = row.get("gpu_category");
+        let gpu_count: i64 = row.get("gpu_count");
+
+        assert_eq!(status, "offline");
+        assert_eq!(bid_active, 1);
+        assert_eq!(last_node_check.as_deref(), Some(existing_last_node_check));
+        assert_eq!(ssh_endpoint, "root@10.0.1.11:2222");
+        assert_eq!(hourly_rate_cents, 2200);
+        assert_eq!(gpu_category.as_deref(), Some("H100"));
+        assert_eq!(gpu_count, 8);
     }
 
     #[tokio::test]
