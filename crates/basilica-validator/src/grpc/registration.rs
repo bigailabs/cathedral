@@ -445,37 +445,41 @@ impl MinerRegistration for RegistrationService {
             )));
         }
 
-        let api_client = self.api_client.as_ref().ok_or_else(|| {
-            Status::failed_precondition(
-                "baseline price client unavailable; cannot enforce UpdateBid floor",
-            )
-        })?;
+        // Fetch baseline prices for bid floor enforcement (best-effort)
+        let baseline_prices = if let Some(ref api_client) = self.api_client {
+            match api_client.get_baseline_prices().await {
+                Ok(prices) => Some(prices),
+                Err(e) => {
+                    warn!(
+                        miner_hotkey = %req.miner_hotkey,
+                        error = %e,
+                        "Failed to fetch baseline prices for UpdateBid floor check - allowing update"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-        let baseline_prices = api_client.get_baseline_prices().await.map_err(|e| {
-            Status::unavailable(format!(
-                "failed to fetch baseline prices for UpdateBid floor check: {e}"
-            ))
-        })?;
-
-        let category_key = gpu_cat.to_string();
-        let baseline_dollars = baseline_prices.get(&category_key).copied().ok_or_else(|| {
-            Status::failed_precondition(format!(
-                "no baseline price available for category '{}'; cannot enforce UpdateBid floor",
-                category_key
-            ))
-        })?;
-
-        let floor_cents =
-            (baseline_dollars * 100.0 * self.bidding_config.min_bid_floor_fraction).round() as u32;
-        if floor_cents > 0 && req.hourly_rate_cents < floor_cents {
-            return Err(Status::invalid_argument(format!(
-                "hourly_rate_cents {} is below minimum floor {} ({:.0}% of baseline ${:.2}/hr) for {}",
-                req.hourly_rate_cents,
-                floor_cents,
-                self.bidding_config.min_bid_floor_fraction * 100.0,
-                baseline_dollars,
-                category_key,
-            )));
+        // Enforce bid floor: bid must be >= min_bid_floor_fraction * baseline price
+        if let Some(ref prices) = baseline_prices {
+            let category_key = gpu_cat.to_string();
+            if let Some(&baseline_dollars) = prices.get(&category_key) {
+                let floor_cents =
+                    (baseline_dollars * 100.0 * self.bidding_config.min_bid_floor_fraction).round()
+                        as u32;
+                if floor_cents > 0 && req.hourly_rate_cents < floor_cents {
+                    return Err(Status::invalid_argument(format!(
+                        "hourly_rate_cents {} is below minimum floor {} ({:.0}% of baseline ${:.2}/hr) for {}",
+                        req.hourly_rate_cents,
+                        floor_cents,
+                        self.bidding_config.min_bid_floor_fraction * 100.0,
+                        baseline_dollars,
+                        category_key,
+                    )));
+                }
+            }
         }
 
         // Update node price
