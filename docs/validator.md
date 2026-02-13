@@ -575,7 +575,7 @@ fn determine_strategy(node: &Node, last_validation: Option<Timestamp>) -> Strate
    ```sql
    UPDATE miner_nodes
    SET status = 'online',
-       last_node_check = NOW()
+       last_node_check = datetime('now')
    WHERE node_id = ? AND miner_id = ?;
    ```
 
@@ -2066,7 +2066,7 @@ ssh -i /tmp/validator_ssh_keys/ephemeral_550e8400.pem \
 ```sql
 UPDATE miner_nodes
 SET status = 'online',
-    last_node_check = NOW()
+    last_node_check = datetime('now')
 WHERE node_id = '550e8400...' AND miner_id = 'miner_5';
 ```
 
