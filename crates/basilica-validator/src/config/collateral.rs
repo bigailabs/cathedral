@@ -224,6 +224,7 @@ fn default_minimum_usd_per_gpu() -> HashMap<String, Decimal> {
     let mut map = HashMap::new();
     map.insert("H100".to_string(), Decimal::from(50));
     map.insert("A100".to_string(), Decimal::from(25));
+    map.insert("H200".to_string(), Decimal::from(75));
     map.insert("B200".to_string(), Decimal::from(75));
     map.insert("DEFAULT".to_string(), Decimal::from(10));
     map

@@ -113,6 +113,8 @@ pub enum GpuCategory {
     A100,
     /// NVIDIA H100 - Flagship AI training & inference
     H100,
+    /// NVIDIA H200 - High-memory AI training & inference
+    H200,
     /// NVIDIA B200 - Next-gen AI acceleration
     B200,
     /// Other GPU models - General GPU compute
@@ -131,10 +133,15 @@ impl GpuCategory {
     /// use basilica_common::types::GpuCategory;
     ///
     /// let supported = GpuCategory::supported_models();
-    /// assert_eq!(supported, vec!["A100", "H100", "B200"]);
+    /// assert_eq!(supported, vec!["A100", "H100", "H200", "B200"]);
     /// ```
     pub fn supported_models() -> Vec<String> {
-        vec!["A100".to_string(), "H100".to_string(), "B200".to_string()]
+        vec![
+            "A100".to_string(),
+            "H100".to_string(),
+            "H200".to_string(),
+            "B200".to_string(),
+        ]
     }
 
     /// Get the use case description for this GPU category
@@ -142,6 +149,7 @@ impl GpuCategory {
         match self {
             GpuCategory::A100 => "High-end training & inference",
             GpuCategory::H100 => "Flagship AI training & inference",
+            GpuCategory::H200 => "High-memory AI training & inference",
             GpuCategory::B200 => "Next-gen AI acceleration",
             GpuCategory::Other(_) => "General GPU compute",
         }
@@ -152,6 +160,7 @@ impl GpuCategory {
         match self {
             GpuCategory::A100 => "A100".to_string(),
             GpuCategory::H100 => "H100".to_string(),
+            GpuCategory::H200 => "H200".to_string(),
             GpuCategory::B200 => "B200".to_string(),
             GpuCategory::Other(_) => "OTHER".to_string(),
         }
@@ -183,6 +192,8 @@ impl FromStr for GpuCategory {
             Ok(GpuCategory::A100)
         } else if cleaned.contains("H100") {
             Ok(GpuCategory::H100)
+        } else if cleaned.contains("H200") {
+            Ok(GpuCategory::H200)
         } else if cleaned.contains("B200") {
             Ok(GpuCategory::B200)
         } else {

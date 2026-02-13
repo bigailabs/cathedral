@@ -42,6 +42,21 @@ mod tests {
             "H100"
         );
 
+        // Test H200 variants
+        assert_eq!(
+            GpuCategory::from_str("NVIDIA H200").unwrap().to_string(),
+            "H200"
+        );
+        assert_eq!(
+            GpuCategory::from_str("H200 SXM").unwrap().to_string(),
+            "H200"
+        );
+        assert_eq!(GpuCategory::from_str("h200").unwrap().to_string(), "H200");
+        assert_eq!(
+            GpuCategory::from_str("HGX H200").unwrap().to_string(),
+            "H200"
+        );
+
         // Test B200 variants
         assert_eq!(
             GpuCategory::from_str("HGX B200").unwrap().to_string(),
@@ -135,6 +150,7 @@ mod tests {
         // Test all known categories
         assert_eq!(GpuCategorizer::model_to_category("A100"), GpuCategory::A100);
         assert_eq!(GpuCategorizer::model_to_category("H100"), GpuCategory::H100);
+        assert_eq!(GpuCategorizer::model_to_category("H200"), GpuCategory::H200);
         assert_eq!(GpuCategorizer::model_to_category("B200"), GpuCategory::B200);
         // These should return Other now
         match GpuCategorizer::model_to_category("RTX4090") {
@@ -145,6 +161,7 @@ mod tests {
         // Test case sensitivity
         assert_eq!(GpuCategorizer::model_to_category("a100"), GpuCategory::A100);
         assert_eq!(GpuCategorizer::model_to_category("h100"), GpuCategory::H100);
+        assert_eq!(GpuCategorizer::model_to_category("h200"), GpuCategory::H200);
         assert_eq!(GpuCategorizer::model_to_category("b200"), GpuCategory::B200);
 
         // Test unknown models
@@ -417,13 +434,16 @@ mod tests {
         // Test enum variants
         let a100 = GpuCategory::A100;
         let h100 = GpuCategory::H100;
+        let h200 = GpuCategory::H200;
         let b200 = GpuCategory::B200;
         let other = GpuCategory::Other("CustomGPU".to_string());
 
         assert_eq!(a100, GpuCategory::A100);
         assert_ne!(h100, a100);
+        assert_eq!(h200, GpuCategory::H200);
+        assert_ne!(h200, h100);
         assert_eq!(b200, GpuCategory::B200);
-        assert_ne!(b200, h100);
+        assert_ne!(b200, h200);
 
         match other {
             GpuCategory::Other(name) => assert_eq!(name, "CustomGPU"),
