@@ -107,7 +107,10 @@ impl AsRef<str> for ApiKeyName {
 /// This enum represents the GPU models that are officially supported and scored
 /// by the Basilica validator network. Any GPU that doesn't match one of these
 /// categories is classified as "Other" for general compute purposes.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash, Eq)]
+///
+/// Serializes as a plain string (e.g., `"A100"`, `"RTX6000"`).
+/// Deserializes from both plain strings and legacy tagged format (`{"Other":"RTX6000"}`).
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum GpuCategory {
     /// NVIDIA A100 - High-end training & inference
     A100,
@@ -117,6 +120,53 @@ pub enum GpuCategory {
     B200,
     /// Other GPU models - General GPU compute
     Other(String),
+}
+
+impl Serialize for GpuCategory {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GpuCategory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct GpuCategoryVisitor;
+
+        impl<'de> de::Visitor<'de> for GpuCategoryVisitor {
+            type Value = GpuCategory;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a GPU type string or legacy tagged object")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<GpuCategory, E> {
+                Ok(GpuCategory::from_str(value).unwrap())
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<GpuCategory, A::Error> {
+                // Handle legacy format: {"Other": "RTX6000"}
+                if let Some(key) = map.next_key::<String>()? {
+                    let value: String = map.next_value()?;
+                    if key == "Other" {
+                        return Ok(GpuCategory::from_str(&value).unwrap());
+                    }
+                    // Unknown key - treat the key itself as a GPU type
+                    return Ok(GpuCategory::from_str(&key).unwrap());
+                }
+                Err(de::Error::custom("empty map for GpuCategory"))
+            }
+        }
+
+        deserializer.deserialize_any(GpuCategoryVisitor)
+    }
 }
 
 impl GpuCategory {
@@ -188,6 +238,86 @@ impl FromStr for GpuCategory {
         } else {
             Ok(GpuCategory::Other(s.to_string()))
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_category_serde_tests {
+    use super::*;
+
+    #[test]
+    fn serialize_known_variants() {
+        assert_eq!(serde_json::to_string(&GpuCategory::A100).unwrap(), "\"A100\"");
+        assert_eq!(serde_json::to_string(&GpuCategory::H100).unwrap(), "\"H100\"");
+        assert_eq!(serde_json::to_string(&GpuCategory::B200).unwrap(), "\"B200\"");
+    }
+
+    #[test]
+    fn serialize_other_variant() {
+        let rtx = GpuCategory::Other("RTX6000".to_string());
+        assert_eq!(serde_json::to_string(&rtx).unwrap(), "\"RTX6000\"");
+    }
+
+    #[test]
+    fn deserialize_known_variants_from_string() {
+        assert_eq!(serde_json::from_str::<GpuCategory>("\"A100\"").unwrap(), GpuCategory::A100);
+        assert_eq!(serde_json::from_str::<GpuCategory>("\"H100\"").unwrap(), GpuCategory::H100);
+        assert_eq!(serde_json::from_str::<GpuCategory>("\"B200\"").unwrap(), GpuCategory::B200);
+    }
+
+    #[test]
+    fn deserialize_other_from_string() {
+        let rtx: GpuCategory = serde_json::from_str("\"RTX6000\"").unwrap();
+        assert_eq!(rtx, GpuCategory::Other("RTX6000".to_string()));
+    }
+
+    #[test]
+    fn deserialize_legacy_tagged_format() {
+        // Backward compat: old serde externally-tagged format
+        let rtx: GpuCategory = serde_json::from_str("{\"Other\":\"RTX6000\"}").unwrap();
+        assert_eq!(rtx, GpuCategory::Other("RTX6000".to_string()));
+    }
+
+    #[test]
+    fn deserialize_legacy_tagged_known_gpu() {
+        // If legacy format wraps a known GPU name, parse it
+        let h100: GpuCategory = serde_json::from_str("{\"Other\":\"H100\"}").unwrap();
+        assert_eq!(h100, GpuCategory::H100);
+    }
+
+    #[test]
+    fn roundtrip_in_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Offering {
+            gpu_type: GpuCategory,
+            count: u32,
+        }
+
+        let original = Offering {
+            gpu_type: GpuCategory::Other("L40S".to_string()),
+            count: 4,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains("\"gpu_type\":\"L40S\""));
+
+        let deserialized: Offering = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn roundtrip_legacy_format_in_struct() {
+        // Simulates what old API server sends
+        let json = r#"{"gpu_type":{"Other":"RTX6000"},"count":2}"#;
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Offering {
+            gpu_type: GpuCategory,
+            count: u32,
+        }
+
+        let parsed: Offering = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.gpu_type, GpuCategory::Other("RTX6000".to_string()));
+        assert_eq!(parsed.count, 2);
     }
 }
 
