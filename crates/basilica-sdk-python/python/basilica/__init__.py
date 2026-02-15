@@ -95,6 +95,7 @@ from basilica._basilica import (
     StorageBackend,
     StorageSpec,
     TopologySpreadConfig,
+    WebSocketConfig,
     VolumeMountRequest,
     EnrollMetadataResponse,
     PublicDeploymentMetadataResponse,
@@ -254,6 +255,7 @@ __all__ = [
     "StorageSpec",
     "ProbeConfig",
     "HealthCheckConfig",
+    "WebSocketConfig",
     "CreateDeploymentRequest",
     "DeploymentResponse",
     "DeploymentSummary",
@@ -1105,6 +1107,7 @@ class BasilicaClient:
         storage: Optional[Union[str, StorageSpec]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
         health_check: Optional[HealthCheckConfig] = None,
+        websocket: Optional[WebSocketConfig] = None,
         public_metadata: bool = False,
     ) -> DeploymentResponse:
         """
@@ -1131,6 +1134,7 @@ class BasilicaClient:
             storage: Storage path or StorageSpec
             topology_spread: Topology spread configuration for pod distribution
             health_check: Custom health check configuration (HealthCheckConfig)
+            websocket: WebSocket configuration (WebSocketConfig)
             public_metadata: Enable public metadata enrollment for validator verification
 
         Returns:
@@ -1180,6 +1184,7 @@ class BasilicaClient:
             storage=storage_spec,
             topology_spread=topology_spread,
             health_check=health_check,
+            websocket=websocket,
             public_metadata=public_metadata,
         )
 
@@ -1629,6 +1634,7 @@ class BasilicaClient:
         storage: Optional[Union[str, StorageSpec]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
         health_check: Optional[HealthCheckConfig] = None,
+        websocket: Optional[WebSocketConfig] = None,
         public_metadata: bool = False,
     ) -> DeploymentResponse:
         """
@@ -1678,6 +1684,7 @@ class BasilicaClient:
             storage=storage_spec,
             topology_spread=topology_spread,
             health_check=health_check,
+            websocket=websocket,
             public_metadata=public_metadata,
         )
 
