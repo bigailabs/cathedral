@@ -97,6 +97,7 @@ pub async fn handle_vllm_deploy(
         suspended: false,
         priority: None,
         topology_spread: None,
+        websocket: None,
         public_metadata: false,
     };
 

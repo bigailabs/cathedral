@@ -9,7 +9,7 @@ use crate::source::{Framework, SourcePackager, SourceType};
 use basilica_sdk::types::{
     CreateDeploymentRequest, DeploymentResponse, GpuRequirementsSpec, HealthCheckConfig,
     PersistentStorageSpec, ProbeConfig, ResourceRequirements, SpreadMode, StorageBackend,
-    StorageSpec, TopologySpreadConfig,
+    StorageSpec, TopologySpreadConfig, WebSocketConfig,
 };
 use basilica_sdk::BasilicaClient;
 use std::time::{Duration, Instant};
@@ -74,10 +74,13 @@ pub async fn handle_create(
     // 9. Build topology spread config (if specified)
     let topology_spread = build_topology_spread(&cmd.topology_spread);
 
-    // 10. Build public flag using is_public() helper
+    // 10. Build websocket config (if enabled)
+    let websocket = build_websocket_config(&cmd.websocket)?;
+
+    // 11. Build public flag using is_public() helper
     let is_public = cmd.networking.is_public();
 
-    // 11. Create request
+    // 12. Create request
     let request = CreateDeploymentRequest {
         instance_name: name.clone(),
         image,
@@ -96,13 +99,14 @@ pub async fn handle_create(
         suspended: false,
         priority: None,
         topology_spread,
+        websocket,
         public_metadata: cmd.networking.public_metadata,
     };
 
-    // 10. Show progress spinner
+    // 13. Show progress spinner
     let spinner = create_spinner(&format!("Creating summons '{}'...", name));
 
-    // 11. Create deployment with retry
+    // 14. Create deployment with retry
     let response = create_with_retry(client, request.clone()).await?;
 
     complete_spinner_and_clear(spinner);
@@ -110,7 +114,7 @@ pub async fn handle_create(
     // Use the instance_name returned by API (may differ from user-provided name)
     let actual_name = response.instance_name.clone();
 
-    // 12. Wait for ready if not detached
+    // 15. Wait for ready if not detached
     if !cmd.lifecycle.detach {
         let result = wait_for_ready_with_phases(
             client,
@@ -440,6 +444,30 @@ fn build_topology_spread(options: &TopologySpreadOptions) -> Option<TopologySpre
         max_skew: options.max_skew,
         topology_key: options.topology_key.clone(),
     })
+}
+
+/// Build websocket config from CLI options
+fn build_websocket_config(
+    options: &crate::cli::commands::WebSocketOptions,
+) -> Result<Option<WebSocketConfig>, CliError> {
+    if !options.websocket {
+        return Ok(None);
+    }
+
+    let timeout = options.ws_idle_timeout;
+    if !(60..=3600).contains(&timeout) {
+        return Err(CliError::Deploy(DeployError::Validation {
+            message: format!(
+                "--ws-idle-timeout must be between 60 and 3600 seconds, got {}",
+                timeout
+            ),
+        }));
+    }
+
+    Ok(Some(WebSocketConfig {
+        enabled: true,
+        idle_timeout_seconds: timeout,
+    }))
 }
 
 /// Build health check configuration with startup probe support
