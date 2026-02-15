@@ -65,56 +65,56 @@ mod tests {
         );
         assert_eq!(GpuCategory::from_str("b200").unwrap().to_string(), "B200");
 
-        // Test other GPU variants (should all return OTHER)
+        // Test other GPU variants (should return actual model name uppercased)
         assert_eq!(
             GpuCategory::from_str("GeForce RTX 4090")
                 .unwrap()
                 .to_string(),
-            "OTHER"
+            "GEFORCE RTX 4090"
         );
         assert_eq!(
             GpuCategory::from_str("RTX 4090").unwrap().to_string(),
-            "OTHER"
+            "RTX 4090"
         );
         assert_eq!(
             GpuCategory::from_str("NVIDIA GeForce RTX 4090")
                 .unwrap()
                 .to_string(),
-            "OTHER"
+            "NVIDIA GEFORCE RTX 4090"
         );
         assert_eq!(
             GpuCategory::from_str("rtx4090").unwrap().to_string(),
-            "OTHER"
+            "RTX4090"
         );
         assert_eq!(
             GpuCategory::from_str("RTX 3090 Ti").unwrap().to_string(),
-            "OTHER"
+            "RTX 3090 TI"
         );
         assert_eq!(
             GpuCategory::from_str("GeForce RTX 3090")
                 .unwrap()
                 .to_string(),
-            "OTHER"
+            "GEFORCE RTX 3090"
         );
         assert_eq!(
             GpuCategory::from_str("RTX 3080").unwrap().to_string(),
-            "OTHER"
+            "RTX 3080"
         );
         assert_eq!(
             GpuCategory::from_str("RTX 4080").unwrap().to_string(),
-            "OTHER"
+            "RTX 4080"
         );
 
         // Test unknown models
         assert_eq!(
             GpuCategory::from_str("Unknown GPU").unwrap().to_string(),
-            "OTHER"
+            "UNKNOWN GPU"
         );
-        assert_eq!(GpuCategory::from_str("").unwrap().to_string(), "OTHER");
-        assert_eq!(GpuCategory::from_str("V100").unwrap().to_string(), "OTHER");
+        assert_eq!(GpuCategory::from_str("").unwrap().to_string(), "");
+        assert_eq!(GpuCategory::from_str("V100").unwrap().to_string(), "V100");
         assert_eq!(
             GpuCategory::from_str("GTX 1080").unwrap().to_string(),
-            "OTHER"
+            "GTX 1080"
         );
 
         // Test edge cases
@@ -350,7 +350,7 @@ mod tests {
         // Should be sorted by count descending
         assert_eq!(models_by_count.len(), 2);
         assert_eq!(models_by_count[0], ("A100".to_string(), 5)); // A100(1) + A100(4) = 5
-        assert_eq!(models_by_count[1], ("OTHER".to_string(), 2)); // RTX4090(2) = OTHER(2)
+        assert_eq!(models_by_count[1], ("RTX4090".to_string(), 2)); // RTX4090(2)
     }
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
             true,
         )];
         let gpu_counts = GpuCategorizer::calculate_gpu_distribution(&validations);
-        assert_eq!(gpu_counts.get("OTHER"), Some(&1));
+        assert_eq!(gpu_counts.get(""), Some(&1));
 
         // Test whitespace-only strings
         let validations = vec![NodeValidationResult::new_for_testing(
@@ -409,7 +409,7 @@ mod tests {
             true,
         )];
         let gpu_counts = GpuCategorizer::calculate_gpu_distribution(&validations);
-        assert_eq!(gpu_counts.get("OTHER"), Some(&1));
+        assert_eq!(gpu_counts.get("   "), Some(&1));
     }
 
     #[test]
@@ -469,7 +469,7 @@ mod tests {
             GpuCategory::from_str("NVIDIA NVIDIA GeForce RTX 4090")
                 .unwrap()
                 .to_string(),
-            "OTHER"
+            "NVIDIA NVIDIA GEFORCE RTX 4090"
         );
 
         // Test mixed case with numbers
@@ -483,7 +483,7 @@ mod tests {
         // Test Tesla prefix variations
         assert_eq!(
             GpuCategory::from_str("Tesla V100").unwrap().to_string(),
-            "OTHER"
+            "TESLA V100"
         );
 
         // Test partial matches
@@ -497,7 +497,7 @@ mod tests {
             GpuCategory::from_str("RTX   4090   Ti")
                 .unwrap()
                 .to_string(),
-            "OTHER"
+            "RTX   4090   TI"
         );
     }
 
