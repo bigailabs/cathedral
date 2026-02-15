@@ -65,6 +65,8 @@ Using `@basilica.deployment` decorator:
 | `31_public_metadata.py` | Public metadata enrollment via Python SDK | `python3 31_public_metadata.py` |
 | `31_public_metadata.sh` | Public metadata enrollment lifecycle via CLI | `./31_public_metadata.sh` |
 | `32_public_metadata_cli/` | Public metadata CLI reference | See directory README |
+| `33_websocket.py` | WebSocket deployment via Python SDK | `python3 33_websocket.py` |
+| `33_websocket.sh` | WebSocket deployment via CLI | `./33_websocket.sh` |
 
 ## Large Model Deployment Notes
 

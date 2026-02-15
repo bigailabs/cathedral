@@ -147,13 +147,13 @@ impl GpuCategory {
         }
     }
 
-    /// Get the display string for this GPU category (e.g., "A100", "H100", "OTHER")
+    /// Get the display string for this GPU category (e.g., "A100", "H100", "RTX6000")
     pub fn as_str(&self) -> String {
         match self {
             GpuCategory::A100 => "A100".to_string(),
             GpuCategory::H100 => "H100".to_string(),
             GpuCategory::B200 => "B200".to_string(),
-            GpuCategory::Other(_) => "OTHER".to_string(),
+            GpuCategory::Other(name) => name.to_uppercase(),
         }
     }
 }

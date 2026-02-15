@@ -680,6 +680,7 @@ use basilica_sdk::types::{
     ReplicaStatus as SdkReplicaStatus, ResourceRequirements as SdkResourceRequirements,
     SpreadMode as SdkSpreadMode, StorageBackend as SdkStorageBackend,
     StorageSpec as SdkStorageSpec, TopologySpreadConfig as SdkTopologySpreadConfig,
+    WebSocketConfig as SdkWebSocketConfig,
 };
 
 /// Environment variable for container deployments
@@ -970,6 +971,48 @@ impl From<SdkTopologySpreadConfig> for TopologySpreadConfig {
             mode: config.mode.into(),
             max_skew: config.max_skew,
             topology_key: config.topology_key,
+        }
+    }
+}
+
+/// WebSocket configuration for deployments
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct WebSocketConfig {
+    #[pyo3(get, set)]
+    pub enabled: bool,
+    #[pyo3(get, set)]
+    pub idle_timeout_seconds: u32,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl WebSocketConfig {
+    #[new]
+    #[pyo3(signature = (enabled=true, idle_timeout_seconds=1800))]
+    fn new(enabled: bool, idle_timeout_seconds: u32) -> Self {
+        Self {
+            enabled,
+            idle_timeout_seconds,
+        }
+    }
+}
+
+impl From<WebSocketConfig> for SdkWebSocketConfig {
+    fn from(config: WebSocketConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            idle_timeout_seconds: config.idle_timeout_seconds,
+        }
+    }
+}
+
+impl From<SdkWebSocketConfig> for WebSocketConfig {
+    fn from(config: SdkWebSocketConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            idle_timeout_seconds: config.idle_timeout_seconds,
         }
     }
 }
@@ -1267,6 +1310,8 @@ pub struct CreateDeploymentRequest {
     #[pyo3(get, set)]
     pub health_check: Option<HealthCheckConfig>,
     #[pyo3(get, set)]
+    pub websocket: Option<WebSocketConfig>,
+    #[pyo3(get, set)]
     pub public_metadata: bool,
 }
 
@@ -1274,7 +1319,7 @@ pub struct CreateDeploymentRequest {
 #[pymethods]
 impl CreateDeploymentRequest {
     #[new]
-    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None, topology_spread=None, health_check=None, public_metadata=false))]
+    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None, topology_spread=None, health_check=None, websocket=None, public_metadata=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         instance_name: String,
@@ -1290,6 +1335,7 @@ impl CreateDeploymentRequest {
         storage: Option<StorageSpec>,
         topology_spread: Option<TopologySpreadConfig>,
         health_check: Option<HealthCheckConfig>,
+        websocket: Option<WebSocketConfig>,
         public_metadata: bool,
     ) -> Self {
         Self {
@@ -1306,6 +1352,7 @@ impl CreateDeploymentRequest {
             storage,
             topology_spread,
             health_check,
+            websocket,
             public_metadata,
         }
     }
@@ -1331,6 +1378,7 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             suspended: false,
             priority: None,
             topology_spread: req.topology_spread.map(Into::into),
+            websocket: req.websocket.map(Into::into),
             public_metadata: req.public_metadata,
         }
     }
@@ -1395,6 +1443,8 @@ pub struct DeploymentResponse {
     #[pyo3(get)]
     pub share_url: Option<String>,
     #[pyo3(get)]
+    pub websocket: Option<WebSocketConfig>,
+    #[pyo3(get)]
     pub public_metadata: bool,
 }
 
@@ -1417,6 +1467,7 @@ impl From<SdkDeploymentResponse> for DeploymentResponse {
             progress: response.progress.map(Into::into),
             share_token: response.share_token,
             share_url: response.share_url,
+            websocket: response.websocket.map(Into::into),
             public_metadata: response.public_metadata,
         }
     }
@@ -1441,6 +1492,8 @@ pub struct DeploymentSummary {
     #[pyo3(get)]
     pub public: bool,
     #[pyo3(get)]
+    pub websocket: Option<WebSocketConfig>,
+    #[pyo3(get)]
     pub public_metadata: bool,
 }
 
@@ -1453,6 +1506,7 @@ impl From<SdkDeploymentSummary> for DeploymentSummary {
             replicas: summary.replicas.into(),
             created_at: summary.created_at,
             public: summary.public,
+            websocket: summary.websocket.map(Into::into),
             public_metadata: summary.public_metadata,
         }
     }

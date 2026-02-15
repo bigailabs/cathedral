@@ -519,6 +519,9 @@ pub struct DeployCommand {
     pub topology_spread: TopologySpreadOptions,
 
     #[command(flatten)]
+    pub websocket: WebSocketOptions,
+
+    #[command(flatten)]
     pub health: HealthCheckOptions,
 
     #[command(flatten)]
@@ -697,6 +700,27 @@ impl Default for TopologySpreadOptions {
             unique_nodes: false,
             max_skew: 1,
             topology_key: "kubernetes.io/hostname".to_string(),
+        }
+    }
+}
+
+/// WebSocket configuration options
+#[derive(clap::Args, Debug, Clone)]
+pub struct WebSocketOptions {
+    /// Enable WebSocket support for long-lived connections
+    #[arg(long)]
+    pub websocket: bool,
+
+    /// WebSocket idle timeout in seconds (60-3600, default: 1800)
+    #[arg(long, default_value = "1800")]
+    pub ws_idle_timeout: u32,
+}
+
+impl Default for WebSocketOptions {
+    fn default() -> Self {
+        Self {
+            websocket: false,
+            ws_idle_timeout: 1800,
         }
     }
 }

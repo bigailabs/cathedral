@@ -1798,6 +1798,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            websocket: None,
             public_metadata: false,
         };
 
@@ -1884,6 +1885,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            websocket: None,
             public_metadata: false,
         };
 
@@ -1934,6 +1936,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            websocket: None,
             public_metadata: false,
         };
 
@@ -2154,6 +2157,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            websocket: None,
             public_metadata: false,
         };
 
@@ -2347,6 +2351,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            websocket: None,
             public_metadata: true,
         };
 
