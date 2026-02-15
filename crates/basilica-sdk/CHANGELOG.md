@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-02-15
+
+### Fixed
+- `GpuCategory` now serializes as a plain string (e.g., `"RTX6000"`) instead of tagged enum format (`{"Other":"RTX6000"}`)
+- Backward-compatible deserialization accepts both plain strings and legacy tagged format
+
 ## [0.20.0] - 2026-02-15
 
 ### Added
