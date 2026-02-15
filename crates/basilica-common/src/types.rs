@@ -247,9 +247,18 @@ mod gpu_category_serde_tests {
 
     #[test]
     fn serialize_known_variants() {
-        assert_eq!(serde_json::to_string(&GpuCategory::A100).unwrap(), "\"A100\"");
-        assert_eq!(serde_json::to_string(&GpuCategory::H100).unwrap(), "\"H100\"");
-        assert_eq!(serde_json::to_string(&GpuCategory::B200).unwrap(), "\"B200\"");
+        assert_eq!(
+            serde_json::to_string(&GpuCategory::A100).unwrap(),
+            "\"A100\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GpuCategory::H100).unwrap(),
+            "\"H100\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GpuCategory::B200).unwrap(),
+            "\"B200\""
+        );
     }
 
     #[test]
@@ -260,9 +269,18 @@ mod gpu_category_serde_tests {
 
     #[test]
     fn deserialize_known_variants_from_string() {
-        assert_eq!(serde_json::from_str::<GpuCategory>("\"A100\"").unwrap(), GpuCategory::A100);
-        assert_eq!(serde_json::from_str::<GpuCategory>("\"H100\"").unwrap(), GpuCategory::H100);
-        assert_eq!(serde_json::from_str::<GpuCategory>("\"B200\"").unwrap(), GpuCategory::B200);
+        assert_eq!(
+            serde_json::from_str::<GpuCategory>("\"A100\"").unwrap(),
+            GpuCategory::A100
+        );
+        assert_eq!(
+            serde_json::from_str::<GpuCategory>("\"H100\"").unwrap(),
+            GpuCategory::H100
+        );
+        assert_eq!(
+            serde_json::from_str::<GpuCategory>("\"B200\"").unwrap(),
+            GpuCategory::B200
+        );
     }
 
     #[test]
