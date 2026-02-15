@@ -754,6 +754,7 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::StorageSpec>()?;
     m.add_class::<types::ProbeConfig>()?;
     m.add_class::<types::HealthCheckConfig>()?;
+    m.add_class::<types::WebSocketConfig>()?;
     m.add_class::<types::CreateDeploymentRequest>()?;
     m.add_class::<types::DeploymentResponse>()?;
     m.add_class::<types::DeploymentSummary>()?;
