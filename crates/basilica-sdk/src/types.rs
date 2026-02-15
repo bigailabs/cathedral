@@ -754,6 +754,9 @@ pub struct CreateDeploymentRequest {
     /// Controls how pod replicas are distributed across nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topology_spread: Option<TopologySpreadConfig>,
+    /// Optional WebSocket configuration for long-lived connections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketConfig>,
     /// Opt-in to exposing non-sensitive metadata publicly for validator verification.
     #[serde(default)]
     pub public_metadata: bool,
@@ -761,6 +764,29 @@ pub struct CreateDeploymentRequest {
 
 fn default_enable_billing() -> bool {
     true
+}
+
+fn default_ws_idle_timeout() -> u32 {
+    1800
+}
+
+/// WebSocket configuration for deployments.
+/// `idle_timeout_seconds` valid range: 60-3600 (1 minute to 1 hour).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketConfig {
+    pub enabled: bool,
+    #[serde(default = "default_ws_idle_timeout")]
+    pub idle_timeout_seconds: u32,
+}
+
+impl Default for WebSocketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_timeout_seconds: default_ws_idle_timeout(),
+        }
+    }
 }
 
 /// Replica status for deployments
@@ -808,6 +834,9 @@ pub struct DeploymentResponse {
     /// Shareable URL with token query parameter for private deployments.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share_url: Option<String>,
+    /// WebSocket configuration if enabled for this deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketConfig>,
     /// Whether public metadata enrollment is enabled for this deployment.
     #[serde(default)]
     pub public_metadata: bool,
@@ -825,6 +854,9 @@ pub struct DeploymentSummary {
     /// Whether deployment is publicly accessible (no token required).
     #[serde(default = "default_public")]
     pub public: bool,
+    /// WebSocket configuration if enabled for this deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketConfig>,
     /// Whether public metadata enrollment is enabled for this deployment.
     #[serde(default)]
     pub public_metadata: bool,
@@ -1290,6 +1322,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            websocket: None,
             public_metadata: false,
         };
         let json = serde_json::to_string(&request).unwrap();
@@ -1320,6 +1353,7 @@ mod tests {
                 max_skew: 1,
                 topology_key: "kubernetes.io/hostname".to_string(),
             }),
+            websocket: None,
             public_metadata: false,
         };
         let json = serde_json::to_string(&request).unwrap();
@@ -1498,5 +1532,129 @@ mod tests {
         let response: DeploymentResponse = serde_json::from_str(json).unwrap();
         assert!(response.share_token.is_none());
         assert!(response.share_url.is_none());
+    }
+
+    #[test]
+    fn test_websocket_config_default_idle_timeout() {
+        let json = r#"{"enabled":true}"#;
+        let config: WebSocketConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.idle_timeout_seconds, 1800);
+    }
+
+    #[test]
+    fn test_websocket_config_default() {
+        let config = WebSocketConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.idle_timeout_seconds, 1800);
+    }
+
+    #[test]
+    fn test_websocket_config_custom_idle_timeout() {
+        let config = WebSocketConfig {
+            enabled: true,
+            idle_timeout_seconds: 3600,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"idleTimeoutSeconds\":3600"));
+    }
+
+    #[test]
+    fn test_websocket_config_serialization_roundtrip() {
+        let config = WebSocketConfig {
+            enabled: true,
+            idle_timeout_seconds: 120,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: WebSocketConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_create_deployment_request_without_websocket() {
+        let request = CreateDeploymentRequest {
+            instance_name: "test".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 1,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+            public: true,
+            storage: None,
+            health_check: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
+            topology_spread: None,
+            websocket: None,
+            public_metadata: false,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("\"websocket\""));
+    }
+
+    #[test]
+    fn test_create_deployment_request_with_websocket() {
+        let request = CreateDeploymentRequest {
+            instance_name: "ws-app".to_string(),
+            image: "node:18".to_string(),
+            replicas: 1,
+            port: 3000,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+            public: true,
+            storage: None,
+            health_check: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
+            topology_spread: None,
+            websocket: Some(WebSocketConfig {
+                enabled: true,
+                idle_timeout_seconds: 1800,
+            }),
+            public_metadata: false,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"websocket\""));
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"idleTimeoutSeconds\":1800"));
+    }
+
+    #[test]
+    fn test_deployment_response_websocket_optional() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "userId": "user123",
+            "namespace": "u-user123",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z"
+        }"#;
+        let response: DeploymentResponse = serde_json::from_str(json).unwrap();
+        assert!(response.websocket.is_none());
+    }
+
+    #[test]
+    fn test_deployment_summary_websocket_optional() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z"
+        }"#;
+        let summary: DeploymentSummary = serde_json::from_str(json).unwrap();
+        assert!(summary.websocket.is_none());
     }
 }
