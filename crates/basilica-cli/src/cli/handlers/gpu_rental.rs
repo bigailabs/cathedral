@@ -302,17 +302,16 @@ fn display_secure_cloud_table(
     Ok(())
 }
 
-/// Helper function to display community cloud nodes
-fn display_community_cloud_table(
-    nodes: &[basilica_sdk::AvailableNode],
-    pricing_map: &HashMap<String, String>,
-) -> Result<(), CliError> {
+/// Helper function to display community cloud nodes (aggregated by GPU category)
+fn display_community_cloud_table(nodes: &[basilica_sdk::AvailableNode]) -> Result<(), CliError> {
     if nodes.is_empty() {
         print_info("No GPUs available matching your criteria");
         return Ok(());
     }
 
-    table_output::display_available_nodes_detailed(nodes, pricing_map)?;
+    use crate::cli::handlers::gpu_rental_helpers::aggregate_nodes_by_gpu_category;
+    let aggregations = aggregate_nodes_by_gpu_category(nodes);
+    table_output::display_community_cloud_categories(&aggregations)?;
 
     Ok(())
 }
@@ -471,7 +470,7 @@ pub async fn handle_ls(
             let result =
                 fetch_and_filter_community_cloud(&api_client, gpu_category, &filters).await;
             complete_spinner_and_clear(spinner);
-            let (nodes, pricing_map) = result?;
+            let (nodes, _pricing_map) = result?;
 
             if json {
                 // Create a simple response structure for JSON output
@@ -484,7 +483,7 @@ pub async fn handle_ls(
                 };
                 json_output(&response)?;
             } else {
-                display_community_cloud_table(&nodes, &pricing_map)?;
+                display_community_cloud_table(&nodes)?;
             }
         }
         None => {
@@ -546,7 +545,7 @@ pub async fn handle_ls(
             complete_spinner_and_clear(spinner);
 
             let secure_gpus = secure_result?;
-            let (community_nodes, pricing_map) = community_result?;
+            let (community_nodes, _pricing_map) = community_result?;
             let filtered_cpu = if let Some(cpu_res) = cpu_result {
                 filter_cpu_offerings(cpu_res.unwrap_or_default(), &filters)
             } else {
@@ -569,7 +568,7 @@ pub async fn handle_ls(
                 json_output(&response)?;
             } else {
                 print_cloud_section_header("The Bourse (GPU)", true);
-                display_community_cloud_table(&community_nodes, &pricing_map)?;
+                display_community_cloud_table(&community_nodes)?;
 
                 println!();
 
@@ -924,7 +923,7 @@ async fn handle_community_cloud_rental_with_selection(
     let request = StartRentalApiRequest {
         gpu_category: selection.gpu_category,
         gpu_count: selection.gpu_count,
-        min_memory_gb: selection.min_memory_gb,
+        min_memory_gb: None,
         max_hourly_rate_cents: effective_max_hourly_rate_cents,
         container_image,
         ssh_public_key: ssh_key.public_key,

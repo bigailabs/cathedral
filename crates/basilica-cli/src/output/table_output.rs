@@ -345,6 +345,67 @@ pub fn display_available_nodes_detailed(
     Ok(())
 }
 
+/// Display community cloud GPU categories in aggregated format
+pub fn display_community_cloud_categories(
+    aggregations: &[crate::cli::handlers::gpu_rental_helpers::GpuCategoryAggregation],
+) -> Result<()> {
+    if aggregations.is_empty() {
+        println!("No available GPUs found matching the specified criteria.");
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct CategoryRow {
+        #[tabled(rename = "GPU")]
+        gpu: String,
+        #[tabled(rename = "Available")]
+        available: String,
+        #[tabled(rename = "Price/hr")]
+        price: String,
+    }
+
+    let rows: Vec<CategoryRow> = aggregations
+        .iter()
+        .map(|agg| {
+            let gpu = if agg.gpu_count > 1 {
+                format!("{}x {}", agg.gpu_count, agg.gpu_category)
+            } else {
+                agg.gpu_category.clone()
+            };
+
+            let multiplier = agg.gpu_count as f64;
+            let price = match (agg.min_rate_cents, agg.max_rate_cents) {
+                (Some(min), Some(max)) if min == max => {
+                    format!("${:.2}", min as f64 / 100.0 * multiplier)
+                }
+                (Some(min), Some(max)) => {
+                    format!(
+                        "${:.2} - ${:.2}",
+                        min as f64 / 100.0 * multiplier,
+                        max as f64 / 100.0 * multiplier
+                    )
+                }
+                _ => "Market".to_string(),
+            };
+
+            CategoryRow {
+                gpu,
+                available: format!("{} nodes", agg.node_count),
+                price,
+            }
+        })
+        .collect();
+
+    let mut table = Table::new(rows);
+    table.with(Style::modern());
+    println!("{}", table);
+
+    let total_nodes: usize = aggregations.iter().map(|a| a.node_count).sum();
+    println!("\nTotal available nodes: {}", total_nodes);
+
+    Ok(())
+}
+
 /// Display secure cloud GPU offerings in detailed format (individual offerings)
 pub fn display_secure_cloud_offerings_detailed(offerings: &[GpuOffering]) -> Result<()> {
     if offerings.is_empty() {

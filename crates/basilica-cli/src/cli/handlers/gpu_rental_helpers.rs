@@ -4,7 +4,7 @@ use crate::cli::handlers::region_mapping::{extract_country_code, region_matches_
 use crate::error::CliError;
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use basilica_common::types::ComputeCategory;
-use basilica_common::types::GpuOffering;
+use basilica_common::types::{GpuCategory, GpuOffering};
 use basilica_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, RentalState};
 use basilica_sdk::{ApiError, BasilicaClient};
 use basilica_validator::api::types::AvailableNode;
@@ -13,6 +13,8 @@ use color_eyre::Help;
 use console::{style, Term};
 use dialoguer::Select;
 use rust_decimal::prelude::ToPrimitive;
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 use tracing::warn;
 
@@ -54,6 +56,81 @@ pub fn print_cloud_section_header(title: &str, leading_newline: bool) {
     } else {
         println!("{}", style(title).bold());
     }
+}
+
+/// Aggregated GPU category information for community cloud display
+#[derive(Debug, Clone)]
+pub struct GpuCategoryAggregation {
+    /// GPU category name (e.g., "H100", "A100")
+    pub gpu_category: String,
+    /// Number of GPUs per node
+    pub gpu_count: u32,
+    /// Memory per GPU in GB
+    pub min_memory_gb: u32,
+    /// Number of available nodes with this configuration
+    pub node_count: usize,
+    /// Minimum hourly rate in cents across all nodes (per GPU)
+    pub min_rate_cents: Option<i32>,
+    /// Maximum hourly rate in cents across all nodes (per GPU)
+    pub max_rate_cents: Option<i32>,
+}
+
+/// Aggregate community cloud nodes by GPU category and count.
+///
+/// Groups `AvailableNode` entries by `(gpu_category, gpu_count)` and computes
+/// per-group statistics (node count, price range, memory).
+pub fn aggregate_nodes_by_gpu_category(nodes: &[AvailableNode]) -> Vec<GpuCategoryAggregation> {
+    let mut groups: HashMap<(String, u32), Vec<&AvailableNode>> = HashMap::new();
+
+    for node in nodes {
+        if node.node.gpu_specs.is_empty() {
+            continue;
+        }
+        let gpu = &node.node.gpu_specs[0];
+        let category = GpuCategory::from_str(&gpu.name)
+            .map(|c| c.to_string())
+            .unwrap_or_else(|_| gpu.name.clone());
+        let gpu_count = node.node.gpu_specs.len() as u32;
+        groups.entry((category, gpu_count)).or_default().push(node);
+    }
+
+    let mut aggregations: Vec<GpuCategoryAggregation> = groups
+        .into_iter()
+        .map(|((gpu_category, gpu_count), nodes)| {
+            let min_memory_gb = nodes
+                .iter()
+                .filter_map(|n| n.node.gpu_specs.first())
+                .map(|g| g.memory_gb)
+                .min()
+                .unwrap_or(0);
+
+            let rates: Vec<i32> = nodes
+                .iter()
+                .filter_map(|n| n.node.hourly_rate_cents)
+                .collect();
+
+            let min_rate_cents = rates.iter().copied().min();
+            let max_rate_cents = rates.iter().copied().max();
+
+            GpuCategoryAggregation {
+                gpu_category,
+                gpu_count,
+                min_memory_gb,
+                node_count: nodes.len(),
+                min_rate_cents,
+                max_rate_cents,
+            }
+        })
+        .collect();
+
+    // Sort by category name, then gpu_count
+    aggregations.sort_by(|a, b| {
+        a.gpu_category
+            .cmp(&b.gpu_category)
+            .then(a.gpu_count.cmp(&b.gpu_count))
+    });
+
+    aggregations
 }
 
 /// Resolve target rental ID - if not provided, fetch active rentals and prompt for selection
@@ -437,7 +514,7 @@ struct UnifiedOfferingItem {
     display_price: String,
     // Original data for creating the offering
     secure_offering: Option<GpuOffering>,
-    community_node: Option<AvailableNode>,
+    community_nodes: Option<Vec<AvailableNode>>,
     cpu_offering: Option<basilica_sdk::types::CpuOffering>,
 }
 
@@ -596,7 +673,7 @@ pub async fn resolve_offering_unified(
                 display_memory: memory_str,
                 display_price: format!("${:.2}/hr", total_price),
                 secure_offering: Some(offering),
-                community_node: None,
+                community_nodes: None,
                 cpu_offering: None,
             });
         }
@@ -642,71 +719,85 @@ pub async fn resolve_offering_unified(
                     display_memory: format!("{}GB RAM", offering.system_memory_gb),
                     display_price: format!("${:.2}/hr", hourly_rate),
                     secure_offering: None,
-                    community_node: None,
+                    community_nodes: None,
                     cpu_offering: Some(offering),
                 });
             }
         }
     }
 
-    // Add community cloud offerings
+    // Add community cloud offerings (aggregated by GPU category)
     if let Ok(response) = community_result {
-        for node in response.available_nodes {
-            // Apply GPU count filter if specified (exact match for community)
-            if let Some(count) = gpu_count_filter {
-                if node.node.gpu_specs.len() as u32 != count {
-                    continue;
-                }
+        let filtered_nodes: Vec<AvailableNode> = if let Some(count) = gpu_count_filter {
+            response
+                .available_nodes
+                .into_iter()
+                .filter(|n| n.node.gpu_specs.len() as u32 == count)
+                .collect()
+        } else {
+            response.available_nodes
+        };
+
+        let mut groups: HashMap<(String, u32), Vec<AvailableNode>> = HashMap::new();
+        for node in filtered_nodes {
+            if node.node.gpu_specs.is_empty() {
+                continue;
             }
+            let gpu = &node.node.gpu_specs[0];
+            let category = GpuCategory::from_str(&gpu.name)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|_| gpu.name.clone());
+            let gpu_count = node.node.gpu_specs.len() as u32;
+            groups.entry((category, gpu_count)).or_default().push(node);
+        }
 
-            // Format GPU info
-            let gpu_info = if node.node.gpu_specs.is_empty() {
-                "Unknown GPU".to_string()
+        for ((category, gpu_count), nodes) in &groups {
+            let min_memory_gb = nodes
+                .iter()
+                .filter_map(|n| n.node.gpu_specs.first())
+                .map(|g| g.memory_gb)
+                .min()
+                .unwrap_or(0);
+
+            let rates: Vec<i32> = nodes
+                .iter()
+                .filter_map(|n| n.node.hourly_rate_cents)
+                .collect();
+            let min_rate = rates.iter().copied().min();
+            let max_rate = rates.iter().copied().max();
+
+            let gpu_info = if *gpu_count > 1 {
+                format!("{}x {} ({} available)", gpu_count, category, nodes.len())
             } else {
-                let gpu = &node.node.gpu_specs[0];
-                if node.node.gpu_specs.len() > 1 {
-                    format!("{}x {}", node.node.gpu_specs.len(), gpu.name)
-                } else {
-                    format!("1x {}", gpu.name)
+                format!("{} ({} available)", category, nodes.len())
+            };
+
+            let memory_str = format!("{}GB", min_memory_gb);
+
+            let multiplier = *gpu_count as f64;
+            let price_str = match (min_rate, max_rate) {
+                (Some(min), Some(max)) if min == max => {
+                    format!("${:.2}/hr", min as f64 / 100.0 * multiplier)
                 }
+                (Some(min), Some(max)) => {
+                    format!(
+                        "${:.2}-{:.2}/hr",
+                        min as f64 / 100.0 * multiplier,
+                        max as f64 / 100.0 * multiplier
+                    )
+                }
+                _ => "Market".to_string(),
             };
-
-            // Format memory
-            let memory_str = if node.node.gpu_specs.is_empty() {
-                "N/A".to_string()
-            } else {
-                let total_mem: u32 = node.node.gpu_specs.iter().map(|g| g.memory_gb).sum();
-                format!("{}GB", total_mem)
-            };
-
-            // Format price (convert from cents to dollars, multiply by GPU count for total node cost)
-            let price_str = if let Some(rate_cents) = node.node.hourly_rate_cents {
-                let gpu_count = node.node.gpu_specs.len() as f64;
-                let total_rate = (rate_cents as f64 / 100.0) * gpu_count;
-                format!("${:.2}/hr", total_rate)
-            } else {
-                "Market".to_string()
-            };
-
-            // Format provider/location
-            let location = node
-                .node
-                .location
-                .clone()
-                .unwrap_or_else(|| "Unknown".to_string());
-
-            // Extract country code from location
-            let country_code = extract_country_code(&location).unwrap_or("--").to_string();
 
             unified_items.push(UnifiedOfferingItem {
                 offering_type: OfferingType::Community,
                 display_gpu: gpu_info,
-                display_provider: location,
-                display_country: country_code,
+                display_provider: "--".to_string(),
+                display_country: "--".to_string(),
                 display_memory: memory_str,
                 display_price: price_str,
                 secure_offering: None,
-                community_node: Some(node),
+                community_nodes: Some(nodes.clone()),
                 cpu_offering: None,
             });
         }
@@ -797,31 +888,40 @@ pub async fn resolve_offering_unified(
             Ok(SelectedOffering::CpuOnly(offering))
         }
         OfferingType::Community => {
-            let node = selected
-                .community_node
+            let nodes = selected
+                .community_nodes
                 .clone()
                 .ok_or_else(|| eyre!("Internal error: community cloud node data missing"))?;
 
-            // Extract GPU category and count from the selected node
-            let gpu_category = node
+            let first_node = nodes
+                .first()
+                .ok_or_else(|| eyre!("Internal error: community cloud group is empty"))?;
+
+            // Extract GPU category and count from the group
+            let gpu_category = first_node
                 .node
                 .gpu_specs
                 .first()
                 .map(|gpu| {
-                    use basilica_common::types::GpuCategory;
-                    use std::str::FromStr;
                     GpuCategory::from_str(&gpu.name)
                         .map(|c| c.to_string())
                         .unwrap_or_else(|_| gpu.name.clone())
                 })
-                .ok_or_else(|| eyre!("Selected node has no GPU specs"))?;
+                .ok_or_else(|| eyre!("Selected group has no GPU specs"))?;
 
-            let gpu_count = node.node.gpu_specs.len() as u32;
-            let min_memory_gb = node.node.gpu_specs.first().map(|gpu| gpu.memory_gb);
-            let derived_max_hourly_rate_cents = node
-                .node
-                .hourly_rate_cents
-                .and_then(|rate_cents| u32::try_from(rate_cents).ok());
+            let gpu_count = first_node.node.gpu_specs.len() as u32;
+            let min_memory_gb = nodes
+                .iter()
+                .filter_map(|n| n.node.gpu_specs.first())
+                .map(|g| g.memory_gb)
+                .min();
+
+            // Use max hourly rate across all nodes in the group as the bid cap
+            let derived_max_hourly_rate_cents = nodes
+                .iter()
+                .filter_map(|n| n.node.hourly_rate_cents)
+                .filter_map(|rate_cents| u32::try_from(rate_cents).ok())
+                .max();
 
             Ok(SelectedOffering::CommunityCloud(CommunityCloudSelection {
                 gpu_category,
