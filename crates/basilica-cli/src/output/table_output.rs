@@ -360,7 +360,7 @@ pub fn display_community_cloud_categories(
         gpu: String,
         #[tabled(rename = "Available")]
         available: String,
-        #[tabled(rename = "Price/GPU-hr")]
+        #[tabled(rename = "Price/hr")]
         price: String,
     }
 
@@ -373,12 +373,17 @@ pub fn display_community_cloud_categories(
                 agg.gpu_category.clone()
             };
 
+            let multiplier = agg.gpu_count as f64;
             let price = match (agg.min_rate_cents, agg.max_rate_cents) {
                 (Some(min), Some(max)) if min == max => {
-                    format!("${:.2}", min as f64 / 100.0)
+                    format!("${:.2}", min as f64 / 100.0 * multiplier)
                 }
                 (Some(min), Some(max)) => {
-                    format!("${:.2} - ${:.2}", min as f64 / 100.0, max as f64 / 100.0)
+                    format!(
+                        "${:.2} - ${:.2}",
+                        min as f64 / 100.0 * multiplier,
+                        max as f64 / 100.0 * multiplier
+                    )
                 }
                 _ => "Market".to_string(),
             };

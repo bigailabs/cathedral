@@ -774,12 +774,17 @@ pub async fn resolve_offering_unified(
 
             let memory_str = format!("{}GB", min_memory_gb);
 
+            let multiplier = *gpu_count as f64;
             let price_str = match (min_rate, max_rate) {
                 (Some(min), Some(max)) if min == max => {
-                    format!("${:.2}/hr", min as f64 / 100.0)
+                    format!("${:.2}/hr", min as f64 / 100.0 * multiplier)
                 }
                 (Some(min), Some(max)) => {
-                    format!("${:.2}-{:.2}/hr", min as f64 / 100.0, max as f64 / 100.0)
+                    format!(
+                        "${:.2}-{:.2}/hr",
+                        min as f64 / 100.0 * multiplier,
+                        max as f64 / 100.0 * multiplier
+                    )
                 }
                 _ => "Market".to_string(),
             };
