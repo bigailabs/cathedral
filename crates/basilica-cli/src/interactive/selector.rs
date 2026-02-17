@@ -3,23 +3,10 @@
 use crate::error::Result;
 use basilica_common::types::GpuCategory;
 use basilica_sdk::types::ApiRentalListItem;
-use basilica_validator::api::types::AvailableNode;
 use color_eyre::eyre::eyre;
 use console::Term;
-use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
-use std::collections::HashMap;
+use dialoguer::{theme::ColorfulTheme, MultiSelect, Select};
 use std::str::FromStr;
-
-/// GPU selection result from the interactive selector
-#[derive(Debug, Clone)]
-pub struct GpuSelection {
-    /// GPU category (e.g., "H100", "A100")
-    pub gpu_category: String,
-    /// Number of GPUs
-    pub gpu_count: u32,
-    /// Minimum GPU memory in GB
-    pub min_memory_gb: Option<u32>,
-}
 
 /// Interactive selector for CLI operations
 pub struct InteractiveSelector {
@@ -29,357 +16,8 @@ pub struct InteractiveSelector {
 impl InteractiveSelector {
     /// Create a new interactive selector
     pub fn new() -> Self {
-        // Create a customized theme for better display
         let theme = ColorfulTheme::default();
-        // The theme already has good defaults, we can customize if needed
         Self { theme }
-    }
-
-    /// Let user select a GPU configuration from available nodes
-    pub fn select_node(
-        &self,
-        nodes: &[AvailableNode],
-        use_detailed: bool,
-        show_ids: bool,
-        gpu_count_filter: Option<u32>,
-    ) -> Result<GpuSelection> {
-        if nodes.is_empty() {
-            return Err(eyre!("No nodes available").into());
-        }
-
-        if use_detailed {
-            // Detailed mode: Show all nodes individually
-            self.select_node_detailed(nodes, show_ids, gpu_count_filter)
-        } else {
-            // Grouped mode: Group by GPU configuration
-            self.select_node_grouped(nodes, gpu_count_filter)
-        }
-    }
-
-    /// Select node in detailed mode (show all nodes)
-    fn select_node_detailed(
-        &self,
-        nodes: &[AvailableNode],
-        show_ids: bool,
-        gpu_count_filter: Option<u32>,
-    ) -> Result<GpuSelection> {
-        // Filter nodes by exact GPU count if specified
-        let filtered_nodes: Vec<&AvailableNode> = if let Some(required_count) = gpu_count_filter {
-            nodes
-                .iter()
-                .filter(|e| e.node.gpu_specs.len() as u32 == required_count)
-                .collect()
-        } else {
-            nodes.iter().collect()
-        };
-
-        if filtered_nodes.is_empty() {
-            if let Some(required_count) = gpu_count_filter {
-                return Err(
-                    eyre!("No nodes available with exactly {} GPU(s)", required_count).into(),
-                );
-            } else {
-                return Err(eyre!("No nodes available").into());
-            }
-        }
-
-        // Collect all display components to calculate proper column widths
-        struct DisplayComponents {
-            node_id: String,
-            gpu_info: String,
-            cpu_info: String,
-            ram_info: String,
-            use_case: String,
-        }
-
-        let display_components: Vec<DisplayComponents> = filtered_nodes
-            .iter()
-            .map(|node| {
-                // Extract node ID (remove miner prefix if present)
-                let node_id = if show_ids {
-                    node.node
-                        .id
-                        .split_once("__")
-                        .map(|(_, id)| id)
-                        .unwrap_or(&node.node.id)
-                        .to_string()
-                } else {
-                    String::new()
-                };
-                // Format GPU info
-                let gpu_info = if node.node.gpu_specs.is_empty() {
-                    "No GPUs".to_string()
-                } else {
-                    let gpu = &node.node.gpu_specs[0];
-                    let gpu_display_name = gpu.name.clone(); // Full name in detailed mode
-                    if node.node.gpu_specs.len() > 1 {
-                        format!("{}x {}", node.node.gpu_specs.len(), gpu_display_name)
-                    } else {
-                        format!("1x {}", gpu_display_name)
-                    }
-                };
-
-                // Format CPU info - handle "Unknown" case
-                let cpu_info =
-                    if node.node.cpu_specs.model == "Unknown" || node.node.cpu_specs.cores == 0 {
-                        "Unknown CPU".to_string()
-                    } else {
-                        format!(
-                            "{} ({} cores)",
-                            node.node.cpu_specs.model, node.node.cpu_specs.cores
-                        )
-                    };
-
-                // Format RAM info
-                let ram_info = if node.node.cpu_specs.memory_gb == 0 {
-                    "Unknown".to_string()
-                } else {
-                    format!("{}GB", node.node.cpu_specs.memory_gb)
-                };
-
-                // Get use case description for GPUs
-                let use_case = if node.node.gpu_specs.is_empty() {
-                    "General compute".to_string()
-                } else {
-                    let gpu = &node.node.gpu_specs[0];
-                    GpuCategory::from_str(&gpu.name)
-                        .unwrap()
-                        .description()
-                        .to_string()
-                };
-
-                DisplayComponents {
-                    node_id,
-                    gpu_info,
-                    cpu_info,
-                    ram_info,
-                    use_case,
-                }
-            })
-            .collect();
-
-        // Calculate maximum widths for each column
-        let id_max_width = if show_ids {
-            display_components
-                .iter()
-                .map(|c| c.node_id.len())
-                .max()
-                .unwrap_or(36) // UUID default length
-        } else {
-            0
-        };
-
-        let gpu_max_width = display_components
-            .iter()
-            .map(|c| c.gpu_info.len())
-            .max()
-            .unwrap_or(30);
-
-        let cpu_max_width = display_components
-            .iter()
-            .map(|c| c.cpu_info.len())
-            .max()
-            .unwrap_or(40);
-
-        let ram_max_width = display_components
-            .iter()
-            .map(|c| c.ram_info.len())
-            .max()
-            .unwrap_or(10);
-
-        // Create formatted items for the selector
-        let selector_items: Vec<String> = display_components
-            .iter()
-            .map(|components| {
-                if show_ids {
-                    format!(
-                        "{:<id_width$} │ {:<gpu_width$} │ {:<cpu_width$} │ {:<ram_width$} │ {}",
-                        components.node_id,
-                        components.gpu_info,
-                        components.cpu_info,
-                        components.ram_info,
-                        components.use_case,
-                        id_width = id_max_width,
-                        gpu_width = gpu_max_width,
-                        cpu_width = cpu_max_width,
-                        ram_width = ram_max_width
-                    )
-                } else {
-                    format!(
-                        "{:<gpu_width$} │ {:<cpu_width$} │ {:<ram_width$} │ {}",
-                        components.gpu_info,
-                        components.cpu_info,
-                        components.ram_info,
-                        components.use_case,
-                        gpu_width = gpu_max_width,
-                        cpu_width = cpu_max_width,
-                        ram_width = ram_max_width
-                    )
-                }
-            })
-            .collect();
-
-        let selection = Select::with_theme(&self.theme)
-            .with_prompt("Select node")
-            .items(&selector_items)
-            .default(0)
-            .interact_opt()
-            .map_err(|e| eyre!("Selection failed: {}", e))?;
-
-        let selection = match selection {
-            Some(s) => s,
-            None => return Err(eyre!("Selection cancelled").into()),
-        };
-
-        // Extract GPU info from the selected node
-        let selected_node = filtered_nodes[selection];
-        let (gpu_category, gpu_count, min_memory_gb) = if selected_node.node.gpu_specs.is_empty() {
-            return Err(eyre!("Selected node has no GPUs").into());
-        } else {
-            let gpu = &selected_node.node.gpu_specs[0];
-            let category = GpuCategory::from_str(&gpu.name)
-                .map(|c| c.to_string())
-                .unwrap_or_else(|_| gpu.name.clone());
-            (
-                category,
-                selected_node.node.gpu_specs.len() as u32,
-                Some(gpu.memory_gb),
-            )
-        };
-
-        Ok(GpuSelection {
-            gpu_category,
-            gpu_count,
-            min_memory_gb,
-        })
-    }
-
-    /// Select node in grouped mode (group by GPU configuration)
-    fn select_node_grouped(
-        &self,
-        nodes: &[AvailableNode],
-        gpu_count_filter: Option<u32>,
-    ) -> Result<GpuSelection> {
-        // Group nodes by GPU configuration
-        let mut gpu_groups: HashMap<String, (String, u32, u32)> = HashMap::new();
-
-        for node in nodes {
-            let key = if node.node.gpu_specs.is_empty() {
-                "no_gpu".to_string()
-            } else {
-                let gpu = &node.node.gpu_specs[0];
-                let category = GpuCategory::from_str(&gpu.name)
-                    .unwrap_or(GpuCategory::Other(gpu.name.clone()));
-                let gpu_count = node.node.gpu_specs.len() as u32;
-                format!("{}_{}_{}", gpu_count, category, gpu.memory_gb)
-            };
-
-            gpu_groups.entry(key).or_insert_with(|| {
-                if node.node.gpu_specs.is_empty() {
-                    ("".to_string(), 0, 0)
-                } else {
-                    let gpu = &node.node.gpu_specs[0];
-                    let category = GpuCategory::from_str(&gpu.name)
-                        .unwrap_or(GpuCategory::Other(gpu.name.clone()));
-                    let gpu_count = node.node.gpu_specs.len() as u32;
-                    (category.to_string(), gpu_count, gpu.memory_gb)
-                }
-            });
-        }
-
-        // Create sorted list of unique GPU configurations
-        let mut gpu_configs: Vec<(String, String, u32, u32)> = gpu_groups
-            .into_iter()
-            .map(|(key, (gpu_type, count, memory))| (key, gpu_type, count, memory))
-            .filter(|(_, _, count, _)| {
-                // Filter by GPU count if specified
-                if let Some(required_count) = gpu_count_filter {
-                    *count == required_count
-                } else {
-                    true
-                }
-            })
-            .collect();
-        gpu_configs.sort_by(|a, b| {
-            // Sort by GPU type, then count, then memory
-            a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3))
-        });
-
-        // Check if any configurations match the filter
-        if gpu_configs.is_empty() {
-            if let Some(required_count) = gpu_count_filter {
-                return Err(eyre!(
-                    "No GPU configurations available with exactly {} GPU(s)",
-                    required_count
-                )
-                .into());
-            } else {
-                return Err(eyre!("No GPU configurations available").into());
-            }
-        }
-
-        // Create display items with GPU use case descriptions
-        let selector_items: Vec<String> = gpu_configs
-            .iter()
-            .map(|(_, gpu_type, count, _memory)| {
-                if gpu_type.is_empty() {
-                    format!("{:<30} {}", "No GPUs", "General compute")
-                } else {
-                    let gpu_info = if *count > 1 {
-                        format!("{}x {}", count, gpu_type)
-                    } else {
-                        format!("1x {}", gpu_type)
-                    };
-                    // Parse the category string directly to get the enum and its description
-                    let category = GpuCategory::from_str(gpu_type)
-                        .unwrap_or(GpuCategory::Other(gpu_type.to_string()));
-                    let use_case = category.description();
-                    format!("{:<30} {}", gpu_info, use_case)
-                }
-            })
-            .collect();
-
-        let selection = Select::with_theme(&self.theme)
-            .with_prompt("Select GPU configuration")
-            .items(&selector_items)
-            .default(0)
-            .interact_opt()
-            .map_err(|e| eyre!("Selection failed: {}", e))?;
-
-        let selection = match selection {
-            Some(s) => s,
-            None => return Err(eyre!("Selection cancelled").into()),
-        };
-
-        let selected_config = &gpu_configs[selection];
-
-        // Use console crate to clear the previous line properly
-        let term = Term::stdout();
-        let _ = term.clear_last_lines(1);
-
-        // Confirm selection
-        let display_name = &selector_items[selection];
-        let confirmed = Confirm::with_theme(&self.theme)
-            .with_prompt(format!("Proceed with {}?", display_name))
-            .default(true)
-            .interact()
-            .map_err(|e| eyre!("Confirmation failed: {}", e))?;
-
-        if !confirmed {
-            return Err(eyre!("Selection cancelled").into());
-        }
-
-        // Return GPU selection
-        if selected_config.1.is_empty() {
-            // No GPU case
-            return Err(eyre!("Selected configuration has no GPUs").into());
-        }
-
-        Ok(GpuSelection {
-            gpu_category: selected_config.1.clone(),
-            gpu_count: selected_config.2,
-            min_memory_gb: Some(selected_config.3),
-        })
     }
 
     /// Let user select a single instance from active instances
@@ -391,7 +29,6 @@ impl InteractiveSelector {
         let items: Vec<String> = rentals
             .iter()
             .map(|rental| {
-                // Format GPU info from specs
                 let gpu = if rental.gpu_specs.is_empty() {
                     "Unknown GPU".to_string()
                 } else {
@@ -409,20 +46,10 @@ impl InteractiveSelector {
                                 .unwrap_or(GpuCategory::Other(first_gpu.name.clone()));
                             category.to_string()
                         };
-                        if detailed {
-                            // Detailed mode: show memory
-                            if rental.gpu_specs.len() > 1 {
-                                format!("{}x {}", rental.gpu_specs.len(), gpu_display_name)
-                            } else {
-                                format!("1x {}", gpu_display_name)
-                            }
+                        if rental.gpu_specs.len() > 1 {
+                            format!("{}x {}", rental.gpu_specs.len(), gpu_display_name)
                         } else {
-                            // Non-detailed mode: no memory
-                            if rental.gpu_specs.len() > 1 {
-                                format!("{}x {}", rental.gpu_specs.len(), gpu_display_name)
-                            } else {
-                                format!("1x {}", gpu_display_name)
-                            }
+                            format!("1x {}", gpu_display_name)
                         }
                     } else {
                         rental
@@ -442,7 +69,6 @@ impl InteractiveSelector {
                     }
                 };
 
-                // Format: "GPU Type    Container Image"
                 format!("{:<30} {:<30}", gpu, rental.container_image)
             })
             .collect();
@@ -459,7 +85,6 @@ impl InteractiveSelector {
             None => return Err(eyre!("Selection cancelled").into()),
         };
 
-        // Clear the selection prompt line
         let term = Term::stdout();
         let _ = term.clear_last_lines(1);
 
@@ -478,7 +103,6 @@ impl InteractiveSelector {
         let items: Vec<String> = rentals
             .iter()
             .map(|rental| {
-                // Format GPU info from specs
                 let gpu = if rental.gpu_specs.is_empty() {
                     "Unknown GPU".to_string()
                 } else {
@@ -500,7 +124,6 @@ impl InteractiveSelector {
                     }
                 };
 
-                // Format consistently with select_rental
                 format!("{:<30} {:<30}", gpu, rental.container_image)
             })
             .collect();
