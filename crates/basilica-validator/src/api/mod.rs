@@ -150,7 +150,6 @@ impl ApiHandler {
             .route("/config", get(routes::get_config))
             .route("/config/verification", get(routes::get_verification_config))
             .route("/config/emission", get(routes::get_emission_config))
-            .route("/discovery", get(routes::discovery))
             .layer(TraceLayer::new_for_http())
             .layer(CorsLayer::permissive())
             .with_state(self.state.clone())

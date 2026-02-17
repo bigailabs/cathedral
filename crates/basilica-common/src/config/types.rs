@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use crate::error::{BasilicaError, ConfigurationError};
 
+/// Default port for the validator's bidding gRPC service.
+pub const DEFAULT_BID_GRPC_PORT: u16 = 50052;
+
 // Re-export BittensorConfig from the bittensor crate as the canonical source
 pub use bittensor::BittensorConfig;
 

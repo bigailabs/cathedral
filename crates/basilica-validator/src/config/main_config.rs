@@ -874,7 +874,10 @@ impl Default for ValidatorConfig {
                 miner_port: default_miner_port(),
             },
             bid_grpc: basilica_common::config::GrpcServerConfig {
-                listen_address: "0.0.0.0:50052".to_string(),
+                listen_address: format!(
+                    "0.0.0.0:{}",
+                    basilica_common::config::DEFAULT_BID_GRPC_PORT
+                ),
                 ..Default::default()
             },
             ssh_session: SshSessionConfig::default(),

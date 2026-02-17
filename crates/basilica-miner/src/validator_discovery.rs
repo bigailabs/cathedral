@@ -1,9 +1,9 @@
 //! Validator discovery and assignment module
 //!
 //! This module handles discovering active validators and selecting the single
-//! validator that should receive all managed nodes. After selecting a validator,
-//! it calls the validator's `/discovery` HTTP endpoint to learn the gRPC port
-//! for bid registration.
+//! validator that should receive all managed nodes. The gRPC endpoint for bid
+//! registration is constructed using the validator's axon IP and a configured
+//! bidding gRPC port (default: 50052).
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -34,20 +34,13 @@ pub struct DiscoveredValidator {
     pub grpc_endpoint: String,
 }
 
-/// Response from the validator's /discovery endpoint
-#[derive(Debug, serde::Deserialize)]
-struct DiscoveryResponse {
-    bid_grpc_port: u16,
-    #[allow(dead_code)]
-    version: Option<String>,
-}
-
 /// Validator discovery service
 pub struct ValidatorDiscovery {
     bittensor_service: Arc<bittensor::Service>,
     node_manager: Arc<NodeManager>,
     assignment_strategy: Box<dyn AssignmentStrategy>,
     netuid: u16,
+    bid_grpc_port: u16,
 }
 
 /// Strategy for assigning nodes to validators
@@ -68,12 +61,14 @@ impl ValidatorDiscovery {
         node_manager: Arc<NodeManager>,
         assignment_strategy: Box<dyn AssignmentStrategy>,
         netuid: u16,
+        bid_grpc_port: u16,
     ) -> Self {
         Self {
             bittensor_service,
             node_manager,
             assignment_strategy,
             netuid,
+            bid_grpc_port,
         }
     }
 
@@ -146,57 +141,32 @@ impl ValidatorDiscovery {
             .set_assigned_validator(&validator.hotkey)
             .await;
 
-        // Call the validator's /discovery endpoint to learn the gRPC port
+        // Construct gRPC endpoint from the validator's axon IP and configured bid_grpc_port
         let axon_endpoint = validator.axon_endpoint.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "Validator {} has no axon endpoint; cannot discover gRPC port",
+                "Validator {} has no axon endpoint; cannot construct gRPC endpoint",
                 validator.hotkey
             )
         })?;
 
-        let discovered = self
-            .call_discovery_endpoint(axon_endpoint, &validator.hotkey)
-            .await?;
-
-        info!(
-            grpc_endpoint = %discovered.grpc_endpoint,
-            "Discovered validator gRPC endpoint"
-        );
-
-        Ok(discovered)
-    }
-
-    /// Call the validator's /discovery endpoint and construct the full gRPC URL.
-    async fn call_discovery_endpoint(
-        &self,
-        axon_endpoint: &str,
-        hotkey: &str,
-    ) -> Result<DiscoveredValidator> {
-        let discovery_url = format!("{}/discovery", axon_endpoint);
-        debug!("Calling discovery endpoint: {}", discovery_url);
-
-        let resp: DiscoveryResponse = reqwest::get(&discovery_url)
-            .await
-            .map_err(|e| anyhow::anyhow!("HTTP request to {} failed: {}", discovery_url, e))?
-            .error_for_status()
-            .map_err(|e| anyhow::anyhow!("Discovery endpoint returned error: {}", e))?
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse discovery response: {}", e))?;
-
-        // Extract the host/IP from the axon endpoint
         let axon_url = url::Url::parse(axon_endpoint)
             .map_err(|e| anyhow::anyhow!("Invalid axon endpoint URL: {}", e))?;
         let host = axon_url
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("No host in axon endpoint"))?;
+        let grpc_endpoint = format!("http://{}:{}", host, self.bid_grpc_port);
 
-        let grpc_endpoint = format!("http://{}:{}", host, resp.bid_grpc_port);
-
-        Ok(DiscoveredValidator {
-            hotkey: hotkey.to_string(),
+        let discovered = DiscoveredValidator {
+            hotkey: validator.hotkey.clone(),
             grpc_endpoint,
-        })
+        };
+
+        info!(
+            grpc_endpoint = %discovered.grpc_endpoint,
+            "Constructed validator gRPC endpoint"
+        );
+
+        Ok(discovered)
     }
 }
 
