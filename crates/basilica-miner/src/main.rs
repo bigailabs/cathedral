@@ -366,6 +366,7 @@ fn minimum_usd_per_gpu(gpu_category: &GpuCategory) -> f64 {
     match gpu_category {
         GpuCategory::H100 => 50.0,
         GpuCategory::A100 => 25.0,
+        GpuCategory::H200 => 75.0,
         GpuCategory::B200 => 75.0,
         GpuCategory::Other(_) => 10.0,
     }
@@ -552,6 +553,7 @@ mod tests {
     fn test_minimum_usd_per_gpu_defaults() {
         assert_eq!(minimum_usd_per_gpu(&GpuCategory::H100), 50.0);
         assert_eq!(minimum_usd_per_gpu(&GpuCategory::A100), 25.0);
+        assert_eq!(minimum_usd_per_gpu(&GpuCategory::H200), 75.0);
         assert_eq!(minimum_usd_per_gpu(&GpuCategory::B200), 75.0);
         assert_eq!(
             minimum_usd_per_gpu(&GpuCategory::Other("unknown".to_string())),
