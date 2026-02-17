@@ -98,9 +98,10 @@ pub fn aggregate_nodes_by_gpu_category(nodes: &[AvailableNode]) -> Vec<GpuCatego
         .into_iter()
         .map(|((gpu_category, gpu_count), nodes)| {
             let min_memory_gb = nodes
-                .first()
-                .and_then(|n| n.node.gpu_specs.first())
+                .iter()
+                .filter_map(|n| n.node.gpu_specs.first())
                 .map(|g| g.memory_gb)
+                .min()
                 .unwrap_or(0);
 
             let rates: Vec<i32> = nodes
@@ -751,12 +752,11 @@ pub async fn resolve_offering_unified(
         }
 
         for ((category, gpu_count), nodes) in &groups {
-            let first_node = &nodes[0];
-            let min_memory_gb = first_node
-                .node
-                .gpu_specs
-                .first()
+            let min_memory_gb = nodes
+                .iter()
+                .filter_map(|n| n.node.gpu_specs.first())
                 .map(|g| g.memory_gb)
+                .min()
                 .unwrap_or(0);
 
             let rates: Vec<i32> = nodes
