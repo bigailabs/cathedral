@@ -923,7 +923,7 @@ async fn handle_community_cloud_rental_with_selection(
     let request = StartRentalApiRequest {
         gpu_category: selection.gpu_category,
         gpu_count: selection.gpu_count,
-        min_memory_gb: selection.min_memory_gb,
+        min_memory_gb: None,
         max_hourly_rate_cents: effective_max_hourly_rate_cents,
         container_image,
         ssh_public_key: ssh_key.public_key,

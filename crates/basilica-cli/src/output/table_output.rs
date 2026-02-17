@@ -360,8 +360,6 @@ pub fn display_community_cloud_categories(
         gpu: String,
         #[tabled(rename = "Available")]
         available: String,
-        #[tabled(rename = "Memory/GPU")]
-        memory: String,
         #[tabled(rename = "Price/GPU-hr")]
         price: String,
     }
@@ -388,7 +386,6 @@ pub fn display_community_cloud_categories(
             CategoryRow {
                 gpu,
                 available: format!("{} nodes", agg.node_count),
-                memory: format!("{}GB", agg.min_memory_gb),
                 price,
             }
         })
