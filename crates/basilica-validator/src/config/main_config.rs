@@ -703,13 +703,6 @@ pub struct ApiConfig {
     pub max_body_size: usize,
     /// Bind address for the API server
     pub bind_address: String,
-    /// Default port for miner connections
-    #[serde(default = "default_miner_port")]
-    pub miner_port: u16,
-}
-
-fn default_miner_port() -> u16 {
-    8091
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,7 +864,6 @@ impl Default for ValidatorConfig {
                 api_key: None,
                 max_body_size: 1024 * 1024, // 1MB
                 bind_address: "0.0.0.0:8080".to_string(),
-                miner_port: default_miner_port(),
             },
             bid_grpc: basilica_common::config::GrpcServerConfig {
                 listen_address: format!(
