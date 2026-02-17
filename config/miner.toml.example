@@ -2,6 +2,13 @@
 # Copy this file to miner.toml and customize for your environment
 
 # =============================================================================
+# Validator Bidding gRPC Port
+# =============================================================================
+# Port for the validator's bidding gRPC service (default: 50052)
+# Only change if the validator uses a non-standard port
+# bid_grpc_port = 50052
+
+# =============================================================================
 # Bittensor Network Configuration
 # =============================================================================
 [bittensor]

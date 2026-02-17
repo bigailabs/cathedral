@@ -148,6 +148,7 @@ impl MinerState {
             node_manager.clone(),
             strategy,
             config.bittensor.common.netuid,
+            config.bid_grpc_port,
         );
 
         // Initialize registration client for miner→validator communication

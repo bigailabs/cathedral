@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use basilica_common::config::{
-    loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig,
+    loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig, DEFAULT_BID_GRPC_PORT,
 };
 use basilica_common::error::ConfigurationError;
 
@@ -50,6 +50,10 @@ pub struct MinerConfig {
     /// Automatic bidding configuration
     #[serde(default)]
     pub bidding: BiddingConfig,
+
+    /// Port for the validator's bidding gRPC service (default: 50052)
+    #[serde(default = "default_bid_grpc_port")]
+    pub bid_grpc_port: u16,
 }
 
 /// Miner-specific Bittensor configuration
@@ -221,12 +225,17 @@ impl Default for MinerConfig {
             advertised_addresses: MinerAdvertisedAddresses::default(),
             validator_assignment: ValidatorAssignmentConfig::default(),
             bidding: BiddingConfig::default(),
+            bid_grpc_port: DEFAULT_BID_GRPC_PORT,
         }
     }
 }
 
 fn default_strategy() -> String {
     "highest_stake".to_string()
+}
+
+fn default_bid_grpc_port() -> u16 {
+    DEFAULT_BID_GRPC_PORT
 }
 
 impl Default for NodeSshConfig {
