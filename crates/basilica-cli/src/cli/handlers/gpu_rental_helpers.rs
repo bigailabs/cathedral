@@ -910,7 +910,11 @@ pub async fn resolve_offering_unified(
                 .ok_or_else(|| eyre!("Selected group has no GPU specs"))?;
 
             let gpu_count = first_node.node.gpu_specs.len() as u32;
-            let min_memory_gb = first_node.node.gpu_specs.first().map(|gpu| gpu.memory_gb);
+            let min_memory_gb = nodes
+                .iter()
+                .filter_map(|n| n.node.gpu_specs.first())
+                .map(|g| g.memory_gb)
+                .min();
 
             // Use max hourly rate across all nodes in the group as the bid cap
             let derived_max_hourly_rate_cents = nodes
