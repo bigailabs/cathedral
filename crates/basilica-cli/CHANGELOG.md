@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-02-25
+
+### Added
+- GPU flavour preferences: --interconnect, --region, --spot, --exclude-spot flags on gpu list, gpu up, and deploy commands
+
 ## [0.22.0] - 2026-02-23
 
 ### Changed
