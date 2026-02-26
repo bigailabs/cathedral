@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-02-26
+
+### Added
+- `deploy restart` subcommand for triggering rolling restarts
+
 ## [0.23.0] - 2026-02-25
 
 ### Added
