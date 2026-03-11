@@ -69,7 +69,7 @@ jobs:
               PROTOC_ARCH="linux-aarch_64"
             fi
             curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-${PROTOC_ARCH}.zip"
-            unzip "protoc-25.1-${PROTOC_ARCH}.zip" -d /usr/local
+            python3 -c "import zipfile; zipfile.ZipFile('protoc-25.1-${PROTOC_ARCH}.zip').extractall('/usr/local')"
             chmod +x /usr/local/bin/protoc
             protoc --version
 
