@@ -47,10 +47,16 @@ jobs:
   build-wheels-linux:
     name: Build wheels on Linux (${{ matrix.target }})
     needs: extract-version
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - target: x86_64
+            runner: ubuntu-latest
+            protoc_arch: linux-x86_64
+          - target: aarch64
+            runner: ubuntu-24.04-arm
+            protoc_arch: linux-aarch_64
     steps:
       - uses: actions/checkout@v4
 
@@ -63,13 +69,8 @@ jobs:
           manylinux: auto
           before-script-linux: |
             # Install protoc inside the manylinux container
-            if [ "$(uname -m)" = "x86_64" ]; then
-              PROTOC_ARCH="linux-x86_64"
-            else
-              PROTOC_ARCH="linux-aarch_64"
-            fi
-            curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-${PROTOC_ARCH}.zip"
-            python3 -c "import zipfile; zipfile.ZipFile('protoc-25.1-${PROTOC_ARCH}.zip').extractall('/usr/local')"
+            curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-${{ matrix.protoc_arch }}.zip"
+            python3 -c "import zipfile; zipfile.ZipFile('protoc-25.1-${{ matrix.protoc_arch }}.zip').extractall('/usr/local')"
             chmod +x /usr/local/bin/protoc
             protoc --version
 
