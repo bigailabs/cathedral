@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-03-11
+
+### Fixed
+- Enable abi3 stable ABI for wheel builds so Linux wheels are compatible with Python 3.10+
+- Add Linux aarch64 pre-built wheels
+- Previously Linux x86_64 wheels were tagged cp38-only, forcing source compilation on Python 3.10+
+
 ### Added
 - `health_check` parameter on `deploy()`, `deploy_async()`, `deploy_vllm()`, `deploy_sglang()`, `create_deployment()`, `create_deployment_async()`
 - `HealthCheckConfig` and `ProbeConfig` types for configuring startup, liveness, and readiness probes
