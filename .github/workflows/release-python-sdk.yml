@@ -80,20 +80,19 @@ jobs:
           path: dist/*.whl
 
   build-wheels-macos:
-    name: Build wheels on macOS (${{ matrix.target }}, py${{ matrix.python-version }})
+    name: Build wheels on macOS (${{ matrix.target }})
     needs: extract-version
     runs-on: macos-latest
     strategy:
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: '${{ matrix.python-version }}'
+          python-version: '3.10'
 
       - name: Install protoc
         run: brew install protobuf
@@ -102,13 +101,13 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -i python${{ matrix.python-version }} --manifest-path crates/basilica-sdk-python/Cargo.toml
+          args: --release --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
           sccache: 'true'
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.target }}-py${{ matrix.python-version }}
+          name: wheels-macos-${{ matrix.target }}
           path: dist/*.whl
 
   build-sdist:
