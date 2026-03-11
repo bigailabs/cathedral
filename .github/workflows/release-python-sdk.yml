@@ -64,7 +64,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
+          args: --release --out dist -i python3.10 --manifest-path crates/basilica-sdk-python/Cargo.toml
           sccache: 'true'
           manylinux: auto
           before-script-linux: |

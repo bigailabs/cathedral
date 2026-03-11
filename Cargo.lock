@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "basilica-sdk-python"
-version = "0.25.1"
+version = "0.25.2"
 dependencies = [
  "basilica-sdk",
  "basilica-validator",

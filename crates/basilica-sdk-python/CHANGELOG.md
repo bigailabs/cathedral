@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-03-11
+
+### Fixed
+- Linux wheels now correctly tagged `cp310-abi3` instead of `cp38-cp38`
+- Maturin builds now explicitly use Python 3.10 interpreter inside manylinux containers
+
 ## [0.25.1] - 2026-03-11
 
 ### Fixed
