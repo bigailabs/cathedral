@@ -103,7 +103,7 @@ docker compose logs -f miner
 11. [Monitoring](#monitoring)
 12. [Troubleshooting](#troubleshooting)
 13. [Advanced Topics](#advanced-topics)
-    - [Time-Based Incentive Ramp-Up](#time-based-incentive-ramp-up)
+    - [Delivery-Based Emissions](#delivery-based-emissions)
     - [Miners & the Ban System](#miners--the-ban-system)
 
 ---
@@ -1637,9 +1637,9 @@ chmod +x /opt/basilica/scripts/monitor-gpus.sh
 - **Error rates**: Failed authentications, SSH failures
 - **Database performance**: Query times, connection pool usage
 
-### Time-Based Incentive Ramp-Up
+### Delivery-Based Emissions
 
-Validators apply a linear uptime multiplier that reaches 1.0 after roughly 14 days of uninterrupted service and resets when downtime exceeds the validator tolerance window. For detailed formulas, examples, and operational guidance, see [Node Uptime Ramp-up (Incentives Ramp-up)](scoring-and-weights.md#node-uptime-ramp-up-incentives-ramp-up).
+Miners earn emissions based on **rental revenue**, not uptime or validation scores. When your GPU nodes are actively rented and generating revenue, the billing system records delivery records that the validator uses to set weights. Your share of emissions within each GPU category is proportional to the `revenue_usd` your nodes generate relative to other miners in the same category. For the full weight calculation details, see [Scoring and Weight Setting](scoring-and-weights.md).
 
 ### Miners & the Ban System
 
