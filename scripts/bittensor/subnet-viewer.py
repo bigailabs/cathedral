@@ -104,7 +104,6 @@ class SubnetListScreen(Screen):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
-        Binding("enter", "select_subnet", "View Subnet"),
     ]
 
     CSS = """
@@ -169,12 +168,8 @@ class SubnetListScreen(Screen):
         self.query_one("#subnet-table", DataTable).add_class("hidden")
         self.load_subnets()
 
-    def action_select_subnet(self) -> None:
-        table = self.query_one("#subnet-table", DataTable)
-        if table.row_count == 0:
-            return
-        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
-        netuid = int(row_key.value)
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        netuid = int(event.row_key.value)
         self.app.push_screen(SubnetDetailScreen(self.network, netuid))
 
     def action_quit(self) -> None:
@@ -400,23 +395,12 @@ class SubnetDetailScreen(Screen):
         if n == 0:
             n = len(getattr(mg, "uids", []))
 
+        rows = []
+        axons = getattr(mg, "axons", None)
         for i in range(n):
-            uid = self._neuron_val(mg, "uids", i, str(i))
-            hotkey = truncate_key(self._neuron_val(mg, "hotkeys", i, ""))
-            coldkey = truncate_key(self._neuron_val(mg, "coldkeys", i, ""))
-            total_stake = self._neuron_num(mg, "total_stake", i)
-            alpha_stake = self._neuron_num(mg, "alpha_stake", i)
-            tao_stake = self._neuron_num(mg, "tao_stake", i)
-            trust = self._neuron_num(mg, "trust", i)
-            consensus = self._neuron_num(mg, "consensus", i)
-            incentive = self._neuron_num(mg, "incentive", i)
-            dividends = self._neuron_num(mg, "dividends", i)
-            emission = self._neuron_num(mg, "emission", i)
-            active = self._neuron_val(mg, "active", i, "?")
-            val_permit = self._neuron_val(mg, "validator_permit", i, "?")
+            stake_raw = self._neuron_float(mg, "total_stake", i)
 
             axon_ip = ""
-            axons = getattr(mg, "axons", None)
             if axons is not None and i < len(axons):
                 axon = axons[i]
                 ip = getattr(axon, "ip", "") or ""
@@ -424,11 +408,26 @@ class SubnetDetailScreen(Screen):
                 if ip and ip != "0.0.0.0":
                     axon_ip = f"{ip}:{port}"
 
-            table.add_row(
-                str(uid), hotkey, coldkey, total_stake, alpha_stake,
-                tao_stake, trust, consensus, incentive, dividends,
-                emission, str(active), str(val_permit), axon_ip,
-            )
+            rows.append((stake_raw, (
+                self._neuron_val(mg, "uids", i, str(i)),
+                truncate_key(self._neuron_val(mg, "hotkeys", i, "")),
+                truncate_key(self._neuron_val(mg, "coldkeys", i, "")),
+                self._neuron_num(mg, "total_stake", i),
+                self._neuron_num(mg, "alpha_stake", i),
+                self._neuron_num(mg, "tao_stake", i),
+                self._neuron_num(mg, "trust", i),
+                self._neuron_num(mg, "consensus", i),
+                self._neuron_num(mg, "incentive", i),
+                self._neuron_num(mg, "dividends", i),
+                self._neuron_num(mg, "emission", i),
+                str(self._neuron_val(mg, "active", i, "?")),
+                str(self._neuron_val(mg, "validator_permit", i, "?")),
+                axon_ip,
+            )))
+
+        rows.sort(key=lambda r: r[0], reverse=True)
+        for _, cols in rows:
+            table.add_row(*cols)
 
     def _neuron_val(self, mg, attr: str, idx: int, fallback: str = "") -> str:
         arr = getattr(mg, attr, None)
@@ -441,6 +440,18 @@ class SubnetDetailScreen(Screen):
             return str(val)
         except (IndexError, TypeError):
             return fallback
+
+    def _neuron_float(self, mg, attr: str, idx: int) -> float:
+        arr = getattr(mg, attr, None)
+        if arr is None:
+            return 0.0
+        try:
+            val = arr[idx]
+            if hasattr(val, "item"):
+                val = val.item()
+            return float(val)
+        except (IndexError, TypeError, ValueError):
+            return 0.0
 
     def _neuron_num(self, mg, attr: str, idx: int) -> str:
         arr = getattr(mg, attr, None)
