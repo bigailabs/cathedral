@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from dataclasses import dataclass
 
@@ -184,6 +185,8 @@ class SubnetListScreen(Screen):
 @dataclass
 class SubnetData:
     """Container for fetched subnet data."""
+    network: str
+    netuid: int
     metagraph: object
     hyperparams: object
 
@@ -242,7 +245,7 @@ class SubnetDetailScreen(Screen):
             self.app.call_from_thread(self._show_error, str(e))
             return
 
-        data = SubnetData(metagraph=metagraph, hyperparams=hyperparams)
+        data = SubnetData(network=self.network, netuid=self.netuid, metagraph=metagraph, hyperparams=hyperparams)
         self.app.call_from_thread(self._render_all, data)
 
     def _show_error(self, msg: str) -> None:
@@ -427,7 +430,7 @@ class SubnetDetailScreen(Screen):
 
         rows.sort(key=lambda r: r[0], reverse=True)
         for _, cols in rows:
-            table.add_row(*cols)
+            table.add_row(*cols, key=cols[0])
 
     def _neuron_val(self, mg, attr: str, idx: int, fallback: str = "") -> str:
         arr = getattr(mg, attr, None)
@@ -507,10 +510,511 @@ class SubnetDetailScreen(Screen):
 
     # --- Actions ---
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "metagraph-table":
+            return
+        if self.subnet_data is None:
+            return
+        uid = int(event.row_key.value)
+        self.app.push_screen(ValidatorWeightsScreen(
+            network=self.subnet_data.network,
+            netuid=self.subnet_data.netuid,
+            validator_uid=uid,
+            subnet_data=self.subnet_data,
+        ))
+
     def action_refresh(self) -> None:
         self.query_one("#loading").remove_class("hidden")
         self.query_one("#detail-content").add_class("hidden")
         self.load_data()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_quit(self) -> None:
+        self.app.exit()
+
+
+# ---------------------------------------------------------------------------
+# Validator Weights Helper
+# ---------------------------------------------------------------------------
+
+
+def extract_validator_weights(all_weights, validator_uid: int) -> list[tuple[int, float]]:
+    """Extract and sort a single validator's weights from subtensor.weights() result."""
+    for uid, weights in all_weights:
+        if uid == validator_uid:
+            result = [(tuid, float(w)) for tuid, w in weights]
+            return sorted(result, key=lambda x: x[1], reverse=True)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Validator Weights Screen
+# ---------------------------------------------------------------------------
+
+
+class ValidatorWeightsScreen(Screen):
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("b", "go_back", "Back"),
+        Binding("c", "compare", "Compare"),
+        Binding("r", "refresh", "Refresh"),
+    ]
+
+    CSS = """
+    #loading { height: auto; }
+    .hidden { display: none; }
+    #weights-content { height: 1fr; }
+    #weights-table { height: 1fr; }
+    #history-table { height: 1fr; }
+    #validator-info { padding: 1 2; }
+    """
+
+    def __init__(self, network: str, netuid: int, validator_uid: int, subnet_data: SubnetData) -> None:
+        super().__init__()
+        self.network = network
+        self.netuid = netuid
+        self.validator_uid = validator_uid
+        self.subnet_data = subnet_data
+        self.all_weights: list | None = None
+        self.current_block: int | None = None
+        self.tempo: int | None = None
+        self._history_loaded = False
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield LoadingIndicator(id="loading")
+        with TabbedContent(id="weights-content", classes="hidden"):
+            with TabPane("Current Weights", id="tab-current"):
+                yield Static(id="validator-info")
+                yield DataTable(id="weights-table")
+            with TabPane("History", id="tab-history"):
+                yield Static("Switch to this tab to load history...", id="history-status")
+                yield DataTable(id="history-table")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        mg = self.subnet_data.metagraph
+        uid = self.validator_uid
+        hotkey = self._neuron_val(mg, "hotkeys", uid, "N/A")
+        stake = self._neuron_num(mg, "total_stake", uid)
+        self.sub_title = f"Validator UID {uid} Weights"
+
+        info = self.query_one("#validator-info", Static)
+        info.update(
+            f"[bold]UID:[/bold] {uid}  |  "
+            f"[bold]Hotkey:[/bold] {truncate_key(hotkey)}  |  "
+            f"[bold]Stake:[/bold] {stake}"
+        )
+
+        table = self.query_one("#weights-table", DataTable)
+        table.cursor_type = "row"
+
+        hist_table = self.query_one("#history-table", DataTable)
+        hist_table.cursor_type = "row"
+
+        self.load_weights()
+
+    def _neuron_val(self, mg, attr: str, idx: int, fallback: str = "") -> str:
+        arr = getattr(mg, attr, None)
+        if arr is None:
+            return fallback
+        try:
+            val = arr[idx]
+            if hasattr(val, "item"):
+                return str(val.item())
+            return str(val)
+        except (IndexError, TypeError):
+            return fallback
+
+    def _neuron_num(self, mg, attr: str, idx: int) -> str:
+        arr = getattr(mg, attr, None)
+        if arr is None:
+            return "N/A"
+        try:
+            val = arr[idx]
+            if hasattr(val, "item"):
+                val = val.item()
+            fval = float(val)
+            if fval == int(fval) and abs(fval) < 1e12:
+                return str(int(fval))
+            return f"{fval:.6f}"
+        except (IndexError, TypeError, ValueError):
+            return "N/A"
+
+    @work(thread=True)
+    def load_weights(self) -> None:
+        try:
+            sub = bittensor.Subtensor(network=self.network)
+            self.all_weights = sub.weights(netuid=self.netuid)
+            self.current_block = sub.block
+            hp = self.subnet_data.hyperparams
+            hparams = getattr(self.subnet_data.metagraph, "hparams", None)
+            self.tempo = getattr(hparams, "tempo", None) or getattr(hp, "tempo", None)
+            if self.tempo is not None:
+                self.tempo = int(self.tempo)
+        except Exception as e:
+            self.app.call_from_thread(self._show_error, str(e))
+            return
+
+        self.app.call_from_thread(self._render_weights)
+
+    def _show_error(self, msg: str) -> None:
+        self.query_one("#loading").add_class("hidden")
+        self.query_one("#weights-content").remove_class("hidden")
+        self.notify(f"Error: {msg}", severity="error", timeout=10)
+
+    def _render_weights(self) -> None:
+        self.query_one("#loading").add_class("hidden")
+        self.query_one("#weights-content").remove_class("hidden")
+
+        weights = extract_validator_weights(self.all_weights, self.validator_uid)
+
+        table = self.query_one("#weights-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("Miner UID", "Hotkey", "Weight", "% of Total")
+
+        total = sum(w for _, w in weights)
+        mg = self.subnet_data.metagraph
+        for miner_uid, weight in weights:
+            pct = (weight / total * 100) if total > 0 else 0.0
+            hotkey = self._neuron_val(mg, "hotkeys", miner_uid, "N/A")
+            table.add_row(
+                str(miner_uid),
+                truncate_key(hotkey),
+                f"{weight:.6f}",
+                f"{pct:.2f}%",
+            )
+
+        if not weights:
+            self.notify("No weights set by this validator", severity="warning")
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if event.pane.id == "tab-history" and not self._history_loaded:
+            self._history_loaded = True
+            self._load_history()
+
+    @work(thread=True)
+    def _load_history(self) -> None:
+        if self.all_weights is None or self.current_block is None or self.tempo is None:
+            self.app.call_from_thread(
+                self._update_history_status, "Cannot load history: missing block/tempo info"
+            )
+            return
+
+        current = extract_validator_weights(self.all_weights, self.validator_uid)
+        top_uids = [uid for uid, _ in current[:20]]
+
+        if not top_uids:
+            self.app.call_from_thread(
+                self._update_history_status, "No current weights — cannot show history"
+            )
+            return
+
+        self.app.call_from_thread(self._setup_history_table, top_uids)
+
+        archive_network = "archive" if self.network in ("finney", "archive") else self.network
+        sub = bittensor.Subtensor(network=archive_network)
+        loaded = 0
+        errors = 0
+        first_error = None
+        for i in range(1, 11):
+            block = self.current_block - self.tempo * i
+            if block <= 0:
+                break
+            try:
+                hist_weights = sub.weights(netuid=self.netuid, block=block)
+                validator_w = extract_validator_weights(hist_weights, self.validator_uid)
+                w_dict = dict(validator_w)
+                age_blocks = self.current_block - block
+                self.app.call_from_thread(
+                    self._add_history_row, block, age_blocks, top_uids, w_dict
+                )
+                loaded += 1
+            except Exception as e:
+                errors += 1
+                if first_error is None:
+                    first_error = str(e)
+                continue
+
+        if loaded == 0 and first_error:
+            msg = f"No historical data available ({errors} queries failed: {first_error})"
+        elif loaded == 0:
+            msg = "No historical data available"
+        else:
+            msg = f"History loaded ({loaded} epochs{f', {errors} failed' if errors else ''})"
+        self.app.call_from_thread(self._update_history_status, msg)
+
+    def _update_history_status(self, msg: str) -> None:
+        self.query_one("#history-status", Static).update(msg)
+
+    def _setup_history_table(self, top_uids: list[int]) -> None:
+        table = self.query_one("#history-table", DataTable)
+        table.clear(columns=True)
+        cols = ["Block", "Age"] + [f"UID {uid}" for uid in top_uids]
+        table.add_columns(*cols)
+        self._update_history_status("Loading history...")
+
+    def _add_history_row(self, block: int, age_blocks: int, top_uids: list[int], w_dict: dict) -> None:
+        table = self.query_one("#history-table", DataTable)
+        row = [str(block), f"{age_blocks} blocks"]
+        for uid in top_uids:
+            w = w_dict.get(uid, 0.0)
+            row.append(f"{w:.6f}" if w > 0 else "—")
+        table.add_row(*row)
+
+    def action_compare(self) -> None:
+        if self.all_weights is None:
+            self.notify("Weights not loaded yet", severity="warning")
+            return
+        self.app.push_screen(ValidatorPickerScreen(
+            network=self.network,
+            netuid=self.netuid,
+            validator_a_uid=self.validator_uid,
+            all_weights=self.all_weights,
+            subnet_data=self.subnet_data,
+        ))
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_refresh(self) -> None:
+        self._history_loaded = False
+        self.query_one("#loading").remove_class("hidden")
+        self.query_one("#weights-content").add_class("hidden")
+        self.load_weights()
+
+    def action_quit(self) -> None:
+        self.app.exit()
+
+
+# ---------------------------------------------------------------------------
+# Validator Picker Screen
+# ---------------------------------------------------------------------------
+
+
+class ValidatorPickerScreen(Screen):
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("b", "go_back", "Back"),
+    ]
+
+    CSS = """
+    #picker-table { height: 1fr; }
+    """
+
+    def __init__(
+        self,
+        network: str,
+        netuid: int,
+        validator_a_uid: int,
+        all_weights: list,
+        subnet_data: SubnetData,
+    ) -> None:
+        super().__init__()
+        self.network = network
+        self.netuid = netuid
+        self.validator_a_uid = validator_a_uid
+        self.all_weights = all_weights
+        self.subnet_data = subnet_data
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield DataTable(id="picker-table")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.sub_title = "Pick validator to compare"
+
+        table = self.query_one("#picker-table", DataTable)
+        table.cursor_type = "row"
+        table.add_columns("UID", "Hotkey", "Stake")
+
+        mg = self.subnet_data.metagraph
+        n = getattr(mg, "n", 0) or 0
+        if n == 0:
+            n = len(getattr(mg, "uids", []))
+
+        validators = []
+        permits = getattr(mg, "validator_permit", None)
+        for i in range(n):
+            if permits is not None:
+                try:
+                    perm = permits[i]
+                    if hasattr(perm, "item"):
+                        perm = perm.item()
+                    if not perm:
+                        continue
+                except (IndexError, TypeError):
+                    continue
+
+            if i == self.validator_a_uid:
+                continue
+
+            stake_raw = 0.0
+            stake_arr = getattr(mg, "total_stake", None)
+            if stake_arr is not None:
+                try:
+                    val = stake_arr[i]
+                    if hasattr(val, "item"):
+                        val = val.item()
+                    stake_raw = float(val)
+                except (IndexError, TypeError, ValueError):
+                    pass
+
+            uid_val = i
+            uids_arr = getattr(mg, "uids", None)
+            if uids_arr is not None:
+                try:
+                    uid_val = uids_arr[i]
+                    if hasattr(uid_val, "item"):
+                        uid_val = uid_val.item()
+                except (IndexError, TypeError):
+                    pass
+
+            hotkey = ""
+            hk_arr = getattr(mg, "hotkeys", None)
+            if hk_arr is not None:
+                try:
+                    hotkey = str(hk_arr[i])
+                except (IndexError, TypeError):
+                    pass
+
+            validators.append((stake_raw, str(uid_val), hotkey))
+
+        validators.sort(key=lambda v: v[0], reverse=True)
+        for stake_raw, uid_str, hotkey in validators:
+            stake_display = f"{stake_raw:.6f}" if stake_raw != int(stake_raw) else str(int(stake_raw))
+            table.add_row(uid_str, truncate_key(hotkey), stake_display, key=uid_str)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        validator_b_uid = int(event.row_key.value)
+        self.app.push_screen(ValidatorCompareScreen(
+            network=self.network,
+            netuid=self.netuid,
+            validator_a_uid=self.validator_a_uid,
+            validator_b_uid=validator_b_uid,
+            all_weights=self.all_weights,
+            subnet_data=self.subnet_data,
+        ))
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_quit(self) -> None:
+        self.app.exit()
+
+
+# ---------------------------------------------------------------------------
+# Validator Compare Screen
+# ---------------------------------------------------------------------------
+
+
+class ValidatorCompareScreen(Screen):
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("b", "go_back", "Back"),
+    ]
+
+    CSS = """
+    #compare-table { height: 1fr; }
+    #compare-summary { padding: 1 2; }
+    """
+
+    def __init__(
+        self,
+        network: str,
+        netuid: int,
+        validator_a_uid: int,
+        validator_b_uid: int,
+        all_weights: list,
+        subnet_data: SubnetData,
+    ) -> None:
+        super().__init__()
+        self.network = network
+        self.netuid = netuid
+        self.validator_a_uid = validator_a_uid
+        self.validator_b_uid = validator_b_uid
+        self.all_weights = all_weights
+        self.subnet_data = subnet_data
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll():
+            yield DataTable(id="compare-table")
+            yield Static(id="compare-summary")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.sub_title = f"Compare UID {self.validator_a_uid} vs UID {self.validator_b_uid}"
+
+        weights_a = extract_validator_weights(self.all_weights, self.validator_a_uid)
+        weights_b = extract_validator_weights(self.all_weights, self.validator_b_uid)
+
+        dict_a = dict(weights_a)
+        dict_b = dict(weights_b)
+        all_miner_uids = sorted(set(dict_a.keys()) | set(dict_b.keys()))
+
+        table = self.query_one("#compare-table", DataTable)
+        table.cursor_type = "row"
+        table.add_columns(
+            "Miner UID", "Hotkey",
+            f"Val {self.validator_a_uid} Weight", f"Val {self.validator_b_uid} Weight",
+            "Diff",
+        )
+
+        rows = []
+        for muid in all_miner_uids:
+            wa = dict_a.get(muid, 0.0)
+            wb = dict_b.get(muid, 0.0)
+            diff = abs(wa - wb)
+            rows.append((diff, muid, wa, wb))
+
+        rows.sort(key=lambda r: r[0], reverse=True)
+
+        mg = self.subnet_data.metagraph
+        for diff, muid, wa, wb in rows:
+            hotkey = ""
+            hk_arr = getattr(mg, "hotkeys", None)
+            if hk_arr is not None:
+                try:
+                    hotkey = str(hk_arr[muid])
+                except (IndexError, TypeError):
+                    pass
+            table.add_row(
+                str(muid),
+                truncate_key(hotkey),
+                f"{wa:.6f}" if wa > 0 else "—",
+                f"{wb:.6f}" if wb > 0 else "—",
+                f"{diff:.6f}",
+            )
+
+        # Summary
+        set_a = set(dict_a.keys())
+        set_b = set(dict_b.keys())
+        overlap = len(set_a & set_b)
+        only_a = len(set_a - set_b)
+        only_b = len(set_b - set_a)
+        cos_sim = self._cosine_similarity(dict_a, dict_b)
+
+        summary = self.query_one("#compare-summary", Static)
+        summary.update(
+            f"[bold]Overlap:[/bold] {overlap} miners weighted by both  |  "
+            f"[bold]Only Val {self.validator_a_uid}:[/bold] {only_a}  |  "
+            f"[bold]Only Val {self.validator_b_uid}:[/bold] {only_b}  |  "
+            f"[bold]Cosine Similarity:[/bold] {cos_sim:.4f}"
+        )
+
+    @staticmethod
+    def _cosine_similarity(dict_a: dict, dict_b: dict) -> float:
+        all_keys = set(dict_a.keys()) | set(dict_b.keys())
+        dot = sum(dict_a.get(k, 0.0) * dict_b.get(k, 0.0) for k in all_keys)
+        norm_a = math.sqrt(sum(v ** 2 for v in dict_a.values()))
+        norm_b = math.sqrt(sum(v ** 2 for v in dict_b.values()))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
 
     def action_go_back(self) -> None:
         self.app.pop_screen()
