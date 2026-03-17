@@ -416,7 +416,6 @@ class SubnetDetailScreen(Screen):
             "Bonds": [
                 ("bonds_moving_avg", hparams),
                 ("bonds_reset_enabled", hp),
-                ("liquid_alpha_enabled", hparams),
             ],
             "State": [
                 ("subnet_is_active", hp),
