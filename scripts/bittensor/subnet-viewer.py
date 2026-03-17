@@ -157,11 +157,11 @@ class SubnetListScreen(Screen):
         for sn in subnets:
             netuid = getattr(sn, "netuid", "?")
             name = getattr(sn, "subnet_name", "") or getattr(sn, "name", "") or ""
-            owner = truncate_key(getattr(sn, "owner_coldkey", "") or getattr(sn, "owner", "") or "")
+            owner = truncate_key(getattr(sn, "owner_ss58", "") or "")
             tempo = fmt_val(getattr(sn, "tempo", None))
-            neurons = fmt_val(getattr(sn, "num_uids", None) or getattr(sn, "subnetwork_n", None))
-            max_uids = fmt_val(getattr(sn, "max_uids", None) or getattr(sn, "max_n", None))
-            emission = fmt_val(getattr(sn, "subnet_emission", None) or getattr(sn, "emission_value", None))
+            neurons = fmt_val(getattr(sn, "subnetwork_n", None))
+            max_uids = fmt_val(getattr(sn, "max_n", None))
+            emission = fmt_val(getattr(sn, "emission_value", None))
             table.add_row(str(netuid), name, owner, tempo, neurons, max_uids, emission, key=str(netuid))
 
     def action_refresh(self) -> None:
@@ -275,25 +275,25 @@ class SubnetDetailScreen(Screen):
         container = self.query_one("#identity-content")
         container.remove_children()
 
-        identity = getattr(mg, "identity", None)
+        identity = getattr(mg, "identity", None)  # dict or None
 
         fields = [
-            ("Subnet Name", getattr(mg, "name", None) or getattr(mg, "subnet_name", None)),
+            ("Subnet Name", getattr(mg, "name", None)),
             ("Symbol", getattr(mg, "symbol", None)),
             ("Owner Coldkey", getattr(mg, "owner_coldkey", None)),
             ("Owner Hotkey", getattr(mg, "owner_hotkey", None)),
             ("Network Registered At", getattr(mg, "network_registered_at", None)),
         ]
 
-        if identity is not None:
+        if identity and isinstance(identity, dict):
             fields.extend([
-                ("Description", getattr(identity, "description", None)),
-                ("GitHub Repo", getattr(identity, "github_repo", None)),
-                ("Subnet URL", getattr(identity, "subnet_url", None)),
-                ("Discord", getattr(identity, "discord", None)),
-                ("Logo URL", getattr(identity, "logo_url", None)),
-                ("Contact", getattr(identity, "subnet_contact", None)),
-                ("Additional", getattr(identity, "additional", None)),
+                ("Description", identity.get("description")),
+                ("GitHub Repo", identity.get("github_repo")),
+                ("Subnet URL", identity.get("subnet_url")),
+                ("Discord", identity.get("discord")),
+                ("Logo URL", identity.get("logo_url")),
+                ("Contact", identity.get("subnet_contact")),
+                ("Additional", identity.get("additional")),
             ])
         else:
             fields.append(("Identity", "Not set on-chain"))
@@ -308,53 +308,59 @@ class SubnetDetailScreen(Screen):
         container = self.query_one("#hparams-content")
         container.remove_children()
 
+        hparams = getattr(mg, "hparams", None)
+
         def _get(obj, attr, fallback="N/A"):
+            if obj is None:
+                return fallback
             val = getattr(obj, attr, None)
             if val is None:
                 return fallback
             return str(val)
 
+        # hparams = mg.hparams (human-readable values)
+        # hp = SubnetHyperparameters (supplemental fields marked with *)
         sections = {
             "Consensus / Weights": [
-                ("min_allowed_weights", mg),
-                ("max_weights_limit", mg),
-                ("weights_version", mg),
-                ("weights_rate_limit", mg),
-                ("alpha_high", mg),
-                ("alpha_low", mg),
+                ("min_allowed_weights", hparams),
+                ("max_weights_limit", hparams),
+                ("weights_version", hparams),
+                ("weights_rate_limit", hparams),
+                ("alpha_high", hparams),
+                ("alpha_low", hparams),
                 ("alpha_sigmoid_steepness", hp),
-                ("liquid_alpha_enabled", mg),
-                ("commit_reveal_weights_enabled", mg),
-                ("commit_reveal_period", mg),
-                ("rho", mg),
-                ("kappa", mg),
+                ("liquid_alpha_enabled", hparams),
+                ("commit_reveal_weights_enabled", hparams),
+                ("commit_reveal_period", hparams),
+                ("rho", hparams),
+                ("kappa", hparams),
             ],
             "Registration": [
-                ("registration_allowed", mg),
-                ("pow_registration_allowed", mg),
-                ("immunity_period", mg),
-                ("burn", mg),
-                ("difficulty", mg),
-                ("min_difficulty", mg),
-                ("max_difficulty", mg),
-                ("min_burn", mg),
-                ("max_burn", mg),
-                ("adjustment_alpha", mg),
-                ("adjustment_interval", mg),
-                ("target_regs_per_interval", mg),
-                ("max_regs_per_block", mg),
-                ("serving_rate_limit", mg),
+                ("registration_allowed", hparams),
+                ("pow_registration_allowed", hparams),
+                ("immunity_period", hparams),
+                ("burn", hparams),
+                ("difficulty", hparams),
+                ("min_difficulty", hparams),
+                ("max_difficulty", hparams),
+                ("min_burn", hparams),
+                ("max_burn", hparams),
+                ("adjustment_alpha", hparams),
+                ("adjustment_interval", hparams),
+                ("target_regs_per_interval", hparams),
+                ("max_regs_per_block", hparams),
+                ("serving_rate_limit", hparams),
             ],
             "Neuron / Validator": [
                 ("num_uids", mg),
                 ("max_uids", mg),
-                ("max_validators", mg),
-                ("activity_cutoff", mg),
+                ("max_validators", hparams),
+                ("activity_cutoff", hparams),
             ],
             "Bonds": [
-                ("bonds_moving_avg", mg),
+                ("bonds_moving_avg", hparams),
                 ("bonds_reset_enabled", hp),
-                ("liquid_alpha_enabled", mg),
+                ("liquid_alpha_enabled", hparams),
             ],
             "State": [
                 ("subnet_is_active", hp),
@@ -367,10 +373,7 @@ class SubnetDetailScreen(Screen):
         for section_name, params in sections.items():
             lines = []
             for attr, source in params:
-                if source is None:
-                    val = "N/A"
-                else:
-                    val = _get(source, attr)
+                val = _get(source, attr)
                 lines.append(f"  {attr}: {val}")
 
             content = "\n".join(lines)
@@ -390,7 +393,7 @@ class SubnetDetailScreen(Screen):
         table.add_columns(
             "UID", "Hotkey", "Coldkey", "Total Stake", "Alpha Stake",
             "TAO Stake", "Trust", "Consensus", "Incentive", "Dividends",
-            "Rank", "Emission", "Active", "Val.Permit", "Axon",
+            "Emission", "Active", "Val.Permit", "Axon",
         )
 
         n = getattr(mg, "n", 0) or 0
@@ -408,7 +411,6 @@ class SubnetDetailScreen(Screen):
             consensus = self._neuron_num(mg, "consensus", i)
             incentive = self._neuron_num(mg, "incentive", i)
             dividends = self._neuron_num(mg, "dividends", i)
-            rank = self._neuron_num(mg, "ranks", i)
             emission = self._neuron_num(mg, "emission", i)
             active = self._neuron_val(mg, "active", i, "?")
             val_permit = self._neuron_val(mg, "validator_permit", i, "?")
@@ -425,7 +427,7 @@ class SubnetDetailScreen(Screen):
             table.add_row(
                 str(uid), hotkey, coldkey, total_stake, alpha_stake,
                 tao_stake, trust, consensus, incentive, dividends,
-                rank, emission, str(active), str(val_permit), axon_ip,
+                emission, str(active), str(val_permit), axon_ip,
             )
 
     def _neuron_val(self, mg, attr: str, idx: int, fallback: str = "") -> str:
@@ -461,24 +463,36 @@ class SubnetDetailScreen(Screen):
         container = self.query_one("#emissions-content")
         container.remove_children()
 
-        fields = [
-            "subnet_emission",
-            "alpha_in",
-            "alpha_out",
-            "tao_in",
-            "alpha_out_emission",
-            "alpha_in_emission",
-            "tao_in_emission",
-            "pending_alpha_emission",
-            "pending_root_emission",
-            "subnet_volume",
-            "moving_price",
+        emissions = getattr(mg, "emissions", None)
+        pool = getattr(mg, "pool", None)
+
+        emission_fields = [
+            ("subnet_emission", emissions),
+            ("alpha_in_emission", emissions),
+            ("alpha_out_emission", emissions),
+            ("tao_in_emission", emissions),
+            ("pending_alpha_emission", emissions),
+            ("pending_root_emission", emissions),
         ]
 
-        for field in fields:
-            val = getattr(mg, field, None)
-            display = fmt_val(val, "N/A")
-            container.mount(Static(f"  [bold]{field}:[/bold]  {display}"))
+        pool_fields = [
+            ("alpha_out", pool),
+            ("alpha_in", pool),
+            ("tao_in", pool),
+            ("subnet_volume", pool),
+            ("moving_price", pool),
+        ]
+
+        container.mount(Static("  [bold underline]Emissions[/bold underline]"))
+        for field, source in emission_fields:
+            val = getattr(source, field, None) if source else None
+            container.mount(Static(f"    [bold]{field}:[/bold]  {fmt_val(val)}"))
+
+        container.mount(Static(""))
+        container.mount(Static("  [bold underline]Pool / Reserve[/bold underline]"))
+        for field, source in pool_fields:
+            val = getattr(source, field, None) if source else None
+            container.mount(Static(f"    [bold]{field}:[/bold]  {fmt_val(val)}"))
 
     # --- Actions ---
 
