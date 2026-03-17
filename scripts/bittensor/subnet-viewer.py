@@ -1003,7 +1003,7 @@ class ValidatorCompareScreen(Screen):
             f"[bold]Overlap:[/bold] {overlap} miners weighted by both  |  "
             f"[bold]Only Val {self.validator_a_uid}:[/bold] {only_a}  |  "
             f"[bold]Only Val {self.validator_b_uid}:[/bold] {only_b}  |  "
-            f"[bold]Cosine Similarity:[/bold] {cos_sim:.4f}"
+            f"[bold]Cosine Similarity:[/bold] {cos_sim:.10f}"
         )
 
     @staticmethod
