@@ -96,6 +96,64 @@ def fmt_val(value, fallback: str = "N/A") -> str:
         return fallback
 
 
+FIELD_DESCRIPTIONS: dict[str, str] = {
+    # --- Emissions ---
+    "subnet_emission": "Legacy pre-dTAO field, hardcoded to 0 on chain. Superseded by tao_in/alpha_in/alpha_out emission",
+    "alpha_in_emission": "Alpha tokens injected into the subnet's liquidity pool each block (tao_in / price)",
+    "alpha_out_emission": "Alpha distributed to miners (41%), validators (41%), and subnet owner (18%)",
+    "tao_in_emission": "TAO injected into the AMM pool each block; may be less than full allocation if alpha injection cap triggers",
+    "pending_alpha_emission": "Accumulated alpha awaiting distribution at next Yuma Consensus epoch (~tempo blocks)",
+    "pending_root_emission": "Accumulated TAO equivalents bound for root subnet (SN0) stakers",
+    # --- Pool / Reserve ---
+    "alpha_out": "Total alpha emitted and held outside the pool (in user hotkeys)",
+    "alpha_in": "Alpha tokens held in the subnet's AMM liquidity reserve",
+    "tao_in": "TAO tokens held in the subnet's AMM liquidity reserve",
+    "subnet_volume": "Cumulative staking transaction volume in the subnet's pool",
+    "moving_price": "EMA price of alpha (TAO_reserve / Alpha_reserve), smoothed ~30-day half-life",
+    # --- Consensus / Weights ---
+    "min_allowed_weights": "Minimum number of UIDs a validator must include in each weight-set",
+    "max_weights_limit": "Max normalized weight a validator can assign to any single UID",
+    "weights_version": "Required weights version; validators below this are excluded from consensus",
+    "weights_rate_limit": "Minimum blocks between successive weight commits by one hotkey",
+    "alpha_high": "Upper bound of the Liquid Alpha range for Yuma Consensus mixing",
+    "alpha_low": "Lower bound of the Liquid Alpha range for Yuma Consensus mixing",
+    "alpha_sigmoid_steepness": "Steepness of the sigmoid mapping consensus score to the alpha mixing factor",
+    "liquid_alpha_enabled": "Whether per-UID adaptive alpha is used instead of a fixed value",
+    "commit_reveal_weights_enabled": "Whether commit-reveal protocol is required for weight submissions",
+    "commit_reveal_period": "Tempo intervals between weight commit and reveal phases",
+    "rho": "Temperature parameter controlling weight normalization in Yuma Consensus",
+    "kappa": "Shift/threshold parameter in the Yuma Consensus sigmoid function",
+    # --- Registration ---
+    "registration_allowed": "Whether new neuron registrations are open on this subnet",
+    "pow_registration_allowed": "Whether proof-of-work registration is accepted (vs burn-only)",
+    "immunity_period": "Blocks a newly registered neuron is protected from deregistration",
+    "burn": "Current TAO burn cost to register a neuron on this subnet",
+    "difficulty": "Current PoW difficulty target for proof-of-work registration",
+    "min_difficulty": "Floor on PoW difficulty; cannot adjust below this",
+    "max_difficulty": "Ceiling on PoW difficulty; cannot adjust above this",
+    "min_burn": "Floor on burn cost; cannot adjust below this",
+    "max_burn": "Ceiling on burn cost; cannot adjust above this",
+    "adjustment_alpha": "EMA smoothing factor for registration rate adjustments",
+    "adjustment_interval": "Blocks between difficulty/burn recalculations",
+    "target_regs_per_interval": "Desired registrations per adjustment interval",
+    "max_regs_per_block": "Max neuron registrations allowed in a single block",
+    "serving_rate_limit": "Minimum blocks between successive axon-serve calls from one hotkey",
+    # --- Neuron / Validator ---
+    "num_uids": "Current number of active neurons registered on the subnet",
+    "max_uids": "Maximum neuron slots available on the subnet",
+    "max_validators": "Max neurons that can hold a validator permit",
+    "activity_cutoff": "Blocks of inactivity after which a validator's weights are ignored",
+    # --- Bonds ---
+    "bonds_moving_avg": "EMA decay factor for bond accumulation between validators and miners",
+    "bonds_reset_enabled": "Whether bonds are periodically reset to zero",
+    # --- State ---
+    "subnet_is_active": "Whether the subnet is active and processing consensus",
+    "transfers_enabled": "Whether alpha token transfers between hotkeys are allowed",
+    "user_liquidity_enabled": "Whether users can add/remove liquidity to the subnet's AMM pool",
+    "yuma_version": "Yuma Consensus algorithm version running on this subnet",
+}
+
+
 # ---------------------------------------------------------------------------
 # Subnet List Screen
 # ---------------------------------------------------------------------------
@@ -320,23 +378,23 @@ class SubnetDetailScreen(Screen):
         # hp = SubnetHyperparameters (supplemental fields marked with *)
         sections = {
             "Consensus / Weights": [
-                ("min_allowed_weights", hparams),
+                ("min_allowed_weights", hp),
                 ("max_weights_limit", hparams),
-                ("weights_version", hparams),
-                ("weights_rate_limit", hparams),
+                ("weights_version", hp),
+                ("weights_rate_limit", hp),
                 ("alpha_high", hparams),
                 ("alpha_low", hparams),
                 ("alpha_sigmoid_steepness", hp),
                 ("liquid_alpha_enabled", hparams),
                 ("commit_reveal_weights_enabled", hparams),
-                ("commit_reveal_period", hparams),
+                ("commit_reveal_period", hp),
                 ("rho", hparams),
                 ("kappa", hparams),
             ],
             "Registration": [
                 ("registration_allowed", hparams),
                 ("pow_registration_allowed", hparams),
-                ("immunity_period", hparams),
+                ("immunity_period", hp),
                 ("burn", hparams),
                 ("difficulty", hparams),
                 ("min_difficulty", hparams),
@@ -344,16 +402,16 @@ class SubnetDetailScreen(Screen):
                 ("min_burn", hparams),
                 ("max_burn", hparams),
                 ("adjustment_alpha", hparams),
-                ("adjustment_interval", hparams),
-                ("target_regs_per_interval", hparams),
-                ("max_regs_per_block", hparams),
-                ("serving_rate_limit", hparams),
+                ("adjustment_interval", hp),
+                ("target_regs_per_interval", hp),
+                ("max_regs_per_block", hp),
+                ("serving_rate_limit", hp),
             ],
             "Neuron / Validator": [
                 ("num_uids", mg),
                 ("max_uids", mg),
-                ("max_validators", hparams),
-                ("activity_cutoff", hparams),
+                ("max_validators", hp),
+                ("activity_cutoff", hp),
             ],
             "Bonds": [
                 ("bonds_moving_avg", hparams),
@@ -372,7 +430,10 @@ class SubnetDetailScreen(Screen):
             lines = []
             for attr, source in params:
                 val = _get(source, attr)
-                lines.append(f"  {attr}: {val}")
+                lines.append(f"  [bold]{attr}:[/bold]  {val}")
+                desc = FIELD_DESCRIPTIONS.get(attr, "")
+                if desc:
+                    lines.append(f"    [dim italic]{desc}[/dim italic]")
 
             content = "\n".join(lines)
             container.mount(
@@ -500,13 +561,17 @@ class SubnetDetailScreen(Screen):
         container.mount(Static("  [bold underline]Emissions[/bold underline]"))
         for field, source in emission_fields:
             val = getattr(source, field, None) if source else None
-            container.mount(Static(f"    [bold]{field}:[/bold]  {fmt_val(val)}"))
+            desc = FIELD_DESCRIPTIONS.get(field, "")
+            desc_line = f"\n      [dim italic]{desc}[/dim italic]" if desc else ""
+            container.mount(Static(f"    [bold]{field}:[/bold]  {fmt_val(val)}{desc_line}"))
 
         container.mount(Static(""))
         container.mount(Static("  [bold underline]Pool / Reserve[/bold underline]"))
         for field, source in pool_fields:
             val = getattr(source, field, None) if source else None
-            container.mount(Static(f"    [bold]{field}:[/bold]  {fmt_val(val)}"))
+            desc = FIELD_DESCRIPTIONS.get(field, "")
+            desc_line = f"\n      [dim italic]{desc}[/dim italic]" if desc else ""
+            container.mount(Static(f"    [bold]{field}:[/bold]  {fmt_val(val)}{desc_line}"))
 
     # --- Actions ---
 
@@ -650,8 +715,7 @@ class ValidatorWeightsScreen(Screen):
             self.all_weights = sub.weights(netuid=self.netuid)
             self.current_block = sub.block
             hp = self.subnet_data.hyperparams
-            hparams = getattr(self.subnet_data.metagraph, "hparams", None)
-            self.tempo = getattr(hparams, "tempo", None) or getattr(hp, "tempo", None)
+            self.tempo = getattr(hp, "tempo", None)
             if self.tempo is not None:
                 self.tempo = int(self.tempo)
         except Exception as e:
