@@ -446,6 +446,10 @@ class SubnetDetailScreen(Screen):
 
     # --- Metagraph Tab ---
 
+    # TODO: Show alpha tokens given out to each miner in metagraph over last 24hr / 7day.
+    #       Requires querying historical blocks (using archive node) and summing
+    #       alpha_out_emission distributed to each miner UID across those windows.
+
     def _render_metagraph(self, mg) -> None:
         table = self.query_one("#metagraph-table", DataTable)
         table.clear(columns=True)
