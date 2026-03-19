@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS availability_log (
     node_id TEXT NOT NULL,
     is_available INTEGER NOT NULL,       -- 1 = passed validation, 0 = failed
     is_rented INTEGER NOT NULL,          -- 1 = node has active rental
+    is_validated INTEGER NOT NULL,       -- 1 = from hardware validation, 0 = from indirect signal
     recorded_at INTEGER NOT NULL,         -- unix epoch seconds
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -243,6 +244,7 @@ CREATE TABLE IF NOT EXISTS availability_log (
 - **FR-4**: Append-only — rows are never updated or deleted (except by retention cleanup)
 - **FR-5**: Old rows cleaned up by the existing `CleanupTask` (configurable retention, e.g. 90 days)
 - **FR-6**: All writes are fire-and-forget — log warning on failure, never block the calling operation
+- **FR-7**: `is_validated` distinguishes entries from actual hardware validation (integration point 1, where GPU attestation occurred) versus indirect signals (integration points 2–5: health check failure, stale cleanup, node deletion, RemoveBid). This enables audit of which availability observations are backed by real validation.
 
 ### Integration Points
 
@@ -255,7 +257,7 @@ The highest-frequency source. Every completed validation (full or lightweight) w
 - **File**: `crates/basilica-validator/src/miner_prover/verification.rs`
 - **Function**: `store_node_verification_result_with_miner_info()`
 - **Where**: After the `success` boolean is determined, before the DB transaction
-- **Values**: `is_available = success`, `is_rented` from `active_rental_id` check
+- **Values**: `is_available = success`, `is_rented` from `active_rental_id` check, `is_validated = true`
 - **Frequency**: Every ~5 min per node
 
 #### 2. Rental Health Check Terminal Failure
@@ -265,7 +267,7 @@ When the rental health monitor gives up on a node (consecutive failure threshold
 - **File**: `crates/basilica-validator/src/rental/monitoring.rs`
 - **Function**: `check_rental_health()`
 - **Where**: When consecutive failure threshold is reached, before the rental state transition
-- **Values**: `is_available = false`, `is_rented = true`
+- **Values**: `is_available = false`, `is_rented = true`, `is_validated = false`
 - **Frequency**: Only on terminal failure (e.g. 3 consecutive), NOT every 30s health check tick
 - **Important**: Individual health check failures (1st, 2nd out of 3) are transient and NOT logged
 
@@ -276,7 +278,7 @@ When the periodic cleanup task marks nodes as offline because they haven't been 
 - **File**: `crates/basilica-validator/src/persistence/gpu_profile_repository.rs`
 - **Function**: `cleanup_stale_nodes()`
 - **Where**: After nodes are marked offline, batch-write entries for all affected nodes
-- **Values**: `is_available = false`, `is_rented = false` (query filters `active_rental_id IS NULL`)
+- **Values**: `is_available = false`, `is_rented = false`, `is_validated = false` (query filters `active_rental_id IS NULL`)
 - **Frequency**: Every ~30 min, typically a handful of nodes
 
 #### 4. Consecutive Failure Node Deletion
@@ -286,7 +288,7 @@ When nodes are permanently deleted after exceeding the consecutive verification 
 - **File**: `crates/basilica-validator/src/persistence/miner_nodes.rs`
 - **Function**: `cleanup_failed_nodes_after_failures()`
 - **Where**: After deletions are committed, batch-write entries for all deleted nodes
-- **Values**: `is_available = false`, `is_rented = false`
+- **Values**: `is_available = false`, `is_rented = false`, `is_validated = false`
 - **Frequency**: Every ~15 min, typically zero nodes
 
 #### 5. Miner RemoveBid
@@ -296,7 +298,7 @@ When a miner explicitly removes their nodes via the RemoveBid RPC.
 - **File**: `crates/basilica-validator/src/persistence/miner_nodes.rs`
 - **Function**: `remove_registered_nodes()`
 - **Where**: After the status UPDATE succeeds, write entries for affected node_ids
-- **Values**: `is_available = false`, `is_rented = false`
+- **Values**: `is_available = false`, `is_rented = false`, `is_validated = false`
 - **Frequency**: On-demand, rare
 
 ### What NOT to Log
