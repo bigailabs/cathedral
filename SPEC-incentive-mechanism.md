@@ -224,9 +224,11 @@ CREATE TABLE IF NOT EXISTS availability_log (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_avail_log_recorded ON availability_log(recorded_at);
-CREATE INDEX IF NOT EXISTS idx_avail_log_node_time ON availability_log(node_id, recorded_at);
-CREATE INDEX IF NOT EXISTS idx_avail_log_hotkey_time ON availability_log(hotkey, recorded_at);
+-- TODO: Add indexes after implementation is complete, based on actual query patterns.
+-- Candidates to consider:
+--   (recorded_at)            — CU Generator range scans
+--   (node_id, recorded_at)   — per-node lookups
+--   (hotkey, recorded_at)    — per-miner lookups
 ```
 
 ### Functional Requirements
@@ -246,111 +248,167 @@ In `VerificationEngine::execute_verification_workflow()` (file: `crates/basilica
 
 ---
 
-## Module 3: CU Ledger (SCD2)
+## Module 3: CU Ledger (Per-CU Event Log)
 
 **New file**: `crates/basilica-validator/src/persistence/cu_ledger.rs`
+**New file**: `crates/basilica-validator/src/incentive/vesting.rs`
 **New PostgreSQL migration**: `018_cu_ledger.sql`
 
 ### Purpose
-Slowly Changing Dimension Type 2 (SCD2) table in the centralized PostgreSQL database. Each row represents a time-bounded state for a (hotkey, node_id) pair. When a node's state changes (e.g., goes offline, gets rented, gets slashed), the current row is closed (`valid_to` set) and a new row is opened.
+Per-CU event table in the centralized PostgreSQL database. Each row represents a single CU earning event — one row per available node per CU Generator tick (~1 hour). This replaces the SCD2 approach; there are no `valid_from`/`valid_to` temporal columns, no running counters, and no state transitions.
+
+Each CU row is self-contained: it captures the GPU-hours earned (`cu_amount`) at a specific time (`earned_at`). The CU Generator computes `cu_amount = elapsed_hours * gpu_count` at insert time by resolving GPU info from existing tables (`miner_nodes`, `miner_gpu_profiles`) — these details are not stored on the CU row.
+
+Rows are append-only. The sole mutation is slashing (setting `is_slashed = true`). Linear vesting math is computed in Rust (not SQL) using the `earned_at` timestamp and configurable `window_hours`.
 
 This is the central ledger for the new incentive mechanism — it must be highly available, data-resilient, and centralized so it can serve as the single source of truth for CU accrual across the network.
 
-**SCD2 reference**: [Dimensional Modeling - Slowly Changing Dimensions](https://learn.microsoft.com/en-us/fabric/data-warehouse/dimensional-modeling-dimension-tables)
-
 ### Database Schema (PostgreSQL — centralized)
-
-**Keys**: Date/Time, Model, GPU Count, Hotkey, Node ID, Rented (bool), Available (bool), Slashing (bool)
 
 ```sql
 CREATE TABLE IF NOT EXISTS cu_ledger (
     id BIGSERIAL PRIMARY KEY,
 
-    -- Dimension keys
+    -- Identity (GPU info resolvable via miner_nodes/miner_gpu_profiles using these keys)
     hotkey TEXT NOT NULL,
     miner_uid INTEGER NOT NULL,
     node_id TEXT NOT NULL,
-    gpu_category TEXT NOT NULL,          -- Model (A100, H100, H200, B200)
-    gpu_count INTEGER NOT NULL,
 
-    -- State flags
-    is_available BOOLEAN NOT NULL,       -- node passed validation
-    is_rented BOOLEAN NOT NULL,          -- node has active rental
-    is_slashed BOOLEAN NOT NULL DEFAULT FALSE,  -- node lost during rental
+    -- CU earning details
+    cu_amount DOUBLE PRECISION NOT NULL,   -- GPU-hours: elapsed_hours * gpu_count (computed at insert)
+    earned_at TIMESTAMPTZ NOT NULL,         -- when this CU was earned
 
-    -- SCD2 temporal columns
-    valid_from TIMESTAMPTZ NOT NULL,     -- when this state began
-    valid_to TIMESTAMPTZ,                -- when this state ended (NULL = current/active record)
+    -- State snapshot at earn time
+    is_rented BOOLEAN NOT NULL DEFAULT FALSE,  -- node had active rental when CU was earned
 
-    -- Accrued compute units during this state period
-    cu_accrued DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    -- Slashing (only mutable field)
+    is_slashed BOOLEAN NOT NULL DEFAULT FALSE,  -- CU voided due to node loss during rental
 
-    -- Audit timestamps
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    -- Crash-safe idempotency: "{node_id}:{tick_ts_seconds}"
+    idempotency_key TEXT NOT NULL UNIQUE,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Fast current-state lookups (only open rows where valid_to IS NULL)
-CREATE INDEX idx_cu_ledger_current
-    ON cu_ledger(hotkey) WHERE valid_to IS NULL;
-
--- Node current-state lookups
-CREATE INDEX idx_cu_ledger_node_current
-    ON cu_ledger(node_id) WHERE valid_to IS NULL;
-
--- Time-window range queries for weight setter epoch calculations
-CREATE INDEX idx_cu_ledger_window
-    ON cu_ledger(valid_from, valid_to);
-
--- Hotkey + window for per-miner aggregation queries
-CREATE INDEX idx_cu_ledger_hotkey_window
-    ON cu_ledger(hotkey, valid_from, valid_to);
+-- TODO: Add indexes after implementation is complete, based on actual query patterns.
+-- Candidates to consider:
+--   (hotkey, earned_at) WHERE NOT is_slashed  — weight setter per-hotkey queries
+--   (earned_at) WHERE NOT is_slashed           — window range scans
+--   (node_id, earned_at)                       — slashing lookups
 ```
 
-### SCD2 State Transition Rules
-1. **State unchanged, node available**: Increment `cu_accrued += elapsed_hours * gpu_count` (proportional to actual elapsed time since last tick)
-2. **State changed** (any of: available, rented, slashed, gpu_category, gpu_count): Close current row (`valid_to = NOW()`), open new row (`valid_from = NOW()`, `cu_accrued = 0`)
-3. **Node disappears** (no availability entries in latest tick): Close row, no new row opened
-4. **Slashed**: When rental terminated due to complete node loss → close current row, open new row with `is_slashed = true`
-5. **Recovery from slash**: When node comes back online → close slashed row, open new row with `is_slashed = false`
+### Linear Vesting Model
 
-### Repository Methods
+Each CU vests linearly from `earned_at` to `earned_at + window_hours`. During an epoch `[E_start, E_end]`, the vesting engine computes the temporal overlap between each CU's vesting window and the epoch:
+
+```
+For a CU row with earned_at = T, cu_amount = A, window = W:
+
+  overlap = max(0, min(T + W, E_end) - max(T, E_start))
+  vesting_fraction = overlap / W
+  vested_cu = A * vesting_fraction
+```
+
+**All vesting math is computed in Rust, not SQL.** The repository fetches raw CU rows via a simple range scan; Rust iterates and applies the overlap formula.
+
+#### Data Flow
+
+1. **SQL (repository)**: Fetch all non-slashed CU rows whose vesting window overlaps the epoch:
+   ```sql
+   SELECT id, hotkey, miner_uid, node_id,
+          cu_amount, earned_at, is_rented
+   FROM cu_ledger
+   WHERE NOT is_slashed
+     AND earned_at < $2                                   -- earned before epoch ends
+     AND earned_at > $1 - make_interval(hours => $3)      -- vesting window overlaps epoch
+   ORDER BY hotkey, earned_at;
+   -- $1 = epoch_start, $2 = epoch_end, $3 = window_hours
+   ```
+
+2. **Rust (vesting engine)**: Iterate rows, compute per-CU vesting, aggregate per-hotkey:
+   ```rust
+   /// Pure function — no DB dependency. Lives in incentive/vesting.rs.
+   fn compute_vested_cus(
+       rows: &[CuLedgerRow],
+       epoch_start: DateTime<Utc>,
+       epoch_end: DateTime<Utc>,
+       window_hours: f64,
+   ) -> HashMap<String, f64> {
+       let window_secs = window_hours * 3600.0;
+       let mut hotkey_vested: HashMap<String, f64> = HashMap::new();
+
+       for row in rows {
+           let vest_end = row.earned_at + Duration::seconds(window_secs as i64);
+           let overlap_start = row.earned_at.max(epoch_start);
+           let overlap_end = vest_end.min(epoch_end);
+           let overlap_secs = (overlap_end - overlap_start).num_seconds().max(0) as f64;
+           let vesting_fraction = overlap_secs / window_secs;
+           let vested_cu = row.cu_amount * vesting_fraction;
+
+           *hotkey_vested.entry(row.hotkey.clone()).or_default() += vested_cu;
+       }
+       hotkey_vested
+   }
+   ```
+
+### Repository Methods (data access only — no business logic)
 ```rust
 pub struct CuLedgerRepository {
     pool: PgPool,  // sqlx PostgreSQL connection pool
 }
 
 impl CuLedgerRepository {
-    // Current state queries
-    async fn get_current_records(&self, hotkey: &str) -> Result<Vec<CuLedgerRow>>;
-    async fn get_current_record_for_node(&self, node_id: &str) -> Result<Option<CuLedgerRow>>;
+    // CU Generator writes
+    async fn insert_cu(&self, row: NewCuRow) -> Result<bool>;           // ON CONFLICT DO NOTHING, returns true if inserted
+    async fn insert_cus_batch(&self, rows: Vec<NewCuRow>) -> Result<u64>; // batch insert in single transaction
 
-    // Time-window queries (for weight setter epoch calculations)
-    async fn get_records_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CuLedgerRow>>;
-    async fn get_total_cu_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<f64>;
-    async fn get_miner_cu_in_window(&self, hotkey: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<f64>;
-    async fn get_all_miner_cus_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<HashMap<String, f64>>;
+    // Slashing
+    async fn slash_node_cus(&self, node_id: &str, since: DateTime<Utc>) -> Result<u64>; // returns rows affected
 
-    // SCD2 mutation operations
-    async fn close_record(&self, id: i64, valid_to: DateTime<Utc>) -> Result<()>;
-    async fn open_record(&self, row: NewCuLedgerRow) -> Result<i64>;
-    async fn accrue_cu(&self, id: i64, cu_delta: f64) -> Result<()>;
+    // Weight setter reads — returns raw CU rows, NO vesting math
+    async fn get_cus_in_window(&self, window_start: DateTime<Utc>, epoch_end: DateTime<Utc>) -> Result<Vec<CuLedgerRow>>;
+
+    // Slash detection support
+    async fn get_node_cus_since(&self, node_id: &str, since: DateTime<Utc>) -> Result<Vec<CuLedgerRow>>;
 }
 ```
 
+### Vesting Engine (business logic — pure Rust, no DB)
+```rust
+// File: crates/basilica-validator/src/incentive/vesting.rs
+
+/// Compute per-hotkey vested CU for the given epoch.
+/// Each CU vests linearly from earned_at to earned_at + window_hours.
+pub fn compute_vested_cus(
+    rows: &[CuLedgerRow],
+    epoch_start: DateTime<Utc>,
+    epoch_end: DateTime<Utc>,
+    window_hours: f64,
+) -> HashMap<String, f64>;
+
+/// Compute total vested CU across all hotkeys (for effective_cu_value denominator).
+pub fn compute_total_vested_cu(
+    rows: &[CuLedgerRow],
+    epoch_start: DateTime<Utc>,
+    epoch_end: DateTime<Utc>,
+    window_hours: f64,
+) -> f64;
+```
+
 ### Functional Requirements
-- **FR-1**: SCD2 semantics — rows are never modified after `valid_to` is set (immutable history)
-- **FR-2**: `cu_accrued` only incremented when `is_available = true` AND `is_slashed = false`
-- **FR-3**: Window queries correctly handle rows that span the window boundary — compute proportional CU for partial overlaps
-- **FR-4**: All payout queries exclude rows where `is_slashed = true`
-- **FR-5**: `cu_accrued` uses actual elapsed time: `elapsed_hours = (now - last_accrual_time).as_hours()`, NOT a fixed 1.0 per tick
+- **FR-1**: Each CU earning event is a single INSERT — rows are never modified after creation (except slashing)
+- **FR-2**: `cu_amount` is computed at insert time (`elapsed_hours * gpu_count`) and set once — no running counter
+- **FR-3**: Slashed CUs (`is_slashed = true`) are excluded from all payout calculations
+- **FR-4**: Unavailable nodes simply produce no CU rows — absence implies unavailability
+- **FR-5**: `cu_amount` uses actual elapsed time proportional to the CU Generator interval, NOT a fixed increment
+- **FR-6**: `idempotency_key` prevents duplicate rows if the CU Generator crashes and re-runs the same tick
+- **FR-7**: GPU details (`gpu_category`, `gpu_count`) are resolved from existing tables at generation time, not stored on the CU row
 
 ### Non-Functional Requirements
 - **NFR-1**: **Data resilience** — PostgreSQL with WAL, append-only semantics, no destructive operations
 - **NFR-2**: **High availability** — centralized PostgreSQL (existing infrastructure), accessible by all validators
 - **NFR-3**: **Centralized** — single source of truth for CU data across the network
-- **NFR-4**: Partial indexes on `valid_to IS NULL` for fast current-state lookups
-- **NFR-5**: Retention policy for rows older than configurable threshold (e.g. 180 days)
+- **NFR-4**: Retention policy for rows older than configurable threshold (e.g. 180 days) — fully-vested CUs (`earned_at + window_hours < NOW()`) are safe to delete
 
 ---
 
@@ -359,49 +417,50 @@ impl CuLedgerRepository {
 **New file**: `crates/basilica-validator/src/incentive/cu_generator.rs`
 
 ### Purpose
-Periodic task (~1 hour) that reads availability log entries from local SQLite since the last run, then writes/updates CU entries in the centralized PostgreSQL ledger. Uses **actual elapsed uptime** for CU accrual since the cron doesn't run at exact 1-hour intervals.
+Periodic task (~1 hour) that reads availability log entries from local SQLite since the last run, then inserts CU rows into the centralized PostgreSQL ledger. Uses **actual elapsed uptime** for CU computation since the cron doesn't run at exact 1-hour intervals.
 
-This is the bridge between local validation data and the centralized CU ledger.
+This is the bridge between local validation data and the centralized CU ledger. Unlike the previous SCD2 approach, the generator is a pure append operation — no reads from PostgreSQL before writing, no state change detection, no UPDATE queries.
 
 ### Algorithm
 ```
 every ~1 hour (hardcoded 3600s interval, not configurable):
   now = current_time
   elapsed_hours = (now - last_run_ts).as_secs_f64() / 3600.0
+  tick_id = now.truncated_to_seconds()
 
   1. entries = [local SQLite] availability_log WHERE recorded_at > last_run_ts ORDER BY recorded_at
   2. for each distinct (hotkey, node_id) in entries:
      a. latest = most recent availability entry for this node
-     b. current_ledger = [PostgreSQL] cu_ledger WHERE node_id = node_id AND valid_to IS NULL
 
-     c. if no current_ledger row exists:
-        → open new row in cu_ledger with state from latest entry, cu_accrued = 0
+     b. if latest.is_available:
+        gpu_count = resolve from miner_nodes/miner_gpu_profiles via node_id
+        → INSERT cu_ledger (
+            hotkey, miner_uid, node_id,
+            cu_amount = elapsed_hours * gpu_count,
+            earned_at = now,
+            is_rented = latest.is_rented,
+            idempotency_key = "{node_id}:{tick_id}"
+          ) ON CONFLICT (idempotency_key) DO NOTHING
 
-     d. check slash condition:
+     c. if NOT latest.is_available:
+        → no row inserted (absence of CU rows = unavailability)
+
+     d. check slash condition (Module 5):
         if rental for this node transitioned to Failed/Stopped with termination_reason
            indicating node loss (validator gave up health-checking):
-           → close current cu_ledger row
-           → open new row with is_slashed = true
-
-     e. else if state changed (available, rented, category, count differ from current ledger row):
-        → close current cu_ledger row (cu_accrued stays as-is for the closed period)
-        → open new row with new state, cu_accrued = 0
-
-     f. else if is_available AND NOT is_slashed:
-        → accrue CU on current row: cu_accrued += elapsed_hours * gpu_count
-
-     g. else (unavailable or slashed):
-        → no CU accrual (row remains open but cu_accrued unchanged)
+           → UPDATE cu_ledger SET is_slashed = true
+             WHERE node_id = node_id AND earned_at >= rental_started_at AND NOT is_slashed
 
   3. last_run_ts = now  (persisted in a control table or validator state)
 ```
 
 ### Functional Requirements
-- **FR-1**: Idempotent — tracks `last_run_ts`, re-running over same availability data does not double-count CUs
-- **FR-2**: Catch-up — if generator misses a tick, next tick processes all unprocessed availability entries and computes CU proportional to actual elapsed time
-- **FR-3**: Rented nodes that are available still accrue CUs (renting doesn't stop availability rewards — the miner is providing both availability AND active compute)
+- **FR-1**: Idempotent — `idempotency_key` with UNIQUE constraint and `ON CONFLICT DO NOTHING` prevents duplicate CU rows if generator crashes and re-runs
+- **FR-2**: Catch-up — if generator misses a tick, next tick processes all unprocessed availability entries. `elapsed_hours` captures actual time elapsed, producing one larger CU row
+- **FR-3**: Rented nodes that are available still earn CUs (renting doesn't stop availability rewards — the miner is providing both availability AND active compute)
 - **FR-4**: Generator only spawned when `config.incentive.is_some()`
-- **FR-5**: CU accrual is proportional to real time: `elapsed_hours * gpu_count`, NOT a fixed increment per tick
+- **FR-5**: CU amount is proportional to real time: `elapsed_hours * gpu_count`, NOT a fixed increment per tick
+- **FR-6**: GPU info (`gpu_count`, `gpu_category`) resolved from existing tables at generation time, not stored on the CU row
 
 ### Non-Functional Requirements
 - **NFR-1**: Tolerates PostgreSQL connectivity blips — retries with exponential backoff
@@ -436,15 +495,20 @@ Slashing is driven entirely by the rental lifecycle — when the validator gives
 Integrated into the CU Generator tick (Module 4, step 2d):
 
 1. **Check rental termination events**: Query rentals that transitioned to `Failed`/`Stopped` with termination reason indicating node loss since the last CU Generator tick
-2. **Mark as slashed**: Close current CU Ledger row, open new row with `is_slashed = true`
-3. **Recovery**: If node comes back online (availability log shows `is_available = true`), close slashed row and open new normal row with `is_slashed = false`
+2. **Mark as slashed**: Flip `is_slashed = true` on existing CU rows earned during the failed rental period:
+   ```sql
+   UPDATE cu_ledger SET is_slashed = true
+   WHERE node_id = $1 AND earned_at >= $2 AND NOT is_slashed;
+   -- $2 = rental start time (only slash CUs earned during the failed rental)
+   ```
+3. **Recovery**: Automatic — when a node comes back online, the CU Generator simply starts inserting new CU rows with `is_slashed = false`. No "unslash" of previously slashed CUs. Once slashed, those CUs are void.
 
 ### Functional Requirements
 - **FR-1**: Slashing only triggers when a rental is terminated/deleted due to node loss — the validator's decision to stop health-checking is the authoritative signal
-- **FR-2**: Slashing is forward-only — does NOT retroactively void prior CUs
-- **FR-3**: Slashing ends when node recovers or rental terminates normally
+- **FR-2**: Slashing only affects CUs earned during the failed rental period — CUs earned before the rental began are not affected
+- **FR-3**: Recovery is automatic: new CU rows created after recovery have `is_slashed = false`. Previously slashed CUs remain void.
 - **FR-4**: Slashed CUs excluded from all payout calculations in the incentive pool
-- **FR-5**: Slash state visible in CU Ledger for audit trail (the `is_slashed` column on open/closed rows)
+- **FR-5**: Slash state visible in CU Ledger for audit trail (the `is_slashed` column on rows)
 
 ### Non-Functional Requirements
 - **NFR-1**: Zero false positives from transient issues — requires sustained unavailability before slashing
@@ -476,12 +540,15 @@ For each gpu_category:
 total_pool_budget = SUM(pool_budget[cat]) across all categories
 ```
 
-**Step 2 — Effective CU Value**
+**Step 2 — Effective CU Value (Linear Vesting)**
 ```
-total_cu_running = SUM(non-slashed cu_accrued in window, across all miners and categories)
+// Fetch raw CU rows from PostgreSQL, compute vesting in Rust:
+cu_rows = cu_ledger_repo.get_cus_in_window(epoch_end - window_hours, epoch_end)
+total_vested_cu = vesting::compute_total_vested_cu(cu_rows, epoch_start, epoch_end, window_hours)
 
-effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_cu_running)
+effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_vested_cu)
 ```
+- **Linear vesting**: Each CU vests from `earned_at` to `earned_at + window_hours`. The `total_vested_cu` is the sum of all CUs' vesting fractions that overlap the current epoch.
 - **Under-provisioned** (fewer GPUs online than target): each CU is worth more, but **capped at max_cu_value_usd**
 - **Over-provisioned** (more GPUs online than target): each CU is worth less (diluted across more supply)
 - This creates a natural market dynamic: if few miners are online, each one earns more per GPU-hour
@@ -494,14 +561,17 @@ effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_cu_running)
 //   revenue_reward[hotkey] = revenue_share_pct/100 * delivery_revenue_usd[hotkey]
 ```
 
-**Step 4 — Miner Payout**
+**Step 4 — Miner Payout (Linear Vesting)**
 ```
-miner_cu[hotkey] = SUM(non-slashed cu_accrued for this hotkey in the payout window)
-miner_usd_owed[hotkey] = effective_cu_value * miner_cu[hotkey] + revenue_reward[hotkey]
+// Vesting math computed in Rust — epoch fraction is built into the overlap formula
+miner_vested_cu = vesting::compute_vested_cus(cu_rows, epoch_start, epoch_end, window_hours)
+// miner_vested_cu is a HashMap<hotkey, f64> with each hotkey's vested CU for this epoch
 
-// Prorate to epoch: what fraction of the window does this epoch cover?
-payment_increment = epoch_duration_hours / window_hours
-miner_usd_per_epoch[hotkey] = miner_usd_owed[hotkey] * payment_increment
+For each hotkey:
+  miner_usd_per_epoch[hotkey] = effective_cu_value * miner_vested_cu[hotkey] + revenue_reward[hotkey]
+
+// NOTE: No separate prorate needed — the vesting overlap formula already computes
+// the epoch-specific fraction for each CU based on its earned_at and window_hours.
 ```
 
 **Step 5 — Weight Conversion (Dynamic Burn)**
@@ -562,9 +632,9 @@ Uses existing `BasilicaApiClient::get_token_prices(netuid)` → `TokenPriceSnaps
 ### Functional Requirements
 - **FR-1**: Dynamic burn rate derived from the formula above, not statically configured like the current `burn_percentage`
 - **FR-2**: Burn rate clamped to `[0.0, 0.99]` — never burn everything
-- **FR-3**: When `total_cu_running = 0`, set all weights to burn (guards against division by zero)
+- **FR-3**: When `total_vested_cu = 0`, set all weights to burn (guards against division by zero)
 - **FR-4**: Revenue share component is additive on top of CU-based availability rewards (TBD integration details)
-- **FR-5**: Per-epoch payout is prorated: `payment_increment = epoch_duration / window_size`
+- **FR-5**: Per-epoch payout uses linear vesting — the overlap formula computes epoch-specific fractions per CU, no separate prorate step
 - **FR-6**: "Total number of Asking" derived from `SUM(gpu_categories[cat].target_count * 8)` in validator config
 
 ### Non-Functional Requirements
@@ -603,11 +673,12 @@ crates/basilica-validator/
     incentive/
       mod.rs                               # Module root, re-exports
       cu_generator.rs                      # CU Generator periodic task (~1hr)
+      vesting.rs                           # Linear vesting math (pure Rust, no DB dependency)
       incentive_pool.rs                    # Pool math and weight conversion
       slashing.rs                          # Slash detection (node-loss heuristic)
     persistence/
       availability_log.rs                  # Availability log SQLite operations (local)
-      cu_ledger.rs                         # CU Ledger SCD2 PostgreSQL operations (centralized)
+      cu_ledger.rs                         # CU Ledger per-CU event log PostgreSQL operations (centralized)
   migrations/
     017_availability_log.sql               # SQLite migration (local validator DB)
     018_cu_ledger.sql                      # PostgreSQL migration (centralized)
@@ -633,34 +704,35 @@ crates/basilica-validator/src/
 1. Create `config/incentive.rs` — `IncentiveConfig` + `GpuCategoryConfig` + validation logic
 2. Wire into `config/mod.rs` and `main_config.rs`
 3. Create SQLite migration `017_availability_log.sql` (local validator DB)
-4. Create PostgreSQL migration `018_cu_ledger.sql` (centralized)
+4. Create PostgreSQL migration `018_cu_ledger.sql` (centralized, per-CU event table)
 5. Create `persistence/availability_log.rs` — local SQLite write/read operations
-6. Create `persistence/cu_ledger.rs` — SCD2 PostgreSQL operations (open/close/accrue/query)
+6. Create `persistence/cu_ledger.rs` — per-CU event log PostgreSQL operations (insert/slash/query)
 
 ### Phase 2: Data Capture
 7. Create `incentive/mod.rs` — module declaration and re-exports
 8. Integrate availability logging into verification workflow (`verification.rs`) — writes to local SQLite after each validation
-9. Create `incentive/slashing.rs` — slash detection logic (node-loss during rental)
-10. Create `incentive/cu_generator.rs` — reads local SQLite availability log, writes CU entries to centralized PostgreSQL
+9. Create `incentive/slashing.rs` — slash detection logic (flip `is_slashed` on CU rows for node-loss during rental)
+10. Create `incentive/cu_generator.rs` — reads local SQLite availability log, inserts CU rows into centralized PostgreSQL (pure append)
 11. Spawn CU Generator in `service.rs` (gated on `config.incentive.is_some()`)
 
 ### Phase 3: Payout & Weights
-12. Create `incentive/incentive_pool.rs` — full payout math (pool budget → effective CU value → per-miner USD → weight conversion)
-13. Modify `weight_setter.rs` — add `incentive_config` field, branch to incentive pool path in `attempt_weight_setting()`
-14. Wire dependencies in `service.rs` (PgPool, CuLedgerRepository → WeightSetter)
+12. Create `incentive/vesting.rs` — linear vesting math (pure Rust, no DB dependency)
+13. Create `incentive/incentive_pool.rs` — full payout math (pool budget → effective CU value → per-miner USD → weight conversion), uses vesting engine
+14. Modify `weight_setter.rs` — add `incentive_config` field, branch to incentive pool path in `attempt_weight_setting()`
+15. Wire dependencies in `service.rs` (PgPool, CuLedgerRepository → WeightSetter)
 
 ### Phase 4: Testing & Observability
-15. Unit tests: config validation, SCD2 operations, payout math with known inputs
-16. Integration test: `tests/incentive_e2e.rs` — full cycle from mock availability data through weight calculation
-17. Add metrics: `cu_accrued_total`, `slashed_cu_total`, `burn_rate_gauge`, `effective_cu_value_gauge`
+16. Unit tests: config validation, vesting math, payout calculations with known inputs
+17. Integration test: `tests/incentive_e2e.rs` — full cycle from mock availability data through weight calculation
+18. Add metrics: `cu_earned_total`, `slashed_cu_total`, `burn_rate_gauge`, `effective_cu_value_gauge`
 
 ---
 
 ## Verification Plan
 
-1. **Unit tests per module**: Config validation, SCD2 open/close/accrue, pool math, slash detection — all with known inputs and expected outputs
+1. **Unit tests per module**: Config validation, linear vesting math, pool math, slash detection — all with known inputs and expected outputs
 2. **Integration test**: `tests/incentive_e2e.rs` — full cycle from mock availability data → CU generation → payout calculation → weight normalization
-3. **SCD2 correctness**: Test all state transitions (available→unavailable, unrented→rented, normal→slashed→recovered), row closing, proportional CU accrual, window boundary handling
+3. **Vesting correctness**: Test CUs expiring mid-epoch, CUs earned mid-epoch, steady-state convergence with flat prorate, window boundary handling
 4. **Payout math edge cases**: zero miners, single miner, all slashed, alpha price = 0, total_cu = 0 (division by zero), generator catch-up after missed ticks, burn rate clamping
 5. **Regression**: Verify legacy delivery-based path continues unchanged when `incentive = None`
 6. **Postgres connectivity**: Verify CU Generator handles temporary Postgres outages gracefully (retry with backoff)
