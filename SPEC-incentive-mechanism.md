@@ -626,15 +626,15 @@ For each gpu_category:
 total_pool_budget = SUM(pool_budget[cat]) across all categories
 ```
 
-**Step 2 — Effective CU Value (Linear Vesting)**
+**Step 2 — Effective CU Value**
 ```
-// Fetch raw CU rows from PostgreSQL, compute vesting in Rust:
+// Fetch raw CU rows from PostgreSQL:
 cu_rows = cu_ledger_repo.get_cus_in_window(epoch_end - window_hours, epoch_end)
-total_vested_cu = vesting::compute_total_vested_cu(cu_rows, epoch_start, epoch_end, window_hours)
+total_cu_in_window = SUM(cu_rows[i].cu_amount) for all non-slashed rows
 
-effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_vested_cu)
+effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_cu_in_window)
 ```
-- **Linear vesting**: Each CU vests from `earned_at` to `earned_at + window_hours`. The `total_vested_cu` is the sum of all CUs' vesting fractions that overlap the current epoch.
+- **Window-scoped denominator**: `total_cu_in_window` is the raw sum of all CU amounts in the window (not epoch-scoped vesting fractions). This keeps the denominator at the same scale as `total_pool_budget`, so dilution kicks in correctly when supply exceeds target. Per-CU vesting overlap is used separately in Step 4 for per-epoch miner payouts.
 - **Under-provisioned** (fewer GPUs online than target): each CU is worth more, but **capped at max_cu_value_usd**
 - **Over-provisioned** (more GPUs online than target): each CU is worth less (diluted across more supply)
 - This creates a natural market dynamic: if few miners are online, each one earns more per GPU-hour
