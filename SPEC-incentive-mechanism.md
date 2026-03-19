@@ -210,9 +210,9 @@ B200 = { target_count = 1, price_usd = 6.00 }
 **New SQLite migration**: `crates/basilica-validator/migrations/017_availability_log.sql`
 
 ### Purpose
-Extends the existing validation flow to record per-node availability events in the **local validator SQLite database**. This is the raw data source the CU Generator reads before writing aggregated CU entries to the centralized PostgreSQL ledger.
+Converges all node availability signals into a single append-only table in the **local validator SQLite database**. The validator currently assesses availability in multiple disconnected places (validation loops, rental health checks, stale node cleanup, node deletion). Instead of each writing to different tables or status fields, they all write to the availability log.
 
-The availability log captures "was this node available at this point in time?" — the CU Generator then aggregates these snapshots into time-bounded CU accrual records.
+This is the raw data source the CU Generator reads before writing aggregated CU entries to the centralized PostgreSQL ledger. The availability log captures "was this node available at this point in time?" — the CU Generator then aggregates these snapshots into time-bounded CU accrual records.
 
 ### Database Schema (SQLite — local validator DB)
 
@@ -238,17 +238,81 @@ CREATE TABLE IF NOT EXISTS availability_log (
 ```
 
 ### Functional Requirements
-- **FR-1**: Every completed validation (pass or fail) inserts one row per node. `is_available` is `1` if validation passed, `0` if it failed — no score, just binary.
-- **FR-2**: `is_rented` derived by checking if node has an active rental in the `rentals` table
+- **FR-1**: Every availability-affecting event inserts one row per node. `is_available` is `1` if the node is available, `0` if unavailable — no score, just binary.
+- **FR-2**: `is_rented` derived by checking if node has an active rental in the `rentals` table (or `true` directly for rental health check failures where the rental is known to be active)
 - **FR-3**: GPU details (category, count, memory) are NOT stored here — they are resolved at CU generation time by joining on existing tables via `node_id` / `hotkey`
 - **FR-4**: Append-only — rows are never updated or deleted (except by retention cleanup)
 - **FR-5**: Old rows cleaned up by the existing `CleanupTask` (configurable retention, e.g. 90 days)
+- **FR-6**: All writes are fire-and-forget — log warning on failure, never block the calling operation
 
-### Integration Point
-In `VerificationEngine::execute_verification_workflow()` (file: `crates/basilica-validator/src/miner_prover/verification.rs`), after the existing `create_verification_log()` call, add `record_availability_event()` that writes to local SQLite.
+### Integration Points
+
+The availability log is written to from **5 distinct sources**, converging all availability signals into one table:
+
+#### 1. Validation Pass/Fail (primary signal)
+
+The highest-frequency source. Every completed validation (full or lightweight) writes one row per node.
+
+- **File**: `crates/basilica-validator/src/miner_prover/verification.rs`
+- **Function**: `store_node_verification_result_with_miner_info()`
+- **Where**: After the `success` boolean is determined, before the DB transaction
+- **Values**: `is_available = success`, `is_rented` from `active_rental_id` check
+- **Frequency**: Every ~5 min per node
+
+#### 2. Rental Health Check Terminal Failure
+
+When the rental health monitor gives up on a node (consecutive failure threshold reached), it records the node as unavailable. This is the signal that feeds slashing (Module 5).
+
+- **File**: `crates/basilica-validator/src/rental/monitoring.rs`
+- **Function**: `check_rental_health()`
+- **Where**: When consecutive failure threshold is reached, before the rental state transition
+- **Values**: `is_available = false`, `is_rented = true`
+- **Frequency**: Only on terminal failure (e.g. 3 consecutive), NOT every 30s health check tick
+- **Important**: Individual health check failures (1st, 2nd out of 3) are transient and NOT logged
+
+#### 3. Stale Node Cleanup
+
+When the periodic cleanup task marks nodes as offline because they haven't been checked recently.
+
+- **File**: `crates/basilica-validator/src/persistence/gpu_profile_repository.rs`
+- **Function**: `cleanup_stale_nodes()`
+- **Where**: After nodes are marked offline, batch-write entries for all affected nodes
+- **Values**: `is_available = false`, `is_rented = false` (query filters `active_rental_id IS NULL`)
+- **Frequency**: Every ~30 min, typically a handful of nodes
+
+#### 4. Consecutive Failure Node Deletion
+
+When nodes are permanently deleted after exceeding the consecutive verification failure threshold.
+
+- **File**: `crates/basilica-validator/src/persistence/miner_nodes.rs`
+- **Function**: `cleanup_failed_nodes_after_failures()`
+- **Where**: After deletions are committed, batch-write entries for all deleted nodes
+- **Values**: `is_available = false`, `is_rented = false`
+- **Frequency**: Every ~15 min, typically zero nodes
+
+#### 5. Miner RemoveBid
+
+When a miner explicitly removes their nodes via the RemoveBid RPC.
+
+- **File**: `crates/basilica-validator/src/persistence/miner_nodes.rs`
+- **Function**: `remove_registered_nodes()`
+- **Where**: After the status UPDATE succeeds, write entries for affected node_ids
+- **Values**: `is_available = false`, `is_rented = false`
+- **Frequency**: On-demand, rare
+
+### What NOT to Log
+
+| Event | Why |
+|---|---|
+| `deactivate_missing_bids()` | Bid eligibility change, not availability. Node may still be online and passing validation. |
+| `stop_rental()` | User-initiated graceful stop. Node becomes available again — next verification tick captures this naturally. |
+| `ensure_not_banned()` | Pre-rental rejection. Administrative decision, not observed unavailability. |
+| `ensure_recent_validation()` | Pre-rental staleness check. Node might still be available — just hasn't been validated recently. |
+| `deploy_container_or_log_failure()` | Container-level issue, already captured in misbehaviour log. Next verification tick determines true availability. |
+| `restart_rental()` failure | Same as deployment failure. Health monitor will detect the resulting unhealthy container and fire Integration Point 2. |
 
 ### Non-Functional Requirements
-- **NFR-1**: Minimal overhead — single INSERT per node per validation tick, local DB (no network latency)
+- **NFR-1**: Minimal overhead — single INSERT per event for high-frequency sources (validation, health check), batch INSERT for cleanup operations. Local DB only (no network latency).
 - **NFR-2**: Time-indexed for efficient range scans by CU Generator
 - **NFR-3**: No external dependency — works even if PostgreSQL is temporarily unavailable
 
