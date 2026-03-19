@@ -311,6 +311,92 @@ For a CU row with earned_at = T, cu_amount = A, window = W:
 
 **All vesting math is computed in Rust, not SQL.** The repository fetches raw CU rows via a simple range scan; Rust iterates and applies the overlap formula.
 
+### Vesting Visualization
+
+The overlap formula handles every possible alignment between a CU's vesting window and an epoch. The diagrams below use `window_hours = 72` and an epoch spanning `[50h, 51h]`.
+
+**Case 1: CU fully within vesting window (normal case)**
+
+A CU earned at `T = 10h` vests over `[10h, 82h]`. The epoch `[50h, 51h]` falls entirely inside.
+
+```
+      T=10h                                              T+W=82h
+      |======================== vesting window ========================|
+                                        |==| epoch [50h, 51h]
+```
+
+```
+overlap = min(82, 51) - max(10, 50) = 51 - 50 = 1h
+vesting_fraction = 1 / 72 ≈ 0.0139
+vested_cu = A * 0.0139
+```
+
+**Case 2: CU earned mid-epoch (partial overlap at start)**
+
+A CU earned at `T = 50.5h` vests over `[50.5h, 122.5h]`. The vesting window starts partway through the epoch.
+
+```
+                                           T=50.5h                          T+W=122.5h
+                                           |============ vesting window ============|
+                                        |==| epoch [50h, 51h]
+```
+
+```
+overlap = min(122.5, 51) - max(50.5, 50) = 51 - 50.5 = 0.5h
+vesting_fraction = 0.5 / 72 ≈ 0.0069
+vested_cu = A * 0.0069
+```
+
+**Case 3: CU earned after epoch (zero contribution)**
+
+A CU earned at `T = 60h` vests over `[60h, 132h]`. The vesting window starts after the epoch ends.
+
+```
+                                                     T=60h                     T+W=132h
+                                                     |====== vesting window ======|
+                                        |==| epoch [50h, 51h]
+```
+
+```
+overlap = max(0, min(132, 51) - max(60, 50)) = max(0, 51 - 60) = 0
+vesting_fraction = 0
+vested_cu = 0
+```
+
+**Case 4: CU fully vested before epoch (zero contribution)**
+
+A CU earned at `T = 0h` with a short `window_hours = 24` vests over `[0h, 24h]`. The window closes before the epoch starts.
+
+```
+T=0h         T+W=24h
+|== vesting ==|
+                                        |==| epoch [50h, 51h]
+```
+
+```
+overlap = max(0, min(24, 51) - max(0, 50)) = max(0, 24 - 50) = 0
+vesting_fraction = 0
+vested_cu = 0
+```
+
+**Case 5: Vesting window entirely contains epoch**
+
+A CU earned at `T = 0h` vests over `[0h, 72h]`. The epoch is a small slice of the full window.
+
+```
+T=0h                                                          T+W=72h
+|=========================== vesting window ===========================|
+                                        |==| epoch [50h, 51h]
+```
+
+```
+overlap = min(72, 51) - max(0, 50) = 51 - 50 = 1h
+vesting_fraction = 1 / 72 ≈ 0.0139
+vested_cu = A * 0.0139
+```
+
+> Cases 1 and 5 produce the same arithmetic when the epoch fits inside the window. The distinction matters when reasoning about boundary conditions: in Case 1 the CU was earned *after* hour 0, so a shorter window could exclude the epoch entirely (Case 4).
+
 #### Data Flow
 
 1. **SQL (repository)**: Fetch all non-slashed CU rows whose vesting window overlaps the epoch:
