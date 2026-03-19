@@ -149,6 +149,11 @@ pub struct IncentiveConfig {
     /// TBD integration — leave as Option for now.
     pub revenue_share_pct: Option<f64>,
 
+    /// Slash percentage (0.0-100.0).
+    /// Percentage of ALL unvested CUs (and RUs, when implemented) that are voided on a slash event.
+    /// Example: 100.0 = slash all unvested, 50.0 = slash half.
+    pub slash_pct: f64,
+
     /// PostgreSQL connection string for the centralized CU ledger.
     pub database_url: String,
 }
@@ -168,7 +173,7 @@ pub struct GpuCategoryConfig {
 
 ### Functional Requirements
 - **FR-1**: All pool parameters defined in TOML config, no hardcoded values
-- **FR-2**: Config validation rejects: `window_hours <= 0`, `max_cu_value <= 0`, `revenue_share` outside `[0,100]`, negative `price_usd`, zero target counts, empty `database_url`
+- **FR-2**: Config validation rejects: `window_hours <= 0`, `max_cu_value <= 0`, `revenue_share` outside `[0,100]`, `slash_pct` outside `[0,100]`, negative `price_usd`, zero target counts, empty `database_url`
 - **FR-3**: `Option<IncentiveConfig>` on `ValidatorConfig` — presence enables new mechanism, absence keeps legacy delivery-based weights
 - **FR-4**: `total_number_of_asking()` helper method returns `SUM(gpu_categories[cat].target_count * 8)` — derived from config, not fetched externally
 
@@ -181,6 +186,7 @@ pub struct GpuCategoryConfig {
 window_hours = 72.0
 max_cu_value_usd = 0.05
 revenue_share_pct = 30.0
+slash_pct = 100.0
 database_url = "postgresql://user:pass@host:5432/basilica"
 
 # Each entry is the 8x variant. target_count = number of 8-GPU nodes.
@@ -534,8 +540,11 @@ every ~1 hour (hardcoded 3600s interval, not configurable):
      d. check slash condition (Module 5):
         if rental for this node transitioned to Failed/Stopped with termination_reason
            indicating node loss (validator gave up health-checking):
+           → slash a configurable percentage (slash_pct) of ALL unvested CUs for this node
            → UPDATE cu_ledger SET is_slashed = true
-             WHERE node_id = node_id AND earned_at >= rental_started_at AND NOT is_slashed
+             WHERE node_id = node_id AND NOT is_slashed
+             AND earned_at > NOW() - make_interval(hours => window_hours)
+             -- selects unvested CUs; apply slash_pct by randomly or proportionally marking rows
 
   3. last_run_ts = now  (persisted in a control table or validator state)
 ```
@@ -562,12 +571,11 @@ Spawned as a tokio task in `service.rs` alongside existing `scoring_task` and `w
 **New file**: `crates/basilica-validator/src/incentive/slashing.rs`
 
 ### Purpose
-Detect nodes that have become completely inaccessible during an active rental and mark their CU periods as slashed. Slashed CUs are excluded from payout calculations, effectively stopping emissions for that node.
+Detect nodes that have become completely inaccessible during an active rental and slash a configurable percentage of ALL their unvested CUs (and RUs, when implemented). "Unvested" means any CU whose vesting window has not yet fully elapsed — i.e., `earned_at + window_hours > NOW()`. Slashed CUs are excluded from payout calculations, effectively penalizing the miner's accumulated collateral pool.
 
 ### Important: What Slashing Is NOT
 - NOT triggered by one-off health check failures (transient network issues)
 - NOT triggered by user-initiated rental stops
-- NOT retroactive — does not void CUs already accrued before the slash event
 
 ### Trigger
 A node is slashed when:
@@ -581,20 +589,34 @@ Slashing is driven entirely by the rental lifecycle — when the validator gives
 Integrated into the CU Generator tick (Module 4, step 2d):
 
 1. **Check rental termination events**: Query rentals that transitioned to `Failed`/`Stopped` with termination reason indicating node loss since the last CU Generator tick
-2. **Mark as slashed**: Flip `is_slashed = true` on existing CU rows earned during the failed rental period:
+2. **Identify unvested CUs**: All non-slashed CU rows for this node still within their vesting window:
+   ```sql
+   SELECT id, cu_amount, earned_at FROM cu_ledger
+   WHERE node_id = $1 AND NOT is_slashed
+     AND earned_at > NOW() - make_interval(hours => $2);
+   -- $2 = window_hours (any CU still vesting)
+   ```
+3. **Apply slash_pct**: Mark `slash_pct`% of the unvested CUs as slashed. When `slash_pct = 100`, all unvested CUs are slashed. For partial slashing (`slash_pct < 100`), slash the most recent CU rows first (newest unvested CUs have the most remaining collateral value):
    ```sql
    UPDATE cu_ledger SET is_slashed = true
-   WHERE node_id = $1 AND earned_at >= $2 AND NOT is_slashed;
-   -- $2 = rental start time (only slash CUs earned during the failed rental)
+   WHERE id IN (
+     SELECT id FROM cu_ledger
+     WHERE node_id = $1 AND NOT is_slashed
+       AND earned_at > NOW() - make_interval(hours => $2)
+     ORDER BY earned_at DESC
+     LIMIT $3  -- number of rows to slash, computed from slash_pct
+   );
    ```
-3. **Recovery**: Automatic — when a node comes back online, the CU Generator simply starts inserting new CU rows with `is_slashed = false`. No "unslash" of previously slashed CUs. Once slashed, those CUs are void.
+4. **Recovery**: Automatic — when a node comes back online, the CU Generator simply starts inserting new CU rows with `is_slashed = false`. No "unslash" of previously slashed CUs. Once slashed, those CUs are void.
 
 ### Functional Requirements
 - **FR-1**: Slashing only triggers when a rental is terminated/deleted due to node loss — the validator's decision to stop health-checking is the authoritative signal
-- **FR-2**: Slashing only affects CUs earned during the failed rental period — CUs earned before the rental began are not affected
-- **FR-3**: Recovery is automatic: new CU rows created after recovery have `is_slashed = false`. Previously slashed CUs remain void.
-- **FR-4**: Slashed CUs excluded from all payout calculations in the incentive pool
-- **FR-5**: Slash state visible in CU Ledger for audit trail (the `is_slashed` column on rows)
+- **FR-2**: Slashing affects a configurable percentage (`slash_pct`) of ALL unvested CUs for the node — not limited to the rental period
+- **FR-3**: When `slash_pct < 100`, the most recent (newest) CU rows are slashed first, since they have the highest unvested value
+- **FR-4**: Recovery is automatic: new CU rows created after recovery have `is_slashed = false`. Previously slashed CUs remain void.
+- **FR-5**: Slashed CUs excluded from all payout calculations in the incentive pool
+- **FR-6**: Slash state visible in CU Ledger for audit trail (the `is_slashed` column on rows)
+- **FR-7**: When RU integration is complete, the same `slash_pct` applies to unvested RUs
 
 ### Non-Functional Requirements
 - **NFR-1**: Zero false positives from transient issues — requires sustained unavailability before slashing
