@@ -51,7 +51,7 @@ These were discussed and resolved during spec design:
 
 | Decision | Resolution | Rationale |
 |---|---|---|
-| Database for CU Ledger | **PostgreSQL** (existing server) | Already running for API and other services. Centralized, HA, data-resilient. |
+| Database for CU Ledger | **PostgreSQL** (in basilica-backend) | Already running for API and other services. Centralized, HA, data-resilient. Validators access it via REST API endpoints on basilica-backend (same `BasilicaApiClient` pattern as `/v1/weights/miner-delivery` and `/v1/prices/tokens`). Validators never connect to the DB directly. |
 | Database for Availability Log | **Local SQLite** (validator DB) | High-frequency writes during validation. No need for centralization. No network dependency. |
 | CU definition | **1 CU = 1 GPU-hour** | CU accrual uses actual elapsed uptime (`elapsed_hours * gpu_count`), not fixed increments, because the cron doesn't run at exact intervals |
 | CU generation interval | **~1 hour (hardcoded)** | The generator cron runs roughly every hour. Not configurable — no reason to change it. |
@@ -83,16 +83,16 @@ Validation Loop (~15min)  [EXISTING — crates/basilica-validator/src/miner_prov
   ├── reads availability log from local SQLite
   ├── computes actual elapsed uptime per node
   ├── detects state changes (SCD2 row transitions)
-  ├── writes CU entries to centralized PostgreSQL
+  ├── submits CU entries via POST /v1/incentive/cus (basilica-backend API)
   ├── accrues CUs proportional to uptime: elapsed_hours * gpu_count
   └── detects slash conditions (node completely lost during rental)
         │
-        ▼
-  CU Ledger (PostgreSQL, SCD2 table)  [NEW — centralized, HA, data-resilient]
+        ▼ (via basilica-backend REST API)
+  CU Ledger (PostgreSQL, in basilica-backend)  [NEW — centralized, HA, data-resilient]
         │
-        ▼
+        ▼ (via basilica-backend REST API)
   Weight Setter (cron ~360 blocks ≈ 72min)  [MODIFIED — crates/basilica-validator/src/bittensor_core/weight_setter.rs]
-  ├── reads CU ledger for epoch window
+  ├── fetches CU ledger for epoch window via GET /v1/incentive/cus
   ├── reads delivery data for revenue share (RU — TBD)
   ├── calculates incentive pool per GPU category
   ├── computes per-hotkey USD payouts
@@ -110,7 +110,7 @@ Incentive Pool Inputs (all from validator config):
 
 ### Data Flow Summary
 ```
-Validation Loop → [local SQLite] Availability Log → CU Generator → [PostgreSQL] CU Ledger → Weight Setter → Bittensor Chain
+Validation Loop → [local SQLite] Availability Log → CU Generator → [REST API] basilica-backend CU Ledger → [REST API] Weight Setter → Bittensor Chain
 ```
 
 ---
@@ -154,8 +154,6 @@ pub struct IncentiveConfig {
     /// Example: 100.0 = slash all unvested, 50.0 = slash half.
     pub slash_pct: f64,
 
-    /// PostgreSQL connection string for the centralized CU ledger.
-    pub database_url: String,
 }
 
 /// Per-GPU-category configuration combining target count and pricing.
@@ -173,7 +171,7 @@ pub struct GpuCategoryConfig {
 
 ### Functional Requirements
 - **FR-1**: All pool parameters defined in TOML config, no hardcoded values
-- **FR-2**: Config validation rejects: `window_hours <= 0`, `max_cu_value <= 0`, `revenue_share` outside `[0,100]`, `slash_pct` outside `[0,100]`, negative `price_usd`, zero target counts, empty `database_url`
+- **FR-2**: Config validation rejects: `window_hours <= 0`, `max_cu_value <= 0`, `revenue_share` outside `[0,100]`, `slash_pct` outside `[0,100]`, negative `price_usd`, zero target counts
 - **FR-3**: `Option<IncentiveConfig>` on `ValidatorConfig` — presence enables new mechanism, absence keeps legacy delivery-based weights
 - **FR-4**: `total_number_of_asking()` helper method returns `SUM(gpu_categories[cat].target_count * 8)` — derived from config, not fetched externally
 
@@ -187,7 +185,8 @@ window_hours = 72.0
 max_cu_value_usd = 0.05
 revenue_share_pct = 30.0
 slash_pct = 100.0
-database_url = "postgresql://user:pass@host:5432/basilica"
+# No database_url needed — CU ledger lives in basilica-backend's PostgreSQL.
+# Validators access it via BasilicaApiClient (same api_endpoint used for all backend calls).
 
 # Each entry is the 8x variant. target_count = number of 8-GPU nodes.
 # Actual GPU count for pool math = target_count * 8.
@@ -212,7 +211,7 @@ B200 = { target_count = 1, price_usd = 6.00 }
 ### Purpose
 Converges all node availability signals into a single append-only table in the **local validator SQLite database**. The validator currently assesses availability in multiple disconnected places (validation loops, rental health checks, stale node cleanup, node deletion). Instead of each writing to different tables or status fields, they all write to the availability log.
 
-This is the raw data source the CU Generator reads before writing aggregated CU entries to the centralized PostgreSQL ledger. The availability log captures "was this node available at this point in time?" — the CU Generator then aggregates these snapshots into time-bounded CU accrual records.
+This is the raw data source the CU Generator reads before submitting aggregated CU entries to the centralized CU ledger via the basilica-backend API. The availability log captures "was this node available at this point in time?" — the CU Generator then aggregates these snapshots into time-bounded CU accrual records.
 
 ### Database Schema (SQLite — local validator DB)
 
@@ -314,26 +313,26 @@ When a miner explicitly removes their nodes via the RemoveBid RPC.
 ### Non-Functional Requirements
 - **NFR-1**: Minimal overhead — single INSERT per event for high-frequency sources (validation, health check), batch INSERT for cleanup operations. Local DB only (no network latency).
 - **NFR-2**: Time-indexed for efficient range scans by CU Generator
-- **NFR-3**: No external dependency — works even if PostgreSQL is temporarily unavailable
+- **NFR-3**: No external dependency — works even if the basilica-backend API is temporarily unavailable
 
 ---
 
 ## Module 3: CU Ledger (Per-CU Event Log)
 
-**New file**: `crates/basilica-validator/src/persistence/cu_ledger.rs`
+**New file**: `crates/basilica-validator/src/persistence/cu_ledger.rs` (API client)
 **New file**: `crates/basilica-validator/src/incentive/vesting.rs`
-**New PostgreSQL migration**: `018_cu_ledger.sql`
+**Backend migration** (in basilica-backend, NOT the validator): `cu_ledger` table
 
 ### Purpose
-Per-CU event table in the centralized PostgreSQL database. Each row represents a single CU earning event — one row per available node per CU Generator tick (~1 hour). This replaces the SCD2 approach; there are no `valid_from`/`valid_to` temporal columns, no running counters, and no state transitions.
+Per-CU event table in **basilica-backend's PostgreSQL database**. Each row represents a single CU earning event — one row per available node per CU Generator tick (~1 hour). This replaces the SCD2 approach; there are no `valid_from`/`valid_to` temporal columns, no running counters, and no state transitions.
 
 Each CU row is self-contained: it captures the GPU-hours earned (`cu_amount`) at a specific time (`earned_at`). The CU Generator computes `cu_amount = elapsed_hours * gpu_count` at insert time by resolving GPU info from existing tables (`miner_nodes`, `miner_gpu_profiles`) — these details are not stored on the CU row.
 
 Rows are append-only. The sole mutation is slashing (setting `is_slashed = true`). Linear vesting math is computed in Rust (not SQL) using the `earned_at` timestamp and configurable `window_hours`.
 
-This is the central ledger for the new incentive mechanism — it must be highly available, data-resilient, and centralized so it can serve as the single source of truth for CU accrual across the network.
+This is the central ledger for the new incentive mechanism — it must be highly available, data-resilient, and centralized so it can serve as the single source of truth for CU accrual across the network. **Validators do not connect to this database directly** — they access it via REST API endpoints on basilica-backend, using the same `BasilicaApiClient` + validator signature auth pattern as existing endpoints (`/v1/weights/miner-delivery`, `/v1/prices/tokens`).
 
-### Database Schema (PostgreSQL — centralized)
+### Database Schema (PostgreSQL — in basilica-backend)
 
 ```sql
 CREATE TABLE IF NOT EXISTS cu_ledger (
@@ -469,16 +468,9 @@ vested_cu = A * 0.0139
 
 #### Data Flow
 
-1. **SQL (repository)**: Fetch all non-slashed CU rows whose vesting window overlaps the epoch:
-   ```sql
-   SELECT id, hotkey, miner_uid, node_id,
-          cu_amount, earned_at, is_rented
-   FROM cu_ledger
-   WHERE NOT is_slashed
-     AND earned_at < $2                                   -- earned before epoch ends
-     AND earned_at > $1 - make_interval(hours => $3)      -- vesting window overlaps epoch
-   ORDER BY hotkey, earned_at;
-   -- $1 = epoch_start, $2 = epoch_end, $3 = window_hours
+1. **API call (validator-side)**: Fetch all non-slashed CU rows whose vesting window overlaps the epoch:
+   ```rust
+   let cu_rows = cu_ledger_client.get_cus_in_window(epoch_start, epoch_end).await?;
    ```
 
 2. **Rust (vesting engine)**: Iterate rows, compute per-CU vesting, aggregate per-hotkey:
@@ -507,25 +499,25 @@ vested_cu = A * 0.0139
    }
    ```
 
-### Repository Methods (data access only — no business logic)
+### API Client (validator-side — replaces direct DB access)
 ```rust
-pub struct CuLedgerRepository {
-    pool: PgPool,  // sqlx PostgreSQL connection pool
+/// Validator-side client for the CU ledger. Wraps BasilicaApiClient to access
+/// the cu_ledger table in basilica-backend's PostgreSQL via REST endpoints.
+/// Uses the same validator signature auth pattern (X-Validator-Hotkey,
+/// X-Validator-Signature, X-Timestamp) as existing endpoints.
+pub struct CuLedgerClient {
+    api_client: Arc<BasilicaApiClient>,
 }
 
-impl CuLedgerRepository {
-    // CU Generator writes
-    async fn insert_cu(&self, row: NewCuRow) -> Result<bool>;           // ON CONFLICT DO NOTHING, returns true if inserted
-    async fn insert_cus_batch(&self, rows: Vec<NewCuRow>) -> Result<u64>; // batch insert in single transaction
+impl CuLedgerClient {
+    // CU Generator writes (POST /v1/incentive/cus)
+    async fn submit_cus(&self, rows: Vec<NewCuRow>) -> Result<u64>;       // returns number of new rows inserted
 
-    // Slashing
-    async fn slash_node_cus(&self, node_id: &str, since: DateTime<Utc>) -> Result<u64>; // returns rows affected
+    // Slashing (POST /v1/incentive/slash)
+    async fn slash_node_cus(&self, node_id: &str, window_hours: f64, slash_pct: f64) -> Result<u64>; // returns rows slashed
 
-    // Weight setter reads — returns raw CU rows, NO vesting math
+    // Weight setter reads (GET /v1/incentive/cus)
     async fn get_cus_in_window(&self, window_start: DateTime<Utc>, epoch_end: DateTime<Utc>) -> Result<Vec<CuLedgerRow>>;
-
-    // Slash detection support
-    async fn get_node_cus_since(&self, node_id: &str, since: DateTime<Utc>) -> Result<Vec<CuLedgerRow>>;
 }
 ```
 
@@ -560,11 +552,111 @@ pub fn compute_total_vested_cu(
 - **FR-6**: `idempotency_key` prevents duplicate rows if the CU Generator crashes and re-runs the same tick
 - **FR-7**: GPU details (`gpu_category`, `gpu_count`) are resolved from existing tables at generation time, not stored on the CU row
 
+### Backend Implementation Notes
+
+The following SQL details describe what **basilica-backend executes internally** when handling API requests. Validators do not run these queries — they are provided here for the backend team's reference.
+
+**Window query** (used by `GET /v1/incentive/cus`):
+```sql
+SELECT id, hotkey, miner_uid, node_id,
+       cu_amount, earned_at, is_rented
+FROM cu_ledger
+WHERE NOT is_slashed
+  AND earned_at < $2                                   -- earned before epoch ends
+  AND earned_at > $1 - make_interval(hours => $3)      -- vesting window overlaps epoch
+ORDER BY hotkey, earned_at;
+-- $1 = epoch_start, $2 = epoch_end, $3 = window_hours
+```
+
+**Batch insert** (used by `POST /v1/incentive/cus`):
+```sql
+INSERT INTO cu_ledger (hotkey, miner_uid, node_id, cu_amount, earned_at, is_rented, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (idempotency_key) DO NOTHING;
+```
+
+**Slash query** (used by `POST /v1/incentive/slash`): see Module 5 backend notes.
+
 ### Non-Functional Requirements
-- **NFR-1**: **Data resilience** — PostgreSQL with WAL, append-only semantics, no destructive operations
-- **NFR-2**: **High availability** — centralized PostgreSQL (existing infrastructure), accessible by all validators
+- **NFR-1**: **Data resilience** — PostgreSQL with WAL, append-only semantics, no destructive operations (backend-side)
+- **NFR-2**: **High availability** — centralized PostgreSQL in basilica-backend, accessible by all validators via REST API
 - **NFR-3**: **Centralized** — single source of truth for CU data across the network
-- **NFR-4**: Retention policy for rows older than configurable threshold (e.g. 180 days) — fully-vested CUs (`earned_at + window_hours < NOW()`) are safe to delete
+- **NFR-4**: Retention policy for rows older than configurable threshold (e.g. 180 days) — fully-vested CUs (`earned_at + window_hours < NOW()`) are safe to delete (backend-side cleanup)
+
+---
+
+## Module 3.5: Backend CU Ledger API
+
+**Location**: basilica-backend (routes + service logic)
+
+### Purpose
+REST API endpoints that basilica-backend must implement to serve the CU ledger data to validators. All endpoints use the existing validator signature auth pattern (`X-Validator-Hotkey`, `X-Validator-Signature`, `X-Timestamp` headers, verified by the backend's auth middleware).
+
+The `cu_ledger` PostgreSQL table and its migration live in basilica-backend (e.g., `basilica-backend/crates/basilica-billing/migrations/`). Detailed backend implementation is outside the scope of this validator spec — this section specifies the API contract.
+
+### Endpoints
+
+#### `POST /v1/incentive/cus` — Submit CU accrual batch
+
+Called by the CU Generator after each tick to submit earned CU rows.
+
+- **Auth**: Validator signature (existing middleware)
+- **Request body**:
+  ```json
+  {
+    "cus": [
+      {
+        "hotkey": "5F...",
+        "miner_uid": 42,
+        "node_id": "node-abc",
+        "cu_amount": 8.0,
+        "earned_at": "2025-03-15T10:00:00Z",
+        "is_rented": false,
+        "idempotency_key": "node-abc:1710500400"
+      }
+    ]
+  }
+  ```
+- **Response**: `{ "inserted": 5 }` (number of new rows; duplicates silently ignored via idempotency)
+- **Backend behavior**: `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`
+
+#### `POST /v1/incentive/slash` — Slash unvested CUs for a node
+
+Called by the CU Generator when a slash condition is detected (node lost during rental).
+
+- **Auth**: Validator signature (existing middleware)
+- **Request body**:
+  ```json
+  {
+    "node_id": "node-abc",
+    "window_hours": 72.0,
+    "slash_pct": 100.0
+  }
+  ```
+- **Response**: `{ "slashed_count": 15 }`
+- **Backend behavior**: Identifies unvested CUs (non-slashed, within vesting window), applies `slash_pct` (newest first), sets `is_slashed = true`
+
+#### `GET /v1/incentive/cus` — Fetch CU rows for weight computation
+
+Called by the Weight Setter at each epoch to fetch CU data for payout calculations.
+
+- **Auth**: Validator signature (existing middleware)
+- **Query params**: `window_start` (ISO 8601 timestamp), `epoch_end` (ISO 8601 timestamp), `window_hours` (float)
+- **Response**: Array of `CuLedgerRow` objects:
+  ```json
+  [
+    {
+      "id": 1,
+      "hotkey": "5F...",
+      "miner_uid": 42,
+      "node_id": "node-abc",
+      "cu_amount": 8.0,
+      "earned_at": "2025-03-15T10:00:00Z",
+      "is_rented": false
+    }
+  ]
+  ```
+- **Backend behavior**: Runs the window query (non-slashed CUs whose vesting window overlaps the requested range)
 
 ---
 
@@ -573,9 +665,9 @@ pub fn compute_total_vested_cu(
 **New file**: `crates/basilica-validator/src/incentive/cu_generator.rs`
 
 ### Purpose
-Periodic task (~1 hour) that reads availability log entries from local SQLite since the last run, then inserts CU rows into the centralized PostgreSQL ledger. Uses **actual elapsed uptime** for CU computation since the cron doesn't run at exact 1-hour intervals.
+Periodic task (~1 hour) that reads availability log entries from local SQLite since the last run, then submits CU rows to the centralized CU ledger via the basilica-backend API (`POST /v1/incentive/cus`). Uses **actual elapsed uptime** for CU computation since the cron doesn't run at exact 1-hour intervals.
 
-This is the bridge between local validation data and the centralized CU ledger. Unlike the previous SCD2 approach, the generator is a pure append operation — no reads from PostgreSQL before writing, no state change detection, no UPDATE queries.
+This is the bridge between local validation data and the centralized CU ledger. Unlike the previous SCD2 approach, the generator is a pure append operation — no reads from the ledger before writing, no state change detection, no UPDATE queries.
 
 ### Algorithm
 ```
@@ -585,32 +677,34 @@ every ~1 hour (hardcoded 3600s interval, not configurable):
   tick_id = now.truncated_to_seconds()
 
   1. entries = [local SQLite] availability_log WHERE recorded_at > last_run_ts ORDER BY recorded_at
-  2. for each distinct (hotkey, node_id) in entries:
+  2. batch = []
+     for each distinct (hotkey, node_id) in entries:
      a. latest = most recent availability entry for this node
 
      b. if latest.is_available:
         gpu_count = resolve from miner_nodes/miner_gpu_profiles via node_id
-        → INSERT cu_ledger (
-            hotkey, miner_uid, node_id,
-            cu_amount = elapsed_hours * gpu_count,
-            earned_at = now,
-            is_rented = latest.is_rented,
-            idempotency_key = "{node_id}:{tick_id}"
-          ) ON CONFLICT (idempotency_key) DO NOTHING
+        → accumulate row into batch:
+            NewCuRow {
+              hotkey, miner_uid, node_id,
+              cu_amount: elapsed_hours * gpu_count,
+              earned_at: now,
+              is_rented: latest.is_rented,
+              idempotency_key: "{node_id}:{tick_id}",
+            }
 
      c. if NOT latest.is_available:
-        → no row inserted (absence of CU rows = unavailability)
+        → no row added to batch (absence of CU rows = unavailability)
 
      d. check slash condition (Module 5):
         if rental for this node transitioned to Failed/Stopped with termination_reason
            indicating node loss (validator gave up health-checking):
-           → slash a configurable percentage (slash_pct) of ALL unvested CUs for this node
-           → UPDATE cu_ledger SET is_slashed = true
-             WHERE node_id = node_id AND NOT is_slashed
-             AND earned_at > NOW() - make_interval(hours => window_hours)
-             -- selects unvested CUs; apply slash_pct by randomly or proportionally marking rows
+           → call cu_ledger_client.slash_node_cus(node_id, window_hours, slash_pct)
+             (backend identifies unvested CUs and applies slash_pct, newest first)
 
-  3. last_run_ts = now  (persisted in a control table or validator state)
+  3. Submit batch via cu_ledger_client.submit_cus(batch)
+     (backend inserts with ON CONFLICT (idempotency_key) DO NOTHING)
+
+  4. last_run_ts = now  (persisted in a control table or validator state)
 ```
 
 ### Functional Requirements
@@ -622,7 +716,7 @@ every ~1 hour (hardcoded 3600s interval, not configurable):
 - **FR-6**: GPU info (`gpu_count`, `gpu_category`) resolved from existing tables at generation time, not stored on the CU row
 
 ### Non-Functional Requirements
-- **NFR-1**: Tolerates PostgreSQL connectivity blips — retries with exponential backoff
+- **NFR-1**: Tolerates API connectivity blips — retries with exponential backoff
 - **NFR-2**: Logs each tick at INFO level: nodes processed, CUs accrued, slashes detected, elapsed time
 
 ### Scheduling
@@ -652,26 +746,33 @@ Slashing is driven entirely by the rental lifecycle — when the validator gives
 ### Detection Logic
 Integrated into the CU Generator tick (Module 4, step 2d):
 
-1. **Check rental termination events**: Query rentals that transitioned to `Failed`/`Stopped` with termination reason indicating node loss since the last CU Generator tick
-2. **Identify unvested CUs**: All non-slashed CU rows for this node still within their vesting window:
-   ```sql
-   SELECT id, cu_amount, earned_at FROM cu_ledger
-   WHERE node_id = $1 AND NOT is_slashed
-     AND earned_at > NOW() - make_interval(hours => $2);
-   -- $2 = window_hours (any CU still vesting)
-   ```
-3. **Apply slash_pct**: Mark `slash_pct`% of the unvested CUs as slashed. When `slash_pct = 100`, all unvested CUs are slashed. For partial slashing (`slash_pct < 100`), slash the most recent CU rows first (newest unvested CUs have the most remaining collateral value):
-   ```sql
-   UPDATE cu_ledger SET is_slashed = true
-   WHERE id IN (
-     SELECT id FROM cu_ledger
-     WHERE node_id = $1 AND NOT is_slashed
-       AND earned_at > NOW() - make_interval(hours => $2)
-     ORDER BY earned_at DESC
-     LIMIT $3  -- number of rows to slash, computed from slash_pct
-   );
-   ```
-4. **Recovery**: Automatic — when a node comes back online, the CU Generator simply starts inserting new CU rows with `is_slashed = false`. No "unslash" of previously slashed CUs. Once slashed, those CUs are void.
+1. **Check rental termination events** (validator-side): Query local rentals that transitioned to `Failed`/`Stopped` with termination reason indicating node loss since the last CU Generator tick
+2. **Call slash API** (validator-side): `cu_ledger_client.slash_node_cus(node_id, window_hours, slash_pct)` — the backend handles identifying and marking unvested CUs
+3. **Recovery**: Automatic — when a node comes back online, the CU Generator simply starts submitting new CU rows with `is_slashed = false`. No "unslash" of previously slashed CUs. Once slashed, those CUs are void.
+
+### Backend Implementation Notes
+
+The following SQL describes what **basilica-backend executes internally** when handling the `POST /v1/incentive/slash` request. Validators do not run these queries.
+
+**Identify unvested CUs**: All non-slashed CU rows for the node still within their vesting window:
+```sql
+SELECT id, cu_amount, earned_at FROM cu_ledger
+WHERE node_id = $1 AND NOT is_slashed
+  AND earned_at > NOW() - make_interval(hours => $2);
+-- $2 = window_hours (any CU still vesting)
+```
+
+**Apply slash_pct**: Mark `slash_pct`% of the unvested CUs as slashed. When `slash_pct = 100`, all unvested CUs are slashed. For partial slashing (`slash_pct < 100`), slash the most recent CU rows first (newest unvested CUs have the most remaining collateral value):
+```sql
+UPDATE cu_ledger SET is_slashed = true
+WHERE id IN (
+  SELECT id FROM cu_ledger
+  WHERE node_id = $1 AND NOT is_slashed
+    AND earned_at > NOW() - make_interval(hours => $2)
+  ORDER BY earned_at DESC
+  LIMIT $3  -- number of rows to slash, computed from slash_pct
+);
+```
 
 ### Functional Requirements
 - **FR-1**: Slashing only triggers when a rental is terminated/deleted due to node loss — the validator's decision to stop health-checking is the authoritative signal
@@ -714,8 +815,8 @@ total_pool_budget = SUM(pool_budget[cat]) across all categories
 
 **Step 2 — Effective CU Value**
 ```
-// Fetch raw CU rows from PostgreSQL:
-cu_rows = cu_ledger_repo.get_cus_in_window(epoch_end - window_hours, epoch_end)
+// Fetch raw CU rows via API:
+cu_rows = cu_ledger_client.get_cus_in_window(epoch_end - window_hours, epoch_end)
 total_cu_in_window = SUM(cu_rows[i].cu_amount) for all non-slashed rows
 
 effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_cu_in_window)
@@ -769,7 +870,7 @@ For each hotkey:
 
 The existing `WeightSetter` struct in `weight_setter.rs` gains:
 - `incentive_config: Option<IncentiveConfig>` field
-- `cu_ledger: Option<CuLedgerRepository>` field
+- `cu_ledger_client: Option<CuLedgerClient>` field
 
 In `attempt_weight_setting()`, add a branch:
 
@@ -778,7 +879,7 @@ if let Some(ref incentive_config) = self.incentive_config {
     // NEW PATH: CU-based incentive pool
     let pool = IncentivePool::new(
         incentive_config,
-        self.cu_ledger.as_ref().unwrap(),
+        self.cu_ledger_client.as_ref().unwrap(),
         &self.api_client,
     );
     let result = pool.calculate_epoch_payouts(
@@ -850,10 +951,12 @@ crates/basilica-validator/
       slashing.rs                          # Slash detection (node-loss heuristic)
     persistence/
       availability_log.rs                  # Availability log SQLite operations (local)
-      cu_ledger.rs                         # CU Ledger per-CU event log PostgreSQL operations (centralized)
+      cu_ledger.rs                         # CuLedgerClient — API client wrapping BasilicaApiClient for CU ledger operations
   migrations/
     017_availability_log.sql               # SQLite migration (local validator DB)
-    018_cu_ledger.sql                      # PostgreSQL migration (centralized)
+    # NOTE: cu_ledger table migration lives in basilica-backend (e.g., basilica-backend/crates/basilica-billing/migrations/)
+    # The backend also needs handler code (routes, service logic) for the /v1/incentive/* endpoints.
+    # Detailed backend implementation is outside the scope of this validator spec.
 ```
 
 ### Modified Files
@@ -863,7 +966,7 @@ crates/basilica-validator/src/
   config/main_config.rs                    # Add incentive: Option<IncentiveConfig> to ValidatorConfig
   persistence/mod.rs                       # pub mod availability_log, cu_ledger
   bittensor_core/weight_setter.rs          # Add incentive_config field, branch in attempt_weight_setting()
-  service.rs                               # Spawn CU Generator task, init PgPool, wire dependencies
+  service.rs                               # Spawn CU Generator task, init CuLedgerClient, wire dependencies
   miner_prover/verification.rs             # Add record_availability_event() call after validation
   lib.rs                                   # pub mod incentive
 ```
@@ -876,22 +979,22 @@ crates/basilica-validator/src/
 1. Create `config/incentive.rs` — `IncentiveConfig` + `GpuCategoryConfig` + validation logic
 2. Wire into `config/mod.rs` and `main_config.rs`
 3. Create SQLite migration `017_availability_log.sql` (local validator DB)
-4. Create PostgreSQL migration `018_cu_ledger.sql` (centralized, per-CU event table)
+4. Coordinate with basilica-backend team to add the `cu_ledger` table migration and API endpoints (`POST /v1/incentive/cus`, `POST /v1/incentive/slash`, `GET /v1/incentive/cus`)
 5. Create `persistence/availability_log.rs` — local SQLite write/read operations
-6. Create `persistence/cu_ledger.rs` — per-CU event log PostgreSQL operations (insert/slash/query)
+6. Create `persistence/cu_ledger.rs` — API client wrapping `BasilicaApiClient` for CU ledger operations
 
 ### Phase 2: Data Capture
 7. Create `incentive/mod.rs` — module declaration and re-exports
 8. Integrate availability logging into verification workflow (`verification.rs`) — writes to local SQLite after each validation
 9. Create `incentive/slashing.rs` — slash detection logic (flip `is_slashed` on CU rows for node-loss during rental)
-10. Create `incentive/cu_generator.rs` — reads local SQLite availability log, inserts CU rows into centralized PostgreSQL (pure append)
+10. Create `incentive/cu_generator.rs` — reads local SQLite availability log, submits CU rows via basilica-backend API (pure append)
 11. Spawn CU Generator in `service.rs` (gated on `config.incentive.is_some()`)
 
 ### Phase 3: Payout & Weights
 12. Create `incentive/vesting.rs` — linear vesting math (pure Rust, no DB dependency)
 13. Create `incentive/incentive_pool.rs` — full payout math (pool budget → effective CU value → per-miner USD → weight conversion), uses vesting engine
 14. Modify `weight_setter.rs` — add `incentive_config` field, branch to incentive pool path in `attempt_weight_setting()`
-15. Wire dependencies in `service.rs` (PgPool, CuLedgerRepository → WeightSetter)
+15. Wire dependencies in `service.rs` (CuLedgerClient → CU Generator, CuLedgerClient → WeightSetter)
 
 ### Phase 4: Testing & Observability
 16. Unit tests: config validation, vesting math, payout calculations with known inputs
@@ -907,7 +1010,8 @@ crates/basilica-validator/src/
 3. **Vesting correctness**: Test CUs expiring mid-epoch, CUs earned mid-epoch, steady-state convergence with flat prorate, window boundary handling
 4. **Payout math edge cases**: zero miners, single miner, all slashed, alpha price = 0, total_cu = 0 (division by zero), generator catch-up after missed ticks, burn rate clamping
 5. **Regression**: Verify legacy delivery-based path continues unchanged when `incentive = None`
-6. **Postgres connectivity**: Verify CU Generator handles temporary Postgres outages gracefully (retry with backoff)
+6. **API connectivity**: Verify CU Generator handles temporary API outages gracefully (retry with backoff)
+7. **CuLedgerClient unit tests**: Mock API responses for unit testing the CuLedgerClient (submit_cus, slash_node_cus, get_cus_in_window)
 
 ---
 
