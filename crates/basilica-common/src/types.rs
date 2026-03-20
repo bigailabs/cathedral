@@ -120,6 +120,8 @@ pub enum GpuCategory {
     H200,
     /// NVIDIA B200 - Next-gen AI acceleration
     B200,
+    /// NVIDIA B300 - Ultra-class AI acceleration
+    B300,
     /// Other GPU models - General GPU compute
     Other(String),
 }
@@ -183,7 +185,7 @@ impl GpuCategory {
     /// use basilica_common::types::GpuCategory;
     ///
     /// let supported = GpuCategory::supported_models();
-    /// assert_eq!(supported, vec!["A100", "H100", "H200", "B200"]);
+    /// assert_eq!(supported, vec!["A100", "H100", "H200", "B200", "B300"]);
     /// ```
     pub fn supported_models() -> Vec<String> {
         vec![
@@ -191,6 +193,7 @@ impl GpuCategory {
             "H100".to_string(),
             "H200".to_string(),
             "B200".to_string(),
+            "B300".to_string(),
         ]
     }
 
@@ -201,6 +204,7 @@ impl GpuCategory {
             GpuCategory::H100 => "Flagship AI training & inference",
             GpuCategory::H200 => "High-memory AI training & inference",
             GpuCategory::B200 => "Next-gen AI acceleration",
+            GpuCategory::B300 => "Ultra-class AI acceleration",
             GpuCategory::Other(_) => "General GPU compute",
         }
     }
@@ -212,6 +216,7 @@ impl GpuCategory {
             GpuCategory::H100 => "H100".to_string(),
             GpuCategory::H200 => "H200".to_string(),
             GpuCategory::B200 => "B200".to_string(),
+            GpuCategory::B300 => "B300".to_string(),
             GpuCategory::Other(name) => name.to_uppercase(),
         }
     }
@@ -244,6 +249,8 @@ impl FromStr for GpuCategory {
             Ok(GpuCategory::H100)
         } else if cleaned.contains("H200") {
             Ok(GpuCategory::H200)
+        } else if cleaned.contains("B300") {
+            Ok(GpuCategory::B300)
         } else if cleaned.contains("B200") {
             Ok(GpuCategory::B200)
         } else {
@@ -270,6 +277,10 @@ mod gpu_category_serde_tests {
             serde_json::to_string(&GpuCategory::B200).unwrap(),
             "\"B200\""
         );
+        assert_eq!(
+            serde_json::to_string(&GpuCategory::B300).unwrap(),
+            "\"B300\""
+        );
     }
 
     #[test]
@@ -291,6 +302,10 @@ mod gpu_category_serde_tests {
         assert_eq!(
             serde_json::from_str::<GpuCategory>("\"B200\"").unwrap(),
             GpuCategory::B200
+        );
+        assert_eq!(
+            serde_json::from_str::<GpuCategory>("\"B300\"").unwrap(),
+            GpuCategory::B300
         );
     }
 

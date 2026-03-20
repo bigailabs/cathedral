@@ -369,6 +369,7 @@ fn minimum_usd_per_gpu(gpu_category: &GpuCategory) -> f64 {
         GpuCategory::A100 => 25.0,
         GpuCategory::H200 => 75.0,
         GpuCategory::B200 => 75.0,
+        GpuCategory::B300 => 100.0,
         GpuCategory::Other(_) => 10.0,
     }
 }
