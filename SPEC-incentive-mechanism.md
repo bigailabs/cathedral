@@ -138,10 +138,12 @@ pub struct IncentiveConfig {
 
     /// Payout window in hours (e.g. 72.0).
     /// The period over which CU accrual is measured for payout calculations.
+    /// NOTE: Snapshotted per CU row at earn time — config changes only affect future CUs.
     pub window_hours: f64,
 
     /// Max CU value cap in USD per CU.
-    /// Prevents any single CU from being worth more than this regardless of supply/demand.
+    /// Absolute ceiling across all categories — prevents any single CU from being worth
+    /// more than this regardless of supply/demand or per-category pricing.
     pub max_cu_value_usd: f64,
 
     /// Revenue share percentage (0.0-100.0).
@@ -165,6 +167,7 @@ pub struct GpuCategoryConfig {
 
     /// Pre-defined price in USD/hour for this GPU category.
     /// Used for pool budget calculations.
+    /// NOTE: Snapshotted per CU row at earn time — config changes only affect future CUs.
     pub price_usd: f64,
 }
 ```
@@ -328,9 +331,9 @@ When a miner explicitly removes their nodes via the RemoveBid RPC.
 ### Purpose
 Per-CU event table in **basilica-backend's PostgreSQL database**. Each row represents a single CU earning event — one row per available node per CU Generator tick (~1 hour). This replaces the SCD2 approach; there are no `valid_from`/`valid_to` temporal columns, no running counters, and no state transitions.
 
-Each CU row is self-contained: it captures the GPU-hours earned (`cu_amount`) at a specific time (`earned_at`). The CU Generator computes `cu_amount = elapsed_hours * gpu_count` at insert time by resolving GPU info from existing tables (`miner_nodes`, `miner_gpu_profiles`) — these details are not stored on the CU row.
+Each CU row is self-contained: it captures the GPU-hours earned (`cu_amount`) at a specific time (`earned_at`), along with the `gpu_category`, `window_hours`, and `price_usd` snapshotted from config at earn time. The CU Generator computes `cu_amount = elapsed_hours * gpu_count` at insert time by resolving GPU info from existing tables (`miner_nodes`, `miner_gpu_profiles`) — `gpu_count` is not stored on the CU row, but `gpu_category` is.
 
-Rows are append-only. The sole mutation is slashing (setting `is_slashed = true`). Linear vesting math is computed in Rust (not SQL) using the `earned_at` timestamp and configurable `window_hours`.
+Rows are append-only. The sole mutation is slashing (setting `is_slashed = true`). Linear vesting math is computed in Rust (not SQL) using the `earned_at` timestamp and each row's stored `window_hours`.
 
 This is the central ledger for the new incentive mechanism — it must be highly available, data-resilient, and centralized so it can serve as the single source of truth for CU accrual across the network. **Validators do not connect to this database directly** — they access it via REST API endpoints on basilica-backend, using the same `BasilicaApiClient` + validator signature auth pattern as existing endpoints (`/v1/weights/miner-delivery`, `/v1/prices/tokens`).
 
@@ -340,7 +343,7 @@ This is the central ledger for the new incentive mechanism — it must be highly
 CREATE TABLE IF NOT EXISTS cu_ledger (
     id BIGSERIAL PRIMARY KEY,
 
-    -- Identity (GPU info resolvable via miner_nodes/miner_gpu_profiles using these keys)
+    -- Identity (gpu_count resolvable via miner_nodes/miner_gpu_profiles using these keys)
     hotkey TEXT NOT NULL,
     miner_uid INTEGER NOT NULL,
     node_id TEXT NOT NULL,
@@ -351,6 +354,9 @@ CREATE TABLE IF NOT EXISTS cu_ledger (
 
     -- State snapshot at earn time
     is_rented BOOLEAN NOT NULL DEFAULT FALSE,  -- node had active rental when CU was earned
+    gpu_category TEXT NOT NULL,                 -- GPU category at earn time (e.g. "H100")
+    window_hours DOUBLE PRECISION NOT NULL,    -- vesting window from config at earn time
+    price_usd DOUBLE PRECISION NOT NULL,       -- category $/hr from config at earn time
 
     -- Slashing (only mutable field)
     is_slashed BOOLEAN NOT NULL DEFAULT FALSE,  -- CU voided due to node loss during rental
@@ -366,6 +372,37 @@ CREATE TABLE IF NOT EXISTS cu_ledger (
 --   (hotkey, earned_at) WHERE NOT is_slashed  — weight setter per-hotkey queries
 --   (earned_at) WHERE NOT is_slashed           — window range scans
 --   (node_id, earned_at)                       — slashing lookups
+--   (gpu_category, earned_at) WHERE NOT is_slashed  — per-category dilution queries
+```
+
+### Type Definitions
+
+```rust
+struct CuLedgerRow {
+    id: i64,
+    hotkey: String,
+    miner_uid: i32,
+    node_id: String,
+    cu_amount: f64,
+    earned_at: DateTime<Utc>,
+    is_rented: bool,
+    gpu_category: String,
+    window_hours: f64,
+    price_usd: f64,
+}
+
+struct NewCuRow {
+    hotkey: String,
+    miner_uid: i32,
+    node_id: String,
+    cu_amount: f64,
+    earned_at: DateTime<Utc>,
+    is_rented: bool,
+    gpu_category: String,          // from miner_gpu_profiles at earn time
+    window_hours: f64,             // from incentive_config.window_hours
+    price_usd: f64,                // from incentive_config.gpu_categories[cat].price_usd
+    idempotency_key: String,
+}
 ```
 
 ### Linear Vesting Model
@@ -482,12 +519,12 @@ vested_cu = A * 0.0139
        rows: &[CuLedgerRow],
        epoch_start: DateTime<Utc>,
        epoch_end: DateTime<Utc>,
-       window_hours: f64,
+       // window_hours REMOVED — uses row.window_hours
    ) -> HashMap<String, f64> {
-       let window_secs = window_hours * 3600.0;
        let mut hotkey_vested: HashMap<String, f64> = HashMap::new();
 
        for row in rows {
+           let window_secs = row.window_hours * 3600.0;  // per-row vesting window
            let vest_end = row.earned_at + Duration::seconds(window_secs as i64);
            let overlap_start = row.earned_at.max(epoch_start);
            let overlap_end = vest_end.min(epoch_end);
@@ -515,11 +552,11 @@ impl CuLedgerClient {
     // CU Generator writes (POST /v1/incentive/cus)
     async fn submit_cus(&self, rows: Vec<NewCuRow>) -> Result<u64>;       // returns number of new rows inserted
 
-    // Slashing (POST /v1/incentive/slash)
-    async fn slash_node_cus(&self, node_id: &str, window_hours: f64, slash_pct: f64) -> Result<u64>; // returns rows slashed
+    // Slashing (POST /v1/incentive/slash) — backend uses per-row window_hours
+    async fn slash_node_cus(&self, node_id: &str, slash_pct: f64) -> Result<u64>; // returns rows slashed
 
     // Weight setter reads (GET /v1/incentive/cus)
-    async fn get_cus_in_window(&self, window_start: DateTime<Utc>, epoch_end: DateTime<Utc>) -> Result<Vec<CuLedgerRow>>;
+    async fn get_cus_in_window(&self, epoch_start: DateTime<Utc>, epoch_end: DateTime<Utc>) -> Result<Vec<CuLedgerRow>>;
 }
 ```
 
@@ -528,20 +565,18 @@ impl CuLedgerClient {
 // File: crates/basilica-validator/src/incentive/vesting.rs
 
 /// Compute per-hotkey vested CU for the given epoch.
-/// Each CU vests linearly from earned_at to earned_at + window_hours.
+/// Each CU vests linearly from earned_at to earned_at + row.window_hours.
 pub fn compute_vested_cus(
     rows: &[CuLedgerRow],
     epoch_start: DateTime<Utc>,
     epoch_end: DateTime<Utc>,
-    window_hours: f64,
 ) -> HashMap<String, f64>;
 
-/// Compute total vested CU across all hotkeys (for effective_cu_value denominator).
+/// Compute total vested CU across all hotkeys (for per-category dilution denominator).
 pub fn compute_total_vested_cu(
     rows: &[CuLedgerRow],
     epoch_start: DateTime<Utc>,
     epoch_end: DateTime<Utc>,
-    window_hours: f64,
 ) -> f64;
 ```
 
@@ -552,7 +587,7 @@ pub fn compute_total_vested_cu(
 - **FR-4**: Unavailable nodes simply produce no CU rows — absence implies unavailability
 - **FR-5**: `cu_amount` uses actual elapsed time proportional to the CU Generator interval, NOT a fixed increment
 - **FR-6**: `idempotency_key` prevents duplicate rows if the CU Generator crashes and re-runs the same tick
-- **FR-7**: GPU details (`gpu_category`, `gpu_count`) are resolved from existing tables at generation time, not stored on the CU row
+- **FR-7**: `gpu_category`, `price_usd`, and `window_hours` are stored on the CU row at earn time (snapshotted from config). `gpu_count` is still resolved from existing tables at generation time and is not stored on the row.
 
 ### Backend Implementation Notes
 
@@ -561,19 +596,20 @@ The following SQL details describe what **basilica-backend executes internally**
 **Window query** (used by `GET /v1/incentive/cus`):
 ```sql
 SELECT id, hotkey, miner_uid, node_id,
-       cu_amount, earned_at, is_rented
+       cu_amount, earned_at, is_rented,
+       gpu_category, window_hours, price_usd
 FROM cu_ledger
 WHERE NOT is_slashed
-  AND earned_at < $2                                   -- earned before epoch ends
-  AND earned_at > $1 - make_interval(hours => $3)      -- vesting window overlaps epoch
+  AND earned_at < $2                                         -- earned before epoch ends
+  AND earned_at + make_interval(hours => window_hours) > $1  -- per-row vesting window overlaps epoch
 ORDER BY hotkey, earned_at;
--- $1 = epoch_start, $2 = epoch_end, $3 = window_hours
+-- $1 = epoch_start, $2 = epoch_end (no window_hours param)
 ```
 
 **Batch insert** (used by `POST /v1/incentive/cus`):
 ```sql
-INSERT INTO cu_ledger (hotkey, miner_uid, node_id, cu_amount, earned_at, is_rented, idempotency_key)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO cu_ledger (hotkey, miner_uid, node_id, cu_amount, earned_at, is_rented, gpu_category, window_hours, price_usd, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (idempotency_key) DO NOTHING;
 ```
 
@@ -614,6 +650,9 @@ Called by the CU Generator after each tick to submit earned CU rows.
         "cu_amount": 8.0,
         "earned_at": "2025-03-15T10:00:00Z",
         "is_rented": false,
+        "gpu_category": "H100",
+        "window_hours": 72.0,
+        "price_usd": 3.00,
         "idempotency_key": "node-abc:1710500400"
       }
     ]
@@ -631,19 +670,18 @@ Called by the CU Generator when a slash condition is detected (node lost during 
   ```json
   {
     "node_id": "node-abc",
-    "window_hours": 72.0,
     "slash_pct": 100.0
   }
   ```
 - **Response**: `{ "slashed_count": 15 }`
-- **Backend behavior**: Identifies unvested CUs (non-slashed, within vesting window), applies `slash_pct` (newest first), sets `is_slashed = true`
+- **Backend behavior**: Identifies unvested CUs (non-slashed, per-row `earned_at + window_hours > NOW()`), applies `slash_pct` (newest first), sets `is_slashed = true`
 
 #### `GET /v1/incentive/cus` — Fetch CU rows for weight computation
 
 Called by the Weight Setter at each epoch to fetch CU data for payout calculations.
 
 - **Auth**: Validator signature (existing middleware)
-- **Query params**: `window_start` (ISO 8601 timestamp), `epoch_end` (ISO 8601 timestamp), `window_hours` (float)
+- **Query params**: `epoch_start` (ISO 8601 timestamp), `epoch_end` (ISO 8601 timestamp)
 - **Response**: Array of `CuLedgerRow` objects:
   ```json
   [
@@ -654,11 +692,14 @@ Called by the Weight Setter at each epoch to fetch CU data for payout calculatio
       "node_id": "node-abc",
       "cu_amount": 8.0,
       "earned_at": "2025-03-15T10:00:00Z",
-      "is_rented": false
+      "is_rented": false,
+      "gpu_category": "H100",
+      "window_hours": 72.0,
+      "price_usd": 3.00
     }
   ]
   ```
-- **Backend behavior**: Runs the window query (non-slashed CUs whose vesting window overlaps the requested range)
+- **Backend behavior**: Runs the window query (non-slashed CUs whose per-row vesting window overlaps the requested range)
 
 ---
 
@@ -684,13 +725,17 @@ every ~1 hour (hardcoded 3600s interval, not configurable):
      a. latest = most recent availability entry for this node
 
      b. if latest.is_available:
-        gpu_count = resolve from miner_nodes/miner_gpu_profiles via node_id
+        (gpu_count, gpu_category) = resolve from miner_nodes/miner_gpu_profiles via node_id
+        price_usd = incentive_config.gpu_categories[gpu_category].price_usd
         → accumulate row into batch:
             NewCuRow {
               hotkey, miner_uid, node_id,
               cu_amount: elapsed_hours * gpu_count,
               earned_at: now,
               is_rented: latest.is_rented,
+              gpu_category: gpu_category,
+              window_hours: incentive_config.window_hours,
+              price_usd: price_usd,
               idempotency_key: "{node_id}:{tick_id}",
             }
 
@@ -700,8 +745,8 @@ every ~1 hour (hardcoded 3600s interval, not configurable):
      d. check slash condition (Module 5):
         if rental for this node transitioned to Failed/Stopped with termination_reason
            indicating node loss (validator gave up health-checking):
-           → call cu_ledger_client.slash_node_cus(node_id, window_hours, slash_pct)
-             (backend identifies unvested CUs and applies slash_pct, newest first)
+           → call cu_ledger_client.slash_node_cus(node_id, slash_pct)
+             (backend identifies unvested CUs via per-row window_hours and applies slash_pct, newest first)
 
   3. Submit batch via cu_ledger_client.submit_cus(batch)
      (backend inserts with ON CONFLICT (idempotency_key) DO NOTHING)
@@ -715,7 +760,7 @@ every ~1 hour (hardcoded 3600s interval, not configurable):
 - **FR-3**: Rented nodes that are available still earn CUs (renting doesn't stop availability rewards — the miner is providing both availability AND active compute)
 - **FR-4**: Generator only spawned when `config.incentive.is_some()`
 - **FR-5**: CU amount is proportional to real time: `elapsed_hours * gpu_count`, NOT a fixed increment per tick
-- **FR-6**: GPU info (`gpu_count`, `gpu_category`) resolved from existing tables at generation time, not stored on the CU row
+- **FR-6**: `gpu_category`, `price_usd`, and `window_hours` are snapshotted on the CU row at earn time. `gpu_count` is resolved from existing tables at generation time and not stored on the row.
 
 ### Non-Functional Requirements
 - **NFR-1**: Tolerates API connectivity blips — retries with exponential backoff
@@ -749,19 +794,19 @@ Slashing is driven entirely by the rental lifecycle — when the validator gives
 Integrated into the CU Generator tick (Module 4, step 2d):
 
 1. **Check rental termination events** (validator-side): Query local rentals that transitioned to `Failed`/`Stopped` with termination reason indicating node loss since the last CU Generator tick
-2. **Call slash API** (validator-side): `cu_ledger_client.slash_node_cus(node_id, window_hours, slash_pct)` — the backend handles identifying and marking unvested CUs
+2. **Call slash API** (validator-side): `cu_ledger_client.slash_node_cus(node_id, slash_pct)` — the backend handles identifying unvested CUs via per-row `window_hours` and marking them
 3. **Recovery**: Automatic — when a node comes back online, the CU Generator simply starts submitting new CU rows with `is_slashed = false`. No "unslash" of previously slashed CUs. Once slashed, those CUs are void.
 
 ### Backend Implementation Notes
 
 The following SQL describes what **basilica-backend executes internally** when handling the `POST /v1/incentive/slash` request. Validators do not run these queries.
 
-**Identify unvested CUs**: All non-slashed CU rows for the node still within their vesting window:
+**Identify unvested CUs**: All non-slashed CU rows for the node still within their per-row vesting window:
 ```sql
 SELECT id, cu_amount, earned_at FROM cu_ledger
 WHERE node_id = $1 AND NOT is_slashed
-  AND earned_at > NOW() - make_interval(hours => $2);
--- $2 = window_hours (any CU still vesting)
+  AND earned_at + make_interval(hours => window_hours) > NOW();
+-- Uses per-row window_hours (no parameter needed)
 ```
 
 **Apply slash_pct**: Mark `slash_pct`% of the unvested CUs as slashed. When `slash_pct = 100`, all unvested CUs are slashed. For partial slashing (`slash_pct < 100`), slash the most recent CU rows first (newest unvested CUs have the most remaining collateral value):
@@ -770,9 +815,9 @@ UPDATE cu_ledger SET is_slashed = true
 WHERE id IN (
   SELECT id FROM cu_ledger
   WHERE node_id = $1 AND NOT is_slashed
-    AND earned_at > NOW() - make_interval(hours => $2)
+    AND earned_at + make_interval(hours => window_hours) > NOW()
   ORDER BY earned_at DESC
-  LIMIT $3  -- number of rows to slash, computed from slash_pct
+  LIMIT $2  -- number of rows to slash, computed from slash_pct
 );
 ```
 
@@ -802,31 +847,35 @@ The core payout engine. Computes per-hotkey USD payouts from CU ledger data + de
 
 These formulas implement the incentive pool math shown in the architecture diagram.
 
-**Step 1 — Pool Capacity & Budget (per GPU category)**
+**Step 1 — Pool Budget (per GPU category, from current config)**
 ```
-For each gpu_category:
-  total_gpus[cat] = gpu_categories[cat].target_count * 8  // 8x = 8 GPUs per node
-  pool_capacity[cat] = total_gpus[cat] * window_hours
-  // Example (H100): 3 nodes * 8 GPUs * 72 hrs = 1,728 CU capacity
-
-  pool_budget[cat] = pool_capacity[cat] * max_cu_value_usd
-  // Example (H100): 1,728 CU * $0.05 = $86.40 budget
+// Pool budget represents what the network WANTS to pay going forward.
+// Uses CURRENT config values (target capacity + price), not per-row values.
+For each gpu_category cat in incentive_config.gpu_categories:
+  target_gpus[cat] = gpu_categories[cat].target_count * 8  // 8x = 8 GPUs per node
+  pool_budget[cat] = target_gpus[cat] * window_hours * gpu_categories[cat].price_usd
+  // Example (H100): 24 GPUs * 72 hrs * $3.00/hr = $5,184
+  // Example (A100): 32 GPUs * 72 hrs * $1.50/hr = $3,456
 
 total_pool_budget = SUM(pool_budget[cat]) across all categories
 ```
 
-**Step 2 — Effective CU Value**
+**Step 2 — Per-Category Dilution**
 ```
-// Fetch raw CU rows via API:
-cu_rows = cu_ledger_client.get_cus_in_window(epoch_end - window_hours, epoch_end)
-total_cu_in_window = SUM(cu_rows[i].cu_amount) for all non-slashed rows
+// Fetch raw CU rows via API (backend uses per-row window_hours for overlap):
+cu_rows = cu_ledger_client.get_cus_in_window(epoch_start, epoch_end)
 
-effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_cu_in_window)
+// Group CU supply by gpu_category (from per-row stored value):
+For each gpu_category cat:
+  cat_cu_in_window[cat] = SUM(row.cu_amount) WHERE row.gpu_category = cat AND NOT is_slashed
+  per_cu_budget[cat] = pool_budget[cat] / cat_cu_in_window[cat]
+
+  // Under-provisioned: per_cu_budget > price_usd → capped at stored price
+  // Over-provisioned:  per_cu_budget < price_usd → diluted
 ```
-- **Window-scoped denominator**: `total_cu_in_window` is the raw sum of all CU amounts in the window (not epoch-scoped vesting fractions). This keeps the denominator at the same scale as `total_pool_budget`, so dilution kicks in correctly when supply exceeds target. Per-CU vesting overlap is used separately in Step 4 for per-epoch miner payouts.
-- **Under-provisioned** (fewer GPUs online than target): each CU is worth more, but **capped at max_cu_value_usd**
-- **Over-provisioned** (more GPUs online than target): each CU is worth less (diluted across more supply)
-- This creates a natural market dynamic: if few miners are online, each one earns more per GPU-hour
+- **Per-category independence**: Oversupply of H100s dilutes only H100 payouts, not A100. Each GPU category is its own dilution pool.
+- **Window-scoped denominator**: `cat_cu_in_window` is the raw sum of CU amounts per category in the window (not epoch-scoped vesting fractions). This keeps the denominator at the same scale as `pool_budget`, so dilution kicks in correctly when supply exceeds target. Per-CU vesting overlap is used separately in Step 4 for per-epoch miner payouts.
+- This creates a natural market dynamic: if few miners of a category are online, each one earns more per GPU-hour for that category.
 
 **Step 3 — Revenue Reward (TBD)**
 ```
@@ -836,17 +885,29 @@ effective_cu_value = MIN(max_cu_value_usd, total_pool_budget / total_cu_in_windo
 //   revenue_reward[hotkey] = revenue_share_pct/100 * delivery_revenue_usd[hotkey]
 ```
 
-**Step 4 — Miner Payout (Linear Vesting)**
+**Step 4 — Per-Row Effective Price & Miner Payout**
 ```
-// Vesting math computed in Rust — epoch fraction is built into the overlap formula
-miner_vested_cu = vesting::compute_vested_cus(cu_rows, epoch_start, epoch_end, window_hours)
+// Vesting math computed in Rust — uses per-row window_hours
+miner_vested_cu = vesting::compute_vested_cus(cu_rows, epoch_start, epoch_end)
 // miner_vested_cu is a HashMap<hotkey, f64> with each hotkey's vested CU for this epoch
 
-For each hotkey:
-  miner_usd_per_epoch[hotkey] = effective_cu_value * miner_vested_cu[hotkey] + revenue_reward[hotkey]
+// Per-row payout uses a three-way MIN:
+For each CU row i:
+  cat = row_i.gpu_category
+  effective_price_i = MIN(row_i.price_usd, per_cu_budget[cat], max_cu_value_usd)
+  row_payout_i = vested_fraction_i * row_i.cu_amount * effective_price_i
 
+// Aggregate per hotkey:
+For each hotkey:
+  miner_usd_per_epoch[hotkey] = SUM(row_payout_i for rows belonging to hotkey) + revenue_reward[hotkey]
+
+// Three-way MIN explained:
+//   row.price_usd:       never pay more than what was promised at earn time
+//   per_cu_budget[cat]:   dilution when category supply > target
+//   max_cu_value_usd:     absolute global ceiling (safety net)
+//
 // NOTE: No separate prorate needed — the vesting overlap formula already computes
-// the epoch-specific fraction for each CU based on its earned_at and window_hours.
+// the epoch-specific fraction for each CU based on its earned_at and row.window_hours.
 ```
 
 **Step 5 — Weight Conversion (Dynamic Burn)**
@@ -1001,7 +1062,7 @@ crates/basilica-validator/src/
 ### Phase 4: Testing & Observability
 16. Unit tests: config validation, vesting math, payout calculations with known inputs
 17. Integration test: `tests/incentive_e2e.rs` — full cycle from mock availability data through weight calculation
-18. Add metrics: `cu_earned_total`, `slashed_cu_total`, `burn_rate_gauge`, `effective_cu_value_gauge`
+18. Add metrics: `cu_earned_total`, `slashed_cu_total`, `burn_rate_gauge`, `per_cu_budget_gauge` (per category)
 
 ---
 
