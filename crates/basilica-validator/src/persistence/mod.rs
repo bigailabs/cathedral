@@ -1,3 +1,4 @@
+pub mod availability_log;
 pub mod cleanup_task;
 pub mod collateral_grace;
 pub mod collateral_persistence;

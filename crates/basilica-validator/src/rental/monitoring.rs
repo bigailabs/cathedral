@@ -17,6 +17,7 @@ use super::container_client::ContainerClient;
 use super::types::{LogEntry, RentalInfo, RentalState};
 use crate::ban_system::BanManager;
 use crate::metrics::ValidatorPrometheusMetrics;
+use crate::persistence::availability_log::{AvailabilityEventRequest, AvailabilitySource};
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
 
@@ -253,6 +254,20 @@ impl DatabaseHealthMonitor {
             let mut counts = self.failure_counts.lock().await;
             counts.remove(&rental.rental_id);
         }
+
+        self.persistence
+            .record_availability_event_best_effort(AvailabilityEventRequest {
+                miner_id: rental.miner_id.clone(),
+                miner_uid: super::extract_miner_uid(&rental.miner_id),
+                hotkey: None,
+                node_id: rental.node_id.clone(),
+                is_available: false,
+                is_rented: Some(true),
+                is_validated: false,
+                source: AvailabilitySource::RentalHealthFailure,
+                source_metadata: Some(reason.clone()),
+                observed_at: Utc::now(),
+            });
 
         // Log misbehaviour
         if matches!(

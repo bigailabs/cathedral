@@ -16,6 +16,7 @@ use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
 use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
 use crate::persistence::{
+    availability_log::{AvailabilityEventRequest, AvailabilitySource},
     entities::{MisbehaviourType, VerificationLog},
     gpu_profile_repository::GpuProfileRepository,
     SimplePersistence,
@@ -550,17 +551,34 @@ impl VerificationEngine {
         }
 
         let miner_id = format!("miner_{miner_uid}");
+        let is_rented = self
+            .persistence
+            .has_active_rental(&node_result.node_id.to_string(), &miner_id)
+            .await
+            .unwrap_or(false);
+
+        self.persistence
+            .record_availability_event_best_effort(AvailabilityEventRequest {
+                miner_id: miner_id.clone(),
+                miner_uid: Some(miner_uid),
+                hotkey: Some(miner_info.hotkey.to_string()),
+                node_id: node_result.node_id.to_string(),
+                is_available: success,
+                is_rented: Some(is_rented),
+                is_validated: true,
+                source: AvailabilitySource::Validation,
+                source_metadata: Some(format!("validation_type={:?}", node_result.validation_type)),
+                observed_at: Utc::now(),
+            });
+
         let status = match (success, &node_result.validation_type) {
             (false, _) => "offline".to_string(),
             (true, ValidationType::Full) => "online".to_string(),
             (true, ValidationType::Lightweight) => {
-                match self
-                    .persistence
-                    .has_active_rental(&node_result.node_id.to_string(), &miner_id)
-                    .await
-                {
-                    Ok(true) => "online".to_string(),
-                    _ => sqlx::query_scalar::<_, String>(
+                if is_rented {
+                    "online".to_string()
+                } else {
+                    sqlx::query_scalar::<_, String>(
                         "SELECT status FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
                     )
                     .bind(&miner_id)
@@ -569,7 +587,7 @@ impl VerificationEngine {
                     .await
                     .ok()
                     .flatten()
-                    .unwrap_or_else(|| "verified".to_string()),
+                    .unwrap_or_else(|| "verified".to_string())
                 }
             }
         };
@@ -1537,6 +1555,7 @@ mod node_profile_wiring_tests {
         SmUtilizationStats, ValidationDetails,
     };
     use crate::miner_prover::verification_engine_builder::VerificationEngineBuilder;
+    use crate::persistence::availability_log::AvailabilityLogRepository;
     use crate::persistence::SimplePersistence;
     use std::str::FromStr;
 
@@ -1616,6 +1635,25 @@ mod node_profile_wiring_tests {
         );
         let engine = builder.build_for_testing().await?;
         Ok((engine, persistence))
+    }
+
+    async fn wait_for_availability_history(
+        repo: &AvailabilityLogRepository,
+        hotkey: &str,
+        node_id: &str,
+        expected_len: usize,
+    ) -> Result<Vec<crate::persistence::availability_log::AvailabilityLogRow>> {
+        for _ in 0..50 {
+            let history = repo.row_history(hotkey, node_id).await?;
+            if history.len() >= expected_len {
+                return Ok(history);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        Err(anyhow::anyhow!(
+            "Timed out waiting for availability history for {hotkey}/{node_id}"
+        ))
     }
 
     async fn register_declared_node(
@@ -2117,6 +2155,62 @@ mod node_profile_wiring_tests {
         assert!(!timestamp.contains('T'));
         chrono::NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S")
             .expect("timestamp should use SQLite datetime format");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_node_verification_result_logs_availability_transitions() -> Result<()> {
+        let (engine, persistence) = create_test_engine().await?;
+        let miner_uid = 208u16;
+        let hotkey = "5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy";
+        let node_id =
+            register_declared_node(&persistence, miner_uid, "10.0.20.8", "A100", 1).await?;
+        let miner_info = MinerInfo {
+            uid: MinerUid::new(miner_uid),
+            hotkey: Hotkey::new(hotkey.to_string()).expect("valid hotkey"),
+            endpoint: "http://127.0.0.1:9090".to_string(),
+            is_validator: false,
+            stake_tao: 100.0,
+            last_verified: None,
+            verification_score: 0.0,
+        };
+
+        let success_result =
+            build_full_verification_result(&node_id, &["NVIDIA A100"], ValidationType::Full);
+        engine
+            .store_node_verification_result_with_miner_info(miner_uid, &success_result, &miner_info)
+            .await?;
+
+        let repo = AvailabilityLogRepository::new(persistence.pool().clone());
+        let mut history = wait_for_availability_history(&repo, hotkey, &node_id, 1).await?;
+        assert_eq!(history.len(), 1);
+        assert!(history[0].is_available);
+        assert!(history[0].is_validated);
+        assert!(history[0].is_current);
+        assert_eq!(history[0].source, "validation");
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let mut failed_result =
+            build_full_verification_result(&node_id, &["NVIDIA A100"], ValidationType::Full);
+        failed_result.ssh_connection_successful = false;
+        failed_result.binary_validation_successful = false;
+        failed_result.failure_reasons = vec!["ssh_failed".to_string()];
+
+        engine
+            .store_node_verification_result_with_miner_info(miner_uid, &failed_result, &miner_info)
+            .await?;
+
+        history = wait_for_availability_history(&repo, hotkey, &node_id, 2).await?;
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0].row_expiration_at,
+            Some(history[1].row_effective_at)
+        );
+        assert!(!history[0].is_current);
+        assert!(!history[1].is_available);
+        assert!(history[1].is_current);
 
         Ok(())
     }
