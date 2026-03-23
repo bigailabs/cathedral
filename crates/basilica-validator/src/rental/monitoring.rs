@@ -16,8 +16,10 @@ use tracing::{debug, error, info, warn};
 use super::container_client::ContainerClient;
 use super::types::{LogEntry, RentalInfo, RentalState};
 use crate::ban_system::BanManager;
+use crate::incentive::slashing::{classify_terminal_rental_loss, RentalLossClassification};
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::availability_log::{AvailabilityEventRequest, AvailabilitySource};
+use crate::persistence::incentive_state::SlashEventRequest;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
 
@@ -255,6 +257,8 @@ impl DatabaseHealthMonitor {
             counts.remove(&rental.rental_id);
         }
 
+        let observed_at = Utc::now();
+
         self.persistence
             .record_availability_event_best_effort(AvailabilityEventRequest {
                 miner_id: rental.miner_id.clone(),
@@ -266,8 +270,13 @@ impl DatabaseHealthMonitor {
                 is_validated: false,
                 source: AvailabilitySource::RentalHealthFailure,
                 source_metadata: Some(reason.clone()),
-                observed_at: Utc::now(),
+                observed_at,
             });
+
+        let slash_classification = classify_terminal_rental_loss(
+            &reason,
+            matches!(misbehaviour, MisbehaviourKind::Halted),
+        );
 
         // Log misbehaviour
         if matches!(
@@ -334,6 +343,18 @@ impl DatabaseHealthMonitor {
                         error = %e,
                         "Failed to release node claim after rental termination"
                     );
+                }
+            }
+
+            if matches!(rental.state, RentalState::Active) {
+                if let RentalLossClassification::NodeLoss { reason } = slash_classification {
+                    self.persistence
+                        .record_incentive_slash_event_best_effort(SlashEventRequest {
+                            rental_id: rental.rental_id.clone(),
+                            node_id: rental.node_id.clone(),
+                            reason,
+                            detected_at_ms: observed_at.timestamp_millis(),
+                        });
                 }
             }
 

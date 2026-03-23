@@ -18,6 +18,7 @@ mod collateral;
 mod config;
 mod gpu;
 mod grpc;
+mod incentive;
 mod journal;
 mod k8s_profile_publisher;
 mod metrics;

@@ -10,6 +10,7 @@ use crate::collateral::SlashExecutor;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_registration_server;
+use crate::incentive::cu_generator::CuGenerator;
 use crate::metrics::{ValidatorMetrics, ValidatorPrometheusMetrics};
 use crate::miner_prover::{MinerProver, MinerProverParams};
 use crate::persistence::cleanup_task::CleanupTask;
@@ -41,6 +42,7 @@ struct RuntimeHandles {
     registration_server_task: JoinHandle<()>,
     cleanup_task: Option<JoinHandle<()>>,
     collateral_scan_task: JoinHandle<()>,
+    cu_generator_task: Option<JoinHandle<()>>,
 }
 
 struct TaskInputs {
@@ -468,6 +470,21 @@ impl ValidatorService {
             tokio::spawn(async { info!("Collateral scan disabled (no collateral config)") })
         };
 
+        let cu_generator_task = spawn_primary_validator_task(self.config.cu_generator_enabled, {
+            let pool = inputs.persistence.pool().clone();
+            let api_client = inputs.api_client.clone();
+            async move {
+                let generator = CuGenerator::new(pool, api_client);
+                let mut interval = tokio::time::interval(StdDuration::from_secs(3600));
+                loop {
+                    interval.tick().await;
+                    if let Err(error) = generator.run_once_at(chrono::Utc::now()).await {
+                        error!(error = %error, "CU generator task failed");
+                    }
+                }
+            }
+        });
+
         RuntimeHandles {
             scoring_task,
             weight_setter_task,
@@ -476,6 +493,7 @@ impl ValidatorService {
             registration_server_task,
             cleanup_task,
             collateral_scan_task,
+            cu_generator_task,
         }
     }
 
@@ -483,6 +501,9 @@ impl ValidatorService {
         handles.scoring_task.abort();
         handles.weight_setter_task.abort();
         handles.miner_prover_task.abort();
+        if let Some(handle) = handles.cu_generator_task {
+            handle.abort();
+        }
         if let Some(handle) = handles.cleanup_task {
             handle.abort();
         }
@@ -555,6 +576,17 @@ impl ValidatorService {
             .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
 
         Ok(block_number)
+    }
+}
+
+fn spawn_primary_validator_task<F>(enabled: bool, future: F) -> Option<JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    if enabled {
+        Some(tokio::spawn(future))
+    } else {
+        None
     }
 }
 
@@ -747,6 +779,32 @@ impl ProcessUtils {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_primary_validator_task;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn primary_validator_gating_spawns_task_only_when_enabled() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_clone = ran.clone();
+        let handle = spawn_primary_validator_task(true, async move {
+            ran_clone.store(true, Ordering::SeqCst);
+        });
+        handle.expect("task should be spawned").await.unwrap();
+        assert!(ran.load(Ordering::SeqCst));
+
+        let skipped = Arc::new(AtomicBool::new(false));
+        let skipped_clone = skipped.clone();
+        let handle = spawn_primary_validator_task(false, async move {
+            skipped_clone.store(true, Ordering::SeqCst);
+        });
+        assert!(handle.is_none());
+        assert!(!skipped.load(Ordering::SeqCst));
     }
 }
 

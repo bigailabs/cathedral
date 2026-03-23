@@ -92,6 +92,9 @@ pub struct ValidatorConfig {
     /// Collateral enforcement configuration (presence = enabled)
     #[serde(default)]
     pub collateral: Option<super::collateral::CollateralConfig>,
+    /// Enables CU generation and incentive slash submission on the primary validator.
+    #[serde(default)]
+    pub cu_generator_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -880,6 +883,7 @@ impl Default for ValidatorConfig {
             api_endpoint: default_api_endpoint(),
             billing: BillingConfig::default(),
             collateral: None,
+            cu_generator_enabled: false,
         }
     }
 }
