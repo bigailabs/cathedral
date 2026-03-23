@@ -14,9 +14,45 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
 
+#[derive(Debug, thiserror::Error)]
+pub enum BasilicaApiError {
+    #[error("incentive system not configured")]
+    NotConfigured,
+    #[error("api transport error: {0}")]
+    Transport(String),
+    #[error("api parse error: {0}")]
+    Parse(String),
+    #[error("api signing error: {0}")]
+    Signing(String),
+    #[error("api returned status {status}: {body}")]
+    HttpStatus {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+}
+
 pub trait ValidatorSigner: Send + Sync {
     fn hotkey(&self) -> String;
     fn sign(&self, message: &[u8]) -> Result<String>;
+}
+
+fn classify_incentive_status(
+    status: reqwest::StatusCode,
+    body: Option<String>,
+    not_found_maps_to_not_configured: bool,
+) -> std::result::Result<(), BasilicaApiError> {
+    if status.is_success() {
+        return Ok(());
+    }
+
+    if not_found_maps_to_not_configured && status == reqwest::StatusCode::NOT_FOUND {
+        return Err(BasilicaApiError::NotConfigured);
+    }
+
+    Err(BasilicaApiError::HttpStatus {
+        status,
+        body: body.unwrap_or_default(),
+    })
 }
 
 impl ValidatorSigner for bittensor::Service {
@@ -345,8 +381,122 @@ impl BasilicaApiClient {
             .collect())
     }
 
+    pub async fn get_incentive_config(
+        &self,
+    ) -> std::result::Result<IncentiveConfigResponse, BasilicaApiError> {
+        let url = format!(
+            "{}/v1/incentive/config",
+            self.api_endpoint.trim_end_matches('/')
+        );
+
+        let response = self.signed_get_typed(&url, &()).await?;
+        self.read_json_response_typed(response, true).await
+    }
+
+    pub async fn get_cus(
+        &self,
+        epoch_start: DateTime<Utc>,
+        epoch_end: DateTime<Utc>,
+    ) -> std::result::Result<Vec<CuLedgerRowResponse>, BasilicaApiError> {
+        let query = EpochWindowQuery {
+            epoch_start: epoch_start.to_rfc3339(),
+            epoch_end: epoch_end.to_rfc3339(),
+        };
+        let url = format!(
+            "{}/v1/incentive/cus",
+            self.api_endpoint.trim_end_matches('/')
+        );
+
+        let response = self.signed_get_typed(&url, &query).await?;
+        let body: GetCusResponse = self.read_json_response_typed(response, false).await?;
+        Ok(body.rows)
+    }
+
+    pub async fn get_rus(
+        &self,
+        epoch_start: DateTime<Utc>,
+        epoch_end: DateTime<Utc>,
+    ) -> std::result::Result<Vec<RuLedgerRowResponse>, BasilicaApiError> {
+        let query = EpochWindowQuery {
+            epoch_start: epoch_start.to_rfc3339(),
+            epoch_end: epoch_end.to_rfc3339(),
+        };
+        let url = format!(
+            "{}/v1/incentive/rus",
+            self.api_endpoint.trim_end_matches('/')
+        );
+
+        let response = self.signed_get_typed(&url, &query).await?;
+        let body: GetRusResponse = self.read_json_response_typed(response, false).await?;
+        Ok(body.rows)
+    }
+
+    pub async fn submit_cus(
+        &self,
+        rows: Vec<NewCuLedgerRowRequest>,
+    ) -> std::result::Result<usize, BasilicaApiError> {
+        let payload = PostCusRequest { cus: rows };
+        let url = format!(
+            "{}/v1/incentive/cus",
+            self.api_endpoint.trim_end_matches('/')
+        );
+
+        let response = self.signed_post_typed(&url, &payload).await?;
+        let body: PostCusResponse = self.read_json_response_typed(response, false).await?;
+        Ok(body.inserted)
+    }
+
+    pub async fn slash_node(
+        &self,
+        node_id: &str,
+        slash_pct: Decimal,
+    ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
+        let payload = PostSlashRequest {
+            node_id: node_id.to_string(),
+            slash_pct,
+        };
+        let url = format!(
+            "{}/v1/incentive/slash",
+            self.api_endpoint.trim_end_matches('/')
+        );
+
+        let response = self.signed_post_typed(&url, &payload).await?;
+        self.read_json_response_typed(response, false).await
+    }
+
     async fn signed_get<Q: Serialize>(&self, url: &str, query: &Q) -> Result<reqwest::Response> {
-        let (signature, timestamp) = self.signed_headers(query)?;
+        self.signed_get_typed(url, query)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    #[allow(dead_code)]
+    fn signed_headers<T: Serialize>(&self, payload: &T) -> Result<(String, String)> {
+        self.signed_headers_typed(payload)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    fn signed_headers_typed<T: Serialize>(
+        &self,
+        payload: &T,
+    ) -> std::result::Result<(String, String), BasilicaApiError> {
+        let timestamp = Utc::now().timestamp().to_string();
+        let payload_json =
+            serde_json::to_string(payload).map_err(|e| BasilicaApiError::Parse(e.to_string()))?;
+        let message = format!("{timestamp}:{payload_json}");
+        let signature = self
+            .signer
+            .sign(message.as_bytes())
+            .map_err(|e| BasilicaApiError::Signing(e.to_string()))?;
+        Ok((signature, timestamp))
+    }
+
+    async fn signed_get_typed<Q: Serialize>(
+        &self,
+        url: &str,
+        query: &Q,
+    ) -> std::result::Result<reqwest::Response, BasilicaApiError> {
+        let (signature, timestamp) = self.signed_headers_typed(query)?;
         debug!(url = url, "Sending signed GET request");
         let response = self
             .http_client
@@ -357,36 +507,66 @@ impl BasilicaApiClient {
             .query(query)
             .send()
             .await
-            .with_context(|| format!("API request to {url} failed"))?;
+            .map_err(|e| {
+                BasilicaApiError::Transport(format!("API request to {url} failed: {e}"))
+            })?;
         debug!(url = url, status = %response.status(), "Received API response");
         Ok(response)
     }
 
-    fn signed_headers<T: Serialize>(&self, payload: &T) -> Result<(String, String)> {
-        let timestamp = Utc::now().timestamp().to_string();
-        let payload_json = serde_json::to_string(payload).context("Failed to serialize payload")?;
-        let message = format!("{timestamp}:{payload_json}");
-        let signature = self.signer.sign(message.as_bytes())?;
-        Ok((signature, timestamp))
+    async fn signed_post_typed<B: Serialize>(
+        &self,
+        url: &str,
+        body: &B,
+    ) -> std::result::Result<reqwest::Response, BasilicaApiError> {
+        let (signature, timestamp) = self.signed_headers_typed(body)?;
+        debug!(url = url, "Sending signed POST request");
+        let response = self
+            .http_client
+            .post(url)
+            .header("X-Validator-Hotkey", self.signer.hotkey())
+            .header("X-Validator-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                BasilicaApiError::Transport(format!("API request to {url} failed: {e}"))
+            })?;
+        debug!(url = url, status = %response.status(), "Received API response");
+        Ok(response)
     }
 
     async fn read_json_response<T: DeserializeOwned>(
         &self,
         response: reqwest::Response,
     ) -> Result<T> {
+        self.read_json_response_typed(response, false)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    async fn read_json_response_typed<T: DeserializeOwned>(
+        &self,
+        response: reqwest::Response,
+        not_found_maps_to_not_configured: bool,
+    ) -> std::result::Result<T, BasilicaApiError> {
         if !response.status().is_success() {
             let status = response.status();
             let body: Option<Value> = response.json().await.ok();
-            return Err(anyhow::anyhow!(
-                "API returned status {}: {}",
+            return match classify_incentive_status(
                 status,
-                body.map(|v| v.to_string()).unwrap_or_default()
-            ));
+                body.map(|v| v.to_string()),
+                not_found_maps_to_not_configured,
+            ) {
+                Ok(()) => unreachable!("non-success status should not classify as success"),
+                Err(err) => Err(err),
+            };
         }
         response
             .json::<T>()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse API response: {e}"))
+            .map_err(|e| BasilicaApiError::Parse(e.to_string()))
     }
 
     async fn get_cached_token_prices_if_valid(&self, netuid: u16) -> Option<TokenPriceSnapshot> {
@@ -403,6 +583,108 @@ impl BasilicaApiClient {
 struct MinerDeliveryQuery {
     since_epoch_seconds: i64,
     until_epoch_seconds: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct EpochWindowQuery {
+    epoch_start: String,
+    epoch_end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IncentiveConfigResponse {
+    pub gpu_categories: HashMap<String, IncentiveGpuCategoryConfig>,
+    pub window_hours: Decimal,
+    pub max_cu_value_usd: Decimal,
+    pub revenue_share_pct: Option<Decimal>,
+    pub slash_pct: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IncentiveGpuCategoryConfig {
+    pub target_count: u32,
+    pub price_usd: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CuLedgerRowResponse {
+    pub id: uuid::Uuid,
+    pub hotkey: String,
+    pub miner_uid: u32,
+    pub node_id: String,
+    pub cu_amount: Decimal,
+    pub earned_at: DateTime<Utc>,
+    pub is_rented: bool,
+    pub gpu_category: String,
+    pub window_hours: Decimal,
+    pub price_usd: Decimal,
+    pub idempotency_key: String,
+    pub is_slashed: bool,
+    pub slash_audit_id: Option<uuid::Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuLedgerRowResponse {
+    pub id: uuid::Uuid,
+    pub hotkey: String,
+    pub miner_uid: u32,
+    pub node_id: String,
+    pub rental_id: String,
+    pub ru_amount: Decimal,
+    pub earned_at: DateTime<Utc>,
+    pub gpu_category: String,
+    pub window_hours: Decimal,
+    pub revenue_share_pct: Decimal,
+    pub is_slashed: bool,
+    pub slash_audit_id: Option<uuid::Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetCusResponse {
+    pub rows: Vec<CuLedgerRowResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetRusResponse {
+    pub rows: Vec<RuLedgerRowResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewCuLedgerRowRequest {
+    pub hotkey: String,
+    pub miner_uid: u32,
+    pub node_id: String,
+    pub cu_amount: Decimal,
+    pub earned_at: DateTime<Utc>,
+    pub is_rented: bool,
+    pub gpu_category: String,
+    pub window_hours: Decimal,
+    pub price_usd: Decimal,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostCusRequest {
+    pub cus: Vec<NewCuLedgerRowRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostCusResponse {
+    pub inserted: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostSlashRequest {
+    pub node_id: String,
+    pub slash_pct: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostSlashResponse {
+    pub slashed_cu_count: usize,
+    pub slashed_ru_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -487,7 +769,10 @@ impl CachedTokenPrices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{body_json, header_exists, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     struct TestBaselineFetcher {
         calls: Arc<AtomicUsize>,
@@ -549,6 +834,19 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FailingSigner;
+
+    impl ValidatorSigner for FailingSigner {
+        fn hotkey(&self) -> String {
+            "test_hotkey".to_string()
+        }
+
+        fn sign(&self, _message: &[u8]) -> Result<String> {
+            Err(anyhow::anyhow!("sign failed"))
+        }
+    }
+
     fn make_prices() -> HashMap<String, f64> {
         let mut prices = HashMap::new();
         prices.insert("H100".to_string(), 2.0);
@@ -580,6 +878,627 @@ mod tests {
             baseline_fetcher,
             token_fetcher,
         )
+    }
+
+    fn build_http_client(
+        api_endpoint: String,
+        signer: Arc<dyn ValidatorSigner>,
+    ) -> BasilicaApiClient {
+        BasilicaApiClient::new_with_fetchers(
+            api_endpoint,
+            signer,
+            Client::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            Arc::new(HttpBaselinePriceFetcher),
+            Arc::new(HttpTokenPriceFetcher),
+        )
+    }
+
+    #[test]
+    fn test_deserialize_incentive_config_response() {
+        let json = r#"
+        {
+            "gpu_categories": {
+                "H100": { "target_count": 2, "price_usd": "3.00" }
+            },
+            "window_hours": "72",
+            "max_cu_value_usd": "0.05",
+            "revenue_share_pct": "30",
+            "slash_pct": "100"
+        }
+        "#;
+
+        let parsed: IncentiveConfigResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.gpu_categories["H100"].target_count, 2);
+        assert_eq!(
+            parsed.gpu_categories["H100"].price_usd,
+            Decimal::from_str_exact("3.00").unwrap()
+        );
+        assert_eq!(parsed.window_hours, Decimal::from_str_exact("72").unwrap());
+        assert_eq!(
+            parsed.max_cu_value_usd,
+            Decimal::from_str_exact("0.05").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_deserialize_cu_row_response() {
+        let json = r#"
+        {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "hotkey": "5miner",
+            "miner_uid": 42,
+            "node_id": "node-abc",
+            "cu_amount": "8.0",
+            "earned_at": "2025-03-15T10:00:00Z",
+            "is_rented": false,
+            "gpu_category": "H100",
+            "window_hours": "72.0",
+            "price_usd": "3.00",
+            "idempotency_key": "node-abc:1710496800",
+            "is_slashed": false,
+            "slash_audit_id": "33333333-3333-3333-3333-333333333333",
+            "created_at": "2025-03-15T10:05:00Z"
+        }
+        "#;
+
+        let parsed: CuLedgerRowResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.hotkey, "5miner");
+        assert_eq!(parsed.miner_uid, 42);
+        assert_eq!(parsed.cu_amount, Decimal::from_str_exact("8.0").unwrap());
+        assert_eq!(parsed.idempotency_key, "node-abc:1710496800");
+        assert!(!parsed.is_slashed);
+        assert_eq!(
+            parsed.slash_audit_id,
+            Some(uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap())
+        );
+        assert_eq!(
+            parsed.created_at,
+            DateTime::parse_from_rfc3339("2025-03-15T10:05:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn test_deserialize_ru_row_response() {
+        let json = r#"
+        {
+            "id": "22222222-2222-2222-2222-222222222222",
+            "hotkey": "5miner",
+            "miner_uid": 42,
+            "node_id": "node-abc",
+            "rental_id": "rental-123",
+            "ru_amount": "9.5",
+            "earned_at": "2025-03-15T10:00:00Z",
+            "gpu_category": "H100",
+            "window_hours": "72.0",
+            "revenue_share_pct": "30.0",
+            "is_slashed": true,
+            "slash_audit_id": null,
+            "created_at": "2025-03-15T10:05:00Z"
+        }
+        "#;
+
+        let parsed: RuLedgerRowResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.rental_id, "rental-123");
+        assert_eq!(parsed.ru_amount, Decimal::from_str_exact("9.5").unwrap());
+        assert!(parsed.is_slashed);
+        assert_eq!(parsed.slash_audit_id, None);
+        assert_eq!(
+            parsed.created_at,
+            DateTime::parse_from_rfc3339("2025-03-15T10:05:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn test_deserialize_get_cus_response() {
+        let json = r#"
+        {
+            "rows": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "hotkey": "5miner",
+                    "miner_uid": 42,
+                    "node_id": "node-abc",
+                    "cu_amount": "8.0",
+                    "earned_at": "2025-03-15T10:00:00Z",
+                    "is_rented": false,
+                    "gpu_category": "H100",
+                    "window_hours": "72.0",
+                    "price_usd": "3.00",
+                    "idempotency_key": "node-abc:1710496800",
+                    "is_slashed": false,
+                    "slash_audit_id": "33333333-3333-3333-3333-333333333333",
+                    "created_at": "2025-03-15T10:05:00Z"
+                }
+            ]
+        }
+        "#;
+
+        let parsed: GetCusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].node_id, "node-abc");
+    }
+
+    #[test]
+    fn test_deserialize_get_rus_response() {
+        let json = r#"
+        {
+            "rows": [
+                {
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "hotkey": "5miner",
+                    "miner_uid": 42,
+                    "node_id": "node-abc",
+                    "rental_id": "rental-123",
+                    "ru_amount": "9.5",
+                    "earned_at": "2025-03-15T10:00:00Z",
+                    "gpu_category": "H100",
+                    "window_hours": "72.0",
+                    "revenue_share_pct": "30.0",
+                    "is_slashed": true,
+                    "slash_audit_id": null,
+                    "created_at": "2025-03-15T10:05:00Z"
+                }
+            ]
+        }
+        "#;
+
+        let parsed: GetRusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].rental_id, "rental-123");
+    }
+
+    #[test]
+    fn test_deserialize_post_cus_request() {
+        let json = r#"
+        {
+            "cus": [
+                {
+                    "hotkey": "5miner",
+                    "miner_uid": 42,
+                    "node_id": "node-abc",
+                    "cu_amount": "8.0",
+                    "earned_at": "2025-03-15T10:00:00Z",
+                    "is_rented": false,
+                    "gpu_category": "H100",
+                    "window_hours": "72.0",
+                    "price_usd": "3.00",
+                    "idempotency_key": "node-abc:1710496800"
+                }
+            ]
+        }
+        "#;
+
+        let parsed: PostCusRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.cus.len(), 1);
+        assert_eq!(parsed.cus[0].node_id, "node-abc");
+    }
+
+    #[test]
+    fn test_deserialize_post_slash_request() {
+        let json = r#"
+        {
+            "node_id": "node-abc",
+            "slash_pct": "100.0"
+        }
+        "#;
+
+        let parsed: PostSlashRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.node_id, "node-abc");
+        assert_eq!(parsed.slash_pct, Decimal::from_str_exact("100.0").unwrap());
+    }
+
+    #[test]
+    fn test_incentive_status_404_maps_to_not_configured() {
+        let err = classify_incentive_status(
+            reqwest::StatusCode::NOT_FOUND,
+            Some("{\"error\":\"not configured\"}".to_string()),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, BasilicaApiError::NotConfigured));
+    }
+
+    #[test]
+    fn test_incentive_status_500_remains_http_status() {
+        let err = classify_incentive_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            Some("{\"error\":\"boom\"}".to_string()),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BasilicaApiError::HttpStatus {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_signed_headers_typed_maps_signing_errors() {
+        #[derive(Serialize)]
+        struct TestPayload {
+            foo: String,
+        }
+
+        let client = BasilicaApiClient::new_with_fetchers(
+            "http://localhost".to_string(),
+            Arc::new(FailingSigner),
+            Client::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            Arc::new(HttpBaselinePriceFetcher),
+            Arc::new(HttpTokenPriceFetcher),
+        );
+
+        let err = client
+            .signed_headers_typed(&TestPayload {
+                foo: "bar".to_string(),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, BasilicaApiError::Signing(_)));
+    }
+
+    #[tokio::test]
+    async fn test_signed_get_typed_maps_transport_errors() {
+        #[derive(Serialize)]
+        struct TestQuery {
+            foo: String,
+        }
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_client(
+            Arc::new(HttpBaselinePriceFetcher),
+            Arc::new(HttpTokenPriceFetcher),
+            signer,
+        );
+
+        let err = client
+            .signed_get_typed(
+                "http://127.0.0.1:9/unreachable",
+                &TestQuery {
+                    foo: "bar".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, BasilicaApiError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn test_read_json_response_typed_404_maps_to_not_configured() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/typed-404"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(r#"{"error":"not configured"}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let response = client
+            .signed_get_typed(&format!("{}/typed-404", server.uri()), &())
+            .await
+            .unwrap();
+        let err = client
+            .read_json_response_typed::<IncentiveConfigResponse>(response, true)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, BasilicaApiError::NotConfigured));
+    }
+
+    #[tokio::test]
+    async fn test_read_json_response_typed_invalid_json_maps_parse() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/typed-invalid-json"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("not-json", "text/plain"))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_client(
+            Arc::new(HttpBaselinePriceFetcher),
+            Arc::new(HttpTokenPriceFetcher),
+            signer,
+        );
+
+        let response = client
+            .signed_get_typed(&format!("{}/typed-invalid-json", server.uri()), &())
+            .await
+            .unwrap();
+        let err = client
+            .read_json_response_typed::<IncentiveConfigResponse>(response, false)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, BasilicaApiError::Parse(_)));
+    }
+
+    #[tokio::test]
+    async fn test_get_incentive_config_parses_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/incentive/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "gpu_categories": {
+                    "H100": { "target_count": 2, "price_usd": "3.00" }
+                },
+                "window_hours": "72",
+                "max_cu_value_usd": "0.05",
+                "revenue_share_pct": "30",
+                "slash_pct": "100"
+            })))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let config = client.get_incentive_config().await.unwrap();
+        assert_eq!(config.gpu_categories["H100"].target_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_incentive_config_404_returns_not_configured() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/incentive/config"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(json!({ "error": "not configured" })),
+            )
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let err = client.get_incentive_config().await.unwrap_err();
+        assert!(matches!(err, BasilicaApiError::NotConfigured));
+    }
+
+    #[tokio::test]
+    async fn test_get_incentive_config_500_returns_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/incentive/config"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let err = client.get_incentive_config().await.unwrap_err();
+        assert!(matches!(
+            err,
+            BasilicaApiError::HttpStatus {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_incentive_config_invalid_json_returns_parse_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/incentive/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("not-json", "text/plain"))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let err = client.get_incentive_config().await.unwrap_err();
+        assert!(matches!(err, BasilicaApiError::Parse(_)));
+    }
+
+    #[tokio::test]
+    async fn test_get_cus_parses_rows() {
+        let epoch_start = DateTime::parse_from_rfc3339("2025-03-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let epoch_end = DateTime::parse_from_rfc3339("2025-03-15T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/incentive/cus"))
+            .and(query_param("epoch_start", epoch_start.to_rfc3339()))
+            .and(query_param("epoch_end", epoch_end.to_rfc3339()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "rows": [{
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "hotkey": "5miner",
+                    "miner_uid": 42,
+                    "node_id": "node-abc",
+                    "cu_amount": "8.0",
+                    "earned_at": "2025-03-15T10:00:00Z",
+                    "is_rented": false,
+                    "gpu_category": "H100",
+                    "window_hours": "72.0",
+                    "price_usd": "3.00",
+                    "idempotency_key": "node-abc:1710496800",
+                    "is_slashed": false,
+                    "slash_audit_id": null,
+                    "created_at": "2025-03-15T10:05:00Z"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let rows = client.get_cus(epoch_start, epoch_end).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].node_id, "node-abc");
+    }
+
+    #[tokio::test]
+    async fn test_get_rus_parses_rows() {
+        let epoch_start = DateTime::parse_from_rfc3339("2025-03-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let epoch_end = DateTime::parse_from_rfc3339("2025-03-15T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/incentive/rus"))
+            .and(query_param("epoch_start", epoch_start.to_rfc3339()))
+            .and(query_param("epoch_end", epoch_end.to_rfc3339()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "rows": [{
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "hotkey": "5miner",
+                    "miner_uid": 42,
+                    "node_id": "node-abc",
+                    "rental_id": "rental-123",
+                    "ru_amount": "9.5",
+                    "earned_at": "2025-03-15T10:00:00Z",
+                    "gpu_category": "H100",
+                    "window_hours": "72.0",
+                    "revenue_share_pct": "30.0",
+                    "is_slashed": false,
+                    "slash_audit_id": null,
+                    "created_at": "2025-03-15T10:05:00Z"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let rows = client.get_rus(epoch_start, epoch_end).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rental_id, "rental-123");
+    }
+
+    #[tokio::test]
+    async fn test_submit_cus_posts_signed_json_body() {
+        let server = MockServer::start().await;
+        let payload = PostCusRequest {
+            cus: vec![NewCuLedgerRowRequest {
+                hotkey: "5miner".to_string(),
+                miner_uid: 42,
+                node_id: "node-abc".to_string(),
+                cu_amount: Decimal::from_str_exact("8.0").unwrap(),
+                earned_at: DateTime::parse_from_rfc3339("2025-03-15T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                is_rented: false,
+                gpu_category: "H100".to_string(),
+                window_hours: Decimal::from_str_exact("72.0").unwrap(),
+                price_usd: Decimal::from_str_exact("3.00").unwrap(),
+                idempotency_key: "node-abc:1710496800".to_string(),
+            }],
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/v1/incentive/cus"))
+            .and(header_exists("X-Validator-Hotkey"))
+            .and(header_exists("X-Validator-Signature"))
+            .and(header_exists("X-Timestamp"))
+            .and(body_json(json!({
+                "cus": [{
+                    "hotkey": "5miner",
+                    "miner_uid": 42,
+                    "node_id": "node-abc",
+                    "cu_amount": "8.0",
+                    "earned_at": "2025-03-15T10:00:00Z",
+                    "is_rented": false,
+                    "gpu_category": "H100",
+                    "window_hours": "72.0",
+                    "price_usd": "3.00",
+                    "idempotency_key": "node-abc:1710496800"
+                }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "inserted": 1 })))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let inserted = client.submit_cus(payload.cus).await.unwrap();
+        assert_eq!(inserted, 1);
+    }
+
+    #[tokio::test]
+    async fn test_slash_node_posts_signed_json_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/incentive/slash"))
+            .and(header_exists("X-Validator-Hotkey"))
+            .and(header_exists("X-Validator-Signature"))
+            .and(header_exists("X-Timestamp"))
+            .and(body_json(json!({
+                "node_id": "node-abc",
+                "slash_pct": "100.0"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "slashed_cu_count": 5,
+                "slashed_ru_count": 2
+            })))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let response = client
+            .slash_node("node-abc", Decimal::from_str_exact("100.0").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.slashed_cu_count, 5);
+        assert_eq!(response.slashed_ru_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_slash_node_403_returns_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/incentive/slash"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
+        let client = build_http_client(server.uri(), signer);
+
+        let err = client
+            .slash_node("node-abc", Decimal::from_str_exact("100.0").unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BasilicaApiError::HttpStatus {
+                status: reqwest::StatusCode::FORBIDDEN,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
