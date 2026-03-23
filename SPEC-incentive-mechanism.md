@@ -768,6 +768,8 @@ Write endpoints (`POST`) are restricted to an authorized validator hotkey allowl
 
 The `cu_ledger`, `ru_ledger`, incentive config storage, and slash audit tables live in `basilica-incentive`. Detailed service implementation is outside the scope of this validator spec — this section specifies the API contract.
 
+This API contract is now treated as the frozen validator/backend boundary for the new incentive system. The validator-side DTOs and `basilica-incentive` route types are expected to remain aligned with this section.
+
 ### Endpoints
 
 #### `GET /v1/incentive/config` — Fetch incentive parameters
@@ -841,22 +843,28 @@ Called by the Weight Setter at each epoch to fetch CU data for payout calculatio
 
 - **Auth**: Any validator (read-only, existing signature middleware)
 - **Query params**: `epoch_start` (ISO 8601 timestamp), `epoch_end` (ISO 8601 timestamp)
-- **Response**: Array of `CuLedgerRow` objects:
+- **Response**: Object containing `CuLedgerRow` objects:
   ```json
-  [
-    {
-      "id": 1,
-      "hotkey": "5F...",
-      "miner_uid": 42,
-      "node_id": "node-abc",
-      "cu_amount": 8.0,
-      "earned_at": "2025-03-15T10:00:00Z",
-      "is_rented": false,
-      "gpu_category": "H100",
-      "window_hours": 72.0,
-      "price_usd": 3.00
-    }
-  ]
+  {
+    "rows": [
+      {
+        "id": "8a4f8c3a-8f80-4ab8-946a-5bbd43c6c657",
+        "hotkey": "5F...",
+        "miner_uid": 42,
+        "node_id": "node-abc",
+        "cu_amount": 8.0,
+        "earned_at": "2025-03-15T10:00:00Z",
+        "is_rented": false,
+        "gpu_category": "H100",
+        "window_hours": 72.0,
+        "price_usd": 3.00,
+        "idempotency_key": "node-abc:1710500400",
+        "is_slashed": false,
+        "slash_audit_id": null,
+        "created_at": "2025-03-15T10:00:01Z"
+      }
+    ]
+  }
   ```
 - **Backend behavior**: Runs the window query (non-slashed CUs whose per-row vesting window overlaps the requested range)
 
@@ -877,7 +885,7 @@ Called by the Weight Setter at each epoch to fetch RU data for payout calculatio
 
 - **Auth**: Any validator (read-only, existing signature middleware)
 - **Query params**: `epoch_start` (ISO 8601 timestamp), `epoch_end` (ISO 8601 timestamp)
-- **Response**: Array of RU ledger row objects (same structure as CU rows but with `ru_amount` and `revenue_share_pct` instead of `cu_amount` and `price_usd`)
+- **Response**: Object containing RU ledger row objects under `rows` (same structure as CU rows but with `ru_amount` and `revenue_share_pct` instead of `cu_amount` and `price_usd`)
 - **Backend behavior**: Returns non-slashed RU rows whose per-row vesting window (`earned_at` to `earned_at + window_hours`) overlaps the requested epoch range
 
 #### `POST /v1/incentive/slash` — Extended to cover both CU and RU
@@ -890,7 +898,7 @@ The existing slash endpoint (Module 3.5) is extended to slash both CU and RU row
 
 ### RU Generation (internal — not an external endpoint)
 
-RU rows are generated internally by `basilica-incentive`, not submitted by validators. The generation mechanism reads billing-owned debit facts derived from `credit_transactions` and creates corresponding `ru_ledger` rows. The exact implementation approach (periodic job, event-driven handler, or replicated fact stream) is a service implementation detail.
+RU rows are generated internally by `basilica-incentive`, not submitted by validators. The initial implementation uses a periodic checkpointed polling job that reads billing-owned debit facts derived from `credit_transactions` and creates corresponding `ru_ledger` rows. A future event-driven ingestion path can be considered later if needed, but it is not part of the initial rollout plan.
 
 ---
 
@@ -1181,7 +1189,7 @@ For each hotkey:
 usd_required_epoch = SUM(miner_usd_per_epoch[hotkey]) across all hotkeys
 
 // How much USD can the subnet's alpha emissions cover?
-alpha_emission_per_epoch = subnet_emission_rate  // from Bittensor metagraph chain data
+alpha_emission_per_epoch = subnet_emission_rate  // validator-derived from Bittensor metagraph chain data
 alpha_price_usd = TokenPriceSnapshot.alpha_price_usd  // from existing BasilicaApiClient
 usd_emission_capacity = alpha_emission_per_epoch * alpha_price_usd
 
@@ -1235,7 +1243,7 @@ match self.api_client.get_incentive_config().await {
             epoch.period_start,
             epoch.period_end,
             alpha_price.alpha_price_usd,
-            subnet_emission_rate,  // TBD: source to be determined during implementation
+            subnet_emission_rate,  // validator-derived from current Bittensor metagraph data
         );
         // result.weights: Vec<NormalizedWeight>
         // result.burn_rate: f64
@@ -1397,8 +1405,5 @@ crates/basilica-validator/src/
 ## Remaining TBD
 
 1. **Initial parameter values**: Specific starting values for `window_hours`, `max_cu_value_usd`, `revenue_share_pct`, `target_count` per category, `gpu_prices_usd` per category need to be determined during testing/simulation. These will be configured in `basilica-incentive`.
-2. **RU generation implementation detail**: The exact `basilica-incentive` mechanism for generating RU rows from billing-owned debit facts (periodic job vs event-driven handler vs replicated fact stream) needs to be determined.
-3. **`subnet_emission_rate` source**: The exact source for `subnet_emission_rate` (Bittensor metagraph field or incentive-service-provided metadata) needs to be determined during implementation. This value is used in Step 5 of the weight conversion formula.
-4. **Burn UID allocation**: How the dynamic burn rate maps to `burn_uid` in the u16 weight vector needs to be specified. The existing system uses `EmissionConfig.burn_uid` — the new system needs to determine whether to reuse this or derive it differently.
-5. **Service deployment topology**: Decide whether validators call `basilica-incentive` directly or via a thin gateway/proxy layer. The service remains the owner either way.
-6. **Config management**: The exact mechanism for configuring incentive parameters inside `basilica-incentive` (TOML file, environment variables, database table, admin API) is a service implementation detail to be determined.
+2. **Exact metagraph field selection for weight math**: `subnet_emission_rate` is definitively validator-local and chain-derived, but the exact metagraph field used in phase 6 should be chosen during implementation from the available subnet emission fields exposed by the pinned `bittensor-rs` client.
+3. **Operational bootstrap details**: Validators call `basilica-incentive` directly, and the service owns incentive config. The remaining implementation detail is the exact operator workflow for seeding/bootstraping active config from service config into Postgres at deployment time.
