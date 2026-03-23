@@ -476,15 +476,28 @@ mod tests {
         }
     }
 
+    type CuRowArgs<'a> = (
+        &'a str,
+        u32,
+        &'a str,
+        &'a str,
+        DateTime<Utc>,
+        &'a str,
+        &'a str,
+        &'a str,
+    );
+
     fn cu_row(
-        hotkey: &str,
-        miner_uid: u32,
-        node_id: &str,
-        cu_amount: &str,
-        earned_at: DateTime<Utc>,
-        gpu_category: &str,
-        window_hours: &str,
-        price_usd: &str,
+        (
+            hotkey,
+            miner_uid,
+            node_id,
+            cu_amount,
+            earned_at,
+            gpu_category,
+            window_hours,
+            price_usd,
+        ): CuRowArgs<'_>,
     ) -> CuLedgerRowResponse {
         CuLedgerRowResponse {
             id: Uuid::new_v4(),
@@ -504,15 +517,28 @@ mod tests {
         }
     }
 
+    type RuRowArgs<'a> = (
+        &'a str,
+        u32,
+        &'a str,
+        &'a str,
+        DateTime<Utc>,
+        &'a str,
+        &'a str,
+        &'a str,
+    );
+
     fn ru_row(
-        hotkey: &str,
-        miner_uid: u32,
-        node_id: &str,
-        ru_amount: &str,
-        earned_at: DateTime<Utc>,
-        gpu_category: &str,
-        window_hours: &str,
-        revenue_share_pct: &str,
+        (
+            hotkey,
+            miner_uid,
+            node_id,
+            ru_amount,
+            earned_at,
+            gpu_category,
+            window_hours,
+            revenue_share_pct,
+        ): RuRowArgs<'_>,
     ) -> RuLedgerRowResponse {
         RuLedgerRowResponse {
             id: Uuid::new_v4(),
@@ -551,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_cu_vesting_behavior() {
-        let row = cu_row("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10");
+        let row = cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10"));
 
         let vested_fraction = compute_cu_vested_fraction(&row, ts(2), ts(4));
 
@@ -560,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_ru_vesting_behavior() {
-        let row = ru_row("miner-1", 11, "node-1", "40", ts(0), "H100", "4", "25");
+        let row = ru_row(("miner-1", 11, "node-1", "40", ts(0), "H100", "4", "25"));
 
         let vested_fraction = compute_ru_vested_fraction(&row, ts(1), ts(3));
 
@@ -573,8 +599,8 @@ mod tests {
         let result = compute_incentive_pool(
             &config,
             &[
-                cu_row("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10"),
-                cu_row("miner-2", 22, "node-2", "4", ts(0), "H100", "4", "10"),
+                cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10")),
+                cu_row(("miner-2", 22, "node-2", "4", ts(0), "H100", "4", "10")),
             ],
             &[],
             ts(0),
@@ -596,7 +622,7 @@ mod tests {
         let result = compute_incentive_pool(
             &config,
             &[],
-            &[ru_row(
+            &[ru_row((
                 "miner-1",
                 11,
                 "node-1",
@@ -605,7 +631,7 @@ mod tests {
                 "H100",
                 "4",
                 "25",
-            )],
+            ))],
             ts(0),
             ts(4),
             d("1"),
@@ -624,7 +650,7 @@ mod tests {
         let config = test_config();
         let result = compute_incentive_pool(
             &config,
-            &[cu_row(
+            &[cu_row((
                 "miner-1",
                 11,
                 "node-1",
@@ -633,8 +659,8 @@ mod tests {
                 "H100",
                 "4",
                 "10",
-            )],
-            &[ru_row(
+            ))],
+            &[ru_row((
                 "miner-2",
                 22,
                 "node-2",
@@ -643,7 +669,7 @@ mod tests {
                 "H100",
                 "4",
                 "25",
-            )],
+            ))],
             ts(0),
             ts(4),
             d("1"),
@@ -664,10 +690,10 @@ mod tests {
         let result = compute_incentive_pool(
             &config,
             &[
-                cu_row("miner-1", 11, "node-1", "20", ts(0), "H100", "4", "10"),
-                cu_row("miner-2", 22, "node-2", "20", ts(0), "A100", "4", "8"),
+                cu_row(("miner-1", 11, "node-1", "20", ts(0), "H100", "4", "10")),
+                cu_row(("miner-2", 22, "node-2", "20", ts(0), "A100", "4", "8")),
             ],
-            &[ru_row(
+            &[ru_row((
                 "miner-3",
                 33,
                 "node-3",
@@ -676,7 +702,7 @@ mod tests {
                 "H100",
                 "4",
                 "25",
-            )],
+            ))],
             ts(0),
             ts(4),
             d("1"),
@@ -703,7 +729,7 @@ mod tests {
         let config = test_config();
         let result = compute_incentive_pool(
             &config,
-            &[cu_row(
+            &[cu_row((
                 "miner-1",
                 11,
                 "node-1",
@@ -712,7 +738,7 @@ mod tests {
                 "H100",
                 "4",
                 "10",
-            )],
+            ))],
             &[],
             ts(0),
             ts(4),
@@ -741,7 +767,7 @@ mod tests {
         let config = test_config();
         let result = compute_incentive_pool(
             &config,
-            &[cu_row(
+            &[cu_row((
                 "miner-1",
                 11,
                 "node-1",
@@ -750,8 +776,8 @@ mod tests {
                 "H100",
                 "4",
                 "10",
-            )],
-            &[ru_row(
+            ))],
+            &[ru_row((
                 "miner-1",
                 11,
                 "node-1",
@@ -760,7 +786,7 @@ mod tests {
                 "H100",
                 "4",
                 "25",
-            )],
+            ))],
             ts(0),
             ts(4),
             Decimal::ZERO,
@@ -782,7 +808,7 @@ mod tests {
         let only_ru = compute_incentive_pool(
             &config,
             &[],
-            &[ru_row(
+            &[ru_row((
                 "miner-2",
                 22,
                 "node-2",
@@ -791,7 +817,7 @@ mod tests {
                 "H100",
                 "4",
                 "25",
-            )],
+            ))],
             ts(0),
             ts(4),
             d("1"),
@@ -804,7 +830,7 @@ mod tests {
 
         let only_cu = compute_incentive_pool(
             &config,
-            &[cu_row(
+            &[cu_row((
                 "miner-1",
                 11,
                 "node-1",
@@ -813,7 +839,7 @@ mod tests {
                 "H100",
                 "4",
                 "10",
-            )],
+            ))],
             &[],
             ts(0),
             ts(4),
@@ -857,10 +883,10 @@ mod tests {
     fn test_weight_computation_is_deterministic_for_same_inputs() {
         let config = test_config();
         let cu_rows = vec![
-            cu_row("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10"),
-            cu_row("miner-2", 22, "node-2", "8", ts(0), "A100", "4", "8"),
+            cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10")),
+            cu_row(("miner-2", 22, "node-2", "8", ts(0), "A100", "4", "8")),
         ];
-        let ru_rows = vec![ru_row(
+        let ru_rows = vec![ru_row((
             "miner-3",
             33,
             "node-3",
@@ -869,7 +895,7 @@ mod tests {
             "H100",
             "4",
             "25",
-        )];
+        ))];
         let hotkey_to_uid = hotkey_to_uid();
 
         let left = compute_incentive_pool(
