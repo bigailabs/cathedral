@@ -8,6 +8,7 @@ use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
+use crate::incentive::incentive_pool::{compute_incentive_pool, should_fallback_to_legacy};
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
@@ -45,6 +46,12 @@ pub struct NodeValidationResult {
     pub attestation_valid: bool,
     pub validation_timestamp: chrono::DateTime<chrono::Utc>,
     pub gpu_model: String,
+}
+
+#[derive(Debug, Clone)]
+struct ComputedWeights {
+    distribution: crate::bittensor_core::weight_allocation::WeightDistribution,
+    burn_percentage: f64,
 }
 
 /// Manages weight setting operations for Bittensor network
@@ -229,43 +236,101 @@ impl WeightSetter {
 
     /// Attempt to set weights (extracted for retry logic)
     async fn attempt_weight_setting(&self) -> Result<()> {
-        info!(
-            "Setting weights for subnet {} with GPU-based allocation",
-            self.config.netuid
-        );
+        info!("Setting weights for subnet {}", self.config.netuid);
 
         let metagraph = self.fetch_metagraph_with_logging().await?;
         let attempt_start = Utc::now();
         let epoch = self.get_or_create_epoch_window(attempt_start).await?;
         self.epoch_repository.increment_attempts(epoch.id).await?;
-
-        self.sync_deliveries_for_epoch(&epoch).await?;
-        let deliveries = self
-            .delivery_repository
-            .get_deliveries_for_window(epoch.period_start, epoch.period_end, None)
-            .await?;
         let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
-        let excluded_nodes = self.fetch_excluded_nodes().await?;
-        let miners_by_category =
-            self.group_deliveries_by_category(deliveries, &hotkey_to_uid, &excluded_nodes);
+        let computed_weights = match self.api_client.get_incentive_config().await {
+            Ok(incentive_config) => {
+                let cu_rows = self
+                    .api_client
+                    .get_cus(epoch.period_start, epoch.period_end)
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                let ru_rows = self
+                    .api_client
+                    .get_rus(epoch.period_start, epoch.period_end)
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                let token_prices = self.api_client.get_token_prices(self.config.netuid).await?;
+                let subnet_emission_rate = self.subnet_emission_rate_from_metagraph(&metagraph);
+                let incentive_result = compute_incentive_pool(
+                    &incentive_config,
+                    &cu_rows,
+                    &ru_rows,
+                    epoch.period_start,
+                    epoch.period_end,
+                    token_prices.alpha_price_usd,
+                    subnet_emission_rate,
+                    self.emission_config.burn_uid,
+                    &hotkey_to_uid,
+                )?;
 
-        self.log_tao_price().await;
+                self.log_incentive_weight_context(
+                    token_prices.alpha_price_usd,
+                    subnet_emission_rate,
+                    incentive_result.usd_required_epoch,
+                    incentive_result.usd_emission_capacity,
+                    incentive_result.burn_rate,
+                );
 
-        let weight_distribution = self
-            .weight_allocation_engine
-            .calculate_weight_distribution(miners_by_category)?;
-        self.log_weight_distribution(&weight_distribution);
+                ComputedWeights {
+                    distribution: incentive_result.distribution,
+                    burn_percentage: incentive_result.burn_percentage,
+                }
+            }
+            Err(error) if should_fallback_to_legacy(&error) => {
+                info!("Incentive config not configured; using legacy delivery-based weights");
+                self.compute_legacy_weights(&epoch, &hotkey_to_uid).await?
+            }
+            Err(error) => return Err(anyhow::Error::new(error)),
+        };
 
-        let normalized_weights = self.build_normalized_weights(&weight_distribution)?;
+        self.log_weight_distribution(&computed_weights.distribution);
+
+        let normalized_weights = self.build_normalized_weights(&computed_weights.distribution)?;
         let version_key = self.get_version_key().await?;
         self.ensure_unique_uids(&normalized_weights)?;
 
         self.submit_weights_to_chain_with_retry(normalized_weights, version_key)
             .await?;
-        self.store_weight_results(&weight_distribution).await?;
+        self.store_weight_results(
+            &computed_weights.distribution,
+            computed_weights.burn_percentage,
+        )
+        .await?;
         self.epoch_repository.mark_success(epoch.id).await?;
 
         Ok(())
+    }
+
+    async fn compute_legacy_weights(
+        &self,
+        epoch: &WeightSetEpoch,
+        hotkey_to_uid: &HashMap<String, u16>,
+    ) -> Result<ComputedWeights> {
+        self.sync_deliveries_for_epoch(epoch).await?;
+        let deliveries = self
+            .delivery_repository
+            .get_deliveries_for_window(epoch.period_start, epoch.period_end, None)
+            .await?;
+        let excluded_nodes = self.fetch_excluded_nodes().await?;
+        let miners_by_category =
+            self.group_deliveries_by_category(deliveries, hotkey_to_uid, &excluded_nodes);
+
+        self.log_tao_price().await;
+
+        let distribution = self
+            .weight_allocation_engine
+            .calculate_weight_distribution(miners_by_category)?;
+
+        Ok(ComputedWeights {
+            distribution,
+            burn_percentage: self.emission_config.burn_percentage,
+        })
     }
 
     async fn fetch_metagraph_with_logging(&self) -> Result<Metagraph> {
@@ -458,6 +523,28 @@ impl WeightSetter {
         }
     }
 
+    fn subnet_emission_rate_from_metagraph(&self, metagraph: &Metagraph) -> u64 {
+        metagraph.alpha_out_emission
+    }
+
+    fn log_incentive_weight_context(
+        &self,
+        alpha_price_usd: rust_decimal::Decimal,
+        subnet_emission_rate: u64,
+        usd_required_epoch: rust_decimal::Decimal,
+        usd_emission_capacity: rust_decimal::Decimal,
+        burn_rate: rust_decimal::Decimal,
+    ) {
+        info!(
+            alpha_price_usd = %alpha_price_usd,
+            subnet_emission_rate = subnet_emission_rate,
+            usd_required_epoch = %usd_required_epoch,
+            usd_emission_capacity = %usd_emission_capacity,
+            burn_rate = %burn_rate,
+            "Computed incentive-based weight context"
+        );
+    }
+
     fn log_weight_distribution(
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
@@ -513,10 +600,11 @@ impl WeightSetter {
     async fn store_weight_results(
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+        burn_percentage: f64,
     ) -> Result<()> {
         let current_block = self.get_current_block().await.unwrap_or(0);
         let emission_metrics_id = self
-            .store_emission_metrics(weight_distribution, current_block)
+            .store_emission_metrics(weight_distribution, current_block, burn_percentage)
             .await?;
 
         self.store_weight_allocations(weight_distribution, emission_metrics_id, current_block)
@@ -853,6 +941,7 @@ impl WeightSetter {
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
         current_block: u64,
+        burn_percentage: f64,
     ) -> Result<i64> {
         use crate::persistence::gpu_profile_repository::{CategoryDistribution, EmissionMetrics};
 
@@ -881,7 +970,7 @@ impl WeightSetter {
             id: 0, // Will be set by database
             timestamp: Utc::now(),
             burn_amount,
-            burn_percentage: self.emission_config.burn_percentage,
+            burn_percentage,
             category_distributions,
             total_miners: weight_distribution.miners_served,
             weight_set_block: current_block,
@@ -896,7 +985,7 @@ impl WeightSetter {
             "Stored emission metrics for block {} with {} categories, burn {}%",
             current_block,
             weight_distribution.category_allocations.len(),
-            self.emission_config.burn_percentage
+            burn_percentage
         );
 
         Ok(metrics_id)
