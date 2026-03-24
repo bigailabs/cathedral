@@ -63,7 +63,7 @@ These were discussed and resolved during spec design:
 | Validator roles | **Single primary validator** | Only one primary validator (ours) generates CUs and slash requests. `basilica-api` enforces validator signature verification on all `/v1/incentive/*` calls and enforces write authorization on `POST` endpoints. `basilica-incentive` remains the internal owner of config, CU/RU ledgers, and slash logic. All validators (including primary) read CU/RU data + config through `basilica-api` and compute weights independently. |
 | Incentive config location | **`basilica-incentive`-owned, TOML-based** | All incentive parameters (gpu_categories, window_hours, max_cu_value_usd, revenue_share_pct, slash_pct) live in `basilica-incentive`'s TOML config (no DB persistence — config is loaded from TOML and passed in-memory). Served to validators via `GET /v1/incentive/config` on `basilica-api`. Validators fetch config when needed and use it transiently — no local storage. Follower validators need zero extra configuration. |
 | GPU category not in config | **Skip silently** | Nodes whose `gpu_category` is not present in `basilica-incentive`'s `gpu_categories` config earn zero CUs — the CU Generator skips them with a WARN log. They are tracked but never receive emissions (same as `Other(String)` today). |
-| Alpha price = 0 | **All to burn** | When `alpha_price_usd = 0`, `usd_emission_capacity = 0`. All weights are assigned to the burn UID. Guards against division by zero. Same behavior as the zero-miner case. |
+| Alpha price = 0 | **All to burn** | `usd_emission_capacity` is pre-computed by the caller (WeightSetter) from `alpha_price_usd`, so when `alpha_price_usd = 0`, `usd_emission_capacity = 0`. All weights are assigned to the burn UID. Guards against division by zero. Same behavior as the zero-miner case. |
 | CU/RU independence | **Computed independently** | CU and RU payouts are computed independently. If total vested CU = 0, CU contribution is zero but RU payouts still apply (and vice versa). Only when both are zero do all weights go to burn. |
 | `is_rented` on CU rows | **Audit/analytics only** | Stored on each CU row for observability and future analysis. Not used in any payout formula — rented and non-rented CUs are treated identically in all calculations. |
 | Partial slashing method | **By row count, newest first** | `rows_to_slash = CEIL(total_unvested_rows * slash_pct / 100)`. Slashes the most recent rows first. Simpler than slashing by CU/RU amount and avoids needing to split individual rows. |
@@ -1275,10 +1275,15 @@ For each hotkey:
 ```
 raw_usd_required_epoch = SUM(miner_usd_per_epoch[hotkey]) across all hotkeys
 
-// How much USD can the subnet's alpha emissions cover?
-alpha_emission_per_epoch = subnet_emission_rate  // validator-derived from Bittensor metagraph chain data
+// How much USD can the subnet's alpha emissions cover this epoch?
+// subnet_emission_rate is in rao/block from Bittensor metagraph
+RAO_PER_ALPHA = 1_000_000_000
+miner_emission_share = 0.41              // 41% of alpha_out_emission goes to miners (dTAO split: 41/41/18)
+alpha_tokens_per_block = subnet_emission_rate / RAO_PER_ALPHA
+blocks_per_epoch = blocks_per_weight_set  // e.g. 360
 alpha_price_usd = TokenPriceSnapshot.alpha_price_usd  // from existing BasilicaApiClient (Decimal)
-usd_emission_capacity = alpha_emission_per_epoch * alpha_price_usd
+
+usd_emission_capacity = alpha_tokens_per_block * miner_emission_share * blocks_per_epoch * alpha_price_usd
 
 // Special case: if no payouts or no emission capacity, all weight goes to burn UID
 if raw_usd_required_epoch <= 0 OR usd_emission_capacity <= 0:
@@ -1326,7 +1331,19 @@ match self.api_client.get_incentive_config().await {
         // Fetch raw CU and RU data from `basilica-incentive`
         let cu_rows = self.api_client.get_cus(epoch.period_start, epoch.period_end).await?;
         let ru_rows = self.api_client.get_rus(epoch.period_start, epoch.period_end).await?;
-        let alpha_price = self.api_client.get_token_prices(self.config.netuid).await?;
+        let token_prices = self.api_client.get_token_prices(self.config.netuid).await?;
+        let subnet_emission_rate = self.subnet_emission_rate_from_metagraph(&metagraph);
+
+        // Convert rao/block emission to USD capacity for this epoch
+        // dTAO split: 41% to miners (via weights), 41% to validators, 18% to subnet owner
+        const RAO_PER_ALPHA: u64 = 1_000_000_000;
+        let miner_emission_share = Decimal::new(41, 2); // 0.41
+        let alpha_tokens_per_block = Decimal::from(subnet_emission_rate) / Decimal::from(RAO_PER_ALPHA);
+        let blocks_per_epoch = Decimal::from(self.blocks_per_weight_set);
+        let usd_emission_capacity = alpha_tokens_per_block
+            * miner_emission_share
+            * blocks_per_epoch
+            * token_prices.alpha_price_usd;
 
         let result = compute_incentive_pool(
             &incentive_config,
@@ -1334,8 +1351,7 @@ match self.api_client.get_incentive_config().await {
             &ru_rows,
             epoch.period_start,
             epoch.period_end,
-            alpha_price.alpha_price_usd,
-            subnet_emission_rate,  // validator-derived from current Bittensor metagraph data
+            usd_emission_capacity, // pre-computed USD the subnet can pay miners this epoch
             burn_uid,              // UID to assign burn weight to
             &hotkey_to_uid,        // mapping of hotkey → u16 UID
         );
@@ -1503,5 +1519,5 @@ crates/basilica-validator/src/
 ## Remaining TBD
 
 1. **Initial parameter values**: Specific starting values for `window_hours`, `max_cu_value_usd`, `revenue_share_pct`, `target_count` per category, `gpu_prices_usd` per category need to be determined during testing/simulation. These will be configured in `basilica-incentive`.
-2. **Exact metagraph field selection for weight math**: `subnet_emission_rate` is definitively validator-local and chain-derived, but the exact metagraph field used in phase 6 should be chosen during implementation from the available subnet emission fields exposed by the pinned `bittensor-rs` client.
+2. ~~**Exact metagraph field selection for weight math**~~: **Resolved** — `subnet_emission_rate` is read via `subnet_emission_rate_from_metagraph()` in rao/block, then converted to alpha tokens, multiplied by the 41% miner dTAO share and `blocks_per_weight_set` to get per-epoch emission capacity.
 3. **Operational bootstrap details**: Validators call `basilica-incentive` directly, and the service owns incentive config. The remaining implementation detail is the exact operator workflow for seeding/bootstraping active config from service config into Postgres at deployment time.
