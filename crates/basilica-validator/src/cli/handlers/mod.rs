@@ -21,9 +21,9 @@ impl HandlerUtils {
         tracing::info!("Loading configuration from: {}", config_path.display());
         let config = ValidatorConfig::load_from_file(config_path.as_path())?;
         tracing::info!(
-            "Configuration loaded: burn_uid={}, burn_percentage={:.2}%, weight_interval_blocks={}, netuid={}, network={}",
+            "Configuration loaded: burn_uid={}, forced_burn_percentage={:?}, weight_interval_blocks={}, netuid={}, network={}",
             config.emission.burn_uid,
-            config.emission.burn_percentage,
+            config.emission.forced_burn_percentage,
             config.emission.weight_set_interval_blocks,
             config.bittensor.common.netuid,
             config.bittensor.common.network

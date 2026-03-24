@@ -279,6 +279,7 @@ impl WeightSetter {
                     usd_emission_capacity,
                     self.emission_config.burn_uid,
                     &hotkey_to_uid,
+                    self.emission_config.forced_burn_percentage,
                 )?;
 
                 self.log_incentive_weight_context(
@@ -340,9 +341,14 @@ impl WeightSetter {
             .weight_allocation_engine
             .calculate_weight_distribution(miners_by_category)?;
 
+        let burn_percentage = distribution
+            .burn_allocation
+            .as_ref()
+            .map(|b| b.percentage)
+            .unwrap_or(0.0);
         Ok(ComputedWeights {
             distribution,
-            burn_percentage: self.emission_config.burn_percentage,
+            burn_percentage,
         })
     }
 
@@ -526,7 +532,7 @@ impl WeightSetter {
             Ok(tao_price) => {
                 info!(
                     tao_price_usd = %tao_price,
-                    burn_percentage = self.emission_config.burn_percentage,
+                    forced_burn_percentage = ?self.emission_config.forced_burn_percentage,
                     "Fetched TAO price for weight context"
                 );
             }

@@ -101,8 +101,9 @@ ssh_retry_attempts = 3
 ssh_retry_delay = { secs = 2, nanos = 0 }
 
 [emission]
-# Percentage of total emissions to burn (0.0-100.0)
-burn_percentage = 95.0
+# Forced minimum burn percentage (0.0-99.9). Reduces effective emission capacity.
+# Omit or comment out to disable forced burn (dynamic burn only).
+forced_burn_percentage = 95.0
 
 # UID to receive burn allocation
 burn_uid = 204

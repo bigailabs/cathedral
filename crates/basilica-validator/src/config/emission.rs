@@ -88,8 +88,10 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmissionConfig {
-    /// Percentage of emissions to burn (0.0-100.0)
-    pub burn_percentage: f64,
+    /// Forced minimum burn percentage (0.0-100.0). Reduces effective emission capacity
+    /// before dynamic burn calculation. None = no forced burn.
+    #[serde(default)]
+    pub forced_burn_percentage: Option<f64>,
 
     /// UID to send burn weights to
     pub burn_uid: u16,
@@ -113,15 +115,14 @@ pub struct EmissionConfig {
 impl EmissionConfig {
     /// Validate the emission configuration
     pub fn validate(&self) -> Result<()> {
-        // Validate burn percentage
-        if !self.burn_percentage.is_finite()
-            || self.burn_percentage < 0.0
-            || self.burn_percentage > 100.0
-        {
-            return Err(anyhow!(
-                "Burn percentage must be between 0.0 and 100.0, got: {}",
-                self.burn_percentage
-            ));
+        // Validate forced burn percentage if set
+        if let Some(pct) = self.forced_burn_percentage {
+            if !pct.is_finite() || !(0.0..100.0).contains(&pct) {
+                return Err(anyhow!(
+                    "Forced burn percentage must be >= 0.0 and < 100.0, got: {}",
+                    pct
+                ));
+            }
         }
 
         // Validate weight set interval
@@ -213,7 +214,7 @@ impl EmissionConfig {
         gpu_allocations.insert("B200".to_string(), GpuAllocation::new(60.0));
 
         Self {
-            burn_percentage: 10.0,
+            forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations,
             min_miners_per_category: 1,
@@ -309,7 +310,7 @@ impl EmissionConfig {
 impl Default for EmissionConfig {
     fn default() -> Self {
         Self {
-            burn_percentage: 0.0,
+            forced_burn_percentage: None,
             burn_uid: DEFAULT_BURN_UID,
             gpu_allocations: HashMap::new(),
             min_miners_per_category: 1,

@@ -53,7 +53,18 @@ pub fn compute_incentive_pool(
     usd_emission_capacity: Decimal,
     burn_uid: u16,
     hotkey_to_uid: &HashMap<String, u16>,
+    forced_burn_percentage: Option<f64>,
 ) -> Result<IncentivePoolResult> {
+    let forced_pct = Decimal::from_f64_retain(forced_burn_percentage.unwrap_or(0.0) / 100.0)
+        .unwrap_or(Decimal::ZERO);
+    let available_fraction = Decimal::ONE - forced_pct;
+    let effective_usd_capacity = usd_emission_capacity * available_fraction;
+    let forced_weight = (forced_pct * Decimal::from(u16::MAX))
+        .round()
+        .to_u16()
+        .unwrap_or(0);
+    let available_weight = u16::MAX - forced_weight;
+
     let active_cu_rows: Vec<&CuLedgerRowResponse> = cu_rows
         .iter()
         .filter(|row| !row.is_slashed)
@@ -157,10 +168,10 @@ pub fn compute_incentive_pool(
 
     let raw_usd_required_epoch = sum_decimals(miner_payouts.values().copied());
 
-    if raw_usd_required_epoch <= Decimal::ZERO || usd_emission_capacity <= Decimal::ZERO {
+    if raw_usd_required_epoch <= Decimal::ZERO || effective_usd_capacity <= Decimal::ZERO {
         warn!(
             raw_usd_required = %raw_usd_required_epoch,
-            usd_emission_capacity = %usd_emission_capacity,
+            effective_usd_capacity = %effective_usd_capacity,
             "All weight to burn: no payouts or zero emission capacity"
         );
         return Ok(all_burn_result(
@@ -171,8 +182,8 @@ pub fn compute_incentive_pool(
         ));
     }
 
-    let scale_factor = if raw_usd_required_epoch > usd_emission_capacity {
-        usd_emission_capacity / raw_usd_required_epoch
+    let scale_factor = if raw_usd_required_epoch > effective_usd_capacity {
+        effective_usd_capacity / raw_usd_required_epoch
     } else {
         Decimal::ONE
     };
@@ -203,9 +214,9 @@ pub fn compute_incentive_pool(
         ));
     }
 
-    let mut burn_rate = Decimal::ONE - (usd_required_epoch / usd_emission_capacity);
+    let mut burn_rate = Decimal::ONE - (usd_required_epoch / effective_usd_capacity);
     burn_rate = clamp_decimal(burn_rate, Decimal::ZERO, Decimal::new(99, 2));
-    let burn_share = if usd_required_epoch >= usd_emission_capacity {
+    let burn_share = if usd_required_epoch >= effective_usd_capacity {
         Decimal::ZERO
     } else {
         burn_rate
@@ -219,7 +230,7 @@ pub fn compute_incentive_pool(
         let Some(uid) = hotkey_to_uid.get(hotkey).copied() else {
             continue;
         };
-        *shares_by_uid.entry(uid).or_insert(Decimal::ZERO) += *payout / usd_emission_capacity;
+        *shares_by_uid.entry(uid).or_insert(Decimal::ZERO) += *payout / effective_usd_capacity;
     }
     if burn_share > Decimal::ZERO {
         *shares_by_uid.entry(burn_uid).or_insert(Decimal::ZERO) += burn_share;
@@ -227,7 +238,21 @@ pub fn compute_incentive_pool(
         shares_by_uid.entry(burn_uid).or_insert(Decimal::ZERO);
     }
 
-    let weights = normalize_uid_shares(&shares_by_uid);
+    let mut weights = normalize_uid_shares(&shares_by_uid, available_weight);
+
+    // Add forced burn weight to burn_uid
+    if forced_weight > 0 {
+        if let Some(entry) = weights.iter_mut().find(|w| w.uid == burn_uid) {
+            entry.weight += forced_weight;
+        } else {
+            weights.push(NormalizedWeight {
+                uid: burn_uid,
+                weight: forced_weight,
+            });
+            weights.sort_by_key(|w| w.uid);
+        }
+    }
+
     let burn_weight = weights
         .iter()
         .find(|weight| weight.uid == burn_uid)
@@ -335,8 +360,11 @@ fn all_burn_result(
     }
 }
 
-fn normalize_uid_shares(shares_by_uid: &HashMap<u16, Decimal>) -> Vec<NormalizedWeight> {
-    let total_weight = Decimal::from(u16::MAX);
+fn normalize_uid_shares(
+    shares_by_uid: &HashMap<u16, Decimal>,
+    target_total: u16,
+) -> Vec<NormalizedWeight> {
+    let total_weight = Decimal::from(target_total);
     let mut candidates: Vec<WeightCandidate> = shares_by_uid
         .iter()
         .filter(|(_, share)| **share > Decimal::ZERO)
@@ -355,7 +383,7 @@ fn normalize_uid_shares(shares_by_uid: &HashMap<u16, Decimal>) -> Vec<Normalized
         .iter()
         .map(|candidate| candidate.base_weight)
         .sum();
-    let mut leftover = (u16::MAX as u64).saturating_sub(base_total);
+    let mut leftover = (target_total as u64).saturating_sub(base_total);
     candidates.sort_by(weight_candidate_order);
     for candidate in &mut candidates {
         if leftover == 0 {
@@ -634,6 +662,7 @@ mod tests {
             d("100"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
 
@@ -662,6 +691,7 @@ mod tests {
             d("100"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
 
@@ -699,6 +729,7 @@ mod tests {
             d("100"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
 
@@ -731,6 +762,7 @@ mod tests {
             d("10"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
 
@@ -767,6 +799,7 @@ mod tests {
             d("1000"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
 
@@ -813,6 +846,7 @@ mod tests {
             Decimal::ZERO,
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
 
@@ -843,6 +877,7 @@ mod tests {
             d("100"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
         assert!(miner_weight(&only_ru, 22) > 0);
@@ -865,6 +900,7 @@ mod tests {
             d("100"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
         assert!(miner_weight(&only_cu, 11) > 0);
@@ -878,6 +914,7 @@ mod tests {
             d("100"),
             999,
             &hotkey_to_uid(),
+            None,
         )
         .unwrap();
         assert_eq!(neither.distribution.weights.len(), 1);
@@ -924,6 +961,7 @@ mod tests {
             d("200"),
             999,
             &hotkey_to_uid,
+            None,
         )
         .unwrap();
         let right = compute_incentive_pool(
@@ -935,6 +973,7 @@ mod tests {
             d("200"),
             999,
             &hotkey_to_uid,
+            None,
         )
         .unwrap();
 

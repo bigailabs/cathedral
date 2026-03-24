@@ -12,8 +12,8 @@ pub struct WeightAllocationEngine {
 impl WeightAllocationEngine {
     pub fn new(emission_config: EmissionConfig) -> Self {
         info!(
-            "WeightAllocationEngine initialized with burn_uid: {}, burn_percentage: {:.2}%",
-            emission_config.burn_uid, emission_config.burn_percentage
+            "WeightAllocationEngine initialized with burn_uid: {}, forced_burn_percentage: {:?}",
+            emission_config.burn_uid, emission_config.forced_burn_percentage
         );
         Self { emission_config }
     }
@@ -170,14 +170,14 @@ impl WeightAllocationEngine {
         })
     }
 
-    /// Calculate burn allocation
+    /// Calculate burn allocation from forced burn percentage
     fn calculate_burn_allocation(&self, total_weight: u64) -> Result<Option<BurnAllocation>> {
-        if self.emission_config.burn_percentage <= 0.0 {
-            return Ok(None);
-        }
+        let pct = match self.emission_config.forced_burn_percentage {
+            Some(pct) if pct > 0.0 => pct,
+            _ => return Ok(None),
+        };
 
-        let burn_weight =
-            (total_weight as f64 * self.emission_config.burn_percentage / 100.0) as u16;
+        let burn_weight = (total_weight as f64 * pct / 100.0).round() as u16;
 
         if burn_weight == 0 {
             return Ok(None);
@@ -186,7 +186,7 @@ impl WeightAllocationEngine {
         Ok(Some(BurnAllocation {
             uid: self.emission_config.burn_uid,
             weight: burn_weight,
-            percentage: self.emission_config.burn_percentage,
+            percentage: pct,
         }))
     }
 
@@ -399,7 +399,7 @@ mod tests {
         );
 
         EmissionConfig {
-            burn_percentage: 10.0,
+            forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations,
             min_miners_per_category: 1,
@@ -454,7 +454,7 @@ mod tests {
 
         // Test with zero burn percentage
         let mut config_no_burn = create_test_config();
-        config_no_burn.burn_percentage = 0.0;
+        config_no_burn.forced_burn_percentage = None;
         let engine_no_burn = WeightAllocationEngine::new(config_no_burn);
 
         let burn_alloc = engine_no_burn.calculate_burn_allocation(10000).unwrap();

@@ -12,7 +12,7 @@ mod tests {
         assert!(config.validate().is_err()); // Default is intentionally empty
 
         // Verify default values
-        assert_eq!(config.burn_percentage, 0.0);
+        assert_eq!(config.forced_burn_percentage, None);
         assert_eq!(config.burn_uid, DEFAULT_BURN_UID);
         assert_eq!(config.weight_set_interval_blocks, 360);
 
@@ -21,29 +21,38 @@ mod tests {
     }
 
     #[test]
-    fn test_burn_percentage_validation() {
-        // Test valid ranges - use for_testing which has valid GPU allocations
+    fn test_forced_burn_percentage_validation() {
         let mut config = EmissionConfig::for_testing();
-        config.burn_percentage = 0.0;
+
+        // None is always valid
+        config.forced_burn_percentage = None;
         assert!(config.validate().is_ok());
 
-        config.burn_percentage = 50.0;
+        // Valid ranges
+        config.forced_burn_percentage = Some(0.0);
         assert!(config.validate().is_ok());
 
-        config.burn_percentage = 100.0;
+        config.forced_burn_percentage = Some(50.0);
         assert!(config.validate().is_ok());
 
-        // Test invalid ranges
-        config.burn_percentage = -0.1;
+        config.forced_burn_percentage = Some(99.9);
+        assert!(config.validate().is_ok());
+
+        // Invalid: >= 100.0
+        config.forced_burn_percentage = Some(100.0);
         assert!(config.validate().is_err());
 
-        config.burn_percentage = 100.1;
+        config.forced_burn_percentage = Some(100.1);
         assert!(config.validate().is_err());
 
-        config.burn_percentage = -50.0;
+        // Invalid: negative
+        config.forced_burn_percentage = Some(-0.1);
         assert!(config.validate().is_err());
 
-        config.burn_percentage = 150.0;
+        config.forced_burn_percentage = Some(-50.0);
+        assert!(config.validate().is_err());
+
+        config.forced_burn_percentage = Some(150.0);
         assert!(config.validate().is_err());
     }
 
@@ -148,7 +157,7 @@ mod tests {
     fn test_config_from_toml_file() {
         // Test loading from valid TOML file
         let toml_content = r#"
-burn_percentage = 15.0
+forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
 weight_version_key = 0
@@ -167,7 +176,7 @@ B200 = 25.0
         let config = EmissionConfig::from_toml_file(temp_file.path())
             .expect("Failed to load from TOML file");
 
-        assert_eq!(config.burn_percentage, 15.0);
+        assert_eq!(config.forced_burn_percentage, Some(15.0));
         assert_eq!(config.burn_uid, 123);
         assert_eq!(config.weight_set_interval_blocks, 720);
         assert_eq!(config.gpu_allocations.len(), 3);
@@ -177,7 +186,7 @@ B200 = 25.0
 
         // Test loading from invalid TOML file (allocations don't sum to 100)
         let invalid_toml = r#"
-burn_percentage = 10.0
+forced_burn_percentage = 10.0
 burn_uid = 0
 weight_set_interval_blocks = 360
 
@@ -203,7 +212,7 @@ H100 = 30.0
     fn test_config_merge_with_defaults() {
         // Test partial config merging
         let partial_config = EmissionConfig {
-            burn_percentage: 20.0,
+            forced_burn_percentage: Some(20.0),
             burn_uid: 456,
             gpu_allocations: HashMap::new(), // Empty - should use default
             min_miners_per_category: 1,
@@ -213,7 +222,7 @@ H100 = 30.0
 
         let merged = partial_config.merge_with_defaults();
 
-        assert_eq!(merged.burn_percentage, 20.0); // Preserved
+        assert_eq!(merged.forced_burn_percentage, Some(20.0)); // Preserved
         assert_eq!(merged.burn_uid, 456); // Preserved
         assert_eq!(merged.weight_set_interval_blocks, 360); // Default
         assert_eq!(merged.min_miners_per_category, 1); // Default
@@ -229,7 +238,7 @@ H100 = 30.0
     fn test_edge_cases() {
         // Test extreme values - maximum values
         let mut config = EmissionConfig::for_testing();
-        config.burn_percentage = 100.0;
+        config.forced_burn_percentage = Some(99.9);
         config.burn_uid = u16::MAX;
         config.weight_set_interval_blocks = u64::MAX;
         assert!(config.validate().is_ok());
@@ -341,7 +350,7 @@ H100 = 30.0
         let config = EmissionConfig::for_testing();
         assert!(config.validate().is_ok());
 
-        assert_eq!(config.burn_percentage, 10.0);
+        assert_eq!(config.forced_burn_percentage, Some(10.0));
         assert_eq!(config.burn_uid, 999);
         assert_eq!(config.weight_set_interval_blocks, 360);
         assert_eq!(config.gpu_allocations.len(), 4);
@@ -359,7 +368,7 @@ H100 = 30.0
         allocations.insert("B200".to_string(), GpuAllocation::new(33.333334));
 
         let config = EmissionConfig {
-            burn_percentage: 0.0,
+            forced_burn_percentage: None,
             burn_uid: 0,
             gpu_allocations: allocations,
             min_miners_per_category: 1,
@@ -377,7 +386,7 @@ H100 = 30.0
         allocations.insert("B200".to_string(), GpuAllocation::new(33.0));
 
         let config = EmissionConfig {
-            burn_percentage: 0.0,
+            forced_burn_percentage: None,
             burn_uid: 0,
             gpu_allocations: allocations,
             min_miners_per_category: 1,
@@ -393,7 +402,7 @@ H100 = 30.0
     fn test_config_legacy_format_compatibility() {
         // Test loading from legacy TOML format (just floats)
         let toml_content = r#"
-burn_percentage = 15.0
+forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
 weight_version_key = 0
@@ -413,7 +422,7 @@ B200 = 25.0
         let config = EmissionConfig::from_toml_file(temp_file.path())
             .expect("Failed to load from TOML file");
 
-        assert_eq!(config.burn_percentage, 15.0);
+        assert_eq!(config.forced_burn_percentage, Some(15.0));
         assert_eq!(config.burn_uid, 123);
         assert_eq!(config.min_miners_per_category, 2);
         assert_eq!(config.gpu_allocations.len(), 3);
@@ -425,7 +434,7 @@ B200 = 25.0
 
         // Test loading from new TOML format with explicit min_gpu_count
         let toml_content = r#"
-burn_percentage = 15.0
+forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
 weight_version_key = 0
@@ -461,7 +470,7 @@ B200 = { weight = 80.0, min_gpu_count = 8 }
     fn test_min_gpu_vram_configuration() {
         // Test loading TOML with min_gpu_vram
         let toml_content = r#"
-burn_percentage = 10.0
+forced_burn_percentage = 10.0
 burn_uid = 204
 weight_set_interval_blocks = 360
 weight_version_key = 0

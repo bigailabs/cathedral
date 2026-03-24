@@ -108,7 +108,7 @@ ssh_retry_attempts = 3
 ssh_retry_delay = { secs = 2, nanos = 0 }
 
 [emission]
-burn_percentage = 0.0
+# forced_burn_percentage = 0.0
 burn_uid = 0
 weight_set_interval_blocks = 360
 min_miners_per_category = 1

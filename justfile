@@ -264,7 +264,7 @@ local-validator-up:
         printf 'format = "json"\n'
         printf 'output = "./validator.log"\n'
         printf '\n[emission]\n'
-        printf 'burn_percentage = 0.0\n'
+        printf '# forced_burn_percentage = 0.0\n'
         printf 'burn_uid = 0\n'
         printf 'weight_set_interval_blocks = 360\n'
         printf '\n[emission.gpu_allocations]\n'
