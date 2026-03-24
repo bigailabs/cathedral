@@ -594,9 +594,9 @@ struct EpochWindowQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IncentiveConfigResponse {
     pub gpu_categories: HashMap<String, IncentiveGpuCategoryConfig>,
-    pub window_hours: Decimal,
+    pub window_hours: u32,
     pub max_cu_value_usd: Decimal,
-    pub revenue_share_pct: Option<Decimal>,
+    pub revenue_share_pct: Option<u32>,
     pub slash_pct: Decimal,
 }
 
@@ -616,7 +616,7 @@ pub struct CuLedgerRowResponse {
     pub earned_at: DateTime<Utc>,
     pub is_rented: bool,
     pub gpu_category: String,
-    pub window_hours: Decimal,
+    pub window_hours: u32,
     pub price_usd: Decimal,
     pub idempotency_key: String,
     pub is_slashed: bool,
@@ -634,8 +634,8 @@ pub struct RuLedgerRowResponse {
     pub ru_amount: Decimal,
     pub earned_at: DateTime<Utc>,
     pub gpu_category: String,
-    pub window_hours: Decimal,
-    pub revenue_share_pct: Decimal,
+    pub window_hours: u32,
+    pub revenue_share_pct: u32,
     pub is_slashed: bool,
     pub slash_audit_id: Option<uuid::Uuid>,
     pub created_at: DateTime<Utc>,
@@ -660,7 +660,7 @@ pub struct NewCuLedgerRowRequest {
     pub earned_at: DateTime<Utc>,
     pub is_rented: bool,
     pub gpu_category: String,
-    pub window_hours: Decimal,
+    pub window_hours: u32,
     pub price_usd: Decimal,
     pub idempotency_key: String,
 }
@@ -902,9 +902,9 @@ mod tests {
             "gpu_categories": {
                 "H100": { "target_count": 2, "price_usd": "3.00" }
             },
-            "window_hours": "72",
+            "window_hours": 72,
             "max_cu_value_usd": "0.05",
-            "revenue_share_pct": "30",
+            "revenue_share_pct": 30,
             "slash_pct": "100"
         }
         "#;
@@ -915,7 +915,7 @@ mod tests {
             parsed.gpu_categories["H100"].price_usd,
             Decimal::from_str_exact("3.00").unwrap()
         );
-        assert_eq!(parsed.window_hours, Decimal::from_str_exact("72").unwrap());
+        assert_eq!(parsed.window_hours, 72);
         assert_eq!(
             parsed.max_cu_value_usd,
             Decimal::from_str_exact("0.05").unwrap()
@@ -934,7 +934,7 @@ mod tests {
             "earned_at": "2025-03-15T10:00:00Z",
             "is_rented": false,
             "gpu_category": "H100",
-            "window_hours": "72.0",
+            "window_hours": 72,
             "price_usd": "3.00",
             "idempotency_key": "node-abc:1710496800",
             "is_slashed": false,
@@ -973,8 +973,8 @@ mod tests {
             "ru_amount": "9.5",
             "earned_at": "2025-03-15T10:00:00Z",
             "gpu_category": "H100",
-            "window_hours": "72.0",
-            "revenue_share_pct": "30.0",
+            "window_hours": 72,
+            "revenue_share_pct": 30,
             "is_slashed": true,
             "slash_audit_id": null,
             "created_at": "2025-03-15T10:05:00Z"
@@ -1008,7 +1008,7 @@ mod tests {
                     "earned_at": "2025-03-15T10:00:00Z",
                     "is_rented": false,
                     "gpu_category": "H100",
-                    "window_hours": "72.0",
+                    "window_hours": 72,
                     "price_usd": "3.00",
                     "idempotency_key": "node-abc:1710496800",
                     "is_slashed": false,
@@ -1038,8 +1038,8 @@ mod tests {
                     "ru_amount": "9.5",
                     "earned_at": "2025-03-15T10:00:00Z",
                     "gpu_category": "H100",
-                    "window_hours": "72.0",
-                    "revenue_share_pct": "30.0",
+                    "window_hours": 72,
+                    "revenue_share_pct": 30,
                     "is_slashed": true,
                     "slash_audit_id": null,
                     "created_at": "2025-03-15T10:05:00Z"
@@ -1066,7 +1066,7 @@ mod tests {
                     "earned_at": "2025-03-15T10:00:00Z",
                     "is_rented": false,
                     "gpu_category": "H100",
-                    "window_hours": "72.0",
+                    "window_hours": 72,
                     "price_usd": "3.00",
                     "idempotency_key": "node-abc:1710496800"
                 }
@@ -1240,9 +1240,9 @@ mod tests {
                 "gpu_categories": {
                     "H100": { "target_count": 2, "price_usd": "3.00" }
                 },
-                "window_hours": "72",
+                "window_hours": 72,
                 "max_cu_value_usd": "0.05",
-                "revenue_share_pct": "30",
+                "revenue_share_pct": 30,
                 "slash_pct": "100"
             })))
             .mount(&server)
@@ -1335,7 +1335,7 @@ mod tests {
                     "earned_at": "2025-03-15T10:00:00Z",
                     "is_rented": false,
                     "gpu_category": "H100",
-                    "window_hours": "72.0",
+                    "window_hours": 72,
                     "price_usd": "3.00",
                     "idempotency_key": "node-abc:1710496800",
                     "is_slashed": false,
@@ -1378,8 +1378,8 @@ mod tests {
                     "ru_amount": "9.5",
                     "earned_at": "2025-03-15T10:00:00Z",
                     "gpu_category": "H100",
-                    "window_hours": "72.0",
-                    "revenue_share_pct": "30.0",
+                    "window_hours": 72,
+                    "revenue_share_pct": 30,
                     "is_slashed": false,
                     "slash_audit_id": null,
                     "created_at": "2025-03-15T10:05:00Z"
@@ -1410,7 +1410,7 @@ mod tests {
                     .with_timezone(&Utc),
                 is_rented: false,
                 gpu_category: "H100".to_string(),
-                window_hours: Decimal::from_str_exact("72.0").unwrap(),
+                window_hours: 72,
                 price_usd: Decimal::from_str_exact("3.00").unwrap(),
                 idempotency_key: "node-abc:1710496800".to_string(),
             }],
@@ -1430,7 +1430,7 @@ mod tests {
                     "earned_at": "2025-03-15T10:00:00Z",
                     "is_rented": false,
                     "gpu_category": "H100",
-                    "window_hours": "72.0",
+                    "window_hours": 72,
                     "price_usd": "3.00",
                     "idempotency_key": "node-abc:1710496800"
                 }]

@@ -537,9 +537,9 @@ mod tests {
 
         IncentiveConfigResponse {
             gpu_categories,
-            window_hours: Decimal::from_str("72").unwrap(),
+            window_hours: 72,
             max_cu_value_usd: Decimal::from_str("0.05").unwrap(),
-            revenue_share_pct: Some(Decimal::from_str("30").unwrap()),
+            revenue_share_pct: Some(30),
             slash_pct: Decimal::from_str("100").unwrap(),
         }
     }

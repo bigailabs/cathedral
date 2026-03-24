@@ -95,7 +95,7 @@ pub fn compute_incentive_pool(
         }
 
         let target_gpus = Decimal::from(category_config.target_count) * Decimal::from(8u32);
-        let row_capacity_budget = target_gpus * row.window_hours * row.price_usd;
+        let row_capacity_budget = target_gpus * Decimal::from(row.window_hours) * row.price_usd;
         let per_cu_budget = row_capacity_budget / category_supply;
         let effective_price = min_decimal(
             row.price_usd,
@@ -124,8 +124,8 @@ pub fn compute_incentive_pool(
             continue;
         }
 
-        let row_payout =
-            vested_fraction * row.ru_amount * row.revenue_share_pct / Decimal::from(100u32);
+        let row_payout = vested_fraction * row.ru_amount * Decimal::from(row.revenue_share_pct)
+            / Decimal::from(100u32);
         if row_payout <= Decimal::ZERO {
             continue;
         }
@@ -243,17 +243,15 @@ pub fn compute_incentive_pool(
 
 fn compute_vested_fraction(
     earned_at: DateTime<Utc>,
-    window_hours: Decimal,
+    window_hours: u32,
     epoch_start: DateTime<Utc>,
     epoch_end: DateTime<Utc>,
 ) -> Decimal {
-    let Some(window_ms) = decimal_hours_to_millis(window_hours) else {
-        return Decimal::ZERO;
-    };
-    if window_ms <= 0 {
+    if window_hours == 0 {
         return Decimal::ZERO;
     }
 
+    let window_ms = (window_hours as i128) * 3_600_000;
     let row_start_ms = earned_at.timestamp_millis() as i128;
     let row_end_ms = row_start_ms + window_ms;
     let overlap_start_ms = row_start_ms.max(epoch_start.timestamp_millis() as i128);
@@ -264,10 +262,6 @@ fn compute_vested_fraction(
 
     Decimal::from_i128_with_scale(overlap_end_ms - overlap_start_ms, 0)
         / Decimal::from_i128_with_scale(window_ms, 0)
-}
-
-fn decimal_hours_to_millis(hours: Decimal) -> Option<i128> {
-    (hours * Decimal::from(3_600_000u64)).round_dp(0).to_i128()
 }
 
 fn scale_decimal_map(
@@ -469,9 +463,9 @@ mod tests {
 
         IncentiveConfigResponse {
             gpu_categories,
-            window_hours: d("4"),
+            window_hours: 4,
             max_cu_value_usd: d("100"),
-            revenue_share_pct: Some(d("25")),
+            revenue_share_pct: Some(25),
             slash_pct: d("100"),
         }
     }
@@ -483,7 +477,7 @@ mod tests {
         &'a str,
         DateTime<Utc>,
         &'a str,
-        &'a str,
+        u32,
         &'a str,
     );
 
@@ -508,7 +502,7 @@ mod tests {
             earned_at,
             is_rented: false,
             gpu_category: gpu_category.to_string(),
-            window_hours: d(window_hours),
+            window_hours,
             price_usd: d(price_usd),
             idempotency_key: format!("{hotkey}-{node_id}"),
             is_slashed: false,
@@ -524,8 +518,8 @@ mod tests {
         &'a str,
         DateTime<Utc>,
         &'a str,
-        &'a str,
-        &'a str,
+        u32,
+        u32,
     );
 
     fn ru_row(
@@ -549,8 +543,8 @@ mod tests {
             ru_amount: d(ru_amount),
             earned_at,
             gpu_category: gpu_category.to_string(),
-            window_hours: d(window_hours),
-            revenue_share_pct: d(revenue_share_pct),
+            window_hours,
+            revenue_share_pct,
             is_slashed: false,
             slash_audit_id: None,
             created_at: earned_at,
@@ -577,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_cu_vesting_behavior() {
-        let row = cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10"));
+        let row = cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", 4, "10"));
 
         let vested_fraction = compute_cu_vested_fraction(&row, ts(2), ts(4));
 
@@ -586,7 +580,7 @@ mod tests {
 
     #[test]
     fn test_ru_vesting_behavior() {
-        let row = ru_row(("miner-1", 11, "node-1", "40", ts(0), "H100", "4", "25"));
+        let row = ru_row(("miner-1", 11, "node-1", "40", ts(0), "H100", 4, 25));
 
         let vested_fraction = compute_ru_vested_fraction(&row, ts(1), ts(3));
 
@@ -599,8 +593,8 @@ mod tests {
         let result = compute_incentive_pool(
             &config,
             &[
-                cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10")),
-                cu_row(("miner-2", 22, "node-2", "4", ts(0), "H100", "4", "10")),
+                cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", 4, "10")),
+                cu_row(("miner-2", 22, "node-2", "4", ts(0), "H100", 4, "10")),
             ],
             &[],
             ts(0),
@@ -629,8 +623,8 @@ mod tests {
                 "80",
                 ts(0),
                 "H100",
-                "4",
-                "25",
+                4,
+                25,
             ))],
             ts(0),
             ts(4),
@@ -657,7 +651,7 @@ mod tests {
                 "4",
                 ts(0),
                 "H100",
-                "4",
+                4,
                 "10",
             ))],
             &[ru_row((
@@ -667,8 +661,8 @@ mod tests {
                 "40",
                 ts(0),
                 "H100",
-                "4",
-                "25",
+                4,
+                25,
             ))],
             ts(0),
             ts(4),
@@ -690,8 +684,8 @@ mod tests {
         let result = compute_incentive_pool(
             &config,
             &[
-                cu_row(("miner-1", 11, "node-1", "20", ts(0), "H100", "4", "10")),
-                cu_row(("miner-2", 22, "node-2", "20", ts(0), "A100", "4", "8")),
+                cu_row(("miner-1", 11, "node-1", "20", ts(0), "H100", 4, "10")),
+                cu_row(("miner-2", 22, "node-2", "20", ts(0), "A100", 4, "8")),
             ],
             &[ru_row((
                 "miner-3",
@@ -700,8 +694,8 @@ mod tests {
                 "100",
                 ts(0),
                 "H100",
-                "4",
-                "25",
+                4,
+                25,
             ))],
             ts(0),
             ts(4),
@@ -736,7 +730,7 @@ mod tests {
                 "2",
                 ts(0),
                 "H100",
-                "4",
+                4,
                 "10",
             ))],
             &[],
@@ -774,7 +768,7 @@ mod tests {
                 "4",
                 ts(0),
                 "H100",
-                "4",
+                4,
                 "10",
             ))],
             &[ru_row((
@@ -784,8 +778,8 @@ mod tests {
                 "80",
                 ts(0),
                 "H100",
-                "4",
-                "25",
+                4,
+                25,
             ))],
             ts(0),
             ts(4),
@@ -815,8 +809,8 @@ mod tests {
                 "40",
                 ts(0),
                 "H100",
-                "4",
-                "25",
+                4,
+                25,
             ))],
             ts(0),
             ts(4),
@@ -837,7 +831,7 @@ mod tests {
                 "4",
                 ts(0),
                 "H100",
-                "4",
+                4,
                 "10",
             ))],
             &[],
@@ -883,8 +877,8 @@ mod tests {
     fn test_weight_computation_is_deterministic_for_same_inputs() {
         let config = test_config();
         let cu_rows = vec![
-            cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", "4", "10")),
-            cu_row(("miner-2", 22, "node-2", "8", ts(0), "A100", "4", "8")),
+            cu_row(("miner-1", 11, "node-1", "4", ts(0), "H100", 4, "10")),
+            cu_row(("miner-2", 22, "node-2", "8", ts(0), "A100", 4, "8")),
         ];
         let ru_rows = vec![ru_row((
             "miner-3",
@@ -893,8 +887,8 @@ mod tests {
             "20",
             ts(0),
             "H100",
-            "4",
-            "25",
+            4,
+            25,
         ))];
         let hotkey_to_uid = hotkey_to_uid();
 
