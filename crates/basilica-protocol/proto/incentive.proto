@@ -21,9 +21,9 @@ message GpuCategoryConfig {
 
 message GetConfigResponse {
   map<string, GpuCategoryConfig> gpu_categories = 1;
-  string window_hours = 2;
+  uint32 window_hours = 2;
   string max_cu_value_usd = 3;
-  optional string revenue_share_pct = 4;
+  optional uint32 revenue_share_pct = 4;
   string slash_pct = 5;
 }
 
@@ -41,7 +41,7 @@ message CuLedgerRow {
   google.protobuf.Timestamp earned_at = 6;
   bool is_rented = 7;
   string gpu_category = 8;
-  string window_hours = 9;
+  uint32 window_hours = 9;
   string price_usd = 10;
   string idempotency_key = 11;
   bool is_slashed = 12;
@@ -67,8 +67,8 @@ message RuLedgerRow {
   string ru_amount = 6;
   google.protobuf.Timestamp earned_at = 7;
   string gpu_category = 8;
-  string window_hours = 9;
-  string revenue_share_pct = 10;
+  uint32 window_hours = 9;
+  uint32 revenue_share_pct = 10;
   bool is_slashed = 11;
   optional string slash_audit_id = 12;
   google.protobuf.Timestamp created_at = 13;
@@ -86,7 +86,7 @@ message NewCuLedgerRow {
   google.protobuf.Timestamp earned_at = 5;
   bool is_rented = 6;
   string gpu_category = 7;
-  string window_hours = 8;
+  uint32 window_hours = 8;
   string price_usd = 9;
   string idempotency_key = 10;
 }

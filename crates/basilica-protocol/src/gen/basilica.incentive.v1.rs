@@ -18,12 +18,12 @@ pub struct GetConfigResponse {
         ::prost::alloc::string::String,
         GpuCategoryConfig,
     >,
-    #[prost(string, tag = "2")]
-    pub window_hours: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub window_hours: u32,
     #[prost(string, tag = "3")]
     pub max_cu_value_usd: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "4")]
-    pub revenue_share_pct: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "4")]
+    pub revenue_share_pct: ::core::option::Option<u32>,
     #[prost(string, tag = "5")]
     pub slash_pct: ::prost::alloc::string::String,
 }
@@ -54,8 +54,8 @@ pub struct CuLedgerRow {
     pub is_rented: bool,
     #[prost(string, tag = "8")]
     pub gpu_category: ::prost::alloc::string::String,
-    #[prost(string, tag = "9")]
-    pub window_hours: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "9")]
+    pub window_hours: u32,
     #[prost(string, tag = "10")]
     pub price_usd: ::prost::alloc::string::String,
     #[prost(string, tag = "11")]
@@ -100,10 +100,10 @@ pub struct RuLedgerRow {
     pub earned_at: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(string, tag = "8")]
     pub gpu_category: ::prost::alloc::string::String,
-    #[prost(string, tag = "9")]
-    pub window_hours: ::prost::alloc::string::String,
-    #[prost(string, tag = "10")]
-    pub revenue_share_pct: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "9")]
+    pub window_hours: u32,
+    #[prost(uint32, tag = "10")]
+    pub revenue_share_pct: u32,
     #[prost(bool, tag = "11")]
     pub is_slashed: bool,
     #[prost(string, optional, tag = "12")]
@@ -134,8 +134,8 @@ pub struct NewCuLedgerRow {
     pub is_rented: bool,
     #[prost(string, tag = "7")]
     pub gpu_category: ::prost::alloc::string::String,
-    #[prost(string, tag = "8")]
-    pub window_hours: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "8")]
+    pub window_hours: u32,
     #[prost(string, tag = "9")]
     pub price_usd: ::prost::alloc::string::String,
     #[prost(string, tag = "10")]
