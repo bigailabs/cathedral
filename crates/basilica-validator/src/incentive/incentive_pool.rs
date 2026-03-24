@@ -49,8 +49,7 @@ pub fn compute_incentive_pool(
     ru_rows: &[RuLedgerRowResponse],
     epoch_start: DateTime<Utc>,
     epoch_end: DateTime<Utc>,
-    alpha_price_usd: Decimal,
-    subnet_emission_rate: u64,
+    usd_emission_capacity: Decimal,
     burn_uid: u16,
     hotkey_to_uid: &HashMap<String, u16>,
 ) -> Result<IncentivePoolResult> {
@@ -143,7 +142,6 @@ pub fn compute_incentive_pool(
     }
 
     let raw_usd_required_epoch = sum_decimals(miner_payouts.values().copied());
-    let usd_emission_capacity = Decimal::from(subnet_emission_rate) * alpha_price_usd;
 
     if raw_usd_required_epoch <= Decimal::ZERO || usd_emission_capacity <= Decimal::ZERO {
         return Ok(all_burn_result(
@@ -600,8 +598,7 @@ mod tests {
             &[],
             ts(0),
             ts(4),
-            d("1"),
-            100,
+            d("100"),
             999,
             &hotkey_to_uid(),
         )
@@ -629,8 +626,7 @@ mod tests {
             ))],
             ts(0),
             ts(4),
-            d("1"),
-            100,
+            d("100"),
             999,
             &hotkey_to_uid(),
         )
@@ -667,8 +663,7 @@ mod tests {
             ))],
             ts(0),
             ts(4),
-            d("1"),
-            100,
+            d("100"),
             999,
             &hotkey_to_uid(),
         )
@@ -700,8 +695,7 @@ mod tests {
             ))],
             ts(0),
             ts(4),
-            d("1"),
-            10,
+            d("10"),
             999,
             &hotkey_to_uid(),
         )
@@ -737,8 +731,7 @@ mod tests {
             &[],
             ts(0),
             ts(4),
-            d("10"),
-            100,
+            d("1000"),
             999,
             &hotkey_to_uid(),
         )
@@ -785,7 +778,6 @@ mod tests {
             ts(0),
             ts(4),
             Decimal::ZERO,
-            100,
             999,
             &hotkey_to_uid(),
         )
@@ -815,8 +807,7 @@ mod tests {
             ))],
             ts(0),
             ts(4),
-            d("1"),
-            100,
+            d("100"),
             999,
             &hotkey_to_uid(),
         )
@@ -838,8 +829,7 @@ mod tests {
             &[],
             ts(0),
             ts(4),
-            d("1"),
-            100,
+            d("100"),
             999,
             &hotkey_to_uid(),
         )
@@ -852,8 +842,7 @@ mod tests {
             &[],
             ts(0),
             ts(4),
-            d("1"),
-            100,
+            d("100"),
             999,
             &hotkey_to_uid(),
         )
@@ -899,8 +888,7 @@ mod tests {
             &ru_rows,
             ts(0),
             ts(4),
-            d("2"),
-            100,
+            d("200"),
             999,
             &hotkey_to_uid,
         )
@@ -911,8 +899,7 @@ mod tests {
             &ru_rows,
             ts(0),
             ts(4),
-            d("2"),
-            100,
+            d("200"),
             999,
             &hotkey_to_uid,
         )

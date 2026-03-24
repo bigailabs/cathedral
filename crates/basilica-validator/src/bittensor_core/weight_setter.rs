@@ -257,14 +257,26 @@ impl WeightSetter {
                     .map_err(anyhow::Error::new)?;
                 let token_prices = self.api_client.get_token_prices(self.config.netuid).await?;
                 let subnet_emission_rate = self.subnet_emission_rate_from_metagraph(&metagraph);
+
+                const RAO_PER_ALPHA: u64 = 1_000_000_000;
+                // 41% of alpha_out_emission goes to miners via weights (dTAO split: 41/41/18)
+                let miner_emission_share = rust_decimal::Decimal::new(41, 2);
+
+                let alpha_tokens_per_block = rust_decimal::Decimal::from(subnet_emission_rate)
+                    / rust_decimal::Decimal::from(RAO_PER_ALPHA);
+                let blocks_per_epoch = rust_decimal::Decimal::from(self.blocks_per_weight_set);
+                let usd_emission_capacity = alpha_tokens_per_block
+                    * miner_emission_share
+                    * blocks_per_epoch
+                    * token_prices.alpha_price_usd;
+
                 let incentive_result = compute_incentive_pool(
                     &incentive_config,
                     &cu_rows,
                     &ru_rows,
                     epoch.period_start,
                     epoch.period_end,
-                    token_prices.alpha_price_usd,
-                    subnet_emission_rate,
+                    usd_emission_capacity,
                     self.emission_config.burn_uid,
                     &hotkey_to_uid,
                 )?;
@@ -272,6 +284,7 @@ impl WeightSetter {
                 self.log_incentive_weight_context(
                     token_prices.alpha_price_usd,
                     subnet_emission_rate,
+                    self.blocks_per_weight_set,
                     incentive_result.usd_required_epoch,
                     incentive_result.usd_emission_capacity,
                     incentive_result.burn_rate,
@@ -531,13 +544,15 @@ impl WeightSetter {
         &self,
         alpha_price_usd: rust_decimal::Decimal,
         subnet_emission_rate: u64,
+        blocks_per_epoch: u64,
         usd_required_epoch: rust_decimal::Decimal,
         usd_emission_capacity: rust_decimal::Decimal,
         burn_rate: rust_decimal::Decimal,
     ) {
         info!(
             alpha_price_usd = %alpha_price_usd,
-            subnet_emission_rate = subnet_emission_rate,
+            subnet_emission_rate_rao = subnet_emission_rate,
+            blocks_per_epoch = blocks_per_epoch,
             usd_required_epoch = %usd_required_epoch,
             usd_emission_capacity = %usd_emission_capacity,
             burn_rate = %burn_rate,
