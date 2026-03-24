@@ -10,6 +10,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IncentivePoolResult {
@@ -65,12 +66,25 @@ pub fn compute_incentive_pool(
         .filter(|row| hotkey_to_uid.contains_key(&row.hotkey))
         .collect();
 
+    info!(
+        total_cu_rows = cu_rows.len(),
+        active_cu_rows = active_cu_rows.len(),
+        total_ru_rows = ru_rows.len(),
+        active_ru_rows = active_ru_rows.len(),
+        "Incentive pool input filtering"
+    );
+
     let mut category_cu_supply: HashMap<String, Decimal> = HashMap::new();
     for row in &active_cu_rows {
         *category_cu_supply
             .entry(row.gpu_category.clone())
             .or_insert(Decimal::ZERO) += row.cu_amount;
     }
+
+    info!(
+        category_cu_supply = ?category_cu_supply,
+        "Category CU supply (dilution denominators)"
+    );
 
     let mut miner_payouts = HashMap::new();
     let mut category_payouts = HashMap::new();
@@ -144,6 +158,11 @@ pub fn compute_incentive_pool(
     let raw_usd_required_epoch = sum_decimals(miner_payouts.values().copied());
 
     if raw_usd_required_epoch <= Decimal::ZERO || usd_emission_capacity <= Decimal::ZERO {
+        warn!(
+            raw_usd_required = %raw_usd_required_epoch,
+            usd_emission_capacity = %usd_emission_capacity,
+            "All weight to burn: no payouts or zero emission capacity"
+        );
         return Ok(all_burn_result(
             burn_uid,
             usd_emission_capacity,
@@ -158,10 +177,24 @@ pub fn compute_incentive_pool(
         Decimal::ONE
     };
 
+    if scale_factor < Decimal::ONE {
+        info!(
+            scale_factor = %scale_factor,
+            "Emission cap active: scaling all payouts"
+        );
+    }
+
     let scaled_miner_payouts = scale_decimal_map(&miner_payouts, scale_factor);
     let scaled_category_payouts = scale_decimal_map(&category_payouts, scale_factor);
+
+    debug!(
+        miner_payouts = ?scaled_miner_payouts,
+        "Per-miner payouts (scaled)"
+    );
+
     let usd_required_epoch = sum_decimals(scaled_miner_payouts.values().copied());
     if usd_required_epoch <= Decimal::ZERO {
+        warn!("All weight to burn: scaled payouts rounded to zero");
         return Ok(all_burn_result(
             burn_uid,
             usd_emission_capacity,
