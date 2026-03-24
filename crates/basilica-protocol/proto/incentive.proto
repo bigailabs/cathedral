@@ -63,7 +63,6 @@ message RuLedgerRow {
   string hotkey = 2;
   uint32 miner_uid = 3;
   string node_id = 4;
-  string rental_id = 5;
   string ru_amount = 6;
   google.protobuf.Timestamp earned_at = 7;
   string gpu_category = 8;
@@ -72,6 +71,8 @@ message RuLedgerRow {
   bool is_slashed = 11;
   optional string slash_audit_id = 12;
   google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp period_start = 14;
+  google.protobuf.Timestamp period_end = 15;
 }
 
 message GetRusResponse {

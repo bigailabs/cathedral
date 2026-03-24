@@ -630,12 +630,13 @@ pub struct RuLedgerRowResponse {
     pub hotkey: String,
     pub miner_uid: u32,
     pub node_id: String,
-    pub rental_id: String,
     pub ru_amount: Decimal,
     pub earned_at: DateTime<Utc>,
     pub gpu_category: String,
     pub window_hours: u32,
     pub revenue_share_pct: u32,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
     pub is_slashed: bool,
     pub slash_audit_id: Option<uuid::Uuid>,
     pub created_at: DateTime<Utc>,
@@ -969,12 +970,13 @@ mod tests {
             "hotkey": "5miner",
             "miner_uid": 42,
             "node_id": "node-abc",
-            "rental_id": "rental-123",
             "ru_amount": "9.5",
             "earned_at": "2025-03-15T10:00:00Z",
             "gpu_category": "H100",
             "window_hours": 72,
             "revenue_share_pct": 30,
+            "period_start": "2025-03-15T09:00:00Z",
+            "period_end": "2025-03-15T10:00:00Z",
             "is_slashed": true,
             "slash_audit_id": null,
             "created_at": "2025-03-15T10:05:00Z"
@@ -982,7 +984,7 @@ mod tests {
         "#;
 
         let parsed: RuLedgerRowResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.rental_id, "rental-123");
+        assert_eq!(parsed.node_id, "node-abc");
         assert_eq!(parsed.ru_amount, Decimal::from_str_exact("9.5").unwrap());
         assert!(parsed.is_slashed);
         assert_eq!(parsed.slash_audit_id, None);
@@ -1034,12 +1036,13 @@ mod tests {
                     "hotkey": "5miner",
                     "miner_uid": 42,
                     "node_id": "node-abc",
-                    "rental_id": "rental-123",
                     "ru_amount": "9.5",
                     "earned_at": "2025-03-15T10:00:00Z",
                     "gpu_category": "H100",
                     "window_hours": 72,
                     "revenue_share_pct": 30,
+                    "period_start": "2025-03-15T09:00:00Z",
+                    "period_end": "2025-03-15T10:00:00Z",
                     "is_slashed": true,
                     "slash_audit_id": null,
                     "created_at": "2025-03-15T10:05:00Z"
@@ -1050,7 +1053,7 @@ mod tests {
 
         let parsed: GetRusResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.rows.len(), 1);
-        assert_eq!(parsed.rows[0].rental_id, "rental-123");
+        assert_eq!(parsed.rows[0].node_id, "node-abc");
     }
 
     #[test]
@@ -1374,12 +1377,13 @@ mod tests {
                     "hotkey": "5miner",
                     "miner_uid": 42,
                     "node_id": "node-abc",
-                    "rental_id": "rental-123",
                     "ru_amount": "9.5",
                     "earned_at": "2025-03-15T10:00:00Z",
                     "gpu_category": "H100",
                     "window_hours": 72,
                     "revenue_share_pct": 30,
+                    "period_start": "2025-03-15T09:00:00Z",
+                    "period_end": "2025-03-15T10:00:00Z",
                     "is_slashed": false,
                     "slash_audit_id": null,
                     "created_at": "2025-03-15T10:05:00Z"
@@ -1393,7 +1397,7 @@ mod tests {
 
         let rows = client.get_rus(epoch_start, epoch_end).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].rental_id, "rental-123");
+        assert_eq!(rows[0].node_id, "node-abc");
     }
 
     #[tokio::test]

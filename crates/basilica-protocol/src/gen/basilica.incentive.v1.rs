@@ -92,8 +92,6 @@ pub struct RuLedgerRow {
     pub miner_uid: u32,
     #[prost(string, tag = "4")]
     pub node_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "5")]
-    pub rental_id: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub ru_amount: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "7")]
@@ -110,6 +108,10 @@ pub struct RuLedgerRow {
     pub slash_audit_id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "13")]
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "14")]
+    pub period_start: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "15")]
+    pub period_end: ::core::option::Option<::prost_types::Timestamp>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
