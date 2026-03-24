@@ -24,7 +24,7 @@ message GetConfigResponse {
   uint32 window_hours = 2;
   string max_cu_value_usd = 3;
   optional uint32 revenue_share_pct = 4;
-  string slash_pct = 5;
+  uint32 slash_pct = 5;
 }
 
 message GetCusRequest {
@@ -102,7 +102,7 @@ message SubmitCusResponse {
 
 message SlashNodeRequest {
   string node_id = 1;
-  string slash_pct = 2;
+  uint32 slash_pct = 2;
   string requested_by_hotkey = 3;
 }
 

@@ -32,7 +32,7 @@ pub trait IncentiveApi: Send + Sync {
     async fn slash_node(
         &self,
         node_id: &str,
-        slash_pct: Decimal,
+        slash_pct: u32,
     ) -> std::result::Result<PostSlashResponse, BasilicaApiError>;
 }
 
@@ -54,7 +54,7 @@ impl IncentiveApi for BasilicaApiClient {
     async fn slash_node(
         &self,
         node_id: &str,
-        slash_pct: Decimal,
+        slash_pct: u32,
     ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
         BasilicaApiClient::slash_node(self, node_id, slash_pct).await
     }
@@ -200,7 +200,7 @@ impl CuGenerator {
         unreachable!("retry loop must return");
     }
 
-    async fn slash_node_with_retry(&self, node_id: &str, slash_pct: Decimal) -> Result<()> {
+    async fn slash_node_with_retry(&self, node_id: &str, slash_pct: u32) -> Result<()> {
         let mut backoff = TokioDuration::from_secs(1);
         for attempt in 1..=MAX_RETRIES {
             match self.api.slash_node(node_id, slash_pct).await {
@@ -515,7 +515,7 @@ mod tests {
         async fn slash_node(
             &self,
             node_id: &str,
-            _slash_pct: Decimal,
+            _slash_pct: u32,
         ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
             self.slash_calls.lock().await.push(node_id.to_string());
             Ok(PostSlashResponse {
@@ -540,7 +540,7 @@ mod tests {
             window_hours: 72,
             max_cu_value_usd: Decimal::from_str("0.05").unwrap(),
             revenue_share_pct: Some(30),
-            slash_pct: Decimal::from_str("100").unwrap(),
+            slash_pct: 100,
         }
     }
 

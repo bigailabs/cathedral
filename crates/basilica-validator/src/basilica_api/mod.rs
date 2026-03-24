@@ -449,7 +449,7 @@ impl BasilicaApiClient {
     pub async fn slash_node(
         &self,
         node_id: &str,
-        slash_pct: Decimal,
+        slash_pct: u32,
     ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
         let payload = PostSlashRequest {
             node_id: node_id.to_string(),
@@ -597,7 +597,7 @@ pub struct IncentiveConfigResponse {
     pub window_hours: u32,
     pub max_cu_value_usd: Decimal,
     pub revenue_share_pct: Option<u32>,
-    pub slash_pct: Decimal,
+    pub slash_pct: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -678,7 +678,7 @@ pub struct PostCusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PostSlashRequest {
     pub node_id: String,
-    pub slash_pct: Decimal,
+    pub slash_pct: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -905,7 +905,7 @@ mod tests {
             "window_hours": 72,
             "max_cu_value_usd": "0.05",
             "revenue_share_pct": 30,
-            "slash_pct": "100"
+            "slash_pct": 100
         }
         "#;
 
@@ -1084,13 +1084,13 @@ mod tests {
         let json = r#"
         {
             "node_id": "node-abc",
-            "slash_pct": "100.0"
+            "slash_pct": 100
         }
         "#;
 
         let parsed: PostSlashRequest = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.node_id, "node-abc");
-        assert_eq!(parsed.slash_pct, Decimal::from_str_exact("100.0").unwrap());
+        assert_eq!(parsed.slash_pct, 100);
     }
 
     #[test]
@@ -1243,7 +1243,7 @@ mod tests {
                 "window_hours": 72,
                 "max_cu_value_usd": "0.05",
                 "revenue_share_pct": 30,
-                "slash_pct": "100"
+                "slash_pct": 100
             })))
             .mount(&server)
             .await;
@@ -1456,7 +1456,7 @@ mod tests {
             .and(header_exists("X-Timestamp"))
             .and(body_json(json!({
                 "node_id": "node-abc",
-                "slash_pct": "100.0"
+                "slash_pct": 100
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "slashed_cu_count": 5,
@@ -1468,10 +1468,7 @@ mod tests {
         let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
         let client = build_http_client(server.uri(), signer);
 
-        let response = client
-            .slash_node("node-abc", Decimal::from_str_exact("100.0").unwrap())
-            .await
-            .unwrap();
+        let response = client.slash_node("node-abc", 100).await.unwrap();
         assert_eq!(response.slashed_cu_count, 5);
         assert_eq!(response.slashed_ru_count, 2);
     }
@@ -1488,10 +1485,7 @@ mod tests {
         let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
         let client = build_http_client(server.uri(), signer);
 
-        let err = client
-            .slash_node("node-abc", Decimal::from_str_exact("100.0").unwrap())
-            .await
-            .unwrap_err();
+        let err = client.slash_node("node-abc", 100).await.unwrap_err();
         assert!(matches!(
             err,
             BasilicaApiError::HttpStatus {

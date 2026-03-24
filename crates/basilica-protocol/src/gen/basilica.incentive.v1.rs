@@ -24,8 +24,8 @@ pub struct GetConfigResponse {
     pub max_cu_value_usd: ::prost::alloc::string::String,
     #[prost(uint32, optional, tag = "4")]
     pub revenue_share_pct: ::core::option::Option<u32>,
-    #[prost(string, tag = "5")]
-    pub slash_pct: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub slash_pct: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -160,8 +160,8 @@ pub struct SubmitCusResponse {
 pub struct SlashNodeRequest {
     #[prost(string, tag = "1")]
     pub node_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub slash_pct: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub slash_pct: u32,
     #[prost(string, tag = "3")]
     pub requested_by_hotkey: ::prost::alloc::string::String,
 }

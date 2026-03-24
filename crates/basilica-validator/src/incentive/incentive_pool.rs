@@ -466,7 +466,7 @@ mod tests {
             window_hours: 4,
             max_cu_value_usd: d("100"),
             revenue_share_pct: Some(25),
-            slash_pct: d("100"),
+            slash_pct: 100,
         }
     }
 
