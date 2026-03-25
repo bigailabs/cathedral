@@ -214,8 +214,7 @@ pub fn compute_incentive_pool(
         ));
     }
 
-    let mut burn_rate = Decimal::ONE - (usd_required_epoch / effective_usd_capacity);
-    burn_rate = clamp_decimal(burn_rate, Decimal::ZERO, Decimal::new(99, 2));
+    let burn_rate = (Decimal::ONE - (usd_required_epoch / effective_usd_capacity)).max(Decimal::ZERO);
     let burn_share = if usd_required_epoch >= effective_usd_capacity {
         Decimal::ZERO
     } else {
@@ -467,16 +466,6 @@ fn min_decimal(left: Decimal, right: Decimal) -> Decimal {
         left
     } else {
         right
-    }
-}
-
-fn clamp_decimal(value: Decimal, min: Decimal, max: Decimal) -> Decimal {
-    if value < min {
-        min
-    } else if value > max {
-        max
-    } else {
-        value
     }
 }
 
@@ -804,7 +793,7 @@ mod tests {
         .unwrap();
 
         assert!(result.burn_rate > Decimal::ZERO);
-        assert!(result.burn_rate <= d("0.99"));
+        assert!(result.burn_rate <= Decimal::ONE);
         assert!(
             result
                 .distribution
@@ -1001,5 +990,31 @@ mod tests {
             slashed_ru_count: 2,
         };
         assert_eq!(response.slashed_cu_count + response.slashed_ru_count, 3);
+    }
+
+    #[test]
+    fn test_low_demand_epoch_weights_sum_to_max() {
+        let config = test_config();
+        let result = compute_incentive_pool(
+            &config,
+            &[cu_row(("miner-1", 11, "node-1", "0.1", ts(0), "H100", 4, "10"))],
+            &[],
+            ts(0),
+            ts(4),
+            d("10000"),
+            999,
+            &hotkey_to_uid(),
+            None,
+        )
+        .unwrap();
+
+        assert!(result.burn_rate > d("0.99"));
+        let total: u64 = result
+            .distribution
+            .weights
+            .iter()
+            .map(|w| w.weight as u64)
+            .sum();
+        assert_eq!(total, u16::MAX as u64, "weights must sum to u16::MAX");
     }
 }
