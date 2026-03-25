@@ -128,13 +128,19 @@ impl IncentiveStateRepository {
         &self,
         rental_id: &str,
         processed_at_ms: i64,
+        slash_mode: &str,
+        applied_slash_pct: u32,
     ) -> Result<()> {
         sqlx::query(
             "UPDATE incentive_slash_events
-             SET processed_at_ms = ?
+             SET processed_at_ms = ?,
+                 slash_mode = ?,
+                 applied_slash_pct = ?
              WHERE rental_id = ?",
         )
         .bind(processed_at_ms)
+        .bind(slash_mode)
+        .bind(applied_slash_pct)
         .bind(rental_id)
         .execute(&self.pool)
         .await?;

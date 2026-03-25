@@ -472,8 +472,10 @@ impl ValidatorService {
         let cu_generator_task = spawn_primary_validator_task(self.config.cu_generator_enabled, {
             let pool = inputs.persistence.pool().clone();
             let api_client = inputs.api_client.clone();
+            let slash_mode = self.config.slash_mode;
             async move {
-                let generator = CuGenerator::new(pool, api_client);
+                info!(slash_mode = ?slash_mode, "CU generator starting");
+                let generator = CuGenerator::new(pool, api_client, slash_mode);
                 let mut interval = tokio::time::interval(StdDuration::from_secs(3600));
                 loop {
                     interval.tick().await;

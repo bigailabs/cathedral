@@ -2,6 +2,7 @@ use crate::basilica_api::{
     BasilicaApiClient, BasilicaApiError, IncentiveConfigResponse, NewCuLedgerRowRequest,
     PostSlashResponse,
 };
+use crate::config::SlashMode;
 use crate::persistence::availability_log::AvailabilityLogRow;
 use crate::persistence::incentive_state::{IncentiveStateRepository, PendingSlashEvent};
 use anyhow::{Context, Result};
@@ -71,11 +72,16 @@ pub struct CuGeneratorRunSummary {
 pub struct CuGenerator {
     pool: SqlitePool,
     api: Arc<dyn IncentiveApi>,
+    slash_mode: SlashMode,
 }
 
 impl CuGenerator {
-    pub fn new(pool: SqlitePool, api: Arc<dyn IncentiveApi>) -> Self {
-        Self { pool, api }
+    pub fn new(pool: SqlitePool, api: Arc<dyn IncentiveApi>, slash_mode: SlashMode) -> Self {
+        Self {
+            pool,
+            api,
+            slash_mode,
+        }
     }
 
     pub async fn run_once_at(&self, now: DateTime<Utc>) -> Result<CuGeneratorRunSummary> {
@@ -126,17 +132,34 @@ impl CuGenerator {
             }
 
             for slash_event in &window.slash_events {
-                self.slash_node_with_retry(&slash_event.node_id, config.slash_pct)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to slash node {} for rental {}",
-                            slash_event.node_id, slash_event.rental_id
-                        )
-                    })?;
+                let mode_str = match self.slash_mode {
+                    SlashMode::Hard => {
+                        self.slash_node_with_retry(&slash_event.node_id, config.slash_pct)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed to slash node {} for rental {}",
+                                    slash_event.node_id, slash_event.rental_id
+                                )
+                            })?;
+                        "hard"
+                    }
+                    SlashMode::Soft => {
+                        warn!(
+                            node_id = %slash_event.node_id,
+                            rental_id = %slash_event.rental_id,
+                            reason = %slash_event.reason,
+                            slash_pct = config.slash_pct,
+                            "Soft slash: would have slashed node (API call skipped)"
+                        );
+                        "soft"
+                    }
+                };
                 repo.mark_slash_event_processed(
                     &slash_event.rental_id,
                     window.earned_at.timestamp_millis(),
+                    mode_str,
+                    config.slash_pct,
                 )
                 .await?;
                 summary.slash_events_processed += 1;
@@ -574,7 +597,7 @@ mod tests {
     async fn generator_progress_checkpoints_completed_windows() -> Result<()> {
         let persistence = crate::persistence::SimplePersistence::for_testing().await?;
         let api = Arc::new(FakeIncentiveApi::default());
-        let generator = CuGenerator::new(persistence.pool().clone(), api.clone());
+        let generator = CuGenerator::new(persistence.pool().clone(), api.clone(), SlashMode::Hard);
         let start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 5, 0).unwrap();
 
         sqlx::query(
@@ -663,7 +686,7 @@ mod tests {
     async fn generator_reuses_stable_idempotency_keys_when_replaying_same_window() -> Result<()> {
         let persistence = crate::persistence::SimplePersistence::for_testing().await?;
         let api = Arc::new(FakeIncentiveApi::default());
-        let generator = CuGenerator::new(persistence.pool().clone(), api.clone());
+        let generator = CuGenerator::new(persistence.pool().clone(), api.clone(), SlashMode::Hard);
         let start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 5, 0).unwrap();
         sqlx::query(
             "INSERT INTO miners (id, hotkey, endpoint, updated_at)
@@ -727,6 +750,101 @@ mod tests {
             .await?;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].node_id, "node-1");
+        Ok(())
+    }
+
+    async fn setup_miner_with_slash_event(
+        persistence: &crate::persistence::SimplePersistence,
+    ) -> Result<()> {
+        let start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 5, 0).unwrap();
+        sqlx::query(
+            "INSERT INTO miners (id, hotkey, endpoint, updated_at)
+             VALUES ('miner_7', 'hotkey-7', 'http://127.0.0.1:1234', datetime('now'))",
+        )
+        .execute(persistence.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, hourly_rate_cents, gpu_category, status, bid_active, created_at)
+             VALUES ('miner_7_node-1', 'miner_7', 'node-1', 'root@127.0.0.1:22', '127.0.0.1', 1, 100, 'H100', 'online', 1, datetime('now'))",
+        )
+        .execute(persistence.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO availability_log (miner_uid, hotkey, node_id, is_available, is_rented, is_validated, source, row_effective_at, row_expiration_at, is_current)
+             VALUES (7, 'hotkey-7', 'node-1', 1, 1, 1, 'validation', ?, NULL, 1)",
+        )
+        .bind(start.timestamp_millis())
+        .execute(persistence.pool())
+        .await?;
+
+        let repo = IncentiveStateRepository::new(persistence.pool().clone());
+        let detected_at = Utc.with_ymd_and_hms(2026, 3, 23, 10, 30, 0).unwrap();
+        repo.record_slash_event(SlashEventRequest {
+            rental_id: "rental-1".to_string(),
+            node_id: "node-1".to_string(),
+            reason: "Health check timeout".to_string(),
+            detected_at_ms: detected_at.timestamp_millis(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn soft_mode_skips_api_call_and_records_to_db() -> Result<()> {
+        let persistence = crate::persistence::SimplePersistence::for_testing().await?;
+        let api = Arc::new(FakeIncentiveApi::default());
+        let generator = CuGenerator::new(persistence.pool().clone(), api.clone(), SlashMode::Soft);
+
+        setup_miner_with_slash_event(&persistence).await?;
+
+        let summary = generator
+            .run_once_at(Utc.with_ymd_and_hms(2026, 3, 23, 11, 5, 0).unwrap())
+            .await?;
+
+        assert_eq!(summary.slash_events_processed, 1);
+        assert!(
+            api.slash_calls.lock().await.is_empty(),
+            "soft mode must not call slash API"
+        );
+
+        let row = sqlx::query(
+            "SELECT slash_mode, applied_slash_pct, processed_at_ms
+             FROM incentive_slash_events WHERE rental_id = 'rental-1'",
+        )
+        .fetch_one(persistence.pool())
+        .await?;
+        assert_eq!(row.get::<String, _>("slash_mode"), "soft");
+        assert_eq!(row.get::<i64, _>("applied_slash_pct"), 100);
+        assert!(row.get::<Option<i64>, _>("processed_at_ms").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hard_mode_calls_api_and_records_to_db() -> Result<()> {
+        let persistence = crate::persistence::SimplePersistence::for_testing().await?;
+        let api = Arc::new(FakeIncentiveApi::default());
+        let generator = CuGenerator::new(persistence.pool().clone(), api.clone(), SlashMode::Hard);
+
+        setup_miner_with_slash_event(&persistence).await?;
+
+        let summary = generator
+            .run_once_at(Utc.with_ymd_and_hms(2026, 3, 23, 11, 5, 0).unwrap())
+            .await?;
+
+        assert_eq!(summary.slash_events_processed, 1);
+        let slash_calls = api.slash_calls.lock().await;
+        assert_eq!(slash_calls.len(), 1);
+        assert_eq!(slash_calls[0], "node-1");
+
+        let row = sqlx::query(
+            "SELECT slash_mode, applied_slash_pct, processed_at_ms
+             FROM incentive_slash_events WHERE rental_id = 'rental-1'",
+        )
+        .fetch_one(persistence.pool())
+        .await?;
+        assert_eq!(row.get::<String, _>("slash_mode"), "hard");
+        assert_eq!(row.get::<i64, _>("applied_slash_pct"), 100);
+        assert!(row.get::<Option<i64>, _>("processed_at_ms").is_some());
         Ok(())
     }
 }

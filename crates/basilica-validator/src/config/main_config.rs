@@ -95,6 +95,17 @@ pub struct ValidatorConfig {
     /// Enables CU generation and incentive slash submission on the primary validator.
     #[serde(default)]
     pub cu_generator_enabled: bool,
+    /// CU slash mode: "soft" (record to DB only) or "hard" (actual API call).
+    #[serde(default)]
+    pub slash_mode: SlashMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlashMode {
+    #[default]
+    Soft,
+    Hard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -884,6 +895,7 @@ impl Default for ValidatorConfig {
             billing: BillingConfig::default(),
             collateral: None,
             cu_generator_enabled: false,
+            slash_mode: SlashMode::default(),
         }
     }
 }
