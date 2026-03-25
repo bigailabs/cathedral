@@ -4,27 +4,22 @@
 //! Sets weights every N blocks based on miner scores from node validations.
 
 use crate::basilica_api::BasilicaApiClient;
-use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
-use crate::incentive::incentive_pool::{compute_incentive_pool, should_fallback_to_legacy};
+use crate::incentive::incentive_pool::compute_incentive_pool;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-use crate::persistence::{
-    MinerDeliveryRepository, SimplePersistence, WeightSetEpoch, WeightSetEpochRepository,
-};
+use crate::persistence::{SimplePersistence, WeightSetEpoch, WeightSetEpochRepository};
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
-use basilica_common::types::GpuCategory;
 use basilica_common::{KeyValueStorage, MemoryStorage};
-use basilica_protocol::billing::MinerDelivery;
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -64,14 +59,11 @@ pub struct WeightSetter {
     blocks_per_weight_set: u64,
     last_weight_set_block: Arc<tokio::sync::Mutex<u64>>,
     gpu_scoring_engine: Arc<GpuScoringEngine>,
-    weight_allocation_engine: Arc<WeightAllocationEngine>,
     emission_config: EmissionConfig,
-    delivery_repository: Arc<MinerDeliveryRepository>,
     epoch_repository: Arc<WeightSetEpochRepository>,
     api_client: Arc<BasilicaApiClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
-    collateral_grace_period: Option<chrono::Duration>,
 }
 
 impl WeightSetter {
@@ -88,12 +80,7 @@ impl WeightSetter {
         api_client: Arc<BasilicaApiClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         metrics: Option<Arc<ValidatorMetrics>>,
-        collateral_grace_period: Option<chrono::Duration>,
     ) -> Result<Self> {
-        // Create weight allocation engine
-        let weight_allocation_engine =
-            Arc::new(WeightAllocationEngine::new(emission_config.clone()));
-        let delivery_repository = Arc::new(MinerDeliveryRepository::new(persistence.clone()));
         let epoch_repository = Arc::new(WeightSetEpochRepository::new(persistence.clone()));
 
         Ok(Self {
@@ -104,14 +91,11 @@ impl WeightSetter {
             blocks_per_weight_set,
             last_weight_set_block: Arc::new(tokio::sync::Mutex::new(0)),
             gpu_scoring_engine,
-            weight_allocation_engine,
             emission_config,
-            delivery_repository,
             epoch_repository,
             api_client,
             gpu_profile_repo,
             metrics,
-            collateral_grace_period,
         })
     }
 
@@ -296,10 +280,6 @@ impl WeightSetter {
                     burn_percentage: incentive_result.burn_percentage,
                 }
             }
-            Err(error) if should_fallback_to_legacy(&error) => {
-                info!("Incentive config not configured; using legacy delivery-based weights");
-                self.compute_legacy_weights(&epoch, &hotkey_to_uid).await?
-            }
             Err(error) => return Err(anyhow::Error::new(error)),
         };
 
@@ -319,37 +299,6 @@ impl WeightSetter {
         self.epoch_repository.mark_success(epoch.id).await?;
 
         Ok(())
-    }
-
-    async fn compute_legacy_weights(
-        &self,
-        epoch: &WeightSetEpoch,
-        hotkey_to_uid: &HashMap<String, u16>,
-    ) -> Result<ComputedWeights> {
-        self.sync_deliveries_for_epoch(epoch).await?;
-        let deliveries = self
-            .delivery_repository
-            .get_deliveries_for_window(epoch.period_start, epoch.period_end, None)
-            .await?;
-        let excluded_nodes = self.fetch_excluded_nodes().await?;
-        let miners_by_category =
-            self.group_deliveries_by_category(deliveries, hotkey_to_uid, &excluded_nodes);
-
-        self.log_tao_price().await;
-
-        let distribution = self
-            .weight_allocation_engine
-            .calculate_weight_distribution(miners_by_category)?;
-
-        let burn_percentage = distribution
-            .burn_allocation
-            .as_ref()
-            .map(|b| b.percentage)
-            .unwrap_or(0.0);
-        Ok(ComputedWeights {
-            distribution,
-            burn_percentage,
-        })
     }
 
     async fn fetch_metagraph_with_logging(&self) -> Result<Metagraph> {
@@ -384,7 +333,7 @@ impl WeightSetter {
             .get_last_success_end(self.config.netuid)
             .await?;
         let mut period_start = match last_success_end {
-            Some(last_end) => last_end + chrono::Duration::seconds(1),
+            Some(last_end) => last_end,
             None => attempt_start,
         };
 
@@ -410,19 +359,6 @@ impl WeightSetter {
         Ok(epoch)
     }
 
-    async fn sync_deliveries_for_epoch(&self, epoch: &WeightSetEpoch) -> Result<()> {
-        let deliveries = self
-            .api_client
-            .get_miner_delivery(epoch.period_start, epoch.period_end)
-            .await?;
-
-        self.delivery_repository
-            .store_deliveries(epoch.period_start, epoch.period_end, &deliveries)
-            .await?;
-
-        Ok(())
-    }
-
     fn build_hotkey_to_uid_map(&self, metagraph: &Metagraph) -> HashMap<String, u16> {
         metagraph
             .hotkeys
@@ -434,112 +370,6 @@ impl WeightSetter {
                     .map(|u| (Hotkey::from_account_id(account).to_string(), u))
             })
             .collect()
-    }
-
-    fn group_deliveries_by_category(
-        &self,
-        deliveries: Vec<MinerDelivery>,
-        hotkey_to_uid: &HashMap<String, u16>,
-        excluded_nodes: &HashSet<(String, String)>,
-    ) -> HashMap<String, Vec<(MinerUid, f64)>> {
-        let mut miners_by_category: HashMap<String, Vec<(MinerUid, f64)>> = HashMap::new();
-        for delivery in deliveries {
-            if excluded_nodes.contains(&(delivery.miner_hotkey.clone(), delivery.node_id.clone())) {
-                debug!(
-                    miner_hotkey = %delivery.miner_hotkey,
-                    node_id = %delivery.node_id,
-                    "Skipping delivery for collateral-excluded node"
-                );
-                continue;
-            }
-            let current_uid = match hotkey_to_uid.get(&delivery.miner_hotkey) {
-                Some(&uid) => uid,
-                None => {
-                    warn!(
-                        miner_hotkey = %delivery.miner_hotkey,
-                        stored_uid = delivery.miner_uid,
-                        revenue_usd = delivery.revenue_usd,
-                        gpu_category = %delivery.gpu_category,
-                        "Miner deregistered - clearing pending revenue (hotkey not in metagraph)"
-                    );
-                    continue;
-                }
-            };
-
-            if current_uid != delivery.miner_uid as u16 {
-                warn!(
-                    miner_hotkey = %delivery.miner_hotkey,
-                    stored_uid = delivery.miner_uid,
-                    current_uid = current_uid,
-                    revenue_usd = delivery.revenue_usd,
-                    "Miner UID changed - using current UID from metagraph"
-                );
-            }
-
-            let gpu_cat: GpuCategory = if delivery.gpu_category.trim().is_empty() {
-                GpuCategory::Other("UNKNOWN".to_string())
-            } else {
-                delivery.gpu_category.parse().unwrap() // Infallible
-            };
-            if matches!(&gpu_cat, GpuCategory::Other(_)) {
-                warn!(
-                    raw_category = %delivery.gpu_category,
-                    miner_hotkey = %delivery.miner_hotkey,
-                    node_id = %delivery.node_id,
-                    "Delivery has unrecognized GPU category - will not receive weight allocation"
-                );
-            }
-            let category = gpu_cat.to_string();
-            let revenue_usd = delivery.revenue_usd;
-            if !revenue_usd.is_finite() || revenue_usd <= 0.0 {
-                debug!(
-                    miner_hotkey = %delivery.miner_hotkey,
-                    node_id = %delivery.node_id,
-                    gpu_category = %category,
-                    "Skipping delivery with zero payment - no weight contribution"
-                );
-                continue;
-            }
-
-            miners_by_category
-                .entry(category)
-                .or_default()
-                .push((MinerUid::new(current_uid), revenue_usd));
-        }
-
-        if miners_by_category.is_empty() {
-            warn!("No miners found in any GPU category - proceeding with burn allocation");
-        }
-
-        info!(
-            "Found miners in {} GPU categories: {:?}",
-            miners_by_category.len(),
-            miners_by_category.keys().collect::<Vec<_>>()
-        );
-
-        miners_by_category
-    }
-
-    async fn fetch_excluded_nodes(&self) -> Result<HashSet<(String, String)>> {
-        let Some(grace_period) = self.collateral_grace_period else {
-            return Ok(HashSet::new());
-        };
-        self.persistence.get_excluded_nodes(grace_period).await
-    }
-
-    async fn log_tao_price(&self) {
-        match self.api_client.get_tao_price_usd(self.config.netuid).await {
-            Ok(tao_price) => {
-                info!(
-                    tao_price_usd = %tao_price,
-                    forced_burn_percentage = ?self.emission_config.forced_burn_percentage,
-                    "Fetched TAO price for weight context"
-                );
-            }
-            Err(err) => {
-                warn!("Failed to fetch TAO price: {}", err);
-            }
-        }
     }
 
     fn subnet_emission_rate_from_metagraph(&self, metagraph: &Metagraph) -> u64 {

@@ -1,6 +1,4 @@
-use crate::basilica_api::{
-    BasilicaApiError, CuLedgerRowResponse, IncentiveConfigResponse, RuLedgerRowResponse,
-};
+use crate::basilica_api::{CuLedgerRowResponse, IncentiveConfigResponse, RuLedgerRowResponse};
 use crate::bittensor_core::weight_allocation::{
     BurnAllocation, CategoryAllocation, NormalizedWeight, WeightDistribution,
 };
@@ -21,10 +19,6 @@ pub struct IncentivePoolResult {
     pub usd_emission_capacity: Decimal,
     pub category_payouts: HashMap<String, Decimal>,
     pub miner_payouts: HashMap<String, Decimal>,
-}
-
-pub fn should_fallback_to_legacy(error: &BasilicaApiError) -> bool {
-    matches!(error, BasilicaApiError::NotConfigured)
 }
 
 pub fn compute_cu_vested_fraction(
@@ -908,18 +902,6 @@ mod tests {
         .unwrap();
         assert_eq!(neither.distribution.weights.len(), 1);
         assert_eq!(neither.distribution.weights[0].uid, 999);
-    }
-
-    #[test]
-    fn test_rollout_behavior_not_configured_vs_transient_failure() {
-        assert!(should_fallback_to_legacy(&BasilicaApiError::NotConfigured));
-        assert!(!should_fallback_to_legacy(&BasilicaApiError::Transport(
-            "timeout".to_string(),
-        )));
-        assert!(!should_fallback_to_legacy(&BasilicaApiError::HttpStatus {
-            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-            body: "boom".to_string(),
-        }));
     }
 
     #[test]

@@ -269,7 +269,6 @@ impl ValidatorService {
             api_client,
             gpu_profile_repo,
             validator_metrics.map(|m| Arc::new(m.clone())),
-            self.config.collateral.as_ref().map(|c| c.grace_period()),
         )?;
         Ok(Arc::new(weight_setter))
     }

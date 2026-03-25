@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use basilica_protocol::billing::MinerDelivery;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
@@ -345,42 +344,6 @@ impl BasilicaApiClient {
         Ok(self.get_token_prices(netuid).await?.alpha_price_usd)
     }
 
-    pub async fn get_tao_price_usd(&self, netuid: u16) -> Result<Decimal> {
-        Ok(self.get_token_prices(netuid).await?.tao_price_usd)
-    }
-
-    pub async fn get_miner_delivery(
-        &self,
-        since: DateTime<Utc>,
-        until: DateTime<Utc>,
-    ) -> Result<Vec<MinerDelivery>> {
-        let query = MinerDeliveryQuery {
-            since_epoch_seconds: since.timestamp(),
-            until_epoch_seconds: until.timestamp(),
-        };
-
-        let url = format!(
-            "{}/v1/weights/miner-delivery",
-            self.api_endpoint.trim_end_matches('/')
-        );
-
-        let response = self.signed_get(&url, &query).await?;
-        let body: MinerDeliveryResponse = self.read_json_response(response).await?;
-
-        Ok(body
-            .deliveries
-            .into_iter()
-            .map(|delivery| MinerDelivery {
-                miner_hotkey: delivery.miner_hotkey,
-                miner_uid: delivery.miner_uid,
-                total_hours: delivery.total_hours,
-                revenue_usd: delivery.revenue_usd,
-                gpu_category: delivery.gpu_category,
-                node_id: delivery.node_id,
-            })
-            .collect())
-    }
-
     pub async fn get_incentive_config(
         &self,
     ) -> std::result::Result<IncentiveConfigResponse, BasilicaApiError> {
@@ -580,12 +543,6 @@ impl BasilicaApiClient {
 }
 
 #[derive(Debug, Serialize)]
-struct MinerDeliveryQuery {
-    since_epoch_seconds: i64,
-    until_epoch_seconds: i64,
-}
-
-#[derive(Debug, Serialize)]
 struct EpochWindowQuery {
     epoch_start: String,
     epoch_end: String,
@@ -686,22 +643,6 @@ pub struct PostSlashRequest {
 pub struct PostSlashResponse {
     pub slashed_cu_count: usize,
     pub slashed_ru_count: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct MinerDeliveryResponse {
-    deliveries: Vec<MinerDeliveryItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MinerDeliveryItem {
-    miner_hotkey: String,
-    miner_uid: u32,
-    total_hours: f64,
-    revenue_usd: f64,
-    gpu_category: String,
-    #[serde(default)]
-    node_id: String,
 }
 
 #[derive(Debug, Deserialize)]
