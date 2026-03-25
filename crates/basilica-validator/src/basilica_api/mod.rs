@@ -15,8 +15,6 @@ use tracing::{debug, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BasilicaApiError {
-    #[error("incentive system not configured")]
-    NotConfigured,
     #[error("api transport error: {0}")]
     Transport(String),
     #[error("api parse error: {0}")]
@@ -38,14 +36,9 @@ pub trait ValidatorSigner: Send + Sync {
 fn classify_incentive_status(
     status: reqwest::StatusCode,
     body: Option<String>,
-    not_found_maps_to_not_configured: bool,
 ) -> std::result::Result<(), BasilicaApiError> {
     if status.is_success() {
         return Ok(());
-    }
-
-    if not_found_maps_to_not_configured && status == reqwest::StatusCode::NOT_FOUND {
-        return Err(BasilicaApiError::NotConfigured);
     }
 
     Err(BasilicaApiError::HttpStatus {
@@ -353,7 +346,7 @@ impl BasilicaApiClient {
         );
 
         let response = self.signed_get_typed(&url, &()).await?;
-        self.read_json_response_typed(response, true).await
+        self.read_json_response_typed(response).await
     }
 
     pub async fn get_cus(
@@ -371,7 +364,7 @@ impl BasilicaApiClient {
         );
 
         let response = self.signed_get_typed(&url, &query).await?;
-        let body: GetCusResponse = self.read_json_response_typed(response, false).await?;
+        let body: GetCusResponse = self.read_json_response_typed(response).await?;
         Ok(body.rows)
     }
 
@@ -390,7 +383,7 @@ impl BasilicaApiClient {
         );
 
         let response = self.signed_get_typed(&url, &query).await?;
-        let body: GetRusResponse = self.read_json_response_typed(response, false).await?;
+        let body: GetRusResponse = self.read_json_response_typed(response).await?;
         Ok(body.rows)
     }
 
@@ -405,7 +398,7 @@ impl BasilicaApiClient {
         );
 
         let response = self.signed_post_typed(&url, &payload).await?;
-        let body: PostCusResponse = self.read_json_response_typed(response, false).await?;
+        let body: PostCusResponse = self.read_json_response_typed(response).await?;
         Ok(body.inserted)
     }
 
@@ -424,7 +417,7 @@ impl BasilicaApiClient {
         );
 
         let response = self.signed_post_typed(&url, &payload).await?;
-        self.read_json_response_typed(response, false).await
+        self.read_json_response_typed(response).await
     }
 
     async fn signed_get<Q: Serialize>(&self, url: &str, query: &Q) -> Result<reqwest::Response> {
@@ -504,7 +497,7 @@ impl BasilicaApiClient {
         &self,
         response: reqwest::Response,
     ) -> Result<T> {
-        self.read_json_response_typed(response, false)
+        self.read_json_response_typed(response)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))
     }
@@ -512,16 +505,11 @@ impl BasilicaApiClient {
     async fn read_json_response_typed<T: DeserializeOwned>(
         &self,
         response: reqwest::Response,
-        not_found_maps_to_not_configured: bool,
     ) -> std::result::Result<T, BasilicaApiError> {
         if !response.status().is_success() {
             let status = response.status();
             let body: Option<Value> = response.json().await.ok();
-            return match classify_incentive_status(
-                status,
-                body.map(|v| v.to_string()),
-                not_found_maps_to_not_configured,
-            ) {
+            return match classify_incentive_status(status, body.map(|v| v.to_string())) {
                 Ok(()) => unreachable!("non-success status should not classify as success"),
                 Err(err) => Err(err),
             };
@@ -1038,23 +1026,10 @@ mod tests {
     }
 
     #[test]
-    fn test_incentive_status_404_maps_to_not_configured() {
-        let err = classify_incentive_status(
-            reqwest::StatusCode::NOT_FOUND,
-            Some("{\"error\":\"not configured\"}".to_string()),
-            true,
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, BasilicaApiError::NotConfigured));
-    }
-
-    #[test]
     fn test_incentive_status_500_remains_http_status() {
         let err = classify_incentive_status(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             Some("{\"error\":\"boom\"}".to_string()),
-            true,
         )
         .unwrap_err();
 
@@ -1121,33 +1096,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_json_response_typed_404_maps_to_not_configured() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/typed-404"))
-            .respond_with(
-                ResponseTemplate::new(404)
-                    .set_body_raw(r#"{"error":"not configured"}"#, "application/json"),
-            )
-            .mount(&server)
-            .await;
-
-        let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
-        let client = build_http_client(server.uri(), signer);
-
-        let response = client
-            .signed_get_typed(&format!("{}/typed-404", server.uri()), &())
-            .await
-            .unwrap();
-        let err = client
-            .read_json_response_typed::<IncentiveConfigResponse>(response, true)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, BasilicaApiError::NotConfigured));
-    }
-
-    #[tokio::test]
     async fn test_read_json_response_typed_invalid_json_maps_parse() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1168,7 +1116,7 @@ mod tests {
             .await
             .unwrap();
         let err = client
-            .read_json_response_typed::<IncentiveConfigResponse>(response, false)
+            .read_json_response_typed::<IncentiveConfigResponse>(response)
             .await
             .unwrap_err();
 
@@ -1200,7 +1148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_incentive_config_404_returns_not_configured() {
+    async fn test_get_incentive_config_404_returns_http_status() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/incentive/config"))
@@ -1214,7 +1162,13 @@ mod tests {
         let client = build_http_client(server.uri(), signer);
 
         let err = client.get_incentive_config().await.unwrap_err();
-        assert!(matches!(err, BasilicaApiError::NotConfigured));
+        assert!(matches!(
+            err,
+            BasilicaApiError::HttpStatus {
+                status: reqwest::StatusCode::NOT_FOUND,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

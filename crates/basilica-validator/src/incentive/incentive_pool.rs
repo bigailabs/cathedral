@@ -208,7 +208,8 @@ pub fn compute_incentive_pool(
         ));
     }
 
-    let burn_rate = (Decimal::ONE - (usd_required_epoch / effective_usd_capacity)).max(Decimal::ZERO);
+    let burn_rate =
+        (Decimal::ONE - (usd_required_epoch / effective_usd_capacity)).max(Decimal::ZERO);
     let burn_share = if usd_required_epoch >= effective_usd_capacity {
         Decimal::ZERO
     } else {
@@ -979,7 +980,16 @@ mod tests {
         let config = test_config();
         let result = compute_incentive_pool(
             &config,
-            &[cu_row(("miner-1", 11, "node-1", "0.1", ts(0), "H100", 4, "10"))],
+            &[cu_row((
+                "miner-1",
+                11,
+                "node-1",
+                "0.1",
+                ts(0),
+                "H100",
+                4,
+                "10",
+            ))],
             &[],
             ts(0),
             ts(4),
