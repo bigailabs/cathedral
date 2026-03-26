@@ -1792,6 +1792,7 @@ pub async fn handle_status(
                         let ssh_username = rental
                             .ssh_command
                             .as_deref()
+                            .filter(|cmd| cmd.contains('@'))
                             .and_then(|cmd| parse_ssh_credentials(cmd).ok())
                             .map(|(_, _, user)| user)
                             .unwrap_or_else(|| "ubuntu".to_string());
@@ -1857,6 +1858,7 @@ pub async fn handle_status(
                         let ssh_username = rental
                             .ssh_command
                             .as_deref()
+                            .filter(|cmd| cmd.contains('@'))
                             .and_then(|cmd| parse_ssh_credentials(cmd).ok())
                             .map(|(_, _, user)| user)
                             .unwrap_or_else(|| "ubuntu".to_string());
