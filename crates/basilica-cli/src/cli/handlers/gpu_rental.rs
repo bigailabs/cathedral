@@ -1789,6 +1789,10 @@ pub async fn handle_status(
                     }
                     // Show SSH command with private key path if available locally
                     if let Some(ip) = &rental.ip_address {
+                        let ssh_username = rental.ssh_command.as_deref()
+                            .and_then(|cmd| parse_ssh_credentials(cmd).ok())
+                            .map(|(_, _, user)| user)
+                            .unwrap_or_else(|| "ubuntu".to_string());
                         if let Some(ref ssh_public_key) = rental.ssh_public_key {
                             if let Ok(private_key_path) =
                                 find_private_key_for_public_key(ssh_public_key)
@@ -1797,20 +1801,21 @@ pub async fn handle_status(
                                 println!(
                                     "  SSH: {}",
                                     style(format!(
-                                        "ssh -i {} ubuntu@{}",
+                                        "ssh -i {} {}@{}",
                                         compress_path(&private_key_path),
+                                        ssh_username,
                                         ip
                                     ))
                                     .cyan()
                                 );
                             } else {
                                 // Key not found locally, show basic command
-                                println!("  SSH: ssh ubuntu@{}", ip);
+                                println!("  SSH: ssh {}@{}", ssh_username, ip);
                                 println!("  SSH Key: {}", style("Not found locally").yellow());
                             }
                         } else {
                             // No public key info, show basic command
-                            println!("  SSH: ssh ubuntu@{}", ip);
+                            println!("  SSH: ssh {}@{}", ssh_username, ip);
                         }
                     }
                 }
@@ -1847,6 +1852,10 @@ pub async fn handle_status(
                     }
                     // Show SSH command with private key path if available locally
                     if let Some(ip) = &rental.ip_address {
+                        let ssh_username = rental.ssh_command.as_deref()
+                            .and_then(|cmd| parse_ssh_credentials(cmd).ok())
+                            .map(|(_, _, user)| user)
+                            .unwrap_or_else(|| "ubuntu".to_string());
                         if let Some(ref ssh_public_key) = rental.ssh_public_key {
                             if let Ok(private_key_path) =
                                 find_private_key_for_public_key(ssh_public_key)
@@ -1855,20 +1864,21 @@ pub async fn handle_status(
                                 println!(
                                     "  SSH: {}",
                                     style(format!(
-                                        "ssh -i {} ubuntu@{}",
+                                        "ssh -i {} {}@{}",
                                         compress_path(&private_key_path),
+                                        ssh_username,
                                         ip
                                     ))
                                     .cyan()
                                 );
                             } else {
                                 // Key not found locally, show basic command
-                                println!("  SSH: ssh ubuntu@{}", ip);
+                                println!("  SSH: ssh {}@{}", ssh_username, ip);
                                 println!("  SSH Key: {}", style("Not found locally").yellow());
                             }
                         } else {
                             // No public key info, show basic command
-                            println!("  SSH: ssh ubuntu@{}", ip);
+                            println!("  SSH: ssh {}@{}", ssh_username, ip);
                         }
                     }
                 }
