@@ -493,7 +493,7 @@ impl ValidationNode {
         let mut nvidia_smi_output: Option<String> = None;
         let connectivity_successful = match self
             .ssh_client
-            .execute_command(
+            .execute_command_with_retry(
                 ssh_details,
                 "nvidia-smi --query-gpu=uuid --format=csv,noheader",
                 true,
@@ -584,7 +584,7 @@ impl ValidationNode {
             let nonce_cmd = format!("printf '{}' | sha256sum", nonce);
             match self
                 .ssh_client
-                .execute_command(ssh_details, &nonce_cmd, true)
+                .execute_command_with_retry(ssh_details, &nonce_cmd, true)
                 .await
             {
                 Ok(output) => output
