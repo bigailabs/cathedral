@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `basilica status` now displays the correct SSH username for MassedCompute and other non-Ubuntu providers instead of hardcoding `ubuntu`
+
 ## [0.25.0] - 2026-03-05
 
 ### Added
