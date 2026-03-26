@@ -325,10 +325,9 @@ impl SimplePersistence {
         }
 
         // Mark nodes offline when validator node verification is stale (>30 minutes)
-        let stale_health_check_result = sqlx::query(
+        let stale_health_check_nodes = sqlx::query(
             r#"
-            UPDATE miner_nodes
-            SET status = 'offline'
+            SELECT node_id, miner_id FROM miner_nodes
             WHERE status IN ('online', 'verified')
             AND active_rental_id IS NULL
             AND (
@@ -337,14 +336,57 @@ impl SimplePersistence {
             )
             "#,
         )
-        .execute(self.pool())
+        .fetch_all(self.pool())
         .await?;
 
-        if stale_health_check_result.rows_affected() > 0 {
+        let stale_health_check_pairs: Vec<(String, String)> = stale_health_check_nodes
+            .iter()
+            .map(|row| {
+                let miner_id: String = row.try_get("miner_id").unwrap();
+                let node_id: String = row.try_get("node_id").unwrap();
+                (miner_id, node_id)
+            })
+            .collect();
+
+        if !stale_health_check_pairs.is_empty() {
+            let stale_health_check_result = sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET status = 'offline'
+                WHERE status IN ('online', 'verified')
+                AND active_rental_id IS NULL
+                AND (
+                    last_node_check IS NULL
+                    OR datetime(last_node_check) < datetime('now', '-30 minutes')
+                )
+                "#,
+            )
+            .execute(self.pool())
+            .await?;
+
             info!(
                 "Marked {} nodes offline due to stale validator node verification (>30 minutes)",
                 stale_health_check_result.rows_affected()
             );
+
+            self.record_availability_events(
+                stale_health_check_pairs
+                    .into_iter()
+                    .map(|(miner_id, node_id)| AvailabilityEventRequest {
+                        miner_id,
+                        miner_uid: None,
+                        hotkey: None,
+                        node_id,
+                        is_available: false,
+                        is_rented: Some(false),
+                        is_validated: false,
+                        source: AvailabilitySource::StaleNodeCleanup,
+                        source_metadata: None,
+                        observed_at: Utc::now(),
+                    })
+                    .collect(),
+            )
+            .await;
         }
 
         let stale_gpu_cleanup_query = r#"
