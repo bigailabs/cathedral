@@ -550,24 +550,25 @@ impl GpuProfileRepository {
                 stale_count, total_assignments_deleted
             );
 
-            SimplePersistence::with_pool(self.pool.clone()).record_availability_events(
-                stale_pairs
-                    .into_iter()
-                    .map(|(miner_id, node_id)| AvailabilityEventRequest {
-                        miner_id,
-                        miner_uid: None,
-                        hotkey: None,
-                        node_id,
-                        is_available: false,
-                        is_rented: Some(false),
-                        is_validated: false,
-                        source: AvailabilitySource::StaleNodeCleanup,
-                        source_metadata: None,
-                        observed_at: Utc::now(),
-                    })
-                    .collect(),
-            )
-            .await;
+            SimplePersistence::with_pool(self.pool.clone())
+                .record_availability_events(
+                    stale_pairs
+                        .into_iter()
+                        .map(|(miner_id, node_id)| AvailabilityEventRequest {
+                            miner_id,
+                            miner_uid: None,
+                            hotkey: None,
+                            node_id,
+                            is_available: false,
+                            is_rented: Some(false),
+                            is_validated: false,
+                            source: AvailabilitySource::StaleNodeCleanup,
+                            source_metadata: None,
+                            observed_at: Utc::now(),
+                        })
+                        .collect(),
+                )
+                .await;
         }
 
         if orphan_count > 0 {

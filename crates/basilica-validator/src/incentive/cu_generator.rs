@@ -847,4 +847,382 @@ mod tests {
         assert!(row.get::<Option<i64>, _>("processed_at_ms").is_some());
         Ok(())
     }
+
+    fn availability_row_for(
+        hotkey: &str,
+        miner_uid: u16,
+        node_id: &str,
+        effective_at: DateTime<Utc>,
+        expiration_at: Option<DateTime<Utc>>,
+        is_available: bool,
+        is_rented: bool,
+    ) -> AvailabilityLogRow {
+        AvailabilityLogRow {
+            miner_uid,
+            hotkey: hotkey.to_string(),
+            node_id: node_id.to_string(),
+            is_available,
+            is_rented,
+            is_validated: true,
+            source: "validation".to_string(),
+            source_metadata: None,
+            row_effective_at: effective_at.timestamp_millis(),
+            row_expiration_at: expiration_at.map(|value| value.timestamp_millis()),
+            is_current: expiration_at.is_none(),
+        }
+    }
+
+    fn single_node_metadata(
+        gpu_category: &str,
+        gpu_count: u32,
+    ) -> HashMap<(String, String), NodeIncentiveMetadata> {
+        HashMap::from([(
+            ("hotkey-7".to_string(), "node-1".to_string()),
+            NodeIncentiveMetadata {
+                gpu_category: gpu_category.to_string(),
+                gpu_count,
+            },
+        )])
+    }
+
+    #[test]
+    fn fully_available_single_node_earns_full_cus() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![availability_row(window_start, None, true, false)];
+        let metadata = single_node_metadata("H100", 8);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        assert_eq!(windows[0].rows[0].cu_amount, Decimal::from(8));
+        Ok(())
+    }
+
+    #[test]
+    fn partially_available_node_earns_proportional_cus() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![
+            availability_row(
+                window_start,
+                Some(window_start + Duration::minutes(30)),
+                true,
+                false,
+            ),
+            availability_row(window_start + Duration::minutes(30), None, false, false),
+        ];
+        let metadata = single_node_metadata("H100", 1);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        assert_eq!(
+            windows[0].rows[0].cu_amount,
+            Decimal::from_str("0.5").unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_node_earns_zero_cus() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![availability_row(
+            window_start - Duration::minutes(10),
+            None,
+            false,
+            false,
+        )];
+        let metadata = single_node_metadata("H100", 8);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_nodes_generate_separate_cu_rows() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![
+            availability_row_for("hotkey-7", 7, "node-1", window_start, None, true, false),
+            availability_row_for("hotkey-7", 7, "node-2", window_start, None, true, false),
+        ];
+        let metadata = HashMap::from([
+            (
+                ("hotkey-7".to_string(), "node-1".to_string()),
+                NodeIncentiveMetadata {
+                    gpu_category: "H100".to_string(),
+                    gpu_count: 8,
+                },
+            ),
+            (
+                ("hotkey-7".to_string(), "node-2".to_string()),
+                NodeIncentiveMetadata {
+                    gpu_category: "H100".to_string(),
+                    gpu_count: 4,
+                },
+            ),
+        ]);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 2);
+
+        let mut rows_by_node: HashMap<&str, &NewCuLedgerRowRequest> = HashMap::new();
+        for row in &windows[0].rows {
+            rows_by_node.insert(&row.node_id, row);
+        }
+        assert_eq!(rows_by_node["node-1"].cu_amount, Decimal::from(8));
+        assert_eq!(rows_by_node["node-2"].cu_amount, Decimal::from(4));
+        Ok(())
+    }
+
+    #[test]
+    fn node_with_unknown_gpu_category_is_skipped() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![availability_row(window_start, None, true, false)];
+        let metadata = single_node_metadata("B200", 8);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn availability_starting_mid_window_clips_to_window_boundary() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![availability_row(
+            window_start + Duration::minutes(15),
+            None,
+            true,
+            false,
+        )];
+        let metadata = single_node_metadata("H100", 1);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        assert_eq!(
+            windows[0].rows[0].cu_amount,
+            Decimal::from_str("0.75").unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn availability_ending_mid_window_clips_to_expiration() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![
+            availability_row(
+                window_start - Duration::minutes(10),
+                Some(window_start + Duration::minutes(40)),
+                true,
+                false,
+            ),
+            availability_row(window_start + Duration::minutes(40), None, false, false),
+        ];
+        let metadata = single_node_metadata("H100", 1);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        assert_eq!(
+            windows[0].rows[0].cu_amount.round_dp(18),
+            Decimal::from_str("0.666666666666666667").unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn intermittent_availability_sums_all_available_segments() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![
+            availability_row(
+                window_start,
+                Some(window_start + Duration::minutes(20)),
+                true,
+                false,
+            ),
+            availability_row(
+                window_start + Duration::minutes(20),
+                Some(window_start + Duration::minutes(40)),
+                false,
+                false,
+            ),
+            availability_row(window_start + Duration::minutes(40), None, true, false),
+        ];
+        let metadata = single_node_metadata("H100", 1);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        assert_eq!(
+            windows[0].rows[0].cu_amount.round_dp(18),
+            Decimal::from_str("0.666666666666666667").unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn multi_hour_catchup_generates_correct_windows() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(3);
+        let rows = vec![availability_row(window_start, None, true, false)];
+        let metadata = single_node_metadata("H100", 8);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 3);
+        for window in &windows {
+            assert_eq!(window.rows.len(), 1);
+            assert_eq!(window.rows[0].cu_amount, Decimal::from(8));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn is_rented_flag_is_passed_through_but_does_not_affect_cu_amount() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![availability_row(window_start, None, true, true)];
+        let metadata = single_node_metadata("H100", 8);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        assert_eq!(windows[0].rows[0].cu_amount, Decimal::from(8));
+        assert!(windows[0].rows[0].is_rented);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshotted_config_values_on_cu_rows() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![availability_row(window_start, None, true, false)];
+        let metadata = single_node_metadata("H100", 1);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        let cu_row = &windows[0].rows[0];
+        assert_eq!(cu_row.window_hours, 72);
+        assert_eq!(cu_row.price_usd, Decimal::from_str("3.00").unwrap());
+        assert_eq!(cu_row.gpu_category, "H100");
+        Ok(())
+    }
+
+    #[test]
+    fn idempotency_key_format() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![availability_row(window_start, None, true, false)];
+        let metadata = single_node_metadata("H100", 1);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        let expected_key = format!("node-1:{}", window_end.timestamp_millis() / 1000);
+        assert_eq!(windows[0].rows[0].idempotency_key, expected_key);
+        Ok(())
+    }
 }
