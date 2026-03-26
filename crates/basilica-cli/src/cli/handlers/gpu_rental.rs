@@ -1789,7 +1789,9 @@ pub async fn handle_status(
                     }
                     // Show SSH command with private key path if available locally
                     if let Some(ip) = &rental.ip_address {
-                        let ssh_username = rental.ssh_command.as_deref()
+                        let ssh_username = rental
+                            .ssh_command
+                            .as_deref()
                             .and_then(|cmd| parse_ssh_credentials(cmd).ok())
                             .map(|(_, _, user)| user)
                             .unwrap_or_else(|| "ubuntu".to_string());
@@ -1852,7 +1854,9 @@ pub async fn handle_status(
                     }
                     // Show SSH command with private key path if available locally
                     if let Some(ip) = &rental.ip_address {
-                        let ssh_username = rental.ssh_command.as_deref()
+                        let ssh_username = rental
+                            .ssh_command
+                            .as_deref()
                             .and_then(|cmd| parse_ssh_credentials(cmd).ok())
                             .map(|(_, _, user)| user)
                             .unwrap_or_else(|| "ubuntu".to_string());
