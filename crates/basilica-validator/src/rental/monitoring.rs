@@ -260,7 +260,7 @@ impl DatabaseHealthMonitor {
         let observed_at = Utc::now();
 
         self.persistence
-            .record_availability_event_best_effort(AvailabilityEventRequest {
+            .record_availability_event(AvailabilityEventRequest {
                 miner_id: rental.miner_id.clone(),
                 miner_uid: super::extract_miner_uid(&rental.miner_id),
                 hotkey: None,
@@ -271,7 +271,8 @@ impl DatabaseHealthMonitor {
                 source: AvailabilitySource::RentalHealthFailure,
                 source_metadata: Some(reason.clone()),
                 observed_at,
-            });
+            })
+            .await;
 
         let slash_classification = classify_terminal_rental_loss(
             &reason,
@@ -349,12 +350,13 @@ impl DatabaseHealthMonitor {
             if matches!(rental.state, RentalState::Active) {
                 if let RentalLossClassification::NodeLoss { reason } = slash_classification {
                     self.persistence
-                        .record_incentive_slash_event_best_effort(SlashEventRequest {
+                        .record_incentive_slash_event(SlashEventRequest {
                             rental_id: rental.rental_id.clone(),
                             node_id: rental.node_id.clone(),
                             reason,
                             detected_at_ms: observed_at.timestamp_millis(),
-                        });
+                        })
+                        .await;
                 }
             }
 

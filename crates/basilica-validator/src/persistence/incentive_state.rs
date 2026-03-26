@@ -150,13 +150,10 @@ impl IncentiveStateRepository {
 }
 
 impl SimplePersistence {
-    pub fn record_incentive_slash_event_best_effort(&self, event: SlashEventRequest) {
-        let pool = self.pool().clone();
-        tokio::spawn(async move {
-            let repo = IncentiveStateRepository::new(pool);
-            if let Err(error) = repo.record_slash_event(event).await {
-                warn!(error = %error, "Failed to persist incentive slash event");
-            }
-        });
+    pub async fn record_incentive_slash_event(&self, event: SlashEventRequest) {
+        let repo = IncentiveStateRepository::new(self.pool().clone());
+        if let Err(error) = repo.record_slash_event(event).await {
+            warn!(error = %error, "Failed to persist incentive slash event");
+        }
     }
 }

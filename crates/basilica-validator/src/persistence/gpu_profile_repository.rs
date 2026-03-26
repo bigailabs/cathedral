@@ -550,7 +550,7 @@ impl GpuProfileRepository {
                 stale_count, total_assignments_deleted
             );
 
-            SimplePersistence::with_pool(self.pool.clone()).record_availability_events_best_effort(
+            SimplePersistence::with_pool(self.pool.clone()).record_availability_events(
                 stale_pairs
                     .into_iter()
                     .map(|(miner_id, node_id)| AvailabilityEventRequest {
@@ -566,7 +566,8 @@ impl GpuProfileRepository {
                         observed_at: Utc::now(),
                     })
                     .collect(),
-            );
+            )
+            .await;
         }
 
         if orphan_count > 0 {

@@ -633,7 +633,7 @@ impl SimplePersistence {
         let unique_removed: std::collections::HashSet<(String, String)> =
             removed_nodes.iter().cloned().collect();
         if !unique_removed.is_empty() {
-            self.record_availability_events_best_effort(
+            self.record_availability_events(
                 unique_removed
                     .into_iter()
                     .map(|(miner_id, node_id)| AvailabilityEventRequest {
@@ -649,7 +649,8 @@ impl SimplePersistence {
                         observed_at: Utc::now(),
                     })
                     .collect(),
-            );
+            )
+            .await;
         }
 
         Ok(removed_nodes)
@@ -1729,7 +1730,7 @@ impl SimplePersistence {
             }
             let removed = count as u32;
             if removed > 0 {
-                self.record_availability_events_best_effort(
+                self.record_availability_events(
                     affected_node_ids
                         .into_iter()
                         .map(|node_id| AvailabilityEventRequest {
@@ -1745,7 +1746,8 @@ impl SimplePersistence {
                             observed_at: Utc::now(),
                         })
                         .collect(),
-                );
+                )
+                .await;
             }
             return Ok(removed);
         };
@@ -1757,7 +1759,7 @@ impl SimplePersistence {
                 nodes_removed = removed,
                 "Removed nodes via RemoveBid"
             );
-            self.record_availability_events_best_effort(
+            self.record_availability_events(
                 affected_node_ids
                     .into_iter()
                     .map(|node_id| AvailabilityEventRequest {
@@ -1773,7 +1775,8 @@ impl SimplePersistence {
                         observed_at: Utc::now(),
                     })
                     .collect(),
-            );
+            )
+            .await;
         }
         Ok(removed)
     }

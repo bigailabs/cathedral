@@ -25,7 +25,7 @@ Understanding the existing system is critical for implementing the new one. Here
 | Weight Allocation | `crates/basilica-validator/src/bittensor_core/weight_allocation.rs` | `WeightAllocationEngine`: distributes u16::MAX weight across burn + GPU categories, proportional to revenue |
 | Weight Setter | `crates/basilica-validator/src/bittensor_core/weight_setter.rs` | Runs every 360 blocks (~72min). Syncs delivery records from billing API, calls WeightAllocationEngine, submits weights to chain |
 | GPU Assignments | `crates/basilica-validator/src/persistence/gpu_assignments.rs` | Tracks GPU UUIDs assigned to (miner_id, node_id) pairs |
-| Validation Loop | `crates/basilica-validator/src/miner_prover/` | ~5min scoring loop, full validation ~6hrs, lightweight ~10min |
+| Validation Loop | `crates/basilica-validator/src/miner_prover/` | ~10min scoring loop (both full and lightweight), full re-validation per node ~6hrs |
 | Price Fetching | `crates/basilica-validator/src/basilica_api/mod.rs` | `HttpTokenPriceFetcher` → `TokenPriceSnapshot` with `alpha_price_usd`. Uses `PriceCache` with TTL. Fetches from Basilica API |
 | Database | `crates/basilica-validator/migrations/` | SQLite. Tables: miner_nodes, gpu_uuid_assignments, miner_gpu_profiles, verification_logs, weight_allocation_history, weight_set_epochs, rentals |
 | Rental State | `crates/basilica-validator/src/persistence/entities/rental.rs` | Rental model with status (Provisioning, Active, Restarting, Stopping, Stopped, Failed), cost_per_hour, total_cost, termination_reason |
@@ -78,7 +78,7 @@ These were discussed and resolved during spec design:
 Miner → makes nodes available
   │
   ▼
-Validation Loop (~15min)  [EXISTING — crates/basilica-validator/src/miner_prover/]
+Validation Loop (~10min)  [EXISTING — crates/basilica-validator/src/miner_prover/]
   ├── measure uptime
   ├── validate hardware (GPU attestation)
   └── assign GPU category + count
@@ -340,7 +340,7 @@ The highest-frequency source. Every completed validation (full or lightweight) w
 - **Function**: `store_node_verification_result_with_miner_info()`
 - **Where**: After the `success` boolean is determined, before the DB transaction
 - **Values**: `is_available = success`, `is_rented` from `active_rental_id` check, `is_validated = true`
-- **Frequency**: Every ~5 min per node
+- **Frequency**: Every ~10 min per node
 
 #### 2. Rental Health Check Terminal Failure
 

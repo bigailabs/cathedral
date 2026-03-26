@@ -334,22 +334,19 @@ impl AvailabilityLogRepository {
 }
 
 impl SimplePersistence {
-    pub fn record_availability_event_best_effort(&self, event: AvailabilityEventRequest) {
-        self.record_availability_events_best_effort(vec![event]);
+    pub async fn record_availability_event(&self, event: AvailabilityEventRequest) {
+        self.record_availability_events(vec![event]).await;
     }
 
-    pub fn record_availability_events_best_effort(&self, events: Vec<AvailabilityEventRequest>) {
+    pub async fn record_availability_events(&self, events: Vec<AvailabilityEventRequest>) {
         if events.is_empty() {
             return;
         }
 
-        let pool = self.pool().clone();
-        tokio::spawn(async move {
-            let repo = AvailabilityLogRepository::new(pool);
-            if let Err(error) = repo.record_events(events).await {
-                warn!(error = %error, "Failed to record availability events");
-            }
-        });
+        let repo = AvailabilityLogRepository::new(self.pool().clone());
+        if let Err(error) = repo.record_events(events).await {
+            warn!(error = %error, "Failed to record availability events");
+        }
     }
 }
 

@@ -558,7 +558,7 @@ impl VerificationEngine {
             .unwrap_or(false);
 
         self.persistence
-            .record_availability_event_best_effort(AvailabilityEventRequest {
+            .record_availability_event(AvailabilityEventRequest {
                 miner_id: miner_id.clone(),
                 miner_uid: Some(miner_uid),
                 hotkey: Some(miner_info.hotkey.to_string()),
@@ -569,7 +569,8 @@ impl VerificationEngine {
                 source: AvailabilitySource::Validation,
                 source_metadata: Some(format!("validation_type={:?}", node_result.validation_type)),
                 observed_at: Utc::now(),
-            });
+            })
+            .await;
 
         let status = match (success, &node_result.validation_type) {
             (false, _) => "offline".to_string(),
