@@ -318,6 +318,11 @@ impl WeightSetter {
         hotkey_to_uid: &HashMap<String, u16>,
         metagraph: &Metagraph,
     ) -> Result<ShadowIncentiveResult> {
+        // The epoch window uses +1s offset on period_start for the old delivery path
+        // (inclusive upper-bound API). The new incentive APIs use exclusive bounds,
+        // so we undo the offset here.
+        let shadow_start = epoch.period_start - chrono::Duration::seconds(1);
+
         let incentive_config = self
             .api_client
             .get_incentive_config()
@@ -325,12 +330,12 @@ impl WeightSetter {
             .map_err(|e| anyhow::anyhow!("incentive config: {e}"))?;
         let cu_rows = self
             .api_client
-            .get_cus(epoch.period_start, epoch.period_end)
+            .get_cus(shadow_start, epoch.period_end)
             .await
             .map_err(|e| anyhow::anyhow!("get CUs: {e}"))?;
         let ru_rows = self
             .api_client
-            .get_rus(epoch.period_start, epoch.period_end)
+            .get_rus(shadow_start, epoch.period_end)
             .await
             .map_err(|e| anyhow::anyhow!("get RUs: {e}"))?;
         let token_prices = self.api_client.get_token_prices(self.config.netuid).await?;
@@ -350,7 +355,7 @@ impl WeightSetter {
             &incentive_config,
             &cu_rows,
             &ru_rows,
-            epoch.period_start,
+            shadow_start,
             epoch.period_end,
             usd_emission_capacity,
             self.emission_config.burn_uid,
@@ -489,7 +494,7 @@ impl WeightSetter {
             .get_last_success_end(self.config.netuid)
             .await?;
         let mut period_start = match last_success_end {
-            Some(last_end) => last_end,
+            Some(last_end) => last_end + chrono::Duration::seconds(1),
             None => attempt_start,
         };
 
