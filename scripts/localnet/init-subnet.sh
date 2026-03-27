@@ -170,7 +170,7 @@ fund_wallet() {
         --wallet-path "${WALLETS_DIR}" \
         --wallet-name "${wallet_name}" \
         --network local \
-        --json-output 2>/dev/null | jq -r '.balance.free // "0"' | sed 's/[^0-9.]//g')
+        --json-output 2>/dev/null | jq -r '.totals.free // 0' | sed 's/[^0-9.]//g')
 
     # If balance > 0, skip funding
     if [ -n "$current_balance" ] && [ "$(echo "$current_balance > 0" | bc -l 2>/dev/null)" = "1" ]; then
@@ -182,8 +182,7 @@ fund_wallet() {
     local dest_addr
     dest_addr=$(uvx --from bittensor-cli btcli wallet list \
         --wallet-path "${WALLETS_DIR}" \
-        --wallet-name "${wallet_name}" \
-        --json-output 2>/dev/null | jq -r '.wallets[0].ss58_address')
+        --json-output 2>/dev/null | jq -r --arg name "${wallet_name}" '.wallets[] | select(.name == $name) | .ss58_address')
 
     if [ -z "$dest_addr" ] || [ "$dest_addr" = "null" ]; then
         echo "  ERROR: Could not get address for ${wallet_name}"
@@ -210,16 +209,15 @@ echo ""
 # =============================================================================
 echo "[4/5] Registering validator on netuid=${NETUID}..."
 
-reg_out=$(uvx --from bittensor-cli btcli subnet register \
+if reg_out=$(uvx --from bittensor-cli btcli subnet register \
     --wallet.name "validator" \
     --wallet.hotkey "default" \
     --wallet.path "${WALLETS_DIR}" \
     --netuid "${NETUID}" \
     --network local \
-    --no-prompt 2>&1)
-reg_exit=$?
-
-if [ $reg_exit -ne 0 ]; then
+    --no-prompt 2>&1); then
+    :
+else
     if echo "$reg_out" | grep -qi "already.*registered\|already.*exist"; then
         echo "  Validator may already be registered"
     else
@@ -236,23 +234,19 @@ echo ""
 # =============================================================================
 echo "[4.5/5] Staking TAO to validator hotkey for validator permit..."
 
-stake_out=$(uvx --from bittensor-cli btcli stake add \
+if stake_out=$(uvx --from bittensor-cli btcli stake add \
     --wallet.name "validator" \
     --wallet.hotkey "default" \
     --wallet.path "${WALLETS_DIR}" \
     --netuid "${NETUID}" \
     --amount 1000 \
     --no-safe-staking \
-    --no-mev-protection \
     --network local \
-    --no-prompt 2>&1)
-stake_exit=$?
-
-if [ $stake_exit -ne 0 ]; then
+    --no-prompt 2>&1); then
+    echo "  Staked 1000 TAO to validator hotkey"
+else
     echo "  WARNING: Staking failed (may already be staked)"
     echo "$stake_out"
-else
-    echo "  Staked 1000 TAO to validator hotkey"
 fi
 
 echo ""
@@ -262,16 +256,15 @@ echo ""
 # =============================================================================
 echo "[5/5] Registering miner on netuid=${NETUID}..."
 
-reg_out=$(uvx --from bittensor-cli btcli subnet register \
+if reg_out=$(uvx --from bittensor-cli btcli subnet register \
     --wallet.name "miner_1" \
     --wallet.hotkey "default" \
     --wallet.path "${WALLETS_DIR}" \
     --netuid "${NETUID}" \
     --network local \
-    --no-prompt 2>&1)
-reg_exit=$?
-
-if [ $reg_exit -ne 0 ]; then
+    --no-prompt 2>&1); then
+    :
+else
     if echo "$reg_out" | grep -qi "already.*registered\|already.*exist"; then
         echo "  Miner may already be registered"
     else
