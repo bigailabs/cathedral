@@ -27,3 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_availability_log_hotkey_node_effective
 
 CREATE INDEX IF NOT EXISTS idx_availability_log_expiration
   ON availability_log (row_expiration_at);
+
+-- CU Generator range scan: covers WHERE row_effective_at < ? and ORDER BY row_effective_at ASC, id ASC
+CREATE INDEX IF NOT EXISTS idx_availability_log_effective_id
+  ON availability_log (row_effective_at ASC, id ASC);
