@@ -6,7 +6,7 @@ use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gau
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::miner_prover::types::ValidationType;
 use crate::miner_prover::validation_states::{StateResult, ValidationState};
@@ -597,7 +597,9 @@ impl ValidatorPrometheusMetrics {
     pub async fn collect_gpu_metrics_from_database(&self) {
         let miners = self.persistence.get_all_registered_miners().await.unwrap();
 
-        for miner in miners {
+        let mut total_miners = 0u32;
+
+        for miner in &miners {
             let miner_uid = miner
                 .miner_id
                 .strip_prefix("miner_")
@@ -610,7 +612,7 @@ impl ValidatorPrometheusMetrics {
                 .await
                 .unwrap();
 
-            debug!(
+            trace!(
                 "Miner {} (UID: {}) has {} nodes with GPU assignments",
                 miner.miner_id,
                 miner_uid,
@@ -621,7 +623,7 @@ impl ValidatorPrometheusMetrics {
             for (node_id, gpu_count, gpu_model, gpu_memory_gb) in &node_gpu_counts {
                 let node_uuid = node_id.as_str();
 
-                debug!(
+                trace!(
                     "Setting node GPU count: miner_uid={}, node_id={}, gpu_model={}, gpu_count={}, gpu_memory_gb={}",
                     miner_uid, node_uuid, gpu_model, gpu_count, gpu_memory_gb
                 );
@@ -640,17 +642,21 @@ impl ValidatorPrometheusMetrics {
                 .await
                 .unwrap();
 
-            debug!(
+            trace!(
                 "Setting miner total GPU count: miner_uid={}, total_count={}",
-                miner_uid, total_count
+                miner_uid,
+                total_count
             );
 
             gauge!("basilica_validator_miner_gpu_count",
                 "miner_uid" => miner_uid.to_string()
             )
             .set(total_count as f64);
+
+            total_miners += 1;
         }
 
+        debug!(miners = total_miners, "GPU metrics collection complete");
         info!("Completed GPU metrics collection from database");
     }
 
