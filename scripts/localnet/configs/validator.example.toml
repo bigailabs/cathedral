@@ -114,10 +114,10 @@ weight_set_interval_blocks = 360
 min_miners_per_category = 1
 weight_version_key = 0
 
+api_endpoint = "http://basilica-api:8000"
+
 [emission.gpu_allocations]
 A100 = { weight = 100.0, min_gpu_count = 1, min_gpu_vram = 1 }
-
-api_endpoint = "http://basilica-api:8000"
 
 [bid_grpc]
 listen_address = "0.0.0.0:50052"
