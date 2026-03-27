@@ -549,6 +549,35 @@ pub struct GetMinerDeliveryResponse {
     #[prost(message, repeated, tag = "1")]
     pub deliveries: ::prost::alloc::vec::Vec<MinerDelivery>,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetRevenueEventsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub bucket_start: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "2")]
+    pub bucket_end: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RevenueEvent {
+    #[prost(string, tag = "1")]
+    pub hotkey: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub miner_uid: u32,
+    #[prost(string, tag = "3")]
+    pub node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub gpu_category: ::prost::alloc::string::String,
+    /// Decimal string for precision
+    #[prost(string, tag = "5")]
+    pub ru_amount: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetRevenueEventsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub events: ::prost::alloc::vec::Vec<RevenueEvent>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum RentalStatus {
@@ -1005,6 +1034,37 @@ pub mod billing_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Revenue event aggregation for incentive RU generation
+        pub async fn get_revenue_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetRevenueEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetRevenueEventsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/GetRevenueEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "GetRevenueEvents",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1084,6 +1144,14 @@ pub mod billing_service_server {
             request: tonic::Request<super::GetRentalStatusRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetRentalStatusResponse>,
+            tonic::Status,
+        >;
+        /// Revenue event aggregation for incentive RU generation
+        async fn get_revenue_events(
+            &self,
+            request: tonic::Request<super::GetRevenueEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetRevenueEventsResponse>,
             tonic::Status,
         >;
     }
@@ -1621,6 +1689,53 @@ pub mod billing_service_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = GetRentalStatusSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/GetRevenueEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetRevenueEventsSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::GetRevenueEventsRequest>
+                    for GetRevenueEventsSvc<T> {
+                        type Response = super::GetRevenueEventsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetRevenueEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::get_revenue_events(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = GetRevenueEventsSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
