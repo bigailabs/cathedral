@@ -157,6 +157,7 @@ mod tests {
     fn test_config_from_toml_file() {
         // Test loading from valid TOML file
         let toml_content = r#"
+burn_percentage = 15.0
 forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
@@ -186,6 +187,7 @@ B200 = 25.0
 
         // Test loading from invalid TOML file (allocations don't sum to 100)
         let invalid_toml = r#"
+burn_percentage = 10.0
 forced_burn_percentage = 10.0
 burn_uid = 0
 weight_set_interval_blocks = 360
@@ -212,6 +214,7 @@ H100 = 30.0
     fn test_config_merge_with_defaults() {
         // Test partial config merging
         let partial_config = EmissionConfig {
+            burn_percentage: 0.0,
             forced_burn_percentage: Some(20.0),
             burn_uid: 456,
             gpu_allocations: HashMap::new(), // Empty - should use default
@@ -368,6 +371,7 @@ H100 = 30.0
         allocations.insert("B200".to_string(), GpuAllocation::new(33.333334));
 
         let config = EmissionConfig {
+            burn_percentage: 0.0,
             forced_burn_percentage: None,
             burn_uid: 0,
             gpu_allocations: allocations,
@@ -386,6 +390,7 @@ H100 = 30.0
         allocations.insert("B200".to_string(), GpuAllocation::new(33.0));
 
         let config = EmissionConfig {
+            burn_percentage: 0.0,
             forced_burn_percentage: None,
             burn_uid: 0,
             gpu_allocations: allocations,
@@ -402,6 +407,7 @@ H100 = 30.0
     fn test_config_legacy_format_compatibility() {
         // Test loading from legacy TOML format (just floats)
         let toml_content = r#"
+burn_percentage = 15.0
 forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
@@ -434,6 +440,7 @@ B200 = 25.0
 
         // Test loading from new TOML format with explicit min_gpu_count
         let toml_content = r#"
+burn_percentage = 15.0
 forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
@@ -470,6 +477,7 @@ B200 = { weight = 80.0, min_gpu_count = 8 }
     fn test_min_gpu_vram_configuration() {
         // Test loading TOML with min_gpu_vram
         let toml_content = r#"
+burn_percentage = 10.0
 forced_burn_percentage = 10.0
 burn_uid = 204
 weight_set_interval_blocks = 360

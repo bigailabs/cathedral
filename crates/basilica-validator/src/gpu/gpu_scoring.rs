@@ -1200,6 +1200,7 @@ mod tests {
         );
 
         let custom_emission_config = EmissionConfig {
+            burn_percentage: 0.0,
             forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations: custom_gpu_allocations,
@@ -1302,6 +1303,7 @@ mod tests {
             crate::config::emission::GpuAllocation::new(80.0),
         );
         let emission_config = EmissionConfig {
+            burn_percentage: 0.0,
             forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations,
@@ -1360,6 +1362,7 @@ mod tests {
         );
 
         let emission_config = EmissionConfig {
+            burn_percentage: 0.0,
             forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations,

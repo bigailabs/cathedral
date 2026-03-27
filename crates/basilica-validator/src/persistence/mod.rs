@@ -8,6 +8,7 @@ pub mod gpu_assignments;
 pub mod gpu_profile_repository;
 pub mod hardware_profile;
 pub mod incentive_state;
+pub mod miner_delivery;
 pub mod miner_nodes;
 pub mod miners;
 pub mod nat_profile;
@@ -22,6 +23,7 @@ pub mod verification;
 pub mod verification_logs;
 pub mod weight_set_epochs;
 
+pub use miner_delivery::MinerDeliveryRepository;
 pub use simple_persistence::*;
 pub use types::*;
 pub use validator_persistence::ValidatorPersistence;
