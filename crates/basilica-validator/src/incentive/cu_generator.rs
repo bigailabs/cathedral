@@ -292,13 +292,27 @@ pub fn generate_hourly_cu_windows(
         let mut rows = Vec::new();
         for aggregate in aggregate_node_windows(current_ms, next_ms, availability_rows) {
             let key = (aggregate.hotkey.clone(), aggregate.node_id.clone());
-            let Some(metadata) = node_metadata.get(&key) else {
-                warn!(
-                    node_id = %aggregate.node_id,
-                    hotkey = %aggregate.hotkey,
-                    "Skipping CU generation for node with missing incentive metadata"
-                );
-                continue;
+
+            // Prefer inline GPU metadata from availability log (snapshotted at event time).
+            // Fall back to node_metadata lookup for rows without snapshots.
+            let metadata = match (&aggregate.gpu_category, aggregate.gpu_count) {
+                (Some(cat), Some(cnt)) if !cat.trim().is_empty() && cnt > 0 => {
+                    NodeIncentiveMetadata {
+                        gpu_category: cat.clone(),
+                        gpu_count: cnt,
+                    }
+                }
+                _ => match node_metadata.get(&key) {
+                    Some(m) => m.clone(),
+                    None => {
+                        warn!(
+                            node_id = %aggregate.node_id,
+                            hotkey = %aggregate.hotkey,
+                            "Skipping CU generation for node with missing incentive metadata"
+                        );
+                        continue;
+                    }
+                },
             };
 
             let Some(category_config) = config.gpu_categories.get(&metadata.gpu_category) else {
@@ -358,6 +372,8 @@ struct NodeWindowAggregate {
     node_id: String,
     node_id_for_key: String,
     is_rented: bool,
+    gpu_category: Option<String>,
+    gpu_count: Option<u32>,
     available_ms: i64,
     latest_available_effective_at: i64,
 }
@@ -388,6 +404,8 @@ fn aggregate_node_windows(
                 node_id: row.node_id.clone(),
                 node_id_for_key: row.node_id.clone(),
                 is_rented: row.is_rented,
+                gpu_category: row.gpu_category.clone(),
+                gpu_count: row.gpu_count,
                 available_ms: 0,
                 latest_available_effective_at: row.row_effective_at,
             });
@@ -396,6 +414,8 @@ fn aggregate_node_windows(
         if row.row_effective_at >= aggregate.latest_available_effective_at {
             aggregate.latest_available_effective_at = row.row_effective_at;
             aggregate.is_rented = row.is_rented;
+            aggregate.gpu_category = row.gpu_category.clone();
+            aggregate.gpu_count = row.gpu_count;
         }
     }
 
@@ -427,7 +447,8 @@ async fn load_availability_rows(
 ) -> Result<Vec<AvailabilityLogRow>> {
     let rows = sqlx::query(
         "SELECT miner_uid, hotkey, node_id, is_available, is_rented, is_validated,
-                source, source_metadata, row_effective_at, row_expiration_at, is_current
+                source, source_metadata, gpu_category, gpu_count,
+                row_effective_at, row_expiration_at, is_current
          FROM availability_log
          WHERE row_effective_at < ?
            AND COALESCE(row_expiration_at, ?) > ?
@@ -450,6 +471,8 @@ async fn load_availability_rows(
             is_validated: row.get::<i64, _>("is_validated") != 0,
             source: row.get("source"),
             source_metadata: row.get("source_metadata"),
+            gpu_category: row.get("gpu_category"),
+            gpu_count: row.get::<Option<i64>, _>("gpu_count").map(|v| v as u32),
             row_effective_at: row.get("row_effective_at"),
             row_expiration_at: row.get("row_expiration_at"),
             is_current: row.get::<i64, _>("is_current") != 0,
@@ -589,6 +612,24 @@ mod tests {
         is_available: bool,
         is_rented: bool,
     ) -> AvailabilityLogRow {
+        availability_row_with_gpu(
+            effective_at,
+            expiration_at,
+            is_available,
+            is_rented,
+            "H100",
+            1,
+        )
+    }
+
+    fn availability_row_with_gpu(
+        effective_at: DateTime<Utc>,
+        expiration_at: Option<DateTime<Utc>>,
+        is_available: bool,
+        is_rented: bool,
+        gpu_category: &str,
+        gpu_count: u32,
+    ) -> AvailabilityLogRow {
         AvailabilityLogRow {
             miner_uid: 7,
             hotkey: "hotkey-7".to_string(),
@@ -598,6 +639,8 @@ mod tests {
             is_validated: true,
             source: "validation".to_string(),
             source_metadata: None,
+            gpu_category: Some(gpu_category.to_string()),
+            gpu_count: Some(gpu_count),
             row_effective_at: effective_at.timestamp_millis(),
             row_expiration_at: expiration_at.map(|value| value.timestamp_millis()),
             is_current: expiration_at.is_none(),
@@ -629,8 +672,8 @@ mod tests {
         .execute(persistence.pool())
         .await?;
         sqlx::query(
-            "INSERT INTO availability_log (miner_uid, hotkey, node_id, is_available, is_rented, is_validated, source, row_effective_at, row_expiration_at, is_current)
-             VALUES (7, 'hotkey-7', 'node-1', 1, 0, 1, 'validation', ?, NULL, 1)",
+            "INSERT INTO availability_log (miner_uid, hotkey, node_id, is_available, is_rented, is_validated, source, gpu_category, gpu_count, row_effective_at, row_expiration_at, is_current)
+             VALUES (7, 'hotkey-7', 'node-1', 1, 0, 1, 'validation', 'H100', 1, ?, NULL, 1)",
         )
         .bind(start.timestamp_millis())
         .execute(persistence.pool())
@@ -717,8 +760,8 @@ mod tests {
         .execute(persistence.pool())
         .await?;
         sqlx::query(
-            "INSERT INTO availability_log (miner_uid, hotkey, node_id, is_available, is_rented, is_validated, source, row_effective_at, row_expiration_at, is_current)
-             VALUES (7, 'hotkey-7', 'node-1', 1, 0, 1, 'validation', ?, NULL, 1)",
+            "INSERT INTO availability_log (miner_uid, hotkey, node_id, is_available, is_rented, is_validated, source, gpu_category, gpu_count, row_effective_at, row_expiration_at, is_current)
+             VALUES (7, 'hotkey-7', 'node-1', 1, 0, 1, 'validation', 'H100', 1, ?, NULL, 1)",
         )
         .bind(start.timestamp_millis())
         .execute(persistence.pool())
@@ -787,8 +830,8 @@ mod tests {
         .execute(persistence.pool())
         .await?;
         sqlx::query(
-            "INSERT INTO availability_log (miner_uid, hotkey, node_id, is_available, is_rented, is_validated, source, row_effective_at, row_expiration_at, is_current)
-             VALUES (7, 'hotkey-7', 'node-1', 1, 1, 1, 'validation', ?, NULL, 1)",
+            "INSERT INTO availability_log (miner_uid, hotkey, node_id, is_available, is_rented, is_validated, source, gpu_category, gpu_count, row_effective_at, row_expiration_at, is_current)
+             VALUES (7, 'hotkey-7', 'node-1', 1, 1, 1, 'validation', 'H100', 1, ?, NULL, 1)",
         )
         .bind(start.timestamp_millis())
         .execute(persistence.pool())
@@ -866,7 +909,8 @@ mod tests {
         Ok(())
     }
 
-    fn availability_row_for(
+    #[allow(clippy::too_many_arguments)]
+    fn availability_row_for_with_gpu(
         hotkey: &str,
         miner_uid: u16,
         node_id: &str,
@@ -874,6 +918,8 @@ mod tests {
         expiration_at: Option<DateTime<Utc>>,
         is_available: bool,
         is_rented: bool,
+        gpu_category: &str,
+        gpu_count: u32,
     ) -> AvailabilityLogRow {
         AvailabilityLogRow {
             miner_uid,
@@ -884,6 +930,8 @@ mod tests {
             is_validated: true,
             source: "validation".to_string(),
             source_metadata: None,
+            gpu_category: Some(gpu_category.to_string()),
+            gpu_count: Some(gpu_count),
             row_effective_at: effective_at.timestamp_millis(),
             row_expiration_at: expiration_at.map(|value| value.timestamp_millis()),
             is_current: expiration_at.is_none(),
@@ -907,7 +955,14 @@ mod tests {
     fn fully_available_single_node_earns_full_cus() -> Result<()> {
         let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
         let window_end = window_start + Duration::hours(1);
-        let rows = vec![availability_row(window_start, None, true, false)];
+        let rows = vec![availability_row_with_gpu(
+            window_start,
+            None,
+            true,
+            false,
+            "H100",
+            8,
+        )];
         let metadata = single_node_metadata("H100", 8);
 
         let windows = generate_hourly_cu_windows(
@@ -962,11 +1017,13 @@ mod tests {
     fn unavailable_node_earns_zero_cus() -> Result<()> {
         let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
         let window_end = window_start + Duration::hours(1);
-        let rows = vec![availability_row(
+        let rows = vec![availability_row_with_gpu(
             window_start - Duration::minutes(10),
             None,
             false,
             false,
+            "H100",
+            8,
         )];
         let metadata = single_node_metadata("H100", 8);
 
@@ -989,8 +1046,28 @@ mod tests {
         let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
         let window_end = window_start + Duration::hours(1);
         let rows = vec![
-            availability_row_for("hotkey-7", 7, "node-1", window_start, None, true, false),
-            availability_row_for("hotkey-7", 7, "node-2", window_start, None, true, false),
+            availability_row_for_with_gpu(
+                "hotkey-7",
+                7,
+                "node-1",
+                window_start,
+                None,
+                true,
+                false,
+                "H100",
+                8,
+            ),
+            availability_row_for_with_gpu(
+                "hotkey-7",
+                7,
+                "node-2",
+                window_start,
+                None,
+                true,
+                false,
+                "H100",
+                4,
+            ),
         ];
         let metadata = HashMap::from([
             (
@@ -1034,7 +1111,14 @@ mod tests {
     fn node_with_unknown_gpu_category_is_skipped() -> Result<()> {
         let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
         let window_end = window_start + Duration::hours(1);
-        let rows = vec![availability_row(window_start, None, true, false)];
+        let rows = vec![availability_row_with_gpu(
+            window_start,
+            None,
+            true,
+            false,
+            "B200",
+            8,
+        )];
         let metadata = single_node_metadata("B200", 8);
 
         let windows = generate_hourly_cu_windows(
@@ -1157,7 +1241,14 @@ mod tests {
     fn multi_hour_catchup_generates_correct_windows() -> Result<()> {
         let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
         let window_end = window_start + Duration::hours(3);
-        let rows = vec![availability_row(window_start, None, true, false)];
+        let rows = vec![availability_row_with_gpu(
+            window_start,
+            None,
+            true,
+            false,
+            "H100",
+            8,
+        )];
         let metadata = single_node_metadata("H100", 8);
 
         let windows = generate_hourly_cu_windows(
@@ -1181,7 +1272,14 @@ mod tests {
     fn is_rented_flag_is_passed_through_but_does_not_affect_cu_amount() -> Result<()> {
         let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
         let window_end = window_start + Duration::hours(1);
-        let rows = vec![availability_row(window_start, None, true, true)];
+        let rows = vec![availability_row_with_gpu(
+            window_start,
+            None,
+            true,
+            true,
+            "H100",
+            8,
+        )];
         let metadata = single_node_metadata("H100", 8);
 
         let windows = generate_hourly_cu_windows(
@@ -1241,6 +1339,86 @@ mod tests {
 
         let expected_key = format!("node-1:{}", window_end.timestamp_millis() / 1000);
         assert_eq!(windows[0].rows[0].idempotency_key, expected_key);
+        Ok(())
+    }
+
+    #[test]
+    fn inline_gpu_metadata_uses_latest_row_per_window() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![
+            // First 30 min: 4 GPUs
+            availability_row_with_gpu(
+                window_start,
+                Some(window_start + Duration::minutes(30)),
+                true,
+                false,
+                "H100",
+                4,
+            ),
+            // Last 30 min: 8 GPUs (node re-registered with more GPUs)
+            availability_row_with_gpu(
+                window_start + Duration::minutes(30),
+                None,
+                true,
+                false,
+                "H100",
+                8,
+            ),
+        ];
+        let metadata = HashMap::new();
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        // Latest row (8 GPUs) wins; full hour available → cu_amount = 8
+        assert_eq!(windows[0].rows[0].cu_amount, Decimal::from(8));
+        assert_eq!(windows[0].rows[0].gpu_category, "H100");
+        Ok(())
+    }
+
+    #[test]
+    fn null_gpu_metadata_falls_back_to_node_metadata() -> Result<()> {
+        let window_start = Utc.with_ymd_and_hms(2026, 3, 23, 10, 0, 0).unwrap();
+        let window_end = window_start + Duration::hours(1);
+        let rows = vec![AvailabilityLogRow {
+            miner_uid: 7,
+            hotkey: "hotkey-7".to_string(),
+            node_id: "node-1".to_string(),
+            is_available: true,
+            is_rented: false,
+            is_validated: true,
+            source: "validation".to_string(),
+            source_metadata: None,
+            gpu_category: None,
+            gpu_count: None,
+            row_effective_at: window_start.timestamp_millis(),
+            row_expiration_at: None,
+            is_current: true,
+        }];
+        let metadata = single_node_metadata("H100", 4);
+
+        let windows = generate_hourly_cu_windows(
+            Some(window_start.timestamp_millis()),
+            window_end.timestamp_millis(),
+            &rows,
+            &metadata,
+            &[],
+            &test_config(),
+        )?;
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rows.len(), 1);
+        assert_eq!(windows[0].rows[0].cu_amount, Decimal::from(4));
+        assert_eq!(windows[0].rows[0].gpu_category, "H100");
         Ok(())
     }
 }

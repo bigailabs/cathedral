@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS availability_log (
   is_validated INTEGER NOT NULL CHECK (is_validated IN (0, 1)),
   source TEXT NOT NULL,
   source_metadata TEXT,
+  gpu_category TEXT,
+  gpu_count INTEGER,
   row_effective_at INTEGER NOT NULL,
   row_expiration_at INTEGER,
   is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),

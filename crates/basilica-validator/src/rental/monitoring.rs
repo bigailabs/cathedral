@@ -271,6 +271,8 @@ impl DatabaseHealthMonitor {
                 source: AvailabilitySource::RentalHealthFailure,
                 source_metadata: Some(reason.clone()),
                 observed_at,
+                gpu_category: None,
+                gpu_count: None,
             })
             .await;
 
@@ -353,6 +355,8 @@ impl DatabaseHealthMonitor {
                                     "node claim released after rental termination".to_string(),
                                 ),
                                 observed_at,
+                                gpu_category: None,
+                                gpu_count: None,
                             })
                             .await;
                     }

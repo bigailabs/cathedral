@@ -38,6 +38,8 @@ pub struct AvailabilityEventRequest {
     pub source: AvailabilitySource,
     pub source_metadata: Option<String>,
     pub observed_at: DateTime<Utc>,
+    pub gpu_category: Option<String>,
+    pub gpu_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +60,8 @@ pub struct AvailabilityLogRow {
     pub is_validated: bool,
     pub source: String,
     pub source_metadata: Option<String>,
+    pub gpu_category: Option<String>,
+    pub gpu_count: Option<u32>,
     pub row_effective_at: i64,
     pub row_expiration_at: Option<i64>,
     pub is_current: bool,
@@ -74,6 +78,8 @@ struct ResolvedAvailabilityEvent {
     source: AvailabilitySource,
     source_metadata: Option<String>,
     observed_at_ms: i64,
+    gpu_category: Option<String>,
+    gpu_count: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +88,8 @@ struct CurrentAvailabilityRow {
     is_available: bool,
     is_rented: bool,
     is_validated: bool,
+    gpu_category: Option<String>,
+    gpu_count: Option<u32>,
     row_effective_at: i64,
 }
 
@@ -103,7 +111,7 @@ impl AvailabilityLogRepository {
 
         let current = sqlx::query(
             r#"
-            SELECT id, is_available, is_rented, is_validated, row_effective_at
+            SELECT id, is_available, is_rented, is_validated, gpu_category, gpu_count, row_effective_at
             FROM availability_log
             WHERE hotkey = ? AND node_id = ? AND is_current = 1
             LIMIT 1
@@ -118,6 +126,8 @@ impl AvailabilityLogRepository {
             is_available: int_to_bool(row.get::<i64, _>("is_available")),
             is_rented: int_to_bool(row.get::<i64, _>("is_rented")),
             is_validated: int_to_bool(row.get::<i64, _>("is_validated")),
+            gpu_category: row.get("gpu_category"),
+            gpu_count: row.get::<Option<i64>, _>("gpu_count").map(|v| v as u32),
             row_effective_at: row.get("row_effective_at"),
         });
 
@@ -205,7 +215,8 @@ impl AvailabilityLogRepository {
         let row = sqlx::query(
             r#"
             SELECT miner_uid, hotkey, node_id, is_available, is_rented, is_validated,
-                   source, source_metadata, row_effective_at, row_expiration_at, is_current
+                   source, source_metadata, gpu_category, gpu_count,
+                   row_effective_at, row_expiration_at, is_current
             FROM availability_log
             WHERE hotkey = ? AND node_id = ? AND is_current = 1
             LIMIT 1
@@ -227,7 +238,8 @@ impl AvailabilityLogRepository {
         let rows = sqlx::query(
             r#"
             SELECT miner_uid, hotkey, node_id, is_available, is_rented, is_validated,
-                   source, source_metadata, row_effective_at, row_expiration_at, is_current
+                   source, source_metadata, gpu_category, gpu_count,
+                   row_effective_at, row_expiration_at, is_current
             FROM availability_log
             WHERE hotkey = ? AND node_id = ?
             ORDER BY row_effective_at ASC, id ASC
@@ -266,6 +278,14 @@ impl AvailabilityLogRepository {
                 .unwrap_or(false),
         };
 
+        let (gpu_category, gpu_count) = match (event.gpu_category, event.gpu_count) {
+            (Some(cat), Some(cnt)) => (Some(cat), Some(cnt)),
+            _ => {
+                self.lookup_gpu_metadata(&event.miner_id, &event.node_id)
+                    .await?
+            }
+        };
+
         Ok(ResolvedAvailabilityEvent {
             miner_uid,
             hotkey,
@@ -276,6 +296,8 @@ impl AvailabilityLogRepository {
             source: event.source,
             source_metadata: event.source_metadata,
             observed_at_ms: event.observed_at.timestamp_millis(),
+            gpu_category,
+            gpu_count,
         })
     }
 
@@ -285,6 +307,41 @@ impl AvailabilityLogRepository {
             .fetch_optional(&self.pool)
             .await
             .map_err(Into::into)
+    }
+
+    async fn lookup_gpu_metadata(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+    ) -> Result<(Option<String>, Option<u32>)> {
+        let row = sqlx::query(
+            r#"
+            SELECT gpu_category, gpu_count
+            FROM miner_nodes
+            WHERE miner_id = ? AND node_id = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(match row {
+            Some(row) => {
+                let gpu_category: Option<String> = row.get("gpu_category");
+                let gpu_count: i64 = row.get("gpu_count");
+                (
+                    gpu_category.filter(|v| !v.trim().is_empty()),
+                    if gpu_count > 0 {
+                        Some(gpu_count as u32)
+                    } else {
+                        None
+                    },
+                )
+            }
+            None => (None, None),
+        })
     }
 
     async fn lookup_is_rented(&self, miner_id: &str, node_id: &str) -> Result<Option<bool>> {
@@ -313,8 +370,9 @@ impl AvailabilityLogRepository {
             r#"
             INSERT INTO availability_log (
                 miner_uid, hotkey, node_id, is_available, is_rented, is_validated,
-                source, source_metadata, row_effective_at, row_expiration_at, is_current
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)
+                source, source_metadata, gpu_category, gpu_count,
+                row_effective_at, row_expiration_at, is_current
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)
             "#,
         )
         .bind(event.miner_uid as i64)
@@ -325,6 +383,8 @@ impl AvailabilityLogRepository {
         .bind(bool_to_int(event.is_validated))
         .bind(event.source.as_str())
         .bind(&event.source_metadata)
+        .bind(&event.gpu_category)
+        .bind(event.gpu_count.map(|v| v as i64))
         .bind(event.observed_at_ms)
         .execute(&mut **tx)
         .await?;
@@ -372,6 +432,8 @@ fn states_match(current: &CurrentAvailabilityRow, resolved: &ResolvedAvailabilit
     current.is_available == resolved.is_available
         && current.is_rented == resolved.is_rented
         && current.is_validated == resolved.is_validated
+        && current.gpu_category == resolved.gpu_category
+        && current.gpu_count == resolved.gpu_count
 }
 
 fn map_row(row: sqlx::sqlite::SqliteRow) -> AvailabilityLogRow {
@@ -384,6 +446,8 @@ fn map_row(row: sqlx::sqlite::SqliteRow) -> AvailabilityLogRow {
         is_validated: int_to_bool(row.get::<i64, _>("is_validated")),
         source: row.get("source"),
         source_metadata: row.get("source_metadata"),
+        gpu_category: row.get("gpu_category"),
+        gpu_count: row.get::<Option<i64>, _>("gpu_count").map(|v| v as u32),
         row_effective_at: row.get("row_effective_at"),
         row_expiration_at: row.get("row_expiration_at"),
         is_current: int_to_bool(row.get::<i64, _>("is_current")),
@@ -411,6 +475,8 @@ mod tests {
             source: AvailabilitySource::Validation,
             source_metadata: Some("full".to_string()),
             observed_at,
+            gpu_category: None,
+            gpu_count: None,
         }
     }
 
