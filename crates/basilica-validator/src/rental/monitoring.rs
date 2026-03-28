@@ -333,17 +333,37 @@ impl DatabaseHealthMonitor {
 
             // INVARIANT: Release node claim so it becomes available again.
             if matches!(new_state, RentalState::Stopped | RentalState::Failed) {
-                if let Err(e) = self
+                match self
                     .persistence
                     .release_node(&rental.node_id, &rental.miner_id, &rental.rental_id)
                     .await
                 {
-                    warn!(
-                        rental_id = %rental.rental_id,
-                        node_id = %rental.node_id,
-                        error = %e,
-                        "Failed to release node claim after rental termination"
-                    );
+                    Ok(_) => {
+                        self.persistence
+                            .record_availability_event(AvailabilityEventRequest {
+                                miner_id: rental.miner_id.clone(),
+                                miner_uid: super::extract_miner_uid(&rental.miner_id),
+                                hotkey: None,
+                                node_id: rental.node_id.clone(),
+                                is_available: false,
+                                is_rented: Some(false),
+                                is_validated: false,
+                                source: AvailabilitySource::RentalHealthFailure,
+                                source_metadata: Some(
+                                    "node claim released after rental termination".to_string(),
+                                ),
+                                observed_at,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(
+                            rental_id = %rental.rental_id,
+                            node_id = %rental.node_id,
+                            error = %e,
+                            "Failed to release node claim after rental termination"
+                        );
+                    }
                 }
             }
 
