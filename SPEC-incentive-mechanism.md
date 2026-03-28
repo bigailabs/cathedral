@@ -316,6 +316,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_availability_log_current
 
 The availability log uses an **SCD2-like model**: when a new availability observation arrives for a (hotkey, node_id), the previous `is_current = 1` row has its `row_expiration_at` set and `is_current` flipped to `0`, then a new row is inserted with `is_current = 1`. This allows the CU Generator to compute precise `available_ms` overlaps within each hourly window by scanning the temporal ranges.
 
+**Concurrency note — expire-and-insert atomicity:** The expire-then-insert SCD2 sequence MUST execute within a single database transaction. The partial unique index (`idx_availability_log_current`) guarantees at most one `is_current = 1` row per (hotkey, node_id) but only enforces this after a write completes — it does not prevent two concurrent transactions from both reading the same current row and then both attempting to insert a replacement. Because SQLite uses database-level write locking (only one writer at a time), the second writer will fail with a unique-constraint violation rather than corrupt data. Combined with FR-6's fire-and-forget semantics, this is acceptable: the lost event is logged as a warning and the next observation cycle re-establishes correct state. No `SELECT ... FOR UPDATE` or `BEGIN IMMEDIATE` is required — the unique index is the safety net and SQLite's single-writer model bounds the blast radius to a single lost event under contention.
+
 Timestamps use **millisecond precision** (`row_effective_at`, `row_expiration_at`) to match the CU Generator's hourly window processing which operates in milliseconds.
 
 ### Functional Requirements
