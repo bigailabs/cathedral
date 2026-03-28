@@ -438,10 +438,12 @@ impl BasilicaApiClient {
         &self,
         node_id: &str,
         slash_pct: u32,
+        idempotency_key: &str,
     ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
         let payload = PostSlashRequest {
             node_id: node_id.to_string(),
             slash_pct,
+            idempotency_key: idempotency_key.to_string(),
         };
         let url = format!(
             "{}/v1/incentive/slash",
@@ -657,6 +659,7 @@ pub struct PostCusResponse {
 pub struct PostSlashRequest {
     pub node_id: String,
     pub slash_pct: u32,
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1070,13 +1073,15 @@ mod tests {
         let json = r#"
         {
             "node_id": "node-abc",
-            "slash_pct": 100
+            "slash_pct": 100,
+            "idempotency_key": "rental:rental-1"
         }
         "#;
 
         let parsed: PostSlashRequest = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.node_id, "node-abc");
         assert_eq!(parsed.slash_pct, 100);
+        assert_eq!(parsed.idempotency_key, "rental:rental-1");
     }
 
     #[test]
@@ -1409,7 +1414,8 @@ mod tests {
             .and(header_exists("X-Timestamp"))
             .and(body_json(json!({
                 "node_id": "node-abc",
-                "slash_pct": 100
+                "slash_pct": 100,
+                "idempotency_key": "test-key-1"
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "slashed_cu_count": 5,
@@ -1421,7 +1427,10 @@ mod tests {
         let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
         let client = build_http_client(server.uri(), signer);
 
-        let response = client.slash_node("node-abc", 100).await.unwrap();
+        let response = client
+            .slash_node("node-abc", 100, "test-key-1")
+            .await
+            .unwrap();
         assert_eq!(response.slashed_cu_count, 5);
         assert_eq!(response.slashed_ru_count, 2);
     }
@@ -1438,7 +1447,10 @@ mod tests {
         let signer: Arc<dyn ValidatorSigner> = Arc::new(RecordingSigner::new());
         let client = build_http_client(server.uri(), signer);
 
-        let err = client.slash_node("node-abc", 100).await.unwrap_err();
+        let err = client
+            .slash_node("node-abc", 100, "test-key-2")
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             BasilicaApiError::HttpStatus {

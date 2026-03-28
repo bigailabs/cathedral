@@ -34,6 +34,7 @@ pub trait IncentiveApi: Send + Sync {
         &self,
         node_id: &str,
         slash_pct: u32,
+        idempotency_key: &str,
     ) -> std::result::Result<PostSlashResponse, BasilicaApiError>;
 }
 
@@ -56,8 +57,9 @@ impl IncentiveApi for BasilicaApiClient {
         &self,
         node_id: &str,
         slash_pct: u32,
+        idempotency_key: &str,
     ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
-        BasilicaApiClient::slash_node(self, node_id, slash_pct).await
+        BasilicaApiClient::slash_node(self, node_id, slash_pct, idempotency_key).await
     }
 }
 
@@ -134,20 +136,24 @@ impl CuGenerator {
             for slash_event in &window.slash_events {
                 let mode_str = match self.slash_mode {
                     SlashMode::Hard => {
-                        self.slash_node_with_retry(&slash_event.node_id, config.slash_pct)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "failed to slash node {} for rental {}",
-                                    slash_event.node_id, slash_event.rental_id
-                                )
-                            })?;
+                        self.slash_node_with_retry(
+                            &slash_event.node_id,
+                            config.slash_pct,
+                            &slash_event.idempotency_key,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to slash node {} (key {})",
+                                slash_event.node_id, slash_event.idempotency_key
+                            )
+                        })?;
                         "hard"
                     }
                     SlashMode::Soft => {
                         warn!(
                             node_id = %slash_event.node_id,
-                            rental_id = %slash_event.rental_id,
+                            idempotency_key = %slash_event.idempotency_key,
                             reason = %slash_event.reason,
                             slash_pct = config.slash_pct,
                             "Soft slash: would have slashed node (API call skipped)"
@@ -156,7 +162,7 @@ impl CuGenerator {
                     }
                 };
                 repo.mark_slash_event_processed(
-                    &slash_event.rental_id,
+                    &slash_event.idempotency_key,
                     window.earned_at.timestamp_millis(),
                     mode_str,
                     config.slash_pct,
@@ -223,10 +229,19 @@ impl CuGenerator {
         unreachable!("retry loop must return");
     }
 
-    async fn slash_node_with_retry(&self, node_id: &str, slash_pct: u32) -> Result<()> {
+    async fn slash_node_with_retry(
+        &self,
+        node_id: &str,
+        slash_pct: u32,
+        idempotency_key: &str,
+    ) -> Result<()> {
         let mut backoff = TokioDuration::from_secs(1);
         for attempt in 1..=MAX_RETRIES {
-            match self.api.slash_node(node_id, slash_pct).await {
+            match self
+                .api
+                .slash_node(node_id, slash_pct, idempotency_key)
+                .await
+            {
                 Ok(_) => return Ok(()),
                 Err(error) if attempt < MAX_RETRIES => {
                     warn!(
@@ -539,6 +554,7 @@ mod tests {
             &self,
             node_id: &str,
             _slash_pct: u32,
+            _idempotency_key: &str,
         ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
             self.slash_calls.lock().await.push(node_id.to_string());
             Ok(PostSlashResponse {
@@ -738,9 +754,10 @@ mod tests {
         let detected_at = Utc.with_ymd_and_hms(2026, 3, 23, 12, 15, 0).unwrap();
 
         repo.record_slash_event(SlashEventRequest {
-            rental_id: "rental-1".to_string(),
+            idempotency_key: "rental:rental-1".to_string(),
             node_id: "node-1".to_string(),
             reason: "Health check timeout".to_string(),
+            rental_id: Some("rental-1".to_string()),
             detected_at_ms: detected_at.timestamp_millis(),
         })
         .await?;
@@ -780,9 +797,10 @@ mod tests {
         let repo = IncentiveStateRepository::new(persistence.pool().clone());
         let detected_at = Utc.with_ymd_and_hms(2026, 3, 23, 10, 30, 0).unwrap();
         repo.record_slash_event(SlashEventRequest {
-            rental_id: "rental-1".to_string(),
+            idempotency_key: "rental:rental-1".to_string(),
             node_id: "node-1".to_string(),
             reason: "Health check timeout".to_string(),
+            rental_id: Some("rental-1".to_string()),
             detected_at_ms: detected_at.timestamp_millis(),
         })
         .await?;
@@ -809,7 +827,7 @@ mod tests {
 
         let row = sqlx::query(
             "SELECT slash_mode, applied_slash_pct, processed_at_ms
-             FROM incentive_slash_events WHERE rental_id = 'rental-1'",
+             FROM incentive_slash_events WHERE idempotency_key = 'rental:rental-1'",
         )
         .fetch_one(persistence.pool())
         .await?;
@@ -838,7 +856,7 @@ mod tests {
 
         let row = sqlx::query(
             "SELECT slash_mode, applied_slash_pct, processed_at_ms
-             FROM incentive_slash_events WHERE rental_id = 'rental-1'",
+             FROM incentive_slash_events WHERE idempotency_key = 'rental:rental-1'",
         )
         .fetch_one(persistence.pool())
         .await?;

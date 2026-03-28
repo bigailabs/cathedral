@@ -22,7 +22,7 @@ impl IncentiveStateRepository {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSlashEvent {
-    pub rental_id: String,
+    pub idempotency_key: String,
     pub node_id: String,
     pub reason: String,
     pub detected_at_ms: i64,
@@ -30,9 +30,10 @@ pub struct PendingSlashEvent {
 
 #[derive(Debug, Clone)]
 pub struct SlashEventRequest {
-    pub rental_id: String,
+    pub idempotency_key: String,
     pub node_id: String,
     pub reason: String,
+    pub rental_id: Option<String>,
     pub detected_at_ms: i64,
 }
 
@@ -84,13 +85,14 @@ impl IncentiveStateRepository {
     pub async fn record_slash_event(&self, event: SlashEventRequest) -> Result<bool> {
         let result = sqlx::query(
             "INSERT INTO incentive_slash_events (
-                rental_id, node_id, reason, detected_at_ms
-             ) VALUES (?, ?, ?, ?)
-             ON CONFLICT(rental_id) DO NOTHING",
+                idempotency_key, node_id, reason, rental_id, detected_at_ms
+             ) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(idempotency_key) DO NOTHING",
         )
-        .bind(&event.rental_id)
+        .bind(&event.idempotency_key)
         .bind(&event.node_id)
         .bind(&event.reason)
+        .bind(&event.rental_id)
         .bind(event.detected_at_ms)
         .execute(&self.pool)
         .await?;
@@ -103,11 +105,11 @@ impl IncentiveStateRepository {
         up_to_ms: i64,
     ) -> Result<Vec<PendingSlashEvent>> {
         let rows = sqlx::query(
-            "SELECT rental_id, node_id, reason, detected_at_ms
+            "SELECT idempotency_key, node_id, reason, detected_at_ms
              FROM incentive_slash_events
              WHERE processed_at_ms IS NULL
                AND detected_at_ms < ?
-             ORDER BY detected_at_ms ASC, rental_id ASC",
+             ORDER BY detected_at_ms ASC, idempotency_key ASC",
         )
         .bind(up_to_ms)
         .fetch_all(&self.pool)
@@ -116,7 +118,7 @@ impl IncentiveStateRepository {
         Ok(rows
             .into_iter()
             .map(|row| PendingSlashEvent {
-                rental_id: row.get("rental_id"),
+                idempotency_key: row.get("idempotency_key"),
                 node_id: row.get("node_id"),
                 reason: row.get("reason"),
                 detected_at_ms: row.get("detected_at_ms"),
@@ -126,7 +128,7 @@ impl IncentiveStateRepository {
 
     pub async fn mark_slash_event_processed(
         &self,
-        rental_id: &str,
+        idempotency_key: &str,
         processed_at_ms: i64,
         slash_mode: &str,
         applied_slash_pct: u32,
@@ -136,12 +138,12 @@ impl IncentiveStateRepository {
              SET processed_at_ms = ?,
                  slash_mode = ?,
                  applied_slash_pct = ?
-             WHERE rental_id = ?",
+             WHERE idempotency_key = ?",
         )
         .bind(processed_at_ms)
         .bind(slash_mode)
         .bind(applied_slash_pct)
-        .bind(rental_id)
+        .bind(idempotency_key)
         .execute(&self.pool)
         .await?;
 

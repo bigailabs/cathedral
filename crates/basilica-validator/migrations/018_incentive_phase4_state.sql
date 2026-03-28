@@ -5,9 +5,10 @@ CREATE TABLE IF NOT EXISTS incentive_cu_generator_progress (
 );
 
 CREATE TABLE IF NOT EXISTS incentive_slash_events (
-  rental_id TEXT PRIMARY KEY,
+  idempotency_key TEXT PRIMARY KEY,
   node_id TEXT NOT NULL,
   reason TEXT NOT NULL,
+  rental_id TEXT,
   slash_mode TEXT,
   applied_slash_pct INTEGER,
   detected_at_ms INTEGER NOT NULL,

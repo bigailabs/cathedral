@@ -371,9 +371,10 @@ impl DatabaseHealthMonitor {
                 if let RentalLossClassification::NodeLoss { reason } = slash_classification {
                     self.persistence
                         .record_incentive_slash_event(SlashEventRequest {
-                            rental_id: rental.rental_id.clone(),
+                            idempotency_key: format!("rental:{}", rental.rental_id),
                             node_id: rental.node_id.clone(),
                             reason,
+                            rental_id: Some(rental.rental_id.clone()),
                             detected_at_ms: observed_at.timestamp_millis(),
                         })
                         .await;

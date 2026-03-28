@@ -166,6 +166,8 @@ pub struct SlashNodeRequest {
     pub slash_pct: u32,
     #[prost(string, tag = "3")]
     pub requested_by_hotkey: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub idempotency_key: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
