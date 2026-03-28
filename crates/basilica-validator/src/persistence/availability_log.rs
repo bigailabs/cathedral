@@ -133,7 +133,7 @@ impl AvailabilityLogRepository {
 
         let transition = match current {
             Some(current) => {
-                if resolved.observed_at_ms <= current.row_effective_at {
+                if resolved.observed_at_ms < current.row_effective_at {
                     if states_match(&current, &resolved) {
                         AvailabilityTransition::NoOp
                     } else {
@@ -564,6 +564,34 @@ mod tests {
         assert_eq!(history[1].row_effective_at, second.timestamp_millis());
         assert!(history[1].is_current);
         assert!(!history[1].is_available);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_timestamp_different_state_transitions_instead_of_ignored() -> Result<()> {
+        let repo = create_repo().await?;
+        let observed_at = Utc::now();
+
+        repo.record_event(test_event(true, false, true, observed_at))
+            .await?;
+
+        // Same timestamp, different state (is_rented changed)
+        let transition = repo
+            .record_event(test_event(true, true, true, observed_at))
+            .await?;
+
+        assert_eq!(transition, AvailabilityTransition::Transitioned);
+
+        let history = repo.row_history("hotkey_1", "node-1").await?;
+        assert_eq!(history.len(), 2);
+        assert!(!history[0].is_current);
+        assert_eq!(
+            history[0].row_expiration_at,
+            Some(observed_at.timestamp_millis())
+        );
+        assert!(history[1].is_current);
+        assert!(history[1].is_rented);
 
         Ok(())
     }
