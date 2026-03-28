@@ -412,7 +412,7 @@ Each CU row is self-contained: it captures the GPU-hours earned (`cu_amount`) at
 
 Rows are append-only. The sole mutation is slashing (setting `is_slashed = true`). Linear vesting math is computed in Rust (not SQL) using the `earned_at` timestamp and each row's stored `window_hours`.
 
-This is the central ledger for the new incentive mechanism — it must be highly available, data-resilient, and centralized so it can serve as the single source of truth for CU accrual across the network. **Validators do not connect to this database directly** — they access it via REST API endpoints on `basilica-incentive`, using the same `BasilicaApiClient` + validator signature auth pattern as existing endpoints (`/v1/weights/miner-delivery`, `/v1/prices/tokens`).
+This is the central ledger for the new incentive mechanism — it must be highly available, data-resilient, and centralized so it can serve as the single source of truth for CU accrual across the network. **Validators do not connect to this database directly** — they access it via REST API endpoints on `basilica-api` (`/v1/incentive/*`), which validates the request (validator signature auth, write authorization) and forwards it to `basilica-incentive` over internal gRPC. Validators use the existing `BasilicaApiClient` with the same auth pattern (`X-Validator-Hotkey`, `X-Validator-Signature`, `X-Timestamp`) as existing endpoints.
 
 ### Database Schema (PostgreSQL — owned by `basilica-incentive`)
 
@@ -1532,4 +1532,4 @@ crates/basilica-validator/src/
 
 1. **Initial parameter values**: Specific starting values for `window_hours`, `max_cu_value_usd`, `revenue_share_pct`, `target_count` per category, `gpu_prices_usd` per category need to be determined during testing/simulation. These will be configured in `basilica-incentive`.
 2. ~~**Exact metagraph field selection for weight math**~~: **Resolved** — `subnet_emission_rate` is read via `subnet_emission_rate_from_metagraph()` in rao/block, then converted to alpha tokens, multiplied by the 41% miner dTAO share and `blocks_per_weight_set` to get per-epoch emission capacity.
-3. **Operational bootstrap details**: Validators call `basilica-incentive` directly, and the service owns incentive config. The remaining implementation detail is the exact operator workflow for seeding/bootstraping active config from service config into Postgres at deployment time.
+3. ~~**Operational bootstrap details**~~: **Resolved** — validators call `basilica-api` REST endpoints, which forwards to `basilica-incentive` over internal gRPC. `basilica-incentive` owns incentive config (loaded from TOML, no database persistence — the `incentive_config` DB table was removed). Only `basilica-api` can reach the gRPC service; validators never call `basilica-incentive` directly. Config changes require a TOML update and service restart.
