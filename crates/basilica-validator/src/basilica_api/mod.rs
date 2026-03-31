@@ -583,8 +583,8 @@ pub struct IncentiveGpuCategoryConfig {
     /// Number of nodes to target. Each node is assumed to have 8 GPUs,
     /// so target_count=1 means 8 GPUs.
     pub target_count: u32,
-    /// Price per individual GPU per hour in USD.
-    pub price_per_gpu_usd: Decimal,
+    /// Price per individual GPU per hour in cents.
+    pub price_per_gpu_cents: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -598,7 +598,7 @@ pub struct CuLedgerRowResponse {
     pub is_rented: bool,
     pub gpu_category: String,
     pub window_hours: u32,
-    pub price_usd: Decimal,
+    pub price_per_gpu_cents: u32,
     pub idempotency_key: String,
     pub is_slashed: bool,
     pub slash_audit_id: Option<uuid::Uuid>,
@@ -643,7 +643,7 @@ pub struct NewCuLedgerRowRequest {
     pub is_rented: bool,
     pub gpu_category: String,
     pub window_hours: u32,
-    pub price_usd: Decimal,
+    pub price_per_gpu_cents: u32,
     pub idempotency_key: String,
 }
 
@@ -889,7 +889,7 @@ mod tests {
         let json = r#"
         {
             "gpu_categories": {
-                "H100": { "target_count": 2, "price_per_gpu_usd": "3.00" }
+                "H100": { "target_count": 2, "price_per_gpu_cents": 300 }
             },
             "window_hours": 72,
             "revenue_share_pct": 30,
@@ -899,10 +899,7 @@ mod tests {
 
         let parsed: IncentiveConfigResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.gpu_categories["H100"].target_count, 2);
-        assert_eq!(
-            parsed.gpu_categories["H100"].price_per_gpu_usd,
-            Decimal::from_str_exact("3.00").unwrap()
-        );
+        assert_eq!(parsed.gpu_categories["H100"].price_per_gpu_cents, 300);
         assert_eq!(parsed.window_hours, 72);
     }
 
@@ -919,7 +916,7 @@ mod tests {
             "is_rented": false,
             "gpu_category": "H100",
             "window_hours": 72,
-            "price_usd": "3.00",
+            "price_per_gpu_cents": 300,
             "idempotency_key": "node-abc:1710496800",
             "is_slashed": false,
             "slash_audit_id": "33333333-3333-3333-3333-333333333333",
@@ -994,7 +991,7 @@ mod tests {
                     "is_rented": false,
                     "gpu_category": "H100",
                     "window_hours": 72,
-                    "price_usd": "3.00",
+                    "price_per_gpu_cents": 300,
                     "idempotency_key": "node-abc:1710496800",
                     "is_slashed": false,
                     "slash_audit_id": "33333333-3333-3333-3333-333333333333",
@@ -1053,7 +1050,7 @@ mod tests {
                     "is_rented": false,
                     "gpu_category": "H100",
                     "window_hours": 72,
-                    "price_usd": "3.00",
+                    "price_per_gpu_cents": 300,
                     "idempotency_key": "node-abc:1710496800"
                 }
             ]
@@ -1186,7 +1183,7 @@ mod tests {
             .and(path("/v1/incentive/config"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "gpu_categories": {
-                    "H100": { "target_count": 2, "price_per_gpu_usd": "3.00" }
+                    "H100": { "target_count": 2, "price_per_gpu_cents": 300 }
                 },
                 "window_hours": 72,
                 "revenue_share_pct": 30,
@@ -1289,7 +1286,7 @@ mod tests {
                     "is_rented": false,
                     "gpu_category": "H100",
                     "window_hours": 72,
-                    "price_usd": "3.00",
+                    "price_per_gpu_cents": 300,
                     "idempotency_key": "node-abc:1710496800",
                     "is_slashed": false,
                     "slash_audit_id": null,
@@ -1365,7 +1362,7 @@ mod tests {
                 is_rented: false,
                 gpu_category: "H100".to_string(),
                 window_hours: 72,
-                price_usd: Decimal::from_str_exact("3.00").unwrap(),
+                price_per_gpu_cents: 300,
                 idempotency_key: "node-abc:1710496800".to_string(),
             }],
         };
@@ -1385,7 +1382,7 @@ mod tests {
                     "is_rented": false,
                     "gpu_category": "H100",
                     "window_hours": 72,
-                    "price_usd": "3.00",
+                    "price_per_gpu_cents": 300,
                     "idempotency_key": "node-abc:1710496800"
                 }]
             })))
