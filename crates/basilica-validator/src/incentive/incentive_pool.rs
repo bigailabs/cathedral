@@ -115,10 +115,7 @@ pub fn compute_incentive_pool(
         let target_gpus = Decimal::from(category_config.target_count) * Decimal::from(8u32);
         let row_capacity_budget = target_gpus * Decimal::from(row.window_hours) * row.price_usd;
         let per_cu_budget = row_capacity_budget / category_supply;
-        let effective_price = min_decimal(
-            row.price_usd,
-            min_decimal(per_cu_budget, config.max_cu_value_usd),
-        );
+        let effective_price = min_decimal(row.price_usd, per_cu_budget);
         let row_payout = vested_fraction * row.cu_amount * effective_price;
         if row_payout <= Decimal::ZERO {
             continue;
@@ -506,23 +503,21 @@ mod tests {
     fn make_config(
         categories: &[(&str, u32, &str)],
         window_hours: u32,
-        max_cu_value_usd: &str,
         revenue_share_pct: Option<u32>,
     ) -> IncentiveConfigResponse {
         let mut gpu_categories = HashMap::new();
-        for (name, target_count, price_usd) in categories {
+        for (name, target_count, price_per_gpu_usd) in categories {
             gpu_categories.insert(
                 name.to_string(),
                 IncentiveGpuCategoryConfig {
                     target_count: *target_count,
-                    price_usd: d(price_usd),
+                    price_per_gpu_usd: d(price_per_gpu_usd),
                 },
             );
         }
         IncentiveConfigResponse {
             gpu_categories,
             window_hours,
-            max_cu_value_usd: d(max_cu_value_usd),
             revenue_share_pct,
             slash_pct: 100,
         }
@@ -534,21 +529,20 @@ mod tests {
             "H100".to_string(),
             IncentiveGpuCategoryConfig {
                 target_count: 1,
-                price_usd: d("10"),
+                price_per_gpu_usd: d("10"),
             },
         );
         gpu_categories.insert(
             "A100".to_string(),
             IncentiveGpuCategoryConfig {
                 target_count: 2,
-                price_usd: d("8"),
+                price_per_gpu_usd: d("8"),
             },
         );
 
         IncentiveConfigResponse {
             gpu_categories,
             window_hours: 4,
-            max_cu_value_usd: d("100"),
             revenue_share_pct: Some(25),
             slash_pct: 100,
         }
@@ -1194,8 +1188,8 @@ mod tests {
 
     #[test]
     fn test_dilution_under_provisioned_capped_at_row_price() {
-        // Config: H100 target_count=4 (→ 32 GPUs), max_cu_value_usd=$100
-        let config = make_config(&[("H100", 4, "10")], 4, "100", None);
+        // Config: H100 target_count=4 (→ 32 GPUs)
+        let config = make_config(&[("H100", 4, "10")], 4, None);
         // 1 miner: cu_amount=8, window_hours=4, price_usd=$10
         let cu_rows = vec![cu_row((
             "miner-0",
@@ -1228,7 +1222,7 @@ mod tests {
     #[test]
     fn test_dilution_over_provisioned_4x() {
         // Config: H100 target_count=1 (→ 8 GPUs)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         // 4 miners: each cu_amount=8, window_hours=4, price_usd=$10 → category_supply = 32
         let cu_rows: Vec<CuLedgerRowResponse> = (0..4)
             .map(|i| {
@@ -1260,7 +1254,7 @@ mod tests {
     #[test]
     fn test_dilution_over_provisioned_8x() {
         // Config: H100 target_count=1 (→ 8 GPUs)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         // 8 miners: each cu_amount=8 → category_supply = 64
         let cu_rows: Vec<CuLedgerRowResponse> = (0..8)
             .map(|i| {
@@ -1281,7 +1275,7 @@ mod tests {
             None,
         )
         .unwrap();
-        // per_cu_budget = $320/64 = $5, effective = MIN($10, $5, $100) = $5 (diluted)
+        // per_cu_budget = $320/64 = $5, effective = MIN($10, $5) = $5 (diluted)
         // Each miner payout = 1.0 × 8 × $5 = $40
         for i in 0..8 {
             assert_eq!(miner_payout(&result, &format!("miner-{i}")), d("40"));
@@ -1289,41 +1283,9 @@ mod tests {
     }
 
     #[test]
-    fn test_max_cu_value_usd_caps_effective_price() {
-        // Config: H100 target_count=4 (32 GPUs), max_cu_value_usd=$2
-        let config = make_config(&[("H100", 4, "10")], 4, "2", None);
-        // 1 miner: cu_amount=8, price_usd=$10
-        let cu_rows = vec![cu_row((
-            "miner-0",
-            0,
-            "node-0",
-            "8",
-            ts(0),
-            "H100",
-            4,
-            "10",
-        ))];
-        let result = compute_incentive_pool(
-            &config,
-            &cu_rows,
-            &[],
-            ts(0),
-            ts(4),
-            d("100000"),
-            999,
-            &make_hotkey_map(1),
-            None,
-        )
-        .unwrap();
-        // per_cu_budget = $1280/8 = $160, effective = MIN($10, $160, $2) = $2
-        // payout = 1.0 × 8 × $2 = $16
-        assert_eq!(miner_payout(&result, "miner-0"), d("16"));
-    }
-
-    #[test]
     fn test_cross_category_dilution_independence() {
         // Config: H100 target_count=1, A100 target_count=2
-        let config = make_config(&[("H100", 1, "10"), ("A100", 2, "8")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10"), ("A100", 2, "8")], 4, None);
         // H100: 8 miners × cu_amount=8 → supply=64, heavily overprovisioned
         let mut cu_rows: Vec<CuLedgerRowResponse> = (0..8)
             .map(|i| {
@@ -1372,7 +1334,7 @@ mod tests {
         // RU: ru_amount=$100, revenue_share_pct=30, window_hours=4
         // Epoch [T0,T4] → vested_fraction=1.0
         // Expected payout = 1.0 × $100 × 30/100 = $30
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let result = compute_incentive_pool(
             &config,
             &[],
@@ -1403,7 +1365,7 @@ mod tests {
         // Row A: ru_amount=$100, revenue_share_pct=30 → contributes $30
         // Row B: ru_amount=$100, revenue_share_pct=50 → contributes $50
         // Expected total payout = $80
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let result = compute_incentive_pool(
             &config,
             &[],
@@ -1426,7 +1388,7 @@ mod tests {
     fn test_ru_zero_revenue_share_pct() {
         // RU: ru_amount=$100, revenue_share_pct=0
         // Expected payout = $0 → miner should get zero weight
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let result = compute_incentive_pool(
             &config,
             &[],
@@ -1447,7 +1409,7 @@ mod tests {
     fn test_ru_100_percent_revenue_share() {
         // RU: ru_amount=$100, revenue_share_pct=100
         // Expected payout = $100
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let result = compute_incentive_pool(
             &config,
             &[],
@@ -1476,7 +1438,7 @@ mod tests {
     fn test_ru_no_category_dilution() {
         // RU rows are NOT subject to per-category dilution.
         // Even if the GPU category is overprovisioned, RU payout = vested × amount × share%
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
 
         // Run 1: RU row alone (no CU oversupply)
         let result_alone = compute_incentive_pool(
@@ -1543,7 +1505,7 @@ mod tests {
     fn test_dilution_uses_row_snapshot_values() {
         // Config: H100 target_count=1 (8 GPUs), config window_hours=4, config price=$10
         // These config values should NOT be used for capacity_budget
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         // CU row with DIFFERENT values: window_hours=8, price_usd=$5
         let cu_rows = vec![cu_row(("miner-0", 0, "node-0", "8", ts(0), "H100", 8, "5"))];
         let result = compute_incentive_pool(
@@ -1571,7 +1533,7 @@ mod tests {
     fn test_cu_and_ru_same_miner_additive() {
         // Miner-0: CU payout = $80 (8 CU × $10), RU payout = $30 (100 × 30%)
         // Expected total = $110
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let result = compute_incentive_pool(
             &config,
             &[cu_row((
@@ -1614,7 +1576,7 @@ mod tests {
         // Miner-0: CU only → payout $80
         // Miner-1: RU only → payout $30
         // Total = $110, capacity = $1000 (no scaling)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let result = compute_incentive_pool(
             &config,
             &[cu_row((
@@ -1670,7 +1632,7 @@ mod tests {
         // effective = MIN($10, $40, $100) = $10
         // 4 consecutive 1h epochs: each vested_fraction=1/4, payout=$20
         // Sum = 4 × $20 = $80 = full CU value
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -1733,7 +1695,7 @@ mod tests {
         //   [T3,T4]: Both vest 1/4, each $20
         //   [T4,T5]: Miner-0 vests 0, Miner-1 vests 1/4=$20
         // Miner-0 total = $80, Miner-1 total = $80
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![
             cu_row(("miner-0", 0, "node-0", "8", ts(0), "H100", 4, "10")),
             cu_row(("miner-1", 1, "node-1", "8", ts(1), "H100", 4, "10")),
@@ -1769,7 +1731,7 @@ mod tests {
         // 4 consecutive 1h epochs: each vested_fraction=1/4
         // Each payout = 0.25 × $100 × 30/100 = $7.5
         // Sum = 4 × $7.5 = $30
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let ru_rows = vec![ru_row((
             "miner-0",
             0,
@@ -1813,7 +1775,7 @@ mod tests {
         // Total raw = $120
         // capacity = $60, scale_factor = $60/$120 = 0.5
         // Scaled: $10, $20, $30 (ratio 1:2:3 preserved)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![
             cu_row(("miner-0", 0, "node-0", "2", ts(0), "H100", 4, "10")),
             cu_row(("miner-1", 1, "node-1", "4", ts(0), "H100", 4, "10")),
@@ -1853,7 +1815,7 @@ mod tests {
         // effective = MIN($10, $40, $100) = $10
         // payout = 8 × $10 = $80
         // capacity = $80 (exactly equal)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -1900,7 +1862,7 @@ mod tests {
         // per_cu=$640/10.001≈$63.99, effective=MIN($10,$63.99,$100)=$10
         // payout = 10.001 × $10 = $100.01
         // capacity = $100
-        let config = make_config(&[("H100", 2, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 2, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -1950,7 +1912,7 @@ mod tests {
         // payout = 100 × $10 = $1000
         // capacity = $10
         // scale_factor = $10/$1000 = 0.01
-        let config = make_config(&[("H100", 100, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 100, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -1999,7 +1961,7 @@ mod tests {
         // effective_price = MIN($10, $160, $100) = $10
         // payout = 1.0 × 2 × $10 = $20, capacity = $100
         // burn_rate = 1 - ($20/$100) = 0.80
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -2034,7 +1996,7 @@ mod tests {
         // effective_price = MIN($10, $40, $100) = $10
         // payout = 8 × $10 = $80, capacity = $80
         // burn_rate = 1 - ($80/$80) = 0
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -2068,7 +2030,7 @@ mod tests {
         // capacity=$40 → scale_factor = 40/80 = 0.5
         // scaled payout = $40
         // burn_rate = 1 - ($40/$40) = 0
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -2108,7 +2070,7 @@ mod tests {
         // Miner weight in pool ≈ 0.25 × 52428 ≈ 13107
         // Dynamic burn weight ≈ 0.75 × 52428 ≈ 39321
         // Total burn = 39321 + 13107 = 52428
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -2182,7 +2144,7 @@ mod tests {
         // scaled payout = $50 (fills effective capacity exactly)
         // No dynamic burn (demand = capacity)
         // Miner gets all available_weight = 32767
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -2234,7 +2196,7 @@ mod tests {
         //
         // 1 miner, raw payout=$20 >> $1 → heavy scaling
         // Payout scaled to ~$1, miner gets all ~655 available weight
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let cu_rows = vec![cu_row((
             "miner-0",
             0,
@@ -2297,7 +2259,7 @@ mod tests {
         // Row B should NOT appear in miner_payouts
         // Row B should NOT contribute to category_cu_supply (dilution denominator)
         // Row A gets full undiluted payout as if row B doesn't exist
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
 
         // Row A: normal
         let row_a = cu_row(("miner-0", 0, "node-0", "8", ts(0), "H100", 4, "10"));
@@ -2332,7 +2294,7 @@ mod tests {
     #[test]
     fn test_slashed_ru_excluded() {
         // Same pattern for RU rows
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
 
         // Row A: normal
         let row_a = ru_row(("miner-0", 0, "node-0", "100", ts(0), "H100", 4, 30));
@@ -2363,7 +2325,7 @@ mod tests {
     fn test_unknown_hotkey_excluded() {
         // CU row with hotkey not in hotkey_to_uid map
         // Should be completely filtered out — no payout, no dilution contribution
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
 
         // "unknown-miner" is NOT in the hotkey map
         let unknown_row = cu_row(("unknown-miner", 99, "node-99", "8", ts(0), "H100", 4, "10"));
@@ -2395,7 +2357,7 @@ mod tests {
     #[test]
     fn test_unknown_gpu_category_cu_excluded() {
         // CU row with gpu_category not in config.gpu_categories → filtered out
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
 
         let unknown_cat_row = cu_row((
             "miner-0",
@@ -2435,7 +2397,7 @@ mod tests {
     fn test_ru_unknown_gpu_category_still_included() {
         // RU row with gpu_category not in config.gpu_categories
         // Should STILL be included (RU filtering only checks is_slashed and hotkey)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
 
         let ru_unknown_cat = ru_row((
             "miner-0",
@@ -2481,7 +2443,7 @@ mod tests {
 
         // Scenario 1: 1 miner
         {
-            let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+            let config = make_config(&[("H100", 1, "10")], 4, None);
             let result = compute_incentive_pool(
                 &config,
                 &[cu_row((
@@ -2508,7 +2470,7 @@ mod tests {
 
         // Scenario 2: 3 miners
         {
-            let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+            let config = make_config(&[("H100", 1, "10")], 4, None);
             let cu_rows: Vec<CuLedgerRowResponse> = (0..3)
                 .map(|i| {
                     let hotkey = format!("miner-{i}");
@@ -2533,7 +2495,7 @@ mod tests {
 
         // Scenario 3: 10 miners
         {
-            let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+            let config = make_config(&[("H100", 1, "10")], 4, None);
             let cu_rows: Vec<CuLedgerRowResponse> = (0..10)
                 .map(|i| {
                     let hotkey = format!("miner-{i}");
@@ -2558,7 +2520,7 @@ mod tests {
 
         // Scenario 4: high burn (tiny payout relative to capacity)
         {
-            let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+            let config = make_config(&[("H100", 1, "10")], 4, None);
             let result = compute_incentive_pool(
                 &config,
                 &[cu_row((
@@ -2585,7 +2547,7 @@ mod tests {
 
         // Scenario 5: low burn (payouts near capacity)
         {
-            let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+            let config = make_config(&[("H100", 1, "10")], 4, None);
             // payout = 1.0 × 8 × $10 = $80, capacity = $81 → burn ≈ 1.2%
             let result = compute_incentive_pool(
                 &config,
@@ -2616,7 +2578,7 @@ mod tests {
     fn test_single_miner_weight_share() {
         // 1 miner, payout=$50, capacity=$100
         // Config: H100 target_count=1 (→ 8 GPUs), max_cu=$100
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         // cu_amount=5 → capacity_budget = 8×4×$10=$320, supply=5, per_cu=$64
         // effective = MIN($10, $64, $100) = $10, payout = 5 × $10 = $50
         let result = compute_incentive_pool(
@@ -2661,7 +2623,7 @@ mod tests {
     #[test]
     fn test_many_miners_greedy_rounding() {
         // 100 miners each with tiny CU → each gets a tiny weight
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let n = 100usize;
         let cu_rows: Vec<CuLedgerRowResponse> = (0..n)
             .map(|i| {
@@ -2718,7 +2680,7 @@ mod tests {
     fn test_category_supply_includes_non_vesting_rows() {
         // Potential bug: category_cu_supply sums ALL active CU rows, even those
         // with zero vesting overlap in the current epoch. This dilutes vesting rows.
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let hotkeys = make_hotkey_map(2);
 
         // With only Row A: supply=80, per_cu_budget=320/80=$4, payout = 80*$4 = $320
@@ -2772,7 +2734,7 @@ mod tests {
 
     #[test]
     fn test_very_small_cu_amount_no_precision_loss() {
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let hotkeys = make_hotkey_map(1);
 
         let result = compute_incentive_pool(
@@ -2810,7 +2772,7 @@ mod tests {
 
     #[test]
     fn test_negative_emission_capacity() {
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let hotkeys = make_hotkey_map(1);
 
         let result = compute_incentive_pool(
@@ -2845,7 +2807,7 @@ mod tests {
 
     #[test]
     fn test_zero_cu_amount_rows_ignored() {
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let hotkeys = make_hotkey_map(2);
 
         let result = compute_incentive_pool(
@@ -2879,7 +2841,7 @@ mod tests {
     #[test]
     fn test_different_window_hours_per_row() {
         // Two CU rows in same category with different snapshotted window_hours (4h and 8h)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let hotkeys = make_hotkey_map(2);
 
         let result = compute_incentive_pool(
@@ -2910,7 +2872,7 @@ mod tests {
     #[test]
     fn test_different_price_usd_per_row() {
         // Two CU rows in same category with different snapshotted price_usd ($10 and $5)
-        let config = make_config(&[("H100", 1, "10")], 4, "100", None);
+        let config = make_config(&[("H100", 1, "10")], 4, None);
         let hotkeys = make_hotkey_map(2);
 
         let result = compute_incentive_pool(

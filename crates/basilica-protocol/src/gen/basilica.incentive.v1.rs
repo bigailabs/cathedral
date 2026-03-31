@@ -5,10 +5,12 @@ pub struct GetConfigRequest {}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GpuCategoryConfig {
+    /// Number of nodes to target. Each node = 8 GPUs, so target_count=1 means 8 GPUs.
     #[prost(uint32, tag = "1")]
     pub target_count: u32,
+    /// Price per individual GPU per hour in USD.
     #[prost(string, tag = "2")]
-    pub price_usd: ::prost::alloc::string::String,
+    pub price_per_gpu_usd: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -20,8 +22,6 @@ pub struct GetConfigResponse {
     >,
     #[prost(uint32, tag = "2")]
     pub window_hours: u32,
-    #[prost(string, tag = "3")]
-    pub max_cu_value_usd: ::prost::alloc::string::String,
     #[prost(uint32, optional, tag = "4")]
     pub revenue_share_pct: ::core::option::Option<u32>,
     #[prost(uint32, tag = "5")]
