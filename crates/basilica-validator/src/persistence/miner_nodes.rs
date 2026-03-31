@@ -1904,6 +1904,39 @@ impl SimplePersistence {
 
         Ok(count as u32)
     }
+
+    /// Get current status string for a node.
+    pub async fn get_node_status(&self, node_id: &str, miner_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM miner_nodes WHERE node_id = ? AND miner_id = ?",
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Update node status and last_node_check timestamp within an existing transaction.
+    pub async fn update_node_status_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        node_id: &str,
+        miner_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE miner_nodes
+             SET status = ?, last_node_check = datetime('now')
+             WHERE node_id = ? AND miner_id = ?",
+        )
+        .bind(status)
+        .bind(node_id)
+        .bind(miner_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

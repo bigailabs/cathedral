@@ -1,9 +1,16 @@
 use anyhow::Result;
 use sqlx::Row;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use tracing::warn;
 
 use crate::persistence::SimplePersistence;
+
+#[derive(Debug, Clone)]
+pub struct NodeIncentiveMetadata {
+    pub gpu_category: String,
+    pub gpu_count: u32,
+}
 
 #[derive(Clone)]
 pub struct IncentiveStateRepository {
@@ -148,6 +155,45 @@ impl IncentiveStateRepository {
         .await?;
 
         Ok(())
+    }
+
+    /// Load GPU metadata for each unique (hotkey, node_id) pair.
+    pub async fn load_node_incentive_metadata(
+        &self,
+        hotkey_node_pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), NodeIncentiveMetadata>> {
+        let mut metadata = HashMap::new();
+        for (hotkey, node_id) in hotkey_node_pairs {
+            if let Some(row) = sqlx::query(
+                "SELECT mn.gpu_category, mn.gpu_count
+                 FROM miner_nodes mn
+                 JOIN miners m ON mn.miner_id = m.id
+                 WHERE m.hotkey = ?
+                   AND mn.node_id = ?
+                 LIMIT 1",
+            )
+            .bind(hotkey)
+            .bind(node_id)
+            .fetch_optional(&self.pool)
+            .await?
+            {
+                let gpu_category: Option<String> = row.get("gpu_category");
+                let gpu_count: i64 = row.get("gpu_count");
+                if let Some(gpu_category) = gpu_category.filter(|value| !value.trim().is_empty()) {
+                    if gpu_count > 0 {
+                        metadata.insert(
+                            (hotkey.clone(), node_id.clone()),
+                            NodeIncentiveMetadata {
+                                gpu_category,
+                                gpu_count: gpu_count as u32,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(metadata)
     }
 }
 

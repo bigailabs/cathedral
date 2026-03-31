@@ -47,6 +47,85 @@ impl SimplePersistence {
         Ok(())
     }
 
+    pub async fn create_verification_log_with_binary_data(
+        &self,
+        log: &VerificationLog,
+        binary_validation_time: Option<String>,
+        binary_validation_score: Option<f64>,
+    ) -> Result<(), anyhow::Error> {
+        let query = r#"
+            INSERT INTO verification_logs (
+                id, node_id, validator_hotkey, verification_type, timestamp,
+                score, success, details, duration_ms, error_message, created_at, updated_at,
+                last_binary_validation, last_binary_validation_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#;
+
+        sqlx::query(query)
+            .bind(log.id.to_string())
+            .bind(&log.node_id)
+            .bind(&log.validator_hotkey)
+            .bind(&log.verification_type)
+            .bind(log.timestamp.to_rfc3339())
+            .bind(log.score)
+            .bind(if log.success { 1 } else { 0 })
+            .bind(&serde_json::to_string(&log.details)?)
+            .bind(log.duration_ms)
+            .bind(&log.error_message)
+            .bind(log.created_at.to_rfc3339())
+            .bind(log.updated_at.to_rfc3339())
+            .bind(&binary_validation_time)
+            .bind(binary_validation_score)
+            .execute(self.pool())
+            .await?;
+
+        info!(
+            verification_id = %log.id,
+            node_id = %log.node_id,
+            success = %log.success,
+            score = %log.score,
+            "Verification log created"
+        );
+
+        Ok(())
+    }
+
+    pub async fn get_last_binary_validation_for_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<(DateTime<Utc>, f64)>, anyhow::Error> {
+        let query = r#"
+            SELECT timestamp, score
+            FROM verification_logs
+            WHERE node_id = ?
+              AND success = 1
+              AND verification_type = 'ssh_automation'
+              AND (
+                json_extract(details, '$.binary_validation_successful') = 1
+                OR json_extract(details, '$.binary_validation_successful') = 'true'
+              )
+            ORDER BY timestamp DESC
+            LIMIT 1
+        "#;
+
+        let row = sqlx::query(query)
+            .bind(node_id)
+            .fetch_optional(self.pool())
+            .await?;
+
+        match row {
+            Some(row) => {
+                let timestamp_str: String = row.get("timestamp");
+                let score: f64 = row.get("score");
+                let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map_err(|e| anyhow::anyhow!("Invalid timestamp format: {}", e))?
+                    .with_timezone(&Utc);
+                Ok(Some((timestamp, score)))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub async fn query_verification_logs(
         &self,
         node_id: Option<&str>,

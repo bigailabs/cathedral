@@ -253,6 +253,30 @@ impl AvailabilityLogRepository {
         Ok(rows.into_iter().map(map_row).collect())
     }
 
+    /// Return all rows whose lifetime overlaps the [start_ms, end_ms) window.
+    pub async fn rows_for_time_range(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<AvailabilityLogRow>> {
+        let rows = sqlx::query(
+            "SELECT miner_uid, hotkey, node_id, is_available, is_rented, is_validated,
+                    source, source_metadata, gpu_category, gpu_count,
+                    row_effective_at, row_expiration_at, is_current
+             FROM availability_log
+             WHERE row_effective_at < ?
+               AND COALESCE(row_expiration_at, ?) > ?
+             ORDER BY row_effective_at ASC, id ASC",
+        )
+        .bind(end_ms)
+        .bind(end_ms)
+        .bind(start_ms)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(map_row).collect())
+    }
+
     async fn resolve_event(
         &self,
         event: AvailabilityEventRequest,

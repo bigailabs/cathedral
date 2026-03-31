@@ -505,50 +505,30 @@ impl VerificationEngine {
             },
         );
 
-        // Store directly to database to avoid repository trait issues
-        let query = r#"
-            INSERT INTO verification_logs (
-                id, node_id, validator_hotkey, verification_type, timestamp,
-                score, success, details, duration_ms, error_message, created_at, updated_at,
-                last_binary_validation, last_binary_validation_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#;
-
-        let now = chrono::Utc::now().to_rfc3339();
         let success = verification_log.success;
 
         // Set binary validation timestamp and score if this was a successful binary validation
         let (binary_validation_time, binary_validation_score) =
             if success && node_result.binary_validation_successful {
-                (Some(now.clone()), Some(node_result.verification_score))
+                (
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some(node_result.verification_score),
+                )
             } else {
                 (None, None)
             };
 
-        if let Err(e) = sqlx::query(query)
-            .bind(verification_log.id.to_string())
-            .bind(&verification_log.node_id)
-            .bind(&verification_log.validator_hotkey)
-            .bind(&verification_log.verification_type)
-            .bind(verification_log.timestamp.to_rfc3339())
-            .bind(verification_log.score)
-            .bind(if success { 1 } else { 0 })
-            .bind(
-                serde_json::to_string(&verification_log.details)
-                    .unwrap_or_else(|_| "{}".to_string()),
+        self.persistence
+            .create_verification_log_with_binary_data(
+                &verification_log,
+                binary_validation_time,
+                binary_validation_score,
             )
-            .bind(verification_log.duration_ms)
-            .bind(&verification_log.error_message)
-            .bind(verification_log.created_at.to_rfc3339())
-            .bind(verification_log.updated_at.to_rfc3339())
-            .bind(binary_validation_time)
-            .bind(binary_validation_score)
-            .execute(self.persistence.pool())
             .await
-        {
-            error!("Failed to store verification log: {}", e);
-            return Err(anyhow::anyhow!("Database storage failed: {}", e));
-        }
+            .map_err(|e| {
+                error!("Failed to store verification log: {}", e);
+                anyhow::anyhow!("Database storage failed: {}", e)
+            })?;
 
         let miner_id = format!("miner_{miner_uid}");
         let is_rented = self
@@ -581,16 +561,12 @@ impl VerificationEngine {
                 if is_rented {
                     "online".to_string()
                 } else {
-                    sqlx::query_scalar::<_, String>(
-                        "SELECT status FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
-                    )
-                    .bind(&miner_id)
-                    .bind(&verification_log.node_id)
-                    .fetch_optional(self.persistence.pool())
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "verified".to_string())
+                    self.persistence
+                        .get_node_status(&verification_log.node_id, &miner_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "verified".to_string())
                 }
             }
         };
@@ -608,16 +584,10 @@ impl VerificationEngine {
         let mut tx = self.persistence.pool().begin().await?;
 
         // Update node status
-        if let Err(e) = sqlx::query(
-            "UPDATE miner_nodes
-             SET status = ?, last_node_check = datetime('now')
-             WHERE node_id = ? AND miner_id = ?",
-        )
-        .bind(&status)
-        .bind(&verification_log.node_id)
-        .bind(&miner_id)
-        .execute(&mut *tx)
-        .await
+        if let Err(e) = self
+            .persistence
+            .update_node_status_in_tx(&mut tx, &verification_log.node_id, &miner_id, &status)
+            .await
         {
             warn!("Failed to update node health status: {}", e);
             tx.rollback().await?;

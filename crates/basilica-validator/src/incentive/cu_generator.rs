@@ -3,13 +3,14 @@ use crate::basilica_api::{
     PostSlashResponse,
 };
 use crate::config::SlashMode;
-use crate::persistence::availability_log::AvailabilityLogRow;
-use crate::persistence::incentive_state::{IncentiveStateRepository, PendingSlashEvent};
+use crate::persistence::availability_log::{AvailabilityLogRepository, AvailabilityLogRow};
+use crate::persistence::incentive_state::{
+    IncentiveStateRepository, NodeIncentiveMetadata, PendingSlashEvent,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::Row;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,12 +105,20 @@ impl CuGenerator {
             });
         }
 
-        let availability_rows =
-            load_availability_rows(&self.pool, progress_ms, completed_window_end_ms).await?;
+        let avail_repo = AvailabilityLogRepository::new(self.pool.clone());
+        let availability_rows = avail_repo
+            .rows_for_time_range(progress_ms, completed_window_end_ms)
+            .await?;
         let slash_events = repo
             .list_unprocessed_slash_events(completed_window_end_ms)
             .await?;
-        let node_metadata = load_node_metadata(&self.pool, &availability_rows).await?;
+        let mut node_keys: Vec<(String, String)> = availability_rows
+            .iter()
+            .map(|row| (row.hotkey.clone(), row.node_id.clone()))
+            .collect();
+        node_keys.sort();
+        node_keys.dedup();
+        let node_metadata = repo.load_node_incentive_metadata(&node_keys).await?;
         let config = self.get_config_with_retry().await?;
         let windows = generate_hourly_cu_windows(
             Some(progress_ms),
@@ -266,12 +275,6 @@ pub struct GeneratedCuWindow {
     pub earned_at: DateTime<Utc>,
     pub rows: Vec<NewCuLedgerRowRequest>,
     pub slash_events: Vec<PendingSlashEvent>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodeIncentiveMetadata {
-    pub gpu_category: String,
-    pub gpu_count: u32,
 }
 
 pub fn generate_hourly_cu_windows(
@@ -440,91 +443,6 @@ async fn initial_progress_ms(repo: &IncentiveStateRepository, fallback_ms: i64) 
     })
 }
 
-async fn load_availability_rows(
-    pool: &SqlitePool,
-    start_ms: i64,
-    end_ms: i64,
-) -> Result<Vec<AvailabilityLogRow>> {
-    let rows = sqlx::query(
-        "SELECT miner_uid, hotkey, node_id, is_available, is_rented, is_validated,
-                source, source_metadata, gpu_category, gpu_count,
-                row_effective_at, row_expiration_at, is_current
-         FROM availability_log
-         WHERE row_effective_at < ?
-           AND COALESCE(row_expiration_at, ?) > ?
-         ORDER BY row_effective_at ASC, id ASC",
-    )
-    .bind(end_ms)
-    .bind(end_ms)
-    .bind(start_ms)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| AvailabilityLogRow {
-            miner_uid: row.get::<i64, _>("miner_uid") as u16,
-            hotkey: row.get("hotkey"),
-            node_id: row.get("node_id"),
-            is_available: row.get::<i64, _>("is_available") != 0,
-            is_rented: row.get::<i64, _>("is_rented") != 0,
-            is_validated: row.get::<i64, _>("is_validated") != 0,
-            source: row.get("source"),
-            source_metadata: row.get("source_metadata"),
-            gpu_category: row.get("gpu_category"),
-            gpu_count: row.get::<Option<i64>, _>("gpu_count").map(|v| v as u32),
-            row_effective_at: row.get("row_effective_at"),
-            row_expiration_at: row.get("row_expiration_at"),
-            is_current: row.get::<i64, _>("is_current") != 0,
-        })
-        .collect())
-}
-
-async fn load_node_metadata(
-    pool: &SqlitePool,
-    availability_rows: &[AvailabilityLogRow],
-) -> Result<HashMap<(String, String), NodeIncentiveMetadata>> {
-    let mut node_keys = availability_rows
-        .iter()
-        .map(|row| (row.hotkey.clone(), row.node_id.clone()))
-        .collect::<Vec<_>>();
-    node_keys.sort();
-    node_keys.dedup();
-
-    let mut metadata = HashMap::new();
-    for (hotkey, node_id) in node_keys {
-        if let Some(row) = sqlx::query(
-            "SELECT mn.gpu_category, mn.gpu_count
-             FROM miner_nodes mn
-             JOIN miners m ON mn.miner_id = m.id
-             WHERE m.hotkey = ?
-               AND mn.node_id = ?
-             LIMIT 1",
-        )
-        .bind(&hotkey)
-        .bind(&node_id)
-        .fetch_optional(pool)
-        .await?
-        {
-            let gpu_category: Option<String> = row.get("gpu_category");
-            let gpu_count: i64 = row.get("gpu_count");
-            if let Some(gpu_category) = gpu_category.filter(|value| !value.trim().is_empty()) {
-                if gpu_count > 0 {
-                    metadata.insert(
-                        (hotkey, node_id),
-                        NodeIncentiveMetadata {
-                            gpu_category,
-                            gpu_count: gpu_count as u32,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(metadata)
-}
-
 fn floor_to_hour_ms(timestamp_ms: i64) -> i64 {
     timestamp_ms - timestamp_ms.rem_euclid(HOUR_MS)
 }
@@ -538,6 +456,7 @@ mod tests {
     use anyhow::Result;
     use chrono::{Duration, TimeZone};
     use rust_decimal::Decimal;
+    use sqlx::Row;
     use std::collections::{HashMap, HashSet};
     use std::str::FromStr;
     use tokio::sync::Mutex;
