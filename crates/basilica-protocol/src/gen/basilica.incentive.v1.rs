@@ -8,9 +8,9 @@ pub struct GpuCategoryConfig {
     /// Number of nodes to target. Each node = 8 GPUs, so target_count=1 means 8 GPUs.
     #[prost(uint32, tag = "1")]
     pub target_count: u32,
-    /// Price per individual GPU per hour in USD.
-    #[prost(string, tag = "2")]
-    pub price_per_gpu_usd: ::prost::alloc::string::String,
+    /// Price per individual GPU per hour in cents.
+    #[prost(uint32, tag = "2")]
+    pub price_per_gpu_cents: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -56,8 +56,8 @@ pub struct CuLedgerRow {
     pub gpu_category: ::prost::alloc::string::String,
     #[prost(uint32, tag = "9")]
     pub window_hours: u32,
-    #[prost(string, tag = "10")]
-    pub price_usd: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "10")]
+    pub price_per_gpu_cents: u32,
     #[prost(string, tag = "11")]
     pub idempotency_key: ::prost::alloc::string::String,
     #[prost(bool, tag = "12")]
@@ -138,8 +138,8 @@ pub struct NewCuLedgerRow {
     pub gpu_category: ::prost::alloc::string::String,
     #[prost(uint32, tag = "8")]
     pub window_hours: u32,
-    #[prost(string, tag = "9")]
-    pub price_usd: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "9")]
+    pub price_per_gpu_cents: u32,
     #[prost(string, tag = "10")]
     pub idempotency_key: ::prost::alloc::string::String,
 }

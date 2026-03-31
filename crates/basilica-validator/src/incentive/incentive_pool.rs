@@ -113,9 +113,10 @@ pub fn compute_incentive_pool(
         }
 
         let target_gpus = Decimal::from(category_config.target_count) * Decimal::from(8u32);
-        let row_capacity_budget = target_gpus * Decimal::from(row.window_hours) * row.price_usd;
+        let row_price_usd = cents_to_usd(row.price_per_gpu_cents);
+        let row_capacity_budget = target_gpus * Decimal::from(row.window_hours) * row_price_usd;
         let per_cu_budget = row_capacity_budget / category_supply;
-        let effective_price = min_decimal(row.price_usd, per_cu_budget);
+        let effective_price = min_decimal(row_price_usd, per_cu_budget);
         let row_payout = vested_fraction * row.cu_amount * effective_price;
         if row_payout <= Decimal::ZERO {
             continue;
@@ -461,6 +462,10 @@ fn min_decimal(left: Decimal, right: Decimal) -> Decimal {
     }
 }
 
+fn cents_to_usd(cents: u32) -> Decimal {
+    Decimal::from(cents) / Decimal::from(100u32)
+}
+
 #[derive(Debug, Clone)]
 struct WeightCandidate {
     uid: u16,
@@ -511,7 +516,7 @@ mod tests {
                 name.to_string(),
                 IncentiveGpuCategoryConfig {
                     target_count: *target_count,
-                    price_per_gpu_usd: d(price_per_gpu_usd),
+                    price_per_gpu_cents: dollars_to_cents(price_per_gpu_usd),
                 },
             );
         }
@@ -529,14 +534,14 @@ mod tests {
             "H100".to_string(),
             IncentiveGpuCategoryConfig {
                 target_count: 1,
-                price_per_gpu_usd: d("10"),
+                price_per_gpu_cents: dollars_to_cents("10"),
             },
         );
         gpu_categories.insert(
             "A100".to_string(),
             IncentiveGpuCategoryConfig {
                 target_count: 2,
-                price_per_gpu_usd: d("8"),
+                price_per_gpu_cents: dollars_to_cents("8"),
             },
         );
 
@@ -581,12 +586,17 @@ mod tests {
             is_rented: false,
             gpu_category: gpu_category.to_string(),
             window_hours,
-            price_usd: d(price_usd),
+            price_per_gpu_cents: dollars_to_cents(price_usd),
             idempotency_key: format!("{hotkey}-{node_id}"),
             is_slashed: false,
             slash_audit_id: None,
             created_at: earned_at,
         }
+    }
+
+    fn dollars_to_cents(value: &str) -> u32 {
+        let usd = Decimal::from_str(value).unwrap();
+        (usd * Decimal::from(100u32)).round().to_u32().unwrap()
     }
 
     type RuRowArgs<'a> = (
