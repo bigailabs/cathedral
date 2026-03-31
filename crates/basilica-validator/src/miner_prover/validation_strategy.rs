@@ -333,7 +333,6 @@ impl ValidationStrategySelector {
         self.persistence
             .get_last_binary_validation_for_node(node_id)
             .await
-            .map_err(Into::into)
     }
 }
 
