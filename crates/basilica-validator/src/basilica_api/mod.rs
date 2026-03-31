@@ -574,7 +574,6 @@ struct EpochWindowQuery {
 pub struct IncentiveConfigResponse {
     pub gpu_categories: HashMap<String, IncentiveGpuCategoryConfig>,
     pub window_hours: u32,
-    pub max_cu_value_usd: Decimal,
     pub revenue_share_pct: Option<u32>,
     pub slash_pct: u32,
 }
@@ -893,7 +892,6 @@ mod tests {
                 "H100": { "target_count": 2, "price_per_gpu_usd": "3.00" }
             },
             "window_hours": 72,
-            "max_cu_value_usd": "0.05",
             "revenue_share_pct": 30,
             "slash_pct": 100
         }
@@ -906,10 +904,6 @@ mod tests {
             Decimal::from_str_exact("3.00").unwrap()
         );
         assert_eq!(parsed.window_hours, 72);
-        assert_eq!(
-            parsed.max_cu_value_usd,
-            Decimal::from_str_exact("0.05").unwrap()
-        );
     }
 
     #[test]
@@ -1195,7 +1189,6 @@ mod tests {
                     "H100": { "target_count": 2, "price_per_gpu_usd": "3.00" }
                 },
                 "window_hours": 72,
-                "max_cu_value_usd": "0.05",
                 "revenue_share_pct": 30,
                 "slash_pct": 100
             })))

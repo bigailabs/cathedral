@@ -22,8 +22,6 @@ pub struct GetConfigResponse {
     >,
     #[prost(uint32, tag = "2")]
     pub window_hours: u32,
-    #[prost(string, tag = "3")]
-    pub max_cu_value_usd: ::prost::alloc::string::String,
     #[prost(uint32, optional, tag = "4")]
     pub revenue_share_pct: ::core::option::Option<u32>,
     #[prost(uint32, tag = "5")]

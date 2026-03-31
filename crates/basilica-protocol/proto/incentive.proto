@@ -24,7 +24,6 @@ message GpuCategoryConfig {
 message GetConfigResponse {
   map<string, GpuCategoryConfig> gpu_categories = 1;
   uint32 window_hours = 2;
-  string max_cu_value_usd = 3;
   optional uint32 revenue_share_pct = 4;
   uint32 slash_pct = 5;
 }
