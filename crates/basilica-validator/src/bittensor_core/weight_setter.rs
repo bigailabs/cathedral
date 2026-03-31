@@ -8,6 +8,7 @@ use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
+use crate::incentive::incentive_pool::compute_incentive_pool;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
@@ -23,7 +24,7 @@ use basilica_protocol::billing::MinerDelivery;
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -47,6 +48,16 @@ pub struct NodeValidationResult {
     pub gpu_model: String,
 }
 
+/// Shadow result from the new incentive-pool logic (log-only, never submitted to chain)
+#[derive(Debug)]
+struct ShadowIncentiveResult {
+    distribution: crate::bittensor_core::weight_allocation::WeightDistribution,
+    burn_percentage: f64,
+    burn_rate: rust_decimal::Decimal,
+    usd_required_epoch: rust_decimal::Decimal,
+    usd_emission_capacity: rust_decimal::Decimal,
+}
+
 /// Manages weight setting operations for Bittensor network
 #[derive(Clone)]
 pub struct WeightSetter {
@@ -57,14 +68,14 @@ pub struct WeightSetter {
     blocks_per_weight_set: u64,
     last_weight_set_block: Arc<tokio::sync::Mutex<u64>>,
     gpu_scoring_engine: Arc<GpuScoringEngine>,
-    weight_allocation_engine: Arc<WeightAllocationEngine>,
     emission_config: EmissionConfig,
-    delivery_repository: Arc<MinerDeliveryRepository>,
     epoch_repository: Arc<WeightSetEpochRepository>,
     api_client: Arc<BasilicaApiClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
-    collateral_grace_period: Option<chrono::Duration>,
+    // Old delivery-based weight logic dependencies
+    weight_allocation_engine: Arc<WeightAllocationEngine>,
+    delivery_repository: Arc<MinerDeliveryRepository>,
 }
 
 impl WeightSetter {
@@ -81,13 +92,11 @@ impl WeightSetter {
         api_client: Arc<BasilicaApiClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         metrics: Option<Arc<ValidatorMetrics>>,
-        collateral_grace_period: Option<chrono::Duration>,
     ) -> Result<Self> {
-        // Create weight allocation engine
+        let epoch_repository = Arc::new(WeightSetEpochRepository::new(persistence.clone()));
         let weight_allocation_engine =
             Arc::new(WeightAllocationEngine::new(emission_config.clone()));
         let delivery_repository = Arc::new(MinerDeliveryRepository::new(persistence.clone()));
-        let epoch_repository = Arc::new(WeightSetEpochRepository::new(persistence.clone()));
 
         Ok(Self {
             config,
@@ -97,14 +106,13 @@ impl WeightSetter {
             blocks_per_weight_set,
             last_weight_set_block: Arc::new(tokio::sync::Mutex::new(0)),
             gpu_scoring_engine,
-            weight_allocation_engine,
             emission_config,
-            delivery_repository,
             epoch_repository,
             api_client,
             gpu_profile_repo,
             metrics,
-            collateral_grace_period,
+            weight_allocation_engine,
+            delivery_repository,
         })
     }
 
@@ -228,6 +236,9 @@ impl WeightSetter {
     }
 
     /// Attempt to set weights (extracted for retry logic)
+    ///
+    /// Runs the OLD delivery-based logic as the active path (submits to chain),
+    /// then runs the NEW incentive-pool logic as a shadow path (log-only).
     async fn attempt_weight_setting(&self) -> Result<()> {
         info!(
             "Setting weights for subnet {} with GPU-based allocation",
@@ -238,18 +249,15 @@ impl WeightSetter {
         let attempt_start = Utc::now();
         let epoch = self.get_or_create_epoch_window(attempt_start).await?;
         self.epoch_repository.increment_attempts(epoch.id).await?;
+        let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
 
+        // ── OLD LOGIC (ACTIVE — sets weights on chain) ──
         self.sync_deliveries_for_epoch(&epoch).await?;
         let deliveries = self
             .delivery_repository
             .get_deliveries_for_window(epoch.period_start, epoch.period_end, None)
             .await?;
-        let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
-        let excluded_nodes = self.fetch_excluded_nodes().await?;
-        let miners_by_category =
-            self.group_deliveries_by_category(deliveries, &hotkey_to_uid, &excluded_nodes);
-
-        self.log_tao_price().await;
+        let miners_by_category = self.group_deliveries_by_category(deliveries, &hotkey_to_uid);
 
         let weight_distribution = self
             .weight_allocation_engine
@@ -265,66 +273,106 @@ impl WeightSetter {
         self.store_weight_results(&weight_distribution).await?;
         self.epoch_repository.mark_success(epoch.id).await?;
 
+        // ── NEW LOGIC (SHADOW — log only, never fails the epoch) ──
+        self.run_shadow_incentive_weights(&epoch, &hotkey_to_uid, &metagraph)
+            .await;
+
         Ok(())
     }
 
-    async fn fetch_metagraph_with_logging(&self) -> Result<Metagraph> {
-        let metagraph = self.get_metagraph().await?;
-        debug!(
-            "Retrieved metagraph with {} neurons",
-            metagraph.hotkeys.len()
-        );
-        Ok(metagraph)
-    }
+    // ── Shadow incentive pool (new logic, log-only) ──
 
-    async fn get_or_create_epoch_window(
+    async fn run_shadow_incentive_weights(
         &self,
-        attempt_start: DateTime<Utc>,
-    ) -> Result<WeightSetEpoch> {
-        if let Some(epoch) = self
-            .epoch_repository
-            .get_pending_epoch(self.config.netuid)
-            .await?
+        epoch: &WeightSetEpoch,
+        hotkey_to_uid: &HashMap<String, u16>,
+        metagraph: &Metagraph,
+    ) {
+        match self
+            .compute_shadow_weights(epoch, hotkey_to_uid, metagraph)
+            .await
         {
-            info!(
-                period_start = %epoch.period_start,
-                period_end = %epoch.period_end,
-                attempts = epoch.attempts,
-                "Reusing pending weight-set epoch window"
-            );
-            return Ok(epoch);
+            Ok(result) => {
+                info!(
+                    miners_served = result.distribution.miners_served,
+                    burn_rate = %result.burn_rate,
+                    burn_percentage = result.burn_percentage,
+                    usd_required = %result.usd_required_epoch,
+                    usd_capacity = %result.usd_emission_capacity,
+                    weights = ?result.distribution.weights,
+                    "[SHADOW_WEIGHTS] New incentive pool weight distribution"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "[SHADOW_WEIGHTS] New incentive weight calculation failed (non-fatal): {:?}",
+                    e
+                );
+            }
         }
-
-        let last_success_end = self
-            .epoch_repository
-            .get_last_success_end(self.config.netuid)
-            .await?;
-        let mut period_start = match last_success_end {
-            Some(last_end) => last_end + chrono::Duration::seconds(1),
-            None => attempt_start,
-        };
-
-        let period_end = attempt_start;
-        if period_start > period_end {
-            warn!(
-                period_start = %period_start,
-                period_end = %period_end,
-                "Computed period_start after period_end; clamping to period_end"
-            );
-            period_start = period_end;
-        }
-
-        let epoch = self
-            .epoch_repository
-            .create_epoch(self.config.netuid, period_start, period_end)
-            .await?;
-        info!(
-            period_start = %epoch.period_start,
-            period_end = %epoch.period_end,
-            "Created new weight-set epoch window"
-        );
-        Ok(epoch)
     }
+
+    async fn compute_shadow_weights(
+        &self,
+        epoch: &WeightSetEpoch,
+        hotkey_to_uid: &HashMap<String, u16>,
+        metagraph: &Metagraph,
+    ) -> Result<ShadowIncentiveResult> {
+        // The epoch window uses +1s offset on period_start for the old delivery path
+        // (inclusive upper-bound API). The new incentive APIs use exclusive bounds,
+        // so we undo the offset here.
+        let shadow_start = epoch.period_start - chrono::Duration::seconds(1);
+
+        let incentive_config = self
+            .api_client
+            .get_incentive_config()
+            .await
+            .map_err(|e| anyhow::anyhow!("incentive config: {e}"))?;
+        let cu_rows = self
+            .api_client
+            .get_cus(shadow_start, epoch.period_end)
+            .await
+            .map_err(|e| anyhow::anyhow!("get CUs: {e}"))?;
+        let ru_rows = self
+            .api_client
+            .get_rus(shadow_start, epoch.period_end)
+            .await
+            .map_err(|e| anyhow::anyhow!("get RUs: {e}"))?;
+        let token_prices = self.api_client.get_token_prices(self.config.netuid).await?;
+        let subnet_emission_rate = self.subnet_emission_rate_from_metagraph(metagraph);
+
+        const RAO_PER_ALPHA: u64 = 1_000_000_000;
+        let miner_emission_share = rust_decimal::Decimal::new(41, 2);
+        let alpha_tokens_per_block = rust_decimal::Decimal::from(subnet_emission_rate)
+            / rust_decimal::Decimal::from(RAO_PER_ALPHA);
+        let blocks_per_epoch = rust_decimal::Decimal::from(self.blocks_per_weight_set);
+        let usd_emission_capacity = alpha_tokens_per_block
+            * miner_emission_share
+            * blocks_per_epoch
+            * token_prices.alpha_price_usd;
+
+        let incentive_result = compute_incentive_pool(
+            &incentive_config,
+            &cu_rows,
+            &ru_rows,
+            shadow_start,
+            epoch.period_end,
+            usd_emission_capacity,
+            self.emission_config.burn_uid,
+            hotkey_to_uid,
+            self.emission_config.forced_burn_percentage,
+        )?;
+
+        Ok(ShadowIncentiveResult {
+            distribution: incentive_result.distribution,
+            burn_percentage: incentive_result.burn_percentage,
+            burn_rate: incentive_result.burn_rate,
+            usd_required_epoch: incentive_result.usd_required_epoch,
+            usd_emission_capacity: incentive_result.usd_emission_capacity,
+        })
+    }
+
+    // ── Old delivery-based helpers ──
 
     async fn sync_deliveries_for_epoch(&self, epoch: &WeightSetEpoch) -> Result<()> {
         let deliveries = self
@@ -339,35 +387,13 @@ impl WeightSetter {
         Ok(())
     }
 
-    fn build_hotkey_to_uid_map(&self, metagraph: &Metagraph) -> HashMap<String, u16> {
-        metagraph
-            .hotkeys
-            .iter()
-            .enumerate()
-            .filter_map(|(uid, account)| {
-                u16::try_from(uid)
-                    .ok()
-                    .map(|u| (Hotkey::from_account_id(account).to_string(), u))
-            })
-            .collect()
-    }
-
     fn group_deliveries_by_category(
         &self,
         deliveries: Vec<MinerDelivery>,
         hotkey_to_uid: &HashMap<String, u16>,
-        excluded_nodes: &HashSet<(String, String)>,
     ) -> HashMap<String, Vec<(MinerUid, f64)>> {
         let mut miners_by_category: HashMap<String, Vec<(MinerUid, f64)>> = HashMap::new();
         for delivery in deliveries {
-            if excluded_nodes.contains(&(delivery.miner_hotkey.clone(), delivery.node_id.clone())) {
-                debug!(
-                    miner_hotkey = %delivery.miner_hotkey,
-                    node_id = %delivery.node_id,
-                    "Skipping delivery for collateral-excluded node"
-                );
-                continue;
-            }
             let current_uid = match hotkey_to_uid.get(&delivery.miner_hotkey) {
                 Some(&uid) => uid,
                 None => {
@@ -436,26 +462,79 @@ impl WeightSetter {
         miners_by_category
     }
 
-    async fn fetch_excluded_nodes(&self) -> Result<HashSet<(String, String)>> {
-        let Some(grace_period) = self.collateral_grace_period else {
-            return Ok(HashSet::new());
-        };
-        self.persistence.get_excluded_nodes(grace_period).await
+    async fn fetch_metagraph_with_logging(&self) -> Result<Metagraph> {
+        let metagraph = self.get_metagraph().await?;
+        debug!(
+            "Retrieved metagraph with {} neurons",
+            metagraph.hotkeys.len()
+        );
+        Ok(metagraph)
     }
 
-    async fn log_tao_price(&self) {
-        match self.api_client.get_tao_price_usd(self.config.netuid).await {
-            Ok(tao_price) => {
-                info!(
-                    tao_price_usd = %tao_price,
-                    burn_percentage = self.emission_config.burn_percentage,
-                    "Fetched TAO price for weight context"
-                );
-            }
-            Err(err) => {
-                warn!("Failed to fetch TAO price: {}", err);
-            }
+    async fn get_or_create_epoch_window(
+        &self,
+        attempt_start: DateTime<Utc>,
+    ) -> Result<WeightSetEpoch> {
+        if let Some(epoch) = self
+            .epoch_repository
+            .get_pending_epoch(self.config.netuid)
+            .await?
+        {
+            info!(
+                period_start = %epoch.period_start,
+                period_end = %epoch.period_end,
+                attempts = epoch.attempts,
+                "Reusing pending weight-set epoch window"
+            );
+            return Ok(epoch);
         }
+
+        let last_success_end = self
+            .epoch_repository
+            .get_last_success_end(self.config.netuid)
+            .await?;
+        let mut period_start = match last_success_end {
+            Some(last_end) => last_end + chrono::Duration::seconds(1),
+            None => attempt_start,
+        };
+
+        let period_end = attempt_start;
+        if period_start > period_end {
+            warn!(
+                period_start = %period_start,
+                period_end = %period_end,
+                "Computed period_start after period_end; clamping to period_end"
+            );
+            period_start = period_end;
+        }
+
+        let epoch = self
+            .epoch_repository
+            .create_epoch(self.config.netuid, period_start, period_end)
+            .await?;
+        info!(
+            period_start = %epoch.period_start,
+            period_end = %epoch.period_end,
+            "Created new weight-set epoch window"
+        );
+        Ok(epoch)
+    }
+
+    fn build_hotkey_to_uid_map(&self, metagraph: &Metagraph) -> HashMap<String, u16> {
+        metagraph
+            .hotkeys
+            .iter()
+            .enumerate()
+            .filter_map(|(uid, account)| {
+                u16::try_from(uid)
+                    .ok()
+                    .map(|u| (Hotkey::from_account_id(account).to_string(), u))
+            })
+            .collect()
+    }
+
+    fn subnet_emission_rate_from_metagraph(&self, metagraph: &Metagraph) -> u64 {
+        metagraph.alpha_out_emission
     }
 
     fn log_weight_distribution(
@@ -854,6 +933,7 @@ impl WeightSetter {
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
         current_block: u64,
     ) -> Result<i64> {
+        let burn_percentage = self.emission_config.burn_percentage;
         use crate::persistence::gpu_profile_repository::{CategoryDistribution, EmissionMetrics};
 
         // Convert category allocations to CategoryDistribution format
@@ -881,7 +961,7 @@ impl WeightSetter {
             id: 0, // Will be set by database
             timestamp: Utc::now(),
             burn_amount,
-            burn_percentage: self.emission_config.burn_percentage,
+            burn_percentage,
             category_distributions,
             total_miners: weight_distribution.miners_served,
             weight_set_block: current_block,
@@ -896,7 +976,7 @@ impl WeightSetter {
             "Stored emission metrics for block {} with {} categories, burn {}%",
             current_block,
             weight_distribution.category_allocations.len(),
-            self.emission_config.burn_percentage
+            burn_percentage
         );
 
         Ok(metrics_id)

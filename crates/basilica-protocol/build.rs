@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/gpu_pow.proto",
                 "proto/billing.proto",
                 "proto/payments.proto",
+                "proto/incentive.proto",
                 "proto/rental.proto",
                 "proto/miner_payouts.proto",
             ],

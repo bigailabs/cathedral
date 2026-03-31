@@ -3,6 +3,7 @@
 //! This module contains all SQL operations related to miner-node relationships.
 
 use crate::miner_prover::types::MinerInfo;
+use crate::persistence::availability_log::{AvailabilityEventRequest, AvailabilitySource};
 use crate::persistence::types::{AvailableNodeData, NodeData};
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
@@ -324,10 +325,9 @@ impl SimplePersistence {
         }
 
         // Mark nodes offline when validator node verification is stale (>30 minutes)
-        let stale_health_check_result = sqlx::query(
+        let stale_health_check_nodes = sqlx::query(
             r#"
-            UPDATE miner_nodes
-            SET status = 'offline'
+            SELECT node_id, miner_id FROM miner_nodes
             WHERE status IN ('online', 'verified')
             AND active_rental_id IS NULL
             AND (
@@ -336,14 +336,59 @@ impl SimplePersistence {
             )
             "#,
         )
-        .execute(self.pool())
+        .fetch_all(self.pool())
         .await?;
 
-        if stale_health_check_result.rows_affected() > 0 {
+        let stale_health_check_pairs: Vec<(String, String)> = stale_health_check_nodes
+            .iter()
+            .map(|row| {
+                let miner_id: String = row.try_get("miner_id").unwrap();
+                let node_id: String = row.try_get("node_id").unwrap();
+                (miner_id, node_id)
+            })
+            .collect();
+
+        if !stale_health_check_pairs.is_empty() {
+            let stale_health_check_result = sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET status = 'offline'
+                WHERE status IN ('online', 'verified')
+                AND active_rental_id IS NULL
+                AND (
+                    last_node_check IS NULL
+                    OR datetime(last_node_check) < datetime('now', '-30 minutes')
+                )
+                "#,
+            )
+            .execute(self.pool())
+            .await?;
+
             info!(
                 "Marked {} nodes offline due to stale validator node verification (>30 minutes)",
                 stale_health_check_result.rows_affected()
             );
+
+            self.record_availability_events(
+                stale_health_check_pairs
+                    .into_iter()
+                    .map(|(miner_id, node_id)| AvailabilityEventRequest {
+                        miner_id,
+                        miner_uid: None,
+                        hotkey: None,
+                        node_id,
+                        is_available: false,
+                        is_rented: Some(false),
+                        is_validated: false,
+                        source: AvailabilitySource::StaleNodeCleanup,
+                        source_metadata: None,
+                        observed_at: Utc::now(),
+                        gpu_category: None,
+                        gpu_count: None,
+                    })
+                    .collect(),
+            )
+            .await;
         }
 
         let stale_gpu_cleanup_query = r#"
@@ -627,6 +672,31 @@ impl SimplePersistence {
 
         if gpu_assignments_cleaned == 0 && deleted == 0 && stale_deleted == 0 {
             debug!("No nodes needed cleanup in this cycle");
+        }
+
+        let unique_removed: std::collections::HashSet<(String, String)> =
+            removed_nodes.iter().cloned().collect();
+        if !unique_removed.is_empty() {
+            self.record_availability_events(
+                unique_removed
+                    .into_iter()
+                    .map(|(miner_id, node_id)| AvailabilityEventRequest {
+                        miner_id,
+                        miner_uid: None,
+                        hotkey: None,
+                        node_id,
+                        is_available: false,
+                        is_rented: Some(false),
+                        is_validated: false,
+                        source: AvailabilitySource::FailedNodeCleanup,
+                        source_metadata: None,
+                        observed_at: Utc::now(),
+                        gpu_category: None,
+                        gpu_count: None,
+                    })
+                    .collect(),
+            )
+            .await;
         }
 
         Ok(removed_nodes)
@@ -1650,6 +1720,29 @@ impl SimplePersistence {
         miner_id: &str,
         node_ids: &[String],
     ) -> Result<u32> {
+        let affected_node_ids = if node_ids.is_empty() {
+            sqlx::query_scalar::<_, String>("SELECT node_id FROM miner_nodes WHERE miner_id = ?")
+                .bind(miner_id)
+                .fetch_all(self.pool())
+                .await?
+        } else {
+            let mut existing = Vec::new();
+            for node_id in node_ids {
+                let exists = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
+                )
+                .bind(miner_id)
+                .bind(node_id)
+                .fetch_one(self.pool())
+                .await?;
+
+                if exists > 0 {
+                    existing.push(node_id.clone());
+                }
+            }
+            existing
+        };
+
         let result = if node_ids.is_empty() {
             // Mark all nodes for this miner as offline and bid-inactive
             sqlx::query(
@@ -1681,7 +1774,30 @@ impl SimplePersistence {
                 .await?;
                 count += r.rows_affected();
             }
-            return Ok(count as u32);
+            let removed = count as u32;
+            if removed > 0 {
+                self.record_availability_events(
+                    affected_node_ids
+                        .into_iter()
+                        .map(|node_id| AvailabilityEventRequest {
+                            miner_id: miner_id.to_string(),
+                            miner_uid: None,
+                            hotkey: None,
+                            node_id,
+                            is_available: false,
+                            is_rented: Some(false),
+                            is_validated: false,
+                            source: AvailabilitySource::RemoveBid,
+                            source_metadata: None,
+                            observed_at: Utc::now(),
+                            gpu_category: None,
+                            gpu_count: None,
+                        })
+                        .collect(),
+                )
+                .await;
+            }
+            return Ok(removed);
         };
 
         let removed = result.rows_affected() as u32;
@@ -1691,6 +1807,26 @@ impl SimplePersistence {
                 nodes_removed = removed,
                 "Removed nodes via RemoveBid"
             );
+            self.record_availability_events(
+                affected_node_ids
+                    .into_iter()
+                    .map(|node_id| AvailabilityEventRequest {
+                        miner_id: miner_id.to_string(),
+                        miner_uid: None,
+                        hotkey: None,
+                        node_id,
+                        is_available: false,
+                        is_rented: Some(false),
+                        is_validated: false,
+                        source: AvailabilitySource::RemoveBid,
+                        source_metadata: None,
+                        observed_at: Utc::now(),
+                        gpu_category: None,
+                        gpu_count: None,
+                    })
+                    .collect(),
+            )
+            .await;
         }
         Ok(removed)
     }
@@ -1768,10 +1904,44 @@ impl SimplePersistence {
 
         Ok(count as u32)
     }
+
+    /// Get current status string for a node.
+    pub async fn get_node_status(&self, node_id: &str, miner_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM miner_nodes WHERE node_id = ? AND miner_id = ?",
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Update node status and last_node_check timestamp within an existing transaction.
+    pub async fn update_node_status_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        node_id: &str,
+        miner_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE miner_nodes
+             SET status = ?, last_node_check = datetime('now')
+             WHERE node_id = ? AND miner_id = ?",
+        )
+        .bind(status)
+        .bind(node_id)
+        .bind(miner_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::persistence::availability_log::AvailabilityLogRepository;
     use crate::persistence::SimplePersistence;
     use sqlx::Row;
     use std::collections::HashSet;
@@ -1855,6 +2025,26 @@ mod tests {
         .execute(persistence.pool())
         .await
         .expect("failed to insert gpu assignment");
+    }
+
+    async fn wait_for_availability_rows(
+        repo: &AvailabilityLogRepository,
+        hotkey: &str,
+        node_id: &str,
+        expected_len: usize,
+    ) -> Vec<crate::persistence::availability_log::AvailabilityLogRow> {
+        for _ in 0..50 {
+            let history = repo
+                .row_history(hotkey, node_id)
+                .await
+                .expect("availability history query should succeed");
+            if history.len() >= expected_len {
+                return history;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        panic!("timed out waiting for availability rows");
     }
 
     #[tokio::test]
@@ -2555,6 +2745,44 @@ mod tests {
             .expect("metadata should exist for existing node");
         assert!(metadata.gpu_category.is_empty());
         assert_eq!(metadata.gpu_count, 1);
+    }
+
+    #[tokio::test]
+    async fn remove_registered_nodes_logs_remove_bid_availability_events() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+
+        insert_test_miner(&persistence, miner_id).await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_remove_bid",
+            "10.0.1.20",
+            "online",
+            1,
+            Some("2025-01-01 00:00:00"),
+            None,
+            None,
+            1000,
+        )
+        .await;
+
+        let removed = persistence
+            .remove_registered_nodes(miner_id, &[String::from("node_remove_bid")])
+            .await
+            .expect("remove bid should succeed");
+        assert_eq!(removed, 1);
+
+        let repo = AvailabilityLogRepository::new(persistence.pool().clone());
+        let history =
+            wait_for_availability_rows(&repo, "hotkey_miner_1", "node_remove_bid", 1).await;
+
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].is_available);
+        assert!(!history[0].is_rented);
+        assert!(!history[0].is_validated);
+        assert_eq!(history[0].source, "remove_bid");
+        assert!(history[0].is_current);
     }
 
     #[tokio::test]

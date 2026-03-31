@@ -11,7 +11,7 @@ mod tests {
         let config = ValidatorConfig::default();
 
         // Verify emission config is included
-        assert_eq!(config.emission.burn_percentage, 0.0);
+        assert_eq!(config.emission.forced_burn_percentage, None);
         assert_eq!(config.emission.burn_uid, DEFAULT_BURN_UID);
         assert_eq!(config.emission.weight_set_interval_blocks, 360);
         assert_eq!(config.emission.gpu_allocations.len(), 0);
@@ -25,13 +25,13 @@ mod tests {
         let mut config = ValidatorConfig::default();
 
         // Modify emission config to be invalid
-        config.emission.burn_percentage = 150.0; // Invalid
+        config.emission.forced_burn_percentage = Some(150.0); // Invalid
 
         // Should fail validation
         assert!(config.validate().is_err());
 
         // Set valid burn percentage and GPU allocations
-        config.emission.burn_percentage = 10.0;
+        config.emission.forced_burn_percentage = Some(10.0);
         config
             .emission
             .gpu_allocations
@@ -52,7 +52,7 @@ mod tests {
         config.verification.binary_validation = None;
 
         // Add valid GPU allocations for testing
-        config.emission.burn_percentage = 10.0;
+        config.emission.forced_burn_percentage = Some(10.0);
         config
             .emission
             .gpu_allocations
@@ -69,7 +69,7 @@ mod tests {
         // Test TOML serialization includes emission config
         let toml_str = toml::to_string(&config).expect("Failed to serialize to TOML");
         assert!(toml_str.contains("[emission]"));
-        assert!(toml_str.contains("burn_percentage"));
+        assert!(toml_str.contains("forced_burn_percentage"));
         // Check that GPU allocations are present in the TOML
         assert!(toml_str.contains("gpu_allocations"));
 
@@ -78,8 +78,8 @@ mod tests {
             toml::from_str(&toml_str).expect("Failed to deserialize from TOML");
 
         assert_eq!(
-            config.emission.burn_percentage,
-            deserialized.emission.burn_percentage
+            config.emission.forced_burn_percentage,
+            deserialized.emission.forced_burn_percentage
         );
         assert_eq!(
             config.emission.gpu_allocations,
@@ -94,7 +94,7 @@ mod tests {
     fn test_billing_api_endpoint_requires_gateway() {
         let mut config = ValidatorConfig::default();
         config.verification.binary_validation = None;
-        config.emission.burn_percentage = 10.0;
+        config.emission.forced_burn_percentage = Some(10.0);
         config
             .emission
             .gpu_allocations

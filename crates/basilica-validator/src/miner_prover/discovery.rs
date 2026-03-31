@@ -9,7 +9,7 @@ use anyhow::Result;
 use basilica_common::identity::{Hotkey, MinerUid};
 use bittensor::{AxonInfo, Service as BittensorService};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
 pub struct MinerDiscovery {
@@ -118,6 +118,13 @@ impl MinerDiscovery {
             miners.push(miner);
         }
 
+        debug!(
+            total = miners.len(),
+            no_axon = no_axon_uids.len(),
+            invalid = invalid_axon_uids.len(),
+            "Metagraph extraction complete"
+        );
+
         if !no_axon_uids.is_empty() {
             info!(count = no_axon_uids.len(), uids = ?no_axon_uids, "Miners with no axon info, skipping");
         }
@@ -136,7 +143,7 @@ impl MinerDiscovery {
         Ok(metagraph.axons.get(uid).and_then(|axon| {
             // Validate that the IP is not zero (unset)
             if axon.ip == 0 {
-                debug!("Miner {} has zero IP address, skipping", uid);
+                trace!("Miner {} has zero IP address, skipping", uid);
                 return None;
             }
 
@@ -144,7 +151,7 @@ impl MinerDiscovery {
             if axon.ip_type == 4 {
                 let ipv4_bits = axon.ip as u32;
                 if ipv4_bits == 0 {
-                    debug!(
+                    trace!(
                         "Miner {} has zero IPv4 address in lower 32 bits, skipping",
                         uid
                     );
@@ -154,14 +161,17 @@ impl MinerDiscovery {
 
             // Validate that the port is reasonable
             if axon.port == 0 {
-                debug!("Miner {} has invalid port {}, skipping", uid, axon.port);
+                trace!("Miner {} has invalid port {}, skipping", uid, axon.port);
                 return None;
             }
 
             let endpoint = self.axon_info_to_endpoint(axon);
-            debug!(
+            trace!(
                 "Miner {} endpoint: {} (IP: {}, port: {})",
-                uid, endpoint, axon.ip, axon.port
+                uid,
+                endpoint,
+                axon.ip,
+                axon.port
             );
             Some(endpoint)
         }))

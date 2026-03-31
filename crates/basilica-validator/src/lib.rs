@@ -14,6 +14,7 @@ pub mod collateral;
 pub mod config;
 pub mod gpu;
 pub mod grpc;
+pub mod incentive;
 pub mod journal;
 pub mod k8s_profile_publisher;
 pub mod metrics;

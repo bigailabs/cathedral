@@ -84,6 +84,12 @@ pub mod basilca {
             include!("gen/basilica.payments.v1.rs");
         }
     }
+
+    pub mod incentive {
+        pub mod v1 {
+            include!("gen/basilica.incentive.v1.rs");
+        }
+    }
 }
 
 // Structured re-exports for better organization
@@ -136,6 +142,11 @@ pub mod payments {
     //! - Automatic credit conversion based on configured rates
     //! - Integration with billing service for credit application
     pub use crate::basilca::payments::v1::*;
+}
+
+pub mod incentive {
+    //! Incentive service for validator-facing CU/RU ledger access via backend services
+    pub use crate::basilca::incentive::v1::*;
 }
 
 // Re-export common types at crate root for convenience

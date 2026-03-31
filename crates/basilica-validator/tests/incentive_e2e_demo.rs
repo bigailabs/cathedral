@@ -66,7 +66,7 @@ impl Metagraph {
 #[derive(Debug, Clone)]
 struct EmissionConfig {
     gpu_allocations: HashMap<String, f64>, // category -> percentage (must sum to 100)
-    burn_percentage: f64,
+    forced_burn_percentage: Option<f64>,
 }
 
 fn separator() -> String {
@@ -99,7 +99,8 @@ fn calculate_weights(
     let total_weight = 1.0; // Normalized
 
     // Calculate burn
-    let burn_weight = total_weight * (emission_config.burn_percentage / 100.0);
+    let burn_weight =
+        total_weight * (emission_config.forced_burn_percentage.unwrap_or(0.0) / 100.0);
     let remaining_weight = total_weight - burn_weight;
 
     // Group deliveries by category, resolving UID from current metagraph
@@ -389,7 +390,7 @@ fn demo_full_incentive_flow() {
             m.insert("B200".to_string(), 10.0); // B200 gets 10%
             m
         },
-        burn_percentage: 0.0, // No burn for simplicity
+        forced_burn_percentage: None, // No burn for simplicity
     };
 
     println!("  Emission allocation:");
@@ -670,7 +671,7 @@ fn demo_category_caps() {
             m.insert("B200".to_string(), 20.0);
             m
         },
-        burn_percentage: 0.0,
+        forced_burn_percentage: None,
     };
 
     println!("  Category allocation:");

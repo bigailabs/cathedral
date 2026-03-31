@@ -10,6 +10,7 @@ use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
 use tracing::{debug, info, warn};
 
 use crate::gpu::MinerGpuProfile;
+use crate::persistence::availability_log::{AvailabilityEventRequest, AvailabilitySource};
 use crate::persistence::SimplePersistence;
 use basilica_common::identity::MinerUid;
 use basilica_common::types::GpuCategory;
@@ -484,10 +485,12 @@ impl GpuProfileRepository {
 
         let stale_count = stale_nodes.len();
         let mut total_assignments_deleted = 0u64;
+        let mut stale_pairs = Vec::with_capacity(stale_count);
 
         for row in stale_nodes {
             let node_id: String = row.get("node_id");
             let miner_id: String = row.get("miner_id");
+            stale_pairs.push((miner_id.clone(), node_id.clone()));
 
             let delete_assignments = r#"
                 DELETE FROM gpu_uuid_assignments
@@ -546,6 +549,28 @@ impl GpuProfileRepository {
                 "Marked {} stale nodes as offline and deleted {} GPU assignments",
                 stale_count, total_assignments_deleted
             );
+
+            SimplePersistence::with_pool(self.pool.clone())
+                .record_availability_events(
+                    stale_pairs
+                        .into_iter()
+                        .map(|(miner_id, node_id)| AvailabilityEventRequest {
+                            miner_id,
+                            miner_uid: None,
+                            hotkey: None,
+                            node_id,
+                            is_available: false,
+                            is_rented: Some(false),
+                            is_validated: false,
+                            source: AvailabilitySource::StaleNodeCleanup,
+                            source_metadata: None,
+                            observed_at: Utc::now(),
+                            gpu_category: None,
+                            gpu_count: None,
+                        })
+                        .collect(),
+                )
+                .await;
         }
 
         if orphan_count > 0 {

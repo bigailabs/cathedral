@@ -112,7 +112,6 @@ scripts/localnet/configs/validator.toml
 scripts/localnet/configs/miner.toml
 terraform.tfstate
 *.tfstate
-CLAUDE.md
 
 scripts/web/basilica-linux-amd64
 scripts/web/basilica-macos-arm64

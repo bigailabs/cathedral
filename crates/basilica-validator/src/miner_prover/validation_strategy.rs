@@ -24,7 +24,6 @@ use anyhow::Result;
 use basilica_common::identity::Hotkey;
 use basilica_common::ssh::SshConnectionDetails;
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -251,16 +250,9 @@ impl ValidationStrategySelector {
         miner_id: &str,
         miner_uid: u16,
     ) -> Result<bool> {
-        let status_query = "SELECT status FROM miner_nodes WHERE node_id = ? AND miner_id = ?";
-        let status_row = sqlx::query(status_query)
-            .bind(node_id)
-            .bind(miner_id)
-            .fetch_optional(self.persistence.pool())
-            .await?;
-
-        if let Some(row) = status_row {
-            let status: String = row.get("status");
-            if status != "online" && status != "verified" {
+        match self.persistence.get_node_status(node_id, miner_id).await? {
+            Some(status) if status == "online" || status == "verified" => {}
+            Some(status) => {
                 debug!(
                     node_id = node_id,
                     miner_id = miner_id,
@@ -269,13 +261,14 @@ impl ValidationStrategySelector {
                 );
                 return Ok(true);
             }
-        } else {
-            debug!(
-                node_id = node_id,
-                miner_id = miner_id,
-                "[EVAL_FLOW] Binary validation needed - node not found in database"
-            );
-            return Ok(true);
+            None => {
+                debug!(
+                    node_id = node_id,
+                    miner_id = miner_id,
+                    "[EVAL_FLOW] Binary validation needed - node not found in database"
+                );
+                return Ok(true);
+            }
         }
 
         // If node has no GPU assignments, it needs full validation
@@ -325,7 +318,7 @@ impl ValidationStrategySelector {
         }
     }
 
-    /// Get last successful binary validation for an node
+    /// Get last successful binary validation for a node
     async fn get_last_binary_validation(
         &self,
         node_id: &str,
@@ -337,57 +330,9 @@ impl ValidationStrategySelector {
             "Attempting to find last binary validation for node_id"
         );
 
-        let query = r#"
-            SELECT timestamp, score
-            FROM verification_logs
-            WHERE node_id = ?
-              AND success = 1
-              AND verification_type = 'ssh_automation'
-              AND (
-                json_extract(details, '$.binary_validation_successful') = 1
-                OR json_extract(details, '$.binary_validation_successful') = 'true'
-              )
-            ORDER BY timestamp DESC
-            LIMIT 1
-        "#;
-
-        let row = sqlx::query(query)
-            .bind(node_id)
-            .fetch_optional(self.persistence.pool())
-            .await?;
-
-        let row = if row.is_none() {
-            debug!(
-                node_id = node_id,
-                miner_uid = miner_uid,
-                "No validation found with composite node_id, trying plain node_id as fallback"
-            );
-
-            sqlx::query(query)
-                .bind(node_id)
-                .fetch_optional(self.persistence.pool())
-                .await?
-        } else {
-            debug!(
-                node_id = node_id,
-                miner_uid = miner_uid,
-                "Found validation with composite node_id"
-            );
-            row
-        };
-
-        if let Some(row) = row {
-            let timestamp_str: String = row.get("timestamp");
-            let score: f64 = row.get("score");
-
-            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
-                .map_err(|e| anyhow::anyhow!("Invalid timestamp format: {}", e))?
-                .with_timezone(&chrono::Utc);
-
-            Ok(Some((timestamp, score)))
-        } else {
-            Ok(None)
-        }
+        self.persistence
+            .get_last_binary_validation_for_node(node_id)
+            .await
     }
 }
 
@@ -493,7 +438,7 @@ impl ValidationNode {
         let mut nvidia_smi_output: Option<String> = None;
         let connectivity_successful = match self
             .ssh_client
-            .execute_command(
+            .execute_command_with_retry(
                 ssh_details,
                 "nvidia-smi --query-gpu=uuid --format=csv,noheader",
                 true,
@@ -584,7 +529,7 @@ impl ValidationNode {
             let nonce_cmd = format!("printf '{}' | sha256sum", nonce);
             match self
                 .ssh_client
-                .execute_command(ssh_details, &nonce_cmd, true)
+                .execute_command_with_retry(ssh_details, &nonce_cmd, true)
                 .await
             {
                 Ok(output) => output

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{error, info};
 
+use crate::persistence::availability_log::AvailabilityLogRepository;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 
 /// Configuration for cleanup tasks
@@ -21,6 +22,10 @@ pub struct CleanupConfig {
     /// Delete emission metrics older than this many days
     pub emission_retention_days: i64,
 
+    /// Delete expired availability history older than this many days
+    #[serde(default = "default_availability_retention_days")]
+    pub availability_retention_days: i64,
+
     /// How often to run stale node cleanup (in minutes)
     pub stale_node_cleanup_cadence_minutes: u64,
 
@@ -34,10 +39,15 @@ impl Default for CleanupConfig {
             run_interval_hours: 24,
             profile_retention_days: 30,
             emission_retention_days: 90,
+            availability_retention_days: default_availability_retention_days(),
             stale_node_cleanup_cadence_minutes: 30,
             enabled: true,
         }
     }
+}
+
+fn default_availability_retention_days() -> i64 {
+    90
 }
 
 /// Cleanup task runner
@@ -123,6 +133,17 @@ impl CleanupTask {
 
         if metrics_count > 0 {
             info!("Cleaned up {} old emission metrics", metrics_count);
+        }
+
+        let availability_count = AvailabilityLogRepository::new(self.gpu_repo.pool().clone())
+            .cleanup_expired_rows(self.config.availability_retention_days)
+            .await?;
+
+        if availability_count > 0 {
+            info!(
+                "Cleaned up {} expired availability history rows",
+                availability_count
+            );
         }
 
         info!("Database cleanup completed");
@@ -228,6 +249,7 @@ mod tests {
             run_interval_hours: 24,
             profile_retention_days: 30,
             emission_retention_days: 90,
+            availability_retention_days: 90,
             stale_node_cleanup_cadence_minutes: 30,
             enabled: true,
         };
@@ -256,6 +278,7 @@ mod tests {
         assert_eq!(config.run_interval_hours, 24);
         assert_eq!(config.profile_retention_days, 30);
         assert_eq!(config.emission_retention_days, 90);
+        assert_eq!(config.availability_retention_days, 90);
         assert!(config.enabled);
     }
 

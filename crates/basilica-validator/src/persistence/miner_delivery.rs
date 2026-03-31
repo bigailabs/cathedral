@@ -80,29 +80,6 @@ impl MinerDeliveryRepository {
         Ok(())
     }
 
-    pub async fn get_deliveries(
-        &self,
-        since: DateTime<Utc>,
-        until: DateTime<Utc>,
-        _miner_hotkeys: Option<Vec<String>>,
-    ) -> Result<Vec<MinerDelivery>> {
-        let rows = sqlx::query(
-            "SELECT deliveries FROM miner_delivery_cache WHERE period_end >= ? AND period_start <= ?",
-        )
-        .bind(since.timestamp())
-        .bind(until.timestamp())
-        .fetch_all(self.persistence.pool())
-        .await?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            let json: String = row.get("deliveries");
-            let cached: Vec<CachedDelivery> = serde_json::from_str(&json)?;
-            result.extend(cached.into_iter().map(MinerDelivery::from));
-        }
-        Ok(result)
-    }
-
     pub async fn get_deliveries_for_window(
         &self,
         period_start: DateTime<Utc>,

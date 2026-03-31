@@ -1,3 +1,4 @@
+pub mod availability_log;
 pub mod cleanup_task;
 pub mod collateral_grace;
 pub mod collateral_persistence;
@@ -6,6 +7,7 @@ pub mod entities;
 pub mod gpu_assignments;
 pub mod gpu_profile_repository;
 pub mod hardware_profile;
+pub mod incentive_state;
 pub mod miner_delivery;
 pub mod miner_nodes;
 pub mod miners;

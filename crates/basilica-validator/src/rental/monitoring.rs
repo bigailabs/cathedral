@@ -16,7 +16,10 @@ use tracing::{debug, error, info, warn};
 use super::container_client::ContainerClient;
 use super::types::{LogEntry, RentalInfo, RentalState};
 use crate::ban_system::BanManager;
+use crate::incentive::slashing::{classify_terminal_rental_loss, RentalLossClassification};
 use crate::metrics::ValidatorPrometheusMetrics;
+use crate::persistence::availability_log::{AvailabilityEventRequest, AvailabilitySource};
+use crate::persistence::incentive_state::SlashEventRequest;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
 
@@ -254,6 +257,30 @@ impl DatabaseHealthMonitor {
             counts.remove(&rental.rental_id);
         }
 
+        let observed_at = Utc::now();
+
+        self.persistence
+            .record_availability_event(AvailabilityEventRequest {
+                miner_id: rental.miner_id.clone(),
+                miner_uid: super::extract_miner_uid(&rental.miner_id),
+                hotkey: None,
+                node_id: rental.node_id.clone(),
+                is_available: false,
+                is_rented: Some(true),
+                is_validated: false,
+                source: AvailabilitySource::RentalHealthFailure,
+                source_metadata: Some(reason.clone()),
+                observed_at,
+                gpu_category: None,
+                gpu_count: None,
+            })
+            .await;
+
+        let slash_classification = classify_terminal_rental_loss(
+            &reason,
+            matches!(misbehaviour, MisbehaviourKind::Halted),
+        );
+
         // Log misbehaviour
         if matches!(
             rental.state,
@@ -308,17 +335,53 @@ impl DatabaseHealthMonitor {
 
             // INVARIANT: Release node claim so it becomes available again.
             if matches!(new_state, RentalState::Stopped | RentalState::Failed) {
-                if let Err(e) = self
+                match self
                     .persistence
                     .release_node(&rental.node_id, &rental.miner_id, &rental.rental_id)
                     .await
                 {
-                    warn!(
-                        rental_id = %rental.rental_id,
-                        node_id = %rental.node_id,
-                        error = %e,
-                        "Failed to release node claim after rental termination"
-                    );
+                    Ok(_) => {
+                        self.persistence
+                            .record_availability_event(AvailabilityEventRequest {
+                                miner_id: rental.miner_id.clone(),
+                                miner_uid: super::extract_miner_uid(&rental.miner_id),
+                                hotkey: None,
+                                node_id: rental.node_id.clone(),
+                                is_available: false,
+                                is_rented: Some(false),
+                                is_validated: false,
+                                source: AvailabilitySource::RentalHealthFailure,
+                                source_metadata: Some(
+                                    "node claim released after rental termination".to_string(),
+                                ),
+                                observed_at,
+                                gpu_category: None,
+                                gpu_count: None,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(
+                            rental_id = %rental.rental_id,
+                            node_id = %rental.node_id,
+                            error = %e,
+                            "Failed to release node claim after rental termination"
+                        );
+                    }
+                }
+            }
+
+            if matches!(rental.state, RentalState::Active) {
+                if let RentalLossClassification::NodeLoss { reason } = slash_classification {
+                    self.persistence
+                        .record_incentive_slash_event(SlashEventRequest {
+                            idempotency_key: format!("rental:{}", rental.rental_id),
+                            node_id: rental.node_id.clone(),
+                            reason,
+                            rental_id: Some(rental.rental_id.clone()),
+                            detected_at_ms: observed_at.timestamp_millis(),
+                        })
+                        .await;
                 }
             }
 

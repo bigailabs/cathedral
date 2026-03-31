@@ -26,6 +26,9 @@ service BillingService {
 
     // Rental status lookup (for credit exhaustion monitoring)
     rpc GetRentalStatus(GetRentalStatusRequest) returns (GetRentalStatusResponse);
+
+    // Revenue event aggregation for incentive RU generation
+    rpc GetRevenueEvents(GetRevenueEventsRequest) returns (GetRevenueEventsResponse);
 }
 
 // Credit Management Messages
@@ -336,4 +339,23 @@ message MinerDelivery {
 
 message GetMinerDeliveryResponse {
     repeated MinerDelivery deliveries = 1;
+}
+
+// Revenue Event Aggregation Messages (for incentive RU generation)
+
+message GetRevenueEventsRequest {
+    google.protobuf.Timestamp bucket_start = 1;
+    google.protobuf.Timestamp bucket_end = 2;
+}
+
+message RevenueEvent {
+    string hotkey = 1;
+    uint32 miner_uid = 2;
+    string node_id = 3;
+    string gpu_category = 4;
+    string ru_amount = 5; // Decimal string for precision
+}
+
+message GetRevenueEventsResponse {
+    repeated RevenueEvent events = 1;
 }

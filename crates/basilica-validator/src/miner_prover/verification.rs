@@ -16,6 +16,7 @@ use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
 use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
 use crate::persistence::{
+    availability_log::{AvailabilityEventRequest, AvailabilitySource},
     entities::{MisbehaviourType, VerificationLog},
     gpu_profile_repository::GpuProfileRepository,
     SimplePersistence,
@@ -504,72 +505,68 @@ impl VerificationEngine {
             },
         );
 
-        // Store directly to database to avoid repository trait issues
-        let query = r#"
-            INSERT INTO verification_logs (
-                id, node_id, validator_hotkey, verification_type, timestamp,
-                score, success, details, duration_ms, error_message, created_at, updated_at,
-                last_binary_validation, last_binary_validation_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#;
-
-        let now = chrono::Utc::now().to_rfc3339();
         let success = verification_log.success;
 
         // Set binary validation timestamp and score if this was a successful binary validation
         let (binary_validation_time, binary_validation_score) =
             if success && node_result.binary_validation_successful {
-                (Some(now.clone()), Some(node_result.verification_score))
+                (
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some(node_result.verification_score),
+                )
             } else {
                 (None, None)
             };
 
-        if let Err(e) = sqlx::query(query)
-            .bind(verification_log.id.to_string())
-            .bind(&verification_log.node_id)
-            .bind(&verification_log.validator_hotkey)
-            .bind(&verification_log.verification_type)
-            .bind(verification_log.timestamp.to_rfc3339())
-            .bind(verification_log.score)
-            .bind(if success { 1 } else { 0 })
-            .bind(
-                serde_json::to_string(&verification_log.details)
-                    .unwrap_or_else(|_| "{}".to_string()),
+        self.persistence
+            .create_verification_log_with_binary_data(
+                &verification_log,
+                binary_validation_time,
+                binary_validation_score,
             )
-            .bind(verification_log.duration_ms)
-            .bind(&verification_log.error_message)
-            .bind(verification_log.created_at.to_rfc3339())
-            .bind(verification_log.updated_at.to_rfc3339())
-            .bind(binary_validation_time)
-            .bind(binary_validation_score)
-            .execute(self.persistence.pool())
             .await
-        {
-            error!("Failed to store verification log: {}", e);
-            return Err(anyhow::anyhow!("Database storage failed: {}", e));
-        }
+            .map_err(|e| {
+                error!("Failed to store verification log: {}", e);
+                anyhow::anyhow!("Database storage failed: {}", e)
+            })?;
 
         let miner_id = format!("miner_{miner_uid}");
+        let is_rented = self
+            .persistence
+            .has_active_rental(&node_result.node_id.to_string(), &miner_id)
+            .await
+            .unwrap_or(false);
+
+        self.persistence
+            .record_availability_event(AvailabilityEventRequest {
+                miner_id: miner_id.clone(),
+                miner_uid: Some(miner_uid),
+                hotkey: Some(miner_info.hotkey.to_string()),
+                node_id: node_result.node_id.to_string(),
+                is_available: success,
+                is_rented: Some(is_rented),
+                is_validated: true,
+                source: AvailabilitySource::Validation,
+                source_metadata: Some(format!("validation_type={:?}", node_result.validation_type)),
+                observed_at: Utc::now(),
+                gpu_category: None,
+                gpu_count: None,
+            })
+            .await;
+
         let status = match (success, &node_result.validation_type) {
             (false, _) => "offline".to_string(),
             (true, ValidationType::Full) => "online".to_string(),
             (true, ValidationType::Lightweight) => {
-                match self
-                    .persistence
-                    .has_active_rental(&node_result.node_id.to_string(), &miner_id)
-                    .await
-                {
-                    Ok(true) => "online".to_string(),
-                    _ => sqlx::query_scalar::<_, String>(
-                        "SELECT status FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
-                    )
-                    .bind(&miner_id)
-                    .bind(&verification_log.node_id)
-                    .fetch_optional(self.persistence.pool())
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "verified".to_string()),
+                if is_rented {
+                    "online".to_string()
+                } else {
+                    self.persistence
+                        .get_node_status(&verification_log.node_id, &miner_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "verified".to_string())
                 }
             }
         };
@@ -587,16 +584,10 @@ impl VerificationEngine {
         let mut tx = self.persistence.pool().begin().await?;
 
         // Update node status
-        if let Err(e) = sqlx::query(
-            "UPDATE miner_nodes
-             SET status = ?, last_node_check = datetime('now')
-             WHERE node_id = ? AND miner_id = ?",
-        )
-        .bind(&status)
-        .bind(&verification_log.node_id)
-        .bind(&miner_id)
-        .execute(&mut *tx)
-        .await
+        if let Err(e) = self
+            .persistence
+            .update_node_status_in_tx(&mut tx, &verification_log.node_id, &miner_id, &status)
+            .await
         {
             warn!("Failed to update node health status: {}", e);
             tx.rollback().await?;
@@ -1537,6 +1528,7 @@ mod node_profile_wiring_tests {
         SmUtilizationStats, ValidationDetails,
     };
     use crate::miner_prover::verification_engine_builder::VerificationEngineBuilder;
+    use crate::persistence::availability_log::AvailabilityLogRepository;
     use crate::persistence::SimplePersistence;
     use std::str::FromStr;
 
@@ -1616,6 +1608,25 @@ mod node_profile_wiring_tests {
         );
         let engine = builder.build_for_testing().await?;
         Ok((engine, persistence))
+    }
+
+    async fn wait_for_availability_history(
+        repo: &AvailabilityLogRepository,
+        hotkey: &str,
+        node_id: &str,
+        expected_len: usize,
+    ) -> Result<Vec<crate::persistence::availability_log::AvailabilityLogRow>> {
+        for _ in 0..50 {
+            let history = repo.row_history(hotkey, node_id).await?;
+            if history.len() >= expected_len {
+                return Ok(history);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        Err(anyhow::anyhow!(
+            "Timed out waiting for availability history for {hotkey}/{node_id}"
+        ))
     }
 
     async fn register_declared_node(
@@ -2117,6 +2128,62 @@ mod node_profile_wiring_tests {
         assert!(!timestamp.contains('T'));
         chrono::NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S")
             .expect("timestamp should use SQLite datetime format");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_node_verification_result_logs_availability_transitions() -> Result<()> {
+        let (engine, persistence) = create_test_engine().await?;
+        let miner_uid = 208u16;
+        let hotkey = "5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy";
+        let node_id =
+            register_declared_node(&persistence, miner_uid, "10.0.20.8", "A100", 1).await?;
+        let miner_info = MinerInfo {
+            uid: MinerUid::new(miner_uid),
+            hotkey: Hotkey::new(hotkey.to_string()).expect("valid hotkey"),
+            endpoint: "http://127.0.0.1:9090".to_string(),
+            is_validator: false,
+            stake_tao: 100.0,
+            last_verified: None,
+            verification_score: 0.0,
+        };
+
+        let success_result =
+            build_full_verification_result(&node_id, &["NVIDIA A100"], ValidationType::Full);
+        engine
+            .store_node_verification_result_with_miner_info(miner_uid, &success_result, &miner_info)
+            .await?;
+
+        let repo = AvailabilityLogRepository::new(persistence.pool().clone());
+        let mut history = wait_for_availability_history(&repo, hotkey, &node_id, 1).await?;
+        assert_eq!(history.len(), 1);
+        assert!(history[0].is_available);
+        assert!(history[0].is_validated);
+        assert!(history[0].is_current);
+        assert_eq!(history[0].source, "validation");
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let mut failed_result =
+            build_full_verification_result(&node_id, &["NVIDIA A100"], ValidationType::Full);
+        failed_result.ssh_connection_successful = false;
+        failed_result.binary_validation_successful = false;
+        failed_result.failure_reasons = vec!["ssh_failed".to_string()];
+
+        engine
+            .store_node_verification_result_with_miner_info(miner_uid, &failed_result, &miner_info)
+            .await?;
+
+        history = wait_for_availability_history(&repo, hotkey, &node_id, 2).await?;
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0].row_expiration_at,
+            Some(history[1].row_effective_at)
+        );
+        assert!(!history[0].is_current);
+        assert!(!history[1].is_available);
+        assert!(history[1].is_current);
 
         Ok(())
     }
