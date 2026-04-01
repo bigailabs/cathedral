@@ -1,6 +1,8 @@
 # Basilica Validator Configuration - Local Development
 # Pre-configured for local Subtensor network
 
+api_endpoint = "http://basilica-api:8000"
+
 [database]
 url = "sqlite:///opt/basilica/data/validator.db"
 max_connections = 10
