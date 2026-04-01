@@ -33,12 +33,14 @@ pub fn resource_usage_to_telemetry(
         gpu_usage,
     };
 
+    let now = Utc::now();
+
     Ok(TelemetryData {
         rental_id,
         node_id,
         timestamp: Some(prost_types::Timestamp {
-            seconds: Utc::now().timestamp(),
-            nanos: Utc::now().timestamp_subsec_nanos() as i32,
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
         }),
         resource_usage: Some(resource_usage),
         custom_metrics: std::collections::HashMap::new(),
