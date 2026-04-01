@@ -206,21 +206,23 @@ impl ValidatorSshClient {
             }
         };
 
+        let now = Instant::now();
+
         // Clean up expired entries if pool is getting large
         if pool.len() >= self.max_pool_size {
-            let cutoff = Instant::now() - self.pool_timeout;
+            let cutoff = now - self.pool_timeout;
             pool.retain(|_, entry| entry.last_used > cutoff);
         }
 
         let entry = pool.entry(key).or_insert_with(|| ConnectionPoolEntry {
             details: details.clone(),
-            last_used: Instant::now(),
+            last_used: now,
             connection_count: 0,
             success_count: 0,
             failure_count: 0,
         });
 
-        entry.last_used = Instant::now();
+        entry.last_used = now;
         entry.connection_count += 1;
 
         if success {
