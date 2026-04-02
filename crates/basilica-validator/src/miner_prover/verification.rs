@@ -545,7 +545,7 @@ impl VerificationEngine {
                 node_id: node_result.node_id.to_string(),
                 is_available: success,
                 is_rented: Some(is_rented),
-                is_validated: true,
+                is_validated: success,
                 source: AvailabilitySource::Validation,
                 source_metadata: Some(format!("validation_type={:?}", node_result.validation_type)),
                 observed_at: Utc::now(),
@@ -2183,6 +2183,7 @@ mod node_profile_wiring_tests {
         );
         assert!(!history[0].is_current);
         assert!(!history[1].is_available);
+        assert!(!history[1].is_validated);
         assert!(history[1].is_current);
 
         Ok(())
