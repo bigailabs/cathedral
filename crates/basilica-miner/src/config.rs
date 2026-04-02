@@ -176,7 +176,8 @@ pub enum BiddingStrategy {
         #[serde(
             default,
             rename = "static_prices",
-            deserialize_with = "deserialize_dollars_to_cents"
+            deserialize_with = "deserialize_dollars_to_cents",
+            serialize_with = "serialize_cents_to_dollars"
         )]
         static_prices_cents: std::collections::HashMap<String, u32>,
     },
@@ -185,6 +186,22 @@ pub enum BiddingStrategy {
 /// Convert dollars (f64) to cents (u32)
 fn dollars_to_cents(dollars: f64) -> u32 {
     (dollars * 100.0).round() as u32
+}
+
+/// Serialize a HashMap of cent values (u32) back to dollars (f64)
+fn serialize_cents_to_dollars<S>(
+    cents: &std::collections::HashMap<String, u32>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(cents.len()))?;
+    for (k, v) in cents {
+        map.serialize_entry(k, &(*v as f64 / 100.0))?;
+    }
+    map.end()
 }
 
 /// Deserialize a HashMap of dollar values (f64) to cents (u32)
