@@ -565,8 +565,6 @@ impl GpuProfileRepository {
                             source: AvailabilitySource::StaleNodeCleanup,
                             source_metadata: None,
                             observed_at: Utc::now(),
-                            gpu_category: None,
-                            gpu_count: None,
                         })
                         .collect(),
                 )

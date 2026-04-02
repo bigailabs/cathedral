@@ -383,8 +383,6 @@ impl SimplePersistence {
                         source: AvailabilitySource::StaleNodeCleanup,
                         source_metadata: None,
                         observed_at: Utc::now(),
-                        gpu_category: None,
-                        gpu_count: None,
                     })
                     .collect(),
             )
@@ -691,8 +689,6 @@ impl SimplePersistence {
                         source: AvailabilitySource::FailedNodeCleanup,
                         source_metadata: None,
                         observed_at: Utc::now(),
-                        gpu_category: None,
-                        gpu_count: None,
                     })
                     .collect(),
             )
@@ -1790,8 +1786,6 @@ impl SimplePersistence {
                             source: AvailabilitySource::RemoveBid,
                             source_metadata: None,
                             observed_at: Utc::now(),
-                            gpu_category: None,
-                            gpu_count: None,
                         })
                         .collect(),
                 )
@@ -1821,8 +1815,6 @@ impl SimplePersistence {
                         source: AvailabilitySource::RemoveBid,
                         source_metadata: None,
                         observed_at: Utc::now(),
-                        gpu_category: None,
-                        gpu_count: None,
                     })
                     .collect(),
             )

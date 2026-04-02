@@ -549,8 +549,6 @@ impl VerificationEngine {
                 source: AvailabilitySource::Validation,
                 source_metadata: Some(format!("validation_type={:?}", node_result.validation_type)),
                 observed_at: Utc::now(),
-                gpu_category: None,
-                gpu_count: None,
             })
             .await;
 
