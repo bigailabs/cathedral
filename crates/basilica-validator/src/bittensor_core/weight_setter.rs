@@ -566,8 +566,8 @@ impl WeightSetter {
             if vested <= Decimal::ZERO {
                 continue;
             }
-            let ru_usd =
-                vested * row.ru_amount * Decimal::from(row.revenue_share_pct) / Decimal::from(100u32);
+            let ru_usd = vested * row.ru_amount * Decimal::from(row.revenue_share_pct)
+                / Decimal::from(100u32);
             if ru_usd <= Decimal::ZERO {
                 continue;
             }
@@ -575,10 +575,8 @@ impl WeightSetter {
         }
 
         // Merge into Vec<ShadowMinerPayout>
-        let all_hotkeys: std::collections::HashSet<&String> = cu_accum
-            .keys()
-            .chain(ru_accum.keys())
-            .collect();
+        let all_hotkeys: std::collections::HashSet<&String> =
+            cu_accum.keys().chain(ru_accum.keys()).collect();
 
         let mut payouts: Vec<ShadowMinerPayout> = all_hotkeys
             .into_iter()
