@@ -3,12 +3,14 @@
 //! Manages Bittensor weight setting operations for the Validator.
 //! Sets weights every N blocks based on miner scores from node validations.
 
-use crate::basilica_api::BasilicaApiClient;
+use crate::basilica_api::{BasilicaApiClient, IncentiveConfigResponse};
 use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
-use crate::incentive::incentive_pool::compute_incentive_pool;
+use crate::incentive::incentive_pool::{
+    compute_cu_vested_fraction, compute_incentive_pool, compute_ru_vested_fraction,
+};
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
@@ -48,14 +50,41 @@ pub struct NodeValidationResult {
     pub gpu_model: String,
 }
 
+/// CU contribution for one category in shadow logging
+struct ShadowCuCategory {
+    category: String,
+    cu_amount: rust_decimal::Decimal,
+    cu_usd: rust_decimal::Decimal,
+}
+
+/// One miner's full payout breakdown for shadow logging
+struct ShadowMinerPayout {
+    miner_uid: u16,
+    hotkey: String,
+    cu_categories: Vec<ShadowCuCategory>,
+    ru_usd: rust_decimal::Decimal,
+    total_usd: rust_decimal::Decimal,
+}
+
 /// Shadow result from the new incentive-pool logic (log-only, never submitted to chain)
-#[derive(Debug)]
 struct ShadowIncentiveResult {
     distribution: crate::bittensor_core::weight_allocation::WeightDistribution,
     burn_percentage: f64,
     burn_rate: rust_decimal::Decimal,
     usd_required_epoch: rust_decimal::Decimal,
     usd_emission_capacity: rust_decimal::Decimal,
+    // Emission chain
+    alpha_out_emission_rao: u64,
+    miner_alpha_per_epoch: rust_decimal::Decimal,
+    alpha_price_usd: rust_decimal::Decimal,
+    tao_price_usd: rust_decimal::Decimal,
+    blocks_per_epoch: u64,
+    // Incentive config
+    incentive_config: IncentiveConfigResponse,
+    // Pool breakdown
+    category_payouts: HashMap<String, rust_decimal::Decimal>,
+    // Per-miner breakdown
+    miner_payouts_detail: Vec<ShadowMinerPayout>,
 }
 
 /// Manages weight setting operations for Bittensor network
@@ -293,14 +322,83 @@ impl WeightSetter {
             .await
         {
             Ok(result) => {
+                // Log 1: Emission parameters
+                info!(
+                    alpha_out_emission_rao = result.alpha_out_emission_rao,
+                    miner_emission_share_pct = 41,
+                    miner_alpha_per_epoch = %result.miner_alpha_per_epoch,
+                    alpha_price_usd = %result.alpha_price_usd,
+                    tao_price_usd = %result.tao_price_usd,
+                    blocks_per_epoch = result.blocks_per_epoch,
+                    usd_emission_capacity = %result.usd_emission_capacity,
+                    "[SHADOW_WEIGHTS] Emission parameters"
+                );
+
+                // Log 2: Incentive config per category + global
+                for (category, cat_config) in &result.incentive_config.gpu_categories {
+                    info!(
+                        category = %category,
+                        target_count = cat_config.target_count,
+                        price_per_gpu_cents = cat_config.price_per_gpu_cents,
+                        "[SHADOW_WEIGHTS] Incentive config"
+                    );
+                }
+                info!(
+                    window_hours = result.incentive_config.window_hours,
+                    revenue_share_pct = ?result.incentive_config.revenue_share_pct,
+                    slash_pct = result.incentive_config.slash_pct,
+                    "[SHADOW_WEIGHTS] Incentive config"
+                );
+
+                // Log 3: Pool summary
                 info!(
                     miners_served = result.distribution.miners_served,
                     burn_rate = %result.burn_rate,
                     burn_percentage = result.burn_percentage,
                     usd_required = %result.usd_required_epoch,
                     usd_capacity = %result.usd_emission_capacity,
+                    "[SHADOW_WEIGHTS] Incentive pool summary"
+                );
+
+                // Log 4: Per-miner breakdown
+                for miner in &result.miner_payouts_detail {
+                    let cu_breakdown: String = miner
+                        .cu_categories
+                        .iter()
+                        .map(|c| format!("{}: {} CU (${})", c.category, c.cu_amount, c.cu_usd))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    info!(
+                        miner_uid = miner.miner_uid,
+                        hotkey = %miner.hotkey,
+                        cu_breakdown = %cu_breakdown,
+                        ru_usd = %miner.ru_usd,
+                        total_usd = %miner.total_usd,
+                        "[SHADOW_WEIGHTS] Miner payout"
+                    );
+                }
+
+                // Log 5: Per-category breakdown
+                for (category, allocation) in &result.distribution.category_allocations {
+                    let category_usd_payout = result
+                        .category_payouts
+                        .get(category)
+                        .copied()
+                        .unwrap_or(rust_decimal::Decimal::ZERO);
+                    info!(
+                        category = %category,
+                        miner_count = allocation.miner_count,
+                        weight_pool = allocation.weight_pool,
+                        allocation_pct = allocation.allocation_percentage,
+                        usd_payout = %category_usd_payout,
+                        "[SHADOW_WEIGHTS] Category breakdown"
+                    );
+                }
+
+                // Log 6: Final weight vector
+                info!(
                     weights = ?result.distribution.weights,
-                    "[SHADOW_WEIGHTS] New incentive pool weight distribution"
+                    "[SHADOW_WEIGHTS] Final weight vector"
                 );
             }
             Err(e) => {
@@ -346,10 +444,19 @@ impl WeightSetter {
         let alpha_tokens_per_block = rust_decimal::Decimal::from(subnet_emission_rate)
             / rust_decimal::Decimal::from(RAO_PER_ALPHA);
         let blocks_per_epoch = rust_decimal::Decimal::from(self.blocks_per_weight_set);
-        let usd_emission_capacity = alpha_tokens_per_block
-            * miner_emission_share
-            * blocks_per_epoch
-            * token_prices.alpha_price_usd;
+        let miner_alpha_per_epoch =
+            alpha_tokens_per_block * miner_emission_share * blocks_per_epoch;
+        let usd_emission_capacity = miner_alpha_per_epoch * token_prices.alpha_price_usd;
+
+        // Build per-miner-per-category CU/RU breakdown from raw rows
+        let miner_payouts_detail = self.compute_shadow_miner_breakdown(
+            &incentive_config,
+            &cu_rows,
+            &ru_rows,
+            shadow_start,
+            epoch.period_end,
+            hotkey_to_uid,
+        );
 
         let incentive_result = compute_incentive_pool(
             &incentive_config,
@@ -369,7 +476,142 @@ impl WeightSetter {
             burn_rate: incentive_result.burn_rate,
             usd_required_epoch: incentive_result.usd_required_epoch,
             usd_emission_capacity: incentive_result.usd_emission_capacity,
+            alpha_out_emission_rao: subnet_emission_rate,
+            miner_alpha_per_epoch,
+            alpha_price_usd: token_prices.alpha_price_usd,
+            tao_price_usd: token_prices.tao_price_usd,
+            blocks_per_epoch: self.blocks_per_weight_set,
+            incentive_config,
+            category_payouts: incentive_result.category_payouts,
+            miner_payouts_detail,
         })
+    }
+
+    /// Build per-miner breakdown of CU (per category) and RU (total) for shadow logging.
+    /// Replicates the payout math from `compute_incentive_pool` but keeps CU/RU separate.
+    fn compute_shadow_miner_breakdown(
+        &self,
+        config: &IncentiveConfigResponse,
+        cu_rows: &[crate::basilica_api::CuLedgerRowResponse],
+        ru_rows: &[crate::basilica_api::RuLedgerRowResponse],
+        epoch_start: DateTime<Utc>,
+        epoch_end: DateTime<Utc>,
+        hotkey_to_uid: &HashMap<String, u16>,
+    ) -> Vec<ShadowMinerPayout> {
+        use rust_decimal::Decimal;
+
+        // CU supply per category (dilution denominator)
+        let mut category_cu_supply: HashMap<String, Decimal> = HashMap::new();
+        for row in cu_rows {
+            if row.is_slashed
+                || !hotkey_to_uid.contains_key(&row.hotkey)
+                || !config.gpu_categories.contains_key(&row.gpu_category)
+            {
+                continue;
+            }
+            *category_cu_supply
+                .entry(row.gpu_category.clone())
+                .or_insert(Decimal::ZERO) += row.cu_amount;
+        }
+
+        // Accumulate CU per (hotkey, category)
+        let mut cu_accum: HashMap<String, HashMap<String, (Decimal, Decimal)>> = HashMap::new();
+        for row in cu_rows {
+            if row.is_slashed
+                || !hotkey_to_uid.contains_key(&row.hotkey)
+                || !config.gpu_categories.contains_key(&row.gpu_category)
+            {
+                continue;
+            }
+            let vested = compute_cu_vested_fraction(row, epoch_start, epoch_end);
+            if vested <= Decimal::ZERO {
+                continue;
+            }
+            let Some(cat_config) = config.gpu_categories.get(&row.gpu_category) else {
+                continue;
+            };
+            let supply = category_cu_supply
+                .get(&row.gpu_category)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            if supply <= Decimal::ZERO {
+                continue;
+            }
+            let target_gpus = Decimal::from(cat_config.target_count) * Decimal::from(8u32);
+            let row_price_usd = Decimal::from(row.price_per_gpu_cents) / Decimal::from(100u32);
+            let capacity_budget = target_gpus * Decimal::from(row.window_hours) * row_price_usd;
+            let per_cu_budget = capacity_budget / supply;
+            let effective_price = row_price_usd.min(per_cu_budget);
+            let cu_usd = vested * row.cu_amount * effective_price;
+            if cu_usd <= Decimal::ZERO {
+                continue;
+            }
+
+            let entry = cu_accum
+                .entry(row.hotkey.clone())
+                .or_default()
+                .entry(row.gpu_category.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.0 += row.cu_amount;
+            entry.1 += cu_usd;
+        }
+
+        // Accumulate RU per hotkey (total, not per category)
+        let mut ru_accum: HashMap<String, Decimal> = HashMap::new();
+        for row in ru_rows {
+            if row.is_slashed || !hotkey_to_uid.contains_key(&row.hotkey) {
+                continue;
+            }
+            let vested = compute_ru_vested_fraction(row, epoch_start, epoch_end);
+            if vested <= Decimal::ZERO {
+                continue;
+            }
+            let ru_usd =
+                vested * row.ru_amount * Decimal::from(row.revenue_share_pct) / Decimal::from(100u32);
+            if ru_usd <= Decimal::ZERO {
+                continue;
+            }
+            *ru_accum.entry(row.hotkey.clone()).or_insert(Decimal::ZERO) += ru_usd;
+        }
+
+        // Merge into Vec<ShadowMinerPayout>
+        let all_hotkeys: std::collections::HashSet<&String> = cu_accum
+            .keys()
+            .chain(ru_accum.keys())
+            .collect();
+
+        let mut payouts: Vec<ShadowMinerPayout> = all_hotkeys
+            .into_iter()
+            .filter_map(|hotkey| {
+                let uid = hotkey_to_uid.get(hotkey)?;
+                let cu_categories: Vec<ShadowCuCategory> = cu_accum
+                    .get(hotkey)
+                    .map(|cats| {
+                        cats.iter()
+                            .map(|(cat, (amount, usd))| ShadowCuCategory {
+                                category: cat.clone(),
+                                cu_amount: *amount,
+                                cu_usd: *usd,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let ru_usd = ru_accum.get(hotkey).copied().unwrap_or(Decimal::ZERO);
+                let cu_total: Decimal = cu_categories.iter().map(|c| c.cu_usd).sum();
+                let total_usd = cu_total + ru_usd;
+
+                Some(ShadowMinerPayout {
+                    miner_uid: *uid,
+                    hotkey: hotkey.clone(),
+                    cu_categories,
+                    ru_usd,
+                    total_usd,
+                })
+            })
+            .collect();
+
+        payouts.sort_by_key(|p| p.miner_uid);
+        payouts
     }
 
     // ── Old delivery-based helpers ──
