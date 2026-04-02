@@ -365,7 +365,12 @@ impl WeightSetter {
                     let cu_breakdown: String = miner
                         .cu_categories
                         .iter()
-                        .map(|c| format!("{}: {} CU (${})", c.category, c.cu_amount, c.cu_usd))
+                        .map(|c| {
+                            format!(
+                                "{}: {:.2} CU (vested ${:.2} this epoch)",
+                                c.category, c.cu_amount, c.cu_usd
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     info!(
