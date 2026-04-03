@@ -287,7 +287,6 @@ impl MinerRegistration for RegistrationService {
             validator_ssh_public_key,
             health_check_interval_secs: self.bidding_config.health_check_interval_secs as u32,
             error_message: String::new(),
-            collateral_status: None,
         }))
     }
 
