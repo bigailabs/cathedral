@@ -101,7 +101,7 @@ pub struct SecurityConfig {
     /// Enable request signing verification
     pub verify_signatures: bool,
 
-    /// Ethereum private key for collateral contract
+    /// Ethereum private key file path
     pub private_key_file: Option<PathBuf>,
 }
 

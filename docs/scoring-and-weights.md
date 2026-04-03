@@ -154,4 +154,3 @@ Deliveries are excluded from weight calculation when:
 - The miner's hotkey is no longer in the metagraph (deregistered)
 - The GPU category is unrecognized (maps to `Other`)
 - The `revenue_usd` is zero, negative, or non-finite
-- The node is excluded due to collateral requirements

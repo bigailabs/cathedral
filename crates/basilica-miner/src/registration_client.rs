@@ -218,28 +218,6 @@ impl RegistrationClient {
             "Successfully registered with validator"
         );
 
-        // Log collateral status if present
-        if let Some(status) = &response.collateral_status {
-            match status.status.as_str() {
-                "warning" | "undercollateralized" | "excluded" => {
-                    warn!(
-                        status = %status.status,
-                        current_usd = status.current_usd_value,
-                        min_required = status.minimum_usd_required,
-                        action = %status.action_required,
-                        "Collateral status requires attention"
-                    );
-                }
-                _ => {
-                    info!(
-                        status = %status.status,
-                        current_usd = status.current_usd_value,
-                        "Collateral status OK"
-                    );
-                }
-            }
-        }
-
         Ok(state)
     }
 

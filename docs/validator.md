@@ -1012,11 +1012,6 @@ nanos = 0
 # gRPC port offset from miner's axon port (default: uses port 8080)
 # grpc_port_offset = 1000  # Would use axon_port + 1000
 
-# Collateral event scan interval (blockchain monitoring)
-[verification.collateral_event_scan_interval]
-secs = 12       # 1 Bittensor block
-nanos = 0
-
 # Interval between full binary validations per node
 [verification.node_validation_interval]
 secs = 21600    # 6 hours

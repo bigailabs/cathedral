@@ -34,12 +34,7 @@ blake3 = { workspace = true }
 clap = { workspace = true }
 clap-verbosity-flag = { workspace = true }
 alloy = { workspace = true }
-alloy-primitives = { workspace = true }
-alloy-provider = { workspace = true }
-alloy-sol-types = { workspace = true }
-collateral-contract = { path = "../collateral-contract" }
 hex = { workspace = true }
-reqwest = { workspace = true }
 url = { workspace = true }
 
 # Internal dependencies

@@ -162,9 +162,8 @@ Expected Revenue = P(win) × Revenue(bid)
 If all miners use aggressive utilization-based bidding, prices can spiral down. Mitigations:
 
 1. **Floor price (future strategy)**: Never bid below cost
-2. **Collateral**: Miners with stake have skin in the game
-3. **Reputation**: Long-term miners optimize for sustainable pricing
-4. **Category caps**: Emission caps prevent single miner domination
+2. **Reputation**: Long-term miners optimize for sustainable pricing
+3. **Category caps**: Emission caps prevent single miner domination
 
 ### New Miner Strategy
 

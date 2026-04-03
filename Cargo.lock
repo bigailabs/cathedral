@@ -2015,9 +2015,6 @@ name = "basilica-miner"
 version = "0.1.0"
 dependencies = [
  "alloy",
- "alloy-primitives",
- "alloy-provider",
- "alloy-sol-types",
  "anyhow",
  "async-trait",
  "basilica-common",
@@ -2027,14 +2024,12 @@ dependencies = [
  "chrono",
  "clap",
  "clap-verbosity-flag",
- "collateral-contract",
  "hex",
  "metrics",
  "metrics-exporter-prometheus",
  "prost",
  "prost-types",
  "rand 0.8.5",
- "reqwest 0.11.27",
  "serde",
  "serde_json",
  "serde_with",
@@ -2631,32 +2626,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "collateral-contract"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "alloy-contract",
- "alloy-network",
- "alloy-primitives",
- "alloy-provider",
- "alloy-sol-types",
- "anyhow",
- "basilica-common",
- "bittensor-rs",
- "clap",
- "clap-verbosity-flag",
- "hex",
- "serde",
- "serde_json",
- "subxt",
- "subxt-signer",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

@@ -266,9 +266,7 @@ fn validate_security_config(
             }
         }
     } else {
-        suggestions.push(
-            "Consider setting private_key_file for collateral contract operations".to_string(),
-        );
+        suggestions.push("Consider setting private_key_file for signing operations".to_string());
     }
 }
 
