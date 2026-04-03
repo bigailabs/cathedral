@@ -576,6 +576,7 @@ pub struct IncentiveConfigResponse {
     pub window_hours: u32,
     pub revenue_share_pct: Option<u32>,
     pub slash_pct: u32,
+    pub weight_mechanism: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1187,7 +1188,8 @@ mod tests {
                 },
                 "window_hours": 72,
                 "revenue_share_pct": 30,
-                "slash_pct": 100
+                "slash_pct": 100,
+                "weight_mechanism": "v2"
             })))
             .mount(&server)
             .await;
@@ -1197,6 +1199,7 @@ mod tests {
 
         let config = client.get_incentive_config().await.unwrap();
         assert_eq!(config.gpu_categories["H100"].target_count, 2);
+        assert_eq!(config.weight_mechanism, Some("v2".to_string()));
     }
 
     #[tokio::test]
