@@ -7,7 +7,6 @@ members = [
   "crates/basilica-cli",
   "crates/basilica-sdk",
   "crates/basilica-sdk-python",
-  "crates/collateral-contract",
 ]
 resolver = "2"
 
