@@ -283,11 +283,11 @@ impl WeightSetter {
         let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
 
         // Determine mechanism from backend config.
-        // If config fetch fails, default to v1.
-        let incentive_config = self.api_client.get_incentive_config().await.ok();
+        // Transport/serde errors propagate (epoch fails and retries).
+        // Only fall back to V1 when the field is absent.
+        let incentive_config = self.api_client.get_incentive_config().await?;
         let mechanism = incentive_config
-            .as_ref()
-            .and_then(|c| c.weight_mechanism)
+            .weight_mechanism
             .unwrap_or(WeightMechanism::V1);
         info!(weight_mechanism = ?mechanism, "Selected weight mechanism");
 
