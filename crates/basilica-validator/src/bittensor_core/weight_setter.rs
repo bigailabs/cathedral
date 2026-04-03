@@ -3,7 +3,7 @@
 //! Manages Bittensor weight setting operations for the Validator.
 //! Sets weights every N blocks based on miner scores from node validations.
 
-use crate::basilica_api::{BasilicaApiClient, IncentiveConfigResponse};
+use crate::basilica_api::{BasilicaApiClient, IncentiveConfigResponse, WeightMechanism};
 use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
@@ -50,24 +50,6 @@ pub struct NodeValidationResult {
     pub gpu_model: String,
 }
 
-/// Which weight-setting mechanism to use for the epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WeightMechanism {
-    /// Delivery-based (old)
-    V1,
-    /// CU/RU incentive pool (new)
-    V2,
-}
-
-impl WeightMechanism {
-    fn from_config(value: Option<&str>) -> Result<Self> {
-        match value {
-            None | Some("v1") => Ok(Self::V1),
-            Some("v2") => Ok(Self::V2),
-            Some(other) => Err(anyhow::anyhow!("unknown weight_mechanism: {other:?}")),
-        }
-    }
-}
 
 /// CU contribution for one category in incentive pool logging
 struct IncentiveCuCategory {
@@ -302,13 +284,12 @@ impl WeightSetter {
         let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
 
         // Determine mechanism from backend config.
-        // If config fetch fails, default to v1. If config has unknown mechanism, fail the epoch.
+        // If config fetch fails, default to v1.
         let incentive_config = self.api_client.get_incentive_config().await.ok();
-        let mechanism = WeightMechanism::from_config(
-            incentive_config
-                .as_ref()
-                .and_then(|c| c.weight_mechanism.as_deref()),
-        )?;
+        let mechanism = incentive_config
+            .as_ref()
+            .and_then(|c| c.weight_mechanism)
+            .unwrap_or(WeightMechanism::V1);
         info!(weight_mechanism = ?mechanism, "Selected weight mechanism");
 
         let version_key = self.get_version_key().await?;
