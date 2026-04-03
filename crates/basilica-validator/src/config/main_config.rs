@@ -89,9 +89,6 @@ pub struct ValidatorConfig {
     /// Billing telemetry streaming configuration
     #[serde(default)]
     pub billing: BillingConfig,
-    /// Collateral enforcement configuration (presence = enabled)
-    #[serde(default)]
-    pub collateral: Option<super::collateral::CollateralConfig>,
     /// Enables CU generation and incentive slash submission on the primary validator.
     #[serde(default)]
     pub cu_generator_enabled: bool,
@@ -149,9 +146,6 @@ pub struct VerificationConfig {
     /// Storage validation configuration
     #[serde(default)]
     pub storage_validation: StorageValidationConfig,
-    /// Collateral event scan interval
-    #[serde(default = "default_collateral_event_scan_interval")]
-    pub collateral_event_scan_interval: Duration,
     /// Interval between full binary validations per node
     #[serde(default = "default_node_validation_interval")]
     pub node_validation_interval: Duration,
@@ -214,10 +208,6 @@ fn default_cache_miner_info_ttl() -> Duration {
     Duration::from_secs(300) // 5 minutes
 }
 
-fn default_collateral_event_scan_interval() -> Duration {
-    Duration::from_secs(12) // one block time
-}
-
 fn default_node_validation_interval() -> Duration {
     Duration::from_secs(6 * 3600) // 6 hours
 }
@@ -252,7 +242,6 @@ impl VerificationConfig {
             grpc_port_offset: None,
             binary_validation: None, // Disabled in test by default
             docker_validation: DockerValidationConfig::default(),
-            collateral_event_scan_interval: Duration::from_secs(12),
             node_validation_interval: Duration::from_secs(3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(7200)),
             enable_worker_queue: false,
@@ -864,7 +853,6 @@ impl Default for ValidatorConfig {
                 binary_validation: None, // Disabled by default
                 docker_validation: DockerValidationConfig::default(),
                 storage_validation: StorageValidationConfig::default(),
-                collateral_event_scan_interval: default_collateral_event_scan_interval(),
                 node_validation_interval: default_node_validation_interval(),
                 gpu_assignment_cleanup_ttl: default_gpu_assignment_cleanup_ttl(),
                 enable_worker_queue: default_enable_worker_queue(),
@@ -893,7 +881,6 @@ impl Default for ValidatorConfig {
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             api_endpoint: default_api_endpoint(),
             billing: BillingConfig::default(),
-            collateral: None,
             cu_generator_enabled: false,
             slash_mode: SlashMode::default(),
         }
@@ -1072,17 +1059,6 @@ impl ConfigValidation for ValidatorConfig {
                     key: "verification.binary_validation.executor_binary_path".to_string(),
                     value: executor_path.display().to_string(),
                     reason: "Executor binary path does not exist".to_string(),
-                });
-            }
-        }
-
-        // Validate collateral configuration if present
-        if let Some(ref collateral) = self.collateral {
-            if let Err(e) = collateral.validate() {
-                return Err(ConfigurationError::InvalidValue {
-                    key: "collateral".to_string(),
-                    value: "collateral_config".to_string(),
-                    reason: e.to_string(),
                 });
             }
         }

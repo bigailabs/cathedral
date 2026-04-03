@@ -14,7 +14,6 @@ mod basilica_api;
 mod billing;
 mod bittensor_core;
 mod cli;
-mod collateral;
 mod config;
 mod gpu;
 mod grpc;

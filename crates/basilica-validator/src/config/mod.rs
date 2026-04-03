@@ -1,5 +1,4 @@
 pub mod bidding;
-pub mod collateral;
 pub mod emission;
 pub mod pricing;
 

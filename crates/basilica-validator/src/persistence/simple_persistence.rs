@@ -80,36 +80,7 @@ impl SimplePersistence {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
 
-        self.initialize_collateral_scan_status().await?;
-
         info!("Database migrations completed successfully");
-        Ok(())
-    }
-
-    async fn initialize_collateral_scan_status(&self) -> Result<(), anyhow::Error> {
-        use chrono::Utc;
-        use collateral_contract::config::CONTRACT_DEPLOYED_BLOCK_NUMBER;
-        use tracing::warn;
-
-        let now = Utc::now().to_rfc3339();
-        let insert_query = r#"
-            INSERT OR IGNORE INTO collateral_scan_status (last_scanned_block_number, updated_at, id)
-            VALUES (?, ?, 1)
-        "#;
-
-        let result = sqlx::query(insert_query)
-            .bind(CONTRACT_DEPLOYED_BLOCK_NUMBER as i64)
-            .bind(now)
-            .execute(&self.pool)
-            .await;
-
-        if let Err(e) = result {
-            warn!(
-                "Error initializing collateral scan status (may already exist): {}",
-                e
-            );
-        }
-
         Ok(())
     }
 

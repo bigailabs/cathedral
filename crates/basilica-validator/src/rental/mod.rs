@@ -21,7 +21,6 @@ pub use types::*;
 
 use crate::ban_system::BanManager;
 use crate::billing::BillingClient;
-use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::entities::MisbehaviourType;
 use crate::persistence::miner_nodes::NodeBidCandidate;
@@ -46,8 +45,6 @@ pub struct RentalManager {
     metrics: Arc<ValidatorPrometheusMetrics>,
     /// Ban manager for logging misbehaviours
     ban_manager: Arc<BanManager>,
-    /// Collateral manager for bid selection and eligibility
-    collateral_manager: Option<Arc<CollateralManager>>,
     /// Max age for full validation before allowing a rental
     pre_rental_full_validation_max_age: std::time::Duration,
 }
@@ -161,12 +158,7 @@ impl RentalManager {
         let log_streamer = Arc::new(LogStreamer::new());
 
         // Create ban manager
-        let ban_manager = Arc::new(BanManager::new(
-            persistence.clone(),
-            Some(metrics.clone()),
-            None,
-            None,
-        ));
+        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
 
         // Create health monitor with SSH key manager, metrics, and ban manager
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
@@ -185,7 +177,6 @@ impl RentalManager {
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
             ban_manager,
-            collateral_manager: None,
             // TODO: Wire this from config for callers using `new`.
             pre_rental_full_validation_max_age: std::time::Duration::from_secs(12 * 60 * 60),
         }
@@ -197,9 +188,6 @@ impl RentalManager {
         config: &crate::config::ValidatorConfig,
         persistence: Arc<SimplePersistence>,
         metrics: Arc<ValidatorPrometheusMetrics>,
-        collateral_manager: Option<Arc<CollateralManager>>,
-        slash_executor: Option<Arc<crate::collateral::SlashExecutor>>,
-        validator_hotkey: Option<String>,
     ) -> Result<Self> {
         // Create SSH key manager
         let ssh_key_dir = config.ssh_session.ssh_key_directory.clone();
@@ -210,12 +198,7 @@ impl RentalManager {
         let ssh_key_manager = Arc::new(ssh_key_manager);
 
         // Create ban manager
-        let ban_manager = Arc::new(BanManager::new(
-            persistence.clone(),
-            Some(metrics.clone()),
-            slash_executor,
-            validator_hotkey,
-        ));
+        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
 
         // Create health monitor
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
@@ -252,7 +235,6 @@ impl RentalManager {
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
             ban_manager,
-            collateral_manager,
             pre_rental_full_validation_max_age: config.verification.node_validation_interval,
         })
     }
@@ -465,7 +447,6 @@ impl RentalManager {
             .filter_by_min_memory(candidates, request.min_memory_gb)
             .await;
 
-        // Rank by collateral preference
         let ordered = self
             .rank_bid_candidates(candidates, &request.gpu_category, request.gpu_count)
             .await;
@@ -560,42 +541,10 @@ impl RentalManager {
     async fn rank_bid_candidates(
         &self,
         candidates: Vec<NodeBidCandidate>,
-        gpu_category: &str,
-        gpu_count: u32,
+        _gpu_category: &str,
+        _gpu_count: u32,
     ) -> Vec<NodeBidCandidate> {
-        let mut preferred = Vec::new();
-        let mut fallback = Vec::new();
-
-        for candidate in candidates {
-            let preference = match &self.collateral_manager {
-                Some(collateral) => {
-                    collateral
-                        .get_preference(
-                            &candidate.miner_hotkey,
-                            &candidate.node_id,
-                            gpu_category,
-                            gpu_count,
-                        )
-                        .await
-                }
-                None => CollateralPreference::Fallback,
-            };
-            match preference {
-                CollateralPreference::Preferred => preferred.push(candidate),
-                CollateralPreference::Fallback => fallback.push(candidate),
-                CollateralPreference::Excluded => {
-                    tracing::info!(
-                        node_id = %candidate.node_id,
-                        miner_uid = candidate.miner_uid,
-                        "Skipping excluded node due to insufficient collateral"
-                    );
-                }
-            }
-        }
-
-        let mut ordered = preferred;
-        ordered.extend(fallback);
-        ordered
+        candidates
     }
 
     async fn ensure_not_banned(&self, selection: &RentalSelection, rental_id: &str) -> Result<()> {
