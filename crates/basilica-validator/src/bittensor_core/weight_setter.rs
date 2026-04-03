@@ -50,7 +50,6 @@ pub struct NodeValidationResult {
     pub gpu_model: String,
 }
 
-
 /// CU contribution for one category in incentive pool logging
 struct IncentiveCuCategory {
     category: String,
