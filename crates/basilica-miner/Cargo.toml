@@ -33,7 +33,6 @@ chrono = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true }
 clap-verbosity-flag = { workspace = true }
-alloy = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
 

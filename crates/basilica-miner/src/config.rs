@@ -6,7 +6,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DurationSeconds};
 use std::collections::BTreeMap;
-use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,9 +31,6 @@ pub struct MinerConfig {
 
     /// Node management configuration
     pub node_management: NodeManagementConfig,
-
-    /// Security configuration
-    pub security: SecurityConfig,
 
     /// SSH session configuration for validator access
     pub ssh_session: NodeSshConfig,
@@ -93,16 +89,6 @@ pub struct NodeManagementConfig {
 
     /// Enable automatic status recovery
     pub auto_recovery: bool,
-}
-
-/// Security configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityConfig {
-    /// Enable request signing verification
-    pub verify_signatures: bool,
-
-    /// Ethereum private key file path
-    pub private_key_file: Option<PathBuf>,
 }
 
 /// SSH configuration for node access by validators
@@ -237,7 +223,6 @@ impl Default for MinerConfig {
             },
             metrics: MetricsConfig::default(),
             node_management: NodeManagementConfig::default(),
-            security: SecurityConfig::default(),
             ssh_session: NodeSshConfig::default(),
             advertised_addresses: MinerAdvertisedAddresses::default(),
             validator_assignment: ValidatorAssignmentConfig::default(),
@@ -304,15 +289,6 @@ impl Default for NodeManagementConfig {
             health_check_timeout: Duration::from_secs(10),
             max_retry_attempts: 3,
             auto_recovery: true,
-        }
-    }
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            verify_signatures: true,
-            private_key_file: None,
         }
     }
 }
@@ -513,24 +489,6 @@ impl MinerConfig {
         }
 
         Ok(())
-    }
-}
-
-impl SecurityConfig {
-    pub fn get_private_key(&self) -> Result<String, anyhow::Error> {
-        match self.private_key_file {
-            Some(ref path) => {
-                if !Path::new(path).exists() {
-                    Err(anyhow::anyhow!("private key file does not exist"))
-                } else {
-                    match fs::read_to_string(path) {
-                        Ok(private_key) => Ok(private_key.trim().to_string()),
-                        Err(e) => Err(anyhow::anyhow!("Failed to read private key file: {}", e)),
-                    }
-                }
-            }
-            None => Err(anyhow::anyhow!("private_key_file config is required")),
-        }
     }
 }
 

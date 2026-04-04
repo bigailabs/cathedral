@@ -799,17 +799,7 @@ ls -la ~/.ssh/miner_node_key
 # Should show: -rw------- (permissions 600)
 ```
 
-#### 6. Security Configuration
-
-```toml
-[security]
-verify_signatures = true   # ALWAYS true for production
-
-# Optional: Ethereum private key file (advanced)
-# private_key_file = "/opt/basilica/keys/private_key.pem"
-```
-
-#### 7. Metrics Configuration
+#### 6. Metrics Configuration
 
 ```toml
 [metrics]
@@ -826,7 +816,7 @@ port = 9090
 curl http://localhost:9090/metrics
 ```
 
-#### 8. Validator Assignment Strategy
+#### 7. Validator Assignment Strategy
 
 ```toml
 [validator_assignment]
@@ -842,7 +832,7 @@ strategy = "highest_stake"           # Options: highest_stake, fixed_assignment
 - **Fixed**: Use `fixed_assignment` with a specific `validator_hotkey` for known validators
 - **Development**: Use default `highest_stake` without specific hotkey
 
-#### 9. Advertised Addresses (Optional)
+#### 8. Advertised Addresses (Optional)
 
 Override auto-detected addresses for NAT/proxy scenarios:
 
