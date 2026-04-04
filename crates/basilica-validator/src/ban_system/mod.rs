@@ -4,7 +4,6 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::collateral::SlashExecutor;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::entities::{MisbehaviourLog, MisbehaviourType};
 use crate::persistence::SimplePersistence;
@@ -13,8 +12,6 @@ use crate::persistence::SimplePersistence;
 pub struct BanManager {
     persistence: Arc<SimplePersistence>,
     metrics: Option<Arc<ValidatorPrometheusMetrics>>,
-    slash_executor: Option<Arc<SlashExecutor>>,
-    validator_hotkey: Option<String>,
 }
 
 impl BanManager {
@@ -22,14 +19,10 @@ impl BanManager {
     pub fn new(
         persistence: Arc<SimplePersistence>,
         metrics: Option<Arc<ValidatorPrometheusMetrics>>,
-        slash_executor: Option<Arc<SlashExecutor>>,
-        validator_hotkey: Option<String>,
     ) -> Self {
         Self {
             persistence,
             metrics,
-            slash_executor,
-            validator_hotkey,
         }
     }
 
@@ -88,22 +81,6 @@ impl BanManager {
             );
         }
 
-        let should_slash = should_ban;
-
-        if should_slash {
-            if let Err(err) = self
-                .try_execute_slash(miner_uid, node_id, type_of_misbehaviour, details)
-                .await
-            {
-                warn!(
-                    miner_uid = miner_uid,
-                    node_id = node_id,
-                    error = %err,
-                    "Failed to execute collateral slash"
-                );
-            }
-        }
-
         // Refresh ban metric after recording misbehaviour
         if let Err(err) = self
             .compute_current_ban(miner_uid, node_id)
@@ -117,48 +94,6 @@ impl BanManager {
                 "Failed to refresh ban metric after logging misbehaviour"
             );
         }
-
-        Ok(())
-    }
-
-    async fn try_execute_slash(
-        &self,
-        miner_uid: u16,
-        node_id: &str,
-        type_of_misbehaviour: MisbehaviourType,
-        details: &str,
-    ) -> Result<()> {
-        let slash_executor = match &self.slash_executor {
-            Some(exec) => exec.clone(),
-            None => return Ok(()),
-        };
-        let miner_hotkey = self
-            .persistence
-            .get_miner_hotkey_by_uid(miner_uid)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("miner hotkey not found"))?;
-        let rental_id = extract_rental_id(details).unwrap_or_else(|| "unknown".to_string());
-        let validator_hotkey = self
-            .validator_hotkey
-            .clone()
-            .unwrap_or_else(|| "unknown-validator".to_string());
-
-        slash_executor
-            .execute_slash(
-                &miner_hotkey,
-                node_id,
-                type_of_misbehaviour.as_str(),
-                details,
-                &validator_hotkey,
-                &rental_id,
-            )
-            .await?;
-
-        if slash_executor.is_shadow_mode() {
-            return Ok(());
-        }
-
-        info!(miner_uid, node_id, "Slash executed for miner");
 
         Ok(())
     }
@@ -385,15 +320,6 @@ impl BanManager {
     }
 }
 
-fn extract_rental_id(details: &str) -> Option<String> {
-    // TODO: Fall back to other detail fields if rental_id format changes.
-    let parsed: serde_json::Value = serde_json::from_str(details).ok()?;
-    parsed
-        .get("rental_id")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-}
-
 struct BanComputation {
     ban_expiry: Option<DateTime<Utc>>,
     ban_trigger: Option<DateTime<Utc>>,
@@ -568,7 +494,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone(), None, None, None);
+        let ban_manager = BanManager::new(persistence.clone(), None);
         let miner_uid = 1;
         let node_id = "node1";
 
@@ -654,7 +580,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone(), None, None, None);
+        let ban_manager = BanManager::new(persistence.clone(), None);
         let miner_uid = 1;
         let node_id = "node1";
 
@@ -726,7 +652,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone(), None, None, None);
+        let ban_manager = BanManager::new(persistence.clone(), None);
         let miner_uid = 1;
         let node_id = "node1";
 

@@ -150,8 +150,7 @@ The Basilica miner manages a fleet of GPU nodes and provides validators with **d
          │                                             │
          │ 3. Response ←─────────────────────────────  │
          │    (validator SSH public key,               │
-         │     health check interval,                  │
-         │     collateral status)                      │
+         │     health check interval)                  │
          │                                             │
          │ 4. Deploy validator SSH key                 │
          │    (miner → nodes)                          │
@@ -377,14 +376,14 @@ validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 2. **Select validator** using the configured assignment strategy (e.g., `highest_stake`)
 3. **Call validator's `/discovery` HTTP endpoint** (via the axon address from metagraph) to learn the gRPC port for bid registration
 4. **Call `RegisterBid` gRPC** with all nodes, SSH details, and pricing
-5. **Receive validator's SSH public key** + health check interval + collateral status
+5. **Receive validator's SSH public key** + health check interval
 6. **Deploy validator SSH key** to all managed nodes
 7. **Enter health check loop** — send periodic `HealthCheck` RPCs to keep registrations active
 
 **Validator's perspective** (passive):
 
 1. **Runs gRPC registration server** listening for `RegisterBid` from miners
-2. **Receives bids** — verifies signature, checks bid floor, checks collateral, upserts nodes into DB
+2. **Receives bids** — verifies signature, checks bid floor, upserts nodes into DB
 3. **Returns SSH public key** so the miner can deploy it to nodes
 4. **Tracks miner heartbeat** — expects periodic `HealthCheck` RPCs from the miner process (default every 60s)
 5. **Tracks node liveness separately** — uses validator SSH verification (`last_node_check`) for node online/offline decisions and stale cleanup
@@ -396,7 +395,7 @@ The miner communicates with the validator via the `MinerRegistration` gRPC servi
 
 #### 1. RegisterBid
 
-Called **once at startup** after validator discovery. Sends all nodes with SSH connection details and pricing. The validator returns its SSH public key, the health check interval, and collateral status.
+Called **once at startup** after validator discovery. Sends all nodes with SSH connection details and pricing. The validator returns its SSH public key and the health check interval.
 
 ```protobuf
 rpc RegisterBid(RegisterBidRequest) returns (RegisterBidResponse);
@@ -424,11 +423,10 @@ message RegisterBidResponse {
   string validator_ssh_public_key = 3;     // Deploy this to your nodes
   uint32 health_check_interval_secs = 4;   // How often to send health checks
   string error_message = 5;
-  CollateralStatus collateral_status = 6;  // Worst status across all nodes
 }
 ```
 
-**Validator processing**: Verifies signature → checks timestamp freshness → validates node fields → enforces bid floor → checks collateral → upserts nodes in DB → deactivates any previously-registered nodes not in this request.
+**Validator processing**: Verifies signature → checks timestamp freshness → validates node fields → enforces bid floor → upserts nodes in DB → deactivates any previously-registered nodes not in this request.
 
 **Availability note**: A successful `RegisterBid` does not make a node immediately visible in `GET /nodes` (and therefore `basilica ls`). The node is shown only after at least one successful full validation has populated `gpu_uuid_assignments` for that node. If full validation later fails and assignments are cleaned up, the node is hidden again until a subsequent successful full validation.
 
@@ -489,30 +487,6 @@ message HealthCheckResponse {
   string error_message = 3;
 }
 ```
-
-#### Collateral Status
-
-The `RegisterBidResponse` includes a `CollateralStatus` message reflecting the **worst** collateral status across all registered nodes:
-
-```protobuf
-message CollateralStatus {
-  double current_alpha = 1;           // Raw Alpha amount deposited
-  double current_usd_value = 2;       // USD value at current price
-  double minimum_usd_required = 3;    // Minimum for this GPU category
-  string status = 4;                  // "sufficient", "warning", "undercollateralized", "excluded"
-  string grace_period_remaining = 5;  // e.g. "23h 45m" or empty
-  string action_required = 6;         // e.g. "Deposit 25 Alpha (~$50) to maintain eligibility"
-  double alpha_usd_price = 7;         // Current Alpha/USD price used
-  bool price_stale = 8;              // True if price data is > 1hr old
-}
-```
-
-| Status | Meaning |
-|---|---|
-| `sufficient` | Collateral meets requirements |
-| `warning` | Collateral is low — action recommended |
-| `undercollateralized` | Below minimum — may be excluded soon |
-| `excluded` | Insufficient collateral — excluded from rentals |
 
 ---
 
@@ -807,15 +781,6 @@ The BidManager runs automatically after validator discovery and registers your n
 
 **Bid floor enforcement**: Validators enforce a minimum bid price (default 10% of the baseline market price for each GPU category). If your bid is below this floor, the `RegisterBid` RPC will be rejected with an error explaining the minimum acceptable price.
 
-**Collateral requirements**: The validator checks your collateral (Alpha token deposit) during registration. The response includes a `CollateralStatus` with one of these states:
-
-| Status | Meaning |
-|---|---|
-| `sufficient` | Collateral meets requirements — no action needed |
-| `warning` | Collateral is low — deposit more Alpha to maintain eligibility |
-| `undercollateralized` | Below minimum — may be excluded from rentals soon |
-| `excluded` | Insufficient collateral — nodes are excluded from rental selection |
-
 #### 5. SSH Access Configuration
 
 ```toml
@@ -834,17 +799,7 @@ ls -la ~/.ssh/miner_node_key
 # Should show: -rw------- (permissions 600)
 ```
 
-#### 6. Security Configuration
-
-```toml
-[security]
-verify_signatures = true   # ALWAYS true for production
-
-# Optional: Ethereum private key for collateral contract (advanced)
-# private_key_file = "/opt/basilica/keys/private_key.pem"
-```
-
-#### 7. Metrics Configuration
+#### 6. Metrics Configuration
 
 ```toml
 [metrics]
@@ -861,7 +816,7 @@ port = 9090
 curl http://localhost:9090/metrics
 ```
 
-#### 8. Validator Assignment Strategy
+#### 7. Validator Assignment Strategy
 
 ```toml
 [validator_assignment]
@@ -877,7 +832,7 @@ strategy = "highest_stake"           # Options: highest_stake, fixed_assignment
 - **Fixed**: Use `fixed_assignment` with a specific `validator_hotkey` for known validators
 - **Development**: Use default `highest_stake` without specific hotkey
 
-#### 9. Advertised Addresses (Optional)
+#### 8. Advertised Addresses (Optional)
 
 Override auto-detected addresses for NAT/proxy scenarios:
 
@@ -1229,9 +1184,8 @@ Sends RegisterBid RPC to validator's gRPC endpoint
 2. Checks timestamp freshness (within 300s tolerance)
 3. Validates all node fields (host, port, username, gpu_category, gpu_count, hourly_rate_cents)
 4. Enforces **bid floor** — rejects bids below minimum fraction (default 10%) of the baseline price
-5. Checks **collateral status** — reports whether the miner has sufficient Alpha deposited
-6. Upserts nodes into database; deactivates any previously-registered nodes not in this request
-7. Returns `RegisterBidResponse` with validator's SSH public key, health check interval, and collateral status
+5. Upserts nodes into database; deactivates any previously-registered nodes not in this request
+6. Returns `RegisterBidResponse` with validator's SSH public key and health check interval
 
 #### 4. Miner Deploys SSH Key to Nodes
 

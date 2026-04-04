@@ -1200,11 +1200,9 @@ mod tests {
         );
 
         let custom_emission_config = EmissionConfig {
-            burn_percentage: 0.0,
             forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations: custom_gpu_allocations,
-            min_miners_per_category: 1,
             weight_set_interval_blocks: 360,
             weight_version_key: 0,
         };
@@ -1303,11 +1301,9 @@ mod tests {
             crate::config::emission::GpuAllocation::new(80.0),
         );
         let emission_config = EmissionConfig {
-            burn_percentage: 0.0,
             forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations,
-            min_miners_per_category: 1,
             weight_set_interval_blocks: 360,
             weight_version_key: 0,
         };
@@ -1362,11 +1358,9 @@ mod tests {
         );
 
         let emission_config = EmissionConfig {
-            burn_percentage: 0.0,
             forced_burn_percentage: Some(10.0),
             burn_uid: 999,
             gpu_allocations,
-            min_miners_per_category: 1,
             weight_set_interval_blocks: 360,
             weight_version_key: 0,
         };

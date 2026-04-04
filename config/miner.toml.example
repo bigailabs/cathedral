@@ -75,16 +75,6 @@ max_retry_attempts = 3
 auto_recovery = true
 
 # =============================================================================
-# Security Configuration
-# =============================================================================
-[security]
-# Verify Bittensor signatures (always true for production)
-verify_signatures = true
-
-# Optional: Ethereum private key for collateral contract
-# private_key_file = "/path/to/private_key.pem"
-
-# =============================================================================
 # SSH Session Configuration
 # =============================================================================
 [ssh_session]

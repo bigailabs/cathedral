@@ -10,7 +10,6 @@ pub mod basilica_api;
 pub mod billing;
 pub mod bittensor_core;
 pub mod cli;
-pub mod collateral;
 pub mod config;
 pub mod gpu;
 pub mod grpc;

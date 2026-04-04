@@ -3,7 +3,6 @@
 //! Handles configuration validation and display operations for the miner configuration system.
 
 use crate::config::MinerConfig;
-use alloy::signers::local::PrivateKeySigner;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
@@ -162,14 +161,6 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
         &mut suggestions,
     );
 
-    // Security configuration validation
-    validate_security_config(
-        &config.security,
-        &mut errors,
-        &mut warnings,
-        &mut suggestions,
-    );
-
     Ok(ValidationResult {
         is_valid: errors.is_empty(),
         errors,
@@ -241,58 +232,6 @@ fn validate_node_config(
 
     if config.max_retry_attempts > 10 {
         warnings.push("High retry attempts may cause long delays".to_string());
-    }
-}
-
-/// Validate security configuration
-fn validate_security_config(
-    config: &crate::config::SecurityConfig,
-    errors: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-    suggestions: &mut Vec<String>,
-) {
-    if !config.verify_signatures {
-        warnings.push("Signature verification is disabled".to_string());
-        suggestions.push("Enable signature verification for production".to_string());
-    }
-
-    if config.private_key_file.is_some() {
-        match config.get_private_key() {
-            Ok(private_key) => {
-                validate_private_key_config(&private_key, errors, warnings, suggestions);
-            }
-            Err(e) => {
-                errors.push(format!("Failed to get private key: {e}"));
-            }
-        }
-    } else {
-        suggestions.push(
-            "Consider setting private_key_file for collateral contract operations".to_string(),
-        );
-    }
-}
-
-/// Validate private key configuration
-fn validate_private_key_config(
-    private_key: &str,
-    errors: &mut Vec<String>,
-    _warnings: &mut [String],
-    _suggestions: &mut [String],
-) {
-    if private_key.is_empty() {
-        errors.push("private_key cannot be empty".to_string());
-        return;
-    }
-
-    let private_key = private_key.trim_start_matches("0x");
-    if private_key.len() != 64 {
-        errors.push("private_key must be exactly 64 characters long".to_string());
-        return;
-    }
-
-    // Validate that the private key can be parsed and get the corresponding address
-    if private_key.parse::<PrivateKeySigner>().is_err() {
-        errors.push("Invalid private key format".to_string());
     }
 }
 

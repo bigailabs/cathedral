@@ -89,9 +89,6 @@ pub struct ValidatorConfig {
     /// Billing telemetry streaming configuration
     #[serde(default)]
     pub billing: BillingConfig,
-    /// Collateral enforcement configuration (presence = enabled)
-    #[serde(default)]
-    pub collateral: Option<super::collateral::CollateralConfig>,
     /// Enables CU generation and incentive slash submission on the primary validator.
     #[serde(default)]
     pub cu_generator_enabled: bool,
@@ -149,9 +146,6 @@ pub struct VerificationConfig {
     /// Storage validation configuration
     #[serde(default)]
     pub storage_validation: StorageValidationConfig,
-    /// Collateral event scan interval
-    #[serde(default = "default_collateral_event_scan_interval")]
-    pub collateral_event_scan_interval: Duration,
     /// Interval between full binary validations per node
     #[serde(default = "default_node_validation_interval")]
     pub node_validation_interval: Duration,
@@ -214,10 +208,6 @@ fn default_cache_miner_info_ttl() -> Duration {
     Duration::from_secs(300) // 5 minutes
 }
 
-fn default_collateral_event_scan_interval() -> Duration {
-    Duration::from_secs(12) // one block time
-}
-
 fn default_node_validation_interval() -> Duration {
     Duration::from_secs(6 * 3600) // 6 hours
 }
@@ -252,7 +242,6 @@ impl VerificationConfig {
             grpc_port_offset: None,
             binary_validation: None, // Disabled in test by default
             docker_validation: DockerValidationConfig::default(),
-            collateral_event_scan_interval: Duration::from_secs(12),
             node_validation_interval: Duration::from_secs(3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(7200)),
             enable_worker_queue: false,
@@ -586,14 +575,6 @@ pub struct BillingConfig {
     #[serde(default = "default_billing_endpoint")]
     pub billing_endpoint: String,
 
-    /// Sync interval for miner delivery cache (seconds)
-    #[serde(default = "default_billing_sync_interval_secs")]
-    pub sync_interval_secs: u64,
-
-    /// Lookback window for miner delivery reads (hours)
-    #[serde(default = "default_billing_lookback_hours")]
-    pub lookback_hours: u64,
-
     /// Request timeout in seconds
     #[serde(default = "default_billing_timeout_secs")]
     pub timeout_secs: u64,
@@ -639,14 +620,6 @@ fn default_billing_endpoint() -> String {
     "http://127.0.0.1:50051".to_string()
 }
 
-fn default_billing_sync_interval_secs() -> u64 {
-    300
-}
-
-fn default_billing_lookback_hours() -> u64 {
-    24
-}
-
 fn default_billing_timeout_secs() -> u64 {
     30
 }
@@ -688,8 +661,6 @@ impl Default for BillingConfig {
         Self {
             enabled: default_billing_enabled(),
             billing_endpoint: default_billing_endpoint(),
-            sync_interval_secs: default_billing_sync_interval_secs(),
-            lookback_hours: default_billing_lookback_hours(),
             timeout_secs: default_billing_timeout_secs(),
             use_tls: default_billing_use_tls(),
             batch_size: default_billing_batch_size(),
@@ -864,7 +835,6 @@ impl Default for ValidatorConfig {
                 binary_validation: None, // Disabled by default
                 docker_validation: DockerValidationConfig::default(),
                 storage_validation: StorageValidationConfig::default(),
-                collateral_event_scan_interval: default_collateral_event_scan_interval(),
                 node_validation_interval: default_node_validation_interval(),
                 gpu_assignment_cleanup_ttl: default_gpu_assignment_cleanup_ttl(),
                 enable_worker_queue: default_enable_worker_queue(),
@@ -893,7 +863,6 @@ impl Default for ValidatorConfig {
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             api_endpoint: default_api_endpoint(),
             billing: BillingConfig::default(),
-            collateral: None,
             cu_generator_enabled: false,
             slash_mode: SlashMode::default(),
         }
@@ -1072,17 +1041,6 @@ impl ConfigValidation for ValidatorConfig {
                     key: "verification.binary_validation.executor_binary_path".to_string(),
                     value: executor_path.display().to_string(),
                     reason: "Executor binary path does not exist".to_string(),
-                });
-            }
-        }
-
-        // Validate collateral configuration if present
-        if let Some(ref collateral) = self.collateral {
-            if let Err(e) = collateral.validate() {
-                return Err(ConfigurationError::InvalidValue {
-                    key: "collateral".to_string(),
-                    value: "collateral_config".to_string(),
-                    reason: e.to_string(),
                 });
             }
         }

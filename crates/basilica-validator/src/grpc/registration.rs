@@ -25,88 +25,13 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::basilica_api::BasilicaApiClient;
-use crate::collateral::{CollateralManager, CollateralState, CollateralStatus};
 use crate::config::bidding::BiddingConfig;
 use crate::persistence::SimplePersistence;
-
-/// Convert internal CollateralStatus to proto CollateralStatus
-fn status_to_proto(
-    status: CollateralStatus,
-) -> basilica_protocol::miner_discovery::CollateralStatus {
-    basilica_protocol::miner_discovery::CollateralStatus {
-        current_alpha: status.current_alpha.to_f64().unwrap_or_default(),
-        current_usd_value: status.current_usd_value.to_f64().unwrap_or_default(),
-        minimum_usd_required: status.minimum_usd_required.to_f64().unwrap_or_default(),
-        status: status.status,
-        grace_period_remaining: status
-            .grace_period_remaining
-            .map(format_duration)
-            .unwrap_or_default(),
-        action_required: status.action_required.unwrap_or_default(),
-        alpha_usd_price: status
-            .alpha_usd_price
-            .and_then(|price| price.to_f64())
-            .unwrap_or_default(),
-        price_stale: status.price_stale,
-    }
-}
-
-fn format_duration(duration: chrono::Duration) -> String {
-    let total_seconds = duration.num_seconds().max(0);
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else {
-        format!("{}m", minutes)
-    }
-}
-
-fn status_rank(state: &CollateralState) -> u8 {
-    match state {
-        CollateralState::Excluded { .. } => 4,
-        CollateralState::Undercollateralized { .. } => 3,
-        CollateralState::Warning { .. } => 2,
-        CollateralState::Sufficient { .. } => 1,
-        CollateralState::Unknown { .. } => 0,
-    }
-}
-
-fn status_rank_from_status(status: &str) -> u8 {
-    match status {
-        "excluded" => 4,
-        "undercollateralized" => 3,
-        "warning" => 2,
-        "sufficient" => 1,
-        _ => 0,
-    }
-}
-
-fn select_worst_status(
-    current: Option<CollateralStatus>,
-    state: CollateralState,
-    next: CollateralStatus,
-) -> CollateralStatus {
-    if let Some(existing) = current {
-        let existing_rank = status_rank_from_status(&existing.status);
-        let next_rank = status_rank(&state);
-        if next_rank > existing_rank {
-            next
-        } else {
-            existing
-        }
-    } else {
-        next
-    }
-}
-
-use rust_decimal::prelude::ToPrimitive;
 
 #[derive(Clone)]
 pub struct RegistrationService {
     persistence: Arc<SimplePersistence>,
     bidding_config: BiddingConfig,
-    collateral_manager: Option<Arc<CollateralManager>>,
     validator_ssh_public_key: String,
     api_client: Option<Arc<BasilicaApiClient>>,
 }
@@ -116,14 +41,12 @@ impl RegistrationService {
     pub fn new(
         persistence: Arc<SimplePersistence>,
         bidding_config: BiddingConfig,
-        collateral_manager: Option<Arc<CollateralManager>>,
         validator_ssh_public_key: String,
         api_client: Option<Arc<BasilicaApiClient>>,
     ) -> Self {
         Self {
             persistence,
             bidding_config,
-            collateral_manager,
             validator_ssh_public_key,
             api_client,
         }
@@ -267,7 +190,6 @@ impl MinerRegistration for RegistrationService {
         };
 
         // Upsert each node
-        let mut worst_collateral_status: Option<CollateralStatus> = None;
         let mut active_node_ids: Vec<String> = Vec::new();
         for node in &req.nodes {
             // Validate node fields
@@ -340,21 +262,6 @@ impl MinerRegistration for RegistrationService {
                 )
                 .await
                 .map_err(|e| Status::internal(format!("failed to register node: {e}")))?;
-
-            // Get collateral status for this node
-            if let Some(ref manager) = self.collateral_manager {
-                let (state, status) = manager
-                    .get_collateral_status(
-                        &req.miner_hotkey,
-                        &node_id,
-                        &node.gpu_category,
-                        node.gpu_count,
-                    )
-                    .await
-                    .map_err(|e| Status::internal(format!("collateral status error: {e}")))?;
-                worst_collateral_status =
-                    Some(select_worst_status(worst_collateral_status, state, status));
-            }
         }
 
         // Deactivate bids for nodes NOT in this RegisterBid request
@@ -380,7 +287,6 @@ impl MinerRegistration for RegistrationService {
             validator_ssh_public_key,
             health_check_interval_secs: self.bidding_config.health_check_interval_secs as u32,
             error_message: String::new(),
-            collateral_status: worst_collateral_status.map(status_to_proto),
         }))
     }
 
@@ -614,14 +520,12 @@ pub async fn start_registration_server(
     config: GrpcServerConfig,
     persistence: Arc<SimplePersistence>,
     bidding_config: BiddingConfig,
-    collateral_manager: Option<Arc<CollateralManager>>,
     validator_ssh_public_key: String,
     api_client: Option<Arc<BasilicaApiClient>>,
 ) -> Result<()> {
     let service = RegistrationService::new(
         persistence,
         bidding_config,
-        collateral_manager,
         validator_ssh_public_key,
         api_client,
     );
@@ -656,7 +560,6 @@ mod tests {
         RegistrationService::new(
             Arc::new(persistence),
             BiddingConfig::default(),
-            None,
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPublicKey test@validator".to_string(),
             None,
         )

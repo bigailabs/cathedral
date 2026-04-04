@@ -157,7 +157,6 @@ mod tests {
     fn test_config_from_toml_file() {
         // Test loading from valid TOML file
         let toml_content = r#"
-burn_percentage = 15.0
 forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
@@ -187,7 +186,6 @@ B200 = 25.0
 
         // Test loading from invalid TOML file (allocations don't sum to 100)
         let invalid_toml = r#"
-burn_percentage = 10.0
 forced_burn_percentage = 10.0
 burn_uid = 0
 weight_set_interval_blocks = 360
@@ -214,12 +212,10 @@ H100 = 30.0
     fn test_config_merge_with_defaults() {
         // Test partial config merging
         let partial_config = EmissionConfig {
-            burn_percentage: 0.0,
             forced_burn_percentage: Some(20.0),
             burn_uid: 456,
             gpu_allocations: HashMap::new(), // Empty - should use default
-            min_miners_per_category: 1,
-            weight_set_interval_blocks: 0, // Invalid - should use default
+            weight_set_interval_blocks: 0,   // Invalid - should use default
             weight_version_key: 0,
         };
 
@@ -228,7 +224,6 @@ H100 = 30.0
         assert_eq!(merged.forced_burn_percentage, Some(20.0)); // Preserved
         assert_eq!(merged.burn_uid, 456); // Preserved
         assert_eq!(merged.weight_set_interval_blocks, 360); // Default
-        assert_eq!(merged.min_miners_per_category, 1); // Default
         assert_eq!(merged.gpu_allocations.len(), 0); // Default GPU allocations (empty)
 
         // Test complete config override (no merging needed)
@@ -371,11 +366,9 @@ H100 = 30.0
         allocations.insert("B200".to_string(), GpuAllocation::new(33.333334));
 
         let config = EmissionConfig {
-            burn_percentage: 0.0,
             forced_burn_percentage: None,
             burn_uid: 0,
             gpu_allocations: allocations,
-            min_miners_per_category: 1,
             weight_set_interval_blocks: 360,
             weight_version_key: 0,
         };
@@ -390,11 +383,9 @@ H100 = 30.0
         allocations.insert("B200".to_string(), GpuAllocation::new(33.0));
 
         let config = EmissionConfig {
-            burn_percentage: 0.0,
             forced_burn_percentage: None,
             burn_uid: 0,
             gpu_allocations: allocations,
-            min_miners_per_category: 1,
             weight_set_interval_blocks: 360,
             weight_version_key: 0,
         };
@@ -407,12 +398,10 @@ H100 = 30.0
     fn test_config_legacy_format_compatibility() {
         // Test loading from legacy TOML format (just floats)
         let toml_content = r#"
-burn_percentage = 15.0
 forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
 weight_version_key = 0
-min_miners_per_category = 2
 
 [gpu_allocations]
 A100 = 25.0
@@ -430,7 +419,6 @@ B200 = 25.0
 
         assert_eq!(config.forced_burn_percentage, Some(15.0));
         assert_eq!(config.burn_uid, 123);
-        assert_eq!(config.min_miners_per_category, 2);
         assert_eq!(config.gpu_allocations.len(), 3);
 
         // Check that legacy format defaults to min_gpu_count = 1
@@ -440,7 +428,6 @@ B200 = 25.0
 
         // Test loading from new TOML format with explicit min_gpu_count
         let toml_content = r#"
-burn_percentage = 15.0
 forced_burn_percentage = 15.0
 burn_uid = 123
 weight_set_interval_blocks = 720
@@ -477,7 +464,6 @@ B200 = { weight = 80.0, min_gpu_count = 8 }
     fn test_min_gpu_vram_configuration() {
         // Test loading TOML with min_gpu_vram
         let toml_content = r#"
-burn_percentage = 10.0
 forced_burn_percentage = 10.0
 burn_uid = 204
 weight_set_interval_blocks = 360
@@ -571,5 +557,38 @@ B200 = { weight = 80.0, min_gpu_count = 8, min_gpu_vram = 192 }
         assert_eq!(alloc.weight, 40.0);
         assert_eq!(alloc.min_gpu_count, 8);
         assert_eq!(alloc.min_gpu_vram, None);
+    }
+
+    #[test]
+    fn test_old_config_with_removed_fields_still_parses() {
+        // Simulates an operator whose config file still has burn_percentage and
+        // min_miners_per_category from before these fields were removed.
+        let toml_content = r#"
+burn_percentage = 95.0
+forced_burn_percentage = 15.0
+burn_uid = 123
+weight_set_interval_blocks = 720
+weight_version_key = 0
+min_miners_per_category = 2
+some_totally_unknown_field = "hello"
+
+[gpu_allocations]
+A100 = 25.0
+H100 = 50.0
+B200 = 25.0
+"#;
+
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        temp_file
+            .write_all(toml_content.as_bytes())
+            .expect("Failed to write temp file");
+
+        let config = EmissionConfig::from_toml_file(temp_file.path())
+            .expect("Old config with removed fields should still parse");
+
+        assert_eq!(config.forced_burn_percentage, Some(15.0));
+        assert_eq!(config.burn_uid, 123);
+        assert_eq!(config.gpu_allocations.len(), 3);
+        assert!(config.validate().is_ok());
     }
 }

@@ -1,17 +1,11 @@
 use crate::api::ApiHandler;
 use crate::basilica_api::{BasilicaApiClient, ValidatorSigner};
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
-use crate::collateral::collateral_scan::Collateral;
-use crate::collateral::evaluator::CollateralEvaluator;
-use crate::collateral::evidence::EvidenceStore;
-use crate::collateral::grace_tracker::GracePeriodTracker;
-use crate::collateral::manager::CollateralManager;
-use crate::collateral::SlashExecutor;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_registration_server;
 use crate::incentive::cu_generator::CuGenerator;
-use crate::metrics::{ValidatorMetrics, ValidatorPrometheusMetrics};
+use crate::metrics::ValidatorMetrics;
 use crate::miner_prover::{MinerProver, MinerProverParams};
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
@@ -27,7 +21,7 @@ use std::time::{Duration as StdDuration, SystemTime};
 use sysinfo::{Pid, System};
 use tokio::signal;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Main validator service that manages all validator components and their lifecycle
 pub struct ValidatorService {
@@ -41,7 +35,6 @@ struct RuntimeHandles {
     api_handler_task: JoinHandle<()>,
     registration_server_task: JoinHandle<()>,
     cleanup_task: Option<JoinHandle<()>>,
-    collateral_scan_task: JoinHandle<()>,
     cu_generator_task: Option<JoinHandle<()>>,
 }
 
@@ -50,7 +43,6 @@ struct TaskInputs {
     miner_prover: MinerProver,
     api_handler: ApiHandler,
     persistence: Arc<SimplePersistence>,
-    collateral_manager: Option<Arc<CollateralManager>>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     validator_ssh_public_key: String,
     api_client: Arc<BasilicaApiClient>,
@@ -101,16 +93,6 @@ impl ValidatorService {
             validator_hotkey.clone(),
         );
 
-        let collateral_metrics = validator_metrics.as_ref().map(|m| m.prometheus());
-        let (collateral_manager, slash_executor) = self
-            .init_collateral_components(
-                persistence_arc.clone(),
-                collateral_metrics.clone(),
-                bittensor_service.clone(),
-                api_client.clone(),
-            )
-            .await?;
-
         let miner_prover = self.init_miner_prover(
             bittensor_service.clone(),
             persistence_arc.clone(),
@@ -118,13 +100,7 @@ impl ValidatorService {
         )?;
 
         let rental_manager = self
-            .init_rental_manager(
-                persistence_arc.clone(),
-                validator_metrics.as_ref(),
-                collateral_manager.clone(),
-                slash_executor.clone(),
-                &validator_hotkey,
-            )
+            .init_rental_manager(persistence_arc.clone(), validator_metrics.as_ref())
             .await?;
 
         // Extract SSH public key from rental manager (required for miner registration)
@@ -149,7 +125,6 @@ impl ValidatorService {
                 miner_prover,
                 api_handler,
                 persistence: persistence_arc.clone(),
-                collateral_manager: collateral_manager.clone(),
                 gpu_profile_repo: gpu_profile_repo.clone(),
                 validator_ssh_public_key,
                 api_client,
@@ -300,46 +275,6 @@ impl ValidatorService {
         )
     }
 
-    async fn init_collateral_components(
-        &self,
-        persistence: Arc<SimplePersistence>,
-        collateral_metrics: Option<Arc<ValidatorPrometheusMetrics>>,
-        signer: Arc<BittensorService>,
-        api_client: Arc<BasilicaApiClient>,
-    ) -> Result<(Option<Arc<CollateralManager>>, Option<Arc<SlashExecutor>>)> {
-        let Some(collateral_config) = self.config.collateral.clone() else {
-            return Ok((None, None));
-        };
-        if collateral_config.shadow_mode {
-            warn!("Collateral shadow_mode is enabled; on-chain slashing is disabled");
-        }
-        let grace_tracker = Arc::new(GracePeriodTracker::new(
-            persistence.clone(),
-            collateral_config.grace_period(),
-        ));
-        let evaluator = Arc::new(CollateralEvaluator::new(
-            collateral_config.clone(),
-            grace_tracker.clone(),
-        ));
-        let collateral_manager = Arc::new(CollateralManager::new(
-            persistence.clone(),
-            api_client,
-            evaluator,
-            grace_tracker.clone(),
-            self.config.bittensor.common.netuid,
-            collateral_metrics.clone(),
-        ));
-        let evidence_store = EvidenceStore::from_config(&collateral_config).await?;
-        let slash_executor = Arc::new(SlashExecutor::new(
-            collateral_config,
-            evidence_store,
-            grace_tracker,
-            collateral_metrics,
-            Some(signer),
-        ));
-        Ok((Some(collateral_manager), Some(slash_executor)))
-    }
-
     fn init_miner_prover(
         &self,
         bittensor_service: Arc<BittensorService>,
@@ -361,23 +296,14 @@ impl ValidatorService {
         &self,
         persistence: Arc<SimplePersistence>,
         validator_metrics: Option<&ValidatorMetrics>,
-        collateral_manager: Option<Arc<CollateralManager>>,
-        slash_executor: Option<Arc<SlashExecutor>>,
-        validator_hotkey: &basilica_common::identity::Hotkey,
     ) -> Result<Option<crate::rental::RentalManager>> {
         let Some(metrics) = validator_metrics else {
             tracing::warn!("Rental manager disabled: metrics must be enabled for rentals");
             return Ok(None);
         };
-        let manager = crate::rental::RentalManager::create(
-            &self.config,
-            persistence,
-            metrics.prometheus(),
-            collateral_manager,
-            slash_executor,
-            Some(validator_hotkey.as_str().to_string()),
-        )
-        .await?;
+        let manager =
+            crate::rental::RentalManager::create(&self.config, persistence, metrics.prometheus())
+                .await?;
 
         manager.start();
         manager
@@ -424,7 +350,6 @@ impl ValidatorService {
         let registration_grpc_config = self.config.bid_grpc.clone();
         let registration_persistence = inputs.persistence.clone();
         let registration_bidding_config = self.config.bidding.clone();
-        let registration_collateral_manager = inputs.collateral_manager.clone();
         let validator_ssh_public_key = inputs.validator_ssh_public_key.clone();
         let registration_api_client = inputs.api_client.clone();
         let registration_server_task = tokio::spawn(async move {
@@ -432,7 +357,6 @@ impl ValidatorService {
                 registration_grpc_config,
                 registration_persistence,
                 registration_bidding_config,
-                registration_collateral_manager,
                 validator_ssh_public_key,
                 Some(registration_api_client),
             )
@@ -453,20 +377,6 @@ impl ValidatorService {
         } else {
             info!("Database cleanup task is disabled");
             None
-        };
-
-        let collateral_scan_task = if let Some(collateral_config) = self.config.collateral.clone() {
-            let verification_config = self.config.verification.clone();
-            let persistence = inputs.persistence.clone();
-            tokio::spawn(async move {
-                let mut collateral_scan =
-                    Collateral::new(verification_config, collateral_config, persistence);
-                if let Err(e) = collateral_scan.start().await {
-                    error!("Collateral scan task failed: {}", e);
-                }
-            })
-        } else {
-            tokio::spawn(async { info!("Collateral scan disabled (no collateral config)") })
         };
 
         let cu_generator_task = spawn_primary_validator_task(self.config.cu_generator_enabled, {
@@ -493,7 +403,6 @@ impl ValidatorService {
             api_handler_task,
             registration_server_task,
             cleanup_task,
-            collateral_scan_task,
             cu_generator_task,
         }
     }
@@ -510,7 +419,6 @@ impl ValidatorService {
         }
         handles.api_handler_task.abort();
         handles.registration_server_task.abort();
-        handles.collateral_scan_task.abort();
     }
 
     /// Stop all running validator processes

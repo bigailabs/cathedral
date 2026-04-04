@@ -562,7 +562,6 @@ mod tests {
             grpc_port_offset: None,
             binary_validation: None, // Disabled in tests
             docker_validation: crate::config::DockerValidationConfig::default(),
-            collateral_event_scan_interval: Duration::from_secs(12),
             node_validation_interval: Duration::from_secs(6 * 3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(120 * 60)),
             enable_worker_queue: false,

@@ -13,6 +13,6 @@ pub mod validator_discovery;
 
 // Re-export commonly used types
 pub use bidding::BidManager;
-pub use config::{BiddingConfig, MinerConfig, SecurityConfig};
+pub use config::{BiddingConfig, MinerConfig};
 pub use node_manager::NodeManager;
 pub use registration_client::{RegistrationClient, RegistrationState};

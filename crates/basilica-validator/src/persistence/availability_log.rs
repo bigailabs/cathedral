@@ -38,8 +38,6 @@ pub struct AvailabilityEventRequest {
     pub source: AvailabilitySource,
     pub source_metadata: Option<String>,
     pub observed_at: DateTime<Utc>,
-    pub gpu_category: Option<String>,
-    pub gpu_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,13 +300,9 @@ impl AvailabilityLogRepository {
                 .unwrap_or(false),
         };
 
-        let (gpu_category, gpu_count) = match (event.gpu_category, event.gpu_count) {
-            (Some(cat), Some(cnt)) => (Some(cat), Some(cnt)),
-            _ => {
-                self.lookup_gpu_metadata(&event.miner_id, &event.node_id)
-                    .await?
-            }
-        };
+        let (gpu_category, gpu_count) = self
+            .lookup_gpu_metadata(&event.miner_id, &event.node_id)
+            .await?;
 
         Ok(ResolvedAvailabilityEvent {
             miner_uid,
@@ -499,8 +493,6 @@ mod tests {
             source: AvailabilitySource::Validation,
             source_metadata: Some("full".to_string()),
             observed_at,
-            gpu_category: None,
-            gpu_count: None,
         }
     }
 

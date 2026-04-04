@@ -3,11 +3,13 @@ use crate::bittensor_core::weight_allocation::{
     BurnAllocation, CategoryAllocation, NormalizedWeight, WeightDistribution,
 };
 use anyhow::Result;
+use basilica_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,12 @@ pub fn compute_ru_vested_fraction(
     epoch_end: DateTime<Utc>,
 ) -> Decimal {
     compute_vested_fraction(row.earned_at, row.window_hours, epoch_start, epoch_end)
+}
+
+/// Normalize a raw GPU category string (e.g. "NVIDIA A100-SXM4-80GB") into its
+/// canonical short form (e.g. "A100") using [`GpuCategory::from_str`].
+fn normalize_gpu_category(raw: &str) -> String {
+    GpuCategory::from_str(raw).unwrap().to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -82,7 +90,7 @@ pub fn compute_incentive_pool(
     let mut category_cu_supply: HashMap<String, Decimal> = HashMap::new();
     for row in &active_cu_rows {
         *category_cu_supply
-            .entry(row.gpu_category.clone())
+            .entry(normalize_gpu_category(&row.gpu_category))
             .or_insert(Decimal::ZERO) += row.cu_amount;
     }
 
@@ -104,8 +112,9 @@ pub fn compute_incentive_pool(
         let Some(category_config) = config.gpu_categories.get(&row.gpu_category) else {
             continue;
         };
+        let normalized_cat = normalize_gpu_category(&row.gpu_category);
         let category_supply = category_cu_supply
-            .get(&row.gpu_category)
+            .get(&normalized_cat)
             .copied()
             .unwrap_or(Decimal::ZERO);
         if category_supply <= Decimal::ZERO {
@@ -126,10 +135,10 @@ pub fn compute_incentive_pool(
             .entry(row.hotkey.clone())
             .or_insert(Decimal::ZERO) += row_payout;
         *category_payouts
-            .entry(row.gpu_category.clone())
+            .entry(normalized_cat.clone())
             .or_insert(Decimal::ZERO) += row_payout;
         category_miners
-            .entry(row.gpu_category.clone())
+            .entry(normalized_cat)
             .or_default()
             .insert(row.hotkey.clone());
     }
@@ -146,14 +155,15 @@ pub fn compute_incentive_pool(
             continue;
         }
 
+        let normalized_cat = normalize_gpu_category(&row.gpu_category);
         *miner_payouts
             .entry(row.hotkey.clone())
             .or_insert(Decimal::ZERO) += row_payout;
         *category_payouts
-            .entry(row.gpu_category.clone())
+            .entry(normalized_cat.clone())
             .or_insert(Decimal::ZERO) += row_payout;
         category_miners
-            .entry(row.gpu_category.clone())
+            .entry(normalized_cat)
             .or_default()
             .insert(row.hotkey.clone());
     }
@@ -2436,6 +2446,53 @@ mod tests {
         // RU row should still get payout despite unknown category
         // payout = 1.0 × $100 × 30/100 = $30
         assert_eq!(miner_payout(&result, "miner-0"), d("30"));
+    }
+
+    #[test]
+    fn test_cu_and_ru_merge_into_single_normalized_category() {
+        // CU row uses short name "A100", RU row uses raw "NVIDIA A100-SXM4-80GB".
+        // After normalization both should merge into the single "A100" category.
+        let config = make_config(&[("A100", 1, "10")], 4, None);
+
+        let cu = cu_row(("miner-0", 0, "node-0", "8", ts(0), "A100", 4, "10"));
+        let ru = ru_row((
+            "miner-0",
+            0,
+            "node-0",
+            "100",
+            ts(0),
+            "NVIDIA A100-SXM4-80GB",
+            4,
+            30,
+        ));
+
+        let result = compute_incentive_pool(
+            &config,
+            &[cu],
+            &[ru],
+            ts(0),
+            ts(4),
+            d("100000"),
+            999,
+            &make_hotkey_map(1),
+            None,
+        )
+        .unwrap();
+
+        // category_payouts should have exactly one key: "A100"
+        assert_eq!(result.category_payouts.len(), 1);
+        assert!(
+            result.category_payouts.contains_key("A100"),
+            "Expected single normalized key 'A100', got: {:?}",
+            result.category_payouts.keys().collect::<Vec<_>>()
+        );
+
+        // CU payout: supply=8, budget=8*4*$10=$320, per_cu=$40,
+        //   effective=MIN($10,$40)=$10, payout=1.0*8*$10=$80
+        // RU payout: 1.0 * $100 * 30/100 = $30
+        // Total miner payout = $110, all under "A100"
+        assert_eq!(miner_payout(&result, "miner-0"), d("110"));
+        assert_eq!(result.category_payouts["A100"], d("110"));
     }
 
     // ==================== Category 9: Weight Normalization ====================

@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -181,15 +182,14 @@ impl TokenPriceFetcher for HttpTokenPriceFetcher {
         let payload: TokenPricesResponse = client.read_json_response(response).await?;
 
         Ok(TokenPriceSnapshot {
-            tao_price_usd: Decimal::from_str_exact(&payload.tao_price_usd)
+            tao_price_usd: Decimal::from_str(&payload.tao_price_usd)
                 .context("Invalid tao_price_usd")?,
-            alpha_price_usd: Decimal::from_str_exact(&payload.alpha_price_usd)
+            alpha_price_usd: Decimal::from_str(&payload.alpha_price_usd)
                 .context("Invalid alpha_price_usd")?,
-            alpha_price_tao: Decimal::from_str_exact(&payload.alpha_price_tao)
+            alpha_price_tao: Decimal::from_str(&payload.alpha_price_tao)
                 .context("Invalid alpha_price_tao")?,
-            tao_reserve: Decimal::from_str_exact(&payload.tao_reserve)
-                .context("Invalid tao_reserve")?,
-            alpha_reserve: Decimal::from_str_exact(&payload.alpha_reserve)
+            tao_reserve: Decimal::from_str(&payload.tao_reserve).context("Invalid tao_reserve")?,
+            alpha_reserve: Decimal::from_str(&payload.alpha_reserve)
                 .context("Invalid alpha_reserve")?,
             fetched_at: payload.fetched_at,
         })
@@ -335,38 +335,6 @@ impl BasilicaApiClient {
 
     pub async fn get_alpha_price_usd(&self, netuid: u16) -> Result<Decimal> {
         Ok(self.get_token_prices(netuid).await?.alpha_price_usd)
-    }
-
-    pub async fn get_miner_delivery(
-        &self,
-        since: DateTime<Utc>,
-        until: DateTime<Utc>,
-    ) -> Result<Vec<basilica_protocol::billing::MinerDelivery>> {
-        let query = MinerDeliveryQuery {
-            since_epoch_seconds: since.timestamp(),
-            until_epoch_seconds: until.timestamp(),
-        };
-
-        let url = format!(
-            "{}/v1/weights/miner-delivery",
-            self.api_endpoint.trim_end_matches('/')
-        );
-
-        let response = self.signed_get(&url, &query).await?;
-        let body: MinerDeliveryResponse = self.read_json_response(response).await?;
-
-        Ok(body
-            .deliveries
-            .into_iter()
-            .map(|delivery| basilica_protocol::billing::MinerDelivery {
-                miner_hotkey: delivery.miner_hotkey,
-                miner_uid: delivery.miner_uid,
-                total_hours: delivery.total_hours,
-                revenue_usd: delivery.revenue_usd,
-                gpu_category: delivery.gpu_category,
-                node_id: delivery.node_id,
-            })
-            .collect())
     }
 
     pub async fn get_incentive_config(
@@ -668,28 +636,6 @@ pub struct PostSlashRequest {
 pub struct PostSlashResponse {
     pub slashed_cu_count: usize,
     pub slashed_ru_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct MinerDeliveryQuery {
-    since_epoch_seconds: i64,
-    until_epoch_seconds: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct MinerDeliveryResponse {
-    deliveries: Vec<MinerDeliveryItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MinerDeliveryItem {
-    miner_hotkey: String,
-    miner_uid: u32,
-    total_hours: f64,
-    revenue_usd: f64,
-    gpu_category: String,
-    #[serde(default)]
-    node_id: String,
 }
 
 #[derive(Debug, Deserialize)]

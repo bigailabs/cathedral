@@ -4,7 +4,6 @@
 //! Sets weights every N blocks based on miner scores from node validations.
 
 use crate::basilica_api::{BasilicaApiClient, IncentiveConfigResponse};
-use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
@@ -14,15 +13,11 @@ use crate::incentive::incentive_pool::{
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-use crate::persistence::{
-    MinerDeliveryRepository, SimplePersistence, WeightSetEpoch, WeightSetEpochRepository,
-};
+use crate::persistence::{SimplePersistence, WeightSetEpoch, WeightSetEpochRepository};
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
-use basilica_common::types::GpuCategory;
 use basilica_common::{KeyValueStorage, MemoryStorage};
-use basilica_protocol::billing::MinerDelivery;
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -50,24 +45,24 @@ pub struct NodeValidationResult {
     pub gpu_model: String,
 }
 
-/// CU contribution for one category in shadow logging
-struct ShadowCuCategory {
+/// CU contribution for one category in incentive pool logging
+struct IncentiveCuCategory {
     category: String,
     cu_amount: rust_decimal::Decimal,
     cu_usd: rust_decimal::Decimal,
 }
 
-/// One miner's full payout breakdown for shadow logging
-struct ShadowMinerPayout {
+/// One miner's full payout breakdown for incentive pool logging
+struct IncentiveMinerPayout {
     miner_uid: u16,
     hotkey: String,
-    cu_categories: Vec<ShadowCuCategory>,
+    cu_categories: Vec<IncentiveCuCategory>,
     ru_usd: rust_decimal::Decimal,
     total_usd: rust_decimal::Decimal,
 }
 
-/// Shadow result from the new incentive-pool logic (log-only, never submitted to chain)
-struct ShadowIncentiveResult {
+/// Result from the incentive-pool weight calculation
+struct IncentiveWeightResult {
     distribution: crate::bittensor_core::weight_allocation::WeightDistribution,
     burn_percentage: f64,
     burn_rate: rust_decimal::Decimal,
@@ -84,7 +79,7 @@ struct ShadowIncentiveResult {
     // Pool breakdown
     category_payouts: HashMap<String, rust_decimal::Decimal>,
     // Per-miner breakdown
-    miner_payouts_detail: Vec<ShadowMinerPayout>,
+    miner_payouts_detail: Vec<IncentiveMinerPayout>,
 }
 
 /// Manages weight setting operations for Bittensor network
@@ -102,9 +97,6 @@ pub struct WeightSetter {
     api_client: Arc<BasilicaApiClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
-    // Old delivery-based weight logic dependencies
-    weight_allocation_engine: Arc<WeightAllocationEngine>,
-    delivery_repository: Arc<MinerDeliveryRepository>,
 }
 
 impl WeightSetter {
@@ -123,9 +115,6 @@ impl WeightSetter {
         metrics: Option<Arc<ValidatorMetrics>>,
     ) -> Result<Self> {
         let epoch_repository = Arc::new(WeightSetEpochRepository::new(persistence.clone()));
-        let weight_allocation_engine =
-            Arc::new(WeightAllocationEngine::new(emission_config.clone()));
-        let delivery_repository = Arc::new(MinerDeliveryRepository::new(persistence.clone()));
 
         Ok(Self {
             config,
@@ -140,8 +129,6 @@ impl WeightSetter {
             api_client,
             gpu_profile_repo,
             metrics,
-            weight_allocation_engine,
-            delivery_repository,
         })
     }
 
@@ -264,10 +251,9 @@ impl WeightSetter {
         ))
     }
 
-    /// Attempt to set weights (extracted for retry logic)
+    /// Attempt to set weights (extracted for retry logic).
     ///
-    /// Runs the OLD delivery-based logic as the active path (submits to chain),
-    /// then runs the NEW incentive-pool logic as a shadow path (log-only).
+    /// Uses the CU/RU incentive pool to compute and submit weights.
     async fn attempt_weight_setting(&self) -> Result<()> {
         info!(
             "Setting weights for subnet {} with GPU-based allocation",
@@ -280,146 +266,125 @@ impl WeightSetter {
         self.epoch_repository.increment_attempts(epoch.id).await?;
         let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
 
-        // ── OLD LOGIC (ACTIVE — sets weights on chain) ──
-        self.sync_deliveries_for_epoch(&epoch).await?;
-        let deliveries = self
-            .delivery_repository
-            .get_deliveries_for_window(epoch.period_start, epoch.period_end, None)
-            .await?;
-        let miners_by_category = self.group_deliveries_by_category(deliveries, &hotkey_to_uid);
-
-        let weight_distribution = self
-            .weight_allocation_engine
-            .calculate_weight_distribution(miners_by_category)?;
-        self.log_weight_distribution(&weight_distribution);
-
-        let normalized_weights = self.build_normalized_weights(&weight_distribution)?;
         let version_key = self.get_version_key().await?;
-        self.ensure_unique_uids(&normalized_weights)?;
 
+        let result = self
+            .compute_incentive_pool_weights(&epoch, &hotkey_to_uid, &metagraph)
+            .await?;
+        self.log_incentive_weight_result(&result);
+
+        let weight_distribution = &result.distribution;
+        self.log_weight_distribution(weight_distribution);
+
+        let normalized_weights = self.build_normalized_weights(weight_distribution)?;
+        self.ensure_unique_uids(&normalized_weights)?;
         self.submit_weights_to_chain_with_retry(normalized_weights, version_key)
             .await?;
-        self.store_weight_results(&weight_distribution).await?;
+        self.store_weight_results(weight_distribution, result.burn_percentage)
+            .await?;
+
         self.epoch_repository.mark_success(epoch.id).await?;
-
-        // ── NEW LOGIC (SHADOW — log only, never fails the epoch) ──
-        self.run_shadow_incentive_weights(&epoch, &hotkey_to_uid, &metagraph)
-            .await;
-
         Ok(())
     }
 
-    // ── Shadow incentive pool (new logic, log-only) ──
+    // ── Incentive pool logging ──
 
-    async fn run_shadow_incentive_weights(
-        &self,
-        epoch: &WeightSetEpoch,
-        hotkey_to_uid: &HashMap<String, u16>,
-        metagraph: &Metagraph,
-    ) {
-        match self
-            .compute_shadow_weights(epoch, hotkey_to_uid, metagraph)
-            .await
-        {
-            Ok(result) => {
-                // Log 1: Emission parameters
-                info!(
-                    alpha_out_emission_rao = result.alpha_out_emission_rao,
-                    miner_emission_share_pct = 41,
-                    miner_alpha_per_epoch = %result.miner_alpha_per_epoch,
-                    alpha_price_usd = %result.alpha_price_usd,
-                    tao_price_usd = %result.tao_price_usd,
-                    blocks_per_epoch = result.blocks_per_epoch,
-                    usd_emission_capacity = %result.usd_emission_capacity,
-                    "[SHADOW_WEIGHTS] Emission parameters"
-                );
+    /// Log incentive pool results
+    fn log_incentive_weight_result(&self, result: &IncentiveWeightResult) {
+        // Emission parameters
+        info!(
+            alpha_out_emission_rao = result.alpha_out_emission_rao,
+            miner_emission_share_pct = 41,
+            miner_alpha_per_epoch = %result.miner_alpha_per_epoch,
+            alpha_price_usd = %result.alpha_price_usd,
+            tao_price_usd = %result.tao_price_usd,
+            blocks_per_epoch = result.blocks_per_epoch,
+            usd_emission_capacity = %result.usd_emission_capacity,
+            "Emission parameters"
+        );
 
-                // Log 2: Incentive config per category + global
-                for (category, cat_config) in &result.incentive_config.gpu_categories {
-                    info!(
-                        category = %category,
-                        target_count = cat_config.target_count,
-                        price_per_gpu_cents = cat_config.price_per_gpu_cents,
-                        "[SHADOW_WEIGHTS] Incentive config"
-                    );
-                }
-                info!(
-                    window_hours = result.incentive_config.window_hours,
-                    revenue_share_pct = ?result.incentive_config.revenue_share_pct,
-                    slash_pct = result.incentive_config.slash_pct,
-                    "[SHADOW_WEIGHTS] Incentive config"
-                );
-
-                // Log 3: Pool summary
-                info!(
-                    miners_served = result.distribution.miners_served,
-                    burn_rate = %result.burn_rate,
-                    burn_percentage = result.burn_percentage,
-                    usd_required = %result.usd_required_epoch,
-                    usd_capacity = %result.usd_emission_capacity,
-                    "[SHADOW_WEIGHTS] Incentive pool summary"
-                );
-
-                // Log 4: Per-miner breakdown
-                for miner in &result.miner_payouts_detail {
-                    let cu_breakdown: String = miner
-                        .cu_categories
-                        .iter()
-                        .map(|c| format!("{}: {} CU (${})", c.category, c.cu_amount, c.cu_usd))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    info!(
-                        miner_uid = miner.miner_uid,
-                        hotkey = %miner.hotkey,
-                        cu_breakdown = %cu_breakdown,
-                        ru_usd = %miner.ru_usd,
-                        total_usd = %miner.total_usd,
-                        "[SHADOW_WEIGHTS] Miner payout"
-                    );
-                }
-
-                // Log 5: Per-category breakdown
-                for (category, allocation) in &result.distribution.category_allocations {
-                    let category_usd_payout = result
-                        .category_payouts
-                        .get(category)
-                        .copied()
-                        .unwrap_or(rust_decimal::Decimal::ZERO);
-                    info!(
-                        category = %category,
-                        miner_count = allocation.miner_count,
-                        weight_pool = allocation.weight_pool,
-                        allocation_pct = allocation.allocation_percentage,
-                        usd_payout = %category_usd_payout,
-                        "[SHADOW_WEIGHTS] Category breakdown"
-                    );
-                }
-
-                // Log 6: Final weight vector
-                info!(
-                    weights = ?result.distribution.weights,
-                    "[SHADOW_WEIGHTS] Final weight vector"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "[SHADOW_WEIGHTS] New incentive weight calculation failed (non-fatal): {:?}",
-                    e
-                );
-            }
+        // Incentive config per category + global
+        for (category, cat_config) in &result.incentive_config.gpu_categories {
+            info!(
+                category = %category,
+                target_count = cat_config.target_count,
+                price_per_gpu_cents = cat_config.price_per_gpu_cents,
+                "Incentive config"
+            );
         }
+        info!(
+            window_hours = result.incentive_config.window_hours,
+            revenue_share_pct = ?result.incentive_config.revenue_share_pct,
+            slash_pct = result.incentive_config.slash_pct,
+            "Incentive config"
+        );
+
+        // Pool summary
+        info!(
+            miners_served = result.distribution.miners_served,
+            burn_rate = %result.burn_rate,
+            burn_percentage = result.burn_percentage,
+            usd_required = %result.usd_required_epoch,
+            usd_capacity = %result.usd_emission_capacity,
+            "Incentive pool summary"
+        );
+
+        // Per-miner breakdown
+        for miner in &result.miner_payouts_detail {
+            let cu_breakdown: String = miner
+                .cu_categories
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}: {:.2} CU (vested ${:.2} this epoch)",
+                        c.category, c.cu_amount, c.cu_usd
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            info!(
+                miner_uid = miner.miner_uid,
+                hotkey = %miner.hotkey,
+                cu_breakdown = %cu_breakdown,
+                ru_usd = %miner.ru_usd,
+                total_usd = %miner.total_usd,
+                "Miner payout"
+            );
+        }
+
+        // Per-category breakdown
+        for (category, allocation) in &result.distribution.category_allocations {
+            let category_usd_payout = result
+                .category_payouts
+                .get(category)
+                .copied()
+                .unwrap_or(rust_decimal::Decimal::ZERO);
+            info!(
+                category = %category,
+                miner_count = allocation.miner_count,
+                weight_pool = allocation.weight_pool,
+                allocation_pct = allocation.allocation_percentage,
+                usd_payout = %category_usd_payout,
+                "Category breakdown"
+            );
+        }
+
+        // Final weight vector
+        info!(
+            weights = ?result.distribution.weights,
+            "Final weight vector"
+        );
     }
 
-    async fn compute_shadow_weights(
+    async fn compute_incentive_pool_weights(
         &self,
         epoch: &WeightSetEpoch,
         hotkey_to_uid: &HashMap<String, u16>,
         metagraph: &Metagraph,
-    ) -> Result<ShadowIncentiveResult> {
-        // The epoch window uses +1s offset on period_start for the old delivery path
-        // (inclusive upper-bound API). The new incentive APIs use exclusive bounds,
-        // so we undo the offset here.
-        let shadow_start = epoch.period_start - chrono::Duration::seconds(1);
+    ) -> Result<IncentiveWeightResult> {
+        // The epoch window has a +1s offset on period_start; undo it for
+        // the incentive APIs which use exclusive bounds.
+        let epoch_start = epoch.period_start - chrono::Duration::seconds(1);
 
         let incentive_config = self
             .api_client
@@ -428,12 +393,12 @@ impl WeightSetter {
             .map_err(|e| anyhow::anyhow!("incentive config: {e}"))?;
         let cu_rows = self
             .api_client
-            .get_cus(shadow_start, epoch.period_end)
+            .get_cus(epoch_start, epoch.period_end)
             .await
             .map_err(|e| anyhow::anyhow!("get CUs: {e}"))?;
         let ru_rows = self
             .api_client
-            .get_rus(shadow_start, epoch.period_end)
+            .get_rus(epoch_start, epoch.period_end)
             .await
             .map_err(|e| anyhow::anyhow!("get RUs: {e}"))?;
         let token_prices = self.api_client.get_token_prices(self.config.netuid).await?;
@@ -449,11 +414,11 @@ impl WeightSetter {
         let usd_emission_capacity = miner_alpha_per_epoch * token_prices.alpha_price_usd;
 
         // Build per-miner-per-category CU/RU breakdown from raw rows
-        let miner_payouts_detail = self.compute_shadow_miner_breakdown(
+        let miner_payouts_detail = self.compute_miner_breakdown(
             &incentive_config,
             &cu_rows,
             &ru_rows,
-            shadow_start,
+            epoch_start,
             epoch.period_end,
             hotkey_to_uid,
         );
@@ -462,7 +427,7 @@ impl WeightSetter {
             &incentive_config,
             &cu_rows,
             &ru_rows,
-            shadow_start,
+            epoch_start,
             epoch.period_end,
             usd_emission_capacity,
             self.emission_config.burn_uid,
@@ -470,7 +435,7 @@ impl WeightSetter {
             self.emission_config.forced_burn_percentage,
         )?;
 
-        Ok(ShadowIncentiveResult {
+        Ok(IncentiveWeightResult {
             distribution: incentive_result.distribution,
             burn_percentage: incentive_result.burn_percentage,
             burn_rate: incentive_result.burn_rate,
@@ -487,9 +452,9 @@ impl WeightSetter {
         })
     }
 
-    /// Build per-miner breakdown of CU (per category) and RU (total) for shadow logging.
+    /// Build per-miner breakdown of CU (per category) and RU (total) for logging.
     /// Replicates the payout math from `compute_incentive_pool` but keeps CU/RU separate.
-    fn compute_shadow_miner_breakdown(
+    fn compute_miner_breakdown(
         &self,
         config: &IncentiveConfigResponse,
         cu_rows: &[crate::basilica_api::CuLedgerRowResponse],
@@ -497,7 +462,7 @@ impl WeightSetter {
         epoch_start: DateTime<Utc>,
         epoch_end: DateTime<Utc>,
         hotkey_to_uid: &HashMap<String, u16>,
-    ) -> Vec<ShadowMinerPayout> {
+    ) -> Vec<IncentiveMinerPayout> {
         use rust_decimal::Decimal;
 
         // CU supply per category (dilution denominator)
@@ -574,19 +539,19 @@ impl WeightSetter {
             *ru_accum.entry(row.hotkey.clone()).or_insert(Decimal::ZERO) += ru_usd;
         }
 
-        // Merge into Vec<ShadowMinerPayout>
+        // Merge into Vec<IncentiveMinerPayout>
         let all_hotkeys: std::collections::HashSet<&String> =
             cu_accum.keys().chain(ru_accum.keys()).collect();
 
-        let mut payouts: Vec<ShadowMinerPayout> = all_hotkeys
+        let mut payouts: Vec<IncentiveMinerPayout> = all_hotkeys
             .into_iter()
             .filter_map(|hotkey| {
                 let uid = hotkey_to_uid.get(hotkey)?;
-                let cu_categories: Vec<ShadowCuCategory> = cu_accum
+                let cu_categories: Vec<IncentiveCuCategory> = cu_accum
                     .get(hotkey)
                     .map(|cats| {
                         cats.iter()
-                            .map(|(cat, (amount, usd))| ShadowCuCategory {
+                            .map(|(cat, (amount, usd))| IncentiveCuCategory {
                                 category: cat.clone(),
                                 cu_amount: *amount,
                                 cu_usd: *usd,
@@ -598,7 +563,7 @@ impl WeightSetter {
                 let cu_total: Decimal = cu_categories.iter().map(|c| c.cu_usd).sum();
                 let total_usd = cu_total + ru_usd;
 
-                Some(ShadowMinerPayout {
+                Some(IncentiveMinerPayout {
                     miner_uid: *uid,
                     hotkey: hotkey.clone(),
                     cu_categories,
@@ -610,96 +575,6 @@ impl WeightSetter {
 
         payouts.sort_by_key(|p| p.miner_uid);
         payouts
-    }
-
-    // ── Old delivery-based helpers ──
-
-    async fn sync_deliveries_for_epoch(&self, epoch: &WeightSetEpoch) -> Result<()> {
-        let deliveries = self
-            .api_client
-            .get_miner_delivery(epoch.period_start, epoch.period_end)
-            .await?;
-
-        self.delivery_repository
-            .store_deliveries(epoch.period_start, epoch.period_end, &deliveries)
-            .await?;
-
-        Ok(())
-    }
-
-    fn group_deliveries_by_category(
-        &self,
-        deliveries: Vec<MinerDelivery>,
-        hotkey_to_uid: &HashMap<String, u16>,
-    ) -> HashMap<String, Vec<(MinerUid, f64)>> {
-        let mut miners_by_category: HashMap<String, Vec<(MinerUid, f64)>> = HashMap::new();
-        for delivery in deliveries {
-            let current_uid = match hotkey_to_uid.get(&delivery.miner_hotkey) {
-                Some(&uid) => uid,
-                None => {
-                    warn!(
-                        miner_hotkey = %delivery.miner_hotkey,
-                        stored_uid = delivery.miner_uid,
-                        revenue_usd = delivery.revenue_usd,
-                        gpu_category = %delivery.gpu_category,
-                        "Miner deregistered - clearing pending revenue (hotkey not in metagraph)"
-                    );
-                    continue;
-                }
-            };
-
-            if current_uid != delivery.miner_uid as u16 {
-                warn!(
-                    miner_hotkey = %delivery.miner_hotkey,
-                    stored_uid = delivery.miner_uid,
-                    current_uid = current_uid,
-                    revenue_usd = delivery.revenue_usd,
-                    "Miner UID changed - using current UID from metagraph"
-                );
-            }
-
-            let gpu_cat: GpuCategory = if delivery.gpu_category.trim().is_empty() {
-                GpuCategory::Other("UNKNOWN".to_string())
-            } else {
-                delivery.gpu_category.parse().unwrap() // Infallible
-            };
-            if matches!(&gpu_cat, GpuCategory::Other(_)) {
-                warn!(
-                    raw_category = %delivery.gpu_category,
-                    miner_hotkey = %delivery.miner_hotkey,
-                    node_id = %delivery.node_id,
-                    "Delivery has unrecognized GPU category - will not receive weight allocation"
-                );
-            }
-            let category = gpu_cat.to_string();
-            let revenue_usd = delivery.revenue_usd;
-            if !revenue_usd.is_finite() || revenue_usd <= 0.0 {
-                debug!(
-                    miner_hotkey = %delivery.miner_hotkey,
-                    node_id = %delivery.node_id,
-                    gpu_category = %category,
-                    "Skipping delivery with zero payment - no weight contribution"
-                );
-                continue;
-            }
-
-            miners_by_category
-                .entry(category)
-                .or_default()
-                .push((MinerUid::new(current_uid), revenue_usd));
-        }
-
-        if miners_by_category.is_empty() {
-            warn!("No miners found in any GPU category - proceeding with burn allocation");
-        }
-
-        info!(
-            "Found miners in {} GPU categories: {:?}",
-            miners_by_category.len(),
-            miners_by_category.keys().collect::<Vec<_>>()
-        );
-
-        miners_by_category
     }
 
     async fn fetch_metagraph_with_logging(&self) -> Result<Metagraph> {
@@ -832,10 +707,11 @@ impl WeightSetter {
     async fn store_weight_results(
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+        burn_percentage: f64,
     ) -> Result<()> {
         let current_block = self.get_current_block().await.unwrap_or(0);
         let emission_metrics_id = self
-            .store_emission_metrics(weight_distribution, current_block)
+            .store_emission_metrics(weight_distribution, current_block, burn_percentage)
             .await?;
 
         self.store_weight_allocations(weight_distribution, emission_metrics_id, current_block)
@@ -1172,8 +1048,8 @@ impl WeightSetter {
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
         current_block: u64,
+        burn_percentage: f64,
     ) -> Result<i64> {
-        let burn_percentage = self.emission_config.burn_percentage;
         use crate::persistence::gpu_profile_repository::{CategoryDistribution, EmissionMetrics};
 
         // Convert category allocations to CategoryDistribution format
