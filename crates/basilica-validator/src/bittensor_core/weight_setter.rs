@@ -280,7 +280,8 @@ impl WeightSetter {
         self.ensure_unique_uids(&normalized_weights)?;
         self.submit_weights_to_chain_with_retry(normalized_weights, version_key)
             .await?;
-        self.store_weight_results(weight_distribution).await?;
+        self.store_weight_results(weight_distribution, result.burn_percentage)
+            .await?;
 
         self.epoch_repository.mark_success(epoch.id).await?;
         Ok(())
@@ -706,10 +707,11 @@ impl WeightSetter {
     async fn store_weight_results(
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+        burn_percentage: f64,
     ) -> Result<()> {
         let current_block = self.get_current_block().await.unwrap_or(0);
         let emission_metrics_id = self
-            .store_emission_metrics(weight_distribution, current_block)
+            .store_emission_metrics(weight_distribution, current_block, burn_percentage)
             .await?;
 
         self.store_weight_allocations(weight_distribution, emission_metrics_id, current_block)
@@ -1046,8 +1048,8 @@ impl WeightSetter {
         &self,
         weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
         current_block: u64,
+        burn_percentage: f64,
     ) -> Result<i64> {
-        let burn_percentage = self.emission_config.burn_percentage;
         use crate::persistence::gpu_profile_repository::{CategoryDistribution, EmissionMetrics};
 
         // Convert category allocations to CategoryDistribution format

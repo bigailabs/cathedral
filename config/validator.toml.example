@@ -101,9 +101,6 @@ ssh_retry_attempts = 3
 ssh_retry_delay = { secs = 2, nanos = 0 }
 
 [emission]
-# Static burn percentage (0.0-100.0)
-burn_percentage = 95.0
-
 # Forced minimum burn percentage (0.0-99.9). Reduces effective emission capacity.
 # Omit to disable.
 forced_burn_percentage = 95.0
@@ -114,10 +111,6 @@ burn_uid = 204
 # Blocks between weight setting operations
 # 360 blocks = ~1 hour on Bittensor (12 seconds per block)
 weight_set_interval_blocks = 360
-
-# Minimum number of miners required
-# per GPU category to receive allocation
-min_miners_per_category = 1
 
 # Version key for weight setting operations
 # This prevents replay attacks by incrementing with each weight set
