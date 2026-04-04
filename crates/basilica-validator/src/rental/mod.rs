@@ -447,9 +447,7 @@ impl RentalManager {
             .filter_by_min_memory(candidates, request.min_memory_gb)
             .await;
 
-        let ordered = self
-            .rank_bid_candidates(candidates, &request.gpu_category, request.gpu_count)
-            .await;
+        let ordered = candidates;
 
         if ordered.is_empty() {
             return Err(anyhow::anyhow!(
@@ -536,15 +534,6 @@ impl RentalManager {
             }
         }
         filtered
-    }
-
-    async fn rank_bid_candidates(
-        &self,
-        candidates: Vec<NodeBidCandidate>,
-        _gpu_category: &str,
-        _gpu_count: u32,
-    ) -> Vec<NodeBidCandidate> {
-        candidates
     }
 
     async fn ensure_not_banned(&self, selection: &RentalSelection, rental_id: &str) -> Result<()> {
