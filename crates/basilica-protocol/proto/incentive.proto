@@ -26,7 +26,6 @@ message GetConfigResponse {
   uint32 window_hours = 2;
   optional uint32 revenue_share_pct = 4;
   uint32 slash_pct = 5;
-  optional string weight_mechanism = 6;
 }
 
 message GetCusRequest {

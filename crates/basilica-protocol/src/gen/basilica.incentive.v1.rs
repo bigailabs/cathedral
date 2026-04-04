@@ -26,8 +26,6 @@ pub struct GetConfigResponse {
     pub revenue_share_pct: ::core::option::Option<u32>,
     #[prost(uint32, tag = "5")]
     pub slash_pct: u32,
-    #[prost(string, optional, tag = "6")]
-    pub weight_mechanism: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

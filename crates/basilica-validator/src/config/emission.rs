@@ -88,12 +88,11 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmissionConfig {
-    /// Percentage of emissions to burn (0.0-100.0) — used by the old delivery-based weight logic
+    /// Percentage of emissions to burn (0.0-100.0)
     pub burn_percentage: f64,
 
     /// Forced minimum burn percentage (0.0-100.0). Reduces effective emission capacity
     /// before dynamic burn calculation. None = no forced burn.
-    /// Used by the new incentive-pool (shadow) weight logic.
     #[serde(default)]
     pub forced_burn_percentage: Option<f64>,
 
@@ -119,7 +118,7 @@ pub struct EmissionConfig {
 impl EmissionConfig {
     /// Validate the emission configuration
     pub fn validate(&self) -> Result<()> {
-        // Validate burn percentage (old delivery-based logic)
+        // Validate burn percentage
         if !self.burn_percentage.is_finite()
             || self.burn_percentage < 0.0
             || self.burn_percentage > 100.0
@@ -130,7 +129,7 @@ impl EmissionConfig {
             ));
         }
 
-        // Validate forced burn percentage if set (new incentive-pool logic)
+        // Validate forced burn percentage if set
         if let Some(pct) = self.forced_burn_percentage {
             if !pct.is_finite() || !(0.0..100.0).contains(&pct) {
                 return Err(anyhow!(

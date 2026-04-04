@@ -535,7 +535,6 @@ mod tests {
             window_hours,
             revenue_share_pct,
             slash_pct: 100,
-            weight_mechanism: None,
         }
     }
 
@@ -561,7 +560,6 @@ mod tests {
             window_hours: 4,
             revenue_share_pct: Some(25),
             slash_pct: 100,
-            weight_mechanism: None,
         }
     }
 

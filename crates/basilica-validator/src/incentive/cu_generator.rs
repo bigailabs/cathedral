@@ -521,7 +521,6 @@ mod tests {
             window_hours: 72,
             revenue_share_pct: Some(30),
             slash_pct: 100,
-            weight_mechanism: None,
         }
     }
 

@@ -570,55 +570,12 @@ struct EpochWindowQuery {
     epoch_end: String,
 }
 
-/// Which weight-setting mechanism the validator should use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub enum WeightMechanism {
-    /// Delivery-based (old)
-    V1,
-    /// CU/RU incentive pool (new)
-    V2,
-}
-
-impl WeightMechanism {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::V1 => "v1",
-            Self::V2 => "v2",
-        }
-    }
-}
-
-impl std::fmt::Display for WeightMechanism {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl TryFrom<String> for WeightMechanism {
-    type Error = anyhow::Error;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        match s.as_str() {
-            "v1" => Ok(Self::V1),
-            "v2" => Ok(Self::V2),
-            other => Err(anyhow::anyhow!("unknown weight_mechanism: {other:?}")),
-        }
-    }
-}
-
-impl From<WeightMechanism> for String {
-    fn from(m: WeightMechanism) -> Self {
-        m.as_str().to_string()
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IncentiveConfigResponse {
     pub gpu_categories: HashMap<String, IncentiveGpuCategoryConfig>,
     pub window_hours: u32,
     pub revenue_share_pct: Option<u32>,
     pub slash_pct: u32,
-    pub weight_mechanism: Option<WeightMechanism>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1230,8 +1187,7 @@ mod tests {
                 },
                 "window_hours": 72,
                 "revenue_share_pct": 30,
-                "slash_pct": 100,
-                "weight_mechanism": "v2"
+                "slash_pct": 100
             })))
             .mount(&server)
             .await;
@@ -1241,7 +1197,6 @@ mod tests {
 
         let config = client.get_incentive_config().await.unwrap();
         assert_eq!(config.gpu_categories["H100"].target_count, 2);
-        assert_eq!(config.weight_mechanism, Some(WeightMechanism::V2));
     }
 
     #[tokio::test]

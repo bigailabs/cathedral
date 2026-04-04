@@ -101,11 +101,11 @@ ssh_retry_attempts = 3
 ssh_retry_delay = { secs = 2, nanos = 0 }
 
 [emission]
-# Static burn percentage for old delivery-based weight logic (0.0-100.0)
+# Static burn percentage (0.0-100.0)
 burn_percentage = 95.0
 
 # Forced minimum burn percentage (0.0-99.9). Reduces effective emission capacity.
-# Used by the new incentive-pool shadow logic. Omit to disable.
+# Omit to disable.
 forced_burn_percentage = 95.0
 
 # UID to receive burn allocation
