@@ -716,8 +716,6 @@ impl WeightSetter {
 
         self.store_weight_allocations(weight_distribution, emission_metrics_id, current_block)
             .await?;
-        self.store_weight_submission_metadata(weight_distribution)
-            .await?;
         Ok(())
     }
 
@@ -1159,34 +1157,6 @@ impl WeightSetter {
             current_block
         );
 
-        Ok(())
-    }
-
-    /// Store metadata about GPU-based weight submission
-    async fn store_weight_submission_metadata(
-        &self,
-        weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
-    ) -> Result<()> {
-        // Store the weight distribution for auditing
-        let distribution_json = serde_json::to_string(weight_distribution)?;
-        let key = format!("submitted_weight_distribution:{}", self.config.netuid);
-        self.storage.set_string(&key, &distribution_json).await?;
-
-        // Store submission timestamp
-        let timestamp_key = format!("last_weight_submission:{}", self.config.netuid);
-        let timestamp = chrono::Utc::now().timestamp();
-        self.storage.set_i64(&timestamp_key, timestamp).await?;
-
-        // Store category statistics
-        let stats_key = format!("category_stats:{}", self.config.netuid);
-        let category_stats = self.gpu_scoring_engine.get_category_statistics().await?;
-        let stats_json = serde_json::to_string(&category_stats)?;
-        self.storage.set_string(&stats_key, &stats_json).await?;
-
-        info!(
-            "Stored weight submission metadata with {} categories",
-            weight_distribution.category_allocations.len()
-        );
         Ok(())
     }
 

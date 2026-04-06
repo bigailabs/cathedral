@@ -223,13 +223,11 @@ impl ValidatorService {
                 gpu_profile_repo.clone(),
                 persistence.clone(),
                 Arc::new(metrics.clone()),
-                self.config.emission.clone(),
             ))
         } else {
             Arc::new(GpuScoringEngine::new(
                 gpu_profile_repo.clone(),
                 persistence.clone(),
-                self.config.emission.clone(),
             ))
         };
 
