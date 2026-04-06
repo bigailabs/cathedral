@@ -187,7 +187,6 @@ impl GpuScoringEngine {
             0.0
         }
     }
-
 }
 
 #[cfg(test)]
@@ -325,103 +324,6 @@ mod tests {
         .bind(now.to_rfc3339())
         .execute(persistence.pool())
         .await?;
-        Ok(())
-    }
-
-    /// Helper function to seed all required data for GPU profile tests
-    async fn seed_test_data(
-        persistence: &SimplePersistence,
-        gpu_repo: &GpuProfileRepository,
-        profiles: &[MinerGpuProfile],
-    ) -> anyhow::Result<()> {
-        let now = Utc::now();
-
-        for profile in profiles {
-            // Store basic profile data
-            gpu_repo.upsert_gpu_profile(profile).await?;
-
-            let miner_id = format!("miner_{}", profile.miner_uid.as_u16());
-            let node_id = format!(
-                "miner{}__test-node-{}",
-                profile.miner_uid.as_u16(),
-                profile.miner_uid.as_u16()
-            );
-
-            // Seed miners table first (required for foreign key constraint)
-            sqlx::query(
-                "INSERT OR REPLACE INTO miners (id, hotkey, endpoint, updated_at)
-                 VALUES (?, ?, ?, ?)",
-            )
-            .bind(&miner_id)
-            .bind(format!("hotkey_{}", profile.miner_uid.as_u16()))
-            .bind("127.0.0.1:8080")
-            .bind(now.to_rfc3339())
-            .execute(persistence.pool())
-            .await?;
-
-            // Seed gpu_uuid_assignments table
-            for (gpu_model, count) in &profile.gpu_counts {
-                for i in 0..*count {
-                    let gpu_uuid =
-                        format!("gpu-{}-{}-{}", profile.miner_uid.as_u16(), gpu_model, i);
-                    sqlx::query(
-                        "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, gpu_memory_gb, last_verified)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)"
-                    )
-                    .bind(&gpu_uuid)
-                    .bind(i as i32)
-                    .bind(&node_id)
-                    .bind(&miner_id)
-                    .bind(gpu_model)
-                    .bind(80i64) // Default 80GB for test data
-                    .bind(now.to_rfc3339())
-                    .execute(persistence.pool())
-                    .await?;
-                }
-            }
-
-            // Seed miner_nodes table (unique IP per miner to satisfy UNIQUE index)
-            let uid = profile.miner_uid.as_u16();
-            let node_ip = format!("10.0.{}.{}", uid / 256, uid % 256);
-            sqlx::query(
-                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, status, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            .bind(&node_id)
-            .bind(&miner_id)
-            .bind(&node_id)
-            .bind(format!("root@{}:8080", node_ip))
-            .bind(&node_ip)
-            .bind(profile.gpu_counts.values().sum::<u32>() as i64)
-            .bind("online")
-            .bind(now.to_rfc3339())
-            .execute(persistence.pool())
-            .await?;
-
-            // Seed verification_logs table if there's a successful validation
-            if let Some(last_successful) = profile.last_successful_validation {
-                let log_id = uuid::Uuid::new_v4().to_string();
-                sqlx::query(
-                    "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, error_message, created_at, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                )
-                .bind(&log_id)
-                .bind(&node_id)
-                .bind("test_validator_hotkey")
-                .bind("gpu_validation")
-                .bind(last_successful.to_rfc3339())
-                .bind(profile.total_score)
-                .bind(1)
-                .bind("{}")
-                .bind(1000i64)
-                .bind(Option::<String>::None)
-                .bind(now.to_rfc3339())
-                .bind(now.to_rfc3339())
-                .execute(persistence.pool())
-                .await?;
-            }
-        }
-
         Ok(())
     }
 
@@ -692,8 +594,7 @@ mod tests {
     #[tokio::test]
     async fn test_direct_score_update() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine =
-            GpuScoringEngine::new(repo.clone(), persistence);
+        let engine = GpuScoringEngine::new(repo.clone(), persistence);
 
         let miner_uid = MinerUid::new(100);
 
