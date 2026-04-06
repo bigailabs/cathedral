@@ -121,12 +121,14 @@ The Basilica miner manages a fleet of GPU nodes and provides validators with **d
 
 - **GPU Nodes**: One or more servers with:
   - NVIDIA GPU (A100, H100, H200, or B200 supported)
-  - NVIDIA CUDA drivers version ≥12.8
-  - Linux OS with SSH server
-  - Docker installed (for container workloads with nvidia runtime)
-  - All ports need to be open, the NAT or firewall should allow inbound SSH connections from the miner and validator server
-  - the validator shall be in control of which ports need to have open internet access
-  - at least 1TB of free disk space recommended (for container images and data)
+  - NVIDIA CUDA drivers version ≥12.8 (`nvidia-smi` must work)
+  - Docker installed with **NVIDIA Container Toolkit** (nvidia runtime) so containers have GPU access — verify with: `docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi`
+  - Linux OS with SSH server running
+  - Dedicated user account (e.g., `basilica`) added to the `docker` group
+  - Miner's SSH public key deployed to the node
+  - Firewall/NAT must allow inbound SSH from both the miner server and the validator server
+  - The validator controls which additional ports need open internet access
+  - At least 1TB of free disk space recommended (for container images and data)
 
 - **Bittensor Wallet**: Registered on subnet 39 (mainnet) or 387 (testnet)
 
