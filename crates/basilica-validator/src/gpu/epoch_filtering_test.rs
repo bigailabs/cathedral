@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::config::emission::EmissionConfig;
-    use crate::gpu::{GpuScoringEngine, MinerGpuProfile};
+    use crate::gpu::MinerGpuProfile;
     use crate::persistence::{gpu_profile_repository::GpuProfileRepository, SimplePersistence};
     use basilica_common::identity::MinerUid;
     use chrono::Utc;
@@ -249,68 +248,6 @@ mod tests {
 
         assert_eq!(a100_count, 4, "Should have 4 A100 miners");
         assert_eq!(h100_count, 1, "Should have 1 H100 miner");
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_scoring_engine_epoch_filtering_logic() -> anyhow::Result<()> {
-        let persistence = Arc::new(SimplePersistence::for_testing().await?);
-        let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let scoring_engine = GpuScoringEngine::new(
-            gpu_repo.clone(),
-            persistence.clone(),
-            EmissionConfig::for_testing(),
-        );
-
-        let now = Utc::now();
-        let one_hour_ago = now - chrono::Duration::hours(1);
-        let three_hours_ago = now - chrono::Duration::hours(3);
-
-        // Create test profiles
-        let profiles = vec![
-            MinerGpuProfile {
-                miner_uid: MinerUid::new(10),
-                gpu_counts: HashMap::from([("A100".to_string(), 4)]),
-                total_score: 0.9,
-                verification_count: 20,
-                last_updated: now,
-                last_successful_validation: Some(one_hour_ago),
-            },
-            MinerGpuProfile {
-                miner_uid: MinerUid::new(11),
-                gpu_counts: HashMap::from([("A100".to_string(), 2)]),
-                total_score: 0.8,
-                verification_count: 15,
-                last_updated: now,
-                last_successful_validation: Some(three_hours_ago),
-            },
-            MinerGpuProfile {
-                miner_uid: MinerUid::new(12),
-                gpu_counts: HashMap::from([("H100".to_string(), 1)]),
-                total_score: 0.85,
-                verification_count: 18,
-                last_updated: now,
-                last_successful_validation: None, // Never validated
-            },
-        ];
-
-        // Store profiles with complete data
-        seed_test_data(&persistence, &gpu_repo, &profiles).await?;
-
-        // Test category statistics
-        let stats = scoring_engine.get_category_statistics().await?;
-
-        assert_eq!(stats.len(), 2, "Should have A100 and H100 categories");
-        assert!(stats.contains_key("A100"));
-        assert!(stats.contains_key("H100"));
-
-        let a100_stats = stats.get("A100").unwrap();
-        assert_eq!(a100_stats.miner_count, 2);
-        assert!(a100_stats.average_score > 0.0);
-
-        let h100_stats = stats.get("H100").unwrap();
-        assert_eq!(h100_stats.miner_count, 1);
 
         Ok(())
     }

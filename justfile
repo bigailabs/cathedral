@@ -267,10 +267,6 @@ local-validator-up:
         printf '# forced_burn_percentage = 0.0\n'
         printf 'burn_uid = 0\n'
         printf 'weight_set_interval_blocks = 360\n'
-        printf '\n[emission.gpu_allocations]\n'
-        printf 'A100 = { weight = 50.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
-        printf 'H100 = { weight = 30.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
-        printf 'B200 = { weight = 20.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
     } > config/validator.local.toml
     # Run validator container
     docker compose -f scripts/validator/compose.local.yml up -d

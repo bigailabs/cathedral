@@ -1,9 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::config::{
-        emission::{GpuAllocation, DEFAULT_BURN_UID},
-        ValidatorConfig,
-    };
+    use crate::config::{emission::DEFAULT_BURN_UID, ValidatorConfig};
     use basilica_common::config::ConfigValidation;
 
     #[test]
@@ -14,10 +11,9 @@ mod tests {
         assert_eq!(config.emission.forced_burn_percentage, None);
         assert_eq!(config.emission.burn_uid, DEFAULT_BURN_UID);
         assert_eq!(config.emission.weight_set_interval_blocks, 360);
-        assert_eq!(config.emission.gpu_allocations.len(), 0);
 
-        // Default config should fail validation because GPU allocations are empty
-        assert!(config.validate().is_err());
+        // Default config should now pass emission validation (no gpu_allocations constraint),
+        // but may still fail on other fields like binary_validation
     }
 
     #[test]
@@ -30,16 +26,8 @@ mod tests {
         // Should fail validation
         assert!(config.validate().is_err());
 
-        // Set valid burn percentage and GPU allocations
+        // Set valid burn percentage
         config.emission.forced_burn_percentage = Some(10.0);
-        config
-            .emission
-            .gpu_allocations
-            .insert("A100".to_string(), GpuAllocation::new(50.0));
-        config
-            .emission
-            .gpu_allocations
-            .insert("H100".to_string(), GpuAllocation::new(50.0));
         // Disable binary validation since we don't have the binaries in test
         config.verification.binary_validation = None;
         assert!(config.validate().is_ok());
@@ -51,27 +39,12 @@ mod tests {
         // Disable binary validation since we don't have the binaries in test (None = disabled)
         config.verification.binary_validation = None;
 
-        // Add valid GPU allocations for testing
         config.emission.forced_burn_percentage = Some(10.0);
-        config
-            .emission
-            .gpu_allocations
-            .insert("A100".to_string(), GpuAllocation::new(8.0));
-        config
-            .emission
-            .gpu_allocations
-            .insert("H100".to_string(), GpuAllocation::new(12.0));
-        config
-            .emission
-            .gpu_allocations
-            .insert("B200".to_string(), GpuAllocation::new(80.0));
 
         // Test TOML serialization includes emission config
         let toml_str = toml::to_string(&config).expect("Failed to serialize to TOML");
         assert!(toml_str.contains("[emission]"));
         assert!(toml_str.contains("forced_burn_percentage"));
-        // Check that GPU allocations are present in the TOML
-        assert!(toml_str.contains("gpu_allocations"));
 
         // Test deserialization
         let deserialized: ValidatorConfig =
@@ -80,10 +53,6 @@ mod tests {
         assert_eq!(
             config.emission.forced_burn_percentage,
             deserialized.emission.forced_burn_percentage
-        );
-        assert_eq!(
-            config.emission.gpu_allocations,
-            deserialized.emission.gpu_allocations
         );
 
         // Verify deserialized config is valid
@@ -95,14 +64,6 @@ mod tests {
         let mut config = ValidatorConfig::default();
         config.verification.binary_validation = None;
         config.emission.forced_burn_percentage = Some(10.0);
-        config
-            .emission
-            .gpu_allocations
-            .insert("A100".to_string(), GpuAllocation::new(50.0));
-        config
-            .emission
-            .gpu_allocations
-            .insert("H100".to_string(), GpuAllocation::new(50.0));
 
         config.billing.enabled = true;
         config.api_endpoint = config.billing.billing_endpoint.clone();

@@ -1,17 +1,13 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use chrono::Utc;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use super::categorization::{MinerGpuProfile, NodeValidationResult};
-use crate::config::emission::EmissionConfig;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
 use basilica_common::identity::MinerUid;
-use basilica_common::types::GpuCategory;
-use std::str::FromStr;
 
 pub struct GpuScoringEngine {
     gpu_profile_repo: Arc<GpuProfileRepository>,
@@ -19,20 +15,17 @@ pub struct GpuScoringEngine {
     #[allow(dead_code)]
     persistence: Arc<SimplePersistence>,
     metrics: Option<Arc<ValidatorMetrics>>,
-    emission_config: EmissionConfig,
 }
 
 impl GpuScoringEngine {
     pub fn new(
         gpu_profile_repo: Arc<GpuProfileRepository>,
         persistence: Arc<SimplePersistence>,
-        emission_config: EmissionConfig,
     ) -> Self {
         Self {
             gpu_profile_repo,
             persistence,
             metrics: None,
-            emission_config,
         }
     }
 
@@ -41,13 +34,11 @@ impl GpuScoringEngine {
         gpu_profile_repo: Arc<GpuProfileRepository>,
         persistence: Arc<SimplePersistence>,
         metrics: Arc<ValidatorMetrics>,
-        emission_config: EmissionConfig,
     ) -> Self {
         Self {
             gpu_profile_repo,
             persistence,
             metrics: Some(metrics),
-            emission_config,
         }
     }
 
@@ -137,15 +128,6 @@ impl GpuScoringEngine {
         Ok(profile)
     }
 
-    /// Check if a GPU model is configured for rewards based on emission config
-    fn is_gpu_model_rewardable(&self, gpu_model: &str) -> bool {
-        let category = GpuCategory::from_str(gpu_model).unwrap();
-        let normalized_model = category.to_string();
-        self.emission_config
-            .gpu_allocations
-            .contains_key(&normalized_model)
-    }
-
     /// Calculate verification score from node results
     fn calculate_verification_score(&self, node_validations: &[NodeValidationResult]) -> f64 {
         if node_validations.is_empty() {
@@ -206,338 +188,14 @@ impl GpuScoringEngine {
         }
     }
 
-    /// Calculate uptime-based multiplication factor for a specific node
-    /// Uses 14-day linear ramp-up based on actual uptime from verification logs
-    ///
-    /// Note: No longer used for weight calculation (miners get full weight immediately).
-    /// Kept for future gRPC endpoint that exposes uptime data to the payout service.
-    #[allow(dead_code)]
-    async fn calculate_uptime_multiplication_factor(
-        &self,
-        miner_uid: MinerUid,
-        node_id: &str,
-    ) -> f64 {
-        let miner_id = format!("miner_{}", miner_uid.as_u16());
-
-        match self
-            .persistence
-            .calculate_node_uptime_multiplier(&miner_id, node_id)
-            .await
-        {
-            Ok((uptime_minutes, multiplier)) => {
-                debug!(
-                    miner_uid = miner_uid.as_u16(),
-                    node_id = %node_id,
-                    uptime_minutes = uptime_minutes,
-                    multiplier = multiplier,
-                    "Applied uptime multiplication factor"
-                );
-
-                // Emit Prometheus metrics
-                if let Some(metrics) = &self.metrics {
-                    metrics.prometheus().record_node_uptime_metrics(
-                        miner_uid.as_u16(),
-                        node_id,
-                        uptime_minutes,
-                        multiplier,
-                    );
-                }
-
-                multiplier
-            }
-            Err(e) => {
-                error!(
-                    miner_uid = miner_uid.as_u16(),
-                    node_id = %node_id,
-                    error = %e,
-                    "Failed to calculate node uptime multiplier, using default 1.0"
-                );
-                1.0 // Fallback to no penalty on error
-            }
-        }
-    }
-
-    /// Get all miners grouped by GPU category with multi-category support
-    /// A single miner can appear in multiple categories if they have multiple GPU types
-    /// Only includes GPU categories configured in emission config for rewards
-    /// Filters out miners without active axons on the chain
-    /// Only includes miners with successful validations since the given timestamp
-    pub async fn get_miners_by_gpu_category_since_epoch(
-        &self,
-        epoch_timestamp: Option<DateTime<Utc>>,
-        cutoff_hours: u32,
-        metagraph: &bittensor::Metagraph,
-    ) -> Result<HashMap<String, Vec<(MinerUid, f64)>>> {
-        let all_profiles = self.gpu_profile_repo.get_all_gpu_profiles().await?;
-        let cutoff_time = Utc::now() - chrono::Duration::hours(cutoff_hours as i64);
-
-        let mut miners_by_category = HashMap::new();
-
-        for profile in all_profiles {
-            // Filter by cutoff time
-            if profile.last_updated < cutoff_time {
-                continue;
-            }
-
-            // Filter by last successful validation epoch if provided
-            if let Some(epoch) = epoch_timestamp {
-                // Skip miners who haven't had successful validations since the last epoch
-                match profile.last_successful_validation {
-                    Some(last_validation) if last_validation >= epoch => {
-                        // Miner has successful validation since epoch, include them
-                    }
-                    _ => {
-                        debug!(
-                            miner_uid = profile.miner_uid.as_u16(),
-                            last_validation = ?profile.last_successful_validation,
-                            epoch = ?epoch,
-                            "Skipping miner: No successful validation since last epoch"
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            // Check if miner has active axon on chain
-            let uid_index = profile.miner_uid.as_u16() as usize;
-            if uid_index >= metagraph.hotkeys.len() {
-                debug!(
-                    miner_uid = profile.miner_uid.as_u16(),
-                    "Skipping miner: UID exceeds metagraph size"
-                );
-                continue;
-            }
-
-            // Check if the UID has an active axon (non-zero IP and port)
-            let Some(axon) = metagraph.axons.get(uid_index) else {
-                debug!(
-                    miner_uid = profile.miner_uid.as_u16(),
-                    "Skipping miner: No axon found for UID"
-                );
-                continue;
-            };
-
-            if axon.port == 0 || axon.ip == 0 {
-                debug!(
-                    miner_uid = profile.miner_uid.as_u16(),
-                    "Skipping miner: Inactive axon (zero IP or port)"
-                );
-                continue;
-            }
-
-            let rewardable_gpus: Vec<(String, GpuCategory, u32)> = self
-                .gpu_profile_repo
-                .get_miner_gpu_assignments(profile.miner_uid)
-                .await?.iter().filter_map(|(node_id, (gpu_count, gpu_name, gpu_memory_gb))| {
-                    if *gpu_count > 0 {
-                        let category = GpuCategory::from_str(gpu_name).unwrap();
-                        let normalized_model = category.to_string();
-                        // Only include GPUs configured in emission config for rewards
-                        if self.is_gpu_model_rewardable(gpu_name) {
-                            // Check if miner meets minimum GPU count and VRAM requirements
-                            if let Some(allocation) = self.emission_config.get_gpu_allocation(&normalized_model) {
-                                let meets_gpu_count = *gpu_count >= allocation.min_gpu_count;
-                                let meets_vram = if let Some(min_vram) = allocation.min_gpu_vram {
-                                    // Check if the miner's GPU has enough VRAM
-                                    min_vram == 1 || min_vram == 0 || *gpu_memory_gb >= min_vram as f64
-                                } else {
-                                    // No VRAM requirement
-                                    true
-                                };
-
-                                if meets_gpu_count && meets_vram {
-                                    info!(
-                                        miner_uid = profile.miner_uid.as_u16(),
-                                        node_id = %node_id,
-                                        gpu_model = %gpu_name,
-                                        gpu_count = *gpu_count,
-                                        min_required = allocation.min_gpu_count,
-                                        "Miner meets all emission requirements"
-                                    );
-                                    Some((node_id.clone(), category, *gpu_count))
-                                } else {
-                                    if !meets_gpu_count {
-                                        info!(
-                                            miner_uid = profile.miner_uid.as_u16(),
-                                            node_id = %node_id,
-                                            gpu_model = %gpu_name,
-                                            gpu_count = *gpu_count,
-                                            min_required = allocation.min_gpu_count,
-                                            "Skipping miner: Does not meet minimum GPU count requirement"
-                                        );
-                                    }
-                                    if !meets_vram {
-                                        info!(
-                                            miner_uid = profile.miner_uid.as_u16(),
-                                            node_id = %node_id,
-                                            gpu_model = %gpu_name,
-                                            gpu_vram = *gpu_memory_gb,
-                                            min_required = allocation.min_gpu_vram,
-                                            "Skipping miner: Does not meet minimum GPU VRAM requirement"
-                                        );
-                                    }
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Count GPUs per category (no uptime multiplier - miners get full weight immediately)
-            let mut rewardable_gpu_counts: HashMap<String, f64> = HashMap::new();
-            for (_node_id, category, count) in rewardable_gpus {
-                let normalized_model = category.to_string();
-                *rewardable_gpu_counts.entry(normalized_model).or_insert(0.0) += count as f64;
-            }
-
-            // Skip miners with no rewardable GPUs
-            if rewardable_gpu_counts.is_empty() {
-                continue;
-            }
-
-            // Add the miner to each rewardable category they have GPUs in
-            for (normalized_model, weighted_gpu_count) in rewardable_gpu_counts {
-                // Multiply by weighted_gpu_count to get the actual linear score
-                let category_score = profile.total_score * weighted_gpu_count;
-
-                miners_by_category
-                    .entry(normalized_model)
-                    .or_insert_with(Vec::new)
-                    .push((profile.miner_uid, category_score));
-            }
-        }
-
-        // Sort miners within each category by score (descending)
-        for miners in miners_by_category.values_mut() {
-            miners.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        }
-
-        info!(
-            categories = miners_by_category.len(),
-            total_entries = miners_by_category.values().map(|v| v.len()).sum::<usize>(),
-            cutoff_hours = cutoff_hours,
-            metagraph_size = metagraph.hotkeys.len(),
-            "Retrieved miners by GPU category (configured models only for rewards, with active axon validation)"
-        );
-
-        Ok(miners_by_category)
-    }
-
-    /// Get category statistics with multi-category support
-    /// Statistics are calculated per category based on proportional scores
-    /// Only includes GPU categories configured in emission config for rewards
-    pub async fn get_category_statistics(&self) -> Result<HashMap<String, CategoryStats>> {
-        let all_profiles = self.gpu_profile_repo.get_all_gpu_profiles().await?;
-        let mut category_stats = HashMap::new();
-
-        for profile in all_profiles {
-            // Only consider GPUs listed in emission config for rewards
-            let rewardable_gpu_counts: HashMap<String, u32> = profile
-                .gpu_counts
-                .iter()
-                .filter_map(|(gpu_model, &gpu_count)| {
-                    if gpu_count > 0 {
-                        let category = GpuCategory::from_str(gpu_model).unwrap();
-                        let normalized_model = category.to_string();
-                        // Only include GPUs configured in emission config for rewards
-                        if self.is_gpu_model_rewardable(gpu_model) {
-                            // Check if miner meets minimum GPU count requirement
-                            if let Some(allocation) =
-                                self.emission_config.get_gpu_allocation(&normalized_model)
-                            {
-                                if gpu_count >= allocation.min_gpu_count {
-                                    Some((normalized_model, gpu_count))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Skip miners with no rewardable GPUs
-            if rewardable_gpu_counts.is_empty() {
-                continue;
-            }
-
-            let total_rewardable_gpus: u32 = rewardable_gpu_counts.values().sum();
-
-            // Add stats for each rewardable category the miner has GPUs in
-            for (normalized_model, gpu_count) in rewardable_gpu_counts {
-                // Calculate proportional score based on rewardable GPU count
-                let category_score = if total_rewardable_gpus > 0 {
-                    profile.total_score * (gpu_count as f64 / total_rewardable_gpus as f64)
-                } else {
-                    0.0
-                };
-
-                let stats =
-                    category_stats
-                        .entry(normalized_model)
-                        .or_insert_with(|| CategoryStats {
-                            miner_count: 0,
-                            total_score: 0.0,
-                            min_score: f64::MAX,
-                            max_score: f64::MIN,
-                            average_score: 0.0,
-                        });
-
-                stats.miner_count += 1;
-                stats.total_score += category_score;
-                stats.min_score = stats.min_score.min(category_score);
-                stats.max_score = stats.max_score.max(category_score);
-            }
-        }
-
-        // Calculate averages
-        for stats in category_stats.values_mut() {
-            if stats.miner_count > 0 {
-                stats.average_score = stats.total_score / stats.miner_count as f64;
-            }
-
-            // Fix edge case where no miners exist
-            if stats.min_score == f64::MAX {
-                stats.min_score = 0.0;
-            }
-            if stats.max_score == f64::MIN {
-                stats.max_score = 0.0;
-            }
-        }
-
-        Ok(category_stats)
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CategoryStats {
-    pub miner_count: u32,
-    pub average_score: f64,
-    pub total_score: f64,
-    pub min_score: f64,
-    pub max_score: f64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-    use crate::persistence::SimplePersistence;
     use basilica_common::identity::MinerUid;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -777,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn test_verification_score_calculation() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(repo, persistence);
 
         // Test with valid attestations
         let validations = vec![
@@ -885,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn test_gpu_count_weighting() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(repo, persistence);
 
         // Test different GPU counts
         for gpu_count in 1..=8 {
@@ -925,7 +583,7 @@ mod tests {
     #[tokio::test]
     async fn test_miner_profile_update() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(repo, persistence);
 
         let miner_uid = MinerUid::new(1);
         let validations = vec![NodeValidationResult {
@@ -966,59 +624,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_category_statistics() {
-        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(
-            repo.clone(),
-            persistence.clone(),
-            EmissionConfig::for_testing(),
-        );
-
-        // Create test profiles
-        let mut a100_counts_1 = HashMap::new();
-        a100_counts_1.insert("A100".to_string(), 2);
-
-        let mut a100_counts_2 = HashMap::new();
-        a100_counts_2.insert("A100".to_string(), 1);
-
-        let mut h100_counts = HashMap::new();
-        h100_counts.insert("H100".to_string(), 1);
-
-        let now = Utc::now();
-        let profiles = vec![
-            create_test_profile(1, a100_counts_1, 0.8, now),
-            create_test_profile(2, a100_counts_2, 0.6, now),
-            create_test_profile(3, h100_counts, 0.9, now),
-        ];
-
-        // Seed all required data
-        seed_test_data(&persistence, &repo, &profiles)
-            .await
-            .unwrap();
-
-        let stats = engine.get_category_statistics().await.unwrap();
-
-        assert_eq!(stats.len(), 2);
-
-        let a100_stats = stats.get("A100").unwrap();
-        assert_eq!(a100_stats.miner_count, 2);
-        assert_eq!(a100_stats.average_score, 0.7);
-        assert_eq!(a100_stats.total_score, 1.4);
-        assert_eq!(a100_stats.min_score, 0.6);
-        assert_eq!(a100_stats.max_score, 0.8);
-
-        let h100_stats = stats.get("H100").unwrap();
-        assert_eq!(h100_stats.miner_count, 1);
-        assert_eq!(h100_stats.average_score, 0.9);
-        assert_eq!(h100_stats.total_score, 0.9);
-        assert_eq!(h100_stats.min_score, 0.9);
-        assert_eq!(h100_stats.max_score, 0.9);
-    }
-
-    #[tokio::test]
     async fn test_pass_fail_scoring_edge_cases() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(repo, persistence);
 
         // Test all invalid validations
         let all_invalid = vec![
@@ -1085,7 +693,7 @@ mod tests {
     async fn test_direct_score_update() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
         let engine =
-            GpuScoringEngine::new(repo.clone(), persistence, EmissionConfig::for_testing());
+            GpuScoringEngine::new(repo.clone(), persistence);
 
         let miner_uid = MinerUid::new(100);
 
@@ -1118,7 +726,7 @@ mod tests {
     #[tokio::test]
     async fn test_scoring_ignores_gpu_memory() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(repo, persistence);
 
         // Test various memory sizes all get same score
         let memory_sizes = vec![16, 24, 40, 80, 100];
@@ -1137,296 +745,6 @@ mod tests {
             let score = engine.calculate_verification_score(&validations);
             assert_eq!(score, 1.0, "Memory {memory} should give score 1.0");
         }
-    }
-
-    #[tokio::test]
-    async fn test_b200_gpu_support() {
-        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(
-            repo.clone(),
-            persistence.clone(),
-            EmissionConfig::for_testing(),
-        );
-
-        // Test that B200 is considered rewardable
-        assert!(engine.is_gpu_model_rewardable("B200"));
-        assert!(engine.is_gpu_model_rewardable("NVIDIA B200"));
-        assert!(engine.is_gpu_model_rewardable("Tesla B200"));
-
-        // Test that A100 and H100 are still rewardable
-        assert!(engine.is_gpu_model_rewardable("A100"));
-        assert!(engine.is_gpu_model_rewardable("H100"));
-
-        // Test that unconfigured GPUs are not rewardable
-        assert!(!engine.is_gpu_model_rewardable("V100"));
-
-        // Create B200 profile
-        let mut b200_counts = HashMap::new();
-        b200_counts.insert("B200".to_string(), 4);
-
-        let now = Utc::now();
-        let b200_profile = create_test_profile(100, b200_counts, 1.0, now);
-
-        // Seed B200 data
-        seed_test_data(&persistence, &repo, &[b200_profile])
-            .await
-            .unwrap();
-
-        // Test category statistics include B200
-        let stats = engine.get_category_statistics().await.unwrap();
-        assert!(
-            stats.contains_key("B200"),
-            "B200 should be included in category statistics"
-        );
-
-        let b200_stats = stats.get("B200").unwrap();
-        assert_eq!(b200_stats.miner_count, 1);
-        assert_eq!(b200_stats.total_score, 1.0);
-    }
-
-    #[tokio::test]
-    async fn test_emission_config_filtering() {
-        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-
-        // Create custom emission config with only A100 and B200 (exclude H100)
-        let mut custom_gpu_allocations = HashMap::new();
-        custom_gpu_allocations.insert(
-            "A100".to_string(),
-            crate::config::emission::GpuAllocation::new(20.0),
-        );
-        custom_gpu_allocations.insert(
-            "B200".to_string(),
-            crate::config::emission::GpuAllocation::new(80.0),
-        );
-
-        let custom_emission_config = EmissionConfig {
-            forced_burn_percentage: Some(10.0),
-            burn_uid: 999,
-            gpu_allocations: custom_gpu_allocations,
-            weight_set_interval_blocks: 360,
-            weight_version_key: 0,
-        };
-
-        let engine =
-            GpuScoringEngine::new(repo.clone(), persistence.clone(), custom_emission_config);
-
-        // Test filtering matches custom config
-        assert!(engine.is_gpu_model_rewardable("A100"));
-        assert!(engine.is_gpu_model_rewardable("B200"));
-        assert!(!engine.is_gpu_model_rewardable("H100"));
-
-        // Create profiles with all GPU types
-        let mut a100_counts = HashMap::new();
-        a100_counts.insert("A100".to_string(), 2);
-
-        let mut h100_counts = HashMap::new();
-        h100_counts.insert("H100".to_string(), 1);
-
-        let mut b200_counts = HashMap::new();
-        b200_counts.insert("B200".to_string(), 3);
-
-        let now = Utc::now();
-        let profiles = vec![
-            create_test_profile(1, a100_counts, 0.8, now),
-            create_test_profile(2, h100_counts, 0.9, now),
-            create_test_profile(3, b200_counts, 1.0, now),
-        ];
-
-        // Seed all data
-        seed_test_data(&persistence, &repo, &profiles)
-            .await
-            .unwrap();
-
-        // Test category statistics only include configured GPUs
-        let stats = engine.get_category_statistics().await.unwrap();
-
-        // Should have A100 and B200 but NOT H100
-        assert_eq!(stats.len(), 2, "Should only have 2 categories (A100, B200)");
-        assert!(stats.contains_key("A100"), "Should include A100");
-        assert!(stats.contains_key("B200"), "Should include B200");
-        assert!(
-            !stats.contains_key("H100"),
-            "Should NOT include H100 (not in emission config)"
-        );
-
-        // Verify correct stats
-        assert_eq!(stats.get("A100").unwrap().miner_count, 1);
-        assert_eq!(stats.get("B200").unwrap().miner_count, 1);
-    }
-
-    #[tokio::test]
-    async fn test_multi_gpu_category_with_b200() {
-        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(
-            repo.clone(),
-            persistence.clone(),
-            EmissionConfig::for_testing(),
-        );
-
-        // Create a miner with multiple GPU types including B200
-        let mut multi_gpu_counts = HashMap::new();
-        multi_gpu_counts.insert("A100".to_string(), 1);
-        multi_gpu_counts.insert("B200".to_string(), 2);
-
-        let now = Utc::now();
-        let multi_gpu_profile = create_test_profile(42, multi_gpu_counts, 0.9, now);
-
-        // Seed data
-        seed_test_data(&persistence, &repo, &[multi_gpu_profile])
-            .await
-            .unwrap();
-
-        // Test category statistics account for both GPU types
-        let stats = engine.get_category_statistics().await.unwrap();
-
-        // Should have both A100 and B200 categories
-        assert!(stats.contains_key("A100"));
-        assert!(stats.contains_key("B200"));
-
-        // Both should show the same miner (miner can be in multiple categories)
-        assert_eq!(stats.get("A100").unwrap().miner_count, 1);
-        assert_eq!(stats.get("B200").unwrap().miner_count, 1);
-    }
-
-    #[test]
-    fn test_is_gpu_model_rewardable_normalization() {
-        // Create test emission config
-        let mut gpu_allocations = HashMap::new();
-        gpu_allocations.insert(
-            "A100".to_string(),
-            crate::config::emission::GpuAllocation::new(20.0),
-        );
-        gpu_allocations.insert(
-            "B200".to_string(),
-            crate::config::emission::GpuAllocation::new(80.0),
-        );
-        let emission_config = EmissionConfig {
-            forced_burn_percentage: Some(10.0),
-            burn_uid: 999,
-            gpu_allocations,
-            weight_set_interval_blocks: 360,
-            weight_version_key: 0,
-        };
-
-        // This test doesn't need async functionality, just the is_gpu_model_rewardable method
-
-        // Test that various GPU model strings are normalized correctly
-        let test_cases = vec![
-            ("A100", true),
-            ("NVIDIA A100", true),
-            ("Tesla A100", true),
-            ("a100", true),
-            ("B200", true),
-            ("NVIDIA B200", true),
-            ("b200", true),
-            ("H100", false), // Not in our custom config
-            ("V100", false),
-            ("A100", true),
-            ("GTX1080", false),
-        ];
-
-        // Test the underlying logic through GpuCategory::from_str
-        for (model, should_be_rewardable) in test_cases {
-            let category = GpuCategory::from_str(model).unwrap();
-            let normalized = category.to_string();
-            let is_rewardable = emission_config.gpu_allocations.contains_key(&normalized);
-            assert_eq!(
-                is_rewardable, should_be_rewardable,
-                "GPU model '{}' normalized to '{}', expected rewardable: {}, got: {}",
-                model, normalized, should_be_rewardable, is_rewardable
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_min_gpu_count_filtering() {
-        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-
-        // Create custom emission config with min_gpu_count requirements
-        let mut gpu_allocations = HashMap::new();
-        gpu_allocations.insert(
-            "A100".to_string(),
-            crate::config::emission::GpuAllocation::with_min_count(25.0, 4),
-        );
-        gpu_allocations.insert(
-            "H100".to_string(),
-            crate::config::emission::GpuAllocation::with_min_count(25.0, 2),
-        );
-        gpu_allocations.insert(
-            "B200".to_string(),
-            crate::config::emission::GpuAllocation::with_min_count(50.0, 8),
-        );
-
-        let emission_config = EmissionConfig {
-            forced_burn_percentage: Some(10.0),
-            burn_uid: 999,
-            gpu_allocations,
-            weight_set_interval_blocks: 360,
-            weight_version_key: 0,
-        };
-
-        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), emission_config);
-
-        // Create profiles with different GPU counts
-        let now = Utc::now();
-
-        // Helper to create single GPU type profile
-        let create_single_gpu_profile = |uid: u16, gpu_model: &str, count: u32, score: f64| {
-            let mut gpu_counts = HashMap::new();
-            gpu_counts.insert(gpu_model.to_string(), count);
-            create_test_profile(uid, gpu_counts, score, now)
-        };
-
-        let profiles = vec![
-            // Miner 1: Has 3x A100 (below min of 4) - should be excluded
-            create_single_gpu_profile(1, "A100", 3, 0.9),
-            // Miner 2: Has 4x A100 (meets min of 4) - should be included
-            create_single_gpu_profile(2, "A100", 4, 0.8),
-            // Miner 3: Has 1x H100 (below min of 2) - should be excluded
-            create_single_gpu_profile(3, "H100", 1, 0.7),
-            // Miner 4: Has 2x H100 (meets min of 2) - should be included
-            create_single_gpu_profile(4, "H100", 2, 0.8),
-            // Miner 5: Has 7x B200 (below min of 8) - should be excluded
-            create_single_gpu_profile(5, "B200", 7, 1.0),
-            // Miner 6: Has 8x B200 (meets min of 8) - should be included
-            create_single_gpu_profile(6, "B200", 8, 1.0),
-        ];
-
-        // Seed all required data
-        seed_test_data(&persistence, &repo, &profiles)
-            .await
-            .unwrap();
-
-        // Test category statistics respect min_gpu_count
-        let stats = engine.get_category_statistics().await.unwrap();
-
-        // Check A100 category - should only have miner 2
-        assert_eq!(
-            stats.get("A100").unwrap().miner_count,
-            1,
-            "A100 should have 1 miner (miner 2)"
-        );
-        assert_eq!(stats.get("A100").unwrap().total_score, 0.8);
-
-        // Check H100 category - should only have miner 4
-        assert_eq!(
-            stats.get("H100").unwrap().miner_count,
-            1,
-            "H100 should have 1 miner (miner 4)"
-        );
-        assert_eq!(stats.get("H100").unwrap().total_score, 0.8);
-
-        // Check B200 category - should only have miner 6
-        assert_eq!(
-            stats.get("B200").unwrap().miner_count,
-            1,
-            "B200 should have 1 miner (miner 6)"
-        );
-        assert_eq!(stats.get("B200").unwrap().total_score, 1.0);
-
-        // Test get_miners_by_gpu_category_since_epoch is skipped
-        // The metagraph type requires complex initialization that comes from the chain
-        // The important min_gpu_count filtering logic is already tested in get_category_statistics above
     }
 
     #[tokio::test]
