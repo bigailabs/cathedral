@@ -103,7 +103,8 @@ docker compose logs -f miner
 11. [Monitoring](#monitoring)
 12. [Troubleshooting](#troubleshooting)
 13. [Advanced Topics](#advanced-topics)
-    - [Delivery-Based Emissions](#delivery-based-emissions)
+    - [How Miners Earn Emissions](#how-miners-earn-emissions)
+    - [Current Incentive Configuration](#current-incentive-configuration)
     - [Miners & the Ban System](#miners--the-ban-system)
 
 ---
@@ -1595,12 +1596,73 @@ chmod +x /opt/basilica/scripts/monitor-gpus.sh
 
 ### How Miners Earn Emissions
 
-Miners earn emissions from **two independent payout streams**:
+You earn emissions from **two independent streams** that stack on top of each other:
 
-- **CU payouts (availability)**: Earned for keeping GPU nodes online and passing validation. 1 CU = 1 GPU-hour of validated availability — you earn CUs regardless of whether your nodes are rented. CUs vest linearly over a configurable window (default 72 hours), creating a collateral-like incentive to stay online.
-- **RU payouts (rental revenue)**: A share of actual rental revenue your nodes generate, layered on top of CU payouts. RUs also vest linearly over the same window.
+1. **Availability earnings** — a fixed dollar amount per GPU per hour for keeping your node online and passing validation, regardless of whether it is rented.
+2. **Rental revenue share** — when your node is actively rented, you earn a percentage of the rental revenue on top of your availability earnings.
 
-Your total weight on chain is proportional to `CU payout + RU payout` relative to other miners. Each GPU category has an independent incentive pool — oversupply in one category only dilutes payouts within that category.
+All rates are **per GPU per hour**. A node with 8 GPUs earns 8× the listed rate.
+
+> For current rates, revenue share percentage, and other live parameters, see [Current Incentive Configuration](#current-incentive-configuration).
+
+#### Vesting
+
+Each unit of earnings vests linearly over a configurable window (e.g. 3 days by default, but can be overridden per GPU type). At each weight-setting epoch, validators calculate the total dollar value that has vested across all your earned rows, and set your on-chain weight proportionally.
+
+Already-earned rewards always vest fully over the configured window. Going offline only stops you from earning **new** availability rewards — your existing earnings continue vesting normally.
+
+#### Dilution
+
+Each GPU type has a **target supply** for the network. When more GPUs of a type come online than the target, the fixed hourly budget for that type is split across all online GPUs — each earns proportionally less.
+
+- **At or below target**: you earn the full rate (no bonus for undersupply).
+- **Above target**: the budget splits evenly, reducing per-GPU earnings.
+- **Categories are independent**: oversupply of H100s does not affect A100 payouts.
+
+*Example: if the target for a GPU type is 24 GPUs and 48 are online, the per-GPU rate is halved.*
+
+#### Slashing
+
+Slashing only happens when your node is **permanently lost during an active rental** — i.e., the validator gives up health-checking the node. When slashed, a portion of your unvested earnings are voided.
+
+The following do **not** trigger slashing:
+- Transient failures
+- Container health issues
+- User-initiated rental stops
+
+Recovery is automatic — new availability rewards accrue normally once the node comes back online.
+
+#### Example
+
+Using example values of $2.00/hr per GPU and 50% revenue share:
+
+**1 node, 8x GPUs, online 24/7, supply at target:**
+
+- **Availability**: 8 GPUs × $2.00/hr × 24h = **$384/day** in emission value
+- **Rental bonus** (if rented 12h at a $3.00/hr bid): revenue = 8 × $3.00 × 12 = $288, your 50% share = **$144/day extra**
+- Total: **$528/day**, vesting linearly over the configured window
+
+> These are illustrative values. Refer to [Current Incentive Configuration](#current-incentive-configuration) for actual rates.
+
+---
+
+### Current Incentive Configuration
+
+These values are configurable and may change. This section reflects the current production configuration.
+
+| Parameter | Value |
+|-----------|-------|
+| **Default vesting window** | 72 hours (3 days) |
+| **Revenue share** | 50% |
+
+**Per-GPU type configuration:**
+
+| GPU Type | Rate (per GPU per hour) | Vesting window |
+|----------|------------------------|----------------|
+| A100     | $1.50                  | default (72h)  |
+| H100     | $2.00                  | default (72h)  |
+
+---
 
 ### Miners & the Ban System
 
