@@ -90,7 +90,11 @@ docker compose -f compose.prod.yml up -d
 docker logs basilica-miner
 ```
 
-**Note**: GPU nodes require SSH access configuration. See [Miner Guide](miner.md) for detailed GPU node setup.
+**GPU node requirements** (must be set up before deploying the miner):
+- NVIDIA CUDA drivers version ≥12.8
+- Docker installed with NVIDIA Container Toolkit (nvidia runtime), so containers have GPU access
+- SSH server running and accessible from the miner server
+- See [Miner Guide](miner.md) for detailed GPU node setup instructions
 
 ## Option 2: Remote Deployment
 
