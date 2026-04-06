@@ -72,6 +72,7 @@ cp ../../config/miner.toml.example /opt/basilica/config/miner.toml
 # - wallet_name and hotkey_name
 # - external_ip (your public IP)
 # - node_management.nodes (GPU node SSH endpoints)
+# - bidding.strategy.static.static_prices (price per GPU-hour for each category)
 # - network ("finney" for mainnet, "test" for testnet)
 # - netuid (39 for mainnet, 387 for testnet)
 
@@ -233,7 +234,7 @@ Choose your role and dive deeper:
 - **[Miner Guide](miner.md)** - Comprehensive miner management and GPU node operations
 - **[Architecture Guide](architecture.md)** - Understand the system design
 - **[Monitoring Guide](monitoring.md)** - Advanced monitoring and alerting setup
-- **[Scoring and Weights](scoring-and-weights.md)** - Understand incentive mechanisms
+
 
 ## Support
 

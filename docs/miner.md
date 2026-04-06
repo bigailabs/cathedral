@@ -11,7 +11,7 @@ Comprehensive guide for running a Basilica miner node that provides GPU compute 
 **Minimum Requirements**:
 
 - Miner server: Linux with 8+ CPU cores, 16GB RAM, public IP
-- GPU node(s): NVIDIA GPU (A100/H100/B200), CUDA ≥12.8, Docker with nvidia runtime
+- GPU node(s): NVIDIA GPU (A100/H100/H200/B200), CUDA ≥12.8, Docker with nvidia runtime
 - Bittensor wallet registered on subnet 39 (mainnet) or 387 (testnet)
 
 **Quick Setup** (5 steps):
@@ -120,7 +120,7 @@ The Basilica miner manages a fleet of GPU nodes and provides validators with **d
   - SSH access to your GPU nodes
 
 - **GPU Nodes**: One or more servers with:
-  - NVIDIA GPU (A100, H100, or B200 supported)
+  - NVIDIA GPU (A100, H100, H200, or B200 supported)
   - NVIDIA CUDA drivers version ≥12.8
   - Linux OS with SSH server
   - Docker installed (for container workloads with nvidia runtime)
@@ -755,10 +755,10 @@ auto_recovery = true
 
 **Node configuration fields:**
 
-- `host`: IP address or hostname of GPU node (required)
+- `host`: IP address of GPU node — must be an IPv4 literal, not a hostname (required)
 - `port`: SSH port, typically 22 (required)
 - `username`: SSH username on the node (required)
-- `gpu_category`: GPU model category, e.g., "H100", "A100", "B200" (required)
+- `gpu_category`: GPU model category, e.g., "H100", "A100", "H200", "B200" (required)
 - `gpu_count`: Number of GPUs on this node (required)
 - `additional_opts` (optional): Extra SSH options like `"-o StrictHostKeyChecking=no"`
 
@@ -1591,9 +1591,14 @@ chmod +x /opt/basilica/scripts/monitor-gpus.sh
 - **Error rates**: Failed authentications, SSH failures
 - **Database performance**: Query times, connection pool usage
 
-### Delivery-Based Emissions
+### How Miners Earn Emissions
 
-Miners earn emissions based on **rental revenue**, not uptime or validation scores. When your GPU nodes are actively rented and generating revenue, the billing system records delivery records that the validator uses to set weights. Your share of emissions within each GPU category is proportional to the `revenue_usd` your nodes generate relative to other miners in the same category. For the full weight calculation details, see [Scoring and Weight Setting](scoring-and-weights.md).
+Miners earn emissions from **two independent payout streams**:
+
+- **CU payouts (availability)**: Earned for keeping GPU nodes online and passing validation. 1 CU = 1 GPU-hour of validated availability — you earn CUs regardless of whether your nodes are rented. CUs vest linearly over a configurable window (default 72 hours), creating a collateral-like incentive to stay online.
+- **RU payouts (rental revenue)**: A share of actual rental revenue your nodes generate, layered on top of CU payouts. RUs also vest linearly over the same window.
+
+Your total weight on chain is proportional to `CU payout + RU payout` relative to other miners. Each GPU category has an independent incentive pool — oversupply in one category only dilutes payouts within that category.
 
 ### Miners & the Ban System
 
@@ -1991,16 +1996,16 @@ For geo-distributed GPU nodes:
 ```toml
 [node_management]
 nodes = [
-    # US East
-    { host = "us-east-1.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
-    { host = "us-east-2.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    # US East (note: host must be an IPv4 literal, not a hostname)
+    { host = "203.0.113.10", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "203.0.113.11", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
 
     # EU West
-    { host = "eu-west-1.example.com", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
-    { host = "eu-west-2.example.com", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
+    { host = "198.51.100.20", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 8 },
+    { host = "198.51.100.21", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 8 },
 
     # Asia Pacific
-    { host = "ap-south-1.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "192.0.2.30", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
 ]
 
 # Prices apply uniformly across all regions

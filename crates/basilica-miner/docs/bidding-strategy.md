@@ -66,7 +66,7 @@ Miner sets fixed prices per GPU category in config file.
 # Fixed prices per GPU-hour by category
 H100 = 2.50
 A100 = 1.20
-RTX4090 = 0.80
+H200 = 3.50
 ```
 
 **Pros:**
@@ -187,7 +187,7 @@ New miners face a cold-start problem: no track record → validators may prefer 
 [bidding.strategy.static.static_prices]
 H100 = 2.50
 A100 = 1.20
-RTX4090 = 0.80
+H200 = 3.50
 ```
 
 ### Node Configuration with GPU Info
