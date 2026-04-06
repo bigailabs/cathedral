@@ -19,6 +19,8 @@ message GpuCategoryConfig {
   uint32 target_count = 1;
   // Price per individual GPU per hour in cents.
   uint32 price_per_gpu_cents = 2;
+  // Per-category vesting window override. Falls back to global window_hours if absent.
+  optional uint32 window_hours = 3;
 }
 
 message GetConfigResponse {

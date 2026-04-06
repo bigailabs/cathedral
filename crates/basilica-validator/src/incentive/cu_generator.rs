@@ -343,7 +343,7 @@ pub fn generate_hourly_cu_windows(
                     .expect("window end should always be a valid timestamp"),
                 is_rented: aggregate.is_rented,
                 gpu_category: metadata.gpu_category.clone(),
-                window_hours: config.window_hours,
+                window_hours: category_config.window_hours.unwrap_or(config.window_hours),
                 price_per_gpu_cents: category_config.price_per_gpu_cents,
                 idempotency_key: format!("{}:{}", aggregate.node_id_for_key, next_ms / 1000),
             });
@@ -513,6 +513,7 @@ mod tests {
             IncentiveGpuCategoryConfig {
                 target_count: 2,
                 price_per_gpu_cents: 300,
+                window_hours: None,
             },
         );
 
