@@ -2,133 +2,7 @@
 
 Comprehensive guide for running a Basilica miner node that provides GPU compute resources to the Bittensor network.
 
----
-
-## Quick Start (TL;DR)
-
-**What it does**: Miner orchestrates validator access to your GPU nodes via SSH. No executor binaries needed.
-
-**Minimum Requirements**:
-
-- Miner server: Linux with 8+ CPU cores, 16GB RAM, public IP
-- GPU node(s): NVIDIA GPU (A100/H100/B200), CUDA ≥12.8, Docker with nvidia runtime
-- Bittensor wallet registered on subnet 39 (mainnet) or 387 (testnet)
-
-**Quick Setup** (5 steps):
-
-```bash
-# 1. Generate SSH key for node access
-ssh-keygen -t ed25519 -f ~/.ssh/miner_node_key -N ""
-
-# 2. Deploy key to GPU nodes
-ssh-copy-id -i ~/.ssh/miner_node_key.pub basilica@<gpu_node_ip>
-
-# 3. Copy and edit config from template
-cp config/miner.toml.example miner.toml
-# Edit miner.toml with your settings:
-# - [bittensor] wallet_name, hotkey_name, external_ip
-# - [node_management] nodes list with your GPU nodes
-# - [bidding.strategy.static.static_prices] prices per GPU category
-# - [ssh_session] miner_node_key_path
-
-# Minimal example configuration:
-cat > miner.toml <<EOF
-[bittensor]
-wallet_name = "your_wallet"
-hotkey_name = "your_hotkey"
-external_ip = "your_public_ip"
-axon_port = 50051
-network = "finney"
-netuid = 39
-chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
-
-[database]
-url = "sqlite:///opt/basilica/data/miner.db"
-
-[node_management]
-nodes = [
-  { host = "<node_ip>", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
-]
-
-[ssh_session]
-miner_node_key_path = "~/.ssh/miner_node_key"
-default_node_username = "basilica"
-
-[validator_assignment]
-strategy = "highest_stake"
-
-[bidding.strategy.static.static_prices]
-H100 = 2.50
-EOF
-
-# 4. Build and run (with docker compose)
-cp ./scripts/miner/compose.prod.yml compose.yml
-docker compose up -d
-
-# Check status
-docker compose ps
-# View logs
-docker compose logs -f miner
-
-# 4. Build and run (with self compiled binary)
-./scripts/miner/build.sh
-./basilica-miner --config miner.toml
-
-# 5. Verify validators can discover nodes
-# Check logs for "Node registered" and "Validator authenticated" messages
-```
-
-**Need details?** See sections below for architecture explanation, security hardening, troubleshooting, and advanced configuration.
-
----
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Prerequisites](#prerequisites)
-4. [Understanding the System](#understanding-the-system)
-    - [Node Identity](#node-identity)
-    - [Authentication Flow](#authentication-flow)
-    - [SSH Key Deployment Mechanism](#ssh-key-deployment-mechanism)
-    - [Validator Assignment Strategies](#validator-assignment-strategies)
-    - [Discovery Process](#discovery-process)
-    - [Bidding & Registration Protocol](#bidding--registration-protocol)
-5. [SSH Key Setup](#ssh-key-setup)
-6. [GPU Node Preparation](#gpu-node-preparation)
-7. [Miner Configuration](#miner-configuration)
-8. [Deployment Methods](#deployment-methods)
-9. [Validator Access Flow](#validator-access-flow)
-10. [Security & Best Practices](#security--best-practices)
-11. [Monitoring](#monitoring)
-12. [Troubleshooting](#troubleshooting)
-13. [Advanced Topics](#advanced-topics)
-    - [Delivery-Based Emissions](#delivery-based-emissions)
-    - [Miners & the Ban System](#miners--the-ban-system)
-
----
-
-## Overview
-
-The Basilica miner manages a fleet of GPU nodes and provides validators with **direct SSH access** to these nodes for verification and rental operations. Unlike traditional architectures that require intermediary agents, Basilica miners act as **access control orchestrators**, deploying validator SSH keys to nodes on-demand.
-
-### What You Need
-
-- **Miner Server**: Linux system with network connectivity (no GPU required)
-  - 8+ CPU cores, 16GB+ RAM recommended
-  - Public IP address or port forwarding
-  - SSH access to your GPU nodes
-
-- **GPU Nodes**: One or more servers with:
-  - NVIDIA GPU (A100, H100, or B200 supported)
-  - NVIDIA CUDA drivers version ≥12.8
-  - Linux OS with SSH server
-  - Docker installed (for container workloads with nvidia runtime)
-  - All ports need to be open, the NAT or firewall should allow inbound SSH connections from the miner and validator server
-  - the validator shall be in control of which ports need to have open internet access
-  - at least 1TB of free disk space recommended (for container images and data)
-
-- **Bittensor Wallet**: Registered on subnet 39 (mainnet) or 387 (testnet)
+> **Getting started?** See [docs.basilica.ai/miners](https://docs.basilica.ai/miners) for quick start, requirements, configuration, and setup instructions.
 
 ---
 
@@ -165,84 +39,6 @@ The Basilica miner manages a fleet of GPU nodes and provides validators with **d
          │                     │                     │
          └─────────────────────┴─────────────────────┘
                   6. Validator connects directly via SSH
-```
-
----
-
-## Prerequisites
-
-### On Miner Server
-
-```bash
-# Update system
-sudo apt update && sudo apt upgrade -y
-
-# Install build dependencies
-sudo apt install -y \
-    build-essential \
-    libssl-dev \
-    pkg-config \
-    protobuf-compiler \
-    git \
-    curl
-
-# Install Rust (if building from source)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-
-# Install Docker (optional, for Docker deployment)
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-```
-
-### On GPU Nodes
-
-```bash
-# Install NVIDIA drivers and CUDA (if not already installed)
-# Follow NVIDIA's official installation guide for your GPU model
-
-# Install Docker
-curl -fsSL https://get.docker.com | sudo sh
-
-# Install NVIDIA Container Toolkit
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
-    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt update
-sudo apt install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-
-# Verify GPU access
-nvidia-smi
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
-```
-
-### Bittensor Wallet Setup
-
-```bash
-# Install btcli if not already installed
-pip install bittensor
-
-# Create wallet (if you don't have one)
-btcli wallet new_coldkey --wallet.name miner_wallet
-btcli wallet new_hotkey --wallet.name miner_wallet --wallet.hotkey default
-
-# Register on subnet (requires TAO for registration fee)
-# Mainnet (subnet 39)
-btcli subnet register --netuid 39 --wallet.name miner_wallet --wallet.hotkey default
-
-# Testnet (subnet 387)
-btcli subnet register --netuid 387 --wallet.name miner_wallet --wallet.hotkey default --subtensor.network test
-```
-
-**Verify wallet location:**
-
-```bash
-ls ~/.bittensor/wallets/miner_wallet/hotkeys/default
-# Should show the hotkey file
 ```
 
 ---
@@ -490,382 +286,6 @@ message HealthCheckResponse {
 
 ---
 
-## SSH Key Setup
-
-Proper SSH key management is **critical** for security and functionality.
-
-### Generate Miner's SSH Key
-
-The miner needs an SSH key to access your GPU nodes for key deployment.
-
-```bash
-# Generate Ed25519 key (recommended for security and performance)
-ssh-keygen -t ed25519 -f ~/.ssh/miner_node_key -C "basilica-miner" -N ""
-
-# Set proper permissions (critical for security)
-chmod 600 ~/.ssh/miner_node_key
-chmod 644 ~/.ssh/miner_node_key.pub
-
-# Verify key was created
-ls -la ~/.ssh/miner_node_key*
-```
-
-**Alternative: RSA key** (if Ed25519 not supported):
-
-```bash
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/miner_node_key -C "basilica-miner" -N ""
-```
-
-### Deploy Miner's Public Key to GPU Nodes
-
-The miner needs SSH access to deploy validator keys.
-
-**For each GPU node:**
-
-```bash
-# Copy public key to node
-ssh-copy-id -i ~/.ssh/miner_node_key.pub basilica@192.168.1.100
-
-# Or manually:
-cat ~/.ssh/miner_node_key.pub | ssh basilica@192.168.1.100 \
-  "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
-```
-
-**Verify access:**
-
-```bash
-ssh -i ~/.ssh/miner_node_key basilica@192.168.1.100 "hostname && nvidia-smi --query-gpu=name --format=csv,noheader"
-```
-
-Expected output:
-
-```text
-gpu-node-1
-NVIDIA H100 PCIe
-```
-
-### SSH Configuration Best Practices
-
-**On Miner Server** (`~/.ssh/config`):
-
-```text
-# Miner's SSH configuration for GPU nodes
-Host gpu-node-*
-    User basilica
-    IdentityFile ~/.ssh/miner_node_key
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-    ConnectTimeout 30
-```
-
-**On GPU Nodes** (`/etc/ssh/sshd_config`):
-
-```text
-# Security hardening
-PermitRootLogin no
-PasswordAuthentication no
-PubkeyAuthentication yes
-ChallengeResponseAuthentication no
-UsePAM yes
-
-# Performance
-MaxStartups 30:30:100
-MaxSessions 100
-
-# Keep connections alive
-ClientAliveInterval 60
-ClientAliveCountMax 3
-```
-
-After editing `sshd_config`:
-
-```bash
-sudo systemctl restart sshd
-```
-
----
-
-## GPU Node Preparation
-
-### Create Dedicated User Account
-
-**On each GPU node:**
-
-```bash
-# Create user for validator access
-sudo useradd -m -s /bin/bash basilica
-
-# Add to docker group (for container workloads)
-sudo usermod -aG docker basilica
-
-# Optional: Add to sudo group (if validators need elevated privileges)
-# sudo usermod -aG sudo basilica
-
-# Set up SSH directory
-sudo -u basilica mkdir -p /home/basilica/.ssh
-sudo chmod 700 /home/basilica/.ssh
-sudo -u basilica touch /home/basilica/.ssh/authorized_keys
-sudo chmod 600 /home/basilica/.ssh/authorized_keys
-```
-
-### Verify GPU Access
-
-```bash
-# Test as basilica user
-sudo -u basilica nvidia-smi
-
-# Test Docker GPU access
-sudo -u basilica docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
-```
-
-### Network Configuration
-
-**Ensure SSH port is accessible:**
-
-```bash
-# Check SSH is running
-sudo systemctl status sshd
-
-# Allow SSH through firewall (if using UFW)
-sudo ufw allow 22/tcp
-sudo ufw enable
-
-# For custom SSH port:
-sudo ufw allow 2222/tcp
-```
-
-**Verify connectivity from miner server:**
-
-```bash
-# From miner server
-ssh -i ~/.ssh/miner_node_key basilica@<node-ip> "echo 'Connection successful'"
-```
-
-### GPU Node Checklist
-
-Before adding nodes to miner config, verify:
-
-- [ ] NVIDIA drivers installed (`nvidia-smi` works)
-- [ ] Docker installed and configured with NVIDIA runtime
-- [ ] Dedicated user account created (`basilica` or similar)
-- [ ] User added to `docker` group
-- [ ] SSH server running and accessible
-- [ ] Miner's SSH public key deployed to node
-- [ ] Firewall allows SSH connections from miner
-- [ ] GPU accessible to Docker containers
-- [ ] Sufficient disk space for containers/data
-
----
-
-## Miner Configuration
-
-### Using the Configuration Template
-
-Use the configuration template provided in the config directory:
-
-```bash
-# Copy the example config
-cp config/miner.toml.example miner.toml
-
-# Edit with your settings
-vim miner.toml
-```
-
-### Essential Configuration Sections
-
-#### 1. Bittensor Network Configuration
-
-```toml
-[bittensor]
-# Wallet configuration (path: ~/.bittensor/wallets/{wallet_name}/hotkeys/{hotkey_name})
-wallet_name = "miner_wallet"        # Your coldkey/wallet name
-hotkey_name = "default"              # Your hotkey name
-
-# Network settings
-network = "finney"                   # Options: finney (mainnet), test, local
-netuid = 39                          # Basilica subnet ID (39=mainnet, 387=testnet)
-weight_interval_secs = 300           # Weight setting interval (5 minutes)
-
-# Axon configuration (for Bittensor network registration)
-external_ip = "<your public ip>"     # YOUR SERVER'S PUBLIC IP
-axon_port = 50051
-
-# Advanced settings (usually don't need to change)
-max_weight_uids = 256
-```
-
-```bash
-# Find your public IP
-curl -4 ifconfig.me
-```
-
-#### 2. Database Configuration
-
-```toml
-[database]
-url = "sqlite:///opt/basilica/data/miner.db"
-run_migrations = true
-```
-
-**Ensure database directory exists:**
-
-```bash
-sudo mkdir -p /opt/basilica/data
-sudo chown $USER:$USER /opt/basilica/data
-```
-
-#### 3. Validator Discovery (Automatic)
-
-The miner automatically discovers the validator to register with:
-
-1. At startup, the miner queries the Bittensor metagraph for validators
-2. Based on the `[validator_assignment]` strategy (e.g., `highest_stake`), it selects a validator
-3. It calls the validator's `/discovery` HTTP endpoint (via the axon address) to learn the gRPC port for bid registration
-4. The BidManager then registers nodes and runs health checks against the discovered gRPC endpoint
-
-No manual `validator_registration_endpoint` configuration is needed.
-
-**⚠️ Firewall**: Ensure the axon port (default 50051) is accessible for Bittensor network registration:
-
-```bash
-# UFW
-sudo ufw allow 50051/tcp
-
-# Or iptables
-sudo iptables -A INPUT -p tcp --dport 50051 -j ACCEPT
-```
-
-#### 4. GPU Node Management
-
-```toml
-[node_management]
-# List your GPU compute nodes with SSH access details
-# Pricing is configured separately in [bidding.strategy.static.static_prices]
-nodes = [
-  { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
-  { host = "192.168.1.101", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
-]
-health_check_interval = 60   # Health check interval in seconds
-health_check_timeout = 10    # Health check timeout in seconds
-max_retry_attempts = 3
-auto_recovery = true
-```
-
-**Node configuration fields:**
-
-- `host`: IP address or hostname of GPU node (required)
-- `port`: SSH port, typically 22 (required)
-- `username`: SSH username on the node (required)
-- `gpu_category`: GPU model category, e.g., "H100", "A100", "B200" (required)
-- `gpu_count`: Number of GPUs on this node (required)
-- `additional_opts` (optional): Extra SSH options like `"-o StrictHostKeyChecking=no"`
-
-#### 4b. Bidding Configuration (GPU Pricing)
-
-Pricing is configured separately from nodes in the `[bidding]` section. Every GPU category
-listed in your nodes **must** have a corresponding price entry. Prices are defined in **dollars per GPU-hour** and are converted to **cents** internally before being sent to the validator.
-
-```toml
-[bidding]
-# Static prices by GPU category (in dollars per GPU-hour)
-[bidding.strategy.static.static_prices]
-H100 = 2.50    # $2.50/hour per H100 GPU → sent as 250 cents
-A100 = 1.20    # $1.20/hour per A100 GPU → sent as 120 cents
-```
-
-The BidManager runs automatically after validator discovery and registers your nodes with these prices.
-
-**Startup validation**: The miner will refuse to start if any GPU category in your `[node_management]` nodes is missing a price entry. For example, if you have a node with `gpu_category = "B200"` but no `B200 = ...` in `static_prices`, the miner will exit with an error.
-
-**Bid floor enforcement**: Validators enforce a minimum bid price (default 10% of the baseline market price for each GPU category). If your bid is below this floor, the `RegisterBid` RPC will be rejected with an error explaining the minimum acceptable price.
-
-#### 5. SSH Access Configuration
-
-```toml
-[ssh_session]
-# Path to your SSH private key for accessing nodes
-miner_node_key_path = "~/.ssh/miner_node_key"
-
-# Default username for SSH access to nodes (used as fallback)
-default_node_username = "node"
-```
-
-**Verify key path is correct:**
-
-```bash
-ls -la ~/.ssh/miner_node_key
-# Should show: -rw------- (permissions 600)
-```
-
-#### 6. Metrics Configuration
-
-```toml
-[metrics]
-enabled = true
-
-[metrics.prometheus]
-host = "127.0.0.1"    # Bind to localhost for security
-port = 9090
-```
-
-**Access metrics:**
-
-```bash
-curl http://localhost:9090/metrics
-```
-
-#### 7. Validator Assignment Strategy
-
-```toml
-[validator_assignment]
-strategy = "highest_stake"           # Options: highest_stake, fixed_assignment
-
-# Optional: Assign to specific validator (required for fixed_assignment)
-# validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
-```
-
-**Choosing a strategy:**
-
-- **Production**: Use `highest_stake` to assign all nodes to the top validator
-- **Fixed**: Use `fixed_assignment` with a specific `validator_hotkey` for known validators
-- **Development**: Use default `highest_stake` without specific hotkey
-
-#### 8. Advertised Addresses (Optional)
-
-Override auto-detected addresses for NAT/proxy scenarios:
-
-```toml
-[advertised_addresses]
-# Only needed if miner is behind NAT/proxy
-# grpc_endpoint = "http://203.0.113.45:50051"
-# axon_endpoint = "http://203.0.113.45:50051"
-# metrics_endpoint = "http://203.0.113.45:9090"
-```
-
-### Configuration Validation
-
-Before starting the miner, validate your configuration:
-
-```bash
-# Validate configuration
-cargo run -p basilica-miner -- --config miner.toml config validate
-
-# Expected output:
-# Configuration validation passed
-```
-
-**If validation fails**, check:
-
-- Wallet names match your actual wallet
-- External IP is correct
-- Database directory exists
-- SSH key paths are valid
-- Node SSH credentials are accessible
-
----
-
 ## Deployment Methods
 
 Choose the deployment method that best fits your infrastructure.
@@ -915,7 +335,7 @@ cd /opt/basilica
 sudo ./basilica-miner --config config/miner.toml
 ```
 
-**⚠️ Note:** Miner requires root/sudo for:
+**Note:** Miner requires root/sudo for:
 
 - SSH key deployment to nodes
 - Database access (if in protected directory)
@@ -1591,50 +1011,51 @@ chmod +x /opt/basilica/scripts/monitor-gpus.sh
 - **Error rates**: Failed authentications, SSH failures
 - **Database performance**: Query times, connection pool usage
 
-### Delivery-Based Emissions
-
-Miners earn emissions based on **rental revenue**, not uptime or validation scores. When your GPU nodes are actively rented and generating revenue, the billing system records delivery records that the validator uses to set weights. Your share of emissions within each GPU category is proportional to the `revenue_usd` your nodes generate relative to other miners in the same category. For the full weight calculation details, see [Scoring and Weight Setting](scoring-and-weights.md).
+---
 
 ### Miners & the Ban System
 
-Validators actively track executor misbehaviour to protect rentals. Each miner/executor pair has an independent ban state backed by persistent storage.
+Validators actively track node misbehaviour to protect rentals. Each miner/node pair has an independent ban state backed by persistent storage.
 
-#### Failure thresholds & ban durations (per executor instance)
+#### Current trigger & ban durations (per node)
 
-| Repeated issue | Window | Threshold | Ban duration (baseline) |
-| --- | --- | --- | --- |
-| Light or full validation failures | 1 hour | 2 failures | 30 minutes |
-| Any misbehaviour | 6 hours | 3 failures | 12 hours |
-| Any misbehaviour | 12 hours | 3 failures | 24 hours |
-| Any misbehaviour | 48 hours | 3 failures | 3 days |
-| Any misbehaviour | 7 days | 3 failures | 7 days |
+| Condition | Value |
+| --- | --- |
+| Ban trigger | `3+` misbehaviour events within any rolling 24-hour window |
+| Offence count = 1 in last 7 days | 1 hour |
+| Offence count = 2 in last 7 days | 2 hours |
+| Offence count = 3 in last 7 days | 4 hours |
+| Offence count = 4 in last 7 days | 8 hours |
+| Offence count = 5+ in last 7 days | 24 hours (max) |
+
+Because a ban only activates after the third qualifying event in 24 hours, the first active ban is typically 4 hours long.
 
 #### What counts as a misbehaviour event?
 
-- Validation failures (lightweight or full)
-- Deployment or startup failures during rentals
-- Executor health checks reporting unhealthy state
-- Connection errors caused by the miner misrouting a validator
+- Deployment failures during rental startup
+- Interrupted rentals detected by rental health monitoring
+- Halted rentals detected by rental health monitoring
+- GPU declaration mismatches detected during full validation
 
 #### How validators enforce bans
 
-- Banned executors are excluded from discovery/rental routing
-- Active bans surface in validator logs and Prometheus metrics
-- Validation requests return a specific `executor_banned` error to the miner
+- Banned nodes fail the misbehaviour check during validation and are excluded from rental routing
+- Rental creation rejects a node when it still has an active ban
+- Active bans surface in validator logs and the Prometheus metric `validator_node_ban_till`
 - When a ban expires, validators automatically clear it; miners can attempt deployments again
 
 ---
 
 #### Recovering from a ban
 
-1. **Fix the root cause** (ensure executor is reachable, healthy, and has compatible drivers/container images)
-2. **Confirm the ban timer** via validator metrics (`validator_executor_ban_active_status`)
+1. **Fix the root cause** (ensure the node is reachable, healthy, and has compatible drivers/container images)
+2. **Confirm the ban timer** via validator metrics (`validator_node_ban_till`)
 3. **Wait for the ban duration to elapse** (no manual action needed for standard bans)
 4. **After expiry**, monitor deployment logs to verify validators reconnect successfully
 
 #### Best practices to avoid bans
 
-- Keep executors patched (CUDA, drivers, containers) and aligned with validator expectations
+- Keep nodes patched (CUDA, drivers, containers) and aligned with validator expectations
 - Automate health checks and restart loops so degraded nodes self-heal quickly
 - Validate images locally before exposing them to validators
 - Enforce network/firewall rules to avoid intermittent reachability
@@ -1991,16 +1412,16 @@ For geo-distributed GPU nodes:
 ```toml
 [node_management]
 nodes = [
-    # US East
-    { host = "us-east-1.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
-    { host = "us-east-2.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    # US East (note: host must be an IPv4 literal, not a hostname)
+    { host = "203.0.113.10", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "203.0.113.11", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
 
     # EU West
-    { host = "eu-west-1.example.com", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
-    { host = "eu-west-2.example.com", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
+    { host = "198.51.100.20", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 8 },
+    { host = "198.51.100.21", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 8 },
 
     # Asia Pacific
-    { host = "ap-south-1.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "192.0.2.30", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
 ]
 
 # Prices apply uniformly across all regions
@@ -2087,7 +1508,7 @@ ulimit -n 65536
 
 ### Next Steps
 
-1. **Deploy your first miner** following this guide
+1. **Deploy your first miner** following the [setup guide](https://docs.basilica.ai/miners/setup)
 2. **Test validator connectivity** and monitor initial interactions
 3. **Set up monitoring** with Prometheus/Grafana
 4. **Join the community** for support and updates
@@ -2095,13 +1516,10 @@ ulimit -n 65536
 
 ### Additional Resources
 
+- **Miner Setup Guide**: <https://docs.basilica.ai/miners>
 - **GitHub Repository**: <https://github.com/one-covenant/basilica>
 - **Discord**: <https://discord.gg/Cy7c9vPsNK>
 - **Website**: <https://www.basilica.ai/>
 - **Validator Guide**: [docs/validator.md](validator.md)
 - **Architecture Overview**: [docs/architecture.md](architecture.md)
 - **API Documentation**: [docs/api.md](api.md)
-
----
-
-**Happy Mining!**

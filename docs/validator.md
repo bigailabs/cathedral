@@ -3854,8 +3854,6 @@ A100 = { weight = 25.0, min_gpu_count = 2, min_gpu_vram = 40 }
 B200 = { weight = 25.0, min_gpu_count = 1, min_gpu_vram = 192 }
 H200 = { weight = 10.0, min_gpu_count = 1, min_gpu_vram = 141 }
 
-# Add new category (e.g., L40S)
-L40S = { weight = 5.0, min_gpu_count = 2, min_gpu_vram = 48 }
 ```
 
 **GPU Name Matching** (code: `scoring/gpu_categorization.rs`):
@@ -3873,8 +3871,6 @@ fn categorize_gpu(model: &str) -> Option<String> {
         Some("B200".to_string())
     } else if model.contains("H200") {
         Some("H200".to_string())
-    } else if model.contains("L40S") {
-        Some("L40S".to_string())
     } else {
         None  // Unknown GPU, not eligible for weights
     }

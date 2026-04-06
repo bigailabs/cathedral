@@ -28,7 +28,7 @@ Bittensor neuron for verification and scoring. Key configuration sections:
 - `[verification]` - Verification suite configuration with binary validation
 - `[ssh_validation]` - SSH-based validation settings
 - `[ssh_session]` - SSH session management and audit logging
-- `[emission]` - GPU category emission allocation settings
+- `[emission]` - Burn settings and weight-set interval (per-category incentive config managed by basilica-incentive service)
 
 **Requirements**: CUDA Toolkit 12.8 for GPU verification kernels
 
@@ -38,7 +38,7 @@ Bittensor neuron that orchestrates GPU node access. Key configuration sections:
 
 - `[bittensor]` - Wallet and network settings (auto-detects UID and chain endpoint)
 - `[node_management]` - GPU node SSH endpoint configuration (gpu_category, gpu_count)
-- `[bidding]` - GPU pricing per category (static prices in dollars per GPU-hour)
+- `[bidding]` - GPU pricing per category (static prices in dollars per GPU-hour). **Note**: Every GPU category in `[node_management]` nodes must have a matching price in `[bidding]` or the miner will refuse to start.
 - `[ssh_session]` - SSH session orchestration for validator access
 - `[advertised_addresses]` - Service endpoint advertising
 - `[validator_assignment]` - Validator assignment strategy (automatic validator discovery)

@@ -46,8 +46,8 @@ cp ../../config/validator.toml.example /opt/basilica/config/validator.toml
 # Edit /opt/basilica/config/validator.toml with your settings:
 # - wallet_name and hotkey_name
 # - external_ip (your public IP)
-# - network ("finney" for mainnet, "test" for testnet)
-# - netuid (39 for mainnet, 387 for testnet)
+# - network ("finney" for mainnet)
+# - netuid (39 for mainnet)
 
 # 3. Ensure wallet exists and create directories
 ls ~/.bittensor/wallets/your_wallet/hotkeys/
@@ -72,8 +72,9 @@ cp ../../config/miner.toml.example /opt/basilica/config/miner.toml
 # - wallet_name and hotkey_name
 # - external_ip (your public IP)
 # - node_management.nodes (GPU node SSH endpoints)
-# - network ("finney" for mainnet, "test" for testnet)
-# - netuid (39 for mainnet, 387 for testnet)
+# - bidding.strategy.static.static_prices (price per GPU-hour for each category)
+# - network ("finney" for mainnet)
+# - netuid (39 for mainnet)
 
 # 3. Create directories and set up SSH key for GPU node access
 mkdir -p /opt/basilica/config /opt/basilica/data /var/log/basilica
@@ -89,7 +90,11 @@ docker compose -f compose.prod.yml up -d
 docker logs basilica-miner
 ```
 
-**Note**: GPU nodes require SSH access configuration. See [Miner Guide](miner.md) for detailed GPU node setup.
+**GPU node requirements** (must be set up before deploying the miner):
+- NVIDIA CUDA drivers version ≥12.8
+- Docker installed with NVIDIA Container Toolkit (nvidia runtime), so containers have GPU access
+- SSH server running and accessible from the miner server
+- See [Miner Guide](miner.md) for detailed GPU node setup instructions
 
 ## Option 2: Remote Deployment
 
@@ -129,15 +134,6 @@ cp config/miner.toml.example config/miner.toml
 network = "finney"
 netuid = 39
 chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
-```
-
-### Testnet
-
-```toml
-[bittensor]
-network = "test"
-netuid = 387
-chain_endpoint = "wss://test.finney.opentensor.ai:443"
 ```
 
 ## Monitoring Your Deployment
@@ -203,7 +199,7 @@ grep wallet_name /opt/basilica/config/validator.toml
 
 ```bash
 # Test network connectivity
-ping test.finney.opentensor.ai
+ping entrypoint-finney.opentensor.ai
 
 # Check firewall rules
 sudo ufw status
@@ -233,7 +229,7 @@ Choose your role and dive deeper:
 - **[Miner Guide](miner.md)** - Comprehensive miner management and GPU node operations
 - **[Architecture Guide](architecture.md)** - Understand the system design
 - **[Monitoring Guide](monitoring.md)** - Advanced monitoring and alerting setup
-- **[Scoring and Weights](scoring-and-weights.md)** - Understand incentive mechanisms
+
 
 ## Support
 

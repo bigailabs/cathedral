@@ -17,8 +17,6 @@ This directory contains comprehensive documentation for the Basilica decentraliz
 ### Operations
 
 - **[Monitoring Guide](monitoring.md)** - Set up metrics and monitoring with Prometheus/Grafana
-- **[Scoring and Weights](scoring-and-weights.md)** - Understand how nodes are scored and weights are calculated
-
 ## Documentation Overview
 
 ### Architecture Guide
@@ -88,7 +86,7 @@ Observability and monitoring setup:
 
 GPU nodes are the compute resources managed by miners:
 
-- NVIDIA GPU with CUDA support (A100, H100, or B200 recommended)
+- NVIDIA GPU with CUDA support (A100, H100, H200, or B200 recommended)
 - CUDA Toolkit 12.8 (for GPU verification kernels)
 - Docker with GPU runtime support (nvidia-container-toolkit)
 - SSH server configured for validator access
