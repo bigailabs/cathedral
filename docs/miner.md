@@ -128,7 +128,7 @@ The Basilica miner manages a fleet of GPU nodes and provides validators with **d
   - Miner's SSH public key deployed to the node
   - Firewall/NAT must allow inbound SSH from both the miner server and the validator server
   - The validator controls which additional ports need open internet access
-  - At least 1TB of free disk space recommended (for container images and data)
+  - At least 1TB of free disk space recommended (for container images and data). **Important**: the disk space must be on the root mount — the validator does not currently support external mounts
 
 - **Bittensor Wallet**: Registered on subnet 39 (mainnet) or 387 (testnet)
 
