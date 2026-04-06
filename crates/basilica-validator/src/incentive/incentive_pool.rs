@@ -527,6 +527,7 @@ mod tests {
                 IncentiveGpuCategoryConfig {
                     target_count: *target_count,
                     price_per_gpu_cents: dollars_to_cents(price_per_gpu_usd),
+                    window_hours: None,
                 },
             );
         }
@@ -545,6 +546,7 @@ mod tests {
             IncentiveGpuCategoryConfig {
                 target_count: 1,
                 price_per_gpu_cents: dollars_to_cents("10"),
+                window_hours: None,
             },
         );
         gpu_categories.insert(
@@ -552,6 +554,7 @@ mod tests {
             IncentiveGpuCategoryConfig {
                 target_count: 2,
                 price_per_gpu_cents: dollars_to_cents("8"),
+                window_hours: None,
             },
         );
 

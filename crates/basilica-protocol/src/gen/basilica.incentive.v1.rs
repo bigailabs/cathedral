@@ -11,6 +11,9 @@ pub struct GpuCategoryConfig {
     /// Price per individual GPU per hour in cents.
     #[prost(uint32, tag = "2")]
     pub price_per_gpu_cents: u32,
+    /// Per-category vesting window override. Falls back to global window_hours if absent.
+    #[prost(uint32, optional, tag = "3")]
+    pub window_hours: ::core::option::Option<u32>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

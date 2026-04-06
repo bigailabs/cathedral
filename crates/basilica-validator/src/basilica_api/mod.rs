@@ -553,6 +553,10 @@ pub struct IncentiveGpuCategoryConfig {
     pub target_count: u32,
     /// Price per individual GPU per hour in cents.
     pub price_per_gpu_cents: u32,
+    /// Per-category vesting window override in hours. Falls back to global
+    /// `window_hours` when `None`.
+    #[serde(default)]
+    pub window_hours: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
