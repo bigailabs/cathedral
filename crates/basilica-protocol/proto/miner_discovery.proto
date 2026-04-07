@@ -34,6 +34,7 @@ message NodeRegistration {
   uint32 gpu_count = 6;             // Number of GPUs on this node
   uint32 hourly_rate_cents = 7;     // Price in cents per GPU per hour
   bytes attestation = 8;            // Optional hardware attestation
+  string ephemeral_mount_path = 9;  // Host path where ephemeral storage is mounted (empty = none)
 }
 
 // RegisterBid: One-time registration when miner comes online

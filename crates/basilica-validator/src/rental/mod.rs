@@ -3,7 +3,7 @@
 //! This module provides functionality for validators to rent GPU resources
 //! and deploy containers on node machines.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -47,6 +47,8 @@ pub struct RentalManager {
     ban_manager: Arc<BanManager>,
     /// Max age for full validation before allowing a rental
     pre_rental_full_validation_max_age: std::time::Duration,
+    /// Ephemeral mount configuration (None = disabled)
+    ephemeral_mount: Option<crate::config::EphemeralMountConfig>,
 }
 
 // /// Parse SSH host from credentials string format "user@host:port"
@@ -112,6 +114,7 @@ impl RentalManager {
         ssh_credentials: &str,
         container_id: &str,
         node_id: &str,
+        miner_id: &str,
         rental_id: &str,
     ) {
         tracing::warn!(
@@ -135,6 +138,18 @@ impl RentalManager {
                         "Failed to cleanup container: {}",
                         e
                     );
+                }
+
+                // Clean up ephemeral storage if configured
+                if self.ephemeral_mount.is_some() {
+                    if let Ok(Some(ephemeral_path)) = self
+                        .persistence
+                        .get_node_ephemeral_mount_path(node_id, miner_id)
+                        .await
+                    {
+                        self.cleanup_ephemeral_storage(&client, &ephemeral_path, rental_id)
+                            .await;
+                    }
                 }
             }
             Err(e) => {
@@ -179,6 +194,7 @@ impl RentalManager {
             ban_manager,
             // TODO: Wire this from config for callers using `new`.
             pre_rental_full_validation_max_age: std::time::Duration::from_secs(12 * 60 * 60),
+            ephemeral_mount: None,
         }
     }
 
@@ -236,6 +252,7 @@ impl RentalManager {
             metrics,
             ban_manager,
             pre_rental_full_validation_max_age: config.verification.node_validation_interval,
+            ephemeral_mount: config.ephemeral_mount.clone(),
         })
     }
 
@@ -341,7 +358,7 @@ impl RentalManager {
     }
 
     /// Start a new rental
-    pub async fn start_rental(&self, request: RentalRequest) -> Result<RentalResponse> {
+    pub async fn start_rental(&self, mut request: RentalRequest) -> Result<RentalResponse> {
         let rental_id = format!("rental-{}", Uuid::new_v4());
 
         // 1. Find winning bid (required - no fallback)
@@ -371,7 +388,57 @@ impl RentalManager {
         let ssh_credentials = self.build_ssh_credentials(&ssh_endpoint);
         let container_client = self.create_container_client(&ssh_credentials)?;
 
-        // 5. Deploy container
+        // 5. Setup ephemeral storage if configured and available
+        if self.ephemeral_mount.is_some() {
+            if let Ok(Some(ephemeral_path)) = self
+                .persistence
+                .get_node_ephemeral_mount_path(&selection.node_id, &selection.miner_id)
+                .await
+            {
+                if self
+                    .check_ephemeral_exists(&container_client, &ephemeral_path)
+                    .await
+                {
+                    // Sweep orphaned directories from previous failed cleanups
+                    self.sweep_orphaned_ephemeral_dirs(
+                        &container_client,
+                        &ephemeral_path,
+                        &selection.node_id,
+                    )
+                    .await;
+
+                    // Create per-rental subdirectory and add volume mount
+                    match self
+                        .setup_ephemeral_storage(&container_client, &ephemeral_path, &rental_id)
+                        .await
+                    {
+                        Ok((host_path, container_path)) => {
+                            request.container_spec.volumes.push(VolumeMount {
+                                host_path,
+                                container_path,
+                                read_only: false,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                rental_id = %rental_id,
+                                error = %e,
+                                "Failed to setup ephemeral storage, continuing without it"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::info!(
+                        rental_id = %rental_id,
+                        node_id = %selection.node_id,
+                        ephemeral_path = %ephemeral_path,
+                        "Ephemeral mount path not found on node, skipping"
+                    );
+                }
+            }
+        }
+
+        // 6. Deploy container
         let container_info = self
             .deploy_container_or_log_failure(
                 &container_client,
@@ -688,6 +755,150 @@ impl RentalManager {
             })
     }
 
+    /// Sanitize a rental ID for use in filesystem paths
+    fn sanitize_rental_id_for_path(rental_id: &str) -> String {
+        rental_id
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect()
+    }
+
+    /// Check if the ephemeral mount path exists on the node via SSH
+    async fn check_ephemeral_exists(
+        &self,
+        container_client: &ContainerClient,
+        mount_path: &str,
+    ) -> bool {
+        let cmd = format!("mountpoint -q '{}'", mount_path);
+        container_client.execute_ssh_command(&cmd).await.is_ok()
+    }
+
+    /// Create the per-rental ephemeral storage directory on the node.
+    /// Returns (host_path, container_path) for the Docker volume mount.
+    async fn setup_ephemeral_storage(
+        &self,
+        container_client: &ContainerClient,
+        ephemeral_host_base: &str,
+        rental_id: &str,
+    ) -> Result<(String, String)> {
+        let container_path = self
+            .ephemeral_mount
+            .as_ref()
+            .map(|c| c.container_path.clone())
+            .unwrap_or_else(|| "/ephemeral".to_string());
+
+        let sanitized_id = Self::sanitize_rental_id_for_path(rental_id);
+        let host_path = format!("{}/{}", ephemeral_host_base, sanitized_id);
+
+        tracing::info!(
+            rental_id = %rental_id,
+            host_path = %host_path,
+            container_path = %container_path,
+            "Creating ephemeral storage directory on node"
+        );
+
+        let mkdir_cmd = format!("mkdir -p '{}'", host_path);
+        container_client
+            .execute_ssh_command(&mkdir_cmd)
+            .await
+            .context("Failed to create ephemeral storage directory")?;
+
+        Ok((host_path, container_path))
+    }
+
+    /// Remove the per-rental ephemeral storage directory on the node via SSH.
+    /// Best-effort: logs warning on failure.
+    async fn cleanup_ephemeral_storage(
+        &self,
+        container_client: &ContainerClient,
+        ephemeral_host_base: &str,
+        rental_id: &str,
+    ) {
+        let sanitized_id = Self::sanitize_rental_id_for_path(rental_id);
+        let host_path = format!("{}/{}", ephemeral_host_base, sanitized_id);
+
+        tracing::info!(
+            rental_id = %rental_id,
+            host_path = %host_path,
+            "Cleaning up ephemeral storage directory on node"
+        );
+
+        let rm_cmd = format!("rm -rf '{}'", host_path);
+        if let Err(e) = container_client.execute_ssh_command(&rm_cmd).await {
+            tracing::warn!(
+                rental_id = %rental_id,
+                host_path = %host_path,
+                error = %e,
+                "Failed to clean up ephemeral storage directory"
+            );
+        }
+    }
+
+    /// Sweep orphaned ephemeral subdirectories on a node.
+    /// Removes directories that don't correspond to an active rental on this node.
+    async fn sweep_orphaned_ephemeral_dirs(
+        &self,
+        container_client: &ContainerClient,
+        ephemeral_host_base: &str,
+        node_id: &str,
+    ) {
+        let ls_cmd = format!("ls -1 '{}' 2>/dev/null || true", ephemeral_host_base);
+        let output = match container_client.execute_ssh_command(&ls_cmd).await {
+            Ok(output) => output,
+            Err(e) => {
+                tracing::debug!(
+                    node_id = %node_id,
+                    error = %e,
+                    "Failed to list ephemeral directories for orphan sweep"
+                );
+                return;
+            }
+        };
+
+        let active_rentals = match self.persistence.query_non_terminated_rentals().await {
+            Ok(rentals) => rentals,
+            Err(e) => {
+                tracing::warn!(
+                    node_id = %node_id,
+                    error = %e,
+                    "Failed to query active rentals for orphan sweep"
+                );
+                return;
+            }
+        };
+
+        let active_rental_ids: std::collections::HashSet<String> = active_rentals
+            .iter()
+            .filter(|r| r.node_id == node_id)
+            .map(|r| Self::sanitize_rental_id_for_path(&r.rental_id))
+            .collect();
+
+        for dir_name in output.lines() {
+            let dir_name = dir_name.trim();
+            if dir_name.is_empty() {
+                continue;
+            }
+
+            if !active_rental_ids.contains(dir_name) {
+                let orphan_path = format!("{}/{}", ephemeral_host_base, dir_name);
+                tracing::info!(
+                    node_id = %node_id,
+                    path = %orphan_path,
+                    "Sweeping orphaned ephemeral directory"
+                );
+                let rm_cmd = format!("rm -rf '{}'", orphan_path);
+                if let Err(e) = container_client.execute_ssh_command(&rm_cmd).await {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        path = %orphan_path,
+                        error = %e,
+                        "Failed to remove orphaned ephemeral directory"
+                    );
+                }
+            }
+        }
+    }
+
     async fn deploy_container_or_log_failure(
         &self,
         container_client: &ContainerClient,
@@ -793,6 +1004,7 @@ impl RentalManager {
                 ssh_credentials,
                 &container_id,
                 &selection.node_id,
+                &selection.miner_id,
                 rental_id,
             )
             .await;
@@ -896,6 +1108,18 @@ impl RentalManager {
         self.deployment_manager
             .stop_container(&container_client, &rental_info.container_id, force)
             .await?;
+
+        // Clean up ephemeral storage if configured
+        if self.ephemeral_mount.is_some() {
+            if let Ok(Some(ephemeral_path)) = self
+                .persistence
+                .get_node_ephemeral_mount_path(&rental_info.node_id, &rental_info.miner_id)
+                .await
+            {
+                self.cleanup_ephemeral_storage(&container_client, &ephemeral_path, rental_id)
+                    .await;
+            }
+        }
 
         // Update rental state
         let mut updated_rental = rental_info.clone();

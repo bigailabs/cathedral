@@ -1162,6 +1162,25 @@ impl SimplePersistence {
         Ok(row.map(|r| r.get("ssh_endpoint")))
     }
 
+    /// Get the ephemeral mount path for a node (declared by the miner during registration)
+    pub async fn get_node_ephemeral_mount_path(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let row: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT ephemeral_mount_path FROM miner_nodes \
+                 WHERE node_id = ? AND miner_id = ? \
+                 LIMIT 1",
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(row.flatten())
+    }
+
     /// Get detailed node information including GPU and CPU specs
     pub async fn get_node_details(
         &self,
@@ -1533,6 +1552,7 @@ impl SimplePersistence {
         gpu_category: &str,
         gpu_count: u32,
         hourly_rate_cents: u32,
+        ephemeral_mount_path: Option<&str>,
     ) -> Result<bool> {
         // Compute node_id deterministically from host (validator-side, not trusting miner)
         let node_id = basilica_common::node_identity::NodeId::new(host)?
@@ -1571,8 +1591,9 @@ impl SimplePersistence {
                 r#"
                 INSERT INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count,
-                    hourly_rate_cents, gpu_category, status, bid_active, last_node_check, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
+                    hourly_rate_cents, gpu_category, ephemeral_mount_path,
+                    status, bid_active, last_node_check, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
                 "#,
             )
             .bind(&relationship_id)
@@ -1583,6 +1604,7 @@ impl SimplePersistence {
             .bind(gpu_count as i64)
             .bind(hourly_rate_cents as i64)
             .bind(gpu_category)
+            .bind(ephemeral_mount_path)
             .execute(self.pool())
             .await?;
 
@@ -1606,6 +1628,7 @@ impl SimplePersistence {
                     gpu_count = ?,
                     hourly_rate_cents = ?,
                     gpu_category = ?,
+                    ephemeral_mount_path = ?,
                     bid_active = 1
                 WHERE miner_id = ? AND node_id = ?
                 "#,
@@ -1615,6 +1638,7 @@ impl SimplePersistence {
             .bind(gpu_count as i64)
             .bind(hourly_rate_cents as i64)
             .bind(gpu_category)
+            .bind(ephemeral_mount_path)
             .bind(miner_id)
             .bind(&node_id)
             .execute(self.pool())
@@ -2520,7 +2544,7 @@ mod tests {
         insert_test_miner(&persistence, miner_id).await;
 
         let created = persistence
-            .upsert_registered_node(miner_id, host, 22, "root", "A100", 4, 1200)
+            .upsert_registered_node(miner_id, host, 22, "root", "A100", 4, 1200, None)
             .await
             .expect("upsert should succeed");
         assert!(created);
@@ -2563,7 +2587,7 @@ mod tests {
         assert!(initial_last_miner_health_check.is_none());
 
         let updated = persistence
-            .upsert_registered_node(miner_id, host, 22, "root", "H100", 8, 2200)
+            .upsert_registered_node(miner_id, host, 22, "root", "H100", 8, 2200, None)
             .await
             .expect("upsert update should succeed");
         assert!(!updated);
@@ -2622,7 +2646,7 @@ mod tests {
         insert_test_miner(&persistence, miner_id).await;
 
         let created = persistence
-            .upsert_registered_node(miner_id, host, 22, "root", "A100", 4, 1200)
+            .upsert_registered_node(miner_id, host, 22, "root", "A100", 4, 1200, None)
             .await
             .expect("upsert should succeed");
         assert!(created);
@@ -2676,7 +2700,7 @@ mod tests {
         .await;
 
         let updated = persistence
-            .upsert_registered_node(miner_id, host, 2222, "root", "H100", 8, 2200)
+            .upsert_registered_node(miner_id, host, 2222, "root", "H100", 8, 2200, None)
             .await
             .expect("upsert update should succeed");
         assert!(!updated);

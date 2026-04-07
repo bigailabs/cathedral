@@ -95,6 +95,12 @@ pub struct ValidatorConfig {
     /// CU slash mode: "soft" (record to DB only) or "hard" (actual API call).
     #[serde(default)]
     pub slash_mode: SlashMode,
+
+    /// Ephemeral storage mount configuration (None = disabled).
+    /// When present, rental containers get a bind-mount from the miner's ephemeral disk.
+    /// The host path comes from the miner's node registration.
+    #[serde(default)]
+    pub ephemeral_mount: Option<EphemeralMountConfig>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -680,6 +686,20 @@ pub struct StorageConfig {
     pub data_dir: String,
 }
 
+/// Configuration for ephemeral storage mount on miner nodes.
+/// When present in the validator config, rental containers get a bind-mount
+/// from the miner's declared ephemeral storage path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralMountConfig {
+    /// Mount point inside the rental container (default: "/ephemeral").
+    #[serde(default = "default_ephemeral_container_path")]
+    pub container_path: String,
+}
+
+fn default_ephemeral_container_path() -> String {
+    "/ephemeral".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
     /// API key for external authentication
@@ -865,6 +885,7 @@ impl Default for ValidatorConfig {
             billing: BillingConfig::default(),
             cu_generator_enabled: false,
             slash_mode: SlashMode::default(),
+            ephemeral_mount: None,
         }
     }
 }

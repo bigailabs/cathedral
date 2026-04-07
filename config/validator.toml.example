@@ -116,5 +116,13 @@ weight_set_interval_blocks = 360
 # This prevents replay attacks by incrementing with each weight set
 weight_version_key = 0
 
+# Ephemeral storage mount (optional)
+# When present, the validator mounts miner-declared ephemeral storage into rental containers.
+# The host path comes from the miner's node registration (ephemeral_mount_path field).
+# Miners must mount their ephemeral NVMe/SSD at the declared path on the host.
+#
+# [ephemeral_mount]
+# container_path = "/ephemeral"    # Mount point inside the rental container
+
 [bid_grpc]
 listen_address = "0.0.0.0:50052"
