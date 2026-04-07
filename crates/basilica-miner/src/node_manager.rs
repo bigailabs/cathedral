@@ -43,8 +43,8 @@ pub struct NodeConfig {
     pub gpu_count: u32,
     /// Additional SSH options
     pub additional_opts: Option<String>,
-    /// Host path where ephemeral storage is mounted (e.g., "/ephemeral")
-    pub ephemeral_mount_path: Option<String>,
+    /// Host path where extra storage is mounted (e.g., "/ephemeral")
+    pub extra_mount_path: Option<String>,
 }
 
 /// Intermediate struct for deserializing NodeConfig
@@ -59,7 +59,7 @@ struct NodeConfigRaw {
     gpu_count: u32,
     additional_opts: Option<String>,
     #[serde(default)]
-    ephemeral_mount_path: Option<String>,
+    extra_mount_path: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for NodeConfig {
@@ -85,7 +85,7 @@ impl<'de> Deserialize<'de> for NodeConfig {
             gpu_category: gpu_cat.to_string(),
             gpu_count: raw.gpu_count,
             additional_opts: raw.additional_opts,
-            ephemeral_mount_path: raw.ephemeral_mount_path,
+            extra_mount_path: raw.extra_mount_path,
         })
     }
 }
@@ -473,7 +473,7 @@ mod tests {
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,
-            ephemeral_mount_path: None,
+            extra_mount_path: None,
         };
 
         manager.register_node(config.clone()).await.unwrap();

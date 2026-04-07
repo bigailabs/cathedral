@@ -14,7 +14,7 @@ async fn test_node_registration() {
         gpu_category: "H100".to_string(),
         gpu_count: 8,
         additional_opts: None,
-        ephemeral_mount_path: None,
+        extra_mount_path: None,
     };
 
     // Register node
@@ -42,7 +42,7 @@ async fn test_list_nodes() {
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,
-            ephemeral_mount_path: None,
+            extra_mount_path: None,
         })
         .await
         .unwrap();
@@ -55,7 +55,7 @@ async fn test_list_nodes() {
             gpu_category: "A100".to_string(),
             gpu_count: 4,
             additional_opts: None,
-            ephemeral_mount_path: None,
+            extra_mount_path: None,
         })
         .await
         .unwrap();
@@ -68,7 +68,7 @@ async fn test_list_nodes() {
             gpu_category: "RTX4090".to_string(),
             gpu_count: 2,
             additional_opts: None,
-            ephemeral_mount_path: None,
+            extra_mount_path: None,
         })
         .await
         .unwrap();
@@ -96,7 +96,7 @@ async fn test_unregister_node() {
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,
-            ephemeral_mount_path: None,
+            extra_mount_path: None,
         })
         .await
         .unwrap();
@@ -124,7 +124,7 @@ async fn test_register_node_rejects_duplicate_ip() {
         gpu_category: "H100".to_string(),
         gpu_count: 8,
         additional_opts: None,
-        ephemeral_mount_path: None,
+        extra_mount_path: None,
     };
 
     manager.register_node(original.clone()).await.unwrap();
@@ -136,7 +136,7 @@ async fn test_register_node_rejects_duplicate_ip() {
         gpu_category: "A100".to_string(),
         gpu_count: 4,
         additional_opts: Some("-o StrictHostKeyChecking=no".to_string()),
-        ephemeral_mount_path: None,
+        extra_mount_path: None,
     };
 
     let result = manager.register_node(duplicate).await;

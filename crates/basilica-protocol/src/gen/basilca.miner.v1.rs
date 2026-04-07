@@ -24,9 +24,9 @@ pub struct NodeRegistration {
     /// Optional hardware attestation
     #[prost(bytes = "vec", tag = "8")]
     pub attestation: ::prost::alloc::vec::Vec<u8>,
-    /// Host path where ephemeral storage is mounted (empty = none)
+    /// Host path where extra storage is mounted (empty = none)
     #[prost(string, tag = "9")]
-    pub ephemeral_mount_path: ::prost::alloc::string::String,
+    pub extra_mount_path: ::prost::alloc::string::String,
 }
 /// RegisterBid: One-time registration when miner comes online
 #[allow(clippy::derive_partial_eq_without_eq)]

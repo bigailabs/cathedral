@@ -1656,7 +1656,7 @@ mod node_profile_wiring_tests {
                 gpu_category,
                 gpu_count,
                 1200,
-                None,
+                None, // extra_mount_path
             )
             .await?;
 

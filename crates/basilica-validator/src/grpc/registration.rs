@@ -249,11 +249,11 @@ impl MinerRegistration for RegistrationService {
                 .to_string();
             active_node_ids.push(node_id.clone());
 
-            // Parse ephemeral mount path (empty string from proto = None)
-            let ephemeral_mount_path = if node.ephemeral_mount_path.is_empty() {
+            // Parse extra mount path (empty string from proto = None)
+            let extra_mount_path = if node.extra_mount_path.is_empty() {
                 None
             } else {
-                Some(node.ephemeral_mount_path.as_str())
+                Some(node.extra_mount_path.as_str())
             };
 
             // Upsert node (node_id computed server-side from host)
@@ -266,7 +266,7 @@ impl MinerRegistration for RegistrationService {
                     &node.gpu_category,
                     node.gpu_count,
                     node.hourly_rate_cents,
-                    ephemeral_mount_path,
+                    extra_mount_path,
                 )
                 .await
                 .map_err(|e| Status::internal(format!("failed to register node: {e}")))?;
