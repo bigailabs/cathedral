@@ -42,6 +42,57 @@ pub(crate) fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
     }
 }
 
+/// Validate a miner-declared extra mount path.
+/// Must be an absolute, non-root path with only safe path segments and no traversal.
+pub fn validate_extra_mount_path(path: &str) -> Result<()> {
+    use std::path::{Component, Path};
+
+    let p = Path::new(path);
+
+    if !p.is_absolute() {
+        anyhow::bail!("invalid extra_mount_path \"{path}\": must be absolute");
+    }
+
+    let mut segment_count = 0u32;
+    for component in p.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(seg) => {
+                segment_count += 1;
+                let s = seg.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("invalid extra_mount_path: non-UTF-8 segment")
+                })?;
+                if !s
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+                {
+                    anyhow::bail!(
+                        "invalid extra_mount_path \"{path}\": \
+                         segment \"{s}\" contains unsafe characters"
+                    );
+                }
+            }
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "invalid extra_mount_path \"{path}\": path traversal (..) not allowed"
+                );
+            }
+            Component::CurDir => {
+                anyhow::bail!("invalid extra_mount_path \"{path}\": current-dir (.) not allowed");
+            }
+            Component::Prefix(_) => {
+                anyhow::bail!("invalid extra_mount_path \"{path}\": not a Unix path");
+            }
+        }
+    }
+
+    if segment_count == 0 {
+        anyhow::bail!("invalid extra_mount_path \"{path}\": must not be root");
+    }
+
+    Ok(())
+}
+
 impl SimplePersistence {
     /// Ensure miner-node relationship exists
     pub async fn ensure_miner_node_relationship(

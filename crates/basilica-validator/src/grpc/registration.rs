@@ -249,10 +249,12 @@ impl MinerRegistration for RegistrationService {
                 .to_string();
             active_node_ids.push(node_id.clone());
 
-            // Parse extra mount path (empty string from proto = None)
+            // Parse and validate extra mount path (empty string from proto = None)
             let extra_mount_path = if node.extra_mount_path.is_empty() {
                 None
             } else {
+                crate::persistence::miner_nodes::validate_extra_mount_path(&node.extra_mount_path)
+                    .map_err(|e| Status::invalid_argument(format!("extra_mount_path: {e}")))?;
                 Some(node.extra_mount_path.as_str())
             };
 
