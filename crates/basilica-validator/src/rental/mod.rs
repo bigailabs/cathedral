@@ -410,11 +410,24 @@ impl RentalManager {
                     .await
                 {
                     Ok((host_path, container_path)) => {
-                        request.container_spec.volumes.push(VolumeMount {
-                            host_path,
-                            container_path,
-                            read_only: false,
-                        });
+                        if request
+                            .container_spec
+                            .volumes
+                            .iter()
+                            .any(|v| v.container_path == container_path)
+                        {
+                            tracing::warn!(
+                                rental_id = %rental_id,
+                                container_path = %container_path,
+                                "Skipping extra mount: container_path already in use by an existing volume"
+                            );
+                        } else {
+                            request.container_spec.volumes.push(VolumeMount {
+                                host_path,
+                                container_path,
+                                read_only: false,
+                            });
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
