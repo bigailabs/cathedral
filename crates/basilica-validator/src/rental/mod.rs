@@ -47,8 +47,8 @@ pub struct RentalManager {
     ban_manager: Arc<BanManager>,
     /// Max age for full validation before allowing a rental
     pre_rental_full_validation_max_age: std::time::Duration,
-    /// Extra mount configuration (None = disabled)
-    extra_mount: Option<crate::config::ExtraMountConfig>,
+    /// Extra mount configuration (container path for miner-declared storage)
+    extra_mount: crate::config::ExtraMountConfig,
 }
 
 // /// Parse SSH host from credentials string format "user@host:port"
@@ -140,16 +140,14 @@ impl RentalManager {
                     );
                 }
 
-                // Clean up extra mount storage if configured
-                if self.extra_mount.is_some() {
-                    if let Ok(Some(mount_path)) = self
-                        .persistence
-                        .get_node_extra_mount_path(node_id, miner_id)
-                        .await
-                    {
-                        self.cleanup_extra_mount_storage(&client, &mount_path, rental_id)
-                            .await;
-                    }
+                // Clean up extra mount storage if miner declared a path
+                if let Ok(Some(mount_path)) = self
+                    .persistence
+                    .get_node_extra_mount_path(node_id, miner_id)
+                    .await
+                {
+                    self.cleanup_extra_mount_storage(&client, &mount_path, rental_id)
+                        .await;
                 }
             }
             Err(e) => {
@@ -194,7 +192,7 @@ impl RentalManager {
             ban_manager,
             // TODO: Wire this from config for callers using `new`.
             pre_rental_full_validation_max_age: std::time::Duration::from_secs(12 * 60 * 60),
-            extra_mount: None,
+            extra_mount: crate::config::ExtraMountConfig::default(),
         }
     }
 
@@ -388,53 +386,51 @@ impl RentalManager {
         let ssh_credentials = self.build_ssh_credentials(&ssh_endpoint);
         let container_client = self.create_container_client(&ssh_credentials)?;
 
-        // 5. Setup extra mount storage if configured and available
-        if self.extra_mount.is_some() {
-            if let Ok(Some(mount_path)) = self
-                .persistence
-                .get_node_extra_mount_path(&selection.node_id, &selection.miner_id)
+        // 5. Setup extra mount storage if miner declared a path
+        if let Ok(Some(mount_path)) = self
+            .persistence
+            .get_node_extra_mount_path(&selection.node_id, &selection.miner_id)
+            .await
+        {
+            if self
+                .check_extra_mount_exists(&container_client, &mount_path)
                 .await
             {
-                if self
-                    .check_extra_mount_exists(&container_client, &mount_path)
+                // Sweep orphaned directories from previous failed cleanups
+                self.sweep_orphaned_extra_mount_dirs(
+                    &container_client,
+                    &mount_path,
+                    &selection.node_id,
+                )
+                .await;
+
+                // Create per-rental subdirectory and add volume mount
+                match self
+                    .setup_extra_mount_storage(&container_client, &mount_path, &rental_id)
                     .await
                 {
-                    // Sweep orphaned directories from previous failed cleanups
-                    self.sweep_orphaned_extra_mount_dirs(
-                        &container_client,
-                        &mount_path,
-                        &selection.node_id,
-                    )
-                    .await;
-
-                    // Create per-rental subdirectory and add volume mount
-                    match self
-                        .setup_extra_mount_storage(&container_client, &mount_path, &rental_id)
-                        .await
-                    {
-                        Ok((host_path, container_path)) => {
-                            request.container_spec.volumes.push(VolumeMount {
-                                host_path,
-                                container_path,
-                                read_only: false,
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                rental_id = %rental_id,
-                                error = %e,
-                                "Failed to setup extra mount storage, continuing without it"
-                            );
-                        }
+                    Ok((host_path, container_path)) => {
+                        request.container_spec.volumes.push(VolumeMount {
+                            host_path,
+                            container_path,
+                            read_only: false,
+                        });
                     }
-                } else {
-                    tracing::info!(
-                        rental_id = %rental_id,
-                        node_id = %selection.node_id,
-                        mount_path = %mount_path,
-                        "Extra mount path not found on node, skipping"
-                    );
+                    Err(e) => {
+                        tracing::warn!(
+                            rental_id = %rental_id,
+                            error = %e,
+                            "Failed to setup extra mount storage, continuing without it"
+                        );
+                    }
                 }
+            } else {
+                tracing::info!(
+                    rental_id = %rental_id,
+                    node_id = %selection.node_id,
+                    mount_path = %mount_path,
+                    "Extra mount path not found on node, skipping"
+                );
             }
         }
 
@@ -781,11 +777,7 @@ impl RentalManager {
         host_base: &str,
         rental_id: &str,
     ) -> Result<(String, String)> {
-        let container_path = self
-            .extra_mount
-            .as_ref()
-            .map(|c| c.container_path.clone())
-            .unwrap_or_else(|| "/ephemeral".to_string());
+        let container_path = self.extra_mount.container_path.clone();
 
         let sanitized_id = Self::sanitize_rental_id_for_path(rental_id);
         let host_path = format!("{}/{}", host_base, sanitized_id);
@@ -1109,16 +1101,14 @@ impl RentalManager {
             .stop_container(&container_client, &rental_info.container_id, force)
             .await?;
 
-        // Clean up extra mount storage if configured
-        if self.extra_mount.is_some() {
-            if let Ok(Some(mount_path)) = self
-                .persistence
-                .get_node_extra_mount_path(&rental_info.node_id, &rental_info.miner_id)
-                .await
-            {
-                self.cleanup_extra_mount_storage(&container_client, &mount_path, rental_id)
-                    .await;
-            }
+        // Clean up extra mount storage if miner declared a path
+        if let Ok(Some(mount_path)) = self
+            .persistence
+            .get_node_extra_mount_path(&rental_info.node_id, &rental_info.miner_id)
+            .await
+        {
+            self.cleanup_extra_mount_storage(&container_client, &mount_path, rental_id)
+                .await;
         }
 
         // Update rental state

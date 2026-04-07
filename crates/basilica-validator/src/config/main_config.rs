@@ -96,11 +96,11 @@ pub struct ValidatorConfig {
     #[serde(default)]
     pub slash_mode: SlashMode,
 
-    /// Extra storage mount configuration (None = disabled).
-    /// When present, rental containers get a bind-mount from the miner's declared storage path.
-    /// The host path comes from the miner's node registration.
+    /// Extra storage mount configuration.
+    /// Rental containers get a bind-mount from the miner's declared storage path
+    /// when the miner has registered one. The container_path can be overridden here.
     #[serde(default)]
-    pub extra_mount: Option<ExtraMountConfig>,
+    pub extra_mount: ExtraMountConfig,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -687,13 +687,21 @@ pub struct StorageConfig {
 }
 
 /// Configuration for extra storage mount on miner nodes.
-/// When present in the validator config, rental containers get a bind-mount
-/// from the miner's declared storage path.
+/// The validator always checks if a miner declared an extra mount path;
+/// this struct only controls the container-side mount point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtraMountConfig {
     /// Mount point inside the rental container (default: "/ephemeral").
     #[serde(default = "default_extra_mount_container_path")]
     pub container_path: String,
+}
+
+impl Default for ExtraMountConfig {
+    fn default() -> Self {
+        Self {
+            container_path: default_extra_mount_container_path(),
+        }
+    }
 }
 
 fn default_extra_mount_container_path() -> String {
@@ -885,7 +893,7 @@ impl Default for ValidatorConfig {
             billing: BillingConfig::default(),
             cu_generator_enabled: false,
             slash_mode: SlashMode::default(),
-            extra_mount: None,
+            extra_mount: ExtraMountConfig::default(),
         }
     }
 }
