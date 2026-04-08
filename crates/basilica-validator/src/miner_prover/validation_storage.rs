@@ -50,10 +50,13 @@ impl StorageCollector {
         }
     }
 
-    /// Collect storage profile from node
+    /// Collect storage profile from node.
+    /// Only counts filesystems accessible to rental containers:
+    /// the root filesystem (`/`) and the miner's declared `extra_mount_path` (if any).
     pub async fn collect(
         &self,
         node_id: &str,
+        miner_uid: u16,
         ssh_details: &SshConnectionDetails,
     ) -> Result<StorageProfile> {
         info!(node_id = node_id, "[STORAGE] Starting storage validation");
@@ -88,24 +91,51 @@ impl StorageCollector {
             }
         };
 
-        let filesystem_details = parse_df_output(&output, node_id, is_bytes_format)?;
+        let all_filesystems = parse_df_output(&output, node_id, is_bytes_format)?;
 
-        let total_bytes: u64 = filesystem_details.iter().map(|fs| fs.total_bytes).sum();
-        let available_bytes: u64 = filesystem_details.iter().map(|fs| fs.available_bytes).sum();
+        // Look up the miner's declared extra mount path from the database
+        let miner_id = format!("miner_{miner_uid}");
+        let extra_mount_path = self
+            .persistence
+            .get_node_extra_mount_path(node_id, &miner_id)
+            .await
+            .unwrap_or_else(|e| {
+                debug!(
+                    node_id = node_id,
+                    error = %e,
+                    "[STORAGE] Failed to look up extra_mount_path, counting only root"
+                );
+                None
+            });
+
+        // Filter to only container-accessible filesystems (root + extra mount)
+        let accessible =
+            filter_container_accessible_filesystems(&all_filesystems, extra_mount_path.as_deref());
+
+        let total_bytes: u64 = accessible.iter().map(|fs| fs.total_bytes).sum();
+        let available_bytes: u64 = accessible.iter().map(|fs| fs.available_bytes).sum();
 
         let available_tb = available_bytes as f64 / 1024_f64.powi(4);
         info!(
             node_id = node_id,
             available_tb = format!("{:.2}", available_tb),
-            "[STORAGE] Storage: {:.2} TB available",
-            available_tb
+            extra_mount_path = ?extra_mount_path,
+            accessible_count = accessible.len(),
+            total_count = all_filesystems.len(),
+            "[STORAGE] Storage: {:.2} TB available ({} of {} filesystems accessible to containers)",
+            available_tb,
+            accessible.len(),
+            all_filesystems.len(),
         );
 
+        // full_json retains ALL filesystems for audit/debugging
         let full_json = serde_json::json!({
             "total_bytes": total_bytes,
             "available_bytes": available_bytes,
             "required_bytes": self.min_required_storage_bytes,
-            "filesystem_details": filesystem_details,
+            "all_filesystems": all_filesystems,
+            "accessible_filesystems": accessible,
+            "extra_mount_path": extra_mount_path,
             "raw_output": output,
         })
         .to_string();
@@ -114,7 +144,7 @@ impl StorageCollector {
             total_bytes,
             available_bytes,
             required_bytes: self.min_required_storage_bytes,
-            filesystem_details,
+            filesystem_details: accessible,
             collection_timestamp: Utc::now(),
             full_json,
         })
@@ -148,7 +178,7 @@ impl StorageCollector {
         miner_uid: u16,
         ssh_details: &SshConnectionDetails,
     ) -> Result<StorageProfile> {
-        let profile = self.collect(node_id, ssh_details).await?;
+        let profile = self.collect(node_id, miner_uid, ssh_details).await?;
         self.store(miner_uid, node_id, &profile).await?;
 
         if profile.available_bytes < self.min_required_storage_bytes {
@@ -482,6 +512,24 @@ fn is_virtual_filesystem(mount_point: &str, filesystem_type: &str) -> bool {
     mount_point == "/dev" || mount_point == "/dev/shm"
 }
 
+/// Filter filesystems to only those accessible to rental containers.
+/// Containers can access:
+/// - The root filesystem (mount_point == "/")
+/// - The miner's declared extra_mount_path (if any), matched exactly
+fn filter_container_accessible_filesystems(
+    filesystems: &[FilesystemInfo],
+    extra_mount_path: Option<&str>,
+) -> Vec<FilesystemInfo> {
+    let normalized_extra = extra_mount_path.map(|p| p.trim_end_matches('/'));
+    filesystems
+        .iter()
+        .filter(|fs| {
+            fs.mount_point == "/" || normalized_extra == Some(fs.mount_point.trim_end_matches('/'))
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,5 +768,142 @@ mod tests {
 
         let result = parse_df_output(output, "test-node", true);
         assert!(result.is_err()); // Should fail as no valid filesystems
+    }
+
+    #[test]
+    fn test_filter_root_only() {
+        // When no extra mount is declared, only root is kept
+        let filesystems = vec![
+            FilesystemInfo {
+                mount_point: "/".to_string(),
+                filesystem_type: "ext4".to_string(),
+                total_bytes: 500_000_000_000,
+                available_bytes: 200_000_000_000,
+            },
+            FilesystemInfo {
+                mount_point: "/mnt/backup".to_string(),
+                filesystem_type: "ext4".to_string(),
+                total_bytes: 1_000_000_000_000,
+                available_bytes: 800_000_000_000,
+            },
+            FilesystemInfo {
+                mount_point: "/data".to_string(),
+                filesystem_type: "xfs".to_string(),
+                total_bytes: 2_000_000_000_000,
+                available_bytes: 1_500_000_000_000,
+            },
+        ];
+
+        let result = filter_container_accessible_filesystems(&filesystems, None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].mount_point, "/");
+        assert_eq!(result[0].total_bytes, 500_000_000_000);
+    }
+
+    #[test]
+    fn test_filter_with_extra_mount() {
+        // When extra mount is declared, root + that mount are kept
+        let filesystems = vec![
+            FilesystemInfo {
+                mount_point: "/".to_string(),
+                filesystem_type: "ext4".to_string(),
+                total_bytes: 500_000_000_000,
+                available_bytes: 200_000_000_000,
+            },
+            FilesystemInfo {
+                mount_point: "/mnt/backup".to_string(),
+                filesystem_type: "ext4".to_string(),
+                total_bytes: 1_000_000_000_000,
+                available_bytes: 800_000_000_000,
+            },
+            FilesystemInfo {
+                mount_point: "/ephemeral".to_string(),
+                filesystem_type: "xfs".to_string(),
+                total_bytes: 2_000_000_000_000,
+                available_bytes: 1_500_000_000_000,
+            },
+        ];
+
+        let result = filter_container_accessible_filesystems(&filesystems, Some("/ephemeral"));
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|fs| fs.mount_point == "/"));
+        assert!(result.iter().any(|fs| fs.mount_point == "/ephemeral"));
+        assert!(!result.iter().any(|fs| fs.mount_point == "/mnt/backup"));
+    }
+
+    #[test]
+    fn test_filter_extra_mount_not_in_df() {
+        // Extra mount declared but not present in df output — only root kept
+        let filesystems = vec![FilesystemInfo {
+            mount_point: "/".to_string(),
+            filesystem_type: "ext4".to_string(),
+            total_bytes: 500_000_000_000,
+            available_bytes: 200_000_000_000,
+        }];
+
+        let result = filter_container_accessible_filesystems(&filesystems, Some("/ephemeral"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].mount_point, "/");
+    }
+
+    #[test]
+    fn test_filter_exact_match_not_prefix() {
+        // /ephemeral-backup must NOT match when extra_mount is /ephemeral
+        let filesystems = vec![
+            FilesystemInfo {
+                mount_point: "/".to_string(),
+                filesystem_type: "ext4".to_string(),
+                total_bytes: 500_000_000_000,
+                available_bytes: 200_000_000_000,
+            },
+            FilesystemInfo {
+                mount_point: "/ephemeral-backup".to_string(),
+                filesystem_type: "xfs".to_string(),
+                total_bytes: 2_000_000_000_000,
+                available_bytes: 1_500_000_000_000,
+            },
+        ];
+
+        let result = filter_container_accessible_filesystems(&filesystems, Some("/ephemeral"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].mount_point, "/");
+    }
+
+    #[test]
+    fn test_filter_trailing_slash_mismatch() {
+        // DB stores "/ephemeral/" but df reports "/ephemeral" (or vice versa)
+        let filesystems = vec![
+            FilesystemInfo {
+                mount_point: "/".to_string(),
+                filesystem_type: "ext4".to_string(),
+                total_bytes: 500_000_000_000,
+                available_bytes: 200_000_000_000,
+            },
+            FilesystemInfo {
+                mount_point: "/ephemeral".to_string(),
+                filesystem_type: "xfs".to_string(),
+                total_bytes: 2_000_000_000_000,
+                available_bytes: 1_500_000_000_000,
+            },
+        ];
+
+        // Trailing slash in DB value should still match
+        let result = filter_container_accessible_filesystems(&filesystems, Some("/ephemeral/"));
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|fs| fs.mount_point == "/ephemeral"));
+    }
+
+    #[test]
+    fn test_filter_no_root() {
+        // Edge case: no root in df output — returns empty
+        let filesystems = vec![FilesystemInfo {
+            mount_point: "/data".to_string(),
+            filesystem_type: "xfs".to_string(),
+            total_bytes: 2_000_000_000_000,
+            available_bytes: 1_500_000_000_000,
+        }];
+
+        let result = filter_container_accessible_filesystems(&filesystems, None);
+        assert!(result.is_empty());
     }
 }

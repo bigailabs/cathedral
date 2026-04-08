@@ -82,6 +82,7 @@ impl BidManager {
                     gpu_count: n.config.gpu_count,
                     hourly_rate_cents: price,
                     attestation: vec![], // TODO: Add attestation when available
+                    extra_mount_path: n.config.extra_mount_path.clone().unwrap_or_default(),
                 }
             })
             .collect()

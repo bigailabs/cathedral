@@ -504,6 +504,7 @@ mod tests {
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,
+            extra_mount_path: None,
         }
     }
 

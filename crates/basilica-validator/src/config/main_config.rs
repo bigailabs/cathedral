@@ -95,6 +95,12 @@ pub struct ValidatorConfig {
     /// CU slash mode: "soft" (record to DB only) or "hard" (actual API call).
     #[serde(default)]
     pub slash_mode: SlashMode,
+
+    /// Extra storage mount configuration.
+    /// Rental containers get a bind-mount from the miner's declared storage path
+    /// when the miner has registered one. The container_path can be overridden here.
+    #[serde(default)]
+    pub extra_mount: ExtraMountConfig,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -680,6 +686,28 @@ pub struct StorageConfig {
     pub data_dir: String,
 }
 
+/// Configuration for extra storage mount on miner nodes.
+/// The validator always checks if a miner declared an extra mount path;
+/// this struct only controls the container-side mount point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraMountConfig {
+    /// Mount point inside the rental container (default: "/ephemeral").
+    #[serde(default = "default_extra_mount_container_path")]
+    pub container_path: String,
+}
+
+impl Default for ExtraMountConfig {
+    fn default() -> Self {
+        Self {
+            container_path: default_extra_mount_container_path(),
+        }
+    }
+}
+
+fn default_extra_mount_container_path() -> String {
+    "/ephemeral".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
     /// API key for external authentication
@@ -865,6 +893,7 @@ impl Default for ValidatorConfig {
             billing: BillingConfig::default(),
             cu_generator_enabled: false,
             slash_mode: SlashMode::default(),
+            extra_mount: ExtraMountConfig::default(),
         }
     }
 }

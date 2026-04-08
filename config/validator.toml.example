@@ -116,5 +116,13 @@ weight_set_interval_blocks = 360
 # This prevents replay attacks by incrementing with each weight set
 weight_version_key = 0
 
+# Extra storage mount
+# The validator automatically mounts miner-declared extra storage into rental containers
+# when the miner registered an extra_mount_path. No config section is needed.
+# Uncomment only to override the default container-side mount point ("/ephemeral").
+#
+# [extra_mount]
+# container_path = "/ephemeral"
+
 [bid_grpc]
 listen_address = "0.0.0.0:50052"

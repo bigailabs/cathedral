@@ -1648,7 +1648,16 @@ mod node_profile_wiring_tests {
 
         let miner_id = format!("miner_{miner_uid}");
         persistence
-            .upsert_registered_node(&miner_id, host, 22, "root", gpu_category, gpu_count, 1200)
+            .upsert_registered_node(
+                &miner_id,
+                host,
+                22,
+                "root",
+                gpu_category,
+                gpu_count,
+                1200,
+                None, // extra_mount_path
+            )
             .await?;
 
         Ok(NodeId::new(host)?.uuid.to_string())
