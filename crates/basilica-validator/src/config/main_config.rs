@@ -377,7 +377,7 @@ impl Default for StorageValidationConfig {
 }
 
 fn default_min_required_storage_bytes() -> u64 {
-    1_099_511_627_776 // 1TB in bytes
+    109_951_162_777 // 0.1TB in bytes
 }
 
 fn default_docker_image() -> String {
