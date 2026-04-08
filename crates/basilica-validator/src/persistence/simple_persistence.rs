@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 use tracing::info;
@@ -57,17 +58,28 @@ impl SimplePersistence {
             format!("{db_url}?mode=rwc")
         };
 
-        let pool = sqlx::SqlitePool::connect(&final_url).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(16)
+            .min_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .idle_timeout(Some(std::time::Duration::from_secs(600)))
+            .connect(&final_url)
+            .await?;
 
         sqlx::query("PRAGMA journal_mode = WAL")
             .execute(&pool)
             .await?;
-        sqlx::query("PRAGMA busy_timeout = 5000")
+        sqlx::query("PRAGMA busy_timeout = 30000")
             .execute(&pool)
             .await?;
         sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(&pool)
             .await?;
+        sqlx::query("PRAGMA wal_autocheckpoint = 1000")
+            .execute(&pool)
+            .await?;
+
+        info!("SQLite pool initialized: max_connections=16, busy_timeout=30s, WAL mode");
 
         Ok(Self { pool })
     }
