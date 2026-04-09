@@ -523,7 +523,12 @@ impl RentalManager {
             .filter_by_min_memory(candidates, request.min_memory_gb)
             .await;
 
-        let ordered = candidates;
+        // Exact GPU count match — the SQL pre-filter uses >=, so we must
+        // enforce the exact count the user requested.
+        let ordered: Vec<_> = candidates
+            .into_iter()
+            .filter(|c| c.gpu_count == request.gpu_count as i64)
+            .collect();
 
         if ordered.is_empty() {
             return Err(anyhow::anyhow!(
