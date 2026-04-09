@@ -84,7 +84,7 @@ fn select_winning_bidder(
     gpu_count: u32,
 ) -> Option<MinerBid> {
     bids.iter()
-        .filter(|b| b.gpu_category == gpu_category && b.gpu_count >= gpu_count)
+        .filter(|b| b.gpu_category == gpu_category && b.gpu_count == gpu_count)
         .min_by_key(|b| b.bid_per_hour_cents)
         .cloned()
 }

@@ -957,7 +957,7 @@ impl SimplePersistence {
     pub async fn get_node_bid_candidates(
         &self,
         gpu_category: &str,
-        min_gpu_count: u32,
+        gpu_count: u32,
         max_hourly_rate_cents: u32,
         limit: u32,
     ) -> Result<Vec<NodeBidCandidate>, anyhow::Error> {
@@ -980,14 +980,14 @@ impl SimplePersistence {
                 AND me.hourly_rate_cents IS NOT NULL
                 AND me.hourly_rate_cents <= ?
             GROUP BY me.node_id, me.miner_id, m.hotkey, m.id, me.hourly_rate_cents
-            HAVING COUNT(DISTINCT gua.gpu_uuid) >= ?
+            HAVING COUNT(DISTINCT gua.gpu_uuid) = ?
             ORDER BY me.hourly_rate_cents ASC
             LIMIT ?
             "#;
 
         let rows = sqlx::query(query)
             .bind(max_hourly_rate_cents as i64)
-            .bind(min_gpu_count as i64)
+            .bind(gpu_count as i64)
             .bind(limit as i64)
             .fetch_all(self.pool())
             .await?;
