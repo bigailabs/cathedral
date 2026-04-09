@@ -7,6 +7,7 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
 
     privileged: true
+    init: true
 
     ulimits:
       nofile:

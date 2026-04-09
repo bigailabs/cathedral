@@ -5,6 +5,7 @@ services:
       dockerfile: scripts/validator/Dockerfile
     container_name: basilica-validator-dev
     restart: unless-stopped
+    init: true
 
     environment:
       - RUST_LOG=debug
