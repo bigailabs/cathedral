@@ -16,6 +16,14 @@
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
+## Why
+
+Bittensor needs a compute layer. Not a product. Not a platform with a token narrative. A substrate -- infrastructure that miners provide, validators verify, and applications consume.
+
+This project is a fork of [Basilica](https://github.com/tplr-ai/basilica), one of the strongest compute codebases ever built on Bittensor. When its original team walked away in April 2026, the architecture survived. The code was sound. The miners and builders who believed in it stayed.
+
+Substrate carries that work forward.
+
 ## Overview
 
 Substrate creates a trustless marketplace for GPU compute by:
