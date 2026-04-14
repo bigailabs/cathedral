@@ -16,6 +16,12 @@
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
+## Status
+
+Validator running. Not setting weights yet (stake threshold).
+See [docs/policy.md](docs/policy.md) for how this works.
+Live dashboard: https://polaris.computer/substrate
+
 ## Why
 
 Bittensor needs a compute layer. Not a product. Not a platform with a token narrative. A substrate -- infrastructure that miners provide, validators verify, and applications consume.
