@@ -105,7 +105,11 @@ impl MinerState {
                     .validator_hotkey
                     .clone()
                     .expect("validator_hotkey is required for fixed_assignment strategy");
-                Box::new(validator_discovery::FixedAssignment::new(validator_hotkey))
+                let has_override = config.validator_assignment.grpc_endpoint_override.is_some();
+                Box::new(
+                    validator_discovery::FixedAssignment::new(validator_hotkey)
+                        .allow_offline(has_override),
+                )
             }
             _ => {
                 return Err(anyhow::anyhow!(
@@ -176,7 +180,17 @@ impl MinerState {
         }
 
         // Perform one-time chain registration (Bittensor network presence)
-        self.chain_registration.register_startup().await?;
+        match self.chain_registration.register_startup().await {
+            Ok(()) => {}
+            Err(e) if self.config.bittensor.common.network == "local" => {
+                warn!(
+                    "serve_axon failed on local network (non-fatal): {}. \
+                     Use sudo_as on the local chain to pre-register the axon.",
+                    e
+                );
+            }
+            Err(e) => return Err(e),
+        }
 
         // Log the discovered UID
         if let Some(uid) = self.chain_registration.get_discovered_uid().await {
@@ -189,15 +203,22 @@ impl MinerState {
 
         // One-shot validator discovery at startup
         let discovered = self.validator_discovery.run_discovery().await?;
+
+        // Allow config to override the gRPC endpoint (for local dev with spoofed IPs)
+        let grpc_endpoint = self
+            .config
+            .validator_assignment
+            .grpc_endpoint_override
+            .clone()
+            .unwrap_or(discovered.grpc_endpoint);
         info!(
-            grpc_endpoint = %discovered.grpc_endpoint,
+            grpc_endpoint = %grpc_endpoint,
             "Validator discovered, starting bid manager"
         );
 
         // Start bid manager (owns registration lifecycle: register, health checks)
         let bid_manager = self.bid_manager.clone();
         let bid_manager_shutdown_rx = shutdown_rx.clone();
-        let grpc_endpoint = discovered.grpc_endpoint;
         let bid_manager_handle = tokio::spawn(async move {
             if let Err(e) = bid_manager
                 .run(grpc_endpoint, bid_manager_shutdown_rx)

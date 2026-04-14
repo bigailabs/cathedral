@@ -110,6 +110,10 @@ pub struct ValidatorAssignmentConfig {
 
     /// Specific validator hotkey to assign nodes to (required for "fixed_assignment" strategy)
     pub validator_hotkey: Option<String>,
+
+    /// Override the gRPC endpoint for the validator (e.g., "http://localhost:50052").
+    /// Useful for local development where the on-chain axon IP is spoofed.
+    pub grpc_endpoint_override: Option<String>,
 }
 
 impl Default for ValidatorAssignmentConfig {
@@ -117,6 +121,7 @@ impl Default for ValidatorAssignmentConfig {
         Self {
             strategy: default_strategy(),
             validator_hotkey: None,
+            grpc_endpoint_override: None,
         }
     }
 }
