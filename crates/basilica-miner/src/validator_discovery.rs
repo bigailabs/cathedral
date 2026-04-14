@@ -141,20 +141,23 @@ impl ValidatorDiscovery {
             .set_assigned_validator(&validator.hotkey)
             .await;
 
-        // Construct gRPC endpoint from the validator's axon IP and configured bid_grpc_port
-        let axon_endpoint = validator.axon_endpoint.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Validator {} has no axon endpoint; cannot construct gRPC endpoint",
+        // Construct gRPC endpoint from the validator's axon IP and configured bid_grpc_port.
+        // If the validator has no axon (e.g. synthesized placeholder), use a dummy endpoint
+        // that will be overridden by grpc_endpoint_override in the caller.
+        let grpc_endpoint = if let Some(ref axon_endpoint) = validator.axon_endpoint {
+            let axon_url = url::Url::parse(axon_endpoint)
+                .map_err(|e| anyhow::anyhow!("Invalid axon endpoint URL: {}", e))?;
+            let host = axon_url
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("No host in axon endpoint"))?;
+            format!("http://{}:{}", host, self.bid_grpc_port)
+        } else {
+            warn!(
+                "Validator {} has no axon endpoint; gRPC endpoint must be provided via override",
                 validator.hotkey
-            )
-        })?;
-
-        let axon_url = url::Url::parse(axon_endpoint)
-            .map_err(|e| anyhow::anyhow!("Invalid axon endpoint URL: {}", e))?;
-        let host = axon_url
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("No host in axon endpoint"))?;
-        let grpc_endpoint = format!("http://{}:{}", host, self.bid_grpc_port);
+            );
+            String::from("http://0.0.0.0:0")
+        };
 
         let discovered = DiscoveredValidator {
             hotkey: validator.hotkey.clone(),
@@ -173,11 +176,23 @@ impl ValidatorDiscovery {
 /// Fixed assignment strategy - assigns all nodes to a specific validator
 pub struct FixedAssignment {
     validator_hotkey: String,
+    /// When true, synthesize a placeholder validator if not found on-chain.
+    /// This allows grpc_endpoint_override to work even when the validator
+    /// has not registered its axon on-chain.
+    allow_offline: bool,
 }
 
 impl FixedAssignment {
     pub fn new(validator_hotkey: String) -> Self {
-        Self { validator_hotkey }
+        Self {
+            validator_hotkey,
+            allow_offline: false,
+        }
+    }
+
+    pub fn allow_offline(mut self, allow: bool) -> Self {
+        self.allow_offline = allow;
+        self
     }
 }
 
@@ -194,6 +209,18 @@ impl AssignmentStrategy for FixedAssignment {
             .find(|v| v.hotkey == self.validator_hotkey)
         {
             Ok(Some(validator))
+        } else if self.allow_offline {
+            warn!(
+                "Validator {} not found on-chain; synthesizing placeholder (grpc_endpoint_override required)",
+                self.validator_hotkey
+            );
+            Ok(Some(ValidatorInfo {
+                uid: 0,
+                hotkey: self.validator_hotkey.clone(),
+                coldkey: String::new(),
+                stake: 0,
+                axon_endpoint: None,
+            }))
         } else {
             warn!(
                 "Validator with hotkey {} not found in active validators",

@@ -196,7 +196,17 @@ impl ValidatorService {
         bittensor_service: Arc<BittensorService>,
     ) -> Result<ChainRegistration> {
         let chain_registration = ChainRegistration::new(&self.config, bittensor_service).await?;
-        chain_registration.register_startup().await?;
+        match chain_registration.register_startup().await {
+            Ok(()) => {}
+            Err(e) if self.config.bittensor.common.network == "local" => {
+                tracing::warn!(
+                    "serve_axon failed on local network (non-fatal): {}. \
+                     Use sudo_as on the local chain to pre-register the axon.",
+                    e
+                );
+            }
+            Err(e) => return Err(e),
+        }
         Ok(chain_registration)
     }
 
