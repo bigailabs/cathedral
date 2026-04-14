@@ -16,11 +16,17 @@
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
+## Status
+
+Validator running. Not setting weights yet (stake threshold).
+See [docs/policy.md](docs/policy.md) for how this works.
+Live dashboard: https://polaris.computer/substrate
+
 ## Why
 
 Bittensor needs a compute layer. Not a product. Not a platform with a token narrative. A substrate -- infrastructure that miners provide, validators verify, and applications consume.
 
-This project is a fork of [Basilica](https://github.com/tplr-ai/basilica), one of the strongest compute codebases ever built on Bittensor. When its original team walked away in April 2026, the architecture survived. The code was sound. The miners and builders who believed in it stayed.
+This project is a fork of [Basilica](https://github.com/one-covenant/basilica), one of the strongest compute codebases ever built on Bittensor. When its original team walked away in April 2026, the architecture survived. The code was sound. The miners and builders who believed in it stayed.
 
 Substrate carries that work forward.
 
@@ -51,7 +57,7 @@ Substrate creates a trustless marketplace for GPU compute by:
 
 ## Origins
 
-Forked from [tplr-ai/basilica](https://github.com/tplr-ai/basilica) under MIT License. Original work by the Basilica contributors. Continued by the community.
+Forked from [one-covenant/basilica](https://github.com/one-covenant/basilica) under MIT License. Original work by the Basilica contributors. Continued by the community.
 
 ## License
 
