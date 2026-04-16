@@ -1,16 +1,16 @@
 [package]
-name = "basilica-validator"
+name = "cathedral-validator"
 version = "0.1.0"
 edition = "2021"
-description = "Basilca Validator - Bittensor neuron for verification and scoring"
+description = "Cathedral Validator - Bittensor neuron for verification and scoring"
 rust-version = "1.70"
 
 [lib]
-name = "basilica_validator"
+name = "cathedral_validator"
 path = "src/lib.rs"
 
 [[bin]]
-name = "basilica-validator"
+name = "cathedral-validator"
 path = "src/main.rs"
 
 [dependencies]
@@ -52,8 +52,8 @@ rust_decimal = { workspace = true }
 bigdecimal = { workspace = true }
 
 # Internal dependencies
-basilica-common = { path = "../basilica-common" }
-basilica-protocol = { path = "../basilica-protocol" }
+cathedral-common = { path = "../cathedral-common" }
+cathedral-protocol = { path = "../cathedral-protocol" }
 bittensor = { workspace = true }
 
 # Validator-specific dependencies

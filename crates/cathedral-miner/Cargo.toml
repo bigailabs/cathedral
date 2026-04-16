@@ -1,16 +1,16 @@
 [package]
-name = "basilica-miner"
+name = "cathedral-miner"
 version = "0.1.0"
 edition = "2021"
-description = "Basilca Miner - Bittensor neuron that manages node fleets"
+description = "Cathedral Miner - Bittensor neuron that manages node fleets"
 rust-version = "1.70"
 
 [lib]
-name = "basilica_miner"
+name = "cathedral_miner"
 path = "src/lib.rs"
 
 [[bin]]
-name = "basilica-miner"
+name = "cathedral-miner"
 path = "src/main.rs"
 
 [dependencies]
@@ -37,8 +37,8 @@ hex = { workspace = true }
 url = { workspace = true }
 
 # Internal dependencies
-basilica-common = { path = "../basilica-common", features = ["sqlite"] }
-basilica-protocol = { path = "../basilica-protocol" }
+cathedral-common = { path = "../cathedral-common", features = ["sqlite"] }
+cathedral-protocol = { path = "../cathedral-protocol" }
 bittensor = { workspace = true }
 
 # Miner-specific dependencies

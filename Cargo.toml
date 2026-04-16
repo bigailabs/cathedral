@@ -1,12 +1,12 @@
 [workspace]
 members = [
-  "crates/basilica-common",
-  "crates/basilica-protocol",
-  "crates/basilica-miner",
-  "crates/basilica-validator",
-  "crates/basilica-cli",
-  "crates/basilica-sdk",
-  "crates/basilica-sdk-python",
+  "crates/cathedral-common",
+  "crates/cathedral-protocol",
+  "crates/cathedral-miner",
+  "crates/cathedral-validator",
+  "crates/cathedral-cli",
+  "crates/cathedral-sdk",
+  "crates/cathedral-sdk-python",
 ]
 resolver = "2"
 

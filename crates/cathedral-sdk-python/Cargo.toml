@@ -1,9 +1,9 @@
 [package]
-name = "basilica-sdk-python"
+name = "cathedral-sdk-python"
 version = "0.25.2"
 edition = "2021"
-authors = ["Basilica Team"]
-description = "Python bindings for the Basilica SDK"
+authors = ["Cathedral Team"]
+description = "Python bindings for the Cathedral SDK"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -19,8 +19,8 @@ extension-module = ["pyo3/extension-module"]
 stub-gen = ["dep:pyo3-stub-gen", "dep:pyo3-stub-gen-derive"]
 
 [dependencies]
-basilica-sdk = { path = "../basilica-sdk" }
-basilica-validator = { path = "../basilica-validator", features = ["client"] }
+cathedral-sdk = { path = "../cathedral-sdk" }
+cathedral-validator = { path = "../cathedral-validator", features = ["client"] }
 pyo3 = { workspace = true }
 pyo3-stub-gen = { workspace = true, optional = true }
 pyo3-stub-gen-derive = { workspace = true, optional = true }

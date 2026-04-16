@@ -3,18 +3,19 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "basilica-sdk"
+name = "cathedral-sdk"
 version = "0.25.2"
-description = "Python SDK for deploying containerized applications on the Basilica GPU cloud"
+description = "Python SDK for deploying containerized applications on the Cathedral GPU cloud"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }
-authors = [{ name = "Basilica Team", email = "team@basilica.ai" }]
+# TODO(cathedral-rename): Update email once cathedral.ai domain is set up
+authors = [{ name = "Cathedral Team", email = "team@basilica.ai" }]
 requires-python = ">=3.10"
 keywords = [
   "gpu",
   "cloud",
   "deployment",
-  "basilica",
+  "cathedral",
   "compute",
   "kubernetes",
   "ml",
@@ -47,13 +48,16 @@ dependencies = []
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "mypy>=1.0", "maturin>=1.0"]
 
 [project.urls]
+# TODO(cathedral-rename): Update URLs once cathedral.ai domain and GitHub org are set up
 Homepage = "https://basilica.ai"
 Documentation = "https://docs.basilica.ai"
-Repository = "https://github.com/one-covenant/basilica"
-Issues = "https://github.com/one-covenant/basilica/issues"
-Changelog = "https://github.com/one-covenant/basilica/blob/main/crates/basilica-sdk-python/CHANGELOG.md"
+Repository = "https://github.com/bigailabs/substrate"
+Issues = "https://github.com/bigailabs/substrate/issues"
+Changelog = "https://github.com/bigailabs/substrate/blob/main/crates/cathedral-sdk-python/CHANGELOG.md"
 
 [tool.maturin]
 features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 python-source = "python"
+# TODO(cathedral-rename): Python module name kept as "basilica._basilica" for backwards compatibility
+# Change to "cathedral._cathedral" once PyPI package migration is complete
 module-name = "basilica._basilica"

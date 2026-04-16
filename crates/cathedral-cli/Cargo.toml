@@ -1,11 +1,11 @@
 [package]
-name = "basilica-cli"
+name = "cathedral-cli"
 version = "0.25.1"
 edition = "2021"
-authors = ["Basilica Team"]
-description = "Unified CLI for Basilica GPU rental and network management"
+authors = ["Cathedral Team"]
+description = "Unified CLI for Cathedral GPU rental and network management"
 license = "MIT"
-repository = "https://github.com/one-covenant/basilica"
+repository = "https://github.com/bigailabs/substrate"
 
 [[bin]]
 name = "basilica"
@@ -70,8 +70,8 @@ regex = { workspace = true }
 urlencoding = { workspace = true }
 
 # Internal crate dependencies
-basilica-common = { path = "../basilica-common" }
-basilica-sdk = { path = "../basilica-sdk" }
-basilica-validator = { path = "../basilica-validator", features = ["client", "cli"] }
+cathedral-common = { path = "../cathedral-common" }
+cathedral-sdk = { path = "../cathedral-sdk" }
+cathedral-validator = { path = "../cathedral-validator", features = ["client", "cli"] }
 
 [dev-dependencies]

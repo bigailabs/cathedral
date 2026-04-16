@@ -1,8 +1,8 @@
 [package]
-name = "basilica-sdk"
+name = "cathedral-sdk"
 version = "0.25.0"
 edition = "2021"
-authors = ["Basilica Team"]
+authors = ["Cathedral Team"]
 description = "SDK for interacting with the Basilica GPU rental network"
 license = "MIT OR Apache-2.0"
 
@@ -31,8 +31,8 @@ base64 = { workspace = true }
 etcetera = { workspace = true }
 
 # Internal dependencies
-basilica-common = { path = "../basilica-common" }
-basilica-validator = { path = "../basilica-validator", features = ["client"] }
+cathedral-common = { path = "../cathedral-common" }
+cathedral-validator = { path = "../cathedral-validator", features = ["client"] }
 urlencoding = { workspace = true }
 
 [dev-dependencies]
