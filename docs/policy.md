@@ -1,10 +1,10 @@
-# How Substrate works (draft)
+# How Cathedral works (draft)
 
 Status: v0, will evolve. Published 2026-04-14.
 
 ## What this is
 
-Substrate (SN39) is an open compute network on Bittensor. Miners contribute GPU capacity, validators verify it, the chain distributes emissions based on validator weights.
+Cathedral (SN39) is an open compute network on Bittensor. Miners contribute GPU capacity, validators verify it, the chain distributes emissions based on validator weights.
 
 We (Polaris) run a validator on SN39 and publish the incentive configuration it reads. The configuration lives at:
 
@@ -42,7 +42,7 @@ See live dashboard: https://polaris.computer/substrate
 ## How to propose changes
 
 - Open an issue in this repo
-- Post in the Substrate Discord
+- Post in the Cathedral Discord
 - DM a maintainer
 
 ## Changelog
