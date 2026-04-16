@@ -3,40 +3,40 @@
 This repository has two very different surfaces:
 
 - `validator` / `miner` / subnet infrastructure
-- Basilica cloud customer operations via the `basilica` CLI and Python SDK
+- Cathedral cloud customer operations via the `cathedral` CLI and Python SDK
 
-If the user is asking how to **use Basilica as a customer/operator** for compute, billing, rentals, deployments, inference, or OpenClaw-style apps, ignore most of the subnet docs and start here:
+If the user is asking how to **use Cathedral as a customer/operator** for compute, billing, rentals, deployments, inference, or OpenClaw-style apps, ignore most of the subnet docs and start here:
 
-- CLI source: `crates/basilica-cli/src/`
-- Python SDK: `crates/basilica-sdk-python/`
-- user docs: `crates/basilica-sdk-python/README.md`, `examples/`, `docs/GETTING-STARTED.md`
+- CLI source: `crates/cathedral-cli/src/`
+- Python SDK: `crates/cathedral-sdk-python/`
+- user docs: `crates/cathedral-sdk-python/README.md`, `examples/`, `docs/GETTING-STARTED.md`
 
 ## What To Use
 
 Use these repo-local skills for agent work:
 
-- `basilica/.claude/skills/basilica-account-ops/SKILL.md`
+- `cathedral/.claude/skills/cathedral-account-ops/SKILL.md`
   - login, device-code auth, API tokens, balance, TAO funding, deposit tracking
-- `basilica/.claude/skills/basilica-rentals-ops/SKILL.md`
+- `cathedral/.claude/skills/cathedral-rentals-ops/SKILL.md`
   - machine discovery, SSH keys, direct rentals, volumes, copy/exec/ssh, teardown
-- `basilica/.claude/skills/basilica-serverless-ops/SKILL.md`
-  - `basilica deploy`, `summon`, vLLM, SGLang, OpenClaw, Tau, scale/logs/share-token
-- `basilica/.claude/skills/basilica-sdk-ops/SKILL.md`
+- `cathedral/.claude/skills/cathedral-serverless-ops/SKILL.md`
+  - `cathedral deploy`, `summon`, vLLM, SGLang, OpenClaw, Tau, scale/logs/share-token
+- `cathedral/.claude/skills/cathedral-sdk-ops/SKILL.md`
   - Python automation, SDK caveats, blocking deploy semantics, low-level API gaps
 
 For a single end-to-end playbook with copyable flows, use:
 
-- `basilica/docs/agent-cloud-ops.md`
+- `cathedral/docs/agent-cloud-ops.md`
   - auth, funding, rentals, deploys, inference, OpenClaw, Tau, SDK, cleanup
 
 ## Routing
 
 If the request is about:
 
-- account setup, credits, deposits, or top-up: use `basilica-account-ops`
-- direct GPU/CPU machines, SSH access, training boxes, or persistent rented hosts: use `basilica-rentals-ops`
-- HTTP services, inference endpoints, public URLs, or self-hosted apps: use `basilica-serverless-ops`
-- Python code, notebooks, scripts, CI automation, or typed programmatic access: use `basilica-sdk-ops`
+- account setup, credits, deposits, or top-up: use `cathedral-account-ops`
+- direct GPU/CPU machines, SSH access, training boxes, or persistent rented hosts: use `cathedral-rentals-ops`
+- HTTP services, inference endpoints, public URLs, or self-hosted apps: use `cathedral-serverless-ops`
+- Python code, notebooks, scripts, CI automation, or typed programmatic access: use `cathedral-sdk-ops`
 
 ## Canonical Agent Rules
 
@@ -52,43 +52,43 @@ If the request is about:
 
 ```bash
 curl -sSL https://basilica.ai/install.sh | bash
-basilica login
+cathedral login
 ```
 
 - For headless terminals, SSH boxes, or remote shells, use:
 
 ```bash
-basilica login --device-code
+cathedral login --device-code
 ```
 
 - Use API tokens mainly for SDK/programmatic work:
 
 ```bash
-basilica tokens create my-agent-token
-export BASILICA_API_TOKEN="basilica_..."
+cathedral tokens create my-agent-token
+export BASILICA_API_TOKEN="cathedral_..."
 ```
 
 ### 3. Treat cost-bearing actions as explicit
 
 Do not create chargeable resources unless the user asked for it. These usually incur cost:
 
-- `basilica up ...`
-- `basilica deploy ...`
-- `basilica deploy vllm ...`
-- `basilica deploy sglang ...`
-- `basilica summon ...`
+- `cathedral up ...`
+- `cathedral deploy ...`
+- `cathedral deploy vllm ...`
+- `cathedral deploy sglang ...`
+- `cathedral summon ...`
 - SDK equivalents like `start_secure_cloud_rental()` and `deploy()`
 
 Safe read-mostly operations include:
 
-- `basilica balance`
-- `basilica fund`
-- `basilica fund list`
-- `basilica ls`
-- `basilica ps`
-- `basilica status <id>`
-- `basilica deploy ls`
-- `basilica deploy status <name>`
+- `cathedral balance`
+- `cathedral fund`
+- `cathedral fund list`
+- `cathedral ls`
+- `cathedral ps`
+- `cathedral status <id>`
+- `cathedral deploy ls`
+- `cathedral deploy status <name>`
 - SDK health/list/get calls
 
 ### 4. Always include cleanup intent
@@ -97,14 +97,14 @@ When you create resources, prefer cleanup-friendly defaults:
 
 - set `--ttl` / `ttl_seconds` for deployments unless the user explicitly wants persistence
 - call out whether the resource will persist after the current task
-- tear down rentals with `basilica down <rental-id>` when the task is finished unless the user asked to keep them
+- tear down rentals with `cathedral down <rental-id>` when the task is finished unless the user asked to keep them
 
 ### 5. Use current command names
 
 The current CLI uses:
 
-- `basilica deploy delete ...`
-- not `basilica deployments delete ...`
+- `cathedral deploy delete ...`
+- not `cathedral deployments delete ...`
 
 Be careful with stale examples in old docs or transcripts.
 
@@ -130,11 +130,11 @@ These files are the best source of truth for agent docs and command behavior:
 - `examples/README.md`
 - `examples/15_cli_deploy/README.md`
 - `examples/inference/README.md`
-- `crates/basilica-cli/src/cli/commands.rs`
-- `crates/basilica-cli/src/cli/handlers/`
-- `crates/basilica-sdk-python/README.md`
-- `crates/basilica-sdk-python/python/basilica/__init__.py`
-- `crates/basilica-sdk-python/python/basilica/_deployment.py`
+- `crates/cathedral-cli/src/cli/commands.rs`
+- `crates/cathedral-cli/src/cli/handlers/`
+- `crates/cathedral-sdk-python/README.md`
+- `crates/cathedral-sdk-python/python/cathedral/__init__.py`
+- `crates/cathedral-sdk-python/python/cathedral/_deployment.py`
 
 ## Fast Decision Table
 

@@ -3,11 +3,11 @@ name: Release Python SDK
 on:
   push:
     tags:
-      - "basilica-sdk-python-v*"
+      - "cathedral-sdk-python-v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g., basilica-sdk-python-v0.1.0)"
+        description: "Tag to release (e.g., cathedral-sdk-python-v0.1.0)"
         required: true
         type: string
 
@@ -31,15 +31,15 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAG="${{ github.event.inputs.tag }}"
-            if [[ ! "$TAG" =~ ^basilica-sdk-python-v ]]; then
-              echo "Error: Tag must start with 'basilica-sdk-python-v' prefix"
-              echo "Example: basilica-sdk-python-v0.1.0"
+            if [[ ! "$TAG" =~ ^cathedral-sdk-python-v ]]; then
+              echo "Error: Tag must start with 'cathedral-sdk-python-v' prefix"
+              echo "Example: cathedral-sdk-python-v0.1.0"
               exit 1
             fi
           else
             TAG="${GITHUB_REF#refs/tags/}"
           fi
-          VERSION="${TAG#basilica-sdk-python-v}"
+          VERSION="${TAG#cathedral-sdk-python-v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Releasing Python SDK version: $VERSION"
@@ -64,7 +64,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -i python3.10 --manifest-path crates/basilica-sdk-python/Cargo.toml
+          args: --release --out dist -i python3.10 --manifest-path crates/cathedral-sdk-python/Cargo.toml
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
@@ -102,7 +102,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
+          args: --release --out dist --manifest-path crates/cathedral-sdk-python/Cargo.toml
           sccache: 'true'
 
       - name: Upload wheels
@@ -133,7 +133,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
+          args: --out dist --manifest-path crates/cathedral-sdk-python/Cargo.toml
 
       - name: Upload sdist
         uses: actions/upload-artifact@v4
@@ -203,26 +203,26 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.extract-version.outputs.tag }}
-          name: Basilica Python SDK v${{ needs.extract-version.outputs.version }}
+          name: Cathedral Python SDK v${{ needs.extract-version.outputs.version }}
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            # Basilica Python SDK v${{ needs.extract-version.outputs.version }}
+            # Cathedral Python SDK v${{ needs.extract-version.outputs.version }}
 
             ## Installation
 
             ```bash
-            pip install basilica-sdk==${{ needs.extract-version.outputs.version }}
+            pip install cathedral-sdk==${{ needs.extract-version.outputs.version }}
             ```
 
             ## Quick Start
 
             ```python
-            import basilica
+            import cathedral
 
             # Client auto-detects BASILICA_API_TOKEN environment variable
-            client = basilica.BasilicaClient("https://api.basilica.ai")
+            client = cathedral.CathedralClient("https://api.cathedral.ai")
 
             # List available nodes
             nodes = client.list_nodes()
@@ -230,9 +230,9 @@ jobs:
 
             # Start a rental
             rental = client.start_rental(
-                basilica.StartRentalApiRequest(
-                    node_selection=basilica.node_by_gpu(
-                        basilica.GpuRequirements(gpu_type="h100", gpu_count=1)
+                cathedral.StartRentalApiRequest(
+                    node_selection=cathedral.node_by_gpu(
+                        cathedral.GpuRequirements(gpu_type="h100", gpu_count=1)
                     )
                 )
             )
@@ -241,14 +241,14 @@ jobs:
 
             ## Documentation
 
-            - [Python SDK Documentation](https://docs.basilica.ai/python-sdk)
-            - [API Reference](https://docs.basilica.ai/api)
-            - [Examples](https://github.com/one-covenant/basilica/tree/main/crates/basilica-sdk-python/examples)
-            - [Changelog](https://github.com/one-covenant/basilica/blob/main/crates/basilica-sdk-python/CHANGELOG.md)
+            - [Python SDK Documentation](https://docs.cathedral.ai/python-sdk)
+            - [API Reference](https://docs.cathedral.ai/api)
+            - [Examples](https://github.com/one-covenant/cathedral/tree/main/crates/cathedral-sdk-python/examples)
+            - [Changelog](https://github.com/one-covenant/cathedral/blob/main/crates/cathedral-sdk-python/CHANGELOG.md)
 
             ## PyPI Package
 
-            https://pypi.org/project/basilica-sdk/${{ needs.extract-version.outputs.version }}/
+            https://pypi.org/project/cathedral-sdk/${{ needs.extract-version.outputs.version }}/
 
             ## Supported Platforms
 
@@ -256,11 +256,11 @@ jobs:
             - macOS: x86_64 (Intel), aarch64 (Apple Silicon)
             - Python: 3.10, 3.11, 3.12, 3.13
 
-            Note: Windows is not supported as Basilica requires Unix/Linux infrastructure (K3s, SSH, process management).
+            Note: Windows is not supported as Cathedral requires Unix/Linux infrastructure (K3s, SSH, process management).
 
             ## What's Changed
 
-            See [CHANGELOG.md](https://github.com/one-covenant/basilica/blob/main/crates/basilica-sdk-python/CHANGELOG.md) for detailed changes.
+            See [CHANGELOG.md](https://github.com/one-covenant/cathedral/blob/main/crates/cathedral-sdk-python/CHANGELOG.md) for detailed changes.
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

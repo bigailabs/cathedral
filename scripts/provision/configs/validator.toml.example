@@ -1,4 +1,4 @@
-# Basilica Validator Configuration - Example
+# Cathedral Validator Configuration - Example
 # Copy this file to validator.toml and customize for your environment
 
 # Bittensor Network Configuration
@@ -7,7 +7,7 @@
 wallet_name = "YOUR_VALIDATOR_WALLET"
 hotkey_name = "YOUR_VALIDATOR_HOTKEY"
 network = "finney"  # Use "local" for development
-netuid = 39  # Basilica subnet ID
+netuid = 39  # Cathedral subnet ID
 chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
 
 # API Server Configuration
@@ -20,7 +20,7 @@ enable_cors = true
 
 # Database Configuration  
 [database]
-url = "sqlite:/opt/basilica/data/validator.db"
+url = "sqlite:/opt/cathedral/data/validator.db"
 max_connections = 20
 run_migrations = true
 backup_enabled = true
@@ -31,7 +31,7 @@ backup_interval = 86400  # 24 hours
 level = "info"
 format = "json"
 enable_file_logging = true
-log_dir = "/var/log/basilica"
+log_dir = "/var/log/cathedral"
 
 # Metrics Configuration
 [metrics]
@@ -65,8 +65,8 @@ cleanup_temp_files = true
 
 # IMPORTANT: Configure your SSH keys
 [ssh_keys]
-private_key_path = "/etc/basilica/keys/validator_ssh"
-public_key_path = "/etc/basilica/keys/validator_ssh.pub"
+private_key_path = "/etc/cathedral/keys/validator_ssh"
+public_key_path = "/etc/cathedral/keys/validator_ssh.pub"
 key_type = "ed25519"
 
 # Security Configuration
@@ -103,12 +103,12 @@ max_failures = 3
 [backup]
 enabled = true
 retention_days = 30
-backup_dir = "/var/backups/basilica"
+backup_dir = "/var/backups/cathedral"
 compress_backups = true
 
 # TLS Configuration (for production)
 [tls]
 enabled = false
-cert_path = "/etc/basilica/certs/validator.crt"
-key_path = "/etc/basilica/certs/validator.key"
-ca_cert_path = "/etc/basilica/certs/ca.crt"
+cert_path = "/etc/cathedral/certs/validator.crt"
+key_path = "/etc/cathedral/certs/validator.key"
+ca_cert_path = "/etc/cathedral/certs/ca.crt"

@@ -1,6 +1,6 @@
 # Deploying Multi-File Projects with Custom Docker Images
 
-For multi-file Python projects, build your own Docker image and deploy it to Basilica.
+For multi-file Python projects, build your own Docker image and deploy it to Cathedral.
 
 ## Project Structure
 
@@ -22,7 +22,7 @@ my-project/
 ```dockerfile
 FROM python:3.11-slim
 
-# Create non-root user first (required by Basilica)
+# Create non-root user first (required by Cathedral)
 RUN useradd -m -u 1000 appuser
 
 WORKDIR /app
@@ -51,12 +51,12 @@ docker build -t ghcr.io/yourusername/my-api:latest .
 docker push ghcr.io/yourusername/my-api:latest
 ```
 
-## Step 3: Deploy to Basilica
+## Step 3: Deploy to Cathedral
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="my-api",
@@ -74,11 +74,11 @@ See the files in this directory:
 - `app/` - Sample FastAPI application
 - `requirements.txt` - Python dependencies
 - `Dockerfile` - Container build instructions
-- `deploy.py` - Basilica deployment script
+- `deploy.py` - Cathedral deployment script
 
 ## Notes
 
-1. **Non-root execution**: Basilica runs containers as UID 1000. Your Dockerfile must:
+1. **Non-root execution**: Cathedral runs containers as UID 1000. Your Dockerfile must:
    - Create the user before copying files: `RUN useradd -m -u 1000 appuser`
    - Set ownership when copying: `COPY --chown=appuser:appuser app/ ./app/`
    - Switch to that user: `USER appuser`

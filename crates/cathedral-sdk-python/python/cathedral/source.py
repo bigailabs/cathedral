@@ -12,7 +12,7 @@ The SourcePackager abstracts the complexity of:
 - Escaping special characters
 
 Example:
-    >>> from basilica.source import SourcePackager
+    >>> from cathedral.source import SourcePackager
     >>> packager = SourcePackager("path/to/app.py")
     >>> command = packager.build_command()
     >>> # Returns: ["bash", "-c", "python - <<'PYCODE'\\n...code...\\nPYCODE\\n"]

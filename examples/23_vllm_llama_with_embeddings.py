@@ -21,14 +21,14 @@ Endpoints:
     LLM:        /v1/chat/completions, /v1/completions
     Embeddings: /v1/embeddings (OpenAI-compatible)
 """
-import basilica
+import cathedral
 
 
-def deploy_embeddings(client: basilica.BasilicaClient) -> basilica.Deployment:
+def deploy_embeddings(client: cathedral.CathedralClient) -> cathedral.Deployment:
     """Deploy E5-Mistral-7B embedding model using vLLM."""
     print("Deploying intfloat/e5-mistral-7b-instruct embedding service (vLLM)...")
 
-    @basilica.deployment(
+    @cathedral.deployment(
         name="embed-7b",
         image="vllm/vllm-openai:v0.8.5.post1",
         port=8000,
@@ -58,11 +58,11 @@ def deploy_embeddings(client: basilica.BasilicaClient) -> basilica.Deployment:
     return serve()
 
 
-def deploy_llm(client: basilica.BasilicaClient) -> basilica.Deployment:
+def deploy_llm(client: cathedral.CathedralClient) -> cathedral.Deployment:
     """Deploy Qwen2.5-7B-Instruct for chat/completions."""
     print("Deploying Qwen/Qwen2.5-7B-Instruct inference service...")
 
-    @basilica.deployment(
+    @cathedral.deployment(
         name="llm-7b",
         image="vllm/vllm-openai:v0.8.5.post1",
         port=8000,
@@ -90,7 +90,7 @@ def deploy_llm(client: basilica.BasilicaClient) -> basilica.Deployment:
 
 
 def main():
-    client = basilica.BasilicaClient()
+    client = cathedral.CathedralClient()
 
     # Deploy LLM first
     llm = deploy_llm(client)

@@ -1,6 +1,6 @@
 # Python SDK Release Checklist
 
-Quick reference for releasing new versions of the Basilica Python SDK to PyPI.
+Quick reference for releasing new versions of the Cathedral Python SDK to PyPI.
 
 ## Pre-Release Setup (First Time Only)
 
@@ -14,7 +14,7 @@ Quick reference for releasing new versions of the Basilica Python SDK to PyPI.
 ### 1. Prepare Release
 
 ```bash
-cd crates/basilica-sdk-python
+cd crates/cathedral-sdk-python
 
 # Bump version
 ./bump-version.sh X.Y.Z
@@ -30,10 +30,10 @@ cd crates/basilica-sdk-python
 maturin build --release
 
 # Install locally
-pip install target/wheels/basilica_sdk-*.whl
+pip install target/wheels/cathedral_sdk-*.whl
 
 # Test import
-python -c "import basilica; print(basilica.DEFAULT_API_URL)"
+python -c "import cathedral; print(cathedral.DEFAULT_API_URL)"
 
 # Run examples (if applicable)
 cd examples
@@ -41,7 +41,7 @@ python quickstart.py  # with test credentials
 cd ..
 
 # Uninstall
-pip uninstall basilica-sdk -y
+pip uninstall cathedral-sdk -y
 ```
 
 ### 3. Commit and Review
@@ -67,10 +67,10 @@ git checkout main
 git pull origin main
 
 # Create annotated tag
-git tag -a basilica-sdk-python-vX.Y.Z -m "Release Python SDK vX.Y.Z"
+git tag -a cathedral-sdk-python-vX.Y.Z -m "Release Python SDK vX.Y.Z"
 
 # Push tag to trigger workflow
-git push origin basilica-sdk-python-vX.Y.Z
+git push origin cathedral-sdk-python-vX.Y.Z
 ```
 
 ### 5. Monitor Release
@@ -86,13 +86,13 @@ git push origin basilica-sdk-python-vX.Y.Z
 # Wait 2-3 minutes for PyPI propagation
 
 # Install from PyPI
-pip install basilica-sdk==X.Y.Z
+pip install cathedral-sdk==X.Y.Z
 
 # Verify import and basic functionality
-python -c "import basilica; client = basilica.BasilicaClient('https://api.basilica.ai')"
+python -c "import cathedral; client = cathedral.CathedralClient('https://api.basilica.ai')"
 
 # Check all platforms available
-# Visit: https://pypi.org/project/basilica-sdk/X.Y.Z/
+# Visit: https://pypi.org/project/cathedral-sdk/X.Y.Z/
 ```
 
 ### 7. Post-Release
@@ -109,7 +109,7 @@ For urgent bug fixes:
 
 ```bash
 # Create hotfix branch from tag
-git checkout -b hotfix/python-sdk-vX.Y.Z basilica-sdk-python-vX.Y.Z
+git checkout -b hotfix/python-sdk-vX.Y.Z cathedral-sdk-python-vX.Y.Z
 
 # Fix bug
 # ...
@@ -119,8 +119,8 @@ git checkout -b hotfix/python-sdk-vX.Y.Z basilica-sdk-python-vX.Y.Z
 
 # Commit and tag
 git commit -am "Hotfix: [description]"
-git tag basilica-sdk-python-vX.Y.Z+1
-git push origin basilica-sdk-python-vX.Y.Z+1
+git tag cathedral-sdk-python-vX.Y.Z+1
+git push origin cathedral-sdk-python-vX.Y.Z+1
 
 # Merge back to main
 git checkout main
@@ -134,7 +134,7 @@ If a release has critical issues:
 
 ### 1. Yank Bad Version on PyPI
 
-1. Go to https://pypi.org/project/basilica-sdk/
+1. Go to https://pypi.org/project/cathedral-sdk/
 2. Navigate to the bad version
 3. Click "Options" → "Yank release"
 4. Provide reason for yanking
@@ -180,14 +180,14 @@ If you need to re-release:
 
 ```bash
 # Delete local tag
-git tag -d basilica-sdk-python-vX.Y.Z
+git tag -d cathedral-sdk-python-vX.Y.Z
 
 # Delete remote tag
-git push --delete origin basilica-sdk-python-vX.Y.Z
+git push --delete origin cathedral-sdk-python-vX.Y.Z
 
 # Recreate and push
-git tag -a basilica-sdk-python-vX.Y.Z -m "Release Python SDK vX.Y.Z"
-git push origin basilica-sdk-python-vX.Y.Z
+git tag -a cathedral-sdk-python-vX.Y.Z -m "Release Python SDK vX.Y.Z"
+git push origin cathedral-sdk-python-vX.Y.Z
 ```
 
 ### Version Mismatch
@@ -230,5 +230,5 @@ Recommended release cadence:
 ## Contact
 
 For questions about the release process:
-- GitHub Issues: https://github.com/one-covenant/basilica/issues
-- Team: team@basilica.ai
+- GitHub Issues: https://github.com/one-covenant/cathedral/issues
+- Team: team@cathedral.ai

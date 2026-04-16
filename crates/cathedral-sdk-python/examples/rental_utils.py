@@ -1,5 +1,5 @@
 """
-Rental utilities for Basilica SDK examples
+Rental utilities for Cathedral SDK examples
 
 Provides functions for SSH credential handling, key management, and rental lifecycle operations.
 """
@@ -82,7 +82,7 @@ def format_ssh_command(
     Args:
         credentials: SSH credentials string (e.g., 'root@84.200.81.243:32776')
         ssh_key_path: Optional path to SSH private key. 
-                      Defaults to ~/.ssh/basilica_ed25519
+                      Defaults to ~/.ssh/cathedral_ed25519
         
     Returns:
         Complete SSH command string
@@ -94,7 +94,7 @@ def format_ssh_command(
     
     # Use default key path if not provided (keep ~ unexpanded for display)
     if ssh_key_path is None:
-        display_key_path = "~/.ssh/basilica_ed25519"
+        display_key_path = "~/.ssh/cathedral_ed25519"
     else:
         display_key_path = ssh_key_path
     
@@ -132,8 +132,8 @@ def print_ssh_instructions(
         print(f"  User: {user}")
         
         # Check if key exists (expand for checking, but display with ~)
-        key_path_expanded = os.path.expanduser(ssh_key_path or "~/.ssh/basilica_ed25519")
-        display_path = ssh_key_path or "~/.ssh/basilica_ed25519"
+        key_path_expanded = os.path.expanduser(ssh_key_path or "~/.ssh/cathedral_ed25519")
+        display_path = ssh_key_path or "~/.ssh/cathedral_ed25519"
         if not os.path.exists(key_path_expanded):
             print(f"\n  Warning: SSH key not found at {display_path}")
             print(f"     Please ensure your SSH key is properly configured")
@@ -190,7 +190,7 @@ def wait_for_rental_ready(client, rental_id: str, rental_type: str = "cpu", time
     Wait for a rental to become ready with SSH access.
 
     Args:
-        client: BasilicaClient instance
+        client: CathedralClient instance
         rental_id: The rental ID to wait for
         rental_type: Type of rental - "cpu", "gpu", or "secure_cloud" (default: "cpu")
         timeout: Maximum time to wait in seconds (default: 5 minutes)

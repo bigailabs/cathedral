@@ -7,13 +7,13 @@ Note: Tests that hit /secure-cloud/gpu-prices require a token with
 secure-cloud permissions. They are skipped when the token lacks access.
 """
 import pytest
-from basilica import BasilicaClient, GpuPriceQuery
+from cathedral import CathedralClient, GpuPriceQuery
 
 
 @pytest.fixture(scope="module")
 def client():
     try:
-        return BasilicaClient()
+        return CathedralClient()
     except Exception as e:
         pytest.skip(f"No authentication available: {e}")
 

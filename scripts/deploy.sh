@@ -21,7 +21,7 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Deploy Basilica components to remote servers.
+Deploy Cathedral components to remote servers.
 
 OPTIONS:
     -s, --services SERVICES      Comma-separated list: validator,miner or 'all'

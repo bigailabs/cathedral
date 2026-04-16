@@ -1,6 +1,6 @@
 [Unit]
-Description=Basilica Validator Service
-Documentation=https://github.com/one-covenant/basilica
+Description=Cathedral Validator Service
+Documentation=https://github.com/one-covenant/cathedral
 After=network-online.target
 Wants=network-online.target
 
@@ -8,23 +8,23 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/basilica
+WorkingDirectory=/opt/cathedral
 Environment=RUST_LOG=debug
-ExecStart=/opt/basilica/basilica-validator --config /opt/basilica/config/validator.toml start
+ExecStart=/opt/cathedral/cathedral-validator --config /opt/cathedral/config/validator.toml start
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-validator
+SyslogIdentifier=cathedral-validator
 
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/basilica/data
-ReadWritePaths=/opt/basilica/logs
+ReadWritePaths=/opt/cathedral/data
+ReadWritePaths=/opt/cathedral/logs
 ProtectHome=yes
 RemoveIPC=yes
 

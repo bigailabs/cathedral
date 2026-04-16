@@ -1,14 +1,14 @@
-# Basilica SDK
+# Cathedral SDK
 
-Official Rust SDK for interacting with the Basilica GPU rental network.
+Official Rust SDK for interacting with the Cathedral GPU rental network.
 
 ## Overview
 
-This SDK provides a type-safe, async Rust client for the Basilica API. It was extracted from the `basilica-api` crate to enable code reuse across multiple consumers:
+This SDK provides a type-safe, async Rust client for the Cathedral API. It was extracted from the `cathedral-api` crate to enable code reuse across multiple consumers:
 
-- **basilica-api**: Re-exports the SDK for backward compatibility
-- **basilica-cli**: Uses the SDK directly for all API interactions
-- **basilica-sdk-python**: Python bindings built on top of this SDK
+- **cathedral-api**: Re-exports the SDK for backward compatibility
+- **cathedral-cli**: Uses the SDK directly for all API interactions
+- **cathedral-sdk-python**: Python bindings built on top of this SDK
 
 ## Installation
 
@@ -16,7 +16,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-basilica-sdk = "0.1"
+cathedral-sdk = "0.1"
 ```
 
 ## Usage
@@ -41,7 +41,7 @@ For complete usage examples and API documentation, please refer to the examples 
 Run tests with:
 
 ```bash
-cargo test -p basilica-sdk
+cargo test -p cathedral-sdk
 ```
 
 ## License

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hello World - Simplest Basilica deployment.
+Hello World - Simplest Cathedral deployment.
 
 Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 01_hello_world.py
 """
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="hello",
@@ -19,7 +19,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Hello from Basilica!')
+        self.wfile.write(b'Hello from Cathedral!')
 
 HTTPServer(('', 8000), Handler).serve_forever()
 """,

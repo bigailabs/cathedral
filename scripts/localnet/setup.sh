@@ -1,5 +1,5 @@
 #!/bin/bash
-# Basilica Localnet - One-time Setup
+# Cathedral Localnet - One-time Setup
 # Creates SSH keys and prepares the environment
 # Wallet creation is handled by init-subnet.sh
 
@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 show_help() {
-    echo "Basilica Localnet - One-time Setup"
+    echo "Cathedral Localnet - One-time Setup"
     echo ""
     echo "Usage: ./setup.sh [-h|--help]"
     echo ""
@@ -37,7 +37,7 @@ show_help() {
 [[ "${1:-}" =~ ^(-h|--help)$ ]] && show_help && exit 0
 
 echo "========================================"
-echo "  Basilica Localnet Setup"
+echo "  Cathedral Localnet Setup"
 echo "========================================"
 echo ""
 
@@ -86,7 +86,7 @@ if [ -f "${MINER_KEY}" ]; then
     echo "  Miner SSH key already exists"
 else
     echo "  Generating miner SSH key..."
-    ssh-keygen -t ed25519 -f "${MINER_KEY}" -N "" -C "basilica-miner-localnet"
+    ssh-keygen -t ed25519 -f "${MINER_KEY}" -N "" -C "cathedral-miner-localnet"
     chmod 600 "${MINER_KEY}"
     chmod 644 "${MINER_KEY}.pub"
 fi
@@ -97,7 +97,7 @@ if [ -f "${VALIDATOR_KEY}" ]; then
     echo "  Validator SSH key already exists"
 else
     echo "  Generating validator SSH key..."
-    ssh-keygen -t ed25519 -f "${VALIDATOR_KEY}" -N "" -C "basilica-validator-localnet"
+    ssh-keygen -t ed25519 -f "${VALIDATOR_KEY}" -N "" -C "cathedral-validator-localnet"
     chmod 600 "${VALIDATOR_KEY}"
     chmod 644 "${VALIDATOR_KEY}.pub"
 fi

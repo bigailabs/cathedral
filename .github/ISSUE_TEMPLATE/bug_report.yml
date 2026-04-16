@@ -71,7 +71,7 @@ body:
       placeholder: |
         - OS: [e.g., Ubuntu 22.04]
         - Rust version: [e.g., 1.75.0]
-        - Basilica version: [e.g., 0.1.0]
+        - Cathedral version: [e.g., 0.1.0]
         - Bittensor version: [if applicable]
         - Hardware: [if relevant, e.g., GPU model]
     validations:

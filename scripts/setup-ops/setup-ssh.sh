@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Automate SSH key distribution between Basilica servers
+# Automate SSH key distribution between Cathedral servers
 # Usage: ./scripts/setup-ops/setup-ssh.sh [config_file]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,7 +32,7 @@ VALIDATOR_SSH=$(parse_server "$VALIDATOR")
 MINER_SSH=$(parse_server "$MINER")
 EXECUTOR_SSH=$(parse_server "$EXECUTOR")
 
-echo "=== Basilica SSH Key Distribution ==="
+echo "=== Cathedral SSH Key Distribution ==="
 echo ""
 
 # Function to get public key from a server
@@ -40,7 +40,7 @@ get_public_key() {
     local server="$1"
     local name="$2"
     echo "Getting public key from $name..."
-    ssh $server "cat ~/.ssh/basilica.pub 2>/dev/null || echo 'Key not found'"
+    ssh $server "cat ~/.ssh/cathedral.pub 2>/dev/null || echo 'Key not found'"
 }
 
 # Function to add key to server
@@ -93,39 +93,39 @@ EXECUTOR_PORT=$(echo "$EXECUTOR" | cut -d: -f2)
 echo "Testing from validator..."
 ssh $VALIDATOR_SSH "
 echo '- Connecting to miner...'
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/basilica $MINER_HOST -p $MINER_PORT 'echo Connected to miner from validator' || echo 'Failed to connect to miner'
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cathedral $MINER_HOST -p $MINER_PORT 'echo Connected to miner from validator' || echo 'Failed to connect to miner'
 
 echo '- Connecting to executor...'
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/basilica $EXECUTOR_HOST -p $EXECUTOR_PORT 'echo Connected to executor from validator' || echo 'Failed to connect to executor'
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cathedral $EXECUTOR_HOST -p $EXECUTOR_PORT 'echo Connected to executor from validator' || echo 'Failed to connect to executor'
 "
 
 # Test connections from miner
 echo "Testing from miner..."
 ssh $MINER_SSH "
 echo '- Connecting to validator...'
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/basilica $VALIDATOR_HOST -p $VALIDATOR_PORT 'echo Connected to validator from miner' || echo 'Failed to connect to validator'
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cathedral $VALIDATOR_HOST -p $VALIDATOR_PORT 'echo Connected to validator from miner' || echo 'Failed to connect to validator'
 
 echo '- Connecting to executor...'
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/basilica $EXECUTOR_HOST -p $EXECUTOR_PORT 'echo Connected to executor from miner' || echo 'Failed to connect to executor'
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cathedral $EXECUTOR_HOST -p $EXECUTOR_PORT 'echo Connected to executor from miner' || echo 'Failed to connect to executor'
 "
 
 # Test connections from executor
 echo "Testing from executor..."
 ssh $EXECUTOR_SSH "
 echo '- Connecting to validator...'
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/basilica $VALIDATOR_HOST -p $VALIDATOR_PORT 'echo Connected to validator from executor' || echo 'Failed to connect to validator'
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cathedral $VALIDATOR_HOST -p $VALIDATOR_PORT 'echo Connected to validator from executor' || echo 'Failed to connect to validator'
 
 echo '- Connecting to miner...'
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/basilica $MINER_HOST -p $MINER_PORT 'echo Connected to miner from executor' || echo 'Failed to connect to miner'
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cathedral $MINER_HOST -p $MINER_PORT 'echo Connected to miner from executor' || echo 'Failed to connect to miner'
 "
 
 echo ""
 echo "=== SSH Setup Complete ==="
 echo "✅ All SSH keys have been distributed"
 echo "✅ Cross-machine connectivity tested"
-echo "✅ Ready for Basilica development and testing!"
+echo "✅ Ready for Cathedral development and testing!"
 echo ""
 echo "Manual connection examples:"
-echo "  From validator: ssh -i ~/.ssh/basilica $MINER_HOST -p $MINER_PORT"
-echo "  From miner:     ssh -i ~/.ssh/basilica $VALIDATOR_HOST -p $VALIDATOR_PORT"
-echo "  From executor:  ssh -i ~/.ssh/basilica $EXECUTOR_HOST -p $EXECUTOR_PORT"
+echo "  From validator: ssh -i ~/.ssh/cathedral $MINER_HOST -p $MINER_PORT"
+echo "  From miner:     ssh -i ~/.ssh/cathedral $VALIDATOR_HOST -p $VALIDATOR_PORT"
+echo "  From executor:  ssh -i ~/.ssh/cathedral $EXECUTOR_HOST -p $EXECUTOR_PORT"

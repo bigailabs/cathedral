@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: scripts/miner/Dockerfile
-    container_name: basilica-miner-local
+    container_name: cathedral-miner-local
     restart: unless-stopped
 
     environment:
@@ -12,9 +12,9 @@ services:
       - SSL_CERT_FILE=/etc/ssl/certs/subtensor-ca.crt
 
     volumes:
-      - ../../config/miner.local.toml:/var/lib/basilica/miner/miner.toml:ro
-      - miner-data-local:/var/lib/basilica/miner/data:rw
-      - ~/.bittensor:/var/lib/basilica/miner/.bittensor:rw
+      - ../../config/miner.local.toml:/var/lib/cathedral/miner/miner.toml:ro
+      - miner-data-local:/var/lib/cathedral/miner/data:rw
+      - ~/.bittensor:/var/lib/cathedral/miner/.bittensor:rw
       - ../subtensor-local/tls/ca.crt:/etc/ssl/certs/subtensor-ca.crt:ro
       - ~/.ssh/tplr:/root/.ssh/tplr:ro
       - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
@@ -25,14 +25,14 @@ services:
       - "9091:9090"     # Metrics port (offset to not conflict with validator)
 
     networks:
-      - basilica_network_local
+      - cathedral_network_local
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-    command: ["--config", "/var/lib/basilica/miner/miner.toml"]
+    command: ["--config", "/var/lib/cathedral/miner/miner.toml"]
 
 networks:
-  basilica_network_local:
+  cathedral_network_local:
     driver: bridge
 
 volumes:

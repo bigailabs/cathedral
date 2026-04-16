@@ -1,6 +1,6 @@
 [Unit]
-Description=Basilica Miner Service
-Documentation=https://github.com/one-covenant/basilica
+Description=Cathedral Miner Service
+Documentation=https://github.com/one-covenant/cathedral
 After=network-online.target
 Wants=network-online.target
 
@@ -8,23 +8,23 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/basilica
+WorkingDirectory=/opt/cathedral
 Environment=RUST_LOG=debug
-ExecStart=/opt/basilica/basilica-miner --config /opt/basilica/config/miner.toml
+ExecStart=/opt/cathedral/cathedral-miner --config /opt/cathedral/config/miner.toml
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-miner
+SyslogIdentifier=cathedral-miner
 
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/basilica/data
-ReadWritePaths=/opt/basilica/logs
+ReadWritePaths=/opt/cathedral/data
+ReadWritePaths=/opt/cathedral/logs
 ReadWritePaths=/root/.ssh
 ProtectHome=yes
 RemoveIPC=yes

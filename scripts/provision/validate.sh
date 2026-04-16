@@ -1,22 +1,22 @@
 #!/bin/bash
-# Basilica End-to-End Validation System
-# Comprehensive validation of the complete Basilica infrastructure
+# Cathedral End-to-End Validation System
+# Comprehensive validation of the complete Cathedral infrastructure
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASILICA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CATHEDRAL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 
 # Validation results tracking
-VALIDATION_LOG="$BASILICA_ROOT/validation_results.log"
+VALIDATION_LOG="$CATHEDRAL_ROOT/validation_results.log"
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
 
 print_usage() {
     cat << EOF
-validate.sh - Basilica End-to-End Infrastructure Validation
+validate.sh - Cathedral End-to-End Infrastructure Validation
 
 USAGE:
     validate.sh <COMMAND> [OPTIONS]
@@ -143,7 +143,7 @@ run_test() {
 
 # Command: Complete end-to-end validation
 cmd_all() {
-    log_header "Basilica Complete Infrastructure Validation"
+    log_header "Cathedral Complete Infrastructure Validation"
     validation_log "Starting complete validation for environment: $ENVIRONMENT"
     
     load_env_config
@@ -180,15 +180,15 @@ cmd_network() {
     
     # SSH connectivity tests
     run_test "ssh_validator_to_miner" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $MINER_HOST -p $MINER_PORT echo Success'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $MINER_HOST -p $MINER_PORT echo Success'" \
         "SSH connection from validator to miner"
     
     run_test "ssh_validator_to_executor" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $EXECUTOR_HOST -p $EXECUTOR_PORT echo Success'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $EXECUTOR_HOST -p $EXECUTOR_PORT echo Success'" \
         "SSH connection from validator to executor"
     
     run_test "ssh_miner_to_executor" \
-        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $EXECUTOR_HOST -p $EXECUTOR_PORT echo Success'" \
+        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $EXECUTOR_HOST -p $EXECUTOR_PORT echo Success'" \
         "SSH connection from miner to executor"
     
     # Service endpoint connectivity
@@ -242,28 +242,28 @@ cmd_services() {
     
     # Configuration files
     run_test "validator_config_exists" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'test -f /etc/basilica/validator.toml'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'test -f /etc/cathedral/validator.toml'" \
         "Validator configuration file exists"
     
     run_test "miner_config_exists" \
-        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'test -f /etc/basilica/miner.toml'" \
+        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'test -f /etc/cathedral/miner.toml'" \
         "Miner configuration file exists"
     
     run_test "executor_config_exists" \
-        "ssh -p $EXECUTOR_PORT $EXECUTOR_USER@$EXECUTOR_HOST 'test -f /etc/basilica/executor.toml'" \
+        "ssh -p $EXECUTOR_PORT $EXECUTOR_USER@$EXECUTOR_HOST 'test -f /etc/cathedral/executor.toml'" \
         "Executor configuration file exists"
     
     # Systemd services
     run_test "validator_service_enabled" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'systemctl is-enabled basilica-validator'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'systemctl is-enabled cathedral-validator'" \
         "Validator systemd service is enabled"
     
     run_test "miner_service_enabled" \
-        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'systemctl is-enabled basilica-miner'" \
+        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'systemctl is-enabled cathedral-miner'" \
         "Miner systemd service is enabled"
     
     run_test "executor_service_enabled" \
-        "ssh -p $EXECUTOR_PORT $EXECUTOR_USER@$EXECUTOR_HOST 'systemctl is-enabled basilica-executor'" \
+        "ssh -p $EXECUTOR_PORT $EXECUTOR_USER@$EXECUTOR_HOST 'systemctl is-enabled cathedral-executor'" \
         "Executor systemd service is enabled"
     
     # Service health (if running)
@@ -273,11 +273,11 @@ cmd_services() {
     
     # Database connectivity
     run_test "validator_database_accessible" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'test -f /var/lib/basilica/validator/validator.db'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'test -f /var/lib/cathedral/validator/validator.db'" \
         "Validator database file exists"
     
     run_test "miner_database_accessible" \
-        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'test -f /var/lib/basilica/miner/miner.db'" \
+        "ssh -p $MINER_PORT $MINER_USER@$MINER_HOST 'test -f /var/lib/cathedral/miner/miner.db'" \
         "Miner database file exists"
 }
 
@@ -288,7 +288,7 @@ cmd_security() {
     
     # SSH key security
     run_test "ssh_keys_secure_permissions" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'stat -c \"%a\" ~/.ssh/basilica | grep -q \"^600$\"'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'stat -c \"%a\" ~/.ssh/cathedral | grep -q \"^600$\"'" \
         "SSH private keys have secure permissions (600)"
     
     run_test "ssh_directory_secure" \
@@ -297,7 +297,7 @@ cmd_security() {
     
     # Configuration file security
     run_test "config_files_secure" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'find /etc/basilica -name \"*.toml\" -exec stat -c \"%a\" {} \\; | grep -q \"^640$\"'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'find /etc/cathedral -name \"*.toml\" -exec stat -c \"%a\" {} \\; | grep -q \"^640$\"'" \
         "Configuration files have secure permissions (640)"
     
     # Firewall configuration
@@ -306,13 +306,13 @@ cmd_security() {
         "UFW firewall is enabled on validator"
     
     # Service user security
-    run_test "basilica_user_exists" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'id basilica'" \
-        "Basilica system user exists"
+    run_test "cathedral_user_exists" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'id cathedral'" \
+        "Cathedral system user exists"
     
-    run_test "basilica_user_no_shell" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'getent passwd basilica | grep -q \"/bin/false\"'" \
-        "Basilica user has no shell access"
+    run_test "cathedral_user_no_shell" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'getent passwd cathedral | grep -q \"/bin/false\"'" \
+        "Cathedral user has no shell access"
 }
 
 # Command: Workflow validation
@@ -332,12 +332,12 @@ cmd_workflow() {
     
     # SSH validation workflow simulation
     run_test "ssh_validation_workflow" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $EXECUTOR_HOST -p $EXECUTOR_PORT \"echo Validation workflow success\"'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $EXECUTOR_HOST -p $EXECUTOR_PORT \"echo Validation workflow success\"'" \
         "SSH validation workflow can execute"
     
     # Service discovery validation
     run_test "service_discovery_config" \
-        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'test -f /etc/basilica/basilica_discovery.conf'" \
+        "ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'test -f /etc/cathedral/cathedral_discovery.conf'" \
         "Service discovery configuration is deployed"
     
     # Network topology validation
@@ -365,7 +365,7 @@ cmd_performance() {
         "Validator API responds within timeout"
     
     run_test "ssh_connection_speed" \
-        "timeout 30 ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=5 -i ~/.ssh/basilica $EXECUTOR_HOST -p $EXECUTOR_PORT hostname'" \
+        "timeout 30 ssh -p $VALIDATOR_PORT $VALIDATOR_USER@$VALIDATOR_HOST 'ssh -o ConnectTimeout=5 -i ~/.ssh/cathedral $EXECUTOR_HOST -p $EXECUTOR_PORT hostname'" \
         "SSH connections complete within reasonable time"
     
     # System resource checks
@@ -408,12 +408,12 @@ generate_validation_summary() {
 
 # Generate detailed validation report
 generate_validation_report() {
-    local report_file="$BASILICA_ROOT/validation_report_$(date +%Y%m%d_%H%M%S).md"
+    local report_file="$CATHEDRAL_ROOT/validation_report_$(date +%Y%m%d_%H%M%S).md"
     
     log_info "Generating detailed validation report: $report_file"
     
     cat > "$report_file" << EOF
-# Basilica Infrastructure Validation Report
+# Cathedral Infrastructure Validation Report
 
 **Date**: $(date)
 **Environment**: $ENVIRONMENT
@@ -463,7 +463,7 @@ For detailed troubleshooting, review the validation log: $VALIDATION_LOG
 EOF
     else
         cat >> "$report_file" << EOF
-All validation tests passed successfully. The Basilica infrastructure is properly configured and operational.
+All validation tests passed successfully. The Cathedral infrastructure is properly configured and operational.
 
 **Next Steps**:
 1. Begin production operations
@@ -484,7 +484,7 @@ main() {
     parse_args "$@"
     
     # Initialize validation log
-    echo "=== Basilica Validation Started at $(date) ===" > "$VALIDATION_LOG"
+    echo "=== Cathedral Validation Started at $(date) ===" > "$VALIDATION_LOG"
     
     case "$command" in
         all)

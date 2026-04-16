@@ -1,6 +1,6 @@
-# Basilica Documentation
+# Cathedral Documentation
 
-This directory contains comprehensive documentation for the Basilica decentralized GPU compute network built on Bittensor.
+This directory contains comprehensive documentation for the Cathedral decentralized GPU compute network built on Bittensor.
 
 ## Quick Navigation
 
@@ -21,9 +21,9 @@ This directory contains comprehensive documentation for the Basilica decentraliz
 
 ### Architecture Guide
 
-Comprehensive overview of Basilica's system design, including:
+Comprehensive overview of Cathedral's system design, including:
 
-- Core components (Validator, Miner, GPU Nodes, Basilica API)
+- Core components (Validator, Miner, GPU Nodes, Cathedral API)
 - Communication protocols (Bittensor, gRPC, SSH, REST)
 - Security architecture with cryptographic framework
 - Direct SSH-based verification model and deployment patterns
@@ -136,6 +136,6 @@ See `config/README.md` for detailed configuration instructions.
 
 - **Configuration Examples**: Production-ready config templates in `config/`
 - **Deployment Scripts**: Automated deployment tools in `scripts/`
-- **GitHub Repository**: https://github.com/one-covenant/basilica
+- **GitHub Repository**: https://github.com/one-covenant/cathedral
 - **Discord**: https://discord.gg/Cy7c9vPsNK
 - **Website**: https://www.basilica.ai/

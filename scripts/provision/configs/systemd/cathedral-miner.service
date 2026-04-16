@@ -1,18 +1,18 @@
 [Unit]
-Description=Basilica Miner Service
-Documentation=https://github.com/spacejar/basilica
+Description=Cathedral Miner Service
+Documentation=https://github.com/spacejar/cathedral
 After=network-online.target
 Wants=network-online.target
-RequiresMountsFor=/var/lib/basilica
+RequiresMountsFor=/var/lib/cathedral
 
 [Service]
 Type=simple
-User=basilica
-Group=basilica
-WorkingDirectory=/var/lib/basilica/miner
+User=cathedral
+Group=cathedral
+WorkingDirectory=/var/lib/cathedral/miner
 Environment=RUST_LOG=info
 Environment=RUST_BACKTRACE=1
-ExecStart=/usr/local/bin/basilica-miner --config /etc/basilica/miner.toml
+ExecStart=/usr/local/bin/cathedral-miner --config /etc/cathedral/miner.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
@@ -20,14 +20,14 @@ TimeoutStartSec=60
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-miner
+SyslogIdentifier=cathedral-miner
 
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/basilica /var/log/basilica
+ReadWritePaths=/var/lib/cathedral /var/log/cathedral
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

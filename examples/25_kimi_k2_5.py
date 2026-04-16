@@ -24,9 +24,9 @@ Reference:
     https://huggingface.co/moonshotai/Kimi-K2-Instruct
     https://docs.vllm.ai/projects/recipes/en/latest/moonshotai/Kimi-K2.html
 """
-import basilica
-from basilica import (
-    BasilicaClient,
+import cathedral
+from cathedral import (
+    CathedralClient,
     CreateDeploymentRequest,
     GpuRequirementsSpec,
     HealthCheckConfig,
@@ -37,7 +37,7 @@ from basilica import (
 
 def deploy_kimi_k2():
     """Deploy Kimi-K2-Instruct with custom configuration for large model loading."""
-    client = BasilicaClient()
+    client = CathedralClient()
 
     model = "moonshotai/Kimi-K2-Instruct"
 
@@ -115,24 +115,24 @@ def deploy_kimi_k2():
     print()
 
     response = client._client.create_deployment(request)
-    deployment = basilica.Deployment._from_response(client, response)
+    deployment = cathedral.Deployment._from_response(client, response)
 
     print(f"Deployment created: {deployment.name}")
     print(f"URL: {deployment.url}")
     print()
     print("Waiting for model to load (this takes 15-20 minutes)...")
-    print("Monitor with: basilica deploy logs kimi-k2-instruct --follow")
+    print("Monitor with: cathedral deploy logs kimi-k2-instruct --follow")
     print()
 
     try:
         deployment.wait_until_ready(timeout=2400, silent=False)
-    except basilica.exceptions.DeploymentFailed:
+    except cathedral.exceptions.DeploymentFailed:
         print()
         print("Deployment is still loading the model.")
         print("Large models like Kimi-K2 require extended startup time.")
         print()
         print("Check progress with:")
-        print(f"  basilica deploy logs {deployment.name} --follow")
+        print(f"  cathedral deploy logs {deployment.name} --follow")
         print()
         print("When ready, the API will be available at:")
         print(f"  {deployment.url}/v1/chat/completions")

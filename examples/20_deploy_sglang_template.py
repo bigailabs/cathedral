@@ -12,9 +12,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 20_deploy_sglang_template.py
 """
-import basilica
+import cathedral
 
-client = basilica.BasilicaClient()
+client = cathedral.CathedralClient()
 
 # Deploy SGLang with minimal configuration - uses defaults
 print("Deploying SGLang with Qwen/Qwen2.5-0.5B-Instruct (default model)...")

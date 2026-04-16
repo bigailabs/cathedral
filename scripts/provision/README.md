@@ -1,10 +1,10 @@
-# Basilica Provisioning System
+# Cathedral Provisioning System
 
-Comprehensive end-to-end provisioning solution for the Basilica decentralized GPU rental marketplace.
+Comprehensive end-to-end provisioning solution for the Cathedral decentralized GPU rental marketplace.
 
 ## Overview
 
-The Basilica provisioning system automates the complete setup and management of a three-tier architecture:
+The Cathedral provisioning system automates the complete setup and management of a three-tier architecture:
 
 - **Validator**: Verifies hardware attestations and manages consensus
 - **Miner**: Manages executor fleets and serves validator requests  
@@ -30,34 +30,34 @@ vim scripts/provision/environments/development.conf
 
 ```bash
 # Complete provisioning for production
-./scripts/basilica.sh provision all --env production
+./scripts/cathedral.sh provision all --env production
 
 # Or step by step
-./scripts/basilica.sh provision servers   # Setup server dependencies
-./scripts/basilica.sh provision configure # Generate configurations
-./scripts/basilica.sh deploy production   # Deploy services
-./scripts/basilica.sh provision validate  # Validate setup
+./scripts/cathedral.sh provision servers   # Setup server dependencies
+./scripts/cathedral.sh provision configure # Generate configurations
+./scripts/cathedral.sh deploy production   # Deploy services
+./scripts/cathedral.sh provision validate  # Validate setup
 ```
 
 ### 3. Manage Services
 
 ```bash
 # Check service status
-./scripts/basilica.sh manage status
+./scripts/cathedral.sh manage status
 
 # Start/stop services
-./scripts/basilica.sh manage start
-./scripts/basilica.sh manage stop validator
+./scripts/cathedral.sh manage start
+./scripts/cathedral.sh manage stop validator
 
 # View logs
-./scripts/basilica.sh manage logs executor --follow
+./scripts/cathedral.sh manage logs executor --follow
 ```
 
 ## System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    BASILICA NETWORK                                     │
+│                                    CATHEDRAL NETWORK                                     │
 ├─────────────────┬─────────────────┬───────────────────────────────────┬─────────────────┤
 │    VALIDATOR    │      MINER      │              EXECUTOR             │   GPU-ATTESTOR  │
 │   (Verifier)    │ (Fleet Manager) │           (GPU Machine)           │   (Attestation) │
@@ -98,7 +98,7 @@ vim scripts/provision/environments/development.conf
 
 ### 3. Deployment Phase (`deploy <environment>`)
 
-- Build Basilica binaries from source
+- Build Cathedral binaries from source
 - Deploy binaries to respective servers
 - Install systemd services
 - Configure database connections
@@ -125,22 +125,22 @@ vim scripts/provision/environments/development.conf
 
 ```bash
 # Provisioning commands
-./scripts/basilica.sh provision all              # Complete end-to-end provisioning
-./scripts/basilica.sh provision servers          # Setup servers with dependencies
-./scripts/basilica.sh provision configure        # Generate service configurations
-./scripts/basilica.sh provision validate         # Validate infrastructure
+./scripts/cathedral.sh provision all              # Complete end-to-end provisioning
+./scripts/cathedral.sh provision servers          # Setup servers with dependencies
+./scripts/cathedral.sh provision configure        # Generate service configurations
+./scripts/cathedral.sh provision validate         # Validate infrastructure
 
 # Deployment commands  
-./scripts/basilica.sh deploy production          # Deploy to production
-./scripts/basilica.sh deploy staging             # Deploy to staging
-./scripts/basilica.sh deploy development         # Deploy to development
+./scripts/cathedral.sh deploy production          # Deploy to production
+./scripts/cathedral.sh deploy staging             # Deploy to staging
+./scripts/cathedral.sh deploy development         # Deploy to development
 
 # Management commands
-./scripts/basilica.sh manage status              # Check service status
-./scripts/basilica.sh manage start [service]     # Start services
-./scripts/basilica.sh manage stop [service]      # Stop services
-./scripts/basilica.sh manage restart [service]   # Restart services
-./scripts/basilica.sh manage logs [service]      # View service logs
+./scripts/cathedral.sh manage status              # Check service status
+./scripts/cathedral.sh manage start [service]     # Start services
+./scripts/cathedral.sh manage stop [service]      # Stop services
+./scripts/cathedral.sh manage restart [service]   # Restart services
+./scripts/cathedral.sh manage logs [service]      # View service logs
 ```
 
 ### Direct Script Access
@@ -296,7 +296,7 @@ Automatically configured by the provisioning system:
 2. **Service Startup Failures**
    ```bash
    # Check service logs
-   ./scripts/basilica.sh manage logs validator
+   ./scripts/cathedral.sh manage logs validator
    
    # Validate configuration
    ./scripts/provision/validate.sh services --env production
@@ -331,13 +331,13 @@ Automatically configured by the provisioning system:
 
 ```bash
 # View real-time logs
-./scripts/basilica.sh manage logs executor --follow
+./scripts/cathedral.sh manage logs executor --follow
 
 # Search logs for errors
-./scripts/basilica.sh manage logs validator | grep ERROR
+./scripts/cathedral.sh manage logs validator | grep ERROR
 
 # Check systemd service status
-ssh user@host 'sudo systemctl status basilica-validator'
+ssh user@host 'sudo systemctl status cathedral-validator'
 ```
 
 ## Advanced Usage
@@ -354,7 +354,7 @@ cp scripts/provision/environments/production.conf scripts/provision/environments
 vim scripts/provision/environments/custom.conf
 
 # Use custom environment
-./scripts/basilica.sh provision all --env custom
+./scripts/cathedral.sh provision all --env custom
 ```
 
 ### Partial Deployments
@@ -375,21 +375,21 @@ Perform rolling updates with zero downtime:
 
 ```bash
 # Stop services in reverse order
-./scripts/basilica.sh manage stop validator
-./scripts/basilica.sh manage stop miner
+./scripts/cathedral.sh manage stop validator
+./scripts/cathedral.sh manage stop miner
 
 # Deploy new version
-./scripts/basilica.sh deploy production
+./scripts/cathedral.sh deploy production
 
 # Start services in dependency order
-./scripts/basilica.sh manage start executor
-./scripts/basilica.sh manage start miner
-./scripts/basilica.sh manage start validator
+./scripts/cathedral.sh manage start executor
+./scripts/cathedral.sh manage start miner
+./scripts/cathedral.sh manage start validator
 ```
 
 ## Integration with Existing Scripts
 
-The provisioning system integrates with existing Basilica scripts:
+The provisioning system integrates with existing Cathedral scripts:
 
 - **setup-ops/**: Used for initial server setup and dependency installation
 - **production/**: Extended with enhanced deployment and configuration features  

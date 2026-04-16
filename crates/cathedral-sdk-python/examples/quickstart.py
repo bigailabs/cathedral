@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Basilica SDK Quickstart - Minimal example
+Cathedral SDK Quickstart - Minimal example
 """
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 from ssh_utils import format_ssh_command
 
-print("Starting Basilica rental with default configuration...")
+print("Starting Cathedral rental with default configuration...")
 
 # That's it! The client auto-configures from BASILICA_API_TOKEN environment variable
-# Create a token using: basilica tokens create
-client = BasilicaClient()
+# Create a token using: cathedral tokens create
+client = CathedralClient()
 
 print("Requesting b200 GPU rental...")
 

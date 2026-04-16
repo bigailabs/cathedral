@@ -1,5 +1,5 @@
 [package]
-name = "basilica-migrations"
+name = "cathedral-migrations"
 version = "0.1.0"
 edition = "2021"
 

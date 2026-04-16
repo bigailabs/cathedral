@@ -1,4 +1,4 @@
-# Deploy LLM Inference on Basilica
+# Deploy LLM Inference on Cathedral
 
 Deploy OpenAI-compatible LLM endpoints with a single command.
 
@@ -12,7 +12,7 @@ python3 quickstart.py
 This deploys a small model and returns an endpoint you can use immediately:
 
 ```bash
-curl https://your-deployment.deployments.basilica.ai/v1/chat/completions \
+curl https://your-deployment.deployments.cathedral.ai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen/Qwen2.5-0.5B-Instruct", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
@@ -20,7 +20,7 @@ curl https://your-deployment.deployments.basilica.ai/v1/chat/completions \
 ## CLI Alternative
 
 ```bash
-basilica deploy vllm Qwen/Qwen2.5-0.5B-Instruct --name my-llm
+cathedral deploy vllm Qwen/Qwen2.5-0.5B-Instruct --name my-llm
 ```
 
 ## Configuration
@@ -69,10 +69,10 @@ def serve():
 ## Management
 
 ```bash
-basilica deploy ls                    # List deployments
-basilica deploy status my-llm         # Check status
-basilica deploy logs my-llm --follow  # Stream logs
-basilica deploy delete my-llm         # Delete
+cathedral deploy ls                    # List deployments
+cathedral deploy status my-llm         # Check status
+cathedral deploy logs my-llm --follow  # Stream logs
+cathedral deploy delete my-llm         # Delete
 ```
 
 ## Reference Examples

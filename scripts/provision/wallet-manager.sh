@@ -265,7 +265,7 @@ main() {
             ;;
         help|*)
             cat << EOF
-Basilica Wallet Manager
+Cathedral Wallet Manager
 
 Usage: wallet-manager.sh <command> [options]
 

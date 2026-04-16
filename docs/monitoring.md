@@ -1,10 +1,10 @@
 # Monitoring Guide
 
-This guide covers setting up monitoring for your Basilica network deployment using the included Prometheus and Grafana configuration.
+This guide covers setting up monitoring for your Cathedral network deployment using the included Prometheus and Grafana configuration.
 
 ## Overview
 
-Basilica services provide built-in metrics that can be monitored using Prometheus and Grafana. The project includes pre-configured monitoring setup for easy deployment.
+Cathedral services provide built-in metrics that can be monitored using Prometheus and Grafana. The project includes pre-configured monitoring setup for easy deployment.
 
 ## Available Monitoring Setup
 
@@ -55,7 +55,7 @@ cat > docker-compose.monitoring.yml << 'EOF'
 services:
   prometheus:
     image: prom/prometheus:latest
-    container_name: basilica-prometheus
+    container_name: cathedral-prometheus
     ports:
       - "9090:9090"
     volumes:
@@ -68,7 +68,7 @@ services:
 
   grafana:
     image: grafana/grafana:latest
-    container_name: basilica-grafana
+    container_name: cathedral-grafana
     ports:
       - "3000:3000"
     volumes:
@@ -113,28 +113,28 @@ curl http://localhost:8080/metrics
 
 ### System Health
 
-- `basilica_cpu_usage_percent` - CPU utilization
-- `basilica_memory_usage_bytes` - Memory usage
-- `basilica_disk_usage_percent` - Disk usage percentage
+- `cathedral_cpu_usage_percent` - CPU utilization
+- `cathedral_memory_usage_bytes` - Memory usage
+- `cathedral_disk_usage_percent` - Disk usage percentage
 
 ### GPU Metrics (from GPU Nodes)
 
-- `basilica_gpu_utilization_percent` - GPU utilization
-- `basilica_gpu_memory_used_bytes` - GPU memory usage
-- `basilica_gpu_temperature_celsius` - GPU temperature
-- `basilica_gpu_power_watts` - GPU power consumption
-- `basilica_gpu_clock_mhz` - GPU clock speed
-- `basilica_network_bandwidth_mbps` - Network bandwidth usage
+- `cathedral_gpu_utilization_percent` - GPU utilization
+- `cathedral_gpu_memory_used_bytes` - GPU memory usage
+- `cathedral_gpu_temperature_celsius` - GPU temperature
+- `cathedral_gpu_power_watts` - GPU power consumption
+- `cathedral_gpu_clock_mhz` - GPU clock speed
+- `cathedral_network_bandwidth_mbps` - Network bandwidth usage
 
 ### Service Performance
 
-- `basilica_validator_validations_total` - Total validations performed
-- `basilica_miner_node_health_checks_total` - GPU node health checks
+- `cathedral_validator_validations_total` - Total validations performed
+- `cathedral_miner_node_health_checks_total` - GPU node health checks
 
 ### Network Activity
 
-- `basilica_validator_ssh_connections_total` - SSH connections
-- `basilica_miner_ssh_sessions_active` - Active SSH sessions
+- `cathedral_validator_ssh_connections_total` - SSH connections
+- `cathedral_miner_ssh_sessions_active` - Active SSH sessions
 
 ## Production Monitoring
 
@@ -158,23 +158,23 @@ In Grafana, create basic panels with these queries:
 
 ```promql
 # CPU Usage
-basilica_cpu_usage_percent
+cathedral_cpu_usage_percent
 
 # Memory Usage  
-basilica_memory_usage_bytes / 1024 / 1024 / 1024
+cathedral_memory_usage_bytes / 1024 / 1024 / 1024
 
 # Service Uptime
-up{job=~"basilica.*"}
+up{job=~"cathedral.*"}
 ```
 
 **Validation Activity:**
 
 ```promql
 # Validation Rate
-rate(basilica_validator_validations_total[5m])
+rate(cathedral_validator_validations_total[5m])
 
 # SSH Connections
-rate(basilica_validator_ssh_connections_total[5m])
+rate(cathedral_validator_ssh_connections_total[5m])
 ```
 
 ## Troubleshooting

@@ -1,6 +1,6 @@
 [Unit]
-Description=Basilica Miner Service
-Documentation=https://github.com/spacejar/basilica
+Description=Cathedral Miner Service
+Documentation=https://github.com/spacejar/cathedral
 After=network-online.target
 Wants=network-online.target
 
@@ -8,20 +8,20 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/basilica
-ExecStartPre=/bin/bash -c 'mkdir -p /opt/basilica/{data,logs}'
-ExecStart=/opt/basilica/bin/basilica-miner --config /opt/basilica/config/miner.toml
+WorkingDirectory=/opt/cathedral
+ExecStartPre=/bin/bash -c 'mkdir -p /opt/cathedral/{data,logs}'
+ExecStart=/opt/cathedral/bin/cathedral-miner --config /opt/cathedral/config/miner.toml
 Restart=always
 RestartSec=10
-StandardOutput=append:/opt/basilica/logs/miner.log
-StandardError=append:/opt/basilica/logs/miner.error.log
+StandardOutput=append:/opt/cathedral/logs/miner.log
+StandardError=append:/opt/cathedral/logs/miner.error.log
 
 # Security settings
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=/opt/basilica /root/.bittensor
+ReadWritePaths=/opt/cathedral /root/.bittensor
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

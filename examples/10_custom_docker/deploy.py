@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Deploy a custom Docker image to Basilica.
+Deploy a custom Docker image to Cathedral.
 
 For multi-file projects, build a Docker image and push to a registry,
-then deploy the image to Basilica.
+then deploy the image to Cathedral.
 
 Prerequisites:
     1. Build and push your image:
@@ -21,7 +21,7 @@ Usage:
     python3 deploy.py ghcr.io/myuser/my-api:latest
 """
 import sys
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 if len(sys.argv) < 2:
     print("Usage: python3 deploy.py <image-name>")
@@ -30,7 +30,7 @@ if len(sys.argv) < 2:
 
 image = sys.argv[1]
 
-client = BasilicaClient()
+client = CathedralClient()
 
 print(f"Deploying image: {image}")
 

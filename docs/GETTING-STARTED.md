@@ -1,6 +1,6 @@
-# Basilica SDK - Complete Getting Started Guide
+# Cathedral SDK - Complete Getting Started Guide
 
-This guide walks you through everything you need to start using the Basilica SDK, from generating your API token to running your first GPU rental or deployment.
+This guide walks you through everything you need to start using the Cathedral SDK, from generating your API token to running your first GPU rental or deployment.
 
 ## Table of Contents
 
@@ -18,28 +18,28 @@ This guide walks you through everything you need to start using the Basilica SDK
 Before you begin, ensure you have:
 
 - **Python 3.10 or higher** installed
-- **Basilica CLI** installed (for token generation)
+- **Cathedral CLI** installed (for token generation)
 - **SSH key pair** for GPU rental access (optional, can be generated)
-- **Internet connection** to access the Basilica API
+- **Internet connection** to access the Cathedral API
 
-### Installing the Basilica CLI
+### Installing the Cathedral CLI
 
 If you don't have the CLI installed yet:
 
 ```bash
 # From the repository root
-cargo install --path crates/basilica-cli
+cargo install --path crates/cathedral-cli
 
 # Or build from source
-cd crates/basilica-cli
+cd crates/cathedral-cli
 cargo build --release
-sudo cp target/release/basilica /usr/local/bin/
+sudo cp target/release/cathedral /usr/local/bin/
 ```
 
 Verify installation:
 
 ```bash
-basilica --version
+cathedral --version
 ```
 
 ---
@@ -52,26 +52,26 @@ There are three methods to generate a `BASILICA_API_TOKEN`:
 
 This is the **recommended** method for production use.
 
-#### Step 1: Authenticate with Basilica
+#### Step 1: Authenticate with Cathedral
 
 First, you need to authenticate to get a JWT token. The CLI uses file-based authentication:
 
 ```bash
 # The CLI will prompt you for credentials or use existing JWT token
-# stored in ~/.basilica/credentials
-basilica tokens create
+# stored in ~/.cathedral/credentials
+cathedral tokens create
 ```
 
-If you don't have credentials set up yet, you'll need to authenticate first. The authentication method depends on your Basilica deployment configuration.
+If you don't have credentials set up yet, you'll need to authenticate first. The authentication method depends on your Cathedral deployment configuration.
 
 #### Step 2: Create Your API Token
 
 ```bash
 # Create a token with a descriptive name
-basilica tokens create my-dev-token
+cathedral tokens create my-dev-token
 
 # Or create interactively (will prompt for name)
-basilica tokens create
+cathedral tokens create
 ```
 
 **Output:**
@@ -79,12 +79,12 @@ basilica tokens create
 ```
 API token created successfully!
 
-Token: basilica_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z
+Token: cathedral_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z
 
 IMPORTANT: This token will only be shown once. Save it securely!
 
 Set it as an environment variable:
-  export BASILICA_API_TOKEN="basilica_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z"
+  export BASILICA_API_TOKEN="cathedral_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z"
 
 Token details:
   Name: my-dev-token
@@ -95,10 +95,10 @@ Token details:
 
 ```bash
 # For current shell session
-export BASILICA_API_TOKEN="basilica_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z"
+export BASILICA_API_TOKEN="cathedral_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z"
 
 # Or add to your shell profile for persistence
-echo 'export BASILICA_API_TOKEN="basilica_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z"' >> ~/.bashrc
+echo 'export BASILICA_API_TOKEN="cathedral_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -106,7 +106,7 @@ source ~/.bashrc
 
 ```bash
 echo $BASILICA_API_TOKEN
-# Should output: basilica_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z
+# Should output: cathedral_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z
 ```
 
 ### Method 2: Using the Bootstrap Script (Development/Testing)
@@ -124,10 +124,10 @@ cd scripts/e2e
 
 ```
 Generated API token for user: test-user
-Token: basilica_abc123...
+Token: cathedral_abc123...
 
 Run this command to set it:
-  export BASILICA_API_TOKEN="basilica_abc123..."
+  export BASILICA_API_TOKEN="cathedral_abc123..."
 ```
 
 ### Method 3: Programmatic Generation (Advanced)
@@ -135,14 +135,14 @@ Run this command to set it:
 For automated systems, you can generate tokens programmatically using the Rust SDK:
 
 ```rust
-use basilica_sdk::ClientBuilder;
+use cathedral_sdk::ClientBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // First authenticate with JWT
     let client = ClientBuilder::default()
         .base_url("https://api.basilica.ai")
-        .with_file_based_auth()  // Uses ~/.basilica/credentials
+        .with_file_based_auth()  // Uses ~/.cathedral/credentials
         .build()?;
 
     // Create API token
@@ -159,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 # List all your tokens
-basilica tokens list
+cathedral tokens list
 
 # Output:
 # ID                                Name              Created              Last Used
@@ -167,10 +167,10 @@ basilica tokens list
 # 2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q  my-test-token     2025-11-01 10:15:32  Never
 
 # Revoke a token
-basilica tokens revoke my-dev-token
+cathedral tokens revoke my-dev-token
 
 # Or with auto-confirmation
-basilica tokens revoke my-dev-token --yes
+cathedral tokens revoke my-dev-token --yes
 ```
 
 **Token Limits:**
@@ -191,7 +191,7 @@ python3 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Install from PyPI
-pip install basilica-sdk
+pip install cathedral-sdk
 ```
 
 ### Option 2: Install from Source (For Development)
@@ -213,28 +213,28 @@ pip install maturin
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/basilica.git
-cd basilica
+git clone https://github.com/your-org/cathedral.git
+cd cathedral
 
 # Create virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 
 # Navigate to Python SDK directory
-cd crates/basilica-sdk-python
+cd crates/cathedral-sdk-python
 
 # Build and install in development mode
 maturin develop
 
 # Or build a wheel for distribution
 maturin build --release
-pip install target/wheels/basilica_sdk-*.whl
+pip install target/wheels/cathedral_sdk-*.whl
 ```
 
 #### Verify Installation
 
 ```bash
-python3 -c "from basilica import BasilicaClient; print('✓ SDK installed successfully')"
+python3 -c "from cathedral import CathedralClient; print('✓ SDK installed successfully')"
 ```
 
 **Expected output:**
@@ -253,20 +253,20 @@ Let's verify everything is set up correctly with a simple health check:
 
 ```bash
 # Create test script
-cat > test_basilica.py << 'EOF'
+cat > test_cathedral.py << 'EOF'
 #!/usr/bin/env python3
-"""Quick test to verify Basilica SDK is working"""
+"""Quick test to verify Cathedral SDK is working"""
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 def main():
     # SDK auto-detects BASILICA_API_TOKEN from environment
-    client = BasilicaClient()
+    client = CathedralClient()
 
     # Health check
     health = client.health_check()
 
-    print("=== Basilica API Health Check ===")
+    print("=== Cathedral API Health Check ===")
     print(f"Status: {health.status}")
     print(f"Version: {health.version}")
     print(f"Healthy Validators: {health.healthy_validators}/{health.total_validators}")
@@ -276,7 +276,7 @@ if __name__ == "__main__":
     main()
 EOF
 
-chmod +x test_basilica.py
+chmod +x test_cathedral.py
 ```
 
 ### Run the Test
@@ -286,13 +286,13 @@ chmod +x test_basilica.py
 export BASILICA_API_TOKEN="your-token-here"
 
 # Run test
-python3 test_basilica.py
+python3 test_cathedral.py
 ```
 
 **Expected Output:**
 
 ```
-=== Basilica API Health Check ===
+=== Cathedral API Health Check ===
 Status: ok
 Version: 0.1.0
 Healthy Validators: 5/5
@@ -310,26 +310,26 @@ Here's a comprehensive example demonstrating the full workflow:
 
 ```bash
 # Generate SSH key for GPU access
-ssh-keygen -t ed25519 -f ~/.ssh/basilica_ed25519 -N ""
+ssh-keygen -t ed25519 -f ~/.ssh/cathedral_ed25519 -N ""
 
 # Verify key was created
-ls -la ~/.ssh/basilica_ed25519*
+ls -la ~/.ssh/cathedral_ed25519*
 ```
 
 ### Complete Example Script
 
 ```bash
-cat > basilica_complete_example.py << 'EOF'
+cat > cathedral_complete_example.py << 'EOF'
 #!/usr/bin/env python3
 """
-Complete Basilica SDK Example
+Complete Cathedral SDK Example
 Demonstrates: health check, node listing, rental creation, and deployments
 """
 
 import os
 import sys
 import time
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 def print_section(title):
     """Print section header"""
@@ -342,11 +342,11 @@ def main():
     api_token = os.environ.get("BASILICA_API_TOKEN")
     if not api_token:
         print("Error: BASILICA_API_TOKEN environment variable not set")
-        print("Generate one with: basilica tokens create")
+        print("Generate one with: cathedral tokens create")
         sys.exit(1)
 
     # Initialize client
-    client = BasilicaClient()
+    client = CathedralClient()
     print(f"✓ Client initialized with token: {api_token[:20]}...")
 
     # 1. Health Check
@@ -392,7 +392,7 @@ def main():
 
     if rental.ssh_credentials:
         print(f"SSH: {rental.ssh_credentials}")
-        print(f"Connect: ssh -i ~/.ssh/basilica_ed25519 {rental.ssh_credentials}")
+        print(f"Connect: ssh -i ~/.ssh/cathedral_ed25519 {rental.ssh_credentials}")
     """)
 
     # 4. Create a Deployment (Example - commented out)
@@ -469,7 +469,7 @@ if __name__ == "__main__":
     main()
 EOF
 
-chmod +x basilica_complete_example.py
+chmod +x cathedral_complete_example.py
 ```
 
 ### Run the Example
@@ -479,13 +479,13 @@ chmod +x basilica_complete_example.py
 export BASILICA_API_TOKEN="your-token-here"
 
 # Run the example
-python3 basilica_complete_example.py
+python3 cathedral_complete_example.py
 ```
 
 **Expected Output:**
 
 ```
-✓ Client initialized with token: basilica_1a2b3c4d5e...
+✓ Client initialized with token: cathedral_1a2b3c4d5e...
 
 ============================================================
   1. API Health Check
@@ -543,13 +543,13 @@ source ~/.bashrc
 2. Check token hasn't been revoked:
 
    ```bash
-   basilica tokens list
+   cathedral tokens list
    ```
 
 3. Generate a new token:
 
    ```bash
-   basilica tokens create fresh-token
+   cathedral tokens create fresh-token
    ```
 
 ### Issue: "Failed to create runtime" or "Connection refused"
@@ -571,7 +571,7 @@ source ~/.bashrc
 3. Try with explicit API URL:
 
    ```python
-   client = BasilicaClient(base_url="https://api.basilica.ai")
+   client = CathedralClient(base_url="https://api.basilica.ai")
    ```
 
 ### Issue: "SSH connection failed" when connecting to rental
@@ -581,46 +581,46 @@ source ~/.bashrc
 1. Verify SSH key exists:
 
    ```bash
-   ls -la ~/.ssh/basilica_ed25519*
+   ls -la ~/.ssh/cathedral_ed25519*
    ```
 
 2. Generate SSH key if missing:
 
    ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/basilica_ed25519 -N ""
+   ssh-keygen -t ed25519 -f ~/.ssh/cathedral_ed25519 -N ""
    ```
 
 3. Check SSH key permissions:
 
    ```bash
-   chmod 600 ~/.ssh/basilica_ed25519
-   chmod 644 ~/.ssh/basilica_ed25519.pub
+   chmod 600 ~/.ssh/cathedral_ed25519
+   chmod 644 ~/.ssh/cathedral_ed25519.pub
    ```
 
 4. Use explicit SSH key path:
 
    ```python
    rental = client.start_rental(
-       ssh_pubkey_path="~/.ssh/basilica_ed25519.pub",
+       ssh_pubkey_path="~/.ssh/cathedral_ed25519.pub",
        gpu_type="b200"
    )
    ```
 
-### Issue: "Module not found: basilica"
+### Issue: "Module not found: cathedral"
 
 **Solutions:**
 
 1. Verify SDK is installed:
 
    ```bash
-   pip list | grep basilica
+   pip list | grep cathedral
    ```
 
 2. Reinstall SDK:
 
    ```bash
-   pip uninstall basilica-sdk
-   pip install basilica-sdk
+   pip uninstall cathedral-sdk
+   pip install cathedral-sdk
    ```
 
 3. Check Python path:
@@ -636,7 +636,7 @@ source ~/.bashrc
 1. Check operator logs:
 
    ```bash
-   kubectl logs -f deployment/basilica-operator -n basilica-system
+   kubectl logs -f deployment/cathedral-operator -n cathedral-system
    ```
 
 2. Check pod status:
@@ -658,13 +658,13 @@ source ~/.bashrc
 
 ```bash
 # List all tokens
-basilica tokens list
+cathedral tokens list
 
 # Revoke unused tokens
-basilica tokens revoke old-token-name
+cathedral tokens revoke old-token-name
 
 # Or revoke without confirmation
-basilica tokens revoke old-token-name --yes
+cathedral tokens revoke old-token-name --yes
 ```
 
 ---
@@ -676,7 +676,7 @@ basilica tokens revoke old-token-name --yes
 Check out the `examples/` directory for more advanced usage:
 
 ```bash
-cd crates/basilica-sdk-python/examples
+cd crates/cathedral-sdk-python/examples
 
 # Start a GPU rental with custom configuration
 python3 start_rental.py
@@ -690,14 +690,14 @@ python3 ../../../examples/deploy_container.py
 
 ### Read Documentation
 
-- **SDK Reference**: `crates/basilica-sdk-python/README.md`
+- **SDK Reference**: `crates/cathedral-sdk-python/README.md`
 - **Deployment Guide**: `examples/README-deployments.md`
 - **Integration Tests**: `tests/integration/README.md`
-- **Architecture**: `prompts/k3s-basilica-sdk.architecture.md`
+- **Architecture**: `prompts/k3s-cathedral-sdk.architecture.md`
 
 ### Join the Community
 
-- GitHub: <https://github.com/your-org/basilica>
+- GitHub: <https://github.com/your-org/cathedral>
 - Discord: <https://discord.gg/Cy7c9vPsNK>
 - Documentation: <https://docs.basilica.ai>
 
@@ -709,29 +709,29 @@ python3 ../../../examples/deploy_container.py
 
 ```bash
 # Token Management
-basilica tokens create [name]          # Create API token
-basilica tokens list                   # List all tokens
-basilica tokens revoke [name]          # Revoke token
+cathedral tokens create [name]          # Create API token
+cathedral tokens list                   # List all tokens
+cathedral tokens revoke [name]          # Revoke token
 
 # Environment Setup
 export BASILICA_API_TOKEN="..."        # Set token
 export BASILICA_API_URL="https://..."  # Optional: custom API URL
 
 # Python SDK
-pip install basilica-sdk               # Install from PyPI
+pip install cathedral-sdk               # Install from PyPI
 maturin develop                        # Build from source
-python3 -c "from basilica import BasilicaClient"  # Verify install
+python3 -c "from cathedral import CathedralClient"  # Verify install
 
 # SSH Setup
-ssh-keygen -t ed25519 -f ~/.ssh/basilica_ed25519 -N ""  # Generate key
+ssh-keygen -t ed25519 -f ~/.ssh/cathedral_ed25519 -N ""  # Generate key
 ```
 
 ### SDK Quick Reference
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # Health & Discovery
 health = client.health_check()
@@ -756,4 +756,4 @@ deployments = client.list_deployments()
 
 ---
 
-**You're all set!** Start building with Basilica's decentralized GPU network.
+**You're all set!** Start building with Cathedral's decentralized GPU network.

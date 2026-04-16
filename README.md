@@ -28,7 +28,7 @@ Bittensor needs a compute layer. Not a product. Not a platform with a token narr
 
 This project is a fork of [Basilica](https://github.com/one-covenant/basilica), one of the strongest compute codebases ever built on Bittensor. When its original team walked away in April 2026, the architecture survived. The code was sound. The miners and builders who believed in it stayed.
 
-Substrate carries that work forward.
+Cathedral carries that work forward.
 
 ## Overview
 

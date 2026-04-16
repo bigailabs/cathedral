@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Start Rental Example for Basilica SDK
+Start Rental Example for Cathedral SDK
 
 Demonstrates how to start GPU rentals with various configurations.
 """
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 from ssh_utils import print_ssh_instructions
 
 
 def main():
-    print("Starting Basilica GPU rental...")
+    print("Starting Cathedral GPU rental...")
     print("Initializing client...")
 
     # Initialize client (uses BASILICA_API_URL and BASILICA_API_TOKEN from environment)
-    # Create a token using: basilica tokens create
-    client = BasilicaClient()
+    # Create a token using: cathedral tokens create
+    client = CathedralClient()
 
     print("\nConfiguration:")
     print("  GPU Type: h100")
@@ -26,7 +26,7 @@ def main():
     # Start a rental with all available configuration options
     rental = client.start_rental(
         # Container configuration
-        container_image="pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime",  # Default: basilica default image
+        container_image="pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime",  # Default: cathedral default image
 
         # GPU selection - choose one method:
 
@@ -38,7 +38,7 @@ def main():
 
         # SSH configuration
         # ssh_pubkey_path="~/.ssh/id_rsa.pub",  # Explicit SSH key path
-        # Auto-uses ~/.ssh/basilica_ed25519.pub if not specified
+        # Auto-uses ~/.ssh/cathedral_ed25519.pub if not specified
 
         # Set custom Environment variables that will be set in the container
         environment={

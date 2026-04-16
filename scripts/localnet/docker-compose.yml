@@ -1,4 +1,4 @@
-# Composable Local Development Environment for Basilica
+# Composable Local Development Environment for Cathedral
 # Use profiles to start specific service groups:
 #   docker compose --profile network up -d      # Subtensor only
 #   docker compose --profile validator up -d    # + Validator
@@ -11,7 +11,7 @@ services:
   # =============================================================================
   subtensor:
     image: ghcr.io/opentensor/subtensor-localnet:latest
-    container_name: basilica-subtensor
+    container_name: cathedral-subtensor
     profiles: ["network", "validator", "miner", "all"]
     ports:
       - "9944:9944"
@@ -31,14 +31,14 @@ services:
       - --allow-private-ipv4
       - --unsafe-force-node-key-generation
     networks:
-      basilica-localnet:
+      cathedral-localnet:
         ipv4_address: 172.28.0.10
 
   # =============================================================================
   # Validator Service
   # =============================================================================
   validator:
-    image: basilica-localnet-validator
+    image: cathedral-localnet-validator
     pull_policy: never
     platform: linux/amd64  # Required for validator-binary (x86-64 ELF)
     build:
@@ -47,26 +47,26 @@ services:
       args:
         BITTENSOR_NETWORK: "local"
         METADATA_CHAIN_ENDPOINT: "ws://subtensor:9944"
-    container_name: basilica-validator
+    container_name: cathedral-validator
     profiles: ["validator", "miner"]
     restart: unless-stopped
     depends_on:
       subtensor:
         condition: service_started
     environment:
-      - RUST_LOG=info,basilica_validator=debug
+      - RUST_LOG=info,cathedral_validator=debug
       - RUST_BACKTRACE=1
     volumes:
       - ./configs/validator.toml:/app/validator.toml:ro
-      - validator-data:/opt/basilica/data
-      - validator-ssh:/opt/basilica/data/ssh_keys
+      - validator-data:/opt/cathedral/data
+      - validator-ssh:/opt/cathedral/data/ssh_keys
       - ./wallets:/root/.bittensor/wallets:ro
     ports:
       - "8080:8080"   # API
       - "9090:9090"   # Metrics
       - "50052:50052" # Bidding gRPC
     networks:
-      basilica-localnet:
+      cathedral-localnet:
         ipv4_address: 172.28.0.20
     command: ["start", "--config", "/app/validator.toml"]
     healthcheck:
@@ -80,7 +80,7 @@ services:
   # Miner Service
   # =============================================================================
   miner:
-    image: basilica-localnet-miner
+    image: cathedral-localnet-miner
     pull_policy: never
     build:
       context: ../..
@@ -88,7 +88,7 @@ services:
       args:
         BITTENSOR_NETWORK: "local"
         METADATA_CHAIN_ENDPOINT: "ws://subtensor:9944"
-    container_name: basilica-miner
+    container_name: cathedral-miner
     profiles: ["miner"]
     restart: unless-stopped
     depends_on:
@@ -97,25 +97,25 @@ services:
       validator:
         condition: service_healthy
     environment:
-      - RUST_LOG=info,basilica_miner=debug
+      - RUST_LOG=info,cathedral_miner=debug
       - RUST_BACKTRACE=1
-      - HOME=/var/lib/basilica/miner
+      - HOME=/var/lib/cathedral/miner
     volumes:
       - ./configs/miner.toml:/app/miner.toml:ro
-      - miner-data:/var/lib/basilica/miner/data
-      - ./ssh-keys:/var/lib/basilica/miner/.ssh:ro
-      - ./wallets:/var/lib/basilica/miner/.bittensor/wallets:ro
+      - miner-data:/var/lib/cathedral/miner/data
+      - ./ssh-keys:/var/lib/cathedral/miner/.ssh:ro
+      - ./wallets:/var/lib/cathedral/miner/.bittensor/wallets:ro
     ports:
       - "8092:50051"  # gRPC server (validator communications)
       - "8091:8091"   # Bittensor axon port
       - "9091:9090"   # Metrics
     networks:
-      basilica-localnet:
+      cathedral-localnet:
         ipv4_address: 172.28.0.30
     command: ["--config", "/app/miner.toml"]
 
 networks:
-  basilica-localnet:
+  cathedral-localnet:
     external: true
 
 volumes:

@@ -31,7 +31,7 @@ API Endpoints:
 """
 import os
 
-import basilica
+import cathedral
 
 # Verify HF_TOKEN is set for gated model access
 hf_token = os.environ.get("HF_TOKEN")
@@ -40,10 +40,10 @@ if not hf_token:
     print("Set it with: export HF_TOKEN='your-huggingface-token'")
     print()
 
-model_cache = basilica.Volume.from_name("vllm-llama-cache", create_if_missing=True)
+model_cache = cathedral.Volume.from_name("vllm-llama-cache", create_if_missing=True)
 
 
-@basilica.deployment(
+@cathedral.deployment(
     name="vllm-llama-embeddings",
     image="vllm/vllm-openai:v0.8.5.post1",
     port=8000,

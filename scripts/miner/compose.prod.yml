@@ -1,7 +1,7 @@
 services:
   miner:
     image: ghcr.io/one-covenant/basilica/miner:latest
-    container_name: basilica-miner
+    container_name: cathedral-miner
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"  # Enable automatic updates via Watchtower
@@ -11,11 +11,11 @@ services:
       - RUST_BACKTRACE=1          # Enable stack traces for debugging
 
     volumes:
-      - ./config/miner.toml:/var/lib/basilica/miner/miner.toml:ro       # Miner configuration file
-      - ./data:/var/lib/basilica/miner/data:rw                          # SQLite database and persistent data
-      - ~/.ssh:/var/lib/basilica/miner/.ssh:ro                          # SSH keys for GPU executor access
-      - ~/.bittensor:/var/lib/basilica/miner/.bittensor:ro              # Bittensor wallet (read-only for security)
-      - ./log:/var/lib/basilica/miner/log:rw                            # Application logs
+      - ./config/miner.toml:/var/lib/cathedral/miner/miner.toml:ro       # Miner configuration file
+      - ./data:/var/lib/cathedral/miner/data:rw                          # SQLite database and persistent data
+      - ~/.ssh:/var/lib/cathedral/miner/.ssh:ro                          # SSH keys for GPU executor access
+      - ~/.bittensor:/var/lib/cathedral/miner/.bittensor:ro              # Bittensor wallet (read-only for security)
+      - ./log:/var/lib/cathedral/miner/log:rw                            # Application logs
 
     ports:
       - "8080:8080"     # gRPC server for validator communications
@@ -27,12 +27,12 @@ services:
       - 1.0.0.1        # Cloudflare DNS (secondary)
 
     networks:
-      - basilica_network
+      - cathedral_network
 
-    command: ["--config", "/var/lib/basilica/miner/miner.toml"]
+    command: ["--config", "/var/lib/cathedral/miner/miner.toml"]
 
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "basilica-miner"]
+      test: ["CMD", "pgrep", "-f", "cathedral-miner"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -40,7 +40,7 @@ services:
 
   watchtower:
     image: nickfedor/watchtower:1.14.0
-    container_name: basilica-watchtower
+    container_name: cathedral-watchtower
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -54,5 +54,5 @@ services:
     command: --label-enable --cleanup --interval 300
 
 networks:
-  basilica_network:
+  cathedral_network:
     driver: bridge

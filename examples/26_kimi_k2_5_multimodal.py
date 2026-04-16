@@ -28,9 +28,9 @@ Reference:
     https://huggingface.co/moonshotai/Kimi-K2.5
     https://huggingface.co/moonshotai/Kimi-K2.5/blob/main/docs/deploy_guidance.md
 """
-import basilica
-from basilica import (
-    BasilicaClient,
+import cathedral
+from cathedral import (
+    CathedralClient,
     CreateDeploymentRequest,
     GpuRequirementsSpec,
     HealthCheckConfig,
@@ -39,9 +39,9 @@ from basilica import (
 )
 
 
-def deploy_kimi_k2_5() -> basilica.Deployment:
+def deploy_kimi_k2_5() -> cathedral.Deployment:
     """Deploy Kimi-K2.5 with configuration per official Moonshot guidance."""
-    client = BasilicaClient()
+    client = CathedralClient()
 
     model = "moonshotai/Kimi-K2.5"
 
@@ -129,24 +129,24 @@ def deploy_kimi_k2_5() -> basilica.Deployment:
     print()
 
     response = client._client.create_deployment(request)
-    deployment = basilica.Deployment._from_response(client, response)
+    deployment = cathedral.Deployment._from_response(client, response)
 
     print(f"Deployment created: {deployment.name}")
     print(f"URL: {deployment.url}")
     print()
     print("Waiting for model to load...")
-    print(f"Monitor with: basilica deploy logs {deployment.name} --follow")
+    print(f"Monitor with: cathedral deploy logs {deployment.name} --follow")
     print()
 
     try:
         deployment.wait_until_ready(timeout=5400, silent=False)
-    except basilica.exceptions.DeploymentFailed:
+    except cathedral.exceptions.DeploymentFailed:
         print()
         print("Deployment is still loading the model.")
         print("Large models like Kimi-K2.5 require extended startup time.")
         print()
         print("Check progress with:")
-        print(f"  basilica deploy logs {deployment.name} --follow")
+        print(f"  cathedral deploy logs {deployment.name} --follow")
         print()
         print("When ready, the API will be available at:")
         print(f"  {deployment.url}/v1/chat/completions")
@@ -155,7 +155,7 @@ def deploy_kimi_k2_5() -> basilica.Deployment:
     return deployment
 
 
-def print_usage(deployment: basilica.Deployment, model: str) -> None:
+def print_usage(deployment: cathedral.Deployment, model: str) -> None:
     """Print usage examples for the deployed model."""
     print()
     print("Kimi-K2.5 deployment ready!")

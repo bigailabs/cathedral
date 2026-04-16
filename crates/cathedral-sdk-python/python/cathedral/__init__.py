@@ -1,11 +1,11 @@
 """
-Basilica SDK for Python
+Cathedral SDK for Python
 
-Deploy and manage containerized applications on the Basilica GPU cloud.
+Deploy and manage containerized applications on the Cathedral GPU cloud.
 
 Quick Start:
-    >>> from basilica import BasilicaClient
-    >>> client = BasilicaClient()
+    >>> from cathedral import CathedralClient
+    >>> client = CathedralClient()
     >>>
     >>> # Deploy a Python app from a file
     >>> deployment = client.deploy("my-api", source="app.py", port=8000)
@@ -19,12 +19,12 @@ Quick Start:
 
 Authentication:
     Set the BASILICA_API_TOKEN environment variable:
-        export BASILICA_API_TOKEN="basilica_..."
+        export BASILICA_API_TOKEN="cathedral_..."
 
     Or pass directly:
-        client = BasilicaClient(api_key="basilica_...")
+        client = CathedralClient(api_key="cathedral_...")
 
-    Create a token using: basilica tokens create
+    Create a token using: cathedral tokens create
 """
 
 import asyncio
@@ -35,7 +35,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from basilica._basilica import (
+from cathedral._cathedral import (
     DEFAULT_API_URL,
     DEFAULT_CONTAINER_IMAGE,
     DEFAULT_CPU_CORES,
@@ -48,10 +48,10 @@ from basilica._basilica import (
     AvailabilityInfo,
     AvailableNode,
 )
-from basilica._basilica import (
-    BasilicaClient as _BasilicaClient,
+from cathedral._cathedral import (
+    CathedralClient as _CathedralClient,
 )  # Core client binding; Helper functions; Response types; Request types; Deployment types; Constants from Rust
-from basilica._basilica import (
+from cathedral._cathedral import (
     CpuOffering,
     CpuRentalListItem,
     CpuRentalResponse,
@@ -104,7 +104,7 @@ from basilica._basilica import (
 
 # GpuRequirementsSpec may not be available in older binaries
 try:
-    from basilica._basilica import GpuRequirementsSpec
+    from cathedral._cathedral import GpuRequirementsSpec
 except ImportError:
     # Fallback: define a compatible class
     from dataclasses import dataclass
@@ -151,7 +151,7 @@ from ._deployment import Deployment, DeploymentStatus, ProgressInfo
 from .exceptions import (
     AuthenticationError,
     AuthorizationError,
-    BasilicaError,
+    CathedralError,
     DeploymentError,
     DeploymentFailed,
     DeploymentNotFound,
@@ -213,7 +213,7 @@ def _build_inference_health_check(port: int) -> HealthCheckConfig:
 __version__ = "0.17.0"
 __all__ = [
     # Main client
-    "BasilicaClient",
+    "CathedralClient",
     # Decorator API
     "deployment",
     "DeployedFunction",
@@ -225,7 +225,7 @@ __all__ = [
     "ProgressInfo",
     "SourcePackager",
     # Exceptions
-    "BasilicaError",
+    "CathedralError",
     "AuthenticationError",
     "AuthorizationError",
     "ValidationError",
@@ -297,17 +297,17 @@ __all__ = [
 ]
 
 
-class BasilicaClient:
+class CathedralClient:
     """
-    Client for deploying and managing applications on Basilica.
+    Client for deploying and managing applications on Cathedral.
 
-    The BasilicaClient provides both high-level and low-level APIs for
-    working with the Basilica GPU cloud platform.
+    The CathedralClient provides both high-level and low-level APIs for
+    working with the Cathedral GPU cloud platform.
 
     High-Level API (Recommended):
         Use deploy() for simple, one-line deployments:
 
-        >>> client = BasilicaClient()
+        >>> client = CathedralClient()
         >>> deployment = client.deploy("my-app", source="app.py", port=8000)
         >>> print(deployment.url)
 
@@ -322,9 +322,9 @@ class BasilicaClient:
         ... )
 
     Authentication (tried in order):
-        1. Direct parameter: BasilicaClient(api_key="basilica_...")
-        2. Environment variable: export BASILICA_API_TOKEN="basilica_..."
-        3. CLI login tokens: run ``basilica login`` first
+        1. Direct parameter: CathedralClient(api_key="cathedral_...")
+        2. Environment variable: export BASILICA_API_TOKEN="cathedral_..."
+        3. CLI login tokens: run ``cathedral login`` first
 
     Attributes:
         base_url: The API endpoint URL
@@ -332,7 +332,7 @@ class BasilicaClient:
 
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
         """
-        Initialize the Basilica client.
+        Initialize the Cathedral client.
 
         Args:
             base_url: API endpoint URL. Defaults to BASILICA_API_URL env var
@@ -345,19 +345,19 @@ class BasilicaClient:
 
         Example:
             >>> # Auto-detect from environment
-            >>> client = BasilicaClient()
+            >>> client = CathedralClient()
 
             >>> # Explicit configuration
-            >>> client = BasilicaClient(
+            >>> client = CathedralClient(
             ...     base_url="https://api.basilica.ai",
-            ...     api_key="basilica_..."
+            ...     api_key="cathedral_..."
             ... )
         """
         if base_url is None:
             base_url = os.environ.get("BASILICA_API_URL", DEFAULT_API_URL)
 
         self._base_url = base_url
-        self._client = _BasilicaClient(base_url, api_key)
+        self._client = _CathedralClient(base_url, api_key)
 
     @property
     def base_url(self) -> str:
@@ -471,7 +471,7 @@ class BasilicaClient:
         infiniband: Optional[bool] = None,
     ) -> Deployment:
         """
-        Deploy an application to Basilica.
+        Deploy an application to Cathedral.
 
         This is the recommended high-level method for deploying applications.
         It handles source code packaging, waits for the deployment to be ready,
@@ -659,7 +659,7 @@ class BasilicaClient:
             Deployment object with .url, .status(), .logs(), .delete() methods
 
         Example:
-            >>> client = BasilicaClient()
+            >>> client = CathedralClient()
             >>> deployment = client.deploy_vllm("meta-llama/Llama-2-7b")
             >>> print(f"OpenAI API: {deployment.url}/v1/chat/completions")
         """
@@ -713,7 +713,7 @@ class BasilicaClient:
                     enabled=True,
                     backend=StorageBackend.R2,
                     bucket="",
-                    credentials_secret="basilica-r2-credentials",
+                    credentials_secret="cathedral-r2-credentials",
                     sync_interval_ms=1000,
                     cache_size_mb=4096,
                     mount_path="/root/.cache",
@@ -821,7 +821,7 @@ class BasilicaClient:
             Deployment object with .url, .status(), .logs(), .delete() methods
 
         Example:
-            >>> client = BasilicaClient()
+            >>> client = CathedralClient()
             >>> deployment = client.deploy_sglang("Qwen/Qwen2.5-0.5B-Instruct")
             >>> print(deployment.url)
         """
@@ -868,7 +868,7 @@ class BasilicaClient:
                     enabled=True,
                     backend=StorageBackend.R2,
                     bucket="",
-                    credentials_secret="basilica-r2-credentials",
+                    credentials_secret="cathedral-r2-credentials",
                     sync_interval_ms=1000,
                     cache_size_mb=4096,
                     mount_path="/root/.cache",
@@ -1041,7 +1041,7 @@ class BasilicaClient:
         """
         Start a new GPU rental.
 
-        For SSH access, ensure you have an SSH key at ~/.ssh/basilica_ed25519.pub
+        For SSH access, ensure you have an SSH key at ~/.ssh/cathedral_ed25519.pub
 
         Args:
             container_image: Docker image to run
@@ -1068,7 +1068,7 @@ class BasilicaClient:
         if ssh_pubkey_path is not None:
             ssh_key_path = os.path.expanduser(ssh_pubkey_path)
         else:
-            ssh_key_path = os.path.expanduser("~/.ssh/basilica_ed25519.pub")
+            ssh_key_path = os.path.expanduser("~/.ssh/cathedral_ed25519.pub")
 
         if os.path.exists(ssh_key_path):
             with open(ssh_key_path) as f:
@@ -1615,7 +1615,7 @@ class BasilicaClient:
 
         Example:
             >>> async def main():
-            ...     client = BasilicaClient()
+            ...     client = CathedralClient()
             ...     deployment = await client.deploy_async("my-app", source="app.py")
             ...     print(deployment.url)
         """

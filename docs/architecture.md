@@ -1,10 +1,10 @@
 # Architecture Guide
 
-This guide provides a comprehensive overview of Basilica's system architecture and design principles.
+This guide provides a comprehensive overview of Cathedral's system architecture and design principles.
 
 ## System Overview
 
-Basilica is a decentralized GPU compute platform built on the Bittensor network. It creates a trustless environment where GPU providers (miners) can offer compute resources, and validators ensure quality and reliability through **hardware verification**.
+Cathedral is a decentralized GPU compute platform built on the Bittensor network. It creates a trustless environment where GPU providers (miners) can offer compute resources, and validators ensure quality and reliability through **hardware verification**.
 
 ## Core Components
 
@@ -23,10 +23,10 @@ The validator is the quality assurance layer of the network:
 
 **Key Files**:
 
-- `crates/basilica-validator/src/miner_prover/` - Verification orchestration
-- `crates/basilica-validator/src/bittensor_core/` - Weight setting
-- `crates/basilica-validator/src/api/` - REST API
-- `crates/basilica-validator/src/ssh/` - SSH session management
+- `crates/cathedral-validator/src/miner_prover/` - Verification orchestration
+- `crates/cathedral-validator/src/bittensor_core/` - Weight setting
+- `crates/cathedral-validator/src/api/` - REST API
+- `crates/cathedral-validator/src/ssh/` - SSH session management
 
 ### 2. Miner
 
@@ -42,9 +42,9 @@ The miner acts as an SSH access orchestrator for GPU nodes:
 
 **Key Files**:
 
-- `crates/basilica-miner/src/node_manager.rs` - Node SSH orchestration
-- `crates/basilica-miner/src/validator_comms.rs` - gRPC server for validators
-- `crates/basilica-miner/src/validator_assignment.rs` - Validator routing logic
+- `crates/cathedral-miner/src/node_manager.rs` - Node SSH orchestration
+- `crates/cathedral-miner/src/validator_comms.rs` - gRPC server for validators
+- `crates/cathedral-miner/src/validator_assignment.rs` - Validator routing logic
 
 ### 3. GPU Nodes
 
@@ -56,7 +56,7 @@ GPU nodes are standard servers with SSH access (no special software):
 - **Storage**: 1TB+ available disk space
 - **NVIDIA GPUs**: Any model (A100, H100, B200, etc.)
 
-### 4. Basilica API Gateway (Optional)
+### 4. Cathedral API Gateway (Optional)
 
 The smart HTTP gateway for external services:
 
@@ -70,7 +70,7 @@ The smart HTTP gateway for external services:
 
 **Key Files**:
 
-- `crates/basilica-api/` - Gateway implementation
+- `crates/cathedral-api/` - Gateway implementation
 
 ## System Architecture
 
@@ -85,7 +85,7 @@ The smart HTTP gateway for external services:
         ┌────────────────┼────────────────┐
         │                │                │
 ┌───────▼──────┐ ┌──────▼──────┐ ┌──────▼──────┐
-│  VALIDATOR   │ │    MINER    │ │BASILICA API │
+│  VALIDATOR   │ │    MINER    │ │CATHEDRAL API │
 │              │ │             │ │  GATEWAY    │
 │ ┌──────────┐ │ │ ┌─────────┐ │ │ ┌─────────┐ │
 │ │ Miner    │ │ │ │  Axon   │ │ │ │  Load   │ │
@@ -185,7 +185,7 @@ The smart HTTP gateway for external services:
 
 **Used for**: Validator ↔ Miner communication
 
-**Services** (defined in `crates/basilica-protocol/proto/`):
+**Services** (defined in `crates/cathedral-protocol/proto/`):
 
 ```protobuf
 service MinerDiscovery {
@@ -236,7 +236,7 @@ GET  /rentals/:id         # Rental status
 GET  /rentals/:id/logs    # Stream rental logs
 ```
 
-**Basilica Gateway API** (optional, for aggregation):
+**Cathedral Gateway API** (optional, for aggregation):
 
 ```text
 GET  /api/v1/capacity     # Available GPU capacity
@@ -275,7 +275,7 @@ Step 2: Authentication
   Validator → Miner (gRPC): ValidatorAuthRequest {
       validator_hotkey: "5G3qVa...",
       ssh_public_key: "ssh-ed25519 AAAA...",
-      signature: "0xabcd...",  // Signs: BASILICA_AUTH_V1:{nonce}:{timestamp}
+      signature: "0xabcd...",  // Signs: CATHEDRAL_AUTH_V1:{nonce}:{timestamp}
       timestamp: 1704067200
   }
   Miner: Verify signature with validator hotkey
@@ -289,7 +289,7 @@ Step 3: Node Discovery
       node_id: "550e8400-...",
       host: "192.168.1.100",
       port: 22,
-      username: "basilica",
+      username: "cathedral",
       ssh_endpoint: "ssh://192.168.1.100:22"
   }
 
@@ -352,7 +352,7 @@ External Service → Node (SSH): Connect and use GPU
 
 ### 1. Cryptographic Framework
 
-**Algorithms** (implemented in `crates/basilica-common/src/crypto/`):
+**Algorithms** (implemented in `crates/cathedral-common/src/crypto/`):
 
 - **Sr25519**: Bittensor signatures and hotkey verification
 - **Ed25519**: SSH key generation and node authentication
@@ -516,10 +516,10 @@ session_rate_limit = 20        # Per hour per validator
 
 ```bash
 # Terminal 1: Run validator
-./basilica-validator --config validator-dev.toml start
+./cathedral-validator --config validator-dev.toml start
 
 # Terminal 2: Run miner
-./basilica-miner --config miner-dev.toml
+./cathedral-miner --config miner-dev.toml
 
 # GPU Node: Just needs SSH server
 sudo systemctl start ssh
@@ -601,19 +601,19 @@ GPU Nodes (Distributed):
 
 ```promql
 # Validator metrics
-basilica_verification_total{type="full|lightweight"}
-basilica_verification_success_total
-basilica_miners_discovered_total
-basilica_weight_set_total
+cathedral_verification_total{type="full|lightweight"}
+cathedral_verification_success_total
+cathedral_miners_discovered_total
+cathedral_weight_set_total
 
 # Miner metrics
-basilica_nodes_registered_total
-basilica_validator_sessions_active
-basilica_ssh_key_deployments_total
+cathedral_nodes_registered_total
+cathedral_validator_sessions_active
+cathedral_ssh_key_deployments_total
 
 # Node metrics (collected during verification)
-basilica_gpu_utilization{node_id, gpu_model}
-basilica_node_uptime_seconds{node_id}
+cathedral_gpu_utilization{node_id, gpu_model}
+cathedral_node_uptime_seconds{node_id}
 ```
 
 ### 2. Logging Architecture
@@ -669,9 +669,9 @@ curl http://localhost:9090/metrics
 ### Workspace Structure
 
 ```text
-basilica/
+cathedral/
 ├── crates/
-│   ├── basilica-common/        # Shared utilities
+│   ├── cathedral-common/        # Shared utilities
 │   │   ├── src/
 │   │   │   ├── crypto/         # Cryptographic operations
 │   │   │   ├── ssh/            # SSH trait abstractions
@@ -680,11 +680,11 @@ basilica/
 │   │   │   └── identity.rs     # Core identity types
 │   │   └── Cargo.toml
 │   │
-│   ├── basilica-protocol/      # gRPC definitions
+│   ├── cathedral-protocol/      # gRPC definitions
 │   │   ├── proto/              # Protobuf files
 │   │   └── src/gen/            # Generated Rust code
 │   │
-│   ├── basilica-validator/     # Validator service
+│   ├── cathedral-validator/     # Validator service
 │   │   ├── src/
 │   │   │   ├── miner_prover/   # Verification orchestration
 │   │   │   ├── bittensor_core/ # Weight setting
@@ -694,7 +694,7 @@ basilica/
 │   │   ├── migrations/         # Database migrations
 │   │   └── Cargo.toml
 │   │
-│   ├── basilica-miner/         # Miner service
+│   ├── cathedral-miner/         # Miner service
 │   │   ├── src/
 │   │   │   ├── node_manager.rs     # Node SSH management
 │   │   │   ├── validator_comms.rs  # gRPC server
@@ -703,7 +703,7 @@ basilica/
 │   │   ├── migrations/         # Database migrations
 │   │   └── Cargo.toml
 │   │
-│   └── basilica-api/           # API gateway (optional)
+│   └── cathedral-api/           # API gateway (optional)
 │       └── src/
 │
 ├── scripts/
@@ -735,9 +735,9 @@ basilica/
 
 ```bash
 # Test individual modules
-cargo test -p basilica-common
-cargo test -p basilica-validator
-cargo test -p basilica-miner
+cargo test -p cathedral-common
+cargo test -p cathedral-validator
+cargo test -p cathedral-miner
 ```
 
 **2. Integration Tests** (cross-component):
@@ -789,7 +789,7 @@ cargo geiger
 
 1. **Follow Rust Best Practices**:
    - Use explicit error types (not `anyhow` in libraries)
-   - Implement `BasilicaError` trait for custom errors
+   - Implement `CathedralError` trait for custom errors
    - Prefer traits for abstractions (dependency injection)
 
 2. **Documentation**:
@@ -845,7 +845,7 @@ cargo geiger
 
 ## Conclusion
 
-Basilica's SSH-based architecture provides:
+Cathedral's SSH-based architecture provides:
 
 ✅ **Simplicity**: No intermediary agents, standard protocols
 ✅ **Security**: Direct verification prevents tampering

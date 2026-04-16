@@ -3,11 +3,11 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "basilica-sdk>=0.9.0",
+#   "cathedral-sdk>=0.9.0",
 # ]
 # ///
 """
-Deploy AgentGym environment to Basilica from custom-built Docker image.
+Deploy AgentGym environment to Cathedral from custom-built Docker image.
 
 AgentGym provides standardized environments for evaluating AI agents across
 diverse tasks like web navigation, text games, and interactive simulations.
@@ -15,7 +15,7 @@ diverse tasks like web navigation, text games, and interactive simulations.
 This example shows how to:
   1. Build an AgentGym Docker image from the included environment files
   2. Push to a container registry
-  3. Deploy to Basilica for LLM evaluation
+  3. Deploy to Cathedral for LLM evaluation
 
 Supported environments:
   - webshop: E-commerce web navigation
@@ -46,7 +46,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from basilica import BasilicaClient, Deployment
+from cathedral import CathedralClient, Deployment
 
 AGENTGYM_ENV_PATH = Path(__file__).parent / "agentgym"
 
@@ -193,7 +193,7 @@ def build_agentgym_image(
 
 
 def deploy_agentgym(
-    client: BasilicaClient,
+    client: CathedralClient,
     env_name: str,
     image: str,
     llm_api_key: Optional[str] = None,
@@ -203,10 +203,10 @@ def deploy_agentgym(
     timeout: int = 300,
 ) -> Deployment:
     """
-    Deploy AgentGym environment to Basilica.
+    Deploy AgentGym environment to Cathedral.
 
     Args:
-        client: Basilica client instance
+        client: Cathedral client instance
         env_name: AgentGym environment name
         image: Docker image to deploy
         llm_api_key: API key for LLM provider (optional)
@@ -257,13 +257,13 @@ def main():
     Command-line interface for building and deploying AgentGym environments.
     1. Parse arguments
     2. Build Docker image (if not provided)
-    3. Deploy to Basilica
+    3. Deploy to Cathedral
     4. Print deployment details
     5. Optionally skip deployment after build
     6. Provide curl commands for health check and evaluation
     """
     parser = argparse.ArgumentParser(
-        description="Build and deploy AgentGym environment to Basilica",
+        description="Build and deploy AgentGym environment to Cathedral",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -357,7 +357,7 @@ Examples:
         print(f"  python3 deploy.py --image {image} {args.env_name}")
         return
 
-    client = BasilicaClient()
+    client = CathedralClient()
 
     deployment = deploy_agentgym(
         client=client,

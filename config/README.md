@@ -1,6 +1,6 @@
-# Basilica Configuration Files
+# Cathedral Configuration Files
 
-This directory contains all configuration files for Basilica components.
+This directory contains all configuration files for Cathedral components.
 
 ## Configuration Files
 
@@ -28,7 +28,7 @@ Bittensor neuron for verification and scoring. Key configuration sections:
 - `[verification]` - Verification suite configuration with binary validation
 - `[ssh_validation]` - SSH-based validation settings
 - `[ssh_session]` - SSH session management and audit logging
-- `[emission]` - Burn settings and weight-set interval (per-category incentive config managed by basilica-incentive service)
+- `[emission]` - Burn settings and weight-set interval (per-category incentive config managed by cathedral-incentive service)
 
 **Requirements**: CUDA Toolkit 12.8 for GPU verification kernels
 

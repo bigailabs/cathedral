@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-IMAGE_NAME="basilica/validator"
+IMAGE_NAME="cathedral/validator"
 IMAGE_TAG="latest"
 EXTRACT_BINARY=true
 BUILD_IMAGE=true
@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--image-name NAME] [--image-tag TAG] [--no-extract] [--no-image] [--debug] [--features FEATURES] [--veritas-binaries DIR]"
             echo ""
             echo "Options:"
-            echo "  --image-name NAME         Docker image name (default: basilica/validator)"
+            echo "  --image-name NAME         Docker image name (default: cathedral/validator)"
             echo "  --image-tag TAG           Docker image tag (default: latest)"
             echo "  --no-extract              Don't extract binary to local filesystem"
             echo "  --no-image                Skip Docker image creation"
@@ -135,10 +135,10 @@ fi
 if [[ "$EXTRACT_BINARY" == "true" ]]; then
     echo "Extracting validator binary..."
     container_id=$(docker create "$IMAGE_NAME:$IMAGE_TAG")
-    docker cp "$container_id:/usr/local/bin/basilica-validator" ./basilica-validator
+    docker cp "$container_id:/usr/local/bin/cathedral-validator" ./cathedral-validator
     docker rm "$container_id"
-    chmod +x ./basilica-validator
-    echo "Binary extracted to: ./basilica-validator"
+    chmod +x ./cathedral-validator
+    echo "Binary extracted to: ./cathedral-validator"
 fi
 
 echo "Build completed successfully!"

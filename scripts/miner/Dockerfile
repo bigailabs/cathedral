@@ -21,8 +21,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 
 # Fetch dependencies with cache mount
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=basilica-cargo-git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cathedral-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cathedral-cargo-git \
     cargo fetch
 
 # Build arguments
@@ -43,9 +43,9 @@ ENV RUST_BACKTRACE=1
 # Build the miner directly (workspace should resolve dependencies)
 # Set explicit endpoint if network is specified but endpoint is not
 # Use cache mounts for cargo registry and target to speed up rebuilds
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=basilica-cargo-git \
-    --mount=type=cache,target=/tmp/target,id=basilica-cargo-target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cathedral-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cathedral-cargo-git \
+    --mount=type=cache,target=/tmp/target,id=cathedral-cargo-target \
     if [ -n "$BITTENSOR_NETWORK" ] && [ -z "$METADATA_CHAIN_ENDPOINT" ]; then \
         case "$BITTENSOR_NETWORK" in \
             test) export METADATA_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443" ;; \
@@ -55,19 +55,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-regist
     fi && \
     if [ "$BUILD_MODE" = "release" ]; then \
         if [ -n "$FEATURES" ]; then \
-            cargo build --release -p basilica-miner --features "$FEATURES"; \
+            cargo build --release -p cathedral-miner --features "$FEATURES"; \
         else \
-            cargo build --release -p basilica-miner; \
+            cargo build --release -p cathedral-miner; \
         fi; \
     else \
         if [ -n "$FEATURES" ]; then \
-            cargo build -p basilica-miner --features "$FEATURES"; \
+            cargo build -p cathedral-miner --features "$FEATURES"; \
         else \
-            cargo build -p basilica-miner; \
+            cargo build -p cathedral-miner; \
         fi; \
     fi && \
     # Copy binary out of cache mount to a regular layer
-    cp /tmp/target/${BUILD_MODE}/basilica-miner /workspace/basilica-miner
+    cp /tmp/target/${BUILD_MODE}/cathedral-miner /workspace/cathedral-miner
 
 # Runtime image
 FROM debian:bookworm-slim
@@ -87,24 +87,24 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary
-COPY --from=builder /workspace/basilica-miner /usr/local/bin/basilica-miner
+COPY --from=builder /workspace/cathedral-miner /usr/local/bin/cathedral-miner
 
 # Make binary executable
-RUN chmod +x /usr/local/bin/basilica-miner
+RUN chmod +x /usr/local/bin/cathedral-miner
 
 # Create required directories
-RUN mkdir -p /var/lib/basilica/miner/data && \
-    mkdir -p /var/lib/basilica/miner/.ssh && \
-    mkdir -p /var/lib/basilica/miner/.bittensor && \
-    chmod 755 /var/lib/basilica/miner && \
-    chmod 755 /var/lib/basilica/miner/.ssh && \
-    chmod 755 /var/lib/basilica/miner/.bittensor
+RUN mkdir -p /var/lib/cathedral/miner/data && \
+    mkdir -p /var/lib/cathedral/miner/.ssh && \
+    mkdir -p /var/lib/cathedral/miner/.bittensor && \
+    chmod 755 /var/lib/cathedral/miner && \
+    chmod 755 /var/lib/cathedral/miner/.ssh && \
+    chmod 755 /var/lib/cathedral/miner/.bittensor
 
-# Set HOME environment variable for the basilica user
-ENV HOME=/var/lib/basilica/miner
+# Set HOME environment variable for the cathedral user
+ENV HOME=/var/lib/cathedral/miner
 
 # Set working directory
-WORKDIR /var/lib/basilica/miner
+WORKDIR /var/lib/cathedral/miner
 
 # Expose ports
 # 8080: Miner gRPC server for validator communications
@@ -113,4 +113,4 @@ WORKDIR /var/lib/basilica/miner
 EXPOSE 8080 8091 9090
 
 # Default command
-ENTRYPOINT ["/usr/local/bin/basilica-miner"]
+ENTRYPOINT ["/usr/local/bin/cathedral-miner"]

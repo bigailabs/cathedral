@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Health Check Example for Basilica SDK
+Health Check Example for Cathedral SDK
 """
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 
 def main():
     # Initialize client using environment variables
     # BASILICA_API_URL and BASILICA_API_TOKEN
-    client = BasilicaClient()
+    client = CathedralClient()
 
     # Or initialize with explicit configuration
-    # client = BasilicaClient(
+    # client = CathedralClient(
     #     base_url="https://api.basilica.ai",
-    #     api_key="basilica_..."  # Your token from 'basilica tokens create'
+    #     api_key="cathedral_..."  # Your token from 'cathedral tokens create'
     # )
     
     # Perform health check

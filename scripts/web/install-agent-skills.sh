@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Basilica agent skills installer
+# Cathedral agent skills installer
 # Usage:
 #   curl -fsSL https://basilica.ai/agents/install.sh | bash
 #   curl -fsSL https://basilica.ai/agents/install.sh | bash -s -- --cursor-only
 
-BASE_URL="${BASILICA_AGENT_BASE_URL:-https://basilica.ai}"
+BASE_URL="${CATHEDRAL_AGENT_BASE_URL:-https://basilica.ai}"
 INSTALL_CURSOR=1
 INSTALL_CLAUDE=1
 INSTALL_CODEX=1
@@ -49,11 +49,11 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 SKILLS=(
-  "basilica-cloud-operator"
-  "basilica-account-ops"
-  "basilica-rentals-ops"
-  "basilica-serverless-ops"
-  "basilica-sdk-ops"
+  "cathedral-cloud-operator"
+  "cathedral-account-ops"
+  "cathedral-rentals-ops"
+  "cathedral-serverless-ops"
+  "cathedral-sdk-ops"
 )
 
 fetch_file() {
@@ -74,9 +74,9 @@ install_skill_set() {
     fetch_file "$BASE_URL/agents/$skill/SKILL.md" "$skill_dir/SKILL.md"
   done
 
-  fetch_file "$BASE_URL/agents/cloud-ops.md" "$root/BASILICA-CLOUD-OPS.md"
+  fetch_file "$BASE_URL/agents/cloud-ops.md" "$root/CATHEDRAL-CLOUD-OPS.md"
 
-  echo "Installed Basilica skills for $kind at $root"
+  echo "Installed Cathedral skills for $kind at $root"
 }
 
 if [[ "$INSTALL_CURSOR" -eq 1 ]]; then
@@ -93,10 +93,10 @@ fi
 
 cat <<EOF
 
-Basilica agent bundle installed.
+Cathedral agent bundle installed.
 
 Primary skill:
-  basilica-cloud-operator
+  cathedral-cloud-operator
 
 Reference:
   $BASE_URL/agents/cloud-ops.md

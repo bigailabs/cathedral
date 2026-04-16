@@ -1,8 +1,8 @@
 # AgentGym Custom Build and Deploy
 
-Build and deploy AgentGym evaluation environments to Basilica.
+Build and deploy AgentGym evaluation environments to Cathedral.
 
-AgentGym is a framework for evaluating AI agents across diverse interactive tasks. This example provides a self-contained environment for building custom AgentGym Docker images and deploying them to Basilica for LLM evaluation.
+AgentGym is a framework for evaluating AI agents across diverse interactive tasks. This example provides a self-contained environment for building custom AgentGym Docker images and deploying them to Cathedral for LLM evaluation.
 
 ## Directory Structure
 
@@ -39,7 +39,7 @@ AgentGym is a framework for evaluating AI agents across diverse interactive task
 ## Prerequisites
 
 1. Docker installed and running
-2. Basilica API token: `export BASILICA_API_TOKEN="your-token"`
+2. Cathedral API token: `export BASILICA_API_TOKEN="your-token"`
 3. LLM API key (optional): `export CHUTES_API_KEY="your-api-key"`
 
 ## Quick Start
@@ -79,7 +79,7 @@ usage: deploy.py [-h] [--image IMAGE] [--push] [--registry REGISTRY]
                  [--skip-deploy]
                  {webshop,sciworld,alfworld,babyai,textcraft,sqlgym,maze,wordle,weather,todo,movie,sheet,academia}
 
-Build and deploy AgentGym environment to Basilica
+Build and deploy AgentGym environment to Cathedral
 
 positional arguments:
   env_name              AgentGym environment to deploy
@@ -103,13 +103,13 @@ Once deployed, the environment exposes:
 ### Health Check
 
 ```bash
-curl https://your-deployment.basilica.ai/health
+curl https://your-deployment.cathedral.ai/health
 ```
 
 ### Evaluate Model
 
 ```bash
-curl -X POST https://your-deployment.basilica.ai/evaluate \
+curl -X POST https://your-deployment.cathedral.ai/evaluate \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen2.5-72B-Instruct",

@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: scripts/validator/Dockerfile
-    container_name: basilica-validator-local
+    container_name: cathedral-validator-local
     restart: unless-stopped
     init: true
 
@@ -16,7 +16,7 @@ services:
       - BASILICA_K3S_URL=${BASILICA_K3S_URL:-}
       - BASILICA_K3S_TOKEN=${BASILICA_K3S_TOKEN:-}
       - BASILICA_K3S_CHANNEL=${BASILICA_K3S_CHANNEL:-stable}
-      - BASILICA_TAINT_EXCLUSIVE=${BASILICA_TAINT_EXCLUSIVE:-false}
+      - CATHEDRAL_TAINT_EXCLUSIVE=${CATHEDRAL_TAINT_EXCLUSIVE:-false}
       - BASILICA_NAMESPACE=${BASILICA_NAMESPACE:-default}
 
     volumes:
@@ -37,13 +37,13 @@ services:
       - "50052:50052"   # Bidding gRPC
 
     networks:
-      - basilica_network_local
+      - cathedral_network_local
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
     entrypoint: ["/bin/bash", "/app/validator-entrypoint.sh"]
-    command: ["/usr/local/bin/basilica-validator", "--config", "/app/validator.toml", "start"]
+    command: ["/usr/local/bin/cathedral-validator", "--config", "/app/validator.toml", "start"]
 
 networks:
-  basilica_network_local:
+  cathedral_network_local:
     driver: bridge

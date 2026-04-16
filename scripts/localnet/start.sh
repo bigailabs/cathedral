@@ -1,5 +1,5 @@
 #!/bin/bash
-# Basilica Localnet - Start Services
+# Cathedral Localnet - Start Services
 # Usage: ./start.sh [profile] [--build]
 #
 # Profiles:
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 show_help() {
-    echo "Basilica Localnet - Start Services"
+    echo "Cathedral Localnet - Start Services"
     echo ""
     echo "Usage: ./start.sh [profile] [--build] [-h|--help]"
     echo ""
@@ -91,7 +91,7 @@ case "${PROFILE}" in
 esac
 
 echo "========================================"
-echo "  Starting Basilica Localnet"
+echo "  Starting Cathedral Localnet"
 echo "  Profile: ${PROFILE}"
 echo "========================================"
 echo ""
@@ -115,7 +115,7 @@ mkdir -p "${SSH_KEY_DIR}"
 MINER_KEY="${SSH_KEY_DIR}/miner_node_key"
 if [ ! -f "${MINER_KEY}" ]; then
     echo "Generating miner SSH key..."
-    ssh-keygen -t ed25519 -f "${MINER_KEY}" -N "" -C "basilica-miner-localnet"
+    ssh-keygen -t ed25519 -f "${MINER_KEY}" -N "" -C "cathedral-miner-localnet"
     chmod 600 "${MINER_KEY}"
     chmod 644 "${MINER_KEY}.pub"
     echo ""
@@ -216,8 +216,8 @@ init_subnet() {
 }
 
 # Create shared network if it doesn't exist
-docker network create basilica-localnet --subnet 172.28.0.0/16 2>/dev/null && \
-    echo "Created shared network: basilica-localnet" || true
+docker network create cathedral-localnet --subnet 172.28.0.0/16 2>/dev/null && \
+    echo "Created shared network: cathedral-localnet" || true
 
 # Two-phase startup: Start subtensor first, init wallets, then start remaining services
 # This prevents race conditions where validator starts before wallets exist

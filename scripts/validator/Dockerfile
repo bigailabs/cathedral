@@ -21,8 +21,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 
 # Fetch dependencies with cache mount
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=basilica-cargo-git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cathedral-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cathedral-cargo-git \
     cargo fetch
 
 # Build arguments
@@ -46,9 +46,9 @@ ENV CARGO_HTTP_TIMEOUT=120
 # Build the validator directly (workspace should resolve dependencies)
 # Set explicit endpoint if network is specified but endpoint is not
 # Use cache mounts for cargo registry and target to speed up rebuilds
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=basilica-cargo-git \
-    --mount=type=cache,target=/tmp/target,id=basilica-cargo-target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cathedral-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cathedral-cargo-git \
+    --mount=type=cache,target=/tmp/target,id=cathedral-cargo-target \
     if [ -n "$BITTENSOR_NETWORK" ] && [ -z "$METADATA_CHAIN_ENDPOINT" ]; then \
         case "$BITTENSOR_NETWORK" in \
             test) export METADATA_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443" ;; \
@@ -58,19 +58,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-regist
     fi && \
     if [ "$BUILD_MODE" = "release" ]; then \
         if [ -n "$FEATURES" ]; then \
-            cargo build --release -p basilica-validator --bin basilica-validator --features "$FEATURES"; \
+            cargo build --release -p cathedral-validator --bin cathedral-validator --features "$FEATURES"; \
         else \
-            cargo build --release -p basilica-validator --bin basilica-validator; \
+            cargo build --release -p cathedral-validator --bin cathedral-validator; \
         fi; \
     else \
         if [ -n "$FEATURES" ]; then \
-            cargo build -p basilica-validator --bin basilica-validator --features "$FEATURES"; \
+            cargo build -p cathedral-validator --bin cathedral-validator --features "$FEATURES"; \
         else \
-            cargo build -p basilica-validator --bin basilica-validator; \
+            cargo build -p cathedral-validator --bin cathedral-validator; \
         fi; \
     fi && \
     # Copy binary out of cache mount to a regular layer
-    cp /tmp/target/${BUILD_MODE}/basilica-validator /workspace/basilica-validator
+    cp /tmp/target/${BUILD_MODE}/cathedral-validator /workspace/cathedral-validator
 
 # Runtime image
 FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
@@ -87,25 +87,25 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary
-COPY --from=builder /workspace/basilica-validator /usr/local/bin/basilica-validator
+COPY --from=builder /workspace/cathedral-validator /usr/local/bin/cathedral-validator
 
-# Create basilica bin directory
-RUN mkdir -p /opt/basilica/bin
+# Create cathedral bin directory
+RUN mkdir -p /opt/cathedral/bin
 
 # Copy veritas binaries if they exist in build context
-COPY bin/executor-binary /opt/basilica/bin/executor-binary
-COPY bin/validator-binary /opt/basilica/bin/validator-binary
+COPY bin/executor-binary /opt/cathedral/bin/executor-binary
+COPY bin/validator-binary /opt/cathedral/bin/validator-binary
 
 # Make binaries executable
-RUN chmod +x /usr/local/bin/basilica-validator && \
-    chmod +x /opt/basilica/bin/executor-binary 2>/dev/null || true && \
-    chmod +x /opt/basilica/bin/validator-binary 2>/dev/null || true
+RUN chmod +x /usr/local/bin/cathedral-validator && \
+    chmod +x /opt/cathedral/bin/executor-binary 2>/dev/null || true && \
+    chmod +x /opt/cathedral/bin/validator-binary 2>/dev/null || true
 
 # Create data directory for SQLite database
-RUN mkdir -p /var/lib/basilica/basilica-validator && \
-    chmod 755 /var/lib/basilica/basilica-validator
+RUN mkdir -p /var/lib/cathedral/cathedral-validator && \
+    chmod 755 /var/lib/cathedral/cathedral-validator
 
 EXPOSE 8080 9090 50052
 
 # Default command
-ENTRYPOINT ["/usr/local/bin/basilica-validator"]
+ENTRYPOINT ["/usr/local/bin/cathedral-validator"]

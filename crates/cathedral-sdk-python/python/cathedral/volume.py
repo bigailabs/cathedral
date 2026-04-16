@@ -14,7 +14,7 @@ class Volume:
 
     Example:
         >>> cache = Volume.from_name("model-cache", create_if_missing=True)
-        >>> @basilica.deployment(name="app", volumes={"/cache": cache})
+        >>> @cathedral.deployment(name="app", volumes={"/cache": cache})
         ... def serve():
         ...     pass
     """

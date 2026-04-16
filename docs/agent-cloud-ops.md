@@ -1,6 +1,6 @@
-# Basilica Agent Cloud Ops
+# Cathedral Agent Cloud Ops
 
-This doc is for coding agents operating Basilica as a customer cloud platform, not for subnet/miner/validator work.
+This doc is for coding agents operating Cathedral as a customer cloud platform, not for subnet/miner/validator work.
 
 Use this when the user wants any of:
 
@@ -17,8 +17,8 @@ Use this when the user wants any of:
 Pick the control plane first:
 
 - needs shell access or a machine: rentals
-- needs a public URL or HTTP API: `basilica deploy`
-- needs Python automation: `BasilicaClient`
+- needs a public URL or HTTP API: `cathedral deploy`
+- needs Python automation: `CathedralClient`
 - needs credits or deposit address: account ops
 
 ## 1. Auth
@@ -27,20 +27,20 @@ Canonical CLI auth:
 
 ```bash
 curl -sSL https://basilica.ai/install.sh | bash
-basilica login
+cathedral login
 ```
 
 Headless auth:
 
 ```bash
-basilica login --device-code
+cathedral login --device-code
 ```
 
 Programmatic auth:
 
 ```bash
-basilica tokens create my-agent-token
-export BASILICA_API_TOKEN="basilica_..."
+cathedral tokens create my-agent-token
+export BASILICA_API_TOKEN="cathedral_..."
 ```
 
 ## 2. Funding And Balance
@@ -48,77 +48,77 @@ export BASILICA_API_TOKEN="basilica_..."
 Check credits:
 
 ```bash
-basilica balance
+cathedral balance
 ```
 
 Get or create the TAO deposit address:
 
 ```bash
-basilica fund
+cathedral fund
 ```
 
 Track deposits:
 
 ```bash
-basilica fund list --limit 100 --offset 0
+cathedral fund list --limit 100 --offset 0
 ```
 
 Current operator facts from the CLI:
 
 - minimum deposit is `0.1 TAO`
 - credits settle after `12` confirmations
-- there is no separate `top-up` verb; `basilica fund` is the funding entrypoint
+- there is no separate `top-up` verb; `cathedral fund` is the funding entrypoint
 
 ## 3. Rentals
 
 Discover capacity:
 
 ```bash
-basilica ls
-basilica ls h100
-basilica ls --price-max 5 --country US
-basilica ls --compute secure-cloud
+cathedral ls
+cathedral ls h100
+cathedral ls --price-max 5 --country US
+cathedral ls --compute secure-cloud
 ```
 
 Ensure SSH key registration:
 
 ```bash
-basilica ssh-keys list
-basilica ssh-keys add
+cathedral ssh-keys list
+cathedral ssh-keys add
 ```
 
 Create a rental:
 
 ```bash
-basilica up h200 --gpu-count 8 --compute secure-cloud
+cathedral up h200 --gpu-count 8 --compute secure-cloud
 ```
 
 Operate the machine:
 
 ```bash
-basilica ps
-basilica status <rental-id>
-basilica ssh <rental-id>
-basilica exec "nvidia-smi" --target <rental-id>
-basilica cp ./local.txt <rental-id>:/workspace/local.txt
-basilica restart <rental-id>
+cathedral ps
+cathedral status <rental-id>
+cathedral ssh <rental-id>
+cathedral exec "nvidia-smi" --target <rental-id>
+cathedral cp ./local.txt <rental-id>:/workspace/local.txt
+cathedral restart <rental-id>
 ```
 
 Teardown:
 
 ```bash
-basilica down <rental-id>
-basilica down --all
+cathedral down <rental-id>
+cathedral down --all
 ```
 
 Persistent volume flow for secure-cloud:
 
 ```bash
-basilica volumes create --name cache --size 100 --provider hyperstack --region US-1
-basilica volumes attach cache --rental <rental-id>
-basilica volumes list
-basilica volumes detach cache --yes
-basilica volumes delete cache --yes
+cathedral volumes create --name cache --size 100 --provider hyperstack --region US-1
+cathedral volumes attach cache --rental <rental-id>
+cathedral volumes list
+cathedral volumes detach cache --yes
+cathedral volumes delete cache --yes
 ```
 
 ## 4. Serverless Deploys
@@ -126,57 +126,57 @@ basilica volumes delete cache --yes
 Inline code:
 
 ```bash
-basilica deploy 'print("hello")' --name hello --port 8000 --ttl 300
+cathedral deploy 'print("hello")' --name hello --port 8000 --ttl 300
 ```
 
 Python file:
 
 ```bash
-basilica deploy my_api.py --name my-api --port 8000 --pip fastapi uvicorn --ttl 600
+cathedral deploy my_api.py --name my-api --port 8000 --pip fastapi uvicorn --ttl 600
 ```
 
 Container image:
 
 ```bash
-basilica deploy nginxinc/nginx-unprivileged:alpine --name nginx-demo --port 8080 --ttl 300
+cathedral deploy nginxinc/nginx-unprivileged:alpine --name nginx-demo --port 8080 --ttl 300
 ```
 
 GPU deploy:
 
 ```bash
-basilica deploy inference.py --name gpu-model --gpu 1 --gpu-model H100 --memory 32Gi --pip torch
+cathedral deploy inference.py --name gpu-model --gpu 1 --gpu-model H100 --memory 32Gi --pip torch
 ```
 
 Storage-backed deploy:
 
 ```bash
-basilica deploy hello.py --name stateful-app --storage --storage-path /data
+cathedral deploy hello.py --name stateful-app --storage --storage-path /data
 ```
 
 Manage deploys:
 
 ```bash
-basilica deploy ls
-basilica deploy status my-app --show-phases
-basilica deploy logs my-app --follow
-basilica deploy scale my-app --replicas 3
-basilica deploy delete my-app --yes
+cathedral deploy ls
+cathedral deploy status my-app --show-phases
+cathedral deploy logs my-app --follow
+cathedral deploy scale my-app --replicas 3
+cathedral deploy delete my-app --yes
 ```
 
-Current command name is `basilica deploy delete`, not stale `basilica deployments delete`.
+Current command name is `cathedral deploy delete`, not stale `cathedral deployments delete`.
 
 ## 5. Inference Templates
 
 vLLM:
 
 ```bash
-basilica deploy vllm Qwen/Qwen2.5-0.5B-Instruct --name my-llm
+cathedral deploy vllm Qwen/Qwen2.5-0.5B-Instruct --name my-llm
 ```
 
 SGLang:
 
 ```bash
-basilica deploy sglang Qwen/Qwen2.5-0.5B-Instruct --name my-sglang
+cathedral deploy sglang Qwen/Qwen2.5-0.5B-Instruct --name my-sglang
 ```
 
 For very large models:
@@ -189,14 +189,14 @@ For very large models:
 OpenClaw:
 
 ```bash
-basilica summon openclaw --provider openai
-basilica summon openclaw --provider anthropic
+cathedral summon openclaw --provider openai
+cathedral summon openclaw --provider anthropic
 ```
 
 Tau:
 
 ```bash
-basilica summon tau
+cathedral summon tau
 ```
 
 OpenClaw notes:
@@ -210,15 +210,15 @@ OpenClaw notes:
 Create a private deployment:
 
 ```bash
-basilica deploy my_api.py --name private-app --port 8000 --private
+cathedral deploy my_api.py --name private-app --port 8000 --private
 ```
 
 Manage share tokens:
 
 ```bash
-basilica deploy share-token status private-app
-basilica deploy share-token regenerate private-app
-basilica deploy share-token revoke private-app --yes
+cathedral deploy share-token status private-app
+cathedral deploy share-token regenerate private-app
+cathedral deploy share-token revoke private-app --yes
 ```
 
 ## 8. Python SDK
@@ -226,15 +226,15 @@ basilica deploy share-token revoke private-app --yes
 Install:
 
 ```bash
-pip install basilica-sdk
+pip install cathedral-sdk
 ```
 
 Basic client:
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 health = client.health_check()
 print(health.status)
 ```
@@ -242,9 +242,9 @@ print(health.status)
 High-level deploy:
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 deployment = client.deploy(
     name="hello-api",
     source="app.py",
@@ -258,9 +258,9 @@ print(deployment.url)
 Secure-cloud rental:
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 key = client.get_ssh_key() or client.register_ssh_key("agent-key")
 offering = sorted(client.list_secure_cloud_gpus(), key=lambda o: float(o.hourly_rate))[0]
 rental = client.start_secure_cloud_rental(offering_id=offering.id, ssh_public_key_id=key.id)
@@ -285,14 +285,14 @@ SDK caveats:
 
 Treat these as cost-bearing actions:
 
-- `basilica up ...`
-- `basilica deploy ...`
-- `basilica summon ...`
+- `cathedral up ...`
+- `cathedral deploy ...`
+- `cathedral summon ...`
 - SDK create/start methods
 
 Agent defaults:
 
-- check `basilica balance` first
+- check `cathedral balance` first
 - use TTLs for deploys unless persistence is explicitly requested
 - tear down rentals when finished unless the user asked to keep them
 
@@ -305,9 +305,9 @@ Agent defaults:
 - `examples/README.md`
 - `examples/15_cli_deploy/README.md`
 - `examples/inference/README.md`
-- `crates/basilica-cli/src/cli/handlers/`
-- `crates/basilica-sdk-python/README.md`
-- `crates/basilica-sdk-python/python/basilica/__init__.py`
+- `crates/cathedral-cli/src/cli/handlers/`
+- `crates/cathedral-sdk-python/README.md`
+- `crates/cathedral-sdk-python/python/cathedral/__init__.py`
 
 ## TODO
 

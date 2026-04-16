@@ -119,7 +119,7 @@ generate_coverage_estimate() {
 
 # Main
 main() {
-    ensure_basilica_root || exit 1
+    ensure_cathedral_root || exit 1
     
     case "${1:-summary}" in
         summary)

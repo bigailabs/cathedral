@@ -10,9 +10,9 @@ Usage:
     python3 08_external_file.py
 """
 import requests
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # Deploy from external file - SDK reads and packages the file
 deployment = client.deploy(

@@ -1,8 +1,8 @@
-# Basilica Miner Guide
+# Cathedral Miner Guide
 
-Comprehensive guide for running a Basilica miner node that provides GPU compute resources to the Bittensor network.
+Comprehensive guide for running a Cathedral miner node that provides GPU compute resources to the Bittensor network.
 
-> **Getting started?** See [docs.basilica.ai/miners](https://docs.basilica.ai/miners) for quick start, requirements, configuration, and setup instructions.
+> **Getting started?** See [docs.cathedral.ai/miners](https://docs.basilica.ai/miners) for quick start, requirements, configuration, and setup instructions.
 
 ---
 
@@ -65,7 +65,7 @@ node_id = UUID_v5_namespace(username@host:port)
 ```toml
 [node_management]
 nodes = [
-  { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 }
+  { host = "192.168.1.100", port = 22, username = "cathedral", gpu_category = "H100", gpu_count = 8 }
 ]
 ```
 
@@ -121,7 +121,7 @@ After a successful `RegisterBid`, the miner receives the validator's SSH public 
 5. **Validator connects directly** to nodes using its private key:
 
    ```bash
-   ssh -i ~/.basilica/ssh/validator_persistent.pem basilica@192.168.1.100
+   ssh -i ~/.cathedral/ssh/validator_persistent.pem cathedral@192.168.1.100
    ```
 
 ### Validator Assignment Strategies
@@ -224,7 +224,7 @@ message RegisterBidResponse {
 
 **Validator processing**: Verifies signature → checks timestamp freshness → validates node fields → enforces bid floor → upserts nodes in DB → deactivates any previously-registered nodes not in this request.
 
-**Availability note**: A successful `RegisterBid` does not make a node immediately visible in `GET /nodes` (and therefore `basilica ls`). The node is shown only after at least one successful full validation has populated `gpu_uuid_assignments` for that node. If full validation later fails and assignments are cleaned up, the node is hidden again until a subsequent successful full validation.
+**Availability note**: A successful `RegisterBid` does not make a node immediately visible in `GET /nodes` (and therefore `cathedral ls`). The node is shown only after at least one successful full validation has populated `gpu_uuid_assignments` for that node. If full validation later fails and assignments are cleaned up, the node is hidden again until a subsequent successful full validation.
 
 #### 2. UpdateBid
 
@@ -298,13 +298,13 @@ Best for: Development, testing, simple setups.
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/basilica.git
-cd basilica/basilica
+git clone https://github.com/your-org/cathedral.git
+cd cathedral/cathedral
 
 # Build miner binary using build script
 ./scripts/miner/build.sh
 
-# Binary will be at: ./basilica-miner
+# Binary will be at: ./cathedral-miner
 ```
 
 **Build options:**
@@ -318,21 +318,21 @@ cd basilica/basilica
 
 ```bash
 # Create data directory
-sudo mkdir -p /opt/basilica/data
-sudo mkdir -p /opt/basilica/config
-sudo chown -R $USER:$USER /opt/basilica
+sudo mkdir -p /opt/cathedral/data
+sudo mkdir -p /opt/cathedral/config
+sudo chown -R $USER:$USER /opt/cathedral
 
 # Copy binary and config
-sudo cp basilica-miner /opt/basilica/
-sudo cp miner.toml /opt/basilica/config/
+sudo cp cathedral-miner /opt/cathedral/
+sudo cp miner.toml /opt/cathedral/config/
 
 # Copy Bittensor wallet
 sudo mkdir -p /root/.bittensor
 sudo cp -r ~/.bittensor/wallets /root/.bittensor/
 
 # Run miner
-cd /opt/basilica
-sudo ./basilica-miner --config config/miner.toml
+cd /opt/cathedral
+sudo ./cathedral-miner --config config/miner.toml
 ```
 
 **Note:** Miner requires root/sudo for:
@@ -349,28 +349,28 @@ Best for: Production deployments requiring auto-restart and logging.
 
 ```bash
 # Create service file
-sudo tee /etc/systemd/system/basilica-miner.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/cathedral-miner.service > /dev/null <<EOF
 [Unit]
-Description=Basilica Miner
+Description=Cathedral Miner
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/basilica
-ExecStart=/opt/basilica/basilica-miner --config /opt/basilica/config/miner.toml
+WorkingDirectory=/opt/cathedral
+ExecStart=/opt/cathedral/cathedral-miner --config /opt/cathedral/config/miner.toml
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-miner
+SyslogIdentifier=cathedral-miner
 
 # Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/basilica/data /var/log/basilica
+ReadWritePaths=/opt/cathedral/data /var/log/cathedral
 
 [Install]
 WantedBy=multi-user.target
@@ -384,35 +384,35 @@ EOF
 sudo systemctl daemon-reload
 
 # Enable auto-start on boot
-sudo systemctl enable basilica-miner
+sudo systemctl enable cathedral-miner
 
 # Start service
-sudo systemctl start basilica-miner
+sudo systemctl start cathedral-miner
 
 # Check status
-sudo systemctl status basilica-miner
+sudo systemctl status cathedral-miner
 
 # View logs
-sudo journalctl -u basilica-miner -f
+sudo journalctl -u cathedral-miner -f
 ```
 
 #### Service Management Commands
 
 ```bash
 # Stop miner
-sudo systemctl stop basilica-miner
+sudo systemctl stop cathedral-miner
 
 # Restart miner
-sudo systemctl restart basilica-miner
+sudo systemctl restart cathedral-miner
 
 # Disable auto-start
-sudo systemctl disable basilica-miner
+sudo systemctl disable cathedral-miner
 
 # View logs (last 100 lines)
-sudo journalctl -u basilica-miner -n 100
+sudo journalctl -u cathedral-miner -n 100
 
 # View logs (follow in real-time)
-sudo journalctl -u basilica-miner -f
+sudo journalctl -u cathedral-miner -f
 ```
 
 ### Method 3: Docker (Containerized)
@@ -423,59 +423,59 @@ Best for: Isolated environments, easy updates, multi-host deployments.
 
 ```bash
 # Build using provided Dockerfile
-docker build -f scripts/miner/Dockerfile -t basilica-miner:latest .
+docker build -f scripts/miner/Dockerfile -t cathedral-miner:latest .
 
 # Or pull from registry (if available)
-docker pull ghcr.io/your-org/basilica/miner:latest
+docker pull ghcr.io/your-org/cathedral/miner:latest
 ```
 
 #### Run Container
 
 ```bash
 # Create required directories
-sudo mkdir -p /opt/basilica/config
-sudo mkdir -p /opt/basilica/data
+sudo mkdir -p /opt/cathedral/config
+sudo mkdir -p /opt/cathedral/data
 
 # Copy configuration
-sudo cp miner.toml /opt/basilica/config/
+sudo cp miner.toml /opt/cathedral/config/
 
 # Run miner container
 docker run -d \
-  --name basilica-miner \
+  --name cathedral-miner \
   --restart unless-stopped \
   -v ~/.bittensor:/root/.bittensor:ro \
-  -v /opt/basilica/config:/opt/basilica/config:ro \
-  -v /opt/basilica/data:/opt/basilica/data \
+  -v /opt/cathedral/config:/opt/cathedral/config:ro \
+  -v /opt/cathedral/data:/opt/cathedral/data \
   -v ~/.ssh:/root/.ssh:ro \
   -p 50051:50051 \
   -p 9090:9090 \
-  basilica-miner:latest --config /opt/basilica/config/miner.toml
+  cathedral-miner:latest --config /opt/cathedral/config/miner.toml
 ```
 
 **Volume mappings explained:**
 
 - `~/.bittensor` - Bittensor wallet (read-only)
-- `/opt/basilica/config` - Miner configuration (read-only)
-- `/opt/basilica/data` - Database and logs (read-write)
+- `/opt/cathedral/config` - Miner configuration (read-only)
+- `/opt/cathedral/data` - Database and logs (read-write)
 - `~/.ssh` - SSH keys for node access (read-only)
 
 #### Container Management
 
 ```bash
 # View logs
-docker logs -f basilica-miner
+docker logs -f cathedral-miner
 
 # Stop container
-docker stop basilica-miner
+docker stop cathedral-miner
 
 # Start container
-docker start basilica-miner
+docker start cathedral-miner
 
 # Remove container
-docker rm -f basilica-miner
+docker rm -f cathedral-miner
 
 # Exec into container (debugging)
-docker exec -it basilica-miner /bin/bash
+docker exec -it cathedral-miner /bin/bash
 ```
 
 ### Method 4: Docker Compose (Production with Auto-Updates)
@@ -499,19 +499,19 @@ version: '3.8'
 
 services:
   miner:
-    image: ghcr.io/your-org/basilica/miner:latest
-    container_name: basilica-miner
+    image: ghcr.io/your-org/cathedral/miner:latest
+    container_name: cathedral-miner
     restart: unless-stopped
     volumes:
       - ~/.bittensor:/root/.bittensor:ro
-      - ./config/miner.toml:/opt/basilica/config/miner.toml:ro
-      - ./data:/opt/basilica/data
+      - ./config/miner.toml:/opt/cathedral/config/miner.toml:ro
+      - ./data:/opt/cathedral/data
       - ~/.ssh:/root/.ssh:ro
-      - /var/log/basilica:/var/log/basilica
+      - /var/log/cathedral:/var/log/cathedral
     ports:
       - "50051:50051"
       - "9090:9090"
-    command: ["--config", "/opt/basilica/config/miner.toml"]
+    command: ["--config", "/opt/cathedral/config/miner.toml"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
       interval: 30s
@@ -521,18 +521,18 @@ services:
 
   watchtower:
     image: nickfedor/watchtower:1.14.0
-    container_name: basilica-watchtower
+    container_name: cathedral-watchtower
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["--cleanup", "--interval", "300", "basilica-miner"]
+    command: ["--cleanup", "--interval", "300", "cathedral-miner"]
 ```
 
 #### Deploy
 
 ```bash
 # Ensure config exists
-sudo cp miner.toml /opt/basilica/config/
+sudo cp miner.toml /opt/cathedral/config/
 
 # Start services
 docker compose up -d
@@ -640,7 +640,7 @@ If health checks stop, the miner heartbeat becomes stale, but node online/offlin
 
 ```bash
 # Validator connects to node (using validator's SSH key)
-ssh -i ~/.basilica/ssh/validator_persistent.pem basilica@192.168.1.100
+ssh -i ~/.cathedral/ssh/validator_persistent.pem cathedral@192.168.1.100
 
 # Validator can now:
 # - Run GPU validation workloads
@@ -797,7 +797,7 @@ cat ~/.ssh/authorized_keys | grep validator-
 sudo grep 'Accepted publickey' /var/log/auth.log | tail -20
 
 # View by user
-sudo grep 'Accepted publickey for basilica' /var/log/auth.log
+sudo grep 'Accepted publickey for cathedral' /var/log/auth.log
 ```
 
 ### Operational Security
@@ -816,7 +816,7 @@ sudo grep 'Accepted publickey for basilica' /var/log/auth.log
 
 ```bash
 # Create alert script
-sudo tee /opt/basilica/scripts/auth-alert.sh > /dev/null << 'EOF'
+sudo tee /opt/cathedral/scripts/auth-alert.sh > /dev/null << 'EOF'
 #!/bin/bash
 FAILED_LOGINS=$(grep "Failed publickey" /var/log/auth.log | wc -l)
 if [ $FAILED_LOGINS -gt 10 ]; then
@@ -825,10 +825,10 @@ if [ $FAILED_LOGINS -gt 10 ]; then
 fi
 EOF
 
-chmod +x /opt/basilica/scripts/auth-alert.sh
+chmod +x /opt/cathedral/scripts/auth-alert.sh
 
 # Run hourly via cron
-echo "0 * * * * /opt/basilica/scripts/auth-alert.sh" | crontab -
+echo "0 * * * * /opt/cathedral/scripts/auth-alert.sh" | crontab -
 ```
 
 #### Backup and Recovery
@@ -836,28 +836,28 @@ echo "0 * * * * /opt/basilica/scripts/auth-alert.sh" | crontab -
 **Critical data to backup:**
 
 - Bittensor wallet (`~/.bittensor/wallets/`)
-- Miner configuration (`/opt/basilica/config/`)
+- Miner configuration (`/opt/cathedral/config/`)
 - SSH keys (`~/.ssh/miner_node_key*`)
-- Database (`/opt/basilica/data/miner.db`)
+- Database (`/opt/cathedral/data/miner.db`)
 
 **Backup script:**
 
 ```bash
 #!/bin/bash
-BACKUP_DIR="/backup/basilica/$(date +%Y%m%d)"
+BACKUP_DIR="/backup/cathedral/$(date +%Y%m%d)"
 mkdir -p $BACKUP_DIR
 
 # Backup wallet
 cp -r ~/.bittensor/wallets $BACKUP_DIR/
 
 # Backup config
-cp /opt/basilica/config/miner.toml $BACKUP_DIR/
+cp /opt/cathedral/config/miner.toml $BACKUP_DIR/
 
 # Backup SSH keys
 cp ~/.ssh/miner_node_key* $BACKUP_DIR/
 
 # Backup database
-sqlite3 /opt/basilica/data/miner.db ".backup $BACKUP_DIR/miner.db"
+sqlite3 /opt/cathedral/data/miner.db ".backup $BACKUP_DIR/miner.db"
 
 # Encrypt backup
 tar -czf - $BACKUP_DIR | gpg --encrypt --recipient admin@yourdomain.com > $BACKUP_DIR.tar.gz.gpg
@@ -874,9 +874,9 @@ echo "Backup completed: $BACKUP_DIR.tar.gz.gpg"
 sudo apt update && sudo apt upgrade -y
 
 # Miner updates
-cd /opt/basilica
+cd /opt/cathedral
 ./scripts/miner/build.sh --release
-sudo systemctl restart basilica-miner
+sudo systemctl restart cathedral-miner
 ```
 
 **For Docker deployments**, Watchtower handles automatic updates.
@@ -903,7 +903,7 @@ sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update
 
 ```bash
 # Prometheus metrics endpoint (health check)
-curl http://localhost:9090/metrics | grep basilica_miner
+curl http://localhost:9090/metrics | grep cathedral_miner
 
 # Check gRPC server is responding
 grpcurl -plaintext localhost:50051 list
@@ -913,10 +913,10 @@ grpcurl -plaintext localhost:50051 list
 
 ```bash
 # Run miner health check
-./basilica-miner --config miner.toml health-check
+./cathedral-miner --config miner.toml health-check
 
 # Or via database CLI command
-./basilica-miner --config miner.toml database health
+./cathedral-miner --config miner.toml database health
 ```
 
 ### Metrics Collection
@@ -928,16 +928,16 @@ grpcurl -plaintext localhost:50051 list
 curl http://localhost:9090/metrics
 
 # Sample metrics:
-# basilica_miner_node_count 3
-# basilica_miner_validator_connections_total 12
-# basilica_miner_ssh_deployments_total 45
-# basilica_miner_authentication_requests_total 120
+# cathedral_miner_node_count 3
+# cathedral_miner_validator_connections_total 12
+# cathedral_miner_ssh_deployments_total 45
+# cathedral_miner_authentication_requests_total 120
 ```
 
 **Grafana dashboard** (if available):
 
 ```text
-https://basilica-grafana.tplr.ai/
+https://cathedral-grafana.tplr.ai/
 ```
 
 ### Log Management
@@ -946,29 +946,29 @@ https://basilica-grafana.tplr.ai/
 
 ```bash
 # Systemd service
-sudo journalctl -u basilica-miner -f
+sudo journalctl -u cathedral-miner -f
 
 # Docker container
-docker logs -f basilica-miner
+docker logs -f cathedral-miner
 
 # Binary (if logging to file)
-tail -f /opt/basilica/miner.log
+tail -f /opt/cathedral/miner.log
 ```
 
 **Important log patterns to monitor:**
 
 ```bash
 # Authentication events
-grep "Successfully authenticated validator" /opt/basilica/miner.log
+grep "Successfully authenticated validator" /opt/cathedral/miner.log
 
 # Node registration events
-grep "Registered node" /opt/basilica/miner.log
+grep "Registered node" /opt/cathedral/miner.log
 
 # SSH key deployment events
-grep "Deploying SSH key for validator" /opt/basilica/miner.log
+grep "Deploying SSH key for validator" /opt/cathedral/miner.log
 
 # Errors
-grep "ERROR" /opt/basilica/miner.log
+grep "ERROR" /opt/cathedral/miner.log
 ```
 
 ### Node Monitoring
@@ -979,7 +979,7 @@ grep "ERROR" /opt/basilica/miner.log
 # Test SSH access to all nodes
 for node in 192.168.1.100 192.168.1.101; do
     echo "Testing $node..."
-    ssh -i ~/.ssh/miner_node_key basilica@$node "nvidia-smi --query-gpu=name,utilization.gpu --format=csv,noheader"
+    ssh -i ~/.ssh/miner_node_key cathedral@$node "nvidia-smi --query-gpu=name,utilization.gpu --format=csv,noheader"
 done
 ```
 
@@ -987,17 +987,17 @@ done
 
 ```bash
 # Create monitoring script
-cat > /opt/basilica/scripts/monitor-gpus.sh << 'EOF'
+cat > /opt/cathedral/scripts/monitor-gpus.sh << 'EOF'
 #!/bin/bash
 while true; do
     echo "=== GPU Status $(date) ==="
-    ssh -i ~/.ssh/miner_node_key basilica@192.168.1.100 nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,temperature.gpu --format=csv
+    ssh -i ~/.ssh/miner_node_key cathedral@192.168.1.100 nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,temperature.gpu --format=csv
     sleep 60
 done
 EOF
 
-chmod +x /opt/basilica/scripts/monitor-gpus.sh
-./opt/basilica/scripts/monitor-gpus.sh
+chmod +x /opt/cathedral/scripts/monitor-gpus.sh
+./opt/cathedral/scripts/monitor-gpus.sh
 ```
 
 ### Performance Metrics
@@ -1080,11 +1080,11 @@ Error: unable to open database file
 
 ```bash
 # Ensure database directory exists
-sudo mkdir -p /opt/basilica/data
-sudo chown $USER:$USER /opt/basilica/data
+sudo mkdir -p /opt/cathedral/data
+sudo chown $USER:$USER /opt/cathedral/data
 
 # Check database URL in config
-# Should be: url = "sqlite:///opt/basilica/data/miner.db"
+# Should be: url = "sqlite:///opt/cathedral/data/miner.db"
 ```
 
 ##### **Error: Wallet loading failed**
@@ -1136,13 +1136,13 @@ Error: Failed to connect to node 192.168.1.100: Permission denied (publickey)
 
 ```bash
 # Verify miner's public key is on node
-ssh basilica@192.168.1.100 'cat ~/.ssh/authorized_keys | grep miner_node_key'
+ssh cathedral@192.168.1.100 'cat ~/.ssh/authorized_keys | grep miner_node_key'
 
 # If not present, deploy it
-ssh-copy-id -i ~/.ssh/miner_node_key.pub basilica@192.168.1.100
+ssh-copy-id -i ~/.ssh/miner_node_key.pub cathedral@192.168.1.100
 
 # Test connection
-ssh -i ~/.ssh/miner_node_key basilica@192.168.1.100 'echo "Connection successful"'
+ssh -i ~/.ssh/miner_node_key cathedral@192.168.1.100 'echo "Connection successful"'
 ```
 
 ##### **Error: Connection timed out**
@@ -1161,10 +1161,10 @@ ping 192.168.1.100
 nc -zv 192.168.1.100 22
 
 # Check firewall on node
-ssh basilica@192.168.1.100 'sudo ufw status'
+ssh cathedral@192.168.1.100 'sudo ufw status'
 
 # Allow SSH from miner IP
-ssh basilica@192.168.1.100 'sudo ufw allow from <MINER_IP> to any port 22'
+ssh cathedral@192.168.1.100 'sudo ufw allow from <MINER_IP> to any port 22'
 ```
 
 ##### **Error: Key permissions too open**
@@ -1203,7 +1203,7 @@ WARN: No validators found matching criteria
 # validator_hotkey = "5G3qVaXz..."
 
 # Restart miner
-sudo systemctl restart basilica-miner
+sudo systemctl restart cathedral-miner
 ```
 
 ##### **Error: Validator authentication failed**
@@ -1241,20 +1241,20 @@ WARN: No nodes registered - miner will not be able to serve validators
 # Check node_management config
 # [node_management]
 # nodes = [
-#   { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 }
+#   { host = "192.168.1.100", port = 22, username = "cathedral", gpu_category = "H100", gpu_count = 8 }
 # ]
 
 # Verify SSH access to each node
 for node in $(grep 'host = ' miner.toml | cut -d'"' -f2); do
     echo "Testing $node..."
-    ssh -i ~/.ssh/miner_node_key basilica@$node 'hostname'
+    ssh -i ~/.ssh/miner_node_key cathedral@$node 'hostname'
 done
 ```
 
 ##### **Error: Node ID generation failed**
 
 ```text
-ERROR: Failed to generate node ID for basilica@192.168.1.100:22
+ERROR: Failed to generate node ID for cathedral@192.168.1.100:22
 ```
 
 **Solution:**
@@ -1267,7 +1267,7 @@ ERROR: Failed to generate node ID for basilica@192.168.1.100:22
 # - username: Must exist on node
 
 # Test connection
-ssh -p 22 -i ~/.ssh/miner_node_key basilica@192.168.1.100
+ssh -p 22 -i ~/.ssh/miner_node_key cathedral@192.168.1.100
 ```
 
 #### 5. Bittensor Network Issues
@@ -1307,7 +1307,7 @@ Error: Metadata error: the generated code is not compatible with the node
 ./scripts/miner/build.sh --release
 
 # Restart miner
-sudo systemctl restart basilica-miner
+sudo systemctl restart cathedral-miner
 ```
 
 ### Debugging Strategies
@@ -1316,7 +1316,7 @@ sudo systemctl restart basilica-miner
 
 ```bash
 # Run miner with verbose logging
-./basilica-miner --config miner.toml -vvv
+./cathedral-miner --config miner.toml -vvv
 
 # Or set in config (not recommended for production)
 # [logging]
@@ -1327,23 +1327,23 @@ sudo systemctl restart basilica-miner
 
 ```bash
 # Validate config before starting
-./basilica-miner --config miner.toml config validate
+./cathedral-miner --config miner.toml config validate
 
 # Show effective configuration
-./basilica-miner --config miner.toml config show
+./cathedral-miner --config miner.toml config show
 ```
 
 #### Test Individual Components
 
 ```bash
 # Test SSH connectivity
-./basilica-miner --config miner.toml service test-ssh
+./cathedral-miner --config miner.toml service test-ssh
 
 # Test database connection
-./basilica-miner --config miner.toml database health
+./cathedral-miner --config miner.toml database health
 
 # Test Bittensor connection
-./basilica-miner --config miner.toml service test-bittensor
+./cathedral-miner --config miner.toml service test-bittensor
 ```
 
 #### Network Diagnostics
@@ -1356,7 +1356,7 @@ grpcurl -plaintext localhost:50051 list
 grpcurl -plaintext <MINER_PUBLIC_IP>:50051 list
 
 # Check metrics endpoint
-curl http://localhost:9090/metrics | grep basilica_miner
+curl http://localhost:9090/metrics | grep cathedral_miner
 ```
 
 ### Getting Help
@@ -1413,15 +1413,15 @@ For geo-distributed GPU nodes:
 [node_management]
 nodes = [
     # US East (note: host must be an IPv4 literal, not a hostname)
-    { host = "203.0.113.10", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
-    { host = "203.0.113.11", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "203.0.113.10", port = 22, username = "cathedral", gpu_category = "H100", gpu_count = 8 },
+    { host = "203.0.113.11", port = 22, username = "cathedral", gpu_category = "H100", gpu_count = 8 },
 
     # EU West
-    { host = "198.51.100.20", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 8 },
-    { host = "198.51.100.21", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 8 },
+    { host = "198.51.100.20", port = 22, username = "cathedral", gpu_category = "A100", gpu_count = 8 },
+    { host = "198.51.100.21", port = 22, username = "cathedral", gpu_category = "A100", gpu_count = 8 },
 
     # Asia Pacific
-    { host = "192.0.2.30", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "192.0.2.30", port = 22, username = "cathedral", gpu_category = "H100", gpu_count = 8 },
 ]
 
 # Prices apply uniformly across all regions
@@ -1449,18 +1449,18 @@ OLD_KEY=~/.ssh/miner_node_key
 NEW_KEY=~/.ssh/miner_node_key.new
 
 # Generate new key
-ssh-keygen -t ed25519 -f $NEW_KEY -N "" -C "basilica-miner-$(date +%Y%m)"
+ssh-keygen -t ed25519 -f $NEW_KEY -N "" -C "cathedral-miner-$(date +%Y%m)"
 
 # Deploy new key to all nodes
-for node in $(grep 'host = ' /opt/basilica/config/miner.toml | cut -d'"' -f2); do
-    ssh-copy-id -i $NEW_KEY.pub basilica@$node
+for node in $(grep 'host = ' /opt/cathedral/config/miner.toml | cut -d'"' -f2); do
+    ssh-copy-id -i $NEW_KEY.pub cathedral@$node
 done
 
 # Update miner config
-sed -i "s|miner_node_key|miner_node_key.new|g" /opt/basilica/config/miner.toml
+sed -i "s|miner_node_key|miner_node_key.new|g" /opt/cathedral/config/miner.toml
 
 # Restart miner
-sudo systemctl restart basilica-miner
+sudo systemctl restart cathedral-miner
 
 # Remove old key after verification
 sleep 60
@@ -1517,7 +1517,7 @@ ulimit -n 65536
 ### Additional Resources
 
 - **Miner Setup Guide**: <https://docs.basilica.ai/miners>
-- **GitHub Repository**: <https://github.com/one-covenant/basilica>
+- **GitHub Repository**: <https://github.com/one-covenant/cathedral>
 - **Discord**: <https://discord.gg/Cy7c9vPsNK>
 - **Website**: <https://www.basilica.ai/>
 - **Validator Guide**: [docs/validator.md](validator.md)

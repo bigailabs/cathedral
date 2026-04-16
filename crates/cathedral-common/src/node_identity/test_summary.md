@@ -145,13 +145,13 @@ Comprehensive test coverage has been implemented for the UUID+HUID node identity
 Run all tests with:
 ```bash
 # Run all tests
-cargo test --package basilica-common --features sqlite
+cargo test --package cathedral-common --features sqlite
 
 # Run tests with output
-cargo test --package basilica-common --features sqlite -- --nocapture
+cargo test --package cathedral-common --features sqlite -- --nocapture
 
 # Run specific module tests
-cargo test --package basilica-common node_identity::
+cargo test --package cathedral-common node_identity::
 ```
 
 ## Coverage Summary

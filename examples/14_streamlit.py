@@ -19,11 +19,11 @@ Documentation: https://docs.streamlit.io
 import base64
 from pathlib import Path
 
-from basilica import BasilicaClient, Deployment
+from cathedral import CathedralClient, Deployment
 
 
 def main():
-    client = BasilicaClient()
+    client = CathedralClient()
 
     print("Deploying Streamlit app...")
 

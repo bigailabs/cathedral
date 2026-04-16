@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deploy Clawdbot AI agent platform on Basilica.
+Deploy Clawdbot AI agent platform on Cathedral.
 
 Usage:
     export ANTHROPIC_API_KEY="your-key"
@@ -12,13 +12,13 @@ import os
 import re
 import sys
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not api_key:
     sys.exit("Set ANTHROPIC_API_KEY or OPENAI_API_KEY")
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="clawdbot",
@@ -37,4 +37,4 @@ match = re.search(r"CLAWDBOT_GATEWAY_TOKEN=([a-f0-9]{64})", deployment.logs(tail
 if match:
     print(f"Control UI: {deployment.url}/chat?session=main&token={match.group(1)}")
 else:
-    print(f"Get token: basilica deploy logs {deployment.name} | grep CLAWDBOT_GATEWAY_TOKEN")
+    print(f"Get token: cathedral deploy logs {deployment.name} | grep CLAWDBOT_GATEWAY_TOKEN")

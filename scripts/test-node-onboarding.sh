@@ -7,7 +7,7 @@
 set -e
 
 echo "========================================="
-echo "  Basilica Node Onboarding Test Script"
+echo "  Cathedral Node Onboarding Test Script"
 echo "========================================="
 echo ""
 
@@ -19,8 +19,8 @@ NC='\033[0m' # No Color
 
 # Configuration
 KUBECONFIG=${KUBECONFIG:-"build/k3s.yaml"}
-VALIDATOR_NAMESPACE=${VALIDATOR_NAMESPACE:-"basilica-validators"}
-OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-"basilica-system"}
+VALIDATOR_NAMESPACE=${VALIDATOR_NAMESPACE:-"cathedral-validators"}
+OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-"cathedral-system"}
 
 # Functions
 check_prereq() {
@@ -38,8 +38,8 @@ check_env_var() {
     local deployment=$2
 
     echo -n "  Checking $var... "
-    if kubectl -n "$deployment" exec deploy/basilica-validator -- env 2>/dev/null | grep -q "^$var="; then
-        local value=$(kubectl -n "$deployment" exec deploy/basilica-validator -- env 2>/dev/null | grep "^$var=" | cut -d'=' -f2)
+    if kubectl -n "$deployment" exec deploy/cathedral-validator -- env 2>/dev/null | grep -q "^$var="; then
+        local value=$(kubectl -n "$deployment" exec deploy/cathedral-validator -- env 2>/dev/null | grep "^$var=" | cut -d'=' -f2)
         if [ "$var" = "BASILICA_K3S_TOKEN" ]; then
             echo -e "${GREEN}✓${NC} Set (hidden)"
         else
@@ -73,14 +73,14 @@ echo ""
 
 # Step 3: Check validator deployment
 echo "3. Checking validator deployment..."
-if ! kubectl -n "$VALIDATOR_NAMESPACE" get deploy/basilica-validator &> /dev/null; then
+if ! kubectl -n "$VALIDATOR_NAMESPACE" get deploy/cathedral-validator &> /dev/null; then
     echo -e "${YELLOW}⚠${NC}  Validator deployment not found in namespace $VALIDATOR_NAMESPACE"
     echo "  This test assumes validator is running. You may need to deploy it first."
 else
     echo -e "${GREEN}✓${NC} Validator deployment found"
 
     # Check if validator is running
-    READY=$(kubectl -n "$VALIDATOR_NAMESPACE" get deploy/basilica-validator -o jsonpath='{.status.readyReplicas}')
+    READY=$(kubectl -n "$VALIDATOR_NAMESPACE" get deploy/cathedral-validator -o jsonpath='{.status.readyReplicas}')
     if [ "$READY" = "1" ]; then
         echo -e "${GREEN}✓${NC} Validator is ready"
     else
@@ -91,7 +91,7 @@ echo ""
 
 # Step 4: Check environment variables
 echo "4. Checking K3s join configuration..."
-if kubectl -n "$VALIDATOR_NAMESPACE" get deploy/basilica-validator &> /dev/null; then
+if kubectl -n "$VALIDATOR_NAMESPACE" get deploy/cathedral-validator &> /dev/null; then
     all_set=true
     check_env_var "BASILICA_ENABLE_K3S_JOIN" "$VALIDATOR_NAMESPACE" || all_set=false
     check_env_var "BASILICA_K3S_URL" "$VALIDATOR_NAMESPACE" || all_set=false
@@ -117,21 +117,21 @@ fi
 echo ""
 
 # Step 5: Check CRDs
-echo "5. Checking BasilicaNodeProfile CRD..."
-if ! kubectl get crd basilicannodeprofiles.basilica.ai &> /dev/null; then
-    echo -e "${RED}✗${NC} BasilicaNodeProfile CRD not found"
-    echo "  Install CRDs: kubectl apply -f basilica-crds.yaml"
+echo "5. Checking CathedralNodeProfile CRD..."
+if ! kubectl get crd cathedralnnodeprofiles.cathedral.ai &> /dev/null; then
+    echo -e "${RED}✗${NC} CathedralNodeProfile CRD not found"
+    echo "  Install CRDs: kubectl apply -f cathedral-crds.yaml"
     exit 1
 fi
-echo -e "${GREEN}✓${NC} BasilicaNodeProfile CRD exists"
+echo -e "${GREEN}✓${NC} CathedralNodeProfile CRD exists"
 echo ""
 
 # Step 6: Check operator
-echo "6. Checking Basilica operator..."
-if ! kubectl -n "$OPERATOR_NAMESPACE" get deploy/basilica-operator &> /dev/null; then
+echo "6. Checking Cathedral operator..."
+if ! kubectl -n "$OPERATOR_NAMESPACE" get deploy/cathedral-operator &> /dev/null; then
     echo -e "${YELLOW}⚠${NC}  Operator deployment not found"
 else
-    READY=$(kubectl -n "$OPERATOR_NAMESPACE" get deploy/basilica-operator -o jsonpath='{.status.readyReplicas}')
+    READY=$(kubectl -n "$OPERATOR_NAMESPACE" get deploy/cathedral-operator -o jsonpath='{.status.readyReplicas}')
     if [ "$READY" = "1" ]; then
         echo -e "${GREEN}✓${NC} Operator is ready"
     else
@@ -146,12 +146,12 @@ kubectl get nodes
 echo ""
 
 # Step 8: Check existing NodeProfiles
-echo "8. Checking existing BasilicaNodeProfiles..."
-if kubectl get basilicannodeprofiles.basilica.ai &> /dev/null; then
-    COUNT=$(kubectl get basilicannodeprofiles.basilica.ai --no-headers 2>/dev/null | wc -l)
+echo "8. Checking existing CathedralNodeProfiles..."
+if kubectl get cathedralnnodeprofiles.cathedral.ai &> /dev/null; then
+    COUNT=$(kubectl get cathedralnnodeprofiles.cathedral.ai --no-headers 2>/dev/null | wc -l)
     if [ "$COUNT" -gt 0 ]; then
         echo "Found $COUNT NodeProfile(s):"
-        kubectl get basilicannodeprofiles.basilica.ai -o custom-columns=NAME:.metadata.name,NODE:.status.kubeNodeName,HEALTH:.status.health,GPU:.spec.gpuCount,VALIDATED:.status.lastValidated
+        kubectl get cathedralnnodeprofiles.cathedral.ai -o custom-columns=NAME:.metadata.name,NODE:.status.kubeNodeName,HEALTH:.status.health,GPU:.spec.gpuCount,VALIDATED:.status.lastValidated
     else
         echo "No NodeProfiles found yet"
     fi
@@ -171,10 +171,10 @@ echo "1. Watch for new nodes joining:"
 echo "   watch -n 1 kubectl get nodes -o wide"
 echo ""
 echo "2. Watch NodeProfile CRs:"
-echo "   watch -n 1 \"kubectl get basilicannodeprofiles -o custom-columns=NAME:.metadata.name,NODE:.status.kubeNodeName,HEALTH:.status.health,GPU:.spec.gpuCount\""
+echo "   watch -n 1 \"kubectl get cathedralnnodeprofiles -o custom-columns=NAME:.metadata.name,NODE:.status.kubeNodeName,HEALTH:.status.health,GPU:.spec.gpuCount\""
 echo ""
 echo "3. Watch validator logs:"
-echo "   kubectl -n $VALIDATOR_NAMESPACE logs -f deploy/basilica-validator | grep -E 'K3s|join|node|validation'"
+echo "   kubectl -n $VALIDATOR_NAMESPACE logs -f deploy/cathedral-validator | grep -E 'K3s|join|node|validation'"
 echo ""
 echo "4. Trigger a validation (if you have a test miner):"
 echo "   # Via validator API or automatic verification cycle"
@@ -184,6 +184,6 @@ echo "   kubectl get node <node-id> -o jsonpath='{.metadata.labels}' | jq ."
 echo "   kubectl get node <node-id> -o jsonpath='{.spec.taints}' | jq ."
 echo ""
 echo "6. Verify the NodeProfile:"
-echo "   kubectl get basilicannodeprofile <node-id> -o yaml"
+echo "   kubectl get cathedralnnodeprofile <node-id> -o yaml"
 echo ""
 echo -e "${GREEN}✓${NC} Ready to test node onboarding!"

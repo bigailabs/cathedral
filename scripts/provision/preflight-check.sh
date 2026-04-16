@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-flight checks for Basilica deployment
+# Pre-flight checks for Cathedral deployment
 
 set -e
 
@@ -171,7 +171,7 @@ check_binaries() {
     local missing=()
     
     for binary in "${binaries[@]}"; do
-        if [[ ! -f "$BASILICA_ROOT/$binary" ]]; then
+        if [[ ! -f "$CATHEDRAL_ROOT/$binary" ]]; then
             missing+=("$binary")
         fi
     done
@@ -194,7 +194,7 @@ check_configurations() {
     local missing=()
     
     for config in "${configs[@]}"; do
-        if [[ ! -f "$BASILICA_ROOT/$config" ]]; then
+        if [[ ! -f "$CATHEDRAL_ROOT/$config" ]]; then
             missing+=("$config")
         fi
     done
@@ -312,7 +312,7 @@ main() {
             ;;
         help|*)
             cat << EOF
-Basilica Pre-flight Check
+Cathedral Pre-flight Check
 
 Usage: preflight-check.sh [environment]
 

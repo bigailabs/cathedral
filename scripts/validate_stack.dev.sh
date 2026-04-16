@@ -1,8 +1,8 @@
 #!/bin/bash
-# validate_stack.dev.sh - Basilica Development Stack Validation Script
+# validate_stack.dev.sh - Cathedral Development Stack Validation Script
 #
 # PURPOSE:
-#   Validates the health and discovery mechanisms of deployed Basilica components
+#   Validates the health and discovery mechanisms of deployed Cathedral components
 #   including miner, validator, and executor nodes. Performs comprehensive checks
 #   on process health, network discovery, and inter-component communication.
 #
@@ -17,7 +17,7 @@
 # REQUIREMENTS:
 #   - SSH access to all component hosts
 #   - sqlite3 installed on miner host
-#   - Basilica components deployed with standard paths (/opt/basilica)
+#   - Cathedral components deployed with standard paths (/opt/cathedral)
 
 set -euo pipefail
 
@@ -36,7 +36,7 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Validates Basilica development stack health and discovery mechanisms.
+Validates Cathedral development stack health and discovery mechanisms.
 
 OPTIONS:
     -m, --miner HOST:PORT        Miner SSH connection (e.g., root@10.0.1.10:22)
@@ -187,12 +187,12 @@ check_component_status() {
 check_miner() {
     log "=== Miner Health Check ==="
 
-    if ! check_component_status "Miner" "$MINER_HOST" "$MINER_PORT" "basilica.*miner"; then
+    if ! check_component_status "Miner" "$MINER_HOST" "$MINER_PORT" "cathedral.*miner"; then
         return 1
     fi
 
     log_verbose "Checking miner logs..."
-    local recent_logs=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -20 /opt/basilica/logs/miner-testnet.log 2>/dev/null | grep -E '(ERROR|WARN|discovered|validators|executors)' || true")
+    local recent_logs=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -20 /opt/cathedral/logs/miner-testnet.log 2>/dev/null | grep -E '(ERROR|WARN|discovered|validators|executors)' || true")
 
     if [[ -n "$recent_logs" ]]; then
         log_verbose "Recent miner log entries:"
@@ -201,21 +201,21 @@ check_miner() {
         done
     fi
 
-    local validators_found=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/basilica/logs/miner-testnet.log | grep -o 'Found [0-9]* validators' | tail -1 | grep -o '[0-9]*' || echo 0")
+    local validators_found=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/cathedral/logs/miner-testnet.log | grep -o 'Found [0-9]* validators' | tail -1 | grep -o '[0-9]*' || echo 0")
     if [[ "$validators_found" -gt 0 ]]; then
         log_success "Miner discovered $validators_found validator(s)"
     else
         log_warning "Miner has not discovered any validators"
     fi
 
-    local executors_found=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/basilica/logs/miner-testnet.log | grep -o 'Found [0-9]* available executors' | tail -1 | grep -o '[0-9]*' || echo 0")
+    local executors_found=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/cathedral/logs/miner-testnet.log | grep -o 'Found [0-9]* available executors' | tail -1 | grep -o '[0-9]*' || echo 0")
     if [[ "$executors_found" -gt 0 ]]; then
         log_success "Miner has $executors_found available executor(s)"
     else
         log_warning "Miner has no available executors"
     fi
 
-    local executor_health=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "sqlite3 /opt/basilica/data/miner.db 'SELECT executor_id, is_healthy FROM executor_health ORDER BY updated_at DESC LIMIT 1;' 2>/dev/null || echo 'DB_ERROR'")
+    local executor_health=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "sqlite3 /opt/cathedral/data/miner.db 'SELECT executor_id, is_healthy FROM executor_health ORDER BY updated_at DESC LIMIT 1;' 2>/dev/null || echo 'DB_ERROR'")
     if [[ "$executor_health" != "DB_ERROR" ]] && [[ -n "$executor_health" ]]; then
         local executor_id=$(echo "$executor_health" | cut -d'|' -f1)
         local is_healthy=$(echo "$executor_health" | cut -d'|' -f2)
@@ -228,7 +228,7 @@ check_miner() {
         log_warning "Could not query executor health from database"
     fi
 
-    local grpc_running=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "grep -c 'Validator communications server started successfully' /opt/basilica/logs/miner-testnet.log || echo 0")
+    local grpc_running=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "grep -c 'Validator communications server started successfully' /opt/cathedral/logs/miner-testnet.log || echo 0")
     if [[ "$grpc_running" -gt 0 ]]; then
         log_success "Miner gRPC server is running"
     else
@@ -241,17 +241,17 @@ check_miner() {
 check_validator() {
     log "=== Validator Health Check ==="
 
-    if ! check_component_status "Validator" "$VALIDATOR_HOST" "$VALIDATOR_PORT" "basilica.*validator"; then
+    if ! check_component_status "Validator" "$VALIDATOR_HOST" "$VALIDATOR_PORT" "cathedral.*validator"; then
         return 1
     fi
 
     log_verbose "Checking validator logs..."
-    local log_size=$(ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "wc -l < /opt/basilica/logs/validator-testnet.log 2>/dev/null || echo 0")
+    local log_size=$(ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "wc -l < /opt/cathedral/logs/validator-testnet.log 2>/dev/null || echo 0")
     log_verbose "Validator log has $log_size lines"
 
-    local registered=$(ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "grep -c 'registered with discovered UID' /opt/basilica/logs/validator-testnet.log 2>/dev/null || echo 0")
+    local registered=$(ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "grep -c 'registered with discovered UID' /opt/cathedral/logs/validator-testnet.log 2>/dev/null || echo 0")
     if [[ "$registered" -gt 0 ]]; then
-        local uid=$(ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "grep 'registered with discovered UID' /opt/basilica/logs/validator-testnet.log | grep -o 'UID: [0-9]*' | grep -o '[0-9]*' | tail -1 || echo 'unknown'")
+        local uid=$(ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "grep 'registered with discovered UID' /opt/cathedral/logs/validator-testnet.log | grep -o 'UID: [0-9]*' | grep -o '[0-9]*' | tail -1 || echo 'unknown'")
         log_success "Validator registered with UID: $uid"
     else
         log_warning "Validator registration status unknown"
@@ -263,22 +263,22 @@ check_validator() {
 check_executor() {
     log "=== Executor Health Check ==="
 
-    if ! check_component_status "Executor" "$EXECUTOR_HOST" "22" "basilica.*executor"; then
+    if ! check_component_status "Executor" "$EXECUTOR_HOST" "22" "cathedral.*executor"; then
         return 1
     fi
 
     log_verbose "Checking executor health check logs..."
-    local health_checks=$(ssh_cmd "$EXECUTOR_HOST" "22" "tail -50 /opt/basilica/logs/executor-testnet.log | grep -c 'Health check requested by: miner' || echo 0")
+    local health_checks=$(ssh_cmd "$EXECUTOR_HOST" "22" "tail -50 /opt/cathedral/logs/executor-testnet.log | grep -c 'Health check requested by: miner' || echo 0")
     if [[ "$health_checks" -gt 0 ]]; then
         log_success "Executor received $health_checks health check(s) from miner recently"
 
-        local last_check=$(ssh_cmd "$EXECUTOR_HOST" "22" "tail -50 /opt/basilica/logs/executor-testnet.log | grep 'Health check requested by: miner' | tail -1 | grep -o '^[^Z]*' || echo 'unknown'")
+        local last_check=$(ssh_cmd "$EXECUTOR_HOST" "22" "tail -50 /opt/cathedral/logs/executor-testnet.log | grep 'Health check requested by: miner' | tail -1 | grep -o '^[^Z]*' || echo 'unknown'")
         log_verbose "Last health check: $last_check"
     else
         log_warning "No recent health checks from miner"
     fi
 
-    local containers=$(ssh_cmd "$EXECUTOR_HOST" "22" "tail -20 /opt/basilica/logs/executor-testnet.log | grep 'Health check:.*containers found' | tail -1 | grep -o '[0-9]* containers' || echo 'unknown'")
+    local containers=$(ssh_cmd "$EXECUTOR_HOST" "22" "tail -20 /opt/cathedral/logs/executor-testnet.log | grep 'Health check:.*containers found' | tail -1 | grep -o '[0-9]* containers' || echo 'unknown'")
     if [[ "$containers" != "unknown" ]]; then
         log_verbose "Container status: $containers"
     fi
@@ -290,21 +290,21 @@ check_discovery() {
     log "=== Discovery Chain Verification ==="
 
     log_verbose "Checking Bittensor network connectivity..."
-    local metagraph_fetch=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/basilica/logs/miner-testnet.log | grep -c 'Metagraph fetched successfully for netuid: $NETUID' || echo 0")
+    local metagraph_fetch=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/cathedral/logs/miner-testnet.log | grep -c 'Metagraph fetched successfully for netuid: $NETUID' || echo 0")
     if [[ "$metagraph_fetch" -gt 0 ]]; then
         log_success "Miner successfully fetching metagraph from netuid $NETUID"
     else
         log_error "Miner not fetching metagraph successfully"
     fi
 
-    local assignments=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/basilica/logs/miner-testnet.log | grep 'assignment for validator' | tail -1 || echo 'none'")
+    local assignments=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "tail -100 /opt/cathedral/logs/miner-testnet.log | grep 'assignment for validator' | tail -1 || echo 'none'")
     if [[ "$assignments" != "none" ]]; then
         log_success "Executor assignments found: ${assignments#*: }"
     else
         log_warning "No executor assignments to validators found"
     fi
 
-    local interactions=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "sqlite3 /opt/basilica/data/miner.db 'SELECT COUNT(*) FROM validator_interactions;' 2>/dev/null || echo 0")
+    local interactions=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "sqlite3 /opt/cathedral/data/miner.db 'SELECT COUNT(*) FROM validator_interactions;' 2>/dev/null || echo 0")
     if [[ "$interactions" -gt 0 ]]; then
         log_success "Found $interactions validator interaction(s) in database"
     else
@@ -320,22 +320,22 @@ generate_report() {
     local overall_status="HEALTHY"
     local issues=()
 
-    if ! ssh_cmd "$MINER_HOST" "$MINER_PORT" "ps aux | grep -v grep | grep -q 'basilica.*miner'"; then
+    if ! ssh_cmd "$MINER_HOST" "$MINER_PORT" "ps aux | grep -v grep | grep -q 'cathedral.*miner'"; then
         overall_status="DEGRADED"
         issues+=("Miner process not running")
     fi
 
-    if ! ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "ps aux | grep -v grep | grep -q 'basilica.*validator'"; then
+    if ! ssh_cmd "$VALIDATOR_HOST" "$VALIDATOR_PORT" "ps aux | grep -v grep | grep -q 'cathedral.*validator'"; then
         overall_status="DEGRADED"
         issues+=("Validator process not running")
     fi
 
-    if ! ssh_cmd "$EXECUTOR_HOST" "22" "ps aux | grep -v grep | grep -q 'basilica.*executor'"; then
+    if ! ssh_cmd "$EXECUTOR_HOST" "22" "ps aux | grep -v grep | grep -q 'cathedral.*executor'"; then
         overall_status="DEGRADED"
         issues+=("Executor process not running")
     fi
 
-    local executor_healthy=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "sqlite3 /opt/basilica/data/miner.db 'SELECT is_healthy FROM executor_health LIMIT 1;' 2>/dev/null || echo 0")
+    local executor_healthy=$(ssh_cmd "$MINER_HOST" "$MINER_PORT" "sqlite3 /opt/cathedral/data/miner.db 'SELECT is_healthy FROM executor_health LIMIT 1;' 2>/dev/null || echo 0")
     if [[ "$executor_healthy" != "1" ]]; then
         overall_status="DEGRADED"
         issues+=("Executor marked unhealthy in miner database")
@@ -363,7 +363,7 @@ main() {
     parse_args "$@"
     validate_args
 
-    log "Starting Basilica stack validation"
+    log "Starting Cathedral stack validation"
     log_verbose "Configuration:"
     log_verbose "  Miner: $MINER_HOST:$MINER_PORT"
     log_verbose "  Validator: $VALIDATOR_HOST:$VALIDATOR_PORT"

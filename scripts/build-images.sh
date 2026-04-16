@@ -8,7 +8,7 @@ REGISTRY="${REGISTRY:-ghcr.io/one-covenant}"
 TAG="${TAG:-latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
-echo "Building Basilica Public Docker images"
+echo "Building Cathedral Public Docker images"
 echo "Registry: $REGISTRY"
 echo "Tag: $TAG"
 echo "Platform: $PLATFORM"
@@ -34,7 +34,7 @@ for component in "${COMPONENTS[@]}"; do
     continue
   fi
 
-  image_name="${REGISTRY}/basilica-${component}:${TAG}"
+  image_name="${REGISTRY}/cathedral-${component}:${TAG}"
   echo ""
   echo "🔨 Building $component..."
   echo "   Image: $image_name"
@@ -75,7 +75,7 @@ else
   echo ""
   echo "To push images to registry:"
   for comp in "${SUCCEEDED[@]}"; do
-    echo "  docker push ${REGISTRY}/basilica-${comp}:${TAG}"
+    echo "  docker push ${REGISTRY}/cathedral-${comp}:${TAG}"
   done
 fi
 

@@ -1,4 +1,4 @@
-# Basilica Miner Configuration Example
+# Cathedral Miner Configuration Example
 # Copy this file to miner.toml and customize for your environment
 
 # =============================================================================
@@ -45,7 +45,7 @@ max_weight_uids = 256
 # Database Configuration
 # =============================================================================
 [database]
-url = "sqlite:///opt/basilica/data/miner.db"
+url = "sqlite:///opt/cathedral/data/miner.db"
 
 # =============================================================================
 # Metrics Configuration
@@ -65,15 +65,15 @@ path = "/metrics"
 # List your GPU nodes with SSH access details
 # Pricing is configured separately in [bidding.strategy.static.static_prices]
 nodes = [
-    { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "192.168.1.100", port = 22, username = "cathedral", gpu_category = "H100", gpu_count = 8 },
     # Add more nodes as needed:
-    # { host = "192.168.1.101", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 8 },
-    # { host = "192.168.1.102", port = 22, username = "basilica", gpu_category = "H200", gpu_count = 8 },
-    # { host = "192.168.1.103", port = 22, username = "basilica", gpu_category = "B200", gpu_count = 8 },
+    # { host = "192.168.1.101", port = 22, username = "cathedral", gpu_category = "A100", gpu_count = 8 },
+    # { host = "192.168.1.102", port = 22, username = "cathedral", gpu_category = "H200", gpu_count = 8 },
+    # { host = "192.168.1.103", port = 22, username = "cathedral", gpu_category = "B200", gpu_count = 8 },
     #
     # To expose extra NVMe/SSD storage to rental containers, mount it on the host
     # and add extra_mount_path:
-    # { host = "192.168.1.104", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8, extra_mount_path = "/ephemeral" },
+    # { host = "192.168.1.104", port = 22, username = "cathedral", gpu_category = "H100", gpu_count = 8, extra_mount_path = "/ephemeral" },
 ]
 health_check_interval = 60
 health_check_timeout = 10

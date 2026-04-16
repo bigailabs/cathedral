@@ -23,13 +23,13 @@ API Endpoints:
     POST /v1/embeddings - OpenAI-compatible embeddings endpoint
     GET /health - Health check
 """
-import basilica
+import cathedral
 
 # Create volume for model caching (speeds up subsequent deployments)
-model_cache = basilica.Volume.from_name("vllm-embeddings-cache", create_if_missing=True)
+model_cache = cathedral.Volume.from_name("vllm-embeddings-cache", create_if_missing=True)
 
 
-@basilica.deployment(
+@cathedral.deployment(
     name="vllm-embeddings",
     image="vllm/vllm-openai:v0.8.5.post1",
     port=8000,

@@ -112,10 +112,10 @@ case "$ACTION" in
         echo "  -n, --name     - Database filename (default: validator.db)"
         echo ""
         echo "Examples:"
-        echo "  Local backup:   $0 backup -s /opt/basilica/data"
-        echo "  Remote backup:  $0 backup -s /opt/basilica/data -c user@server"
-        echo "  Local restore:  $0 restore -s ./validator_backup_20240101 -t /opt/basilica/data"
-        echo "  Remote restore: $0 restore -s ./validator_backup_20240101 -t /opt/basilica/data -c user@server"
+        echo "  Local backup:   $0 backup -s /opt/cathedral/data"
+        echo "  Remote backup:  $0 backup -s /opt/cathedral/data -c user@server"
+        echo "  Local restore:  $0 restore -s ./validator_backup_20240101 -t /opt/cathedral/data"
+        echo "  Remote restore: $0 restore -s ./validator_backup_20240101 -t /opt/cathedral/data -c user@server"
         exit 0
         ;;
 esac

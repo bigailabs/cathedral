@@ -1,6 +1,6 @@
-# Basilica
+# Cathedral
 
-Agent-facing Basilica cloud ops bundle for coding agents.
+Agent-facing Cathedral cloud ops bundle for coding agents.
 
 Install the local skills bundle:
 
@@ -17,8 +17,8 @@ Primary resources:
 
 Skill files:
 
-- `https://basilica.ai/agents/basilica-cloud-operator/SKILL.md`
-- `https://basilica.ai/agents/basilica-account-ops/SKILL.md`
-- `https://basilica.ai/agents/basilica-rentals-ops/SKILL.md`
-- `https://basilica.ai/agents/basilica-serverless-ops/SKILL.md`
-- `https://basilica.ai/agents/basilica-sdk-ops/SKILL.md`
+- `https://basilica.ai/agents/cathedral-cloud-operator/SKILL.md`
+- `https://basilica.ai/agents/cathedral-account-ops/SKILL.md`
+- `https://basilica.ai/agents/cathedral-rentals-ops/SKILL.md`
+- `https://basilica.ai/agents/cathedral-serverless-ops/SKILL.md`
+- `https://basilica.ai/agents/cathedral-sdk-ops/SKILL.md`

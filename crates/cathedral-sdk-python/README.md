@@ -1,15 +1,15 @@
-# Basilica Python SDK
+# Cathedral Python SDK
 
-The official Python SDK for deploying containerized applications on the Basilica GPU cloud platform.
+The official Python SDK for deploying containerized applications on the Cathedral GPU cloud platform.
 
-[![PyPI](https://img.shields.io/pypi/v/basilica-sdk)](https://pypi.org/project/basilica-sdk/)
-[![Python](https://img.shields.io/pypi/pyversions/basilica-sdk)](https://pypi.org/project/basilica-sdk/)
-[![License](https://img.shields.io/pypi/l/basilica-sdk)](https://github.com/one-covenant/basilica/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/cathedral-sdk)](https://pypi.org/project/cathedral-sdk/)
+[![Python](https://img.shields.io/pypi/pyversions/cathedral-sdk)](https://pypi.org/project/cathedral-sdk/)
+[![License](https://img.shields.io/pypi/l/cathedral-sdk)](https://github.com/one-covenant/cathedral/blob/main/LICENSE)
 
 ## Installation
 
 ```bash
-pip install basilica-sdk
+pip install cathedral-sdk
 ```
 
 **Requirements:** Python 3.10+
@@ -19,22 +19,22 @@ pip install basilica-sdk
 ### 1. Get an API Token
 
 ```bash
-# Install the Basilica CLI
-pip install basilica-cli
+# Install the Cathedral CLI
+pip install cathedral-cli
 
 # Create an API token
-basilica tokens create
+cathedral tokens create
 
 # Set the environment variable
-export BASILICA_API_TOKEN="basilica_..."
+export BASILICA_API_TOKEN="cathedral_..."
 ```
 
 ### 2. Deploy Your First App
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # Deploy inline Python code
 deployment = client.deploy(
@@ -46,7 +46,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Hello from Basilica!')
+        self.wfile.write(b'Hello from Cathedral!')
 
 HTTPServer(('', 8000), Handler).serve_forever()
 """,
@@ -60,9 +60,9 @@ print(f"Live at: {deployment.url}")
 ### 3. Deploy a FastAPI Application
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="my-api",
@@ -122,9 +122,9 @@ deployment.delete()          # Manual cleanup
 Define deployments as decorated functions:
 
 ```python
-import basilica
+import cathedral
 
-@basilica.deployment(
+@cathedral.deployment(
     name="my-service",
     port=8000,
     pip_packages=["fastapi", "uvicorn"],
@@ -171,9 +171,9 @@ Filter GPU offerings and control hardware placement with interconnect, region, a
 #### Query GPU offerings
 
 ```python
-from basilica import BasilicaClient, GpuPriceQuery
+from cathedral import CathedralClient, GpuPriceQuery
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # SXM interconnect in the US
 gpus = client.list_secure_cloud_gpus(
@@ -231,7 +231,7 @@ deployment = client.deploy_vllm(
 )
 
 # Decorator API with flavour
-@basilica.deployment(
+@cathedral.deployment(
     name="my-service",
     port=8000,
     gpu_count=1,
@@ -275,11 +275,11 @@ deployment = client.deploy(
 Using volumes with the decorator API:
 
 ```python
-import basilica
+import cathedral
 
-cache = basilica.Volume.from_name("my-cache", create_if_missing=True)
+cache = cathedral.Volume.from_name("my-cache", create_if_missing=True)
 
-@basilica.deployment(
+@cathedral.deployment(
     name="app-with-storage",
     port=8000,
     volumes={"/data": cache},
@@ -296,9 +296,9 @@ into GPU memory. Configure custom health check probes to prevent Kubernetes
 from killing pods before models are ready:
 
 ```python
-from basilica import BasilicaClient, HealthCheckConfig, ProbeConfig
+from cathedral import CathedralClient, HealthCheckConfig, ProbeConfig
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # Deploy SGLang with a 20-minute startup tolerance
 deployment = client.deploy_sglang(
@@ -352,7 +352,7 @@ deployment = client.deploy(
 )
 
 # Decorator API
-@basilica.deployment(
+@cathedral.deployment(
     name="my-service",
     port=8000,
     health_check=HealthCheckConfig(
@@ -388,10 +388,10 @@ deployment = client.deploy(
 
 ## API Reference
 
-### BasilicaClient
+### CathedralClient
 
 ```python
-class BasilicaClient:
+class CathedralClient:
     def __init__(
         self,
         base_url: str = None,  # Default: https://api.basilica.ai
@@ -475,8 +475,8 @@ class DeploymentStatus:
 The SDK provides a comprehensive exception hierarchy:
 
 ```python
-from basilica import (
-    BasilicaError,        # Base exception
+from cathedral import (
+    CathedralError,        # Base exception
     AuthenticationError,  # Invalid/missing token
     AuthorizationError,   # Permission denied
     ValidationError,      # Invalid parameters
@@ -532,7 +532,7 @@ logs = client.get_deployment_logs("my-app", tail=100)
 ### GPU Offerings (Secure Cloud)
 
 ```python
-from basilica import GpuPriceQuery
+from cathedral import GpuPriceQuery
 
 # List all GPU offerings
 gpus = client.list_secure_cloud_gpus()
@@ -585,7 +585,7 @@ client.stop_rental(rental.rental_id)
 
 ## Examples
 
-For complete working examples, see the [examples directory](https://github.com/one-covenant/basilica/tree/main/examples):
+For complete working examples, see the [examples directory](https://github.com/one-covenant/cathedral/tree/main/examples):
 
 | Example | Description |
 |---------|-------------|
@@ -613,8 +613,8 @@ For complete working examples, see the [examples directory](https://github.com/o
 ### Building from Source
 
 ```bash
-git clone https://github.com/one-covenant/basilica.git
-cd basilica/crates/basilica-sdk-python
+git clone https://github.com/one-covenant/cathedral.git
+cd cathedral/crates/cathedral-sdk-python
 
 # Create virtual environment
 python -m venv .venv
@@ -625,7 +625,7 @@ pip install maturin
 maturin develop
 
 # Test import
-python -c "from basilica import BasilicaClient; print('OK')"
+python -c "from cathedral import CathedralClient; print('OK')"
 ```
 
 ### Running Tests
@@ -642,7 +642,7 @@ The SDK is built with:
 - **Async runtime**: Tokio-based async operations exposed as sync Python calls
 - **Type safety**: Full type hints with IDE support
 
-For detailed architecture documentation, see [PYTHON-SDK-ARCHITECTURE.md](https://github.com/one-covenant/basilica/blob/main/docs/architecture/PYTHON-SDK-ARCHITECTURE.md).
+For detailed architecture documentation, see [PYTHON-SDK-ARCHITECTURE.md](https://github.com/one-covenant/cathedral/blob/main/docs/architecture/PYTHON-SDK-ARCHITECTURE.md).
 
 ## License
 
@@ -651,7 +651,7 @@ MIT OR Apache-2.0
 ## Links
 
 - [Documentation](https://docs.basilica.ai)
-- [PyPI Package](https://pypi.org/project/basilica-sdk/)
-- [GitHub Repository](https://github.com/one-covenant/basilica)
-- [Issue Tracker](https://github.com/one-covenant/basilica/issues)
-- [Changelog](https://github.com/one-covenant/basilica/blob/main/crates/basilica-sdk-python/CHANGELOG.md)
+- [PyPI Package](https://pypi.org/project/cathedral-sdk/)
+- [GitHub Repository](https://github.com/one-covenant/cathedral)
+- [Issue Tracker](https://github.com/one-covenant/cathedral/issues)
+- [Changelog](https://github.com/one-covenant/cathedral/blob/main/crates/cathedral-sdk-python/CHANGELOG.md)

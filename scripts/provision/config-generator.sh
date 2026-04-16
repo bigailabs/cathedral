@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fixed configuration generator for Basilica services
+# Fixed configuration generator for Cathedral services
 
 set -e
 
@@ -13,7 +13,7 @@ if [[ -f "$SCRIPT_DIR/../lib/ssh-wrapper.sh" ]]; then
 fi
 
 TEMPLATE_DIR="$SCRIPT_DIR/templates"
-CONFIG_OUTPUT_DIR="${CONFIG_OUTPUT_DIR:-$BASILICA_ROOT}"
+CONFIG_OUTPUT_DIR="${CONFIG_OUTPUT_DIR:-$CATHEDRAL_ROOT}"
 
 # Generate configuration from template using envsubst
 generate_config() {
@@ -143,7 +143,7 @@ main() {
             ;;
         help|*)
             cat << EOF
-Basilica Configuration Generator
+Cathedral Configuration Generator
 
 Usage: config-generator.sh <command> [environment]
 

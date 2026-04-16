@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Entrypoint for torchrun-ddp Basilica deployment.
+Entrypoint for torchrun-ddp Cathedral deployment.
 
-Runs a health server for Basilica health checks while executing
+Runs a health server for Cathedral health checks while executing
 the distributed training job.
 """
 import sys

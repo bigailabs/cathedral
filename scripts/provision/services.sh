@@ -1,16 +1,16 @@
 #!/bin/bash
-# Basilica Service Lifecycle Management
-# Deploy, start, stop, and manage Basilica services across the infrastructure
+# Cathedral Service Lifecycle Management
+# Deploy, start, stop, and manage Cathedral services across the infrastructure
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASILICA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CATHEDRAL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 
 print_usage() {
     cat << EOF
-services.sh - Basilica Service Lifecycle Management
+services.sh - Cathedral Service Lifecycle Management
 
 USAGE:
     services.sh <COMMAND> [SERVICE] [OPTIONS]
@@ -109,7 +109,7 @@ ssh_exec() {
 
 # Build binaries using existing build system
 build_binaries() {
-    log_header "Building Basilica Binaries"
+    log_header "Building Cathedral Binaries"
     
     # Use existing production build system
     local production_script="$SCRIPT_DIR/../production/deploy.sh"
@@ -120,17 +120,17 @@ build_binaries() {
     else
         # Fallback to direct cargo build
         log_info "Building with cargo"
-        cd "$BASILICA_ROOT"
+        cd "$CATHEDRAL_ROOT"
         cargo build --release --workspace
         
         # Create production build directory
-        mkdir -p "$BASILICA_ROOT/build/production"
-        cd "$BASILICA_ROOT/build/production"
+        mkdir -p "$CATHEDRAL_ROOT/build/production"
+        cd "$CATHEDRAL_ROOT/build/production"
         
         # Copy binaries
         for binary in validator miner; do
-            if [[ -f "$BASILICA_ROOT/target/release/$binary" ]]; then
-                cp "$BASILICA_ROOT/target/release/$binary" .
+            if [[ -f "$CATHEDRAL_ROOT/target/release/$binary" ]]; then
+                cp "$CATHEDRAL_ROOT/target/release/$binary" .
                 log_success "Copied $binary binary"
             else
                 log_warning "Binary not found: $binary"
@@ -145,7 +145,7 @@ deploy_binary() {
     local port="$2"
     local user="$3"
     local binary="$4"
-    local binary_path="$BASILICA_ROOT/build/production/$binary"
+    local binary_path="$CATHEDRAL_ROOT/build/production/$binary"
     
     if [[ ! -f "$binary_path" ]]; then
         log_error "Binary not found: $binary_path"
@@ -156,7 +156,7 @@ deploy_binary() {
     
     # Create directories on remote server
     ssh_exec "$host" "$port" "$user" \
-        "sudo mkdir -p /opt/basilica/bin /var/lib/basilica/$binary /etc/basilica" \
+        "sudo mkdir -p /opt/cathedral/bin /var/lib/cathedral/$binary /etc/cathedral" \
         "Creating directories"
     
     # Upload binary
@@ -164,12 +164,12 @@ deploy_binary() {
     
     # Install binary with proper permissions
     ssh_exec "$host" "$port" "$user" \
-        "sudo mv /tmp/$binary /opt/basilica/bin/ && sudo chmod +x /opt/basilica/bin/$binary && sudo chown root:root /opt/basilica/bin/$binary" \
+        "sudo mv /tmp/$binary /opt/cathedral/bin/ && sudo chmod +x /opt/cathedral/bin/$binary && sudo chown root:root /opt/cathedral/bin/$binary" \
         "Installing binary"
     
     # Create symlink in /usr/local/bin
     ssh_exec "$host" "$port" "$user" \
-        "sudo ln -sf /opt/basilica/bin/$binary /usr/local/bin/$binary" \
+        "sudo ln -sf /opt/cathedral/bin/$binary /usr/local/bin/$binary" \
         "Creating symlink"
     
     log_success "Successfully deployed $binary"
@@ -179,7 +179,7 @@ deploy_binary() {
 cmd_deploy() {
     local environment="${1:-$ENVIRONMENT}"
     
-    log_header "Deploying Basilica Services to $environment"
+    log_header "Deploying Cathedral Services to $environment"
     load_env_config
     
     # Build binaries first
@@ -193,7 +193,7 @@ cmd_deploy() {
     log_info "Deploying miner service"
     deploy_binary "$MINER_HOST" "$MINER_PORT" "$MINER_USER" "miner"
 
-    # Setup basilica user and directories on all servers
+    # Setup cathedral user and directories on all servers
     for server_info in \
         "$VALIDATOR_HOST:$VALIDATOR_PORT:$VALIDATOR_USER" \
         "$MINER_HOST:$MINER_PORT:$MINER_USER"
@@ -201,11 +201,11 @@ cmd_deploy() {
         IFS=':' read -r host port user <<< "$server_info"
         
         ssh_exec "$host" "$port" "$user" \
-            "sudo useradd --system --home /var/lib/basilica --shell /bin/false basilica 2>/dev/null || true" \
-            "Creating basilica user"
+            "sudo useradd --system --home /var/lib/cathedral --shell /bin/false cathedral 2>/dev/null || true" \
+            "Creating cathedral user"
         
         ssh_exec "$host" "$port" "$user" \
-            "sudo chown -R basilica:basilica /var/lib/basilica" \
+            "sudo chown -R cathedral:cathedral /var/lib/cathedral" \
             "Setting directory ownership"
     done
     
@@ -216,7 +216,7 @@ cmd_deploy() {
 cmd_start() {
     local service="${1:-all}"
     
-    log_header "Starting Basilica Services"
+    log_header "Starting Cathedral Services"
     load_env_config
     
     case "$service" in
@@ -251,17 +251,17 @@ start_service() {
     log_info "Starting $service service on $host"
     
     ssh_exec "$host" "$port" "$user" \
-        "sudo systemctl start basilica-$service" \
-        "Starting basilica-$service"
+        "sudo systemctl start cathedral-$service" \
+        "Starting cathedral-$service"
     
     ssh_exec "$host" "$port" "$user" \
-        "sudo systemctl enable basilica-$service" \
-        "Enabling basilica-$service"
+        "sudo systemctl enable cathedral-$service" \
+        "Enabling cathedral-$service"
     
     # Wait a moment and check status
     sleep 3
     ssh_exec "$host" "$port" "$user" \
-        "sudo systemctl is-active basilica-$service" \
+        "sudo systemctl is-active cathedral-$service" \
         "Checking $service status"
 }
 
@@ -269,7 +269,7 @@ start_service() {
 cmd_stop() {
     local service="${1:-all}"
     
-    log_header "Stopping Basilica Services"
+    log_header "Stopping Cathedral Services"
     load_env_config
     
     case "$service" in
@@ -303,15 +303,15 @@ stop_service() {
     log_info "Stopping $service service on $host"
     
     ssh_exec "$host" "$port" "$user" \
-        "sudo systemctl stop basilica-$service" \
-        "Stopping basilica-$service"
+        "sudo systemctl stop cathedral-$service" \
+        "Stopping cathedral-$service"
 }
 
 # Command: Restart services
 cmd_restart() {
     local service="${1:-all}"
     
-    log_header "Restarting Basilica Services"
+    log_header "Restarting Cathedral Services"
     cmd_stop "$service"
     sleep 5
     cmd_start "$service"
@@ -321,7 +321,7 @@ cmd_restart() {
 cmd_status() {
     local service="${1:-all}"
 
-    log_header "Basilica Service Status"
+    log_header "Cathedral Service Status"
     load_env_config
 
     case "$service" in
@@ -353,7 +353,7 @@ check_service_status() {
     log_info "Checking $service service on $host"
     
     # Check systemd service status
-    if ssh -p "$port" "$user@$host" "sudo systemctl is-active basilica-$service" >/dev/null 2>&1; then
+    if ssh -p "$port" "$user@$host" "sudo systemctl is-active cathedral-$service" >/dev/null 2>&1; then
         log_success "$service service is running"
     else
         log_error "$service service is not running"
@@ -419,9 +419,9 @@ view_service_logs() {
     log_info "Viewing $service logs on $host (last $LOG_LINES lines)"
     
     if [[ "$FOLLOW_LOGS" == "true" ]]; then
-        ssh -p "$port" "$user@$host" "sudo journalctl -u basilica-$service -f"
+        ssh -p "$port" "$user@$host" "sudo journalctl -u cathedral-$service -f"
     else
-        ssh -p "$port" "$user@$host" "sudo journalctl -u basilica-$service -n $LOG_LINES --no-pager"
+        ssh -p "$port" "$user@$host" "sudo journalctl -u cathedral-$service -n $LOG_LINES --no-pager"
     fi
 }
 
@@ -429,7 +429,7 @@ view_service_logs() {
 cmd_enable() {
     local service="${1:-all}"
 
-    log_header "Enabling Basilica Services"
+    log_header "Enabling Cathedral Services"
     load_env_config
 
     case "$service" in
@@ -459,7 +459,7 @@ enable_service() {
     local user="$4"
     
     ssh_exec "$host" "$port" "$user" \
-        "sudo systemctl enable basilica-$service" \
+        "sudo systemctl enable cathedral-$service" \
         "Enabling $service service for auto-start"
 }
 
@@ -467,7 +467,7 @@ enable_service() {
 cmd_disable() {
     local service="${1:-all}"
 
-    log_header "Disabling Basilica Services"
+    log_header "Disabling Cathedral Services"
     load_env_config
 
     case "$service" in
@@ -497,7 +497,7 @@ disable_service() {
     local user="$4"
     
     ssh_exec "$host" "$port" "$user" \
-        "sudo systemctl disable basilica-$service" \
+        "sudo systemctl disable cathedral-$service" \
         "Disabling $service service from auto-start"
 }
 

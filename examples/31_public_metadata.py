@@ -6,9 +6,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 31_public_metadata.py
 """
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # Create a deployment with public metadata enabled
 deployment = client.create_deployment(

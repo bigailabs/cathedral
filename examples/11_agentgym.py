@@ -17,14 +17,14 @@ Usage:
 import os
 import sys
 
-from basilica import BasilicaClient, Deployment
+from cathedral import CathedralClient, Deployment
 
 
-def deploy_llm_evaluator(client: BasilicaClient, llm_api_key: str) -> Deployment:
+def deploy_llm_evaluator(client: CathedralClient, llm_api_key: str) -> Deployment:
     """Deploy an LLM-powered evaluation service.
 
     Args:
-        client: Basilica client instance
+        client: Cathedral client instance
         llm_api_key: API key for LLM provider
 
     Returns:
@@ -48,7 +48,7 @@ def deploy_llm_evaluator(client: BasilicaClient, llm_api_key: str) -> Deployment
 
 
 def deploy_agentgym(
-    client: BasilicaClient,
+    client: CathedralClient,
     llm_api_key: str,
     env_name: str = "webshop",
 ) -> Deployment:
@@ -62,7 +62,7 @@ def deploy_agentgym(
       - sciworld: Scientific reasoning tasks
 
     Args:
-        client: Basilica client instance
+        client: Cathedral client instance
         llm_api_key: API key for LLM provider
         env_name: AgentGym environment name
 
@@ -96,7 +96,7 @@ def main():
         print("  export CHUTES_API_KEY=your-api-key")
         sys.exit(1)
 
-    client = BasilicaClient()
+    client = CathedralClient()
 
     evaluator = deploy_llm_evaluator(client, llm_api_key)
     agentgym = deploy_agentgym(client, llm_api_key, env_name="webshop")

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Basilica Localnet - Restart Services
+# Cathedral Localnet - Restart Services
 # Usage: ./restart.sh [services...] [options]
 #
 # Arguments:
@@ -22,7 +22,7 @@ PROFILE=""
 FOLLOW_LOGS=false
 
 show_help() {
-    echo "Basilica Localnet - Restart Services"
+    echo "Cathedral Localnet - Restart Services"
     echo ""
     echo "Usage: ./restart.sh [services...] [options]"
     echo ""
@@ -100,7 +100,7 @@ if [[ -n "${PROFILE}" ]]; then
 fi
 
 echo "========================================"
-echo "  Restarting Basilica Localnet"
+echo "  Restarting Cathedral Localnet"
 if [[ -n "${PROFILE}" ]]; then
     echo "  Profile: ${PROFILE}"
 elif [[ ${#SERVICES[@]} -gt 0 ]]; then

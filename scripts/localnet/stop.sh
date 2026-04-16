@@ -1,5 +1,5 @@
 #!/bin/bash
-# Basilica Localnet - Stop Services
+# Cathedral Localnet - Stop Services
 # Usage: ./stop.sh [--clean]
 #
 # Options:
@@ -37,7 +37,7 @@ for arg in "$@"; do
 done
 
 echo "========================================"
-echo "  Stopping Basilica Localnet"
+echo "  Stopping Cathedral Localnet"
 if [ "$CLEAN" = true ]; then
     echo "  Mode: Clean (reset blockchain state)"
 fi
@@ -58,7 +58,7 @@ if [ "$CLEAN" = true ]; then
 
     echo ""
     echo "[3/3] Removing Docker network..."
-    docker network rm basilica-localnet 2>/dev/null || true
+    docker network rm cathedral-localnet 2>/dev/null || true
 else
     echo "[1/3] Stopping containers..."
     docker compose --profile network --profile validator --profile miner down 2>/dev/null || true

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .volume import Volume
-    from basilica._basilica import HealthCheckConfig
+    from cathedral._cathedral import HealthCheckConfig
 
 
 @dataclass(frozen=True)

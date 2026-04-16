@@ -1,5 +1,5 @@
 """
-Unit tests for async methods in Basilica SDK.
+Unit tests for async methods in Cathedral SDK.
 
 These tests verify that:
 1. Async methods use asyncio.sleep() instead of time.sleep()
@@ -13,15 +13,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from basilica import Deployment, DeploymentStatus, ProgressInfo
-from basilica.exceptions import DeploymentFailed, DeploymentTimeout
+from cathedral import Deployment, DeploymentStatus, ProgressInfo
+from cathedral.exceptions import DeploymentFailed, DeploymentTimeout
 
 
 class TestDeploymentAsyncMethods:
     """Tests for async methods on the Deployment class."""
 
     def _create_mock_deployment(
-        self, url: str = "https://test.deployments.basilica.ai"
+        self, url: str = "https://test.deployments.cathedral.ai"
     ) -> Deployment:
         """Create a mock Deployment instance for testing."""
         mock_client = MagicMock()
@@ -214,7 +214,7 @@ class TestDeploymentAsyncMethods:
         deployment._state = "Pending"
 
         mock_response = MagicMock()
-        mock_response.url = "https://new-url.basilica.ai"
+        mock_response.url = "https://new-url.cathedral.ai"
         mock_response.state = "Active"
         mock_response.replicas.ready = 1
         mock_response.replicas.desired = 1
@@ -225,7 +225,7 @@ class TestDeploymentAsyncMethods:
 
         assert result is deployment
         assert deployment._state == "Active"
-        assert deployment._url == "https://new-url.basilica.ai"
+        assert deployment._url == "https://new-url.cathedral.ai"
 
     @pytest.mark.asyncio
     async def test_delete_async_calls_client(self):
@@ -269,7 +269,7 @@ class TestAsyncConcurrency:
             return Deployment(
                 client=mock_client,
                 instance_name=name,
-                url=f"https://{name}.basilica.ai",
+                url=f"https://{name}.cathedral.ai",
                 namespace="u-test",
                 user_id="test-user",
                 state="Active",
@@ -341,7 +341,7 @@ class TestAsyncDnsResolution:
         deployment = Deployment(
             client=mock_client,
             instance_name="test",
-            url="https://test.basilica.ai",
+            url="https://test.cathedral.ai",
             namespace="u-test",
             user_id="test-user",
             state="Active",
@@ -364,7 +364,7 @@ class TestAsyncDnsResolution:
         deployment = Deployment(
             client=mock_client,
             instance_name="test",
-            url="https://test.basilica.ai",
+            url="https://test.cathedral.ai",
             namespace="u-test",
             user_id="test-user",
             state="Active",
@@ -391,7 +391,7 @@ class TestAsyncProgressCallback:
         deployment = Deployment(
             client=mock_client,
             instance_name="test-callback",
-            url="https://test.basilica.ai",
+            url="https://test.cathedral.ai",
             namespace="u-test",
             user_id="test-user",
             state="Pending",

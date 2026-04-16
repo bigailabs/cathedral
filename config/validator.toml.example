@@ -1,5 +1,5 @@
 [database]
-url = "sqlite:/opt/basilica/data/validator.db?mode=rwc"
+url = "sqlite:/opt/cathedral/data/validator.db?mode=rwc"
 max_connections = 10
 run_migrations = true
 
@@ -36,8 +36,8 @@ enable_worker_queue = false  # Enable for decoupled async validation execution
 
 [verification.binary_validation]
 enabled = true
-validator_binary_path = "/opt/basilica/bin/validator-binary/validator-binary"
-executor_binary_path = "/opt/basilica/bin/executor-binary/executor-binary"
+validator_binary_path = "/opt/cathedral/bin/validator-binary/validator-binary"
+executor_binary_path = "/opt/cathedral/bin/executor-binary/executor-binary"
 execution_timeout_secs = 1200
 output_format = "json"
 
@@ -81,10 +81,10 @@ max_body_size = 1048576      # 1MB
 bind_address = "0.0.0.0:8080"
 
 [storage]
-data_dir = "/opt/basilica/data"
+data_dir = "/opt/cathedral/data"
 
 [ssh_session]
-ssh_key_directory = "/opt/basilica/data/ssh_keys"
+ssh_key_directory = "/opt/cathedral/data/ssh_keys"
 key_algorithm = "ed25519"
 default_session_duration = 300
 max_session_duration = 3600
@@ -94,7 +94,7 @@ enable_automated_sessions = true
 max_concurrent_sessions = 5
 session_rate_limit = 20
 enable_audit_logging = true
-audit_log_path = "/opt/basilica/data/ssh_audit.log"
+audit_log_path = "/opt/cathedral/data/ssh_audit.log"
 ssh_connection_timeout = { secs = 30, nanos = 0 }
 ssh_command_timeout = { secs = 60, nanos = 0 }
 ssh_retry_attempts = 3

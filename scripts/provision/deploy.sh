@@ -1,5 +1,5 @@
 #!/bin/bash
-# Binary deployment module for Basilica
+# Binary deployment module for Cathedral
 
 set -e
 
@@ -13,10 +13,10 @@ if [[ -f "$SCRIPT_DIR/../lib/ssh-wrapper.sh" ]]; then
 fi
 
 # Default configuration
-DEFAULT_BINARY_DIR="/opt/basilica/bin"
-DEFAULT_CONFIG_DIR="/opt/basilica/config"
-DEFAULT_DATA_DIR="/opt/basilica/data"
-DEFAULT_LOG_DIR="/opt/basilica/logs"
+DEFAULT_BINARY_DIR="/opt/cathedral/bin"
+DEFAULT_CONFIG_DIR="/opt/cathedral/config"
+DEFAULT_DATA_DIR="/opt/cathedral/data"
+DEFAULT_LOG_DIR="/opt/cathedral/logs"
 
 # Load environment configuration
 load_environment() {
@@ -38,7 +38,7 @@ deploy_binary() {
     local server_host="$2"
     local server_port="$3"
     local server_user="$4"
-    local binary_path="${5:-$BASILICA_ROOT/$binary_name}"
+    local binary_path="${5:-$CATHEDRAL_ROOT/$binary_name}"
     
     if [[ ! -f "$binary_path" ]]; then
         log_error "Binary not found: $binary_path"
@@ -89,7 +89,7 @@ deploy_config() {
     local server_host="$2"
     local server_port="$3"
     local server_user="$4"
-    local config_path="${5:-$BASILICA_ROOT/$config_name}"
+    local config_path="${5:-$CATHEDRAL_ROOT/$config_name}"
     
     if [[ ! -f "$config_path" ]]; then
         log_error "Configuration not found: $config_path"
@@ -142,22 +142,22 @@ create_directories() {
             SUDO_CMD="sudo"
         else
             # Not root and no sudo available
-            echo "Error: Need root privileges to create directories in /opt/basilica"
+            echo "Error: Need root privileges to create directories in /opt/cathedral"
             exit 1
         fi
         
         # Create all required directories
-        for dir in /opt/basilica/{bin,config,data,logs,ssh_keys}; do
+        for dir in /opt/cathedral/{bin,config,data,logs,ssh_keys}; do
             $SUDO_CMD mkdir -p "$dir"
             $SUDO_CMD chmod 755 "$dir"
         done
         
         # Set secure permissions for SSH keys directory
-        $SUDO_CMD chmod 700 /opt/basilica/ssh_keys
+        $SUDO_CMD chmod 700 /opt/cathedral/ssh_keys
         
         # Set ownership to current user if not root
         if [ "$EUID" -ne 0 ] && [ -n "$SUDO_CMD" ]; then
-            $SUDO_CMD chown -R $USER:$USER /opt/basilica
+            $SUDO_CMD chown -R $USER:$USER /opt/cathedral
         fi
         
         echo "Directories created successfully"
@@ -223,11 +223,11 @@ deploy_all() {
 
 # Build binaries locally
 build_binaries() {
-    log_header "Building Basilica binaries"
+    log_header "Building Cathedral binaries"
     
     # Check if we're in the project root
-    if [[ ! -f "$BASILICA_ROOT/Cargo.toml" ]]; then
-        log_error "Not in Basilica project root. Please run from project root."
+    if [[ ! -f "$CATHEDRAL_ROOT/Cargo.toml" ]]; then
+        log_error "Not in Cathedral project root. Please run from project root."
         return 1
     fi
     
@@ -273,7 +273,7 @@ main() {
             ;;
         help|*)
             cat << EOF
-Basilica Binary Deployment Tool
+Cathedral Binary Deployment Tool
 
 Usage: deploy.sh <command> [environment]
 

@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: scripts/validator/Dockerfile
-    container_name: basilica-validator-dev
+    container_name: cathedral-validator-dev
     restart: unless-stopped
     init: true
 
@@ -26,11 +26,11 @@ services:
       - "50052:50052"   # Bidding gRPC
 
     networks:
-      - basilica_network_dev
+      - cathedral_network_dev
 
     command: ["--config", "/app/validator.toml", "start"]
 
 networks:
-  basilica_network_dev:
+  cathedral_network_dev:
     driver: bridge
 

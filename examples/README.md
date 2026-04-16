@@ -1,16 +1,16 @@
-# Basilica SDK Examples
+# Cathedral SDK Examples
 
-Production-ready examples demonstrating deployment patterns on Basilica.
+Production-ready examples demonstrating deployment patterns on Cathedral.
 
 ## Prerequisites
 
 ```bash
 # 1. Get an API token
-basilica tokens create my-token
-export BASILICA_API_TOKEN="basilica_..."
+cathedral tokens create my-token
+export BASILICA_API_TOKEN="cathedral_..."
 
 # 2. Install Python SDK
-pip install basilica-sdk
+pip install cathedral-sdk
 ```
 
 ## Core Examples (01-04)
@@ -26,7 +26,7 @@ Simple, self-contained examples using `client.deploy()`:
 
 ## Decorator Examples (05)
 
-Using `@basilica.deployment` decorator:
+Using `@cathedral.deployment` decorator:
 
 | Example | Description | Run |
 |---------|-------------|-----|
@@ -77,8 +77,8 @@ Models over 100B parameters (like Kimi-K2, DeepSeek-V3) require:
 
 For extremely large models, consider using **GPU Rentals** (SSH access) instead:
 ```bash
-basilica up h200 --gpu-count 8
-basilica ssh <rental-id>
+cathedral up h200 --gpu-count 8
+cathedral ssh <rental-id>
 # Then run vLLM directly on the instance
 ```
 
@@ -118,9 +118,9 @@ See `10_custom_docker/` for complete example.
 
 ### Basic Deploy
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 deployment = client.deploy(
     name="hello",
     source="app.py",
@@ -131,9 +131,9 @@ print(deployment.url)
 
 ### Decorator Deploy
 ```python
-import basilica
+import cathedral
 
-@basilica.deployment(name="api", port=8000, pip_packages=["fastapi", "uvicorn"])
+@cathedral.deployment(name="api", port=8000, pip_packages=["fastapi", "uvicorn"])
 def serve():
     from fastapi import FastAPI
     import uvicorn
@@ -149,18 +149,18 @@ print(deployment.url)
 
 ### With Volume
 ```python
-import basilica
+import cathedral
 
-cache = basilica.Volume.from_name("my-cache", create_if_missing=True)
+cache = cathedral.Volume.from_name("my-cache", create_if_missing=True)
 
-@basilica.deployment(name="app", volumes={"/cache": cache})
+@cathedral.deployment(name="app", volumes={"/cache": cache})
 def serve():
     ...
 ```
 
 ### GPU Deployment
 ```python
-@basilica.deployment(
+@cathedral.deployment(
     name="pytorch",
     image="pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
     gpu="NVIDIA-RTX-A4000",
@@ -209,7 +209,7 @@ See `16_progress_callback.py` for a complete example.
 
 ## Container Requirements
 
-Basilica runs containers as non-root (UID 1000). When building custom images:
+Cathedral runs containers as non-root (UID 1000). When building custom images:
 ```dockerfile
 RUN useradd -m -u 1000 appuser
 USER appuser

@@ -12,13 +12,13 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from basilica import Deployment, DeploymentStatus
+from cathedral import Deployment, DeploymentStatus
 
 
 class TestDnsResolutionInWaitUntilReady:
     """Tests for DNS resolution verification in wait_until_ready()"""
 
-    def _create_mock_deployment(self, url: str = "https://test.deployments.basilica.ai") -> Deployment:
+    def _create_mock_deployment(self, url: str = "https://test.deployments.cathedral.ai") -> Deployment:
         """Create a mock Deployment instance for testing."""
         mock_client = MagicMock()
         return Deployment(
@@ -127,7 +127,7 @@ class TestDnsResolutionInWaitUntilReady:
         def mock_gethostbyname(hostname):
             raise socket.gaierror(-5, "No address associated with hostname")
 
-        from basilica.exceptions import DeploymentTimeout
+        from cathedral.exceptions import DeploymentTimeout
 
         with patch("socket.gethostbyname", side_effect=mock_gethostbyname):
             with patch("time.sleep"):
@@ -193,7 +193,7 @@ class TestDnsResolutionIntegration:
         deployment = Deployment(
             client=mock_client,
             instance_name="my-app",
-            url="https://my-app.deployments.basilica.ai:443/api",
+            url="https://my-app.deployments.cathedral.ai:443/api",
             namespace="u-test",
             user_id="test-user",
             state="Active",
@@ -224,7 +224,7 @@ class TestDnsResolutionIntegration:
                 )
 
         # Verify: Correct hostname was extracted (without port or path)
-        assert checked_hostname == "my-app.deployments.basilica.ai"
+        assert checked_hostname == "my-app.deployments.cathedral.ai"
 
 
 if __name__ == "__main__":

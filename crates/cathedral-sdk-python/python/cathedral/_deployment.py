@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 from urllib.parse import urlparse
 
-from basilica.exceptions import DeploymentFailed, DeploymentTimeout
+from cathedral.exceptions import DeploymentFailed, DeploymentTimeout
 
 
 # HTTP readiness verification settings
@@ -35,7 +35,7 @@ from basilica.exceptions import DeploymentFailed, DeploymentTimeout
 HTTP_READY_TIMEOUT = 10.0  # seconds per attempt
 
 if TYPE_CHECKING:
-    from . import BasilicaClient
+    from . import CathedralClient
 
 
 def _format_phase_message(phase: Optional[str]) -> str:
@@ -129,7 +129,7 @@ class DeploymentStatus:
 
 class Deployment:
     """
-    A facade for managing a Basilica deployment.
+    A facade for managing a Cathedral deployment.
 
     This class provides a convenient, object-oriented interface for working
     with deployments. It wraps the low-level API client and provides methods
@@ -162,7 +162,7 @@ class Deployment:
 
     def __init__(
         self,
-        client: "BasilicaClient",
+        client: "CathedralClient",
         instance_name: str,
         url: str,
         namespace: str,
@@ -202,7 +202,7 @@ class Deployment:
 
         Example:
             >>> print(deployment.url)
-            'https://my-app.deployments.basilica.ai'
+            'https://my-app.deployments.cathedral.ai'
         """
         return self._url
 
@@ -679,11 +679,11 @@ class Deployment:
         return f"Deployment '{self._name}' ({self._state}) at {self._url}"
 
     @classmethod
-    def _from_response(cls, client: "BasilicaClient", response) -> "Deployment":
+    def _from_response(cls, client: "CathedralClient", response) -> "Deployment":
         """
         Create a Deployment from an API response.
 
-        Internal method used by BasilicaClient.
+        Internal method used by CathedralClient.
         """
         return cls(
             client=client,

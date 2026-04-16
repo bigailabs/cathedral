@@ -1,5 +1,5 @@
 #!/bin/bash
-# Service management for Basilica components
+# Service management for Cathedral components
 
 set -e
 
@@ -14,7 +14,7 @@ deploy_service_file() {
     local server_host="$2"
     local server_port="$3"
     local server_user="$4"
-    local service_file="$TEMPLATE_DIR/basilica-${service_name}.service"
+    local service_file="$TEMPLATE_DIR/cathedral-${service_name}.service"
     
     if [[ ! -f "$service_file" ]]; then
         log_error "Service file not found: $service_file"
@@ -24,14 +24,14 @@ deploy_service_file() {
     log_info "Deploying systemd service for $service_name to $server_host"
     
     # Copy service file
-    scp -P "$server_port" "$service_file" "$server_user@$server_host:/tmp/basilica-${service_name}.service" || {
+    scp -P "$server_port" "$service_file" "$server_user@$server_host:/tmp/cathedral-${service_name}.service" || {
         log_error "Failed to copy service file"
         return 1
     }
     
     # Install service file
     ssh -p "$server_port" "$server_user@$server_host" "
-        sudo mv /tmp/basilica-${service_name}.service /etc/systemd/system/
+        sudo mv /tmp/cathedral-${service_name}.service /etc/systemd/system/
         sudo systemctl daemon-reload
     " || {
         log_error "Failed to install service file"
@@ -51,9 +51,9 @@ start_service() {
     log_info "Starting $service_name on $server_host"
     
     ssh -p "$server_port" "$server_user@$server_host" "
-        sudo systemctl start basilica-${service_name}
+        sudo systemctl start cathedral-${service_name}
         sleep 2
-        sudo systemctl is-active basilica-${service_name}
+        sudo systemctl is-active cathedral-${service_name}
     " || {
         log_error "Failed to start $service_name"
         return 1
@@ -72,7 +72,7 @@ stop_service() {
     log_info "Stopping $service_name on $server_host"
     
     ssh -p "$server_port" "$server_user@$server_host" "
-        sudo systemctl stop basilica-${service_name} || true
+        sudo systemctl stop cathedral-${service_name} || true
     "
     
     log_success "$service_name stopped"
@@ -88,7 +88,7 @@ enable_service() {
     log_info "Enabling $service_name on $server_host"
     
     ssh -p "$server_port" "$server_user@$server_host" "
-        sudo systemctl enable basilica-${service_name}
+        sudo systemctl enable cathedral-${service_name}
     " || {
         log_error "Failed to enable $service_name"
         return 1
@@ -107,7 +107,7 @@ service_status() {
     log_info "Checking status of $service_name on $server_host"
     
     ssh -p "$server_port" "$server_user@$server_host" "
-        sudo systemctl status basilica-${service_name} --no-pager || true
+        sudo systemctl status cathedral-${service_name} --no-pager || true
     "
 }
 
@@ -122,7 +122,7 @@ service_logs() {
     log_info "Getting logs for $service_name on $server_host"
     
     ssh -p "$server_port" "$server_user@$server_host" "
-        sudo journalctl -u basilica-${service_name} -n $lines --no-pager
+        sudo journalctl -u cathedral-${service_name} -n $lines --no-pager
     "
 }
 
@@ -282,7 +282,7 @@ main() {
             ;;
         help|*)
             cat << EOF
-Basilica Service Manager
+Cathedral Service Manager
 
 Usage: service-manager.sh <command> [options]
 

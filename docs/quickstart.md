@@ -1,10 +1,10 @@
 # Quick Start Guide
 
-This guide provides step-by-step instructions for quickly getting started with Basilica network participation.
+This guide provides step-by-step instructions for quickly getting started with Cathedral network participation.
 
 ## Deployment Options
 
-Basilica supports two primary roles with multiple deployment methods:
+Cathedral supports two primary roles with multiple deployment methods:
 
 **Roles:**
 
@@ -42,8 +42,8 @@ This is the fastest way to get started with production-ready deployment.
 cd scripts/validator
 
 # 2. Prepare configuration
-cp ../../config/validator.toml.example /opt/basilica/config/validator.toml
-# Edit /opt/basilica/config/validator.toml with your settings:
+cp ../../config/validator.toml.example /opt/cathedral/config/validator.toml
+# Edit /opt/cathedral/config/validator.toml with your settings:
 # - wallet_name and hotkey_name
 # - external_ip (your public IP)
 # - network ("finney" for mainnet)
@@ -51,13 +51,13 @@ cp ../../config/validator.toml.example /opt/basilica/config/validator.toml
 
 # 3. Ensure wallet exists and create directories
 ls ~/.bittensor/wallets/your_wallet/hotkeys/
-mkdir -p /opt/basilica/config /opt/basilica/data /var/log/basilica
+mkdir -p /opt/cathedral/config /opt/cathedral/data /var/log/cathedral
 
 # 4. Deploy with auto-updates and monitoring
 docker compose -f compose.prod.yml up -d
 
 # 5. Check status
-docker logs basilica-validator
+docker logs cathedral-validator
 ```
 
 ### Miner
@@ -67,8 +67,8 @@ docker logs basilica-validator
 cd scripts/miner
 
 # 2. Prepare configuration
-cp ../../config/miner.toml.example /opt/basilica/config/miner.toml
-# Edit /opt/basilica/config/miner.toml with your settings:
+cp ../../config/miner.toml.example /opt/cathedral/config/miner.toml
+# Edit /opt/cathedral/config/miner.toml with your settings:
 # - wallet_name and hotkey_name
 # - external_ip (your public IP)
 # - node_management.nodes (GPU node SSH endpoints)
@@ -77,17 +77,17 @@ cp ../../config/miner.toml.example /opt/basilica/config/miner.toml
 # - netuid (39 for mainnet)
 
 # 3. Create directories and set up SSH key for GPU node access
-mkdir -p /opt/basilica/config /opt/basilica/data /var/log/basilica
+mkdir -p /opt/cathedral/config /opt/cathedral/data /var/log/cathedral
 ssh-keygen -t ed25519 -f ~/.ssh/miner_node_key -N ""
 
 # 4. Deploy key to your GPU nodes
-ssh-copy-id -i ~/.ssh/miner_node_key.pub basilica@<gpu_node_ip>
+ssh-copy-id -i ~/.ssh/miner_node_key.pub cathedral@<gpu_node_ip>
 
 # 5. Deploy with auto-updates and monitoring
 docker compose -f compose.prod.yml up -d
 
 # 6. Check status
-docker logs basilica-miner
+docker logs cathedral-miner
 ```
 
 **GPU node requirements** (must be set up before deploying the miner):
@@ -145,8 +145,8 @@ chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
 docker ps
 
 # View logs
-docker logs basilica-validator
-docker logs basilica-miner
+docker logs cathedral-validator
+docker logs cathedral-miner
 
 # Check health endpoints
 curl http://localhost:8080/health    # validator API
@@ -192,7 +192,7 @@ docker logs container-name
 ls ~/.bittensor/wallets/your_wallet/hotkeys/
 
 # Verify wallet name matches config
-grep wallet_name /opt/basilica/config/validator.toml
+grep wallet_name /opt/cathedral/config/validator.toml
 ```
 
 ### Network Connection Issues
@@ -214,7 +214,7 @@ netstat -tlnp | grep -E "8080|50051|8091|9090"
 
 ```bash
 # Test SSH access to GPU nodes
-ssh -i ~/.ssh/miner_node_key basilica@<gpu_node_ip>
+ssh -i ~/.ssh/miner_node_key cathedral@<gpu_node_ip>
 
 # Check SSH key permissions
 chmod 600 ~/.ssh/miner_node_key
@@ -234,6 +234,6 @@ Choose your role and dive deeper:
 ## Support
 
 - Check the individual component guides for detailed troubleshooting
-- [GitHub](https://github.com/one-covenant/basilica)
+- [GitHub](https://github.com/one-covenant/cathedral)
 - [Discord](https://discord.gg/Cy7c9vPsNK)
 - [Website](https://www.basilica.ai/)

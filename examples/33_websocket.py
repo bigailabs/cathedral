@@ -9,9 +9,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 33_websocket.py
 """
-from basilica import BasilicaClient, WebSocketConfig
+from cathedral import CathedralClient, WebSocketConfig
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # Deploy with WebSocket support (default 1800s idle timeout)
 deployment = client.create_deployment(

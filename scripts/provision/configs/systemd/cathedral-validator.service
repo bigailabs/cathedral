@@ -1,18 +1,18 @@
 [Unit]
-Description=Basilica Validator Service
-Documentation=https://github.com/spacejar/basilica
+Description=Cathedral Validator Service
+Documentation=https://github.com/spacejar/cathedral
 After=network-online.target
 Wants=network-online.target
-RequiresMountsFor=/var/lib/basilica
+RequiresMountsFor=/var/lib/cathedral
 
 [Service]
 Type=simple
-User=basilica
-Group=basilica
-WorkingDirectory=/var/lib/basilica/validator
+User=cathedral
+Group=cathedral
+WorkingDirectory=/var/lib/cathedral/validator
 Environment=RUST_LOG=info
 Environment=RUST_BACKTRACE=1
-ExecStart=/usr/local/bin/basilica-validator start --config /etc/basilica/validator.toml
+ExecStart=/usr/local/bin/cathedral-validator start --config /etc/cathedral/validator.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
@@ -20,14 +20,14 @@ TimeoutStartSec=60
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-validator
+SyslogIdentifier=cathedral-validator
 
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/basilica /var/log/basilica
+ReadWritePaths=/var/lib/cathedral /var/log/cathedral
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

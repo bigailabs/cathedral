@@ -1,5 +1,5 @@
 #!/bin/bash
-# Main Basilica CLI tool
+# Main Cathedral CLI tool
 
 set -e
 
@@ -13,16 +13,16 @@ VERSION="0.1.0"
 # Commands
 print_usage() {
     cat << EOF
-basilica - Basilica project management tool
+cathedral - Cathedral project management tool
 
 USAGE:
-    basilica <COMMAND> [OPTIONS]
+    cathedral <COMMAND> [OPTIONS]
 
 COMMANDS:
     test        Run or manage tests
     build       Build the project
     check       Check code quality
-    provision   Provision and manage Basilica infrastructure
+    provision   Provision and manage Cathedral infrastructure
     deploy      Deploy services to production
     manage      Manage running services
     help        Show help for a command
@@ -32,16 +32,16 @@ GLOBAL OPTIONS:
     -v, --version   Show version information
 
 EXAMPLES:
-    basilica test verify              # Verify test implementation
-    basilica test run                 # Run all tests
-    basilica test run -p              # Run tests in parallel
-    basilica test stats               # Show test statistics
-    basilica build --release          # Build release version
-    basilica provision all            # Complete end-to-end provisioning
-    basilica deploy production        # Deploy to production servers
-    basilica manage status            # Check service status
+    cathedral test verify              # Verify test implementation
+    cathedral test run                 # Run all tests
+    cathedral test run -p              # Run tests in parallel
+    cathedral test stats               # Show test statistics
+    cathedral build --release          # Build release version
+    cathedral provision all            # Complete end-to-end provisioning
+    cathedral deploy production        # Deploy to production servers
+    cathedral manage status            # Check service status
 
-For more help on a command, use: basilica help <COMMAND>
+For more help on a command, use: cathedral help <COMMAND>
 EOF
 }
 
@@ -62,10 +62,10 @@ cmd_test() {
             ;;
         help|--help|-h)
             cat << EOF
-basilica test - Test management commands
+cathedral test - Test management commands
 
 USAGE:
-    basilica test <SUBCOMMAND> [OPTIONS]
+    cathedral test <SUBCOMMAND> [OPTIONS]
 
 SUBCOMMANDS:
     run         Run tests
@@ -76,17 +76,17 @@ OPTIONS:
     -h, --help  Show this help message
 
 EXAMPLES:
-    basilica test run                # Run all tests
-    basilica test run -p             # Run tests in parallel
-    basilica test run miner          # Run only miner tests
-    basilica test verify             # Verify test implementation
-    basilica test stats              # Show summary statistics
-    basilica test stats detailed     # Show detailed report
+    cathedral test run                # Run all tests
+    cathedral test run -p             # Run tests in parallel
+    cathedral test run miner          # Run only miner tests
+    cathedral test verify             # Verify test implementation
+    cathedral test stats              # Show summary statistics
+    cathedral test stats detailed     # Show detailed report
 EOF
             ;;
         *)
             log_error "Unknown test subcommand: $subcommand"
-            echo "Use 'basilica test help' for available commands"
+            echo "Use 'cathedral test help' for available commands"
             exit 1
             ;;
     esac
@@ -94,7 +94,7 @@ EOF
 
 # Command: build
 cmd_build() {
-    ensure_basilica_root || exit 1
+    ensure_cathedral_root || exit 1
     
     local args=""
     while [[ $# -gt 0 ]]; do
@@ -114,13 +114,13 @@ cmd_build() {
         esac
     done
     
-    log_header "Building Basilica"
+    log_header "Building Cathedral"
     cargo build $args
 }
 
 # Command: check
 cmd_check() {
-    ensure_basilica_root || exit 1
+    ensure_cathedral_root || exit 1
     
     log_header "Running checks"
     
@@ -165,10 +165,10 @@ cmd_provision() {
             ;;
         help|--help|-h)
             cat << EOF
-basilica provision - Provision and manage Basilica infrastructure
+cathedral provision - Provision and manage Cathedral infrastructure
 
 USAGE:
-    basilica provision <SUBCOMMAND> [OPTIONS]
+    cathedral provision <SUBCOMMAND> [OPTIONS]
 
 SUBCOMMANDS:
     all         Complete end-to-end provisioning with checks
@@ -183,10 +183,10 @@ OPTIONS:
     -h, --help  Show this help message
 
 EXAMPLES:
-    basilica provision all production    # Complete provisioning
-    basilica provision build             # Build binaries only
-    basilica provision config production # Generate configs
-    basilica provision validate          # Run pre-flight checks
+    cathedral provision all production    # Complete provisioning
+    cathedral provision build             # Build binaries only
+    cathedral provision config production # Generate configs
+    cathedral provision validate          # Run pre-flight checks
 
 FEATURES:
     - Pre-flight checks before deployment
@@ -198,7 +198,7 @@ EOF
             ;;
         *)
             log_error "Unknown provision subcommand: $subcommand"
-            echo "Use 'basilica provision help' for available commands"
+            echo "Use 'cathedral provision help' for available commands"
             exit 1
             ;;
     esac
@@ -229,10 +229,10 @@ cmd_deploy() {
             ;;
         help|--help|-h)
             cat << EOF
-basilica deploy - Deploy services to environments
+cathedral deploy - Deploy services to environments
 
 USAGE:
-    basilica deploy <SUBCOMMAND> [environment]
+    cathedral deploy <SUBCOMMAND> [environment]
 
 SUBCOMMANDS:
     all         Deploy everything (binaries + configs)
@@ -249,14 +249,14 @@ OPTIONS:
     -h, --help   Show this help message
 
 EXAMPLES:
-    basilica deploy all production      # Full deployment
-    basilica deploy binaries            # Deploy binaries only
-    basilica deploy configs staging     # Deploy configs to staging
+    cathedral deploy all production      # Full deployment
+    cathedral deploy binaries            # Deploy binaries only
+    cathedral deploy configs staging     # Deploy configs to staging
 EOF
             ;;
         *)
             log_error "Unknown deploy command: $subcommand"
-            echo "Use 'basilica deploy help' for available commands"
+            echo "Use 'cathedral deploy help' for available commands"
             exit 1
             ;;
     esac
@@ -291,10 +291,10 @@ cmd_manage() {
             ;;
         help|--help|-h)
             cat << EOF
-basilica manage - Manage running services
+cathedral manage - Manage running services
 
 USAGE:
-    basilica manage <OPERATION> [service] [environment]
+    cathedral manage <OPERATION> [service] [environment]
 
 OPERATIONS:
     status              Check service status
@@ -312,15 +312,15 @@ OPTIONS:
     -h, --help  Show this help message
 
 EXAMPLES:
-    basilica manage status                    # Check all services
-    basilica manage start all production      # Start all services
-    basilica manage logs executor             # View executor logs
-    basilica manage enable production         # Enable auto-start
+    cathedral manage status                    # Check all services
+    cathedral manage start all production      # Start all services
+    cathedral manage logs executor             # View executor logs
+    cathedral manage enable production         # Enable auto-start
 EOF
             ;;
         *)
             log_error "Unknown management operation: $operation"
-            echo "Use 'basilica manage help' for available operations"
+            echo "Use 'cathedral manage help' for available operations"
             exit 1
             ;;
     esac
@@ -336,10 +336,10 @@ cmd_help() {
             ;;
         build)
             cat << EOF
-basilica build - Build the project
+cathedral build - Build the project
 
 USAGE:
-    basilica build [OPTIONS]
+    cathedral build [OPTIONS]
 
 OPTIONS:
     -r, --release   Build in release mode
@@ -347,16 +347,16 @@ OPTIONS:
     -h, --help      Show this help message
 
 EXAMPLES:
-    basilica build              # Debug build
-    basilica build --release    # Release build
+    cathedral build              # Debug build
+    cathedral build --release    # Release build
 EOF
             ;;
         check)
             cat << EOF
-basilica check - Check code quality
+cathedral check - Check code quality
 
 USAGE:
-    basilica check
+    cathedral check
 
 Runs format check, clippy, and test compilation.
 EOF
@@ -408,7 +408,7 @@ main() {
             cmd_help "$@"
             ;;
         --version|-v)
-            echo "basilica $VERSION"
+            echo "cathedral $VERSION"
             ;;
         *)
             log_error "Unknown command: $1"

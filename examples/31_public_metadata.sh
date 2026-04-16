@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# Basilica Public Deployment Metadata - CLI Example
+# Cathedral Public Deployment Metadata - CLI Example
 #
-# Demonstrates the full metadata enrollment lifecycle using the basilica CLI:
+# Demonstrates the full metadata enrollment lifecycle using the cathedral CLI:
 #   1. Deploy with --public-metadata to enable enrollment at creation
 #   2. Check enrollment status with enroll-metadata subcommand
 #   3. Query public metadata (no authentication required)
@@ -13,7 +13,7 @@
 # miners have deployed.
 #
 # Prerequisites:
-#   - basilica CLI installed and authenticated (basilica login)
+#   - cathedral CLI installed and authenticated (cathedral login)
 #
 # Usage:
 #   ./31_public_metadata.sh
@@ -23,7 +23,7 @@ set -e
 INSTANCE_NAME="metadata-demo-$(date +%s)"
 
 echo "========================================================================"
-echo "Basilica Public Deployment Metadata - CLI Example"
+echo "Cathedral Public Deployment Metadata - CLI Example"
 echo "========================================================================"
 echo ""
 
@@ -33,7 +33,7 @@ echo ""
 echo "Step 1: Creating deployment with --public-metadata..."
 echo "------------------------------------------------------------------------"
 
-basilica deploy hashicorp/http-echo:latest \
+cathedral deploy hashicorp/http-echo:latest \
     --name "$INSTANCE_NAME" \
     --port 5678 \
     --public-metadata \
@@ -48,7 +48,7 @@ echo ""
 echo "Step 2: Checking enrollment status..."
 echo "------------------------------------------------------------------------"
 
-basilica deploy enroll-metadata "$INSTANCE_NAME"
+cathedral deploy enroll-metadata "$INSTANCE_NAME"
 
 echo ""
 
@@ -58,11 +58,11 @@ echo ""
 echo "Step 3: Querying public metadata (unauthenticated endpoint)..."
 echo "------------------------------------------------------------------------"
 
-basilica deploy metadata "$INSTANCE_NAME"
+cathedral deploy metadata "$INSTANCE_NAME"
 
 echo ""
 echo "Same in JSON format:"
-basilica deploy metadata "$INSTANCE_NAME" --json
+cathedral deploy metadata "$INSTANCE_NAME" --json
 
 echo ""
 
@@ -72,7 +72,7 @@ echo ""
 echo "Step 4: Disabling metadata enrollment..."
 echo "------------------------------------------------------------------------"
 
-basilica deploy enroll-metadata "$INSTANCE_NAME" --disable
+cathedral deploy enroll-metadata "$INSTANCE_NAME" --disable
 
 echo ""
 
@@ -82,7 +82,7 @@ echo ""
 echo "Step 5: Querying public metadata after disabling..."
 echo "------------------------------------------------------------------------"
 
-basilica deploy metadata "$INSTANCE_NAME"
+cathedral deploy metadata "$INSTANCE_NAME"
 
 echo ""
 
@@ -92,7 +92,7 @@ echo ""
 echo "Step 6: Re-enabling metadata enrollment..."
 echo "------------------------------------------------------------------------"
 
-basilica deploy enroll-metadata "$INSTANCE_NAME" --enable
+cathedral deploy enroll-metadata "$INSTANCE_NAME" --enable
 
 echo ""
 
@@ -102,7 +102,7 @@ echo ""
 echo "Step 7: Final status check..."
 echo "------------------------------------------------------------------------"
 
-basilica deploy enroll-metadata "$INSTANCE_NAME"
+cathedral deploy enroll-metadata "$INSTANCE_NAME"
 
 echo ""
 
@@ -112,19 +112,19 @@ echo ""
 echo "------------------------------------------------------------------------"
 read -p "Delete the deployment? (y/N): " CONFIRM
 if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
-    basilica summon delete "$INSTANCE_NAME"
+    cathedral summon delete "$INSTANCE_NAME"
 else
     echo "Deployment left running: $INSTANCE_NAME"
-    echo "  Delete later: basilica summon delete $INSTANCE_NAME"
+    echo "  Delete later: cathedral summon delete $INSTANCE_NAME"
 fi
 
 echo ""
 echo "========================================================================"
 echo "CLI Commands Used:"
-echo "  basilica deploy <image> --public-metadata      - Deploy with enrollment"
-echo "  basilica deploy enroll-metadata <name>          - Check enrollment status"
-echo "  basilica deploy enroll-metadata <name> --enable - Enable enrollment"
-echo "  basilica deploy enroll-metadata <name> --disable- Disable enrollment"
-echo "  basilica deploy metadata <name>                 - Public lookup (no auth)"
-echo "  basilica deploy metadata <name> --json          - Public lookup as JSON"
+echo "  cathedral deploy <image> --public-metadata      - Deploy with enrollment"
+echo "  cathedral deploy enroll-metadata <name>          - Check enrollment status"
+echo "  cathedral deploy enroll-metadata <name> --enable - Enable enrollment"
+echo "  cathedral deploy enroll-metadata <name> --disable- Disable enrollment"
+echo "  cathedral deploy metadata <name>                 - Public lookup (no auth)"
+echo "  cathedral deploy metadata <name> --json          - Public lookup as JSON"
 echo "========================================================================"

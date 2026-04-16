@@ -1,6 +1,6 @@
 # CLI Deploy Guide
 
-Deploy applications to Basilica using the command line.
+Deploy applications to Cathedral using the command line.
 
 ## Files
 
@@ -13,13 +13,13 @@ Deploy applications to Basilica using the command line.
 ## Setup
 
 ```bash
-pip install basilica-cli
-basilica login
+pip install cathedral-cli
+cathedral login
 ```
 
 Or use an API token:
 ```bash
-export BASILICA_API_TOKEN="basilica_..."
+export BASILICA_API_TOKEN="cathedral_..."
 ```
 
 ## 1. Deploy Inline Code
@@ -27,13 +27,13 @@ export BASILICA_API_TOKEN="basilica_..."
 The simplest way to deploy - pass Python code directly:
 
 ```bash
-basilica deploy 'from http.server import HTTPServer, BaseHTTPRequestHandler
+cathedral deploy 'from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Hello from Basilica!")
+        self.wfile.write(b"Hello from Cathedral!")
 
 HTTPServer(("", 8000), Handler).serve_forever()' \
   --name hello \
@@ -43,7 +43,7 @@ HTTPServer(("", 8000), Handler).serve_forever()' \
 
 Check status:
 ```bash
-basilica deploy status hello
+cathedral deploy status hello
 ```
 
 ## 2. Deploy a Python File
@@ -51,7 +51,7 @@ basilica deploy status hello
 For larger applications, deploy from a file. See [my_api.py](my_api.py):
 
 ```bash
-basilica deploy my_api.py \
+cathedral deploy my_api.py \
   --name my-api \
   --port 8000 \
   --pip fastapi uvicorn \
@@ -60,7 +60,7 @@ basilica deploy my_api.py \
 
 View the API docs:
 ```bash
-basilica deploy status my-api --show-phases
+cathedral deploy status my-api --show-phases
 # Then open {url}/docs in browser
 ```
 
@@ -69,7 +69,7 @@ basilica deploy status my-api --show-phases
 Deploy pre-built container images:
 
 ```bash
-basilica deploy nginxinc/nginx-unprivileged:alpine \
+cathedral deploy nginxinc/nginx-unprivileged:alpine \
   --name nginx-demo \
   --port 8080 \
   --cpu 250m \
@@ -82,7 +82,7 @@ basilica deploy nginxinc/nginx-unprivileged:alpine \
 For ML workloads requiring GPU. See [inference.py](inference.py):
 
 ```bash
-basilica deploy inference.py \
+cathedral deploy inference.py \
   --name gpu-model \
   --gpu 1 \
   --gpu-model H100 \
@@ -97,7 +97,7 @@ Available GPU models: `H100`, `A100`, `L40S`, `RTX4090`, `RTX-A4000`
 Data persists across restarts at the specified path:
 
 ```bash
-basilica deploy hello.py \
+cathedral deploy hello.py \
   --name stateful-app \
   --storage \
   --storage-path /data
@@ -110,7 +110,7 @@ Storage is backed by object storage (R2) and syncs automatically.
 Control CPU and memory allocation:
 
 ```bash
-basilica deploy my_api.py \
+cathedral deploy my_api.py \
   --name my-app \
   --cpu 500m \
   --memory 1Gi \
@@ -124,7 +124,7 @@ basilica deploy my_api.py \
 Configure custom health check endpoints:
 
 ```bash
-basilica deploy my_api.py \
+cathedral deploy my_api.py \
   --name my-app \
   --health-path /health \
   --health-initial-delay 10 \
@@ -137,51 +137,51 @@ basilica deploy my_api.py \
 ### List Deployments
 
 ```bash
-basilica deploy ls
-basilica deploy ls --json
+cathedral deploy ls
+cathedral deploy ls --json
 ```
 
 ### Get Status
 
 ```bash
-basilica deploy status my-app
-basilica deploy status my-app --show-phases
-basilica deploy status my-app --json
+cathedral deploy status my-app
+cathedral deploy status my-app --show-phases
+cathedral deploy status my-app --json
 ```
 
 ### View Logs
 
 ```bash
-basilica deploy logs my-app
-basilica deploy logs my-app --follow
-basilica deploy logs my-app --tail 100
+cathedral deploy logs my-app
+cathedral deploy logs my-app --follow
+cathedral deploy logs my-app --tail 100
 ```
 
 ### Scale Replicas
 
 ```bash
-basilica deploy scale my-app --replicas 3
+cathedral deploy scale my-app --replicas 3
 ```
 
 ### Delete Deployment
 
 ```bash
-basilica deploy delete my-app
-basilica deploy delete my-app --yes  # skip confirmation
+cathedral deploy delete my-app
+cathedral deploy delete my-app --yes  # skip confirmation
 ```
 
 ## Quick Reference
 
 | Use Case | Command |
 |----------|---------|
-| Inline code | `basilica deploy 'print("hello")' --name hello` |
-| Python file | `basilica deploy my_api.py --name my-app --pip fastapi uvicorn` |
-| Docker image | `basilica deploy nginx:alpine --name nginx --port 80` |
-| With GPU | `basilica deploy inference.py --name ml --gpu 1 --gpu-model A100` |
-| With storage | `basilica deploy hello.py --name db --storage` |
+| Inline code | `cathedral deploy 'print("hello")' --name hello` |
+| Python file | `cathedral deploy my_api.py --name my-app --pip fastapi uvicorn` |
+| Docker image | `cathedral deploy nginx:alpine --name nginx --port 80` |
+| With GPU | `cathedral deploy inference.py --name ml --gpu 1 --gpu-model A100` |
+| With storage | `cathedral deploy hello.py --name db --storage` |
 
 ## Help
 
 ```bash
-basilica deploy --help
+cathedral deploy --help
 ```

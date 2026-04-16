@@ -6,10 +6,10 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 05_decorator_gpu.py
 """
-import basilica
+import cathedral
 
 
-@basilica.deployment(
+@cathedral.deployment(
     name="decorator-gpu",
     image="pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
     port=8000,

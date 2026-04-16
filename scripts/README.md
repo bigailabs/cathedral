@@ -1,8 +1,8 @@
-# Basilica Scripts
+# Cathedral Scripts
 
-This directory contains build and deployment scripts for Basilica public components.
+This directory contains build and deployment scripts for Cathedral public components.
 
-> **Note**: Backend services (api, billing, payments, operator, storage, autoscaler) have been moved to the private `basilica-backend` repository.
+> **Note**: Backend services (api, billing, payments, operator, storage, autoscaler) have been moved to the private `cathedral-backend` repository.
 
 ## Structure
 
@@ -28,7 +28,7 @@ Each component has its own directory with:
 - **localnet/** - Full local network setup
 - **test/** - Test utilities
 
-### Backend Services (Moved to `basilica-backend`)
+### Backend Services (Moved to `cathedral-backend`)
 
 The following have been moved to the private repo:
 - api/ - External HTTP API service
@@ -109,4 +109,4 @@ Use `just` commands from the project root:
 - `just local-subtensor-up` - Start local Subtensor only
 - `just docker-build-all` - Build all Docker images
 
-For backend services, see the `basilica-backend` repository.
+For backend services, see the `cathedral-backend` repository.

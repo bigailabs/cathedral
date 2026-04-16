@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Deploy Clawdbot with Kimi-K2.5 inference on Basilica.
+Deploy Clawdbot with Kimi-K2.5 inference on Cathedral.
 
-Connects Clawdbot to a running Kimi-K2.5 vLLM deployment on Basilica,
+Connects Clawdbot to a running Kimi-K2.5 vLLM deployment on Cathedral,
 giving the agent platform access to K2.5's reasoning capabilities.
 
 Prerequisites:
-    - A running Kimi-K2.5 deployment on Basilica (see 26_kimi_k2_5_multimodal.py)
+    - A running Kimi-K2.5 deployment on Cathedral (see 26_kimi_k2_5_multimodal.py)
 
 Usage:
     export BASILICA_API_TOKEN="your-token"
-    export KIMI_K2_5_DEPLOYMENT_URL="https://<id>.deployments.basilica.ai"
+    export KIMI_K2_5_DEPLOYMENT_URL="https://<id>.deployments.cathedral.ai"
     python3 27_clawdbot_kimi_k2_5.py
 
 See: https://github.com/clawdbot/clawdbot
@@ -19,13 +19,13 @@ import os
 import re
 import sys
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 k2_5_url = os.getenv("KIMI_K2_5_DEPLOYMENT_URL")
 if not k2_5_url:
     sys.exit(
         "Set KIMI_K2_5_DEPLOYMENT_URL to your Kimi-K2.5 deployment URL.\n"
-        "Example: export KIMI_K2_5_DEPLOYMENT_URL=https://<id>.deployments.basilica.ai"
+        "Example: export KIMI_K2_5_DEPLOYMENT_URL=https://<id>.deployments.cathedral.ai"
     )
 
 # Ensure the base URL ends with /v1 for OpenAI-compatible API
@@ -37,7 +37,7 @@ print("Deploying Clawdbot with Kimi-K2.5 backend...")
 print(f"  K2.5 endpoint: {base_url}")
 print()
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="clawdbot-kimi-k2-5",
@@ -62,4 +62,4 @@ if match:
     print()
     print(f"Gateway token: {token}")
 else:
-    print(f"Get token: basilica deploy logs {deployment.name} | grep CLAWDBOT_GATEWAY_TOKEN")
+    print(f"Get token: cathedral deploy logs {deployment.name} | grep CLAWDBOT_GATEWAY_TOKEN")

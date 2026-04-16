@@ -1,11 +1,11 @@
 """
-Basilica SDK Exception Hierarchy
+Cathedral SDK Exception Hierarchy
 
-This module provides a comprehensive exception hierarchy for the Basilica SDK,
+This module provides a comprehensive exception hierarchy for the Cathedral SDK,
 offering clear and actionable error messages for common failure scenarios.
 
 Exception Hierarchy:
-    BasilicaError (base)
+    CathedralError (base)
     ├── AuthenticationError     - Token/API key issues
     ├── AuthorizationError      - Permission denied
     ├── ValidationError         - Invalid input parameters
@@ -18,7 +18,7 @@ Exception Hierarchy:
     └── NetworkError            - Connection/API communication issues
 
 Example:
-    >>> from basilica.exceptions import DeploymentTimeout
+    >>> from cathedral.exceptions import DeploymentTimeout
     >>> try:
     ...     deployment = client.deploy("my-app", source="app.py")
     ... except DeploymentTimeout as e:
@@ -29,11 +29,11 @@ Example:
 from typing import Optional
 
 
-class BasilicaError(Exception):
+class CathedralError(Exception):
     """
-    Base exception for all Basilica SDK errors.
+    Base exception for all Cathedral SDK errors.
 
-    All Basilica-specific exceptions inherit from this class, making it easy
+    All Cathedral-specific exceptions inherit from this class, making it easy
     to catch all SDK errors with a single except clause.
 
     Attributes:
@@ -44,8 +44,8 @@ class BasilicaError(Exception):
     Example:
         >>> try:
         ...     client.deploy(...)
-        ... except BasilicaError as e:
-        ...     print(f"Basilica error: {e}")
+        ... except CathedralError as e:
+        ...     print(f"Cathedral error: {e}")
     """
 
     def __init__(
@@ -65,7 +65,7 @@ class BasilicaError(Exception):
         return self.message
 
 
-class AuthenticationError(BasilicaError):
+class AuthenticationError(CathedralError):
     """
     Raised when API authentication fails.
 
@@ -76,14 +76,14 @@ class AuthenticationError(BasilicaError):
 
     Example:
         >>> # No token set
-        >>> client = BasilicaClient()
+        >>> client = CathedralClient()
         AuthenticationError: No API token provided. Set BASILICA_API_TOKEN or pass api_key parameter.
 
     Resolution:
-        Create a token using: basilica tokens create
+        Create a token using: cathedral tokens create
         Then either:
-        - Set environment variable: export BASILICA_API_TOKEN="basilica_..."
-        - Pass directly: BasilicaClient(api_key="basilica_...")
+        - Set environment variable: export BASILICA_API_TOKEN="cathedral_..."
+        - Pass directly: CathedralClient(api_key="cathedral_...")
     """
 
     def __init__(self, message: str = "Authentication failed"):
@@ -94,7 +94,7 @@ class AuthenticationError(BasilicaError):
         )
 
 
-class AuthorizationError(BasilicaError):
+class AuthorizationError(CathedralError):
     """
     Raised when the authenticated user lacks permission for an operation.
 
@@ -119,7 +119,7 @@ class AuthorizationError(BasilicaError):
         )
 
 
-class ValidationError(BasilicaError):
+class ValidationError(CathedralError):
     """
     Raised when input parameters fail validation.
 
@@ -153,7 +153,7 @@ class ValidationError(BasilicaError):
         )
 
 
-class DeploymentError(BasilicaError):
+class DeploymentError(CathedralError):
     """
     Base exception for deployment-related errors.
 
@@ -266,7 +266,7 @@ class DeploymentFailed(DeploymentError):
         )
 
 
-class ResourceError(BasilicaError):
+class ResourceError(CathedralError):
     """
     Raised when requested resources are unavailable.
 
@@ -292,7 +292,7 @@ class ResourceError(BasilicaError):
         )
 
 
-class StorageError(BasilicaError):
+class StorageError(CathedralError):
     """
     Raised when storage configuration or operations fail.
 
@@ -314,7 +314,7 @@ class StorageError(BasilicaError):
         )
 
 
-class NetworkError(BasilicaError):
+class NetworkError(CathedralError):
     """
     Raised when API communication fails.
 
@@ -340,7 +340,7 @@ class NetworkError(BasilicaError):
         )
 
 
-class RateLimitError(BasilicaError):
+class RateLimitError(CathedralError):
     """
     Raised when API rate limits are exceeded.
 
@@ -364,7 +364,7 @@ class RateLimitError(BasilicaError):
         )
 
 
-class SourceError(BasilicaError):
+class SourceError(CathedralError):
     """
     Raised when source code handling fails.
 

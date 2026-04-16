@@ -17,7 +17,7 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Deploy Basilica validator component to remote server.
+Deploy Cathedral validator component to remote server.
 
 OPTIONS:
     -s, --server USER@HOST:PORT      Server connection
@@ -116,8 +116,8 @@ build_service() {
         ./scripts/validator/build.sh
     fi
 
-    if [[ ! -f "./basilica-validator" ]]; then
-        log "ERROR: Binary ./basilica-validator not found after build"
+    if [[ ! -f "./cathedral-validator" ]]; then
+        log "ERROR: Binary ./cathedral-validator not found after build"
         exit 1
     fi
 }
@@ -146,13 +146,13 @@ deploy_veritas_binaries() {
     fi
 
     log "Deploying veritas binaries to validator"
-    ssh_cmd "mkdir -p /opt/basilica/bin"
+    ssh_cmd "mkdir -p /opt/cathedral/bin"
 
-    scp_file "$executor_binary" "/opt/basilica/bin/executor-binary"
-    scp_file "$validator_binary" "/opt/basilica/bin/validator-binary"
+    scp_file "$executor_binary" "/opt/cathedral/bin/executor-binary"
+    scp_file "$validator_binary" "/opt/cathedral/bin/validator-binary"
 
-    ssh_cmd "chmod +x /opt/basilica/bin/executor-binary"
-    ssh_cmd "chmod +x /opt/basilica/bin/validator-binary"
+    ssh_cmd "chmod +x /opt/cathedral/bin/executor-binary"
+    ssh_cmd "chmod +x /opt/cathedral/bin/validator-binary"
 
     log "Veritas binaries deployed successfully"
 }
@@ -161,34 +161,34 @@ deploy_binary() {
     log "Deploying validator in binary mode"
 
     log "Stopping existing validator processes"
-    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -f '/opt/basilica/validator' 2>/dev/null || true" || log "WARNING: Could not connect to stop validator processes"
+    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -f '/opt/cathedral/validator' 2>/dev/null || true" || log "WARNING: Could not connect to stop validator processes"
 
     sleep 2
 
     # Force kill with shorter timeout
-    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -9 -f '/opt/basilica/validator' 2>/dev/null || true" || log "WARNING: Could not connect for force kill"
+    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -9 -f '/opt/cathedral/validator' 2>/dev/null || true" || log "WARNING: Could not connect for force kill"
 
     sleep 3
 
     log "Removing old validator files"
-    ssh_cmd "cp /opt/basilica/validator /opt/basilica/validator.backup 2>/dev/null || true"
+    ssh_cmd "cp /opt/cathedral/validator /opt/cathedral/validator.backup 2>/dev/null || true"
 
     # Try to move the current binary out of the way to avoid "Text file busy"
-    ssh_cmd "mv /opt/basilica/validator /opt/basilica/validator.old 2>/dev/null || true"
+    ssh_cmd "mv /opt/cathedral/validator /opt/cathedral/validator.old 2>/dev/null || true"
 
-    scp_file "basilica-validator" "/opt/basilica/validator"
-    ssh_cmd "chmod +x /opt/basilica/validator"
+    scp_file "cathedral-validator" "/opt/cathedral/validator"
+    ssh_cmd "chmod +x /opt/cathedral/validator"
 
     log "Creating directories for validator"
-    ssh_cmd "mkdir -p /opt/basilica/config"
-    scp_file "$CONFIG_FILE" "/opt/basilica/config/validator.toml"
+    ssh_cmd "mkdir -p /opt/cathedral/config"
+    scp_file "$CONFIG_FILE" "/opt/cathedral/config/validator.toml"
 
-    ssh_cmd "mkdir -p /opt/basilica/data && chmod 755 /opt/basilica/data"
+    ssh_cmd "mkdir -p /opt/cathedral/data && chmod 755 /opt/cathedral/data"
 
     # Deploy veritas binaries if specified
     deploy_veritas_binaries
 
-    local start_cmd="cd /opt/basilica && RUST_LOG=debug nohup ./validator --config config/validator.toml start > validator.log 2>&1 &"
+    local start_cmd="cd /opt/cathedral && RUST_LOG=debug nohup ./validator --config config/validator.toml start > validator.log 2>&1 &"
 
     log "Starting validator"
     ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "$start_cmd" || true
@@ -198,7 +198,7 @@ deploy_binary() {
         log "Validator started successfully"
     else
         log "ERROR: Validator failed to start"
-        ssh_cmd "tail -10 /opt/basilica/validator.log"
+        ssh_cmd "tail -10 /opt/cathedral/validator.log"
         exit 1
     fi
 }
@@ -207,43 +207,43 @@ deploy_systemd() {
     log "Deploying validator in systemd mode"
 
     log "Stopping existing validator service"
-    ssh_cmd "systemctl stop basilica-validator 2>/dev/null || true"
+    ssh_cmd "systemctl stop cathedral-validator 2>/dev/null || true"
 
     log "Removing old validator files"
-    ssh_cmd "cp /opt/basilica/validator /opt/basilica/validator.backup 2>/dev/null || true"
-    ssh_cmd "mv /opt/basilica/validator /opt/basilica/validator.old 2>/dev/null || true"
+    ssh_cmd "cp /opt/cathedral/validator /opt/cathedral/validator.backup 2>/dev/null || true"
+    ssh_cmd "mv /opt/cathedral/validator /opt/cathedral/validator.old 2>/dev/null || true"
 
-    scp_file "basilica-validator" "/opt/basilica/validator"
-    ssh_cmd "chmod +x /opt/basilica/validator"
+    scp_file "cathedral-validator" "/opt/cathedral/validator"
+    ssh_cmd "chmod +x /opt/cathedral/validator"
 
     log "Creating directories for validator"
-    ssh_cmd "mkdir -p /opt/basilica/config"
-    scp_file "$CONFIG_FILE" "/opt/basilica/config/validator.toml"
+    ssh_cmd "mkdir -p /opt/cathedral/config"
+    scp_file "$CONFIG_FILE" "/opt/cathedral/config/validator.toml"
 
-    ssh_cmd "mkdir -p /opt/basilica/data && chmod 755 /opt/basilica/data"
+    ssh_cmd "mkdir -p /opt/cathedral/data && chmod 755 /opt/cathedral/data"
 
     # Deploy veritas binaries if specified
     deploy_veritas_binaries
 
     log "Installing systemd service"
-    if [[ ! -f "scripts/validator/systemd/basilica-validator.service" ]]; then
-        log "ERROR: Systemd service file not found: scripts/validator/systemd/basilica-validator.service"
+    if [[ ! -f "scripts/validator/systemd/cathedral-validator.service" ]]; then
+        log "ERROR: Systemd service file not found: scripts/validator/systemd/cathedral-validator.service"
         exit 1
     fi
 
-    scp_file "scripts/validator/systemd/basilica-validator.service" "/etc/systemd/system/"
+    scp_file "scripts/validator/systemd/cathedral-validator.service" "/etc/systemd/system/"
     ssh_cmd "systemctl daemon-reload"
-    ssh_cmd "systemctl enable basilica-validator"
+    ssh_cmd "systemctl enable cathedral-validator"
 
     log "Starting validator service"
-    ssh_cmd "systemctl start basilica-validator"
+    ssh_cmd "systemctl start cathedral-validator"
 
     sleep 5
-    if ssh_cmd "systemctl is-active basilica-validator --quiet"; then
+    if ssh_cmd "systemctl is-active cathedral-validator --quiet"; then
         log "Validator service started successfully"
     else
         log "ERROR: Validator service failed to start"
-        ssh_cmd "journalctl -u basilica-validator --lines=20 --no-pager"
+        ssh_cmd "journalctl -u cathedral-validator --lines=20 --no-pager"
         exit 1
     fi
 }
@@ -252,13 +252,13 @@ deploy_docker() {
     log "Deploying validator in docker mode"
 
     log "Stopping existing validator containers"
-    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml down 2>/dev/null || true"
+    ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml down 2>/dev/null || true"
 
     log "Creating directories for validator"
-    ssh_cmd "mkdir -p /opt/basilica/config"
-    scp_file "$CONFIG_FILE" "/opt/basilica/config/validator.toml"
+    ssh_cmd "mkdir -p /opt/cathedral/config"
+    scp_file "$CONFIG_FILE" "/opt/cathedral/config/validator.toml"
 
-    ssh_cmd "mkdir -p /opt/basilica/data && chmod 755 /opt/basilica/data"
+    ssh_cmd "mkdir -p /opt/cathedral/data && chmod 755 /opt/cathedral/data"
 
     log "Deploying docker compose files"
     if [[ ! -f "scripts/validator/compose.prod.yml" ]]; then
@@ -266,29 +266,29 @@ deploy_docker() {
         exit 1
     fi
 
-    scp_file "scripts/validator/compose.prod.yml" "/opt/basilica/"
+    scp_file "scripts/validator/compose.prod.yml" "/opt/cathedral/"
 
     # Deploy telemetry config for Alloy
-    ssh_cmd "mkdir -p /opt/basilica/telemetry"
+    ssh_cmd "mkdir -p /opt/cathedral/telemetry"
     if [[ -f "scripts/validator/telemetry/alloy.yml" ]]; then
-        scp_file "scripts/validator/telemetry/alloy.yml" "/opt/basilica/telemetry/"
+        scp_file "scripts/validator/telemetry/alloy.yml" "/opt/cathedral/telemetry/"
     fi
 
     # Deploy .env file if it exists
     if [[ -f "scripts/validator/.env" ]]; then
-        scp_file "scripts/validator/.env" "/opt/basilica/"
+        scp_file "scripts/validator/.env" "/opt/cathedral/"
     fi
 
     log "Pulling and starting validator container"
-    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml pull"
-    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml up -d"
+    ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml pull"
+    ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml up -d"
 
     sleep 5
-    if ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
+    if ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
         log "Validator container started successfully"
     else
         log "ERROR: Validator container failed to start"
-        ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml logs --tail=20"
+        ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml logs --tail=20"
         exit 1
     fi
 }
@@ -315,22 +315,22 @@ health_check_service() {
     case "$DEPLOY_MODE" in
         binary)
             if ssh_cmd "pgrep -f validator > /dev/null"; then
-                local port=$(ssh_cmd "grep '^port = ' /opt/basilica/config/validator.toml | cut -d' ' -f3")
+                local port=$(ssh_cmd "grep '^port = ' /opt/cathedral/config/validator.toml | cut -d' ' -f3")
                 log "Validator running (port $port)"
             else
                 log "Validator not running"
             fi
             ;;
         systemd)
-            if ssh_cmd "systemctl is-active basilica-validator --quiet"; then
-                local port=$(ssh_cmd "grep '^port = ' /opt/basilica/config/validator.toml | cut -d' ' -f3")
+            if ssh_cmd "systemctl is-active cathedral-validator --quiet"; then
+                local port=$(ssh_cmd "grep '^port = ' /opt/cathedral/config/validator.toml | cut -d' ' -f3")
                 log "Validator service active (port $port)"
             else
                 log "Validator service not active"
             fi
             ;;
         docker)
-            if ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
+            if ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
                 log "Validator container running"
             else
                 log "Validator container not running"
@@ -343,13 +343,13 @@ follow_logs_service() {
     log "Following logs for validator"
     case "$DEPLOY_MODE" in
         binary)
-            ssh_cmd "tail -f /opt/basilica/validator.log"
+            ssh_cmd "tail -f /opt/cathedral/validator.log"
             ;;
         systemd)
-            ssh_cmd "journalctl -u basilica-validator -f"
+            ssh_cmd "journalctl -u cathedral-validator -f"
             ;;
         docker)
-            ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml logs -f"
+            ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml logs -f"
             ;;
     esac
 }

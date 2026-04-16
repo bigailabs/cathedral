@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Create non-root user first (required by Basilica)
+# Create non-root user first (required by Cathedral)
 RUN useradd -m -u 1000 appuser
 
 WORKDIR /app

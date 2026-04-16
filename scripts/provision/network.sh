@@ -1,16 +1,16 @@
 #!/bin/bash
-# Basilica Network Connectivity and Discovery Setup
+# Cathedral Network Connectivity and Discovery Setup
 # Manages SSH connectivity, service discovery, and network topology
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASILICA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CATHEDRAL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 
 print_usage() {
     cat << EOF
-network.sh - Basilica Network Connectivity and Discovery Management
+network.sh - Cathedral Network Connectivity and Discovery Management
 
 USAGE:
     network.sh <COMMAND> [OPTIONS]
@@ -19,7 +19,7 @@ COMMANDS:
     setup       Complete network setup (SSH + discovery)
     ssh         Setup SSH connectivity between all machines
     discovery   Configure service discovery endpoints
-    firewall    Configure firewall rules for Basilica services
+    firewall    Configure firewall rules for Cathedral services
     test        Test network connectivity and service discovery
     keys        Distribute SSH keys between machines
 
@@ -39,7 +39,7 @@ EXAMPLES:
 NETWORK FEATURES:
     - Automated SSH key distribution and management
     - Service discovery endpoint configuration
-    - Firewall rule automation for Basilica ports
+    - Firewall rule automation for Cathedral ports
     - Network connectivity validation
     - Cross-machine authentication setup
     - Security hardening for production
@@ -121,7 +121,7 @@ ssh_exec() {
 
 # Command: Complete network setup
 cmd_setup() {
-    log_header "Basilica Network Setup"
+    log_header "Cathedral Network Setup"
     load_env_config
     
     # Execute all network setup steps
@@ -184,9 +184,9 @@ setup_ssh_basic() {
         ssh $server_ssh "
             mkdir -p ~/.ssh
             chmod 700 ~/.ssh
-            if [[ ! -f ~/.ssh/basilica ]]; then
-                ssh-keygen -t ed25519 -f ~/.ssh/basilica -N ''
-                echo 'Generated SSH key for Basilica'
+            if [[ ! -f ~/.ssh/cathedral ]]; then
+                ssh-keygen -t ed25519 -f ~/.ssh/cathedral -N ''
+                echo 'Generated SSH key for Cathedral'
             fi
         "
     done
@@ -195,9 +195,9 @@ setup_ssh_basic() {
     log_info "Distributing SSH keys between machines"
     
     # Get all public keys
-    local validator_key=$(ssh $validator_ssh "cat ~/.ssh/basilica.pub 2>/dev/null || echo 'Key not found'")
-    local miner_key=$(ssh $miner_ssh "cat ~/.ssh/basilica.pub 2>/dev/null || echo 'Key not found'")
-    local executor_key=$(ssh $executor_ssh "cat ~/.ssh/basilica.pub 2>/dev/null || echo 'Key not found'")
+    local validator_key=$(ssh $validator_ssh "cat ~/.ssh/cathedral.pub 2>/dev/null || echo 'Key not found'")
+    local miner_key=$(ssh $miner_ssh "cat ~/.ssh/cathedral.pub 2>/dev/null || echo 'Key not found'")
+    local executor_key=$(ssh $executor_ssh "cat ~/.ssh/cathedral.pub 2>/dev/null || echo 'Key not found'")
     
     # Distribute keys to all machines
     for server_ssh in "$validator_ssh" "$miner_ssh" "$executor_ssh"; do
@@ -227,10 +227,10 @@ cmd_discovery() {
     load_env_config
     
     # Create service discovery configuration
-    local discovery_config="/tmp/basilica_discovery.conf"
+    local discovery_config="/tmp/cathedral_discovery.conf"
     
     cat > "$discovery_config" << EOF
-# Basilica Service Discovery Configuration
+# Cathedral Service Discovery Configuration
 # Generated on $(date) for environment: $ENVIRONMENT
 
 [services]
@@ -268,7 +268,7 @@ EOF
         
         scp -P "$port" "$discovery_config" "$user@$host:/tmp/"
         ssh_exec "$host" "$port" "$user" \
-            "sudo mv /tmp/basilica_discovery.conf /etc/basilica/ && sudo chown root:basilica /etc/basilica/basilica_discovery.conf && sudo chmod 644 /etc/basilica/basilica_discovery.conf" \
+            "sudo mv /tmp/cathedral_discovery.conf /etc/cathedral/ && sudo chown root:cathedral /etc/cathedral/cathedral_discovery.conf && sudo chmod 644 /etc/cathedral/cathedral_discovery.conf" \
             "Deploying discovery configuration"
     done
     
@@ -320,13 +320,13 @@ configure_firewall_for_service() {
         # Allow SSH from anywhere (be careful in production)
         ufw allow ssh
         
-        # Allow Basilica service ports
+        # Allow Cathedral service ports
     "
     
     # Add port rules
     for port_spec in "${ports[@]}"; do
         IFS=':' read -r port_num proto <<< "$port_spec"
-        firewall_script+="\n        ufw allow $port_num/$proto comment 'Basilica $service'"
+        firewall_script+="\n        ufw allow $port_num/$proto comment 'Cathedral $service'"
     done
     
     # Add inter-service communication rules
@@ -402,8 +402,8 @@ test_ssh_connectivity() {
     
     # Test from validator
     if ssh -p "$VALIDATOR_PORT" "$VALIDATOR_USER@$VALIDATOR_HOST" \
-        "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $miner_host -p $MINER_PORT 'echo Success' && 
-         ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $executor_host -p $EXECUTOR_PORT 'echo Success'" >/dev/null 2>&1; then
+        "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $miner_host -p $MINER_PORT 'echo Success' && 
+         ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $executor_host -p $EXECUTOR_PORT 'echo Success'" >/dev/null 2>&1; then
         log_success "Validator can connect to miner and executor"
     else
         log_error "Validator cannot connect to other services"
@@ -412,8 +412,8 @@ test_ssh_connectivity() {
     
     # Test from miner
     if ssh -p "$MINER_PORT" "$MINER_USER@$MINER_HOST" \
-        "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $validator_host -p $VALIDATOR_PORT 'echo Success' && 
-         ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $executor_host -p $EXECUTOR_PORT 'echo Success'" >/dev/null 2>&1; then
+        "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $validator_host -p $VALIDATOR_PORT 'echo Success' && 
+         ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $executor_host -p $EXECUTOR_PORT 'echo Success'" >/dev/null 2>&1; then
         log_success "Miner can connect to validator and executor"
     else
         log_error "Miner cannot connect to other services"
@@ -422,8 +422,8 @@ test_ssh_connectivity() {
     
     # Test from executor
     if ssh -p "$EXECUTOR_PORT" "$EXECUTOR_USER@$EXECUTOR_HOST" \
-        "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $validator_host -p $VALIDATOR_PORT 'echo Success' && 
-         ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/basilica $miner_host -p $MINER_PORT 'echo Success'" >/dev/null 2>&1; then
+        "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $validator_host -p $VALIDATOR_PORT 'echo Success' && 
+         ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ~/.ssh/cathedral $miner_host -p $MINER_PORT 'echo Success'" >/dev/null 2>&1; then
         log_success "Executor can connect to validator and miner"
     else
         log_error "Executor cannot connect to other services"

@@ -1,4 +1,4 @@
-# Basilica Miner
+# Cathedral Miner
 
 Bittensor neuron that manages executor fleets and handles validator communications.
 
@@ -49,7 +49,7 @@ Deploys using docker-compose with public registry images:
 - `Dockerfile` - Container image definition
 - `build.sh` - Build script for Docker image and binary
 - `deploy.sh` - Multi-mode deployment script
-- `systemd/basilica-miner.service` - Systemd service definition
+- `systemd/cathedral-miner.service` - Systemd service definition
 - `compose.prod.yml` - Production docker-compose with watchtower
 - `compose.dev.yml` - Development docker-compose with local build
 
@@ -66,7 +66,7 @@ Key settings:
 - `[bittensor]` - Wallet name, hotkey, network (finney/test/local), netuid 387
 - `[server]` - Port 8080 for internal server, advertised_port 8080
 - `[executor_management]` - Configure executor fleet connections
-- `[database]` - SQLite database path: `/opt/basilica/data/miner.db`
+- `[database]` - SQLite database path: `/opt/cathedral/data/miner.db`
 
 ## Ports
 
@@ -111,7 +111,7 @@ OPTIONS:
 ssh root@miner.example.com -p 46088 "pgrep -f miner"
 
 # View logs
-ssh root@miner.example.com -p 46088 "tail -f /opt/basilica/miner.log"
+ssh root@miner.example.com -p 46088 "tail -f /opt/cathedral/miner.log"
 
 # Stop service
 ssh root@miner.example.com -p 46088 "pkill -f miner"
@@ -120,25 +120,25 @@ ssh root@miner.example.com -p 46088 "pkill -f miner"
 ### Systemd Mode
 ```bash
 # Check status
-ssh root@miner.example.com -p 46088 "systemctl status basilica-miner"
+ssh root@miner.example.com -p 46088 "systemctl status cathedral-miner"
 
 # View logs
-ssh root@miner.example.com -p 46088 "journalctl -u basilica-miner -f"
+ssh root@miner.example.com -p 46088 "journalctl -u cathedral-miner -f"
 
 # Restart service
-ssh root@miner.example.com -p 46088 "systemctl restart basilica-miner"
+ssh root@miner.example.com -p 46088 "systemctl restart cathedral-miner"
 ```
 
 ### Docker Mode
 ```bash
 # Check status
-ssh root@miner.example.com -p 46088 "cd /opt/basilica && docker-compose ps"
+ssh root@miner.example.com -p 46088 "cd /opt/cathedral && docker-compose ps"
 
 # View logs
-ssh root@miner.example.com -p 46088 "cd /opt/basilica && docker-compose logs -f"
+ssh root@miner.example.com -p 46088 "cd /opt/cathedral && docker-compose logs -f"
 
 # Restart containers
-ssh root@miner.example.com -p 46088 "cd /opt/basilica && docker-compose restart"
+ssh root@miner.example.com -p 46088 "cd /opt/cathedral && docker-compose restart"
 ```
 
 ## SSH Key Management

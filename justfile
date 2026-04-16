@@ -1,4 +1,4 @@
-# Basilica Justfile - Public repo (miner, validator, cli, sdk)
+# Cathedral Justfile - Public repo (miner, validator, cli, sdk)
 # Run `just --list` to see all available commands
 
 # Install development tools
@@ -362,7 +362,7 @@ local-dev-down:
 # LOCALNET COMMANDS
 # =============================================================================
 
-# Start local Subtensor network with all Basilica services
+# Start local Subtensor network with all Cathedral services
 localnet:
     #!/usr/bin/env bash
     cd scripts/localnet && ./setup.sh
@@ -388,18 +388,18 @@ develop-python:
 
     # Install Python SDK in editable mode
     echo "Installing Python SDK..."
-    uv pip install -e crates/basilica-sdk-python
+    uv pip install -e crates/cathedral-sdk-python
 
     # Generate type stubs
     echo "Generating type stubs..."
-    cd crates/basilica-sdk-python
+    cd crates/cathedral-sdk-python
 
     # Set PYTHONHOME for pyo3 stub generator to find Python's standard library
     export PYTHONHOME=$(python3 -c "import sys; print(sys.base_prefix)")
     cargo run --bin stub_gen --features stub-gen
 
     echo "Python SDK installed with type stubs"
-    echo "Stub file generated at: python/basilica/_basilica.pyi"
+    echo "Stub file generated at: python/cathedral/_cathedral.pyi"
     echo "Virtual environment: .venv (root directory)"
 
 # =============================================================================

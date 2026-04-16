@@ -12,7 +12,7 @@ import random
 import time
 import urllib.request
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 NUM_APPS = 50
 
@@ -27,7 +27,7 @@ def app():
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(f"app-{app_id} hello from basilica".encode())
+            self.wfile.write(f"app-{app_id} hello from cathedral".encode())
 
         def log_message(self, *a):
             pass
@@ -35,7 +35,7 @@ def app():
     HTTPServer(("", 8000), H).serve_forever()
 
 
-async def deploy(client: BasilicaClient, id: int) -> dict:
+async def deploy(client: CathedralClient, id: int) -> dict:
     start = time.monotonic()
     try:
         d = await client.deploy_async(
@@ -57,7 +57,7 @@ async def deploy(client: BasilicaClient, id: int) -> dict:
 async def main():
     print(f"\nDeploying {NUM_APPS} apps in parallel...\n")
 
-    client = BasilicaClient()
+    client = CathedralClient()
     start = time.monotonic()
 
     results = await asyncio.gather(*[deploy(client, i) for i in range(1, NUM_APPS + 1)])

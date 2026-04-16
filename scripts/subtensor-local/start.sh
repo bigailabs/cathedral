@@ -27,7 +27,7 @@ maybe_generate_tls() {
     # Root CA
     openssl genrsa -out "$tls_dir/ca.key" 4096 >/dev/null 2>&1
     openssl req -x509 -new -key "$tls_dir/ca.key" -sha256 -days 3650 \
-      -subj "/CN=Basilica Local Dev CA" \
+      -subj "/CN=Cathedral Local Dev CA" \
       -addext "basicConstraints=critical,CA:true,pathlen:1" \
       -addext "keyUsage=critical,keyCertSign,cRLSign" \
       -addext "subjectKeyIdentifier=hash" \

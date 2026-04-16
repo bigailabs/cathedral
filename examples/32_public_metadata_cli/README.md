@@ -8,7 +8,7 @@ without requiring authentication.
 ## Setup
 
 ```bash
-basilica login
+cathedral login
 # or
 export BASILICA_API_TOKEN="your-token"
 ```
@@ -18,7 +18,7 @@ export BASILICA_API_TOKEN="your-token"
 Enable metadata enrollment at deployment creation with `--public-metadata`:
 
 ```bash
-basilica deploy hashicorp/http-echo:latest \
+cathedral deploy hashicorp/http-echo:latest \
   --name my-verified-app \
   --port 5678 \
   --public-metadata
@@ -27,7 +27,7 @@ basilica deploy hashicorp/http-echo:latest \
 ## 2. Check Enrollment Status
 
 ```bash
-basilica deploy enroll-metadata my-verified-app
+cathedral deploy enroll-metadata my-verified-app
 ```
 
 Output:
@@ -42,7 +42,7 @@ Public Metadata: Enrolled
 Anyone can query public metadata for enrolled deployments:
 
 ```bash
-basilica deploy metadata my-verified-app
+cathedral deploy metadata my-verified-app
 ```
 
 Output:
@@ -60,7 +60,7 @@ Public Deployment Metadata: my-verified-app
 JSON output for scripting:
 
 ```bash
-basilica deploy metadata my-verified-app --json
+cathedral deploy metadata my-verified-app --json
 ```
 
 ## 4. Enroll an Existing Deployment
@@ -68,13 +68,13 @@ basilica deploy metadata my-verified-app --json
 Enable metadata for a deployment that was created without `--public-metadata`:
 
 ```bash
-basilica deploy enroll-metadata my-app --enable
+cathedral deploy enroll-metadata my-app --enable
 ```
 
 ## 5. Disable Enrollment
 
 ```bash
-basilica deploy enroll-metadata my-app --disable
+cathedral deploy enroll-metadata my-app --disable
 ```
 
 ## 6. Interactive Selection
@@ -82,11 +82,11 @@ basilica deploy enroll-metadata my-app --disable
 Omit the name to select from your active deployments:
 
 ```bash
-basilica deploy enroll-metadata --enable
+cathedral deploy enroll-metadata --enable
 ```
 
 ## Cleanup
 
 ```bash
-basilica summon delete my-verified-app
+cathedral summon delete my-verified-app
 ```

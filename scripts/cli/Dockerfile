@@ -47,18 +47,18 @@ ENV CARGO_TARGET_DIR=/tmp/target
 ENV CARGO_INCREMENTAL=0
 ENV RUST_BACKTRACE=1
 
-# Build the basilica-cli binary
+# Build the cathedral-cli binary
 RUN if [ "$BUILD_MODE" = "release" ]; then \
         if [ -n "$FEATURES" ]; then \
-            cargo build --locked --release -p basilica-cli --features "$FEATURES"; \
+            cargo build --locked --release -p cathedral-cli --features "$FEATURES"; \
         else \
-            cargo build --locked --release -p basilica-cli; \
+            cargo build --locked --release -p cathedral-cli; \
         fi; \
     else \
         if [ -n "$FEATURES" ]; then \
-            cargo build --locked -p basilica-cli --features "$FEATURES"; \
+            cargo build --locked -p cathedral-cli --features "$FEATURES"; \
         else \
-            cargo build --locked -p basilica-cli; \
+            cargo build --locked -p cathedral-cli; \
         fi; \
     fi && \
     # Clean up intermediate build artifacts to save space
@@ -77,22 +77,22 @@ RUN apt-get update && apt-get install -y \
 
 # Copy the built binary
 ARG BUILD_MODE=release
-COPY --from=builder /tmp/target/${BUILD_MODE}/basilica /usr/local/bin/basilica
+COPY --from=builder /tmp/target/${BUILD_MODE}/cathedral /usr/local/bin/cathedral
 
 # Make binary executable
-RUN chmod +x /usr/local/bin/basilica
+RUN chmod +x /usr/local/bin/cathedral
 
 # Create non-root user
-RUN useradd -m -u 1000 -s /bin/bash basilica
+RUN useradd -m -u 1000 -s /bin/bash cathedral
 
 # Create config directory
-RUN mkdir -p /home/basilica/.basilica && chown basilica:basilica /home/basilica/.basilica
+RUN mkdir -p /home/cathedral/.cathedral && chown cathedral:cathedral /home/cathedral/.cathedral
 
 # Switch to non-root user
-USER basilica
+USER cathedral
 
 # Set working directory to user home
-WORKDIR /home/basilica
+WORKDIR /home/cathedral
 
 # Default command
-ENTRYPOINT ["/usr/local/bin/basilica"]
+ENTRYPOINT ["/usr/local/bin/cathedral"]

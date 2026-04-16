@@ -1,6 +1,6 @@
 [Unit]
-Description=Basilica Validator Service
-Documentation=https://github.com/spacejar/basilica
+Description=Cathedral Validator Service
+Documentation=https://github.com/spacejar/cathedral
 After=network-online.target
 Wants=network-online.target
 
@@ -8,20 +8,20 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/basilica
-ExecStartPre=/bin/bash -c 'mkdir -p /opt/basilica/{data,logs}'
-ExecStart=/opt/basilica/bin/basilica-validator --config /opt/basilica/config/validator.toml start
+WorkingDirectory=/opt/cathedral
+ExecStartPre=/bin/bash -c 'mkdir -p /opt/cathedral/{data,logs}'
+ExecStart=/opt/cathedral/bin/cathedral-validator --config /opt/cathedral/config/validator.toml start
 Restart=always
 RestartSec=10
-StandardOutput=append:/opt/basilica/logs/validator.log
-StandardError=append:/opt/basilica/logs/validator.error.log
+StandardOutput=append:/opt/cathedral/logs/validator.log
+StandardError=append:/opt/cathedral/logs/validator.error.log
 
 # Security settings
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=/opt/basilica /root/.bittensor /root/.ssh
+ReadWritePaths=/opt/cathedral /root/.bittensor /root/.ssh
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

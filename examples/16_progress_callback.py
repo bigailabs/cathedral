@@ -9,7 +9,7 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 16_progress_callback.py
 """
-from basilica import BasilicaClient, DeploymentStatus
+from cathedral import CathedralClient, DeploymentStatus
 
 
 def custom_progress(status: DeploymentStatus) -> None:
@@ -46,7 +46,7 @@ def custom_progress(status: DeploymentStatus) -> None:
 
 
 def main():
-    client = BasilicaClient()
+    client = CathedralClient()
 
     print("=== Deployment with Custom Progress Callback ===\n")
 

@@ -1,4 +1,4 @@
-# Basilica Validator
+# Cathedral Validator
 
 Bittensor neuron for verification and scoring of miners and executors.
 
@@ -49,7 +49,7 @@ Deploys using docker-compose with public registry images:
 - `Dockerfile` - Container image definition
 - `build.sh` - Build script for Docker image and binary
 - `deploy.sh` - Multi-mode deployment script
-- `systemd/basilica-validator.service` - Systemd service definition
+- `systemd/cathedral-validator.service` - Systemd service definition
 - `compose.prod.yml` - Production docker-compose with watchtower
 - `compose.dev.yml` - Development docker-compose with local build
 
@@ -115,7 +115,7 @@ OPTIONS:
 ssh root@validator.example.com -p 9001 "pgrep -f validator"
 
 # View logs
-ssh root@validator.example.com -p 9001 "tail -f /opt/basilica/validator.log"
+ssh root@validator.example.com -p 9001 "tail -f /opt/cathedral/validator.log"
 
 # Stop service
 ssh root@validator.example.com -p 9001 "pkill -f validator"
@@ -124,25 +124,25 @@ ssh root@validator.example.com -p 9001 "pkill -f validator"
 ### Systemd Mode
 ```bash
 # Check status
-ssh root@validator.example.com -p 9001 "systemctl status basilica-validator"
+ssh root@validator.example.com -p 9001 "systemctl status cathedral-validator"
 
 # View logs
-ssh root@validator.example.com -p 9001 "journalctl -u basilica-validator -f"
+ssh root@validator.example.com -p 9001 "journalctl -u cathedral-validator -f"
 
 # Restart service
-ssh root@validator.example.com -p 9001 "systemctl restart basilica-validator"
+ssh root@validator.example.com -p 9001 "systemctl restart cathedral-validator"
 ```
 
 ### Docker Mode
 ```bash
 # Check status
-ssh root@validator.example.com -p 9001 "cd /opt/basilica && docker-compose ps"
+ssh root@validator.example.com -p 9001 "cd /opt/cathedral && docker-compose ps"
 
 # View logs
-ssh root@validator.example.com -p 9001 "cd /opt/basilica && docker-compose logs -f"
+ssh root@validator.example.com -p 9001 "cd /opt/cathedral && docker-compose logs -f"
 
 # Restart containers
-ssh root@validator.example.com -p 9001 "cd /opt/basilica && docker-compose restart"
+ssh root@validator.example.com -p 9001 "cd /opt/cathedral && docker-compose restart"
 ```
 
 ## SSH Keys

@@ -113,18 +113,18 @@ scripts/localnet/configs/miner.toml
 terraform.tfstate
 *.tfstate
 
-scripts/web/basilica-linux-amd64
-scripts/web/basilica-macos-arm64
+scripts/web/cathedral-linux-amd64
+scripts/web/cathedral-macos-arm64
 plans/
 
 # Python SDK
-crates/basilica-sdk-python/python/basilica/_basilica.abi3.so
-crates/basilica-sdk-python/python/basilica/*.so
+crates/cathedral-sdk-python/python/cathedral/_cathedral.abi3.so
+crates/cathedral-sdk-python/python/cathedral/*.so
 **/__pycache__/
 **/*.pyc
 **/*.pyo
 **/*.pyd
-crates/basilica-sdk-python/.venv/
+crates/cathedral-sdk-python/.venv/
 .worktrees/
 # docs/
 # build/

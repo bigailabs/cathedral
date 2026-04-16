@@ -1,4 +1,4 @@
-# Basilica Miner Configuration - Local Development
+# Cathedral Miner Configuration - Local Development
 # Pre-configured for local Subtensor network
 
 # =============================================================================
@@ -18,7 +18,7 @@ max_weight_uids = 256
 # Database Configuration
 # =============================================================================
 [database]
-url = "sqlite:///var/lib/basilica/miner/data/miner.db"
+url = "sqlite:///var/lib/cathedral/miner/data/miner.db"
 
 # =============================================================================
 # Metrics Configuration
@@ -54,7 +54,7 @@ verify_signatures = false
 # SSH Session Configuration
 # =============================================================================
 [ssh_session]
-miner_node_key_path = "/var/lib/basilica/miner/.ssh/miner_node_key"
+miner_node_key_path = "/var/lib/cathedral/miner/.ssh/miner_node_key"
 default_node_username = "node"
 
 # =============================================================================

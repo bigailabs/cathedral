@@ -8,9 +8,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 35_deploy_with_flavour.py
 """
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # --- create_deployment with flavour (returns immediately) ---
 print("create_deployment with flavour...")

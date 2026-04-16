@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quickstart: Deploy an LLM inference endpoint on Basilica.
+Quickstart: Deploy an LLM inference endpoint on Cathedral.
 
 This example deploys a small model and returns an OpenAI-compatible API endpoint.
 
@@ -8,7 +8,7 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 quickstart.py
 """
-from basilica.decorators import deployment
+from cathedral.decorators import deployment
 
 
 @deployment(

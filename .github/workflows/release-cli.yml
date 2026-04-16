@@ -3,11 +3,11 @@ name: Release CLI
 on:
   push:
     tags:
-      - "basilica-cli-v*"
+      - "cathedral-cli-v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g., basilica-cli-v0.1.0)"
+        description: "Tag to release (e.g., cathedral-cli-v0.1.0)"
         required: true
         type: string
 
@@ -34,17 +34,17 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             VERSION="${{ github.event.inputs.tag }}"
-            # Validate that the tag starts with basilica-cli-v
-            if [[ ! "$VERSION" =~ ^basilica-cli-v ]]; then
-              echo "Error: Tag must start with 'basilica-cli-v' prefix"
-              echo "Example: basilica-cli-v0.1.0"
+            # Validate that the tag starts with cathedral-cli-v
+            if [[ ! "$VERSION" =~ ^cathedral-cli-v ]]; then
+              echo "Error: Tag must start with 'cathedral-cli-v' prefix"
+              echo "Example: cathedral-cli-v0.1.0"
               exit 1
             fi
           else
             VERSION="${GITHUB_REF#refs/tags/}"
           fi
-          # Remove 'basilica-cli-v' prefix to get clean version
-          CLEAN_VERSION="${VERSION#basilica-cli-v}"
+          # Remove 'cathedral-cli-v' prefix to get clean version
+          CLEAN_VERSION="${VERSION#cathedral-cli-v}"
           echo "version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
           echo "tag=$VERSION" >> $GITHUB_OUTPUT
 
@@ -53,12 +53,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: Basilica CLI ${{ steps.version.outputs.version }}
+          name: Cathedral CLI ${{ steps.version.outputs.version }}
           draft: false
           prerelease: true
           generate_release_notes: false
           body: |
-            For installation instructions, please visit [https://basilica.ai/](https://basilica.ai/)
+            For installation instructions, please visit [https://cathedral.ai/](https://cathedral.ai/)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -126,25 +126,25 @@ jobs:
           BASILICA_AUTH0_ISSUER: ${{ vars.BASILICA_AUTH0_ISSUER }}
           BASILICA_AUTH0_DOMAIN: ${{ vars.BASILICA_AUTH0_DOMAIN }}
         run: |
-          cargo build --release --locked --target ${{ matrix.target }} -p basilica-cli
+          cargo build --release --locked --target ${{ matrix.target }} -p cathedral-cli
 
-      # Package binary in self_update compatible format: basilica-<version>-<target>.tar.gz
+      # Package binary in self_update compatible format: cathedral-<version>-<target>.tar.gz
       - name: Package binary
         run: |
           # Copy binary to working directory
-          cp target/${{ matrix.target }}/release/basilica ./basilica
-          chmod +x ./basilica
+          cp target/${{ matrix.target }}/release/cathedral ./cathedral
+          chmod +x ./cathedral
 
           # Strip debug symbols to reduce size
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            strip --strip-all ./basilica
+            strip --strip-all ./cathedral
           else
-            strip ./basilica
+            strip ./cathedral
           fi
 
-          # Create tar.gz archive with self_update expected naming: basilica-<version>-<target>.tar.gz
-          ARCHIVE_NAME="basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz"
-          tar czf "$ARCHIVE_NAME" basilica
+          # Create tar.gz archive with self_update expected naming: cathedral-<version>-<target>.tar.gz
+          ARCHIVE_NAME="cathedral-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar czf "$ARCHIVE_NAME" cathedral
 
           # Generate checksum
           if command -v shasum &> /dev/null; then
@@ -162,7 +162,7 @@ jobs:
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
           files: |
-            basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
-            basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+            cathedral-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
+            cathedral-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -16,16 +16,16 @@ Repository:
   - LobeChat: https://github.com/lobehub/lobe-chat
   - vLLM: https://github.com/vllm-project/vllm
 """
-import basilica
+import cathedral
 
 
-def deploy_vllm(client: basilica.BasilicaClient) -> basilica.Deployment:
+def deploy_vllm(client: cathedral.CathedralClient) -> cathedral.Deployment:
     """Deploy vLLM server with Qwen model."""
     print("Deploying vLLM server (this may take a few minutes)...")
 
-    cache = basilica.Volume.from_name("vllm-cache", create_if_missing=True)
+    cache = cathedral.Volume.from_name("vllm-cache", create_if_missing=True)
 
-    @basilica.deployment(
+    @cathedral.deployment(
         name="vllm-backend",
         image="vllm/vllm-openai:latest",
         port=8000,
@@ -44,7 +44,7 @@ def deploy_vllm(client: basilica.BasilicaClient) -> basilica.Deployment:
     return serve()
 
 
-def deploy_lobechat(client: basilica.BasilicaClient, vllm_url: str) -> basilica.Deployment:
+def deploy_lobechat(client: cathedral.CathedralClient, vllm_url: str) -> cathedral.Deployment:
     """Deploy LobeChat configured to use vLLM backend."""
     print("Deploying LobeChat UI...")
 
@@ -56,7 +56,7 @@ def deploy_lobechat(client: basilica.BasilicaClient, vllm_url: str) -> basilica.
             "OPENAI_API_KEY": "not-needed",
             "OPENAI_PROXY_URL": f"{vllm_url}/v1",
             "OPENAI_MODEL_LIST": "Qwen/Qwen3-0.6B",
-            "ACCESS_CODE": "basilica",
+            "ACCESS_CODE": "cathedral",
         },
         cpu="500m",
         memory="1Gi",
@@ -66,7 +66,7 @@ def deploy_lobechat(client: basilica.BasilicaClient, vllm_url: str) -> basilica.
 
 
 def main():
-    client = basilica.BasilicaClient()
+    client = cathedral.CathedralClient()
 
     vllm = deploy_vllm(client)
     print(f"  vLLM API: {vllm.url}")
@@ -79,7 +79,7 @@ def main():
     print("=" * 60)
     print(f"LobeChat UI:  {lobechat.url}")
     print(f"vLLM Backend: {vllm.url}")
-    print(f"Access Code:  basilica")
+    print(f"Access Code:  cathedral")
     print()
     print("Open LobeChat in your browser - it's pre-configured to use vLLM!")
     print()

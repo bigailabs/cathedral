@@ -1,10 +1,10 @@
-# torchrun-ddp - Basilica Deployment Example
+# torchrun-ddp - Cathedral Deployment Example
 
-PyTorch Distributed Data Parallel (DDP) training deployed to Basilica GPU infrastructure.
+PyTorch Distributed Data Parallel (DDP) training deployed to Cathedral GPU infrastructure.
 
 ## Overview
 
-This example demonstrates how to deploy a PyTorch DDP training job to Basilica as a custom Docker image. The training runs LLaMA fine-tuning with:
+This example demonstrates how to deploy a PyTorch DDP training job to Cathedral as a custom Docker image. The training runs LLaMA fine-tuning with:
 
 - Distributed Data Parallel training via torchrun
 - DCT gradient compression (~50% bandwidth reduction)
@@ -15,7 +15,7 @@ This example demonstrates how to deploy a PyTorch DDP training job to Basilica a
 
 - Docker installed locally
 - Container registry access (ghcr.io, Docker Hub, etc.)
-- Basilica API token
+- Cathedral API token
 - HuggingFace token with LLaMA model access
 
 ## Deployment Steps
@@ -37,11 +37,11 @@ docker push ghcr.io/<username>/torchrun-ddp:latest
 ### 3. Set environment variables
 
 ```bash
-export BASILICA_API_TOKEN="your-basilica-token"
+export BASILICA_API_TOKEN="your-cathedral-token"
 export HF_TOKEN="your-huggingface-token"
 ```
 
-### 4. Deploy to Basilica
+### 4. Deploy to Cathedral
 
 ```bash
 python3 deploy.py ghcr.io/<username>/torchrun-ddp:latest
@@ -68,7 +68,7 @@ Status response example:
 
 ```
 18_torchrun_ddp/
-  deploy.py          # Basilica deployment script
+  deploy.py          # Cathedral deployment script
   Dockerfile         # Container image definition
   entrypoint.py      # Health server + training runner
   train.py           # Training entry point
@@ -97,7 +97,7 @@ Training parameters can be modified in `train.py`:
 
 ## Local Development
 
-To run locally without Basilica:
+To run locally without Cathedral:
 
 ```bash
 # Single GPU

@@ -86,31 +86,31 @@ jobs:
           cp bin/validator-binary/validator-binary ./validator-binary
 
       - name: Build ${{ matrix.service }}
-        run: cargo build --release --target ${{ matrix.target }} -p basilica-${{ matrix.service }}
+        run: cargo build --release --target ${{ matrix.target }} -p cathedral-${{ matrix.service }}
 
       - name: Package binary (Unix)
         if: matrix.os != 'windows-latest'
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/basilica-${{ matrix.service }} dist/
+          cp target/${{ matrix.target }}/release/cathedral-${{ matrix.service }} dist/
           cp README.md dist/
-          tar -czf basilica-${{ matrix.service }}-${{ matrix.suffix }}.tar.gz -C dist .
+          tar -czf cathedral-${{ matrix.service }}-${{ matrix.suffix }}.tar.gz -C dist .
 
       - name: Package binary (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           mkdir dist
-          copy target\${{ matrix.target }}\release\basilica-${{ matrix.service }}.exe dist\
+          copy target\${{ matrix.target }}\release\cathedral-${{ matrix.service }}.exe dist\
           copy README.md dist\
-          Compress-Archive -Path dist\* -DestinationPath basilica-${{ matrix.service }}-${{ matrix.suffix }}.zip
+          Compress-Archive -Path dist\* -DestinationPath cathedral-${{ matrix.service }}-${{ matrix.suffix }}.zip
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           files: |
-            basilica-${{ matrix.service }}-${{ matrix.suffix }}.tar.gz
-            basilica-${{ matrix.service }}-${{ matrix.suffix }}.zip
+            cathedral-${{ matrix.service }}-${{ matrix.suffix }}.tar.gz
+            cathedral-${{ matrix.service }}-${{ matrix.suffix }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -151,12 +151,12 @@ jobs:
           BITTENSOR_NETWORK: finney
         run: |
           ./scripts/${{ matrix.service }}/build.sh \
-            --image-name ghcr.io/one-covenant/basilica/${{ matrix.service }} \
+            --image-name ghcr.io/one-covenant/cathedral/${{ matrix.service }} \
             --image-tag ${{ steps.version.outputs.tag }}
 
       - name: Push Docker image
         run: |
           ./scripts/${{ matrix.service }}/push.sh \
-            --source-image ghcr.io/one-covenant/basilica/${{ matrix.service }} \
-            --target-image ghcr.io/one-covenant/basilica/${{ matrix.service }} \
+            --source-image ghcr.io/one-covenant/cathedral/${{ matrix.service }} \
+            --target-image ghcr.io/one-covenant/cathedral/${{ matrix.service }} \
             --tag ${{ steps.version.outputs.tag }}

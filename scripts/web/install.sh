@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-# Basilica CLI Installation Script
+# Cathedral CLI Installation Script
 # Usage: curl -sSL https://basilica.ai/install.sh | bash
 
-BINARY_NAME="basilica"
-GITHUB_REPO="one-covenant/basilica"
+BINARY_NAME="cathedral"
+GITHUB_REPO="one-covenant/cathedral"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -26,8 +26,8 @@ TEMP_DIR=$(mktemp -d)
 TEMP_BINARY="$TEMP_DIR/$BINARY_NAME"
 
 # Determine install directory
-BASILICA_DIR="${BASILICA_DIR:-$HOME/.basilica}"
-INSTALL_DIR="$BASILICA_DIR/bin"
+CATHEDRAL_DIR="${CATHEDRAL_DIR:-$HOME/.cathedral}"
+INSTALL_DIR="$CATHEDRAL_DIR/bin"
 
 # Colors for output
 RED='\033[0;31m'
@@ -82,15 +82,15 @@ setup_install_dir() {
     mkdir -p "$INSTALL_DIR"
 }
 
-# Remove binaries left by the old install layout (pre-~/.basilica era).
+# Remove binaries left by the old install layout (pre-~/.cathedral era).
 # Old locations: ~/.local/bin or /usr/local/bin.
 # Does NOT modify shell profiles — the new env file appended by setup_shells()
 # naturally overrides the old PATH/completion lines.
 migrate_from_old_install() {
     for old_dir in "$HOME/.local/bin" "/usr/local/bin"; do
-        if [ -f "$old_dir/basilica" ]; then
+        if [ -f "$old_dir/cathedral" ]; then
             print_step "Removing old binary from $old_dir..."
-            rm -f "$old_dir/basilica" 2>/dev/null || true
+            rm -f "$old_dir/cathedral" 2>/dev/null || true
             rm -f "$old_dir/bs" 2>/dev/null || true
             print_info "Cleaned up old install location"
         fi
@@ -135,49 +135,49 @@ get_profile_for_shell() {
     esac
 }
 
-# Create env files in BASILICA_DIR for shell setup
+# Create env files in CATHEDRAL_DIR for shell setup
 # These are self-contained files that handle PATH and completions,
 # following the pattern used by cargo (~/.cargo/env) and deno (~/.deno/env).
 create_env_files() {
-    # Create ~/.basilica/env (sh-compatible, sourced by bash & zsh)
-    cat > "$BASILICA_DIR/env" << 'ENVEOF'
+    # Create ~/.cathedral/env (sh-compatible, sourced by bash & zsh)
+    cat > "$CATHEDRAL_DIR/env" << 'ENVEOF'
 #!/bin/sh
-# basilica shell setup (sourced by bash and zsh)
+# cathedral shell setup (sourced by bash and zsh)
 
 # Add to PATH if not already present (cargo-style dedup)
 case ":${PATH}:" in
-    *:"$HOME/.basilica/bin":*)
+    *:"$HOME/.cathedral/bin":*)
         ;;
     *)
-        export PATH="$HOME/.basilica/bin:$PATH"
+        export PATH="$HOME/.cathedral/bin:$PATH"
         ;;
 esac
 
-# basilica completions
+# cathedral completions
 if [ -n "$BASH_VERSION" ]; then
-    eval "$(COMPLETE=bash basilica)" 2>/dev/null
-    eval "$(complete -p basilica 2>/dev/null | sed 's/ basilica$/ bs/')" 2>/dev/null
+    eval "$(COMPLETE=bash cathedral)" 2>/dev/null
+    eval "$(complete -p cathedral 2>/dev/null | sed 's/ cathedral$/ bs/')" 2>/dev/null
 elif [ -n "$ZSH_VERSION" ]; then
-    eval "$(COMPLETE=zsh basilica)" 2>/dev/null
-    compdef bs=basilica 2>/dev/null
+    eval "$(COMPLETE=zsh cathedral)" 2>/dev/null
+    compdef bs=cathedral 2>/dev/null
 fi
 ENVEOF
 
-    # Create ~/.basilica/env.fish
-    cat > "$BASILICA_DIR/env.fish" << 'FISHEOF'
-# basilica shell setup (sourced by fish)
+    # Create ~/.cathedral/env.fish
+    cat > "$CATHEDRAL_DIR/env.fish" << 'FISHEOF'
+# cathedral shell setup (sourced by fish)
 
 # Add to PATH if not already present
-if not contains "$HOME/.basilica/bin" $PATH
-    set -x PATH "$HOME/.basilica/bin" $PATH
+if not contains "$HOME/.cathedral/bin" $PATH
+    set -x PATH "$HOME/.cathedral/bin" $PATH
 end
 
-# basilica completions
-COMPLETE=fish basilica | source 2>/dev/null
-complete -c bs -w basilica 2>/dev/null
+# cathedral completions
+COMPLETE=fish cathedral | source 2>/dev/null
+complete -c bs -w cathedral 2>/dev/null
 FISHEOF
 
-    print_info "Created shell env files in $BASILICA_DIR"
+    print_info "Created shell env files in $CATHEDRAL_DIR"
 }
 
 # Add a source line to a shell's profile file
@@ -188,21 +188,21 @@ add_source_to_profile() {
 
     # shellcheck disable=SC2016 # $HOME must stay literal in profile files
     if [ "$shell_type" = "fish" ]; then
-        source_line='source "$HOME/.basilica/env.fish"'
+        source_line='source "$HOME/.cathedral/env.fish"'
     else
-        source_line='. "$HOME/.basilica/env"'
+        source_line='. "$HOME/.cathedral/env"'
     fi
 
     # Ensure profile directory exists (important for fish where ~/.config/fish/ may not exist)
     mkdir -p "$(dirname "$profile_file")" 2>/dev/null || true
 
     # Check if source line is already present
-    if [ -f "$profile_file" ] && grep -qF ".basilica/env" "$profile_file" 2>/dev/null; then
+    if [ -f "$profile_file" ] && grep -qF ".cathedral/env" "$profile_file" 2>/dev/null; then
         return 0
     fi
 
     if echo "$source_line" >> "$profile_file" 2>/dev/null; then
-        print_info "Added basilica env to $profile_file"
+        print_info "Added cathedral env to $profile_file"
     else
         print_warning "Could not update $profile_file automatically"
         print_info "Please add this to your $profile_file: $source_line"
@@ -279,7 +279,7 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Get latest basilica-cli release tag from GitHub
+# Get latest cathedral-cli release tag from GitHub
 get_latest_cli_release() {
     local releases_json
 
@@ -310,12 +310,12 @@ get_latest_cli_release() {
         return 1
     fi
 
-    # Parse JSON to find latest non-prerelease basilica-cli-v* tag
+    # Parse JSON to find latest non-prerelease cathedral-cli-v* tag
     # Pipeline explanation:
     # 1. grep -E '"tag_name"|"prerelease"' - Extract only tag_name and prerelease lines
     # 2. grep -B1 '"prerelease": false' - Find non-prerelease entries and include 1 line before (the tag_name)
     # 3. grep 'tag_name' - Filter to only tag_name lines from the previous output
-    # 4. grep 'basilica-cli-v' - Keep only tags starting with basilica-cli-v
+    # 4. grep 'cathedral-cli-v' - Keep only tags starting with cathedral-cli-v
     # 5. cut -d '"' -f 4 - Extract the tag value between quotes
     # 6. sort -V -r - Sort by version number (descending)
     # 7. head -1 - Take the highest version
@@ -324,13 +324,13 @@ get_latest_cli_release() {
         grep -E '"tag_name"|"prerelease"' | \
         grep -B1 '"prerelease": false' | \
         grep 'tag_name' | \
-        grep 'basilica-cli-v' | \
+        grep 'cathedral-cli-v' | \
         cut -d '"' -f 4 | \
         sort -V -r | \
         head -1)
 
     if [ -z "$latest_tag" ]; then
-        print_error "No stable basilica-cli releases found" >&2
+        print_error "No stable cathedral-cli releases found" >&2
         print_info "Please check https://github.com/$GITHUB_REPO/releases" >&2
         return 1
     fi
@@ -363,14 +363,14 @@ download_binary() {
 
     # Extract version number for display
     local version
-    version="${latest_tag#basilica-cli-v}"
+    version="${latest_tag#cathedral-cli-v}"
     print_info "Found latest version: v$version"
 
     # Detect platform
     arch=$(detect_arch)
     os=$(detect_os)
     target=$(get_rust_target)
-    local archive_name="basilica-${version}-${target}.tar.gz"
+    local archive_name="cathedral-${version}-${target}.tar.gz"
     local download_url="https://github.com/${GITHUB_REPO}/releases/download/${latest_tag}/${archive_name}"
     local temp_archive="$TEMP_DIR/archive.tar.gz"
 
@@ -401,7 +401,7 @@ download_binary() {
         print_info "Attempting download anyway..."
     fi
 
-    print_step "Downloading Basilica CLI v$version..."
+    print_step "Downloading Cathedral CLI v$version..."
 
     if command_exists curl; then
         if ! curl -fsSL -L "$download_url" -o "$temp_archive" 2>/dev/null; then
@@ -446,7 +446,7 @@ download_binary() {
     # Verify the extracted binary exists
     if [ ! -f "$TEMP_BINARY" ]; then
         print_error "Binary not found in archive"
-        print_info "Expected to find 'basilica' in the archive"
+        print_info "Expected to find 'cathedral' in the archive"
         exit 1
     fi
 }
@@ -474,13 +474,13 @@ check_existing_installation() {
 
     if [ -n "$existing_binary" ]; then
         echo
-        print_warning "Basilica CLI is already installed at $existing_binary"
+        print_warning "Cathedral CLI is already installed at $existing_binary"
 
         # Try to get current version
         local current_version
         local current_version_clean
         if current_version=$("$existing_binary" --version 2>/dev/null | head -n1); then
-            # Extract just the version number (e.g., "basilica 0.1.0" -> "0.1.0")
+            # Extract just the version number (e.g., "cathedral 0.1.0" -> "0.1.0")
             current_version_clean="${current_version#"${current_version%%[0-9]*}"}"
             current_version_clean="${current_version_clean%%[!0-9.]*}"
         else
@@ -496,8 +496,8 @@ check_existing_installation() {
         latest_tag=$(get_latest_cli_release 2>/dev/null || true)
 
         if [ -n "$latest_tag" ]; then
-            # Extract version from tag (e.g., "basilica-cli-v0.2.0" -> "0.2.0")
-            latest_version_clean="${latest_tag#basilica-cli-v}"
+            # Extract version from tag (e.g., "cathedral-cli-v0.2.0" -> "0.2.0")
+            latest_version_clean="${latest_tag#cathedral-cli-v}"
         else
             latest_version_clean="unable to fetch"
         fi
@@ -567,7 +567,7 @@ cleanup_old_backups() {
     done
 
     # Clean up old config backups silently
-    local config_dir="$HOME/.config/basilica"
+    local config_dir="$HOME/.config/cathedral"
     for config_backup in "$config_dir/config.toml.bak."*; do
         if [ -f "$config_backup" ]; then
             rm -f "$config_backup" 2>/dev/null
@@ -614,22 +614,22 @@ show_completion() {
     installed_shells="$(detect_installed_shells)"
 
     echo
-    print_info "Basilica CLI installed successfully!"
-    print_info "You can use 'basilica' or the shorter 'bs' alias"
+    print_info "Cathedral CLI installed successfully!"
+    print_info "You can use 'cathedral' or the shorter 'bs' alias"
     echo
 
     print_info "PATH and completions configured for: $installed_shells"
     print_info "Please restart your terminal or run:"
-    echo -e "  ${CYAN}source \"\$HOME/.basilica/env\"${NC}      (bash/zsh)"
-    echo -e "  ${CYAN}source \"\$HOME/.basilica/env.fish\"${NC}  (fish)"
+    echo -e "  ${CYAN}source \"\$HOME/.cathedral/env\"${NC}      (bash/zsh)"
+    echo -e "  ${CYAN}source \"\$HOME/.cathedral/env.fish\"${NC}  (fish)"
     echo
 
     echo "Get started:"
-    echo "  basilica login                    # Login to Basilica"
-    echo "  basilica ls                       # List available GPUs"
-    echo "  basilica up                       # Start a GPU rental"
-    echo "  basilica exec <uid> \"python train.py\"  # Run your code"
-    echo "  basilica down <uid>               # Terminate rental"
+    echo "  cathedral login                    # Login to Cathedral"
+    echo "  cathedral ls                       # List available GPUs"
+    echo "  cathedral up                       # Start a GPU rental"
+    echo "  cathedral exec <uid> \"python train.py\"  # Run your code"
+    echo "  cathedral down <uid>               # Terminate rental"
     echo
     echo "Use TAB to autocomplete commands and options!"
     echo
@@ -638,7 +638,7 @@ show_completion() {
 # Main installation flow
 main() {
     show_logo
-    echo "Welcome to the Basilica CLI installer!"
+    echo "Welcome to the Cathedral CLI installer!"
     echo
 
     setup_install_dir

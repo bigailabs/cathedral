@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-# Quick start script for Basilica miner
+# Quick start script for Cathedral miner
 
-echo "Basilica Quick Start Script"
+echo "Cathedral Quick Start Script"
 echo "=========================="
 
 # Colors for output
@@ -51,7 +51,7 @@ host = "0.0.0.0"
 port = 8080
 
 [database]
-url = "sqlite:///var/lib/basilica/miner.db"
+url = "sqlite:///var/lib/cathedral/miner.db"
 run_migrations = true
 
 [logging]
@@ -71,23 +71,23 @@ EOF
 
 # Run miner
 run_miner() {
-    echo -e "${YELLOW}Starting Basilica Miner...${NC}"
+    echo -e "${YELLOW}Starting Cathedral Miner...${NC}"
     
     create_default_config "miner"
     
     # Create data directory
-    mkdir -p /var/lib/basilica
+    mkdir -p /var/lib/cathedral
     
     # Build if needed
-    if [ ! -f "target/release/basilica-miner" ]; then
+    if [ ! -f "target/release/cathedral-miner" ]; then
         echo -e "${YELLOW}Building miner...${NC}"
-        cargo build --release -p basilica-miner
+        cargo build --release -p cathedral-miner
     fi
     
     # Run miner
     export BASILCA_CONFIG_FILE=config/miner.toml
     echo -e "${GREEN}Starting miner on port 8080...${NC}"
-    ./target/release/basilica-miner
+    ./target/release/cathedral-miner
 }
 
 # Run with Docker
@@ -100,22 +100,22 @@ run_docker() {
         create_default_config "miner"
         
         # Build Docker image
-        docker build -f docker/miner.Dockerfile -t basilica-miner .
+        docker build -f docker/miner.Dockerfile -t cathedral-miner .
         
         # Stop existing container if any
-        docker stop basilica-miner 2>/dev/null || true
-        docker rm basilica-miner 2>/dev/null || true
+        docker stop cathedral-miner 2>/dev/null || true
+        docker rm cathedral-miner 2>/dev/null || true
         
         # Run container
         docker run -d \
-            --name basilica-miner \
+            --name cathedral-miner \
             -p 8080:8080 \
             -v $(pwd)/config:/config \
-            -v /var/lib/basilica:/var/lib/basilica \
+            -v /var/lib/cathedral:/var/lib/cathedral \
             -e BASILCA_CONFIG_FILE=/config/miner.toml \
-            basilica-miner
+            cathedral-miner
         
-        echo -e "${GREEN}Miner started! Check logs with: docker logs basilica-miner${NC}"
+        echo -e "${GREEN}Miner started! Check logs with: docker logs cathedral-miner${NC}"
     fi
 }
 

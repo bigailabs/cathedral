@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Simple, idempotent remote server setup for Basilica
+# Simple, idempotent remote server setup for Cathedral
 # Usage: ./scripts/setup-ops/remote.sh <role> <user@host> [-p port]
 # Example: ./scripts/setup-ops/remote.sh validator root@51.159.183.42 -p 43738
 
@@ -84,20 +84,20 @@ mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 
 # Generate key if doesn't exist
-if [[ ! -f ~/.ssh/basilica ]]; then
-    ssh-keygen -t ed25519 -f ~/.ssh/basilica -N ''
+if [[ ! -f ~/.ssh/cathedral ]]; then
+    ssh-keygen -t ed25519 -f ~/.ssh/cathedral -N ''
 fi
 
 # Show public key
 echo 'Public key for this machine:'
-cat ~/.ssh/basilica.pub
+cat ~/.ssh/cathedral.pub
 "
 
 # Create workspace directory
 echo "Creating workspace..."
 $SSH_CMD "
-mkdir -p /opt/basilica
-echo 'Workspace created at /opt/basilica'
+mkdir -p /opt/cathedral
+echo 'Workspace created at /opt/cathedral'
 "
 
 # Final verification
@@ -113,8 +113,8 @@ echo 'Rsync:' \$(rsync --version | head -1)
 if [[ '$ROLE' == 'executor' ]]; then
     echo 'NVIDIA:' \$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null || echo 'Not available')
 fi
-echo 'SSH key available at ~/.ssh/basilica.pub'
-echo 'Workspace: /opt/basilica'
+echo 'SSH key available at ~/.ssh/cathedral.pub'
+echo 'Workspace: /opt/cathedral'
 echo '=== SETUP COMPLETE ==='
 "
 

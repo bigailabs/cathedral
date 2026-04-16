@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-IMAGE_NAME="basilica/cli"
+IMAGE_NAME="cathedral/cli"
 IMAGE_TAG="latest"
 BUILD_DOCKER=true
 BUILD_NATIVE=false
@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --image-name NAME         Docker image name (default: basilica/cli)"
+            echo "  --image-name NAME         Docker image name (default: cathedral/cli)"
             echo "  --image-tag TAG           Docker image tag (default: latest)"
             echo "  --no-docker               Skip Docker image creation"
             echo "  --native-only             Build only for the current platform"
@@ -184,7 +184,7 @@ else
     BUILD_DIR="debug"
 fi
 
-BUILD_CMD="$BUILD_CMD -p basilica-cli"
+BUILD_CMD="$BUILD_CMD -p cathedral-cli"
 
 if [[ -n "$FEATURES" ]]; then
     BUILD_CMD="$BUILD_CMD --features $FEATURES"
@@ -220,8 +220,8 @@ for target in "${TARGET_ARRAY[@]}"; do
                 eval "$BUILD_CMD --target $target"
                 
                 # Copy binary
-                BINARY_NAME="basilica-$(get_binary_suffix $target)"
-                cp "target/$target/$BUILD_DIR/basilica" "$OUTPUT_DIR/$BINARY_NAME"
+                BINARY_NAME="cathedral-$(get_binary_suffix $target)"
+                cp "target/$target/$BUILD_DIR/cathedral" "$OUTPUT_DIR/$BINARY_NAME"
                 chmod +x "$OUTPUT_DIR/$BINARY_NAME"
                 print_success "Binary built: $OUTPUT_DIR/$BINARY_NAME"
             else
@@ -252,12 +252,12 @@ for target in "${TARGET_ARRAY[@]}"; do
                 --single-arch
             
             # Move the binary to output directory with proper naming
-            BINARY_NAME="basilica-$(get_binary_suffix $target)"
-            if [[ -f "./basilica-linux-$DOCKER_ARCH" ]]; then
-                mv "./basilica-linux-$DOCKER_ARCH" "$OUTPUT_DIR/$BINARY_NAME"
+            BINARY_NAME="cathedral-$(get_binary_suffix $target)"
+            if [[ -f "./cathedral-linux-$DOCKER_ARCH" ]]; then
+                mv "./cathedral-linux-$DOCKER_ARCH" "$OUTPUT_DIR/$BINARY_NAME"
                 print_success "Binary built: $OUTPUT_DIR/$BINARY_NAME"
-            elif [[ -f "./basilica" ]]; then
-                mv "./basilica" "$OUTPUT_DIR/$BINARY_NAME"
+            elif [[ -f "./cathedral" ]]; then
+                mv "./cathedral" "$OUTPUT_DIR/$BINARY_NAME"
                 print_success "Binary built: $OUTPUT_DIR/$BINARY_NAME"
             fi
             continue
@@ -275,8 +275,8 @@ for target in "${TARGET_ARRAY[@]}"; do
         eval "$BUILD_CMD --target $target"
         
         # Copy binary
-        BINARY_NAME="basilica-$(get_binary_suffix $target)"
-        cp "target/$target/$BUILD_DIR/basilica" "$OUTPUT_DIR/$BINARY_NAME"
+        BINARY_NAME="cathedral-$(get_binary_suffix $target)"
+        cp "target/$target/$BUILD_DIR/cathedral" "$OUTPUT_DIR/$BINARY_NAME"
         chmod +x "$OUTPUT_DIR/$BINARY_NAME"
         print_success "Binary built: $OUTPUT_DIR/$BINARY_NAME"
     fi
@@ -284,18 +284,18 @@ done
 
 # Create a summary
 print_info "Build complete! Binaries created in $OUTPUT_DIR:"
-ls -la "$OUTPUT_DIR"/basilica-* 2>/dev/null || print_error "No binaries found in $OUTPUT_DIR"
+ls -la "$OUTPUT_DIR"/cathedral-* 2>/dev/null || print_error "No binaries found in $OUTPUT_DIR"
 
 # Generate checksums
 if command -v sha256sum &> /dev/null; then
     print_info "Generating checksums..."
     cd "$OUTPUT_DIR"
-    sha256sum basilica-* > SHA256SUMS 2>/dev/null || true
+    sha256sum cathedral-* > SHA256SUMS 2>/dev/null || true
     cd - > /dev/null
 elif command -v shasum &> /dev/null; then
     print_info "Generating checksums..."
     cd "$OUTPUT_DIR"
-    shasum -a 256 basilica-* > SHA256SUMS 2>/dev/null || true
+    shasum -a 256 cathedral-* > SHA256SUMS 2>/dev/null || true
     cd - > /dev/null
 fi
 

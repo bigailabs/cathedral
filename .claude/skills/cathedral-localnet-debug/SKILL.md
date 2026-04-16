@@ -1,9 +1,9 @@
 ---
-name: basilica-localnet-debug
-description: Debug Basilica localnet services using existing scripts and Docker Compose commands
+name: cathedral-localnet-debug
+description: Debug Cathedral localnet services using existing scripts and Docker Compose commands
 ---
 
-# Basilica Localnet Debugging
+# Cathedral Localnet Debugging
 
 ## Architecture Reference
 
@@ -11,11 +11,11 @@ description: Debug Basilica localnet services using existing scripts and Docker 
 
 | Service | Container Name | IP Address | Ports |
 |---------|---------------|------------|-------|
-| Subtensor | basilica-subtensor | 172.28.0.10 | 9944 (RPC), 30334 (P2P) |
-| Validator | basilica-validator | 172.28.0.20 | 8080 (API), 9090 (Metrics) |
-| Miner | basilica-miner | 172.28.0.30 | 8092 (gRPC), 8091 (Axon), 9091 (Metrics) |
-| Prometheus | basilica-prometheus | 172.28.0.40 | 9099 |
-| Grafana | basilica-grafana | 172.28.0.41 | 3000 |
+| Subtensor | cathedral-subtensor | 172.28.0.10 | 9944 (RPC), 30334 (P2P) |
+| Validator | cathedral-validator | 172.28.0.20 | 8080 (API), 9090 (Metrics) |
+| Miner | cathedral-miner | 172.28.0.30 | 8092 (gRPC), 8091 (Axon), 9091 (Metrics) |
+| Prometheus | cathedral-prometheus | 172.28.0.40 | 9099 |
+| Grafana | cathedral-grafana | 172.28.0.41 | 3000 |
 
 ### Database Architecture
 
@@ -23,8 +23,8 @@ description: Debug Basilica localnet services using existing scripts and Docker 
 
 | Service | Database | File Path |
 |---------|----------|-----------|
-| Validator | SQLite | `/opt/basilica/data/validator.db` |
-| Miner | SQLite | `/var/lib/basilica/miner/data/miner.db` |
+| Validator | SQLite | `/opt/cathedral/data/validator.db` |
+| Miner | SQLite | `/var/lib/cathedral/miner/data/miner.db` |
 
 ### Docker Compose Profiles
 
@@ -129,12 +129,12 @@ docker compose up -d --build validator
 
 ```bash
 # Shell into container
-docker exec -it basilica-validator /bin/sh
-docker exec -it basilica-miner /bin/sh
+docker exec -it cathedral-validator /bin/sh
+docker exec -it cathedral-miner /bin/sh
 
 # Run command in container
-docker exec basilica-validator cat /app/validator.toml
-docker exec basilica-validator ls -la /opt/basilica/data/  # Check validator data
+docker exec cathedral-validator cat /app/validator.toml
+docker exec cathedral-validator ls -la /opt/cathedral/data/  # Check validator data
 ```
 
 ### Volume Management
@@ -192,10 +192,10 @@ Validator and miner use SQLite databases stored in their data volumes.
 
 ```bash
 # Check validator database exists
-docker exec basilica-validator ls -la /opt/basilica/data/validator.db
+docker exec cathedral-validator ls -la /opt/cathedral/data/validator.db
 
 # Check miner database exists
-docker exec basilica-miner ls -la /var/lib/basilica/miner/data/miner.db
+docker exec cathedral-miner ls -la /var/lib/cathedral/miner/data/miner.db
 
 # Reset validator database (will be recreated on startup)
 docker compose stop validator
@@ -212,14 +212,14 @@ docker compose up -d miner
 
 ```bash
 # Check if services can reach each other
-docker exec basilica-validator curl -s http://subtensor:9944/health
-docker exec basilica-miner curl -s http://validator:8080/health
+docker exec cathedral-validator curl -s http://subtensor:9944/health
+docker exec cathedral-miner curl -s http://validator:8080/health
 
 # Check network exists
-docker network ls | grep basilica
+docker network ls | grep cathedral
 
 # Inspect network
-docker network inspect localnet_basilica-localnet
+docker network inspect localnet_cathedral-localnet
 ```
 
 ### Wallet Issues
@@ -280,10 +280,10 @@ uvx --from bittensor-cli btcli wallet balance \
 | Volume | Mount Point | Purpose |
 |--------|------------|---------|
 | `subtensor-data` | `/tmp/alice` | Chain state |
-| `validator-data` | `/opt/basilica/data` | Validator SQLite DB + state |
-| `validator-ssh` | `/opt/basilica/data/ssh_keys` | SSH keys |
-| `miner-data` | `/var/lib/basilica/miner/data` | Miner SQLite DB + state |
-| `miner-ssh` | `/var/lib/basilica/miner/.ssh` | SSH keys |
+| `validator-data` | `/opt/cathedral/data` | Validator SQLite DB + state |
+| `validator-ssh` | `/opt/cathedral/data/ssh_keys` | SSH keys |
+| `miner-data` | `/var/lib/cathedral/miner/data` | Miner SQLite DB + state |
+| `miner-ssh` | `/var/lib/cathedral/miner/.ssh` | SSH keys |
 | `prometheus-data` | `/prometheus` | Metrics storage |
 | `grafana-data` | `/var/lib/grafana` | Dashboards |
 
@@ -295,4 +295,4 @@ uvx --from bittensor-cli btcli wallet balance \
 | `configs/miner.toml` | `/app/miner.toml` | miner |
 | `configs/prometheus.yml` | `/etc/prometheus/prometheus.yml` | prometheus |
 | `wallets/` | `/root/.bittensor/wallets` | validator |
-| `wallets/` | `/var/lib/basilica/miner/.bittensor/wallets` | miner |
+| `wallets/` | `/var/lib/cathedral/miner/.bittensor/wallets` | miner |

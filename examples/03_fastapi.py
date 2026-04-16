@@ -6,9 +6,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 03_fastapi.py
 """
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="api",

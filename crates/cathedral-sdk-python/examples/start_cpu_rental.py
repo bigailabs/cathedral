@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Start CPU Rental Example for Basilica SDK
+Start CPU Rental Example for Cathedral SDK
 
 Demonstrates how to start and stop CPU-only rentals (no GPU) with secure cloud providers.
 This script is interactive - it waits for the rental to be ready and lets you terminate it.
@@ -11,20 +11,20 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 from rental_utils import format_ssh_command, find_private_key_for_public_key, wait_for_rental_ready
 
 
 def main():
     print("=" * 60)
-    print("  Basilica CPU Rental - Interactive Example")
+    print("  Cathedral CPU Rental - Interactive Example")
     print("=" * 60)
 
     print("\nInitializing client...")
 
     # Initialize client connecting to local API server
-    # Create a token using: basilica tokens create
-    client = BasilicaClient()
+    # Create a token using: cathedral tokens create
+    client = CathedralClient()
 
     # Step 1: Ensure SSH key is registered
     print("\n[Step 1] Checking SSH key registration...")

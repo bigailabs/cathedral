@@ -1,11 +1,11 @@
 # Verification Feature Review
 
-This document summarizes the end-to-end verification flow (veritas → basilica-2) and the changes
+This document summarizes the end-to-end verification flow (veritas → cathedral-2) and the changes
 implemented to enforce strict binary outcomes, propagate failure reasons, and harden proofs.
 
 ## Scope
 - veritas: executor + validator binaries, PoW proofs (CPU/storage), and verification logic.
-- basilica-2: validator orchestration, parsing, persistence, and node profile publication.
+- cathedral-2: validator orchestration, parsing, persistence, and node profile publication.
 
 ## Strict Binary Outcome
 **Goal:** Any failed check yields overall failure; no partial success or scoring.
@@ -21,7 +21,7 @@ Implemented changes:
 ## Failure Reasons
 Failure reasons are now carried end-to-end:
 - veritas emits `failure_reasons` in JSON.
-- basilica-2 parses and persists them.
+- cathedral-2 parses and persists them.
 - Node profile CR includes them for external visibility.
 
 ## Remaining Assumptions / Risks
@@ -37,5 +37,5 @@ Failure reasons are now carried end-to-end:
 ## References
 - `veritas` executor: `crates/executor-binary/src/server/handlers.rs`
 - `veritas` validator: `crates/validator-binary/src/executor_client.rs`, `executor_manager.rs`
-- `basilica-2` validator: `crates/basilica-validator/src/miner_prover/validation_binary.rs`
+- `cathedral-2` validator: `crates/cathedral-validator/src/miner_prover/validation_binary.rs`
 

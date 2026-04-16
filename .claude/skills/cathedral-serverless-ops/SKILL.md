@@ -1,16 +1,16 @@
 ---
-name: basilica-serverless-ops
-description: Use when the user wants to deploy apps, APIs, inference endpoints, or OpenClaw/Tau-style services with the Basilica CLI.
+name: cathedral-serverless-ops
+description: Use when the user wants to deploy apps, APIs, inference endpoints, or OpenClaw/Tau-style services with the Cathedral CLI.
 ---
 
-# Basilica Serverless Ops
+# Cathedral Serverless Ops
 
 Use this skill for the managed deployment surface exposed by the CLI:
 
-- generic `basilica deploy`
+- generic `cathedral deploy`
 - inference templates like `vllm` and `sglang`
-- `basilica summon openclaw`
-- `basilica summon tau`
+- `cathedral summon openclaw`
+- `cathedral summon tau`
 - deployment logs, status, scale, and delete
 - share-token operations for private deployments
 
@@ -30,13 +30,13 @@ Prefer rentals instead when the user needs SSH, custom system control, distribut
 Authenticate:
 
 ```bash
-basilica login
+cathedral login
 ```
 
 Check spendability:
 
 ```bash
-basilica balance
+cathedral balance
 ```
 
 Before you create a deployment, decide:
@@ -52,13 +52,13 @@ Before you create a deployment, decide:
 Inline Python:
 
 ```bash
-basilica deploy 'print("hello")' --name hello --port 8000 --ttl 300
+cathedral deploy 'print("hello")' --name hello --port 8000 --ttl 300
 ```
 
 Python file:
 
 ```bash
-basilica deploy my_api.py \
+cathedral deploy my_api.py \
   --name my-api \
   --port 8000 \
   --pip fastapi uvicorn \
@@ -68,7 +68,7 @@ basilica deploy my_api.py \
 Container image:
 
 ```bash
-basilica deploy nginxinc/nginx-unprivileged:alpine \
+cathedral deploy nginxinc/nginx-unprivileged:alpine \
   --name nginx-demo \
   --port 8080 \
   --cpu 250m \
@@ -79,7 +79,7 @@ basilica deploy nginxinc/nginx-unprivileged:alpine \
 GPU-backed deploy:
 
 ```bash
-basilica deploy inference.py \
+cathedral deploy inference.py \
   --name gpu-model \
   --gpu 1 \
   --gpu-model H100 \
@@ -90,7 +90,7 @@ basilica deploy inference.py \
 Persistent storage:
 
 ```bash
-basilica deploy hello.py \
+cathedral deploy hello.py \
   --name stateful-app \
   --storage \
   --storage-path /data
@@ -101,35 +101,35 @@ basilica deploy hello.py \
 List:
 
 ```bash
-basilica deploy ls
-basilica deploy ls --json
+cathedral deploy ls
+cathedral deploy ls --json
 ```
 
 Status:
 
 ```bash
-basilica deploy status my-app
-basilica deploy status my-app --show-phases
+cathedral deploy status my-app
+cathedral deploy status my-app --show-phases
 ```
 
 Logs:
 
 ```bash
-basilica deploy logs my-app
-basilica deploy logs my-app --follow
-basilica deploy logs my-app --tail 100
+cathedral deploy logs my-app
+cathedral deploy logs my-app --follow
+cathedral deploy logs my-app --tail 100
 ```
 
 Scale:
 
 ```bash
-basilica deploy scale my-app --replicas 3
+cathedral deploy scale my-app --replicas 3
 ```
 
 Delete:
 
 ```bash
-basilica deploy delete my-app --yes
+cathedral deploy delete my-app --yes
 ```
 
 Always use `deploy delete`, not stale `deployments delete` variants from older examples.
@@ -139,13 +139,13 @@ Always use `deploy delete`, not stale `deployments delete` variants from older e
 vLLM:
 
 ```bash
-basilica deploy vllm Qwen/Qwen2.5-0.5B-Instruct --name my-llm
+cathedral deploy vllm Qwen/Qwen2.5-0.5B-Instruct --name my-llm
 ```
 
 SGLang:
 
 ```bash
-basilica deploy sglang Qwen/Qwen2.5-0.5B-Instruct --name my-sglang
+cathedral deploy sglang Qwen/Qwen2.5-0.5B-Instruct --name my-sglang
 ```
 
 For large or unusual models, expect to tune health checks, GPU count, memory, or move to rentals.
@@ -155,14 +155,14 @@ For large or unusual models, expect to tune health checks, GPU count, memory, or
 OpenClaw:
 
 ```bash
-basilica summon openclaw --provider openai
-basilica summon openclaw --provider anthropic
+cathedral summon openclaw --provider openai
+cathedral summon openclaw --provider anthropic
 ```
 
 Tau:
 
 ```bash
-basilica summon tau
+cathedral summon tau
 ```
 
 OpenClaw-specific flags exposed by the current template include:
@@ -194,15 +194,15 @@ Optional Tau env:
 Deploy privately:
 
 ```bash
-basilica deploy my_api.py --name private-app --port 8000 --private
+cathedral deploy my_api.py --name private-app --port 8000 --private
 ```
 
 Manage share tokens:
 
 ```bash
-basilica deploy share-token status private-app
-basilica deploy share-token regenerate private-app
-basilica deploy share-token revoke private-app --yes
+cathedral deploy share-token status private-app
+cathedral deploy share-token regenerate private-app
+cathedral deploy share-token revoke private-app --yes
 ```
 
 Current behavior:
@@ -216,7 +216,7 @@ Current behavior:
 Spread replicas across nodes:
 
 ```bash
-basilica deploy hashicorp/http-echo:latest \
+cathedral deploy hashicorp/http-echo:latest \
   --name spread-demo \
   --port 5678 \
   --replicas 2 \
@@ -226,7 +226,7 @@ basilica deploy hashicorp/http-echo:latest \
 Use explicit spread policy:
 
 ```bash
-basilica deploy image \
+cathedral deploy image \
   --name app \
   --replicas 4 \
   --spread-mode required \
@@ -242,7 +242,7 @@ basilica deploy image \
 
 ## Good Agent Flow
 
-1. check `basilica balance`
+1. check `cathedral balance`
 2. pick the deploy shape
 3. deploy with `--ttl` unless persistence is required
 4. watch status/logs until the URL is usable
@@ -253,11 +253,11 @@ basilica deploy image \
 
 - `examples/15_cli_deploy/README.md`
 - `examples/inference/README.md`
-- `crates/basilica-cli/src/cli/handlers/deploy/mod.rs`
-- `crates/basilica-cli/src/cli/handlers/deploy/templates/openclaw.rs`
-- `crates/basilica-cli/src/cli/handlers/deploy/templates/vllm.rs`
-- `crates/basilica-cli/src/cli/handlers/deploy/templates/sglang.rs`
-- `crates/basilica-cli/src/cli/handlers/deploy/templates/tau.rs`
+- `crates/cathedral-cli/src/cli/handlers/deploy/mod.rs`
+- `crates/cathedral-cli/src/cli/handlers/deploy/templates/openclaw.rs`
+- `crates/cathedral-cli/src/cli/handlers/deploy/templates/vllm.rs`
+- `crates/cathedral-cli/src/cli/handlers/deploy/templates/sglang.rs`
+- `crates/cathedral-cli/src/cli/handlers/deploy/templates/tau.rs`
 
 ## TODOs
 

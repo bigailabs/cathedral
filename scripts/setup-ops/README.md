@@ -1,6 +1,6 @@
 # Remote Server Setup Scripts
 
-Scripts for setting up remote servers for Basilica development and testing.
+Scripts for setting up remote servers for Cathedral development and testing.
 
 ## Usage
 
@@ -45,7 +45,7 @@ This will:
 - ✅ Installs Rust toolchain (latest stable)
 - ✅ Installs Docker and Docker Compose
 - ✅ Generates SSH keys for cross-machine access
-- ✅ Creates `/opt/basilica` workspace directory
+- ✅ Creates `/opt/cathedral` workspace directory
 - ✅ Verifies all installations
 
 ### Executor Specific
@@ -68,7 +68,7 @@ Automates SSH key distribution and tests cross-machine connectivity.
 
 The scripts automatically handle SSH key generation and distribution:
 
-1. Each server generates its own `~/.ssh/basilica` key pair
+1. Each server generates its own `~/.ssh/cathedral` key pair
 2. `setup-ssh.sh` collects all public keys and distributes them to all machines
 3. Connectivity testing ensures everything works properly
 
@@ -112,11 +112,11 @@ docker info
 ### SSH Issues
 ```bash
 # Test SSH connectivity
-ssh -i ~/.ssh/basilica target_host
+ssh -i ~/.ssh/cathedral target_host
 
 # Check SSH key permissions
-chmod 600 ~/.ssh/basilica
-chmod 644 ~/.ssh/basilica.pub
+chmod 600 ~/.ssh/cathedral
+chmod 644 ~/.ssh/cathedral.pub
 ```
 
 ### NVIDIA Docker Issues (Executor only)

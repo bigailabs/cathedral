@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deploy torchrun-ddp to Basilica.
+Deploy torchrun-ddp to Cathedral.
 
 Prerequisites:
     1. Build and push the Docker image:
@@ -20,7 +20,7 @@ Usage:
 import os
 import sys
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 
 def main() -> None:
@@ -40,7 +40,7 @@ def main() -> None:
     if hf_token:
         env["HF_TOKEN"] = hf_token
 
-    client = BasilicaClient()
+    client = CathedralClient()
 
     print(f"Deploying image: {image}")
 

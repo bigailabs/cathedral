@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run tests for Basilica
+# Run tests for Cathedral
 
 set -e
 
@@ -74,7 +74,7 @@ usage() {
     cat << EOF
 Usage: $0 [OPTIONS] [CRATE|all]
 
-Run Basilica tests with various options.
+Run Cathedral tests with various options.
 
 OPTIONS:
     -p, --parallel       Run tests in parallel
@@ -140,12 +140,12 @@ parse_args() {
 
 # Main
 main() {
-    ensure_basilica_root || exit 1
+    ensure_cathedral_root || exit 1
     
     # Parse command line arguments
     IFS=':' read -r target test_type <<< "$(parse_args "$@")"
     
-    log_header "Basilica Test Runner"
+    log_header "Cathedral Test Runner"
     log_info "Target: $target"
     log_info "Parallel: $PARALLEL"
     log_info "Verbose: $VERBOSE"

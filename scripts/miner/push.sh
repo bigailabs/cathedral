@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SOURCE_IMAGE="basilica/miner"
+SOURCE_IMAGE="cathedral/miner"
 TARGET_IMAGE="ghcr.io/one-covenant/basilica/miner"
 IMAGE_TAG="latest"
 
@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--source-image SOURCE] [--target-image TARGET] [--tag TAG]"
             echo ""
             echo "Options:"
-            echo "  --source-image SOURCE     Source Docker image (default: basilica/miner)"
+            echo "  --source-image SOURCE     Source Docker image (default: cathedral/miner)"
             echo "  --target-image TARGET     Target Docker image (default: ghcr.io/one-covenant/basilica/miner)"
             echo "  --tag TAG                 Image tag (default: latest)"
             echo "  --help                    Show this help message"

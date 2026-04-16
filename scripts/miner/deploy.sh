@@ -16,7 +16,7 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Deploy Basilica miner component to remote server.
+Deploy Cathedral miner component to remote server.
 
 OPTIONS:
     -s, --server USER@HOST:PORT      Server connection
@@ -106,8 +106,8 @@ build_service() {
 
     ./scripts/miner/build.sh
 
-    if [[ ! -f "./basilica-miner" ]]; then
-        log "ERROR: Binary ./basilica-miner not found after build"
+    if [[ ! -f "./cathedral-miner" ]]; then
+        log "ERROR: Binary ./cathedral-miner not found after build"
         exit 1
     fi
 }
@@ -116,35 +116,35 @@ deploy_binary() {
     log "Deploying miner in binary mode"
 
     log "Stopping existing miner processes"
-    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -f '/opt/basilica/miner' 2>/dev/null || true" || log "WARNING: Could not connect to stop miner processes"
+    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -f '/opt/cathedral/miner' 2>/dev/null || true" || log "WARNING: Could not connect to stop miner processes"
 
     sleep 2
 
     # Force kill with shorter timeout
-    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -9 -f '/opt/basilica/miner' 2>/dev/null || true" || log "WARNING: Could not connect for force kill"
+    ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "pkill -9 -f '/opt/cathedral/miner' 2>/dev/null || true" || log "WARNING: Could not connect for force kill"
 
     sleep 3
 
     log "Removing old miner files"
-    ssh_cmd "cp /opt/basilica/miner /opt/basilica/miner.backup 2>/dev/null || true"
+    ssh_cmd "cp /opt/cathedral/miner /opt/cathedral/miner.backup 2>/dev/null || true"
 
     # Try to move the current binary out of the way to avoid "Text file busy"
-    ssh_cmd "mv /opt/basilica/miner /opt/basilica/miner.old 2>/dev/null || true"
+    ssh_cmd "mv /opt/cathedral/miner /opt/cathedral/miner.old 2>/dev/null || true"
 
-    scp_file "basilica-miner" "/opt/basilica/miner"
-    ssh_cmd "chmod +x /opt/basilica/miner"
+    scp_file "cathedral-miner" "/opt/cathedral/miner"
+    ssh_cmd "chmod +x /opt/cathedral/miner"
 
     log "Creating directories for miner"
-    ssh_cmd "mkdir -p /opt/basilica/config"
-    scp_file "$CONFIG_FILE" "/opt/basilica/config/miner.toml"
+    ssh_cmd "mkdir -p /opt/cathedral/config"
+    scp_file "$CONFIG_FILE" "/opt/cathedral/config/miner.toml"
 
-    ssh_cmd "mkdir -p /opt/basilica/data && chmod 755 /opt/basilica/data"
+    ssh_cmd "mkdir -p /opt/cathedral/data && chmod 755 /opt/cathedral/data"
 
     log "Setting up data directories and permissions for miner"
-    ssh_cmd "touch /opt/basilica/data/miner.db && chmod 644 /opt/basilica/data/miner.db"
+    ssh_cmd "touch /opt/cathedral/data/miner.db && chmod 644 /opt/cathedral/data/miner.db"
     ssh_cmd "[ ! -f /root/.ssh/miner_executor_key ] && ssh-keygen -t ed25519 -f /root/.ssh/miner_executor_key -N '' || true"
 
-    local start_cmd="cd /opt/basilica && RUST_LOG=debug nohup ./miner --config config/miner.toml > miner.log 2>&1 &"
+    local start_cmd="cd /opt/cathedral && RUST_LOG=debug nohup ./miner --config config/miner.toml > miner.log 2>&1 &"
 
     log "Starting miner"
     ssh -o ConnectTimeout=5 "$SERVER_USER@$SERVER_HOST" -p "$SERVER_PORT" "$start_cmd" || true
@@ -154,7 +154,7 @@ deploy_binary() {
         log "Miner started successfully"
     else
         log "ERROR: Miner failed to start"
-        ssh_cmd "tail -10 /opt/basilica/miner.log"
+        ssh_cmd "tail -10 /opt/cathedral/miner.log"
         exit 1
     fi
 }
@@ -163,44 +163,44 @@ deploy_systemd() {
     log "Deploying miner in systemd mode"
 
     log "Stopping existing miner service"
-    ssh_cmd "systemctl stop basilica-miner 2>/dev/null || true"
+    ssh_cmd "systemctl stop cathedral-miner 2>/dev/null || true"
 
     log "Removing old miner files"
-    ssh_cmd "cp /opt/basilica/miner /opt/basilica/miner.backup 2>/dev/null || true"
-    ssh_cmd "mv /opt/basilica/miner /opt/basilica/miner.old 2>/dev/null || true"
+    ssh_cmd "cp /opt/cathedral/miner /opt/cathedral/miner.backup 2>/dev/null || true"
+    ssh_cmd "mv /opt/cathedral/miner /opt/cathedral/miner.old 2>/dev/null || true"
 
-    scp_file "basilica-miner" "/opt/basilica/miner"
-    ssh_cmd "chmod +x /opt/basilica/miner"
+    scp_file "cathedral-miner" "/opt/cathedral/miner"
+    ssh_cmd "chmod +x /opt/cathedral/miner"
 
     log "Creating directories for miner"
-    ssh_cmd "mkdir -p /opt/basilica/config"
-    scp_file "$CONFIG_FILE" "/opt/basilica/config/miner.toml"
+    ssh_cmd "mkdir -p /opt/cathedral/config"
+    scp_file "$CONFIG_FILE" "/opt/cathedral/config/miner.toml"
 
-    ssh_cmd "mkdir -p /opt/basilica/data && chmod 755 /opt/basilica/data"
+    ssh_cmd "mkdir -p /opt/cathedral/data && chmod 755 /opt/cathedral/data"
 
     log "Setting up data directories and permissions for miner"
-    ssh_cmd "touch /opt/basilica/data/miner.db && chmod 644 /opt/basilica/data/miner.db"
+    ssh_cmd "touch /opt/cathedral/data/miner.db && chmod 644 /opt/cathedral/data/miner.db"
     ssh_cmd "[ ! -f /root/.ssh/miner_executor_key ] && ssh-keygen -t ed25519 -f /root/.ssh/miner_executor_key -N '' || true"
 
     log "Installing systemd service"
-    if [[ ! -f "scripts/miner/systemd/basilica-miner.service" ]]; then
-        log "ERROR: Systemd service file not found: scripts/miner/systemd/basilica-miner.service"
+    if [[ ! -f "scripts/miner/systemd/cathedral-miner.service" ]]; then
+        log "ERROR: Systemd service file not found: scripts/miner/systemd/cathedral-miner.service"
         exit 1
     fi
 
-    scp_file "scripts/miner/systemd/basilica-miner.service" "/etc/systemd/system/"
+    scp_file "scripts/miner/systemd/cathedral-miner.service" "/etc/systemd/system/"
     ssh_cmd "systemctl daemon-reload"
-    ssh_cmd "systemctl enable basilica-miner"
+    ssh_cmd "systemctl enable cathedral-miner"
 
     log "Starting miner service"
-    ssh_cmd "systemctl start basilica-miner"
+    ssh_cmd "systemctl start cathedral-miner"
 
     sleep 5
-    if ssh_cmd "systemctl is-active basilica-miner --quiet"; then
+    if ssh_cmd "systemctl is-active cathedral-miner --quiet"; then
         log "Miner service started successfully"
     else
         log "ERROR: Miner service failed to start"
-        ssh_cmd "journalctl -u basilica-miner --lines=20 --no-pager"
+        ssh_cmd "journalctl -u cathedral-miner --lines=20 --no-pager"
         exit 1
     fi
 }
@@ -209,13 +209,13 @@ deploy_docker() {
     log "Deploying miner in docker mode"
 
     log "Stopping existing miner containers"
-    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml down 2>/dev/null || true"
+    ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml down 2>/dev/null || true"
 
     log "Creating directories for miner"
-    ssh_cmd "mkdir -p /opt/basilica/config"
-    scp_file "$CONFIG_FILE" "/opt/basilica/config/miner.toml"
+    ssh_cmd "mkdir -p /opt/cathedral/config"
+    scp_file "$CONFIG_FILE" "/opt/cathedral/config/miner.toml"
 
-    ssh_cmd "mkdir -p /opt/basilica/data && chmod 755 /opt/basilica/data"
+    ssh_cmd "mkdir -p /opt/cathedral/data && chmod 755 /opt/cathedral/data"
 
     log "Deploying docker compose files"
     if [[ ! -f "scripts/miner/compose.prod.yml" ]]; then
@@ -223,23 +223,23 @@ deploy_docker() {
         exit 1
     fi
 
-    scp_file "scripts/miner/compose.prod.yml" "/opt/basilica/"
+    scp_file "scripts/miner/compose.prod.yml" "/opt/cathedral/"
 
     # Deploy .env file if it exists
     if [[ -f "scripts/miner/.env" ]]; then
-        scp_file "scripts/miner/.env" "/opt/basilica/"
+        scp_file "scripts/miner/.env" "/opt/cathedral/"
     fi
 
     log "Pulling and starting miner container"
-    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml pull"
-    ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml up -d"
+    ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml pull"
+    ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml up -d"
 
     sleep 5
-    if ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
+    if ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
         log "Miner container started successfully"
     else
         log "ERROR: Miner container failed to start"
-        ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml logs --tail=20"
+        ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml logs --tail=20"
         exit 1
     fi
 }
@@ -266,22 +266,22 @@ health_check_service() {
     case "$DEPLOY_MODE" in
         binary)
             if ssh_cmd "pgrep -f miner > /dev/null"; then
-                local port=$(ssh_cmd "grep '^port = ' /opt/basilica/config/miner.toml | cut -d' ' -f3")
+                local port=$(ssh_cmd "grep '^port = ' /opt/cathedral/config/miner.toml | cut -d' ' -f3")
                 log "Miner running (port $port)"
             else
                 log "Miner not running"
             fi
             ;;
         systemd)
-            if ssh_cmd "systemctl is-active basilica-miner --quiet"; then
-                local port=$(ssh_cmd "grep '^port = ' /opt/basilica/config/miner.toml | cut -d' ' -f3")
+            if ssh_cmd "systemctl is-active cathedral-miner --quiet"; then
+                local port=$(ssh_cmd "grep '^port = ' /opt/cathedral/config/miner.toml | cut -d' ' -f3")
                 log "Miner service active (port $port)"
             else
                 log "Miner service not active"
             fi
             ;;
         docker)
-            if ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
+            if ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml ps | grep -q 'Up'"; then
                 log "Miner container running"
             else
                 log "Miner container not running"
@@ -294,13 +294,13 @@ follow_logs_service() {
     log "Following logs for miner"
     case "$DEPLOY_MODE" in
         binary)
-            ssh_cmd "tail -f /opt/basilica/miner.log"
+            ssh_cmd "tail -f /opt/cathedral/miner.log"
             ;;
         systemd)
-            ssh_cmd "journalctl -u basilica-miner -f"
+            ssh_cmd "journalctl -u cathedral-miner -f"
             ;;
         docker)
-            ssh_cmd "cd /opt/basilica && docker compose -f compose.prod.yml logs -f"
+            ssh_cmd "cd /opt/cathedral && docker compose -f compose.prod.yml logs -f"
             ;;
     esac
 }

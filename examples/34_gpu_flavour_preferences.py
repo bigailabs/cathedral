@@ -6,9 +6,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 34_gpu_flavour_preferences.py
 """
-from basilica import BasilicaClient, GpuPriceQuery
+from cathedral import CathedralClient, GpuPriceQuery
 
-client = BasilicaClient()
+client = CathedralClient()
 
 # SXM interconnect in the US
 gpus = client.list_secure_cloud_gpus(

@@ -198,14 +198,14 @@ H200 = 3.50
 [[node_management.nodes]]
 host = "192.168.1.100"
 port = 22
-username = "basilica"
+username = "cathedral"
 gpu_category = "H100"        # Must match bidding.strategy.static.static_prices key
 gpu_count = 8
 
 [[node_management.nodes]]
 host = "192.168.1.101"
 port = 22
-username = "basilica"
+username = "cathedral"
 gpu_category = "A100"
 gpu_count = 4
 ```

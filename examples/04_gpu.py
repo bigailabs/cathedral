@@ -6,9 +6,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 04_gpu.py
 """
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="gpu-test",

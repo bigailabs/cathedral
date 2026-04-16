@@ -1,17 +1,17 @@
 #!/bin/bash
-# Basilica End-to-End Provisioning Orchestrator
-# Comprehensive solution for provisioning the entire Basilica architecture
+# Cathedral End-to-End Provisioning Orchestrator
+# Comprehensive solution for provisioning the entire Cathedral architecture
 
 set -e
 
 # Get script directory and load common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASILICA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CATHEDRAL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 
 # Configuration
 DEFAULT_CONFIG="$SCRIPT_DIR/environments/production.conf"
-PROVISION_LOG="$BASILICA_ROOT/provision.log"
+PROVISION_LOG="$CATHEDRAL_ROOT/provision.log"
 
 # Logging function with timestamps
 provision_log() {
@@ -20,7 +20,7 @@ provision_log() {
 
 print_usage() {
     cat << EOF
-basilica provision - End-to-End Basilica Infrastructure Provisioning
+cathedral provision - End-to-End Cathedral Infrastructure Provisioning
 
 USAGE:
     provision.sh <COMMAND> [OPTIONS]
@@ -28,7 +28,7 @@ USAGE:
 COMMANDS:
     all         Complete end-to-end provisioning workflow
     servers     Setup servers with dependencies and SSH
-    deploy      Build and deploy Basilica services
+    deploy      Build and deploy Cathedral services
     configure   Generate service configurations
     start       Start all services in correct order
     validate    Validate complete infrastructure setup
@@ -50,7 +50,7 @@ EXAMPLES:
 WORKFLOW:
     1. Setup servers with dependencies (Docker, Rust, NVIDIA)
     2. Configure SSH connectivity between all machines
-    3. Build Basilica binaries and Docker images
+    3. Build Cathedral binaries and Docker images
     4. Generate service configurations for each role
     5. Deploy services to respective servers
     6. Start services in correct dependency order
@@ -136,7 +136,7 @@ execute_cmd() {
 
 # Command: Complete end-to-end provisioning
 cmd_all() {
-    log_header "Basilica End-to-End Provisioning"
+    log_header "Cathedral End-to-End Provisioning"
     provision_log "Starting complete provisioning workflow"
     
     # Execute all steps in correct order
@@ -158,9 +158,9 @@ cmd_all() {
     echo "Log file: $PROVISION_LOG"
     echo ""
     echo "Next steps:"
-    echo "1. Run 'basilica manage status' to check service health"
-    echo "2. Test end-to-end workflow with 'basilica provision validate'"
-    echo "3. Monitor logs with 'basilica manage logs'"
+    echo "1. Run 'cathedral manage status' to check service health"
+    echo "2. Test end-to-end workflow with 'cathedral provision validate'"
+    echo "3. Monitor logs with 'cathedral manage logs'"
 }
 
 # Command: Setup servers with dependencies
@@ -195,7 +195,7 @@ cmd_deploy() {
     provision_log "Starting deployment phase"
     
     # Build binaries using existing build system
-    execute_cmd "cd '$BASILICA_ROOT' && cargo build --release --workspace" "Build Basilica binaries"
+    execute_cmd "cd '$CATHEDRAL_ROOT' && cargo build --release --workspace" "Build Cathedral binaries"
     
     # Use network.sh to setup connectivity
     execute_cmd "$SCRIPT_DIR/network.sh setup" "Setup network connectivity"
@@ -284,6 +284,6 @@ main() {
 }
 
 # Initialize logging
-provision_log "Basilica provisioning started with args: $*"
+provision_log "Cathedral provisioning started with args: $*"
 
 main "$@"

@@ -18,7 +18,7 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 vllm_qwen_small.py
 """
-from basilica.decorators import deployment
+from cathedral.decorators import deployment
 
 
 @deployment(

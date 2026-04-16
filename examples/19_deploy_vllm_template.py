@@ -12,9 +12,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 19_deploy_vllm_template.py
 """
-import basilica
+import cathedral
 
-client = basilica.BasilicaClient()
+client = cathedral.CathedralClient()
 
 # Deploy vLLM with minimal configuration - uses defaults
 print("Deploying vLLM with Qwen/Qwen3-0.6B (default model)...")

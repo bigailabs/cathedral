@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Basilica UserDeployment - curl API Example
+# Cathedral UserDeployment - curl API Example
 #
 # This script demonstrates how to create a UserDeployment with public access
 # and persistent storage using direct API calls with curl.
@@ -29,8 +29,8 @@ if [ -z "$BASILICA_API_TOKEN" ]; then
     echo "Error: BASILICA_API_TOKEN environment variable not set"
     echo ""
     echo "To get a token:"
-    echo "  1. Run: basilica tokens create my-token"
-    echo "  2. Export: export BASILICA_API_TOKEN='basilica_...'"
+    echo "  1. Run: cathedral tokens create my-token"
+    echo "  2. Export: export BASILICA_API_TOKEN='cathedral_...'"
     exit 1
 fi
 
@@ -42,7 +42,7 @@ else
 fi
 
 echo "========================================================================"
-echo "Basilica UserDeployment - curl API Example"
+echo "Cathedral UserDeployment - curl API Example"
 echo "========================================================================"
 echo ""
 echo "Configuration:"
@@ -65,7 +65,7 @@ from pathlib import Path
 import socket
 from datetime import datetime
 
-app = FastAPI(title="Basilica Storage Demo")
+app = FastAPI(title="Cathedral Storage Demo")
 
 STORAGE_PATH = Path("/data")
 
@@ -76,7 +76,7 @@ class WriteRequest(BaseModel):
 @app.get("/")
 def root():
     return {
-        "service": "Basilica FastAPI Demo",
+        "service": "Cathedral FastAPI Demo",
         "hostname": socket.gethostname(),
         "storage_mounted": STORAGE_PATH.exists(),
         "timestamp": datetime.utcnow().isoformat()
@@ -265,7 +265,7 @@ echo "Writing file to storage..."
 WRITE_RESPONSE=$(curl -s --max-time 10 \
     -X POST \
     -H "Content-Type: application/json" \
-    -d '{"filename": "hello.txt", "content": "Hello from Basilica storage!"}' \
+    -d '{"filename": "hello.txt", "content": "Hello from Cathedral storage!"}' \
     "$PUBLIC_URL/storage/write" || echo '{"error": "request failed"}')
 echo "Write response: $WRITE_RESPONSE"
 

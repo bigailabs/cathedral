@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-IMAGE_NAME="basilica/cli"
+IMAGE_NAME="cathedral/cli"
 IMAGE_TAG="latest"
 EXTRACT_BINARY=true
 BUILD_IMAGE=true
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--image-name NAME] [--image-tag TAG] [--no-extract] [--no-image] [--debug] [--features FEATURES] [--architectures ARCHS] [--single-arch]"
             echo ""
             echo "Options:"
-            echo "  --image-name NAME         Docker image name (default: basilica/cli)"
+            echo "  --image-name NAME         Docker image name (default: cathedral/cli)"
             echo "  --image-tag TAG           Docker image tag (default: latest)"
             echo "  --no-extract              Don't extract binary to local filesystem"
             echo "  --no-image                Skip Docker image creation"
@@ -134,11 +134,11 @@ if [[ "$BUILD_IMAGE" == "true" ]]; then
         done
 
         # Create multi-arch builder if it doesn't exist
-        if ! docker buildx ls | grep -q "basilica-builder"; then
+        if ! docker buildx ls | grep -q "cathedral-builder"; then
             echo "Creating Docker buildx builder..."
-            docker buildx create --name basilica-builder --use
+            docker buildx create --name cathedral-builder --use
         else
-            docker buildx use basilica-builder
+            docker buildx use cathedral-builder
         fi
 
         docker buildx build \
@@ -183,21 +183,21 @@ if [[ "$EXTRACT_BINARY" == "true" ]]; then
 
             # Extract binary with architecture suffix
             container_id=$(docker create "$arch_image")
-            docker cp "$container_id:/usr/local/bin/basilica" "./basilica-linux-$arch"
+            docker cp "$container_id:/usr/local/bin/cathedral" "./cathedral-linux-$arch"
             docker rm "$container_id"
-            chmod +x "./basilica-linux-$arch"
-            echo "Binary extracted to: ./basilica-linux-$arch"
+            chmod +x "./cathedral-linux-$arch"
+            echo "Binary extracted to: ./cathedral-linux-$arch"
 
             # Clean up architecture-specific image
             docker rmi "$arch_image" 2>/dev/null || true
         done
     else
-        echo "Extracting basilica binary..."
+        echo "Extracting cathedral binary..."
         container_id=$(docker create "$IMAGE_NAME:$IMAGE_TAG")
-        docker cp "$container_id:/usr/local/bin/basilica" ./basilica
+        docker cp "$container_id:/usr/local/bin/cathedral" ./cathedral
         docker rm "$container_id"
-        chmod +x ./basilica
-        echo "Binary extracted to: ./basilica"
+        chmod +x ./cathedral
+        echo "Binary extracted to: ./cathedral"
     fi
 fi
 

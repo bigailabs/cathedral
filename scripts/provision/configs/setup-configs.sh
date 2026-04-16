@@ -1,5 +1,5 @@
 #!/bin/bash
-# Basilica Configuration Setup Script
+# Cathedral Configuration Setup Script
 # Helps users create initial configuration files from examples
 
 set -e
@@ -21,7 +21,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 print_usage() {
     cat << EOF
-Basilica Configuration Setup
+Cathedral Configuration Setup
 
 USAGE:
     setup-configs.sh [OPTIONS] <COMMAND>
@@ -111,7 +111,7 @@ execute_cmd() {
 
 # Command: Initialize configuration files
 cmd_init() {
-    log_info "Initializing Basilica configuration files for environment: $ENVIRONMENT"
+    log_info "Initializing Cathedral configuration files for environment: $ENVIRONMENT"
     
     # List of configuration files to create
     local config_files=(
@@ -179,13 +179,13 @@ cmd_init() {
     if [[ "$INCLUDE_SECRETS" == "true" ]]; then
         echo "   vim secrets.toml  # Add your actual secrets"
     fi
-    echo "2. Deploy configurations: ./scripts/basilica.sh deploy config"
-    echo "3. Validate setup: ./scripts/basilica.sh provision validate"
+    echo "2. Deploy configurations: ./scripts/cathedral.sh deploy config"
+    echo "3. Validate setup: ./scripts/cathedral.sh provision validate"
 }
 
 # Command: Validate configuration files
 cmd_validate() {
-    log_info "Validating Basilica configuration files"
+    log_info "Validating Cathedral configuration files"
     
     local config_files=(
         "executor.toml"
@@ -253,7 +253,7 @@ cmd_validate() {
 
 # Command: Clean configuration files
 cmd_clean() {
-    log_info "Cleaning generated Basilica configuration files"
+    log_info "Cleaning generated Cathedral configuration files"
     
     local config_files=(
         "executor.toml"

@@ -6,9 +6,9 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 22_topology_spread.py
 """
-from basilica import BasilicaClient, TopologySpreadConfig
+from cathedral import CathedralClient, TopologySpreadConfig
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.create_deployment(
     instance_name="spread-demo",

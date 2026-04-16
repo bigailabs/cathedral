@@ -23,7 +23,7 @@ Repository: https://github.com/lobehub/lobe-chat
 import os
 import sys
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 
 def main():
@@ -35,7 +35,7 @@ def main():
         print("Supported providers: OpenAI, Together, Groq, etc.")
         sys.exit(1)
 
-    client = BasilicaClient()
+    client = CathedralClient()
 
     print("Deploying LobeChat...")
 
@@ -45,7 +45,7 @@ def main():
         port=3210,
         env={
             "OPENAI_API_KEY": openai_api_key,
-            "ACCESS_CODE": "basilica",
+            "ACCESS_CODE": "cathedral",
         },
         cpu="500m",
         memory="1Gi",
@@ -56,7 +56,7 @@ def main():
     print("LobeChat Ready")
     print("=" * 50)
     print(f"URL: {deployment.url}")
-    print(f"Access Code: basilica")
+    print(f"Access Code: cathedral")
     print()
     print("Open the URL in your browser to start chatting!")
 

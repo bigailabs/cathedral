@@ -6,10 +6,10 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 05_decorator_hello.py
 """
-import basilica
+import cathedral
 
 
-@basilica.deployment(name="decorator-hello", port=8000, ttl_seconds=600)
+@cathedral.deployment(name="decorator-hello", port=8000, ttl_seconds=600)
 def serve():
     from http.server import HTTPServer, BaseHTTPRequestHandler
 

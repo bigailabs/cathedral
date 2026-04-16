@@ -1,11 +1,11 @@
-# Basilica CLI Configuration
+# Cathedral CLI Configuration
 #
-# This file configures the Basilica CLI for interacting with the network
-# Copy this file to ~/.config/basilica/config.toml and adjust values as needed
+# This file configures the Cathedral CLI for interacting with the network
+# Copy this file to ~/.config/cathedral/config.toml and adjust values as needed
 
 # API Configuration
 [api]
-# Base URL for the Basilica API
+# Base URL for the Cathedral API
 # Production: https://api.basilica.ai
 # Development: http://localhost:8000
 base_url = "https://api.basilica.ai"

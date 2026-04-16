@@ -15,7 +15,7 @@ Why NOT use FUSE-based storage for model downloads:
 Trade-off: Models re-download on pod restart, but downloads are reliable.
 
 Usage:
-    export BASILICA_API_TOKEN="basilica_..."
+    export BASILICA_API_TOKEN="cathedral_..."
     python deploy_sglang_health_check.py
 
 Real-world timing observations:
@@ -32,7 +32,7 @@ Key Formula:
   max_startup_time = initial_delay_seconds + (failure_threshold * period_seconds)
 """
 
-from basilica import BasilicaClient, HealthCheckConfig, ProbeConfig
+from cathedral import CathedralClient, HealthCheckConfig, ProbeConfig
 
 SGLANG_PORT = 8000
 
@@ -171,7 +171,7 @@ if __name__ == "__main__":
 
 
 def main() -> None:
-    client = BasilicaClient()
+    client = CathedralClient()
 
     health_check = build_sglang_health_check(startup_minutes=30)
     func_source = create_sglang_deployment_source(

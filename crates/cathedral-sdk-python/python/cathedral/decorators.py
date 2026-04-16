@@ -12,14 +12,14 @@ from .spec import DeploymentSpec
 from .volume import Volume
 
 if TYPE_CHECKING:
-    from basilica._basilica import HealthCheckConfig
+    from cathedral._cathedral import HealthCheckConfig
 
 
 class DeployedFunction:
     """
     Wrapper around a decorated function with deployment capabilities.
 
-    Provides methods to deploy the function to Basilica cloud or run locally.
+    Provides methods to deploy the function to Cathedral cloud or run locally.
     Calling the wrapper directly triggers deployment.
     """
 
@@ -45,18 +45,18 @@ class DeployedFunction:
 
     def deploy(self, client=None):
         """
-        Deploy the function to Basilica cloud.
+        Deploy the function to Cathedral cloud.
 
         Args:
-            client: Optional BasilicaClient instance. If not provided,
+            client: Optional CathedralClient instance. If not provided,
                    creates a new client using environment credentials.
 
         Returns:
             Deployment instance with url, logs(), delete(), etc.
         """
-        from . import BasilicaClient
+        from . import CathedralClient
 
-        client = client or BasilicaClient()
+        client = client or CathedralClient()
         source = self._extract_source()
         storage = self._resolve_storage()
         gpu_models = self._resolve_gpu_models()
@@ -159,7 +159,7 @@ def deployment(
     health_check: Optional["HealthCheckConfig"] = None,
 ) -> Callable[[Callable], DeployedFunction]:
     """
-    Decorator to mark a function for deployment to Basilica.
+    Decorator to mark a function for deployment to Cathedral.
 
     The decorated function can be deployed by calling it directly,
     or via the .deploy() method for more control.
@@ -194,7 +194,7 @@ def deployment(
         DeployedFunction wrapper
 
     Example:
-        >>> @basilica.deployment(name="hello", port=8000)
+        >>> @cathedral.deployment(name="hello", port=8000)
         ... def serve():
         ...     from http.server import HTTPServer, BaseHTTPRequestHandler
         ...     HTTPServer(('', 8000), BaseHTTPRequestHandler).serve_forever()

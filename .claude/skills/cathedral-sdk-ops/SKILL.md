@@ -1,32 +1,32 @@
 ---
-name: basilica-sdk-ops
-description: Use when the user wants to operate Basilica programmatically from Python, including deployments, rentals, inference templates, balance checks, and usage history.
+name: cathedral-sdk-ops
+description: Use when the user wants to operate Cathedral programmatically from Python, including deployments, rentals, inference templates, balance checks, and usage history.
 ---
 
-# Basilica SDK Ops
+# Cathedral SDK Ops
 
-Use this skill for Python-based Basilica automation:
+Use this skill for Python-based Cathedral automation:
 
 - scripts
 - notebooks
 - CI jobs
 - programmatic deploy/rental orchestration
-- code generation that uses `BasilicaClient`
+- code generation that uses `CathedralClient`
 
 ## Install And Authenticate
 
 Install the SDK:
 
 ```bash
-pip install basilica-sdk
+pip install cathedral-sdk
 ```
 
 Install the CLI if you need to mint an API token:
 
 ```bash
-pip install basilica-cli
-basilica tokens create my-sdk-token
-export BASILICA_API_TOKEN="basilica_..."
+pip install cathedral-cli
+cathedral tokens create my-sdk-token
+export BASILICA_API_TOKEN="cathedral_..."
 ```
 
 Optional API override:
@@ -38,17 +38,17 @@ export BASILICA_API_URL="https://api.basilica.ai"
 Basic client:
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 ```
 
 ## Safe First Call
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 health = client.health_check()
 
 print(health.status)
@@ -60,9 +60,9 @@ print(health.version)
 The public Python wrapper exposes balance and usage history:
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 balance = client.get_balance()
 usage = client.list_usage_history(limit=20, offset=0)
@@ -80,9 +80,9 @@ If the user needs deposit-address creation or deposit-history inspection, prefer
 `deploy()` is the main SDK surface. It packages source, creates the deployment, waits for readiness, and refreshes the final URL.
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="hello-api",
@@ -113,9 +113,9 @@ Good default: set `ttl_seconds` unless the user explicitly wants the deploy to p
 ## Deploy A Prebuilt Image
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy(
     name="nginx-demo",
@@ -134,9 +134,9 @@ print(deployment.url)
 vLLM:
 
 ```python
-from basilica import BasilicaClient, HealthCheckConfig
+from cathedral import CathedralClient, HealthCheckConfig
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy_vllm(
     model="Qwen/Qwen2.5-7B-Instruct",
@@ -152,9 +152,9 @@ print(f"{deployment.url}/v1/chat/completions")
 SGLang:
 
 ```python
-from basilica import BasilicaClient, HealthCheckConfig
+from cathedral import CathedralClient, HealthCheckConfig
 
-client = BasilicaClient()
+client = CathedralClient()
 
 deployment = client.deploy_sglang(
     model="Qwen/Qwen2.5-7B-Instruct",
@@ -171,9 +171,9 @@ print(f"{deployment.url}/v1/chat/completions")
 Preferred programmatic rental path:
 
 ```python
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 key = client.get_ssh_key()
 if key is None:
@@ -273,7 +273,7 @@ print(response.message)
 
 ## Good Agent Defaults
 
-- use `BasilicaClient()` with env-driven auth
+- use `CathedralClient()` with env-driven auth
 - use `ttl_seconds` for any agent-created deployment
 - use secure-cloud APIs for machine rentals
 - use CLI for funding/deposit workflows
@@ -281,13 +281,13 @@ print(response.message)
 
 ## File Pointers
 
-- `crates/basilica-sdk-python/README.md`
-- `crates/basilica-sdk-python/python/basilica/__init__.py`
-- `crates/basilica-sdk-python/python/basilica/_deployment.py`
-- `crates/basilica-sdk-python/python/basilica/source.py`
-- `crates/basilica-sdk-python/python/basilica/decorators.py`
-- `crates/basilica-sdk-python/examples/quickstart.py`
-- `crates/basilica-sdk-python/examples/start_secure_cloud_gpu_rental.py`
+- `crates/cathedral-sdk-python/README.md`
+- `crates/cathedral-sdk-python/python/cathedral/__init__.py`
+- `crates/cathedral-sdk-python/python/cathedral/_deployment.py`
+- `crates/cathedral-sdk-python/python/cathedral/source.py`
+- `crates/cathedral-sdk-python/python/cathedral/decorators.py`
+- `crates/cathedral-sdk-python/examples/quickstart.py`
+- `crates/cathedral-sdk-python/examples/start_secure_cloud_gpu_rental.py`
 - `examples/19_deploy_vllm_template.py`
 - `examples/20_deploy_sglang_template.py`
 

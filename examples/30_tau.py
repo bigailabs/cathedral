@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deploy Tau agent on Basilica.
+Deploy Tau agent on Cathedral.
 
 Usage:
     export TAU_BOT_TOKEN="your-telegram-token"
@@ -11,8 +11,8 @@ Usage:
 import os
 import sys
 
-from basilica import (
-    BasilicaClient,
+from cathedral import (
+    CathedralClient,
     Deployment,
     HealthCheckConfig,
     PersistentStorageSpec,
@@ -37,7 +37,7 @@ env = {
 if chat_model:
     env["TAU_CHAT_MODEL"] = chat_model
 
-client = BasilicaClient()
+client = CathedralClient()
 
 health_probe = ProbeConfig(
     path="/health",
@@ -54,7 +54,7 @@ storage = StorageSpec(
         backend=StorageBackend.R2,
         bucket="",
         region="auto",
-        credentials_secret="basilica-r2-credentials",
+        credentials_secret="cathedral-r2-credentials",
         sync_interval_ms=1000,
         cache_size_mb=2048,
         mount_path="/data",
@@ -65,7 +65,7 @@ response = client.create_deployment(
     instance_name="tau",
     image="ghcr.io/one-covenant/basilica-tau:latest",
     port=8080,
-    command=["/usr/local/bin/basilica-entrypoint.sh"],
+    command=["/usr/local/bin/cathedral-entrypoint.sh"],
     env=env,
     cpu="2",
     memory="16Gi",

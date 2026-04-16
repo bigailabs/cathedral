@@ -1,5 +1,5 @@
 #!/bin/bash
-# Basilica Localnet - Health Check Script
+# Cathedral Localnet - Health Check Script
 # Checks connectivity and health of all services
 
 set -euo pipefail
@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 show_help() {
-    echo "Basilica Localnet - Health Check"
+    echo "Cathedral Localnet - Health Check"
     echo ""
     echo "Usage: ./test.sh [-h|--help]"
     echo ""
@@ -84,7 +84,7 @@ check_port() {
 }
 
 echo "========================================"
-echo "  Basilica Localnet Health Check"
+echo "  Cathedral Localnet Health Check"
 echo "========================================"
 echo ""
 
@@ -101,7 +101,7 @@ echo ""
 # =============================================================================
 echo "[2/5] PostgreSQL Database"
 printf "  %-15s " "Connection:"
-if docker exec basilica-postgres pg_isready -U basilica -d validator > /dev/null 2>&1; then
+if docker exec cathedral-postgres pg_isready -U cathedral -d validator > /dev/null 2>&1; then
     echo -e "${GREEN}OK${NC}"
 else
     echo -e "${RED}FAIL${NC} (container may not be running)"
@@ -114,7 +114,7 @@ echo ""
 # =============================================================================
 echo "[3/5] Validator Service"
 check_service "Health" "http://localhost:8080/health"
-check_service "Metrics" "http://localhost:9090/metrics" "basilica"
+check_service "Metrics" "http://localhost:9090/metrics" "cathedral"
 check_port "API" "localhost" "8080"
 echo ""
 
@@ -122,7 +122,7 @@ echo ""
 # Miner
 # =============================================================================
 echo "[4/5] Miner Service"
-check_service "Metrics" "http://localhost:9091/metrics" "basilica"
+check_service "Metrics" "http://localhost:9091/metrics" "cathedral"
 check_port "gRPC" "localhost" "8092"
 check_port "Axon" "localhost" "8091"
 echo ""

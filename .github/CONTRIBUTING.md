@@ -1,12 +1,12 @@
-# Contributing to Basilica
+# Contributing to Cathedral
 
-Thanks for your interest in contributing to Basilica. We welcome contributions from the community.
+Thanks for your interest in contributing to Cathedral. We welcome contributions from the community.
 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/basilica.git`
-3. Add upstream remote: `git remote add upstream https://github.com/one-covenant/basilica.git`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/cathedral.git`
+3. Add upstream remote: `git remote add upstream https://github.com/one-covenant/cathedral.git`
 4. Create a feature branch: `git checkout -b feature/your-feature-name`
 
 ## Development Setup
@@ -24,9 +24,9 @@ Thanks for your interest in contributing to Basilica. We welcome contributions f
 cargo build
 
 # Build specific crate
-cargo build -p basilica-validator
-cargo build -p basilica-miner
-cargo build -p basilica-executor
+cargo build -p cathedral-validator
+cargo build -p cathedral-miner
+cargo build -p cathedral-executor
 
 # Build with release optimizations
 cargo build --release
@@ -39,7 +39,7 @@ cargo build --release
 cargo test
 
 # Run tests for specific crate
-cargo test -p basilica-common
+cargo test -p cathedral-common
 
 # Run tests with logging
 RUST_LOG=debug cargo test

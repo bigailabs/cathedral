@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install system dependencies for Basilica
+# Install system dependencies for Cathedral
 
 set -e
 
@@ -9,7 +9,7 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${YELLOW}Installing system dependencies for Basilica...${NC}"
+echo -e "${YELLOW}Installing system dependencies for Cathedral...${NC}"
 
 # Detect OS
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then

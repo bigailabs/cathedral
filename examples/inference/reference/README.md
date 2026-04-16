@@ -118,9 +118,9 @@ Some HuggingFace models require authentication:
 ## Volumes for Model Caching
 
 ```python
-import basilica
+import cathedral
 
-cache = basilica.Volume.from_name("model-cache", create_if_missing=True)
+cache = cathedral.Volume.from_name("model-cache", create_if_missing=True)
 
 @deployment(
     volumes={"/root/.cache/huggingface": cache},

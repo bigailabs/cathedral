@@ -1,16 +1,16 @@
 #!/bin/bash
-# Basilica Service Configuration Generator
+# Cathedral Service Configuration Generator
 # Generates production-ready configurations for validator and miner
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASILICA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CATHEDRAL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 
 print_usage() {
     cat << EOF
-configure.sh - Generate and deploy Basilica service configurations
+configure.sh - Generate and deploy Cathedral service configurations
 
 USAGE:
     configure.sh <COMMAND> [OPTIONS]
@@ -100,11 +100,11 @@ generate_validator_config() {
     mkdir -p "$OUTPUT_DIR"
     
     cat > "$config_file" << EOF
-# Basilica Validator Configuration
+# Cathedral Validator Configuration
 # Generated on $(date) for environment: $ENVIRONMENT
 
 [database]
-url = "sqlite:/var/lib/basilica/validator/validator.db"
+url = "sqlite:/var/lib/cathedral/validator/validator.db"
 max_connections = 10
 min_connections = 1
 run_migrations = true
@@ -159,7 +159,7 @@ max_body_size = 1048576
 bind_address = "0.0.0.0:8080"
 
 [storage]
-data_dir = "/var/lib/basilica/validator"
+data_dir = "/var/lib/cathedral/validator"
 
 [logging]
 level = "${LOG_LEVEL:-info}"
@@ -176,7 +176,7 @@ path = "/metrics"
 
 # SSH validation settings
 [ssh]
-private_key_path = "/etc/basilica/keys/validator_ssh"
+private_key_path = "/etc/cathedral/keys/validator_ssh"
 timeout_seconds = 30
 max_concurrent_sessions = 10
 
@@ -206,7 +206,7 @@ generate_miner_config() {
     mkdir -p "$OUTPUT_DIR"
     
     cat > "$config_file" << EOF
-# Basilica Miner Configuration
+# Cathedral Miner Configuration
 # Generated on $(date) for environment: $ENVIRONMENT
 
 [bittensor]
@@ -222,7 +222,7 @@ external_ip = "${MINER_EXTERNAL_IP:-${MINER_HOST}}"
 max_weight_uids = 256
 
 [database]
-url = "sqlite:/var/lib/basilica/miner/miner.db"
+url = "sqlite:/var/lib/cathedral/miner/miner.db"
 max_connections = 10
 min_connections = 1
 run_migrations = true
@@ -281,22 +281,22 @@ generate_systemd_services() {
     mkdir -p "$services_dir"
     
     # Validator service
-    cat > "$services_dir/basilica-validator.service" << 'EOF'
+    cat > "$services_dir/cathedral-validator.service" << 'EOF'
 [Unit]
-Description=Basilica Validator Service
-Documentation=https://github.com/spacejar/basilica
+Description=Cathedral Validator Service
+Documentation=https://github.com/spacejar/cathedral
 After=network-online.target
 Wants=network-online.target
-RequiresMountsFor=/var/lib/basilica
+RequiresMountsFor=/var/lib/cathedral
 
 [Service]
 Type=simple
-User=basilica
-Group=basilica
-WorkingDirectory=/var/lib/basilica/validator
+User=cathedral
+Group=cathedral
+WorkingDirectory=/var/lib/cathedral/validator
 Environment=RUST_LOG=info
 Environment=RUST_BACKTRACE=1
-ExecStart=/usr/local/bin/validator start --config /etc/basilica/validator.toml
+ExecStart=/usr/local/bin/validator start --config /etc/cathedral/validator.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
@@ -304,14 +304,14 @@ TimeoutStartSec=60
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-validator
+SyslogIdentifier=cathedral-validator
 
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/basilica /var/log/basilica
+ReadWritePaths=/var/lib/cathedral /var/log/cathedral
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -325,22 +325,22 @@ WantedBy=multi-user.target
 EOF
 
     # Miner service
-    cat > "$services_dir/basilica-miner.service" << 'EOF'
+    cat > "$services_dir/cathedral-miner.service" << 'EOF'
 [Unit]
-Description=Basilica Miner Service
-Documentation=https://github.com/spacejar/basilica
+Description=Cathedral Miner Service
+Documentation=https://github.com/spacejar/cathedral
 After=network-online.target
 Wants=network-online.target
-RequiresMountsFor=/var/lib/basilica
+RequiresMountsFor=/var/lib/cathedral
 
 [Service]
 Type=simple
-User=basilica
-Group=basilica
-WorkingDirectory=/var/lib/basilica/miner
+User=cathedral
+Group=cathedral
+WorkingDirectory=/var/lib/cathedral/miner
 Environment=RUST_LOG=info
 Environment=RUST_BACKTRACE=1
-ExecStart=/usr/local/bin/miner --config /etc/basilica/miner.toml
+ExecStart=/usr/local/bin/miner --config /etc/cathedral/miner.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
@@ -348,14 +348,14 @@ TimeoutStartSec=60
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-miner
+SyslogIdentifier=cathedral-miner
 
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/basilica /var/log/basilica
+ReadWritePaths=/var/lib/cathedral /var/log/cathedral
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -413,14 +413,14 @@ cmd_deploy() {
     scp -P "$VALIDATOR_PORT" "$OUTPUT_DIR/validator.toml" \
         "$VALIDATOR_USER@$VALIDATOR_HOST:/tmp/validator.toml"
     ssh -p "$VALIDATOR_PORT" "$VALIDATOR_USER@$VALIDATOR_HOST" \
-        "sudo mv /tmp/validator.toml /etc/basilica/validator.toml && sudo chown root:basilica /etc/basilica/validator.toml && sudo chmod 640 /etc/basilica/validator.toml"
+        "sudo mv /tmp/validator.toml /etc/cathedral/validator.toml && sudo chown root:cathedral /etc/cathedral/validator.toml && sudo chmod 640 /etc/cathedral/validator.toml"
     
     # Deploy miner config
     log_info "Deploying miner configuration"
     scp -P "$MINER_PORT" "$OUTPUT_DIR/miner.toml" \
         "$MINER_USER@$MINER_HOST:/tmp/miner.toml"
     ssh -p "$MINER_PORT" "$MINER_USER@$MINER_HOST" \
-        "sudo mv /tmp/miner.toml /etc/basilica/miner.toml && sudo chown root:basilica /etc/basilica/miner.toml && sudo chmod 640 /etc/basilica/miner.toml"
+        "sudo mv /tmp/miner.toml /etc/cathedral/miner.toml && sudo chown root:cathedral /etc/cathedral/miner.toml && sudo chmod 640 /etc/cathedral/miner.toml"
 
     # Deploy systemd services
     if [[ -d "$OUTPUT_DIR/systemd" ]]; then
@@ -431,12 +431,12 @@ cmd_deploy() {
             local target_host target_port target_user
             
             case "$service_name" in
-                basilica-validator.service)
+                cathedral-validator.service)
                     target_host="$VALIDATOR_HOST"
                     target_port="$VALIDATOR_PORT"
                     target_user="$VALIDATOR_USER"
                     ;;
-                basilica-miner.service)
+                cathedral-miner.service)
                     target_host="$MINER_HOST"
                     target_port="$MINER_PORT"
                     target_user="$MINER_USER"
@@ -499,7 +499,7 @@ cmd_keys() {
     
     if [[ ! -f "$keys_dir/validator_private.pem" ]]; then
         log_info "Generating P256 key pair for validator"
-        "$BASILICA_ROOT/scripts/gen-key.sh" "$keys_dir/validator"
+        "$CATHEDRAL_ROOT/scripts/gen-key.sh" "$keys_dir/validator"
         log_success "Generated validator P256 keys"
     fi
     
@@ -508,7 +508,7 @@ cmd_keys() {
         local ssh_key="$keys_dir/${service}_ssh"
         if [[ ! -f "$ssh_key" ]]; then
             log_info "Generating SSH key for $service"
-            ssh-keygen -t ed25519 -f "$ssh_key" -N "" -C "basilica-$service"
+            ssh-keygen -t ed25519 -f "$ssh_key" -N "" -C "cathedral-$service"
             log_success "Generated SSH key for $service"
         fi
     done

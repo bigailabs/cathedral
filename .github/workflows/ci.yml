@@ -35,8 +35,8 @@ jobs:
     outputs:
       validator: ${{ steps.changes.outputs.validator }}
       miner: ${{ steps.changes.outputs.miner }}
-      basilica-cli: ${{ steps.changes.outputs.basilica-cli }}
-      basilica-sdk-python: ${{ steps.changes.outputs.basilica-sdk-python }}
+      cathedral-cli: ${{ steps.changes.outputs.cathedral-cli }}
+      cathedral-sdk-python: ${{ steps.changes.outputs.cathedral-sdk-python }}
       workspace: ${{ steps.changes.outputs.workspace }}
     steps:
       - uses: actions/checkout@v4
@@ -45,30 +45,30 @@ jobs:
         with:
           filters: |
             validator:
-              - 'crates/basilica-validator/**'
-              - 'crates/basilica-common/**'
-              - 'crates/basilica-protocol/**'
+              - 'crates/cathedral-validator/**'
+              - 'crates/cathedral-common/**'
+              - 'crates/cathedral-protocol/**'
               - 'scripts/validator/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
             miner:
-              - 'crates/basilica-miner/**'
-              - 'crates/basilica-common/**'
-              - 'crates/basilica-protocol/**'
+              - 'crates/cathedral-miner/**'
+              - 'crates/cathedral-common/**'
+              - 'crates/cathedral-protocol/**'
               - 'scripts/miner/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
-            basilica-cli:
-              - 'crates/basilica-cli/**'
-              - 'crates/basilica-common/**'
-              - 'crates/basilica-protocol/**'
+            cathedral-cli:
+              - 'crates/cathedral-cli/**'
+              - 'crates/cathedral-common/**'
+              - 'crates/cathedral-protocol/**'
               - 'scripts/cli/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
-            basilica-sdk-python:
-              - 'crates/basilica-sdk-python/**'
-              - 'crates/basilica-sdk/**'
-              - 'crates/basilica-common/**'
+            cathedral-sdk-python:
+              - 'crates/cathedral-sdk-python/**'
+              - 'crates/cathedral-sdk/**'
+              - 'crates/cathedral-common/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
             workspace:
@@ -105,10 +105,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Quick check builds
         run: |
-          cargo check -p basilica-common -p basilica-protocol
+          cargo check -p cathedral-common -p cathedral-protocol
       - name: Run clippy on core packages
         run: |
-          cargo clippy -p basilica-common -p basilica-protocol --all-targets -- -D warnings
+          cargo clippy -p cathedral-common -p cathedral-protocol --all-targets -- -D warnings
 
   # Lint complex packages
   lint-complex:
@@ -139,10 +139,10 @@ jobs:
           tool: nextest
       - name: Run clippy on complex packages
         run: |
-          cargo clippy -p basilica-miner --all-targets --all-features -- -D warnings
-          cargo clippy -p basilica-validator --all-targets --all-features -- -D warnings
-          cargo clippy -p basilica-cli --all-targets --all-features -- -D warnings
-          cargo clippy -p basilica-sdk --all-targets --all-features -- -D warnings
+          cargo clippy -p cathedral-miner --all-targets --all-features -- -D warnings
+          cargo clippy -p cathedral-validator --all-targets --all-features -- -D warnings
+          cargo clippy -p cathedral-cli --all-targets --all-features -- -D warnings
+          cargo clippy -p cathedral-sdk --all-targets --all-features -- -D warnings
 
   # Build and test validator
   build-validator:
@@ -185,9 +185,9 @@ jobs:
       - name: Build and test validator
         run: |
           export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
-          cargo build -p basilica-validator
-          cargo nextest run -p basilica-validator --all-features --no-fail-fast
-          ./target/debug/basilica-validator --help
+          cargo build -p cathedral-validator
+          cargo nextest run -p cathedral-validator --all-features --no-fail-fast
+          ./target/debug/cathedral-validator --help
       - name: Clean up space before Docker build
         run: |
           docker system prune -af
@@ -199,7 +199,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica/validator:latest
+          image-ref: cathedral/validator:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
@@ -246,9 +246,9 @@ jobs:
       - name: Build and test miner
         run: |
           export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
-          cargo build -p basilica-miner
-          cargo nextest run -p basilica-miner --lib --no-fail-fast
-          ./target/debug/basilica-miner --help
+          cargo build -p cathedral-miner
+          cargo nextest run -p cathedral-miner --lib --no-fail-fast
+          ./target/debug/cathedral-miner --help
       - name: Clean up space before Docker build
         run: |
           docker system prune -af
@@ -260,17 +260,17 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica/miner:latest
+          image-ref: cathedral/miner:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
-  # Build and test basilica-cli
+  # Build and test cathedral-cli
   build-cli:
     runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
-    if: needs.changes.outputs.basilica-cli == 'true' || needs.changes.outputs.workspace == 'true'
+    if: needs.changes.outputs.cathedral-cli == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
       matrix:
         rust-version: [stable]
@@ -298,17 +298,17 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Build and test basilica-cli
+      - name: Build and test cathedral-cli
         run: |
-          cargo build -p basilica-cli
-          cargo nextest run -p basilica-cli --all-features --no-fail-fast
-          ./target/debug/basilica --help
+          cargo build -p cathedral-cli
+          cargo nextest run -p cathedral-cli --all-features --no-fail-fast
+          ./target/debug/cathedral --help
 
   # Build and test Python SDK
   test-python-sdk:
     runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
-    if: needs.changes.outputs.basilica-sdk-python == 'true' || needs.changes.outputs.workspace == 'true'
+    if: needs.changes.outputs.cathedral-sdk-python == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13']
@@ -350,19 +350,19 @@ jobs:
       - name: Build and install Python SDK
         run: |
           source .venv/bin/activate
-          cd crates/basilica-sdk-python
+          cd crates/cathedral-sdk-python
           maturin develop --release
 
       - name: Run Python tests
         run: |
           source .venv/bin/activate
-          cd crates/basilica-sdk-python
+          cd crates/cathedral-sdk-python
           python -m pytest tests/ -v || echo "No tests found yet"
 
       - name: Test examples (syntax check)
         run: |
           source .venv/bin/activate
-          cd crates/basilica-sdk-python/examples
+          cd crates/cathedral-sdk-python/examples
           for example in *.py; do
             echo "Checking $example..."
             python -m py_compile "$example"
@@ -371,7 +371,7 @@ jobs:
       - name: Test import
         run: |
           source .venv/bin/activate
-          python -c 'import basilica; print(f"SDK imported successfully. API URL: {basilica.DEFAULT_API_URL}")'
+          python -c 'import cathedral; print(f"SDK imported successfully. API URL: {cathedral.DEFAULT_API_URL}")'
 
   # Final status check
   ci-success:
@@ -440,13 +440,13 @@ jobs:
           BITTENSOR_NETWORK: finney
         run: |
           ./scripts/validator/build.sh \
-            --image-name ghcr.io/one-covenant/basilica/validator \
+            --image-name ghcr.io/one-covenant/cathedral/validator \
             --image-tag "$TAG" \
             --no-extract
       - name: Scan validator image
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ghcr.io/one-covenant/basilica/validator:${{ env.TAG }}
+          image-ref: ghcr.io/one-covenant/cathedral/validator:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
@@ -455,8 +455,8 @@ jobs:
       - name: Push validator image
         run: |
           ./scripts/validator/push.sh \
-            --source-image ghcr.io/one-covenant/basilica/validator \
-            --target-image ghcr.io/one-covenant/basilica/validator \
+            --source-image ghcr.io/one-covenant/cathedral/validator \
+            --target-image ghcr.io/one-covenant/cathedral/validator \
             --tag "$TAG"
 
       - name: Build miner image
@@ -464,13 +464,13 @@ jobs:
           BITTENSOR_NETWORK: finney
         run: |
           ./scripts/miner/build.sh \
-            --image-name ghcr.io/one-covenant/basilica/miner \
+            --image-name ghcr.io/one-covenant/cathedral/miner \
             --image-tag "$TAG" \
             --no-extract
       - name: Scan miner image
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ghcr.io/one-covenant/basilica/miner:${{ env.TAG }}
+          image-ref: ghcr.io/one-covenant/cathedral/miner:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
@@ -479,21 +479,21 @@ jobs:
       - name: Push miner image
         run: |
           ./scripts/miner/push.sh \
-            --source-image ghcr.io/one-covenant/basilica/miner \
-            --target-image ghcr.io/one-covenant/basilica/miner \
+            --source-image ghcr.io/one-covenant/cathedral/miner \
+            --target-image ghcr.io/one-covenant/cathedral/miner \
             --tag "$TAG"
 
       - name: Build CLI image (single-arch)
         run: |
           ./scripts/cli/build.sh \
             --single-arch \
-            --image-name ghcr.io/one-covenant/basilica/cli \
+            --image-name ghcr.io/one-covenant/cathedral/cli \
             --image-tag "$TAG" \
             --no-extract
       - name: Scan CLI image
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ghcr.io/one-covenant/basilica/cli:${{ env.TAG }}
+          image-ref: ghcr.io/one-covenant/cathedral/cli:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
@@ -501,4 +501,4 @@ jobs:
 
       - name: Push CLI image
         run: |
-          docker push ghcr.io/one-covenant/basilica/cli:"$TAG"
+          docker push ghcr.io/one-covenant/cathedral/cli:"$TAG"

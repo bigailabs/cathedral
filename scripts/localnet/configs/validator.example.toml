@@ -1,10 +1,10 @@
-# Basilica Validator Configuration - Local Development
+# Cathedral Validator Configuration - Local Development
 # Pre-configured for local Subtensor network
 
-api_endpoint = "http://basilica-api:8000"
+api_endpoint = "http://cathedral-api:8000"
 
 [database]
-url = "sqlite:///opt/basilica/data/validator.db"
+url = "sqlite:///opt/cathedral/data/validator.db"
 max_connections = 10
 run_migrations = true
 
@@ -43,8 +43,8 @@ enable_worker_queue = false
 
 # Binary validation disabled for localnet (requires NVIDIA GPU hardware)
 # [verification.binary_validation]
-# validator_binary_path = "/opt/basilica/bin/validator-binary/validator-binary"
-# executor_binary_path = "/opt/basilica/bin/executor-binary/executor-binary"
+# validator_binary_path = "/opt/cathedral/bin/validator-binary/validator-binary"
+# executor_binary_path = "/opt/cathedral/bin/executor-binary/executor-binary"
 # execution_timeout_secs = 1200
 # output_format = "json"
 
@@ -57,7 +57,7 @@ enabled = true
 timeout = { secs = 60 }
 max_file_size = "10MB"
 allowed_commands = ["gpu-attestor", "nvidia-smi"]
-temp_dir = "/tmp/basilica-validation"
+temp_dir = "/tmp/cathedral-validation"
 
 [scoring]
 gpu_weight = 0.4
@@ -78,7 +78,7 @@ path = "/metrics"
 [logging]
 level = "debug"
 format = "json"
-output = "/opt/basilica/data/validator.log"
+output = "/opt/cathedral/data/validator.log"
 max_file_size = 104857600
 max_files = 10
 
@@ -90,10 +90,10 @@ cors_origins = ["*"]
 rate_limit = 100
 
 [storage]
-data_dir = "/opt/basilica/data"
+data_dir = "/opt/cathedral/data"
 
 [ssh_session]
-ssh_key_directory = "/opt/basilica/data/ssh_keys"
+ssh_key_directory = "/opt/cathedral/data/ssh_keys"
 key_algorithm = "ed25519"
 default_session_duration = 300
 max_session_duration = 3600
@@ -103,7 +103,7 @@ enable_automated_sessions = true
 max_concurrent_sessions = 5
 session_rate_limit = 200
 enable_audit_logging = true
-audit_log_path = "/opt/basilica/data/ssh_audit.log"
+audit_log_path = "/opt/cathedral/data/ssh_audit.log"
 ssh_connection_timeout = { secs = 30, nanos = 0 }
 ssh_command_timeout = { secs = 60, nanos = 0 }
 ssh_retry_attempts = 3

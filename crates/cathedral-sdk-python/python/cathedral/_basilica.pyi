@@ -21,9 +21,9 @@ class AvailableNode:
     @property
     def availability(self) -> AvailabilityInfo: ...
 
-class BasilicaClient:
+class CathedralClient:
     r"""
-    Python wrapper for BasilicaClient
+    Python wrapper for CathedralClient
     """
     ...
 

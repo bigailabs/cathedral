@@ -1,5 +1,5 @@
 #!/bin/bash
-# Common functions and utilities for Basilica scripts
+# Common functions and utilities for Cathedral scripts
 
 # Colors for output
 export RED='\033[0;31m'
@@ -10,9 +10,9 @@ export PURPLE='\033[0;35m'
 export NC='\033[0m' # No Color
 
 # Project paths
-export BASILICA_ROOT="${BASILICA_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-export SCRIPTS_DIR="$BASILICA_ROOT/scripts"
-export CRATES_DIR="$BASILICA_ROOT/crates"
+export CATHEDRAL_ROOT="${CATHEDRAL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+export SCRIPTS_DIR="$CATHEDRAL_ROOT/scripts"
+export CRATES_DIR="$CATHEDRAL_ROOT/crates"
 
 # Logging functions
 log_info() {
@@ -41,13 +41,13 @@ command_exists() {
 }
 
 # Check if we're in the correct directory
-ensure_basilica_root() {
-    if [ ! -f "$BASILICA_ROOT/Cargo.toml" ]; then
-        log_error "Not in Basilica root directory"
-        log_info "Expected root: $BASILICA_ROOT"
+ensure_cathedral_root() {
+    if [ ! -f "$CATHEDRAL_ROOT/Cargo.toml" ]; then
+        log_error "Not in Cathedral root directory"
+        log_info "Expected root: $CATHEDRAL_ROOT"
         return 1
     fi
-    cd "$BASILICA_ROOT" || return 1
+    cd "$CATHEDRAL_ROOT" || return 1
 }
 
 # Get list of crates

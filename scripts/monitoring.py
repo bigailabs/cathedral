@@ -11,7 +11,7 @@
 # ///
 
 """
-Basilica Bittensor Network Monitor
+Cathedral Bittensor Network Monitor
 
 Monitor extrinsics and transactions on a Bittensor substrate blockchain,
 specifically focusing on miner and validator operations, with comprehensive
@@ -558,7 +558,7 @@ def main(
     weights_only: bool,
 ):
     """Monitor Bittensor blockchain for miner and validator extrinsics."""
-    print("Basilica Network Monitor")
+    print("Cathedral Network Monitor")
     print(f"Network: {network}, Netuid: {netuid}")
     if coldkey:
         print(f"Coldkey filter: {coldkey}")

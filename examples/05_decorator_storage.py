@@ -6,12 +6,12 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 05_decorator_storage.py
 """
-import basilica
+import cathedral
 
-cache = basilica.Volume.from_name("counter-cache", create_if_missing=True)
+cache = cathedral.Volume.from_name("counter-cache", create_if_missing=True)
 
 
-@basilica.deployment(
+@cathedral.deployment(
     name="decorator-counter",
     port=8000,
     volumes={"/data": cache},

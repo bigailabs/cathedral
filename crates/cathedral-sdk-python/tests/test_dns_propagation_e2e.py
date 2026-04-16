@@ -1,12 +1,12 @@
 """
 End-to-end integration test for DNS propagation fix.
 
-This test creates a real Basilica deployment and verifies that
+This test creates a real Cathedral deployment and verifies that
 wait_until_ready() waits for DNS resolution before returning.
 
 Requirements:
 - BASILICA_API_TOKEN environment variable must be set
-- Network access to Basilica API
+- Network access to Cathedral API
 """
 
 import os
@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 # Add the SDK to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
-from basilica import BasilicaClient, Deployment
+from cathedral import CathedralClient, Deployment
 
 
 def test_dns_resolves_after_wait_until_ready():
@@ -42,7 +42,7 @@ def test_dns_resolves_after_wait_until_ready():
 
     # Generate unique deployment name
     deployment_name = f"dns-test-{int(time.time())}"
-    client = BasilicaClient()
+    client = CathedralClient()
     deployment = None
 
     try:

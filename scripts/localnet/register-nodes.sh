@@ -60,12 +60,12 @@ require_cmd docker
 require_cmd curl
 
 echo "Checking localnet containers..."
-is_container_running "basilica-validator" || {
-  echo "ERROR: basilica-validator is not running" >&2
+is_container_running "cathedral-validator" || {
+  echo "ERROR: cathedral-validator is not running" >&2
   exit 1
 }
-is_container_running "basilica-miner" || {
-  echo "ERROR: basilica-miner is not running" >&2
+is_container_running "cathedral-miner" || {
+  echo "ERROR: cathedral-miner is not running" >&2
   exit 1
 }
 
@@ -83,7 +83,7 @@ found_marker=false
 start_epoch="$(date +%s)"
 
 while true; do
-  if docker logs basilica-miner --since "$start_marker" 2>&1 | grep -q "Successfully registered with validator"; then
+  if docker logs cathedral-miner --since "$start_marker" 2>&1 | grep -q "Successfully registered with validator"; then
     found_marker=true
     break
   fi

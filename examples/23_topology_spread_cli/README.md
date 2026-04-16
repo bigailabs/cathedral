@@ -11,7 +11,7 @@ export BASILICA_API_TOKEN="your-token"
 ## Deploy with Unique Nodes
 
 ```bash
-basilica deploy hashicorp/http-echo:latest \
+cathedral deploy hashicorp/http-echo:latest \
   --name spread-demo \
   --port 5678 \
   --replicas 2 \
@@ -24,18 +24,18 @@ Each pod runs on a different node, giving unique IP subnets.
 
 ```bash
 # Best-effort spreading
-basilica deploy image --name app --replicas 4 --spread-mode preferred
+cathedral deploy image --name app --replicas 4 --spread-mode preferred
 
 # Strict spreading (won't schedule if can't spread)
-basilica deploy image --name app --replicas 4 --spread-mode required --max-skew 1
+cathedral deploy image --name app --replicas 4 --spread-mode required --max-skew 1
 
 # Spread across zones
-basilica deploy image --name app --replicas 4 --spread-mode required \
+cathedral deploy image --name app --replicas 4 --spread-mode required \
   --topology-key topology.kubernetes.io/zone
 ```
 
 ## Cleanup
 
 ```bash
-basilica deployments delete spread-demo
+cathedral deployments delete spread-demo
 ```

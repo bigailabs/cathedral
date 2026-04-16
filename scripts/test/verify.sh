@@ -61,7 +61,7 @@ verify_all_tests() {
     local total_tests=0
     local total_lines=0
     
-    log_header "Basilica Test Verification Report"
+    log_header "Cathedral Test Verification Report"
     echo
     
     # Verify each crate
@@ -99,7 +99,7 @@ verify_all_tests() {
 
 # Main
 main() {
-    ensure_basilica_root || exit 1
+    ensure_cathedral_root || exit 1
     
     case "${1:-all}" in
         all)

@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-IMAGE_NAME="basilica/miner"
+IMAGE_NAME="cathedral/miner"
 IMAGE_TAG="latest"
 EXTRACT_BINARY=true
 BUILD_IMAGE=true
@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--image-name NAME] [--image-tag TAG] [--no-extract] [--no-image] [--debug] [--features FEATURES] [--no-cache]"
             echo ""
             echo "Options:"
-            echo "  --image-name NAME     Docker image name (default: basilica/miner)"
+            echo "  --image-name NAME     Docker image name (default: cathedral/miner)"
             echo "  --image-tag TAG       Docker image tag (default: latest)"
             echo "  --no-extract          Don't extract binary to local filesystem"
             echo "  --no-image            Skip Docker image creation"
@@ -109,10 +109,10 @@ fi
 if [[ "$EXTRACT_BINARY" == "true" ]]; then
     echo "Extracting miner binary..."
     container_id=$(docker create "$IMAGE_NAME:$IMAGE_TAG")
-    docker cp "$container_id:/usr/local/bin/basilica-miner" ./basilica-miner
+    docker cp "$container_id:/usr/local/bin/cathedral-miner" ./cathedral-miner
     docker rm "$container_id"
-    chmod +x ./basilica-miner
-    echo "Binary extracted to: ./basilica-miner"
+    chmod +x ./cathedral-miner
+    echo "Binary extracted to: ./cathedral-miner"
 fi
 
 echo "Build completed successfully!"

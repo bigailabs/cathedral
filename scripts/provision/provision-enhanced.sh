@@ -1,5 +1,5 @@
 #!/bin/bash
-# Enhanced provisioning script for Basilica with full error handling
+# Enhanced provisioning script for Cathedral with full error handling
 
 set -e
 
@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 
 # Track deployment state for rollback
-DEPLOYMENT_STATE_FILE="/tmp/basilica-deployment-state-$$"
+DEPLOYMENT_STATE_FILE="/tmp/cathedral-deployment-state-$$"
 trap cleanup EXIT
 
 cleanup() {
@@ -229,8 +229,8 @@ provision_all() {
     
     echo
     log_info "Next steps:"
-    echo "  1. Check service status: ./scripts/basilica.sh manage status"
-    echo "  2. View logs: ./scripts/basilica.sh manage logs <service>"
+    echo "  1. Check service status: ./scripts/cathedral.sh manage status"
+    echo "  2. View logs: ./scripts/cathedral.sh manage logs <service>"
     echo "  3. For production, replace development wallets with real Bittensor wallets"
     
     return 0
@@ -269,7 +269,7 @@ main() {
             ;;
         help|*)
             cat << EOF
-Enhanced Basilica Provisioning
+Enhanced Cathedral Provisioning
 
 Usage: provision-enhanced.sh <command> [environment]
 

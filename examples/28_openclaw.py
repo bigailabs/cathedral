@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deploy OpenClaw gateway on Basilica.
+Deploy OpenClaw gateway on Cathedral.
 
 Usage:
     export OPENCLAW_BASE_URL="https://your-openai-compatible-backend/v1"
@@ -13,13 +13,13 @@ import os
 import re
 import sys
 
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
 backend_url = os.getenv("OPENCLAW_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 if not backend_url:
     sys.exit("Set OPENCLAW_BASE_URL or OPENAI_BASE_URL")
 
-client = BasilicaClient()
+client = CathedralClient()
 
 env = {
     "OPENCLAW_BASE_URL": backend_url,
@@ -47,4 +47,4 @@ match = re.search(
 if match:
     print(f"Control UI: {deployment.url}/chat?session=main&token={match.group(1)}")
 else:
-    print(f"Get token: basilica deploy logs {deployment.name} | grep GATEWAY_TOKEN")
+    print(f"Get token: cathedral deploy logs {deployment.name} | grep GATEWAY_TOKEN")

@@ -1,6 +1,6 @@
-# Basilica Validator Guide
+# Cathedral Validator Guide
 
-Comprehensive guide for running a Basilica validator node that verifies GPU compute resources and maintains network quality on the Bittensor network.
+Comprehensive guide for running a Cathedral validator node that verifies GPU compute resources and maintains network quality on the Bittensor network.
 
 ---
 
@@ -54,7 +54,7 @@ EOF
 
 # 3. Build and run
 ./scripts/validator/build.sh
-./basilica-validator --config validator.toml start
+./cathedral-validator --config validator.toml start
 
 # 4. Verify operation
 # Check logs for "Discovered X miners from metagraph"
@@ -89,7 +89,7 @@ curl http://localhost:8080/miners
 
 ## Overview
 
-The Basilica validator performs critical network functions that ensure GPU provider quality and distribute rewards fairly across the Bittensor network.
+The Cathedral validator performs critical network functions that ensure GPU provider quality and distribute rewards fairly across the Bittensor network.
 
 ### What You Need
 
@@ -124,7 +124,7 @@ The Basilica validator performs critical network functions that ensure GPU provi
 
 ### SSH-Based Verification Model
 
-Unlike traditional verification systems that rely on intermediary agents, Basilica validators use **direct SSH access** to GPU nodes for verification. This eliminates intermediaries and ensures cryptographic integrity.
+Unlike traditional verification systems that rely on intermediary agents, Cathedral validators use **direct SSH access** to GPU nodes for verification. This eliminates intermediaries and ensures cryptographic integrity.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -200,7 +200,7 @@ The validator employs a **two-tier verification strategy** that optimizes for bo
 
 #### MinerProver
 
-**Location**: `crates/basilica-validator/src/miner_prover/`
+**Location**: `crates/cathedral-validator/src/miner_prover/`
 
 **Purpose**: Main orchestrator for miner verification
 
@@ -220,7 +220,7 @@ The validator employs a **two-tier verification strategy** that optimizes for bo
 
 #### WeightSetter
 
-**Location**: `crates/basilica-validator/src/bittensor_core/weight_setter.rs`
+**Location**: `crates/cathedral-validator/src/bittensor_core/weight_setter.rs`
 
 **Purpose**: Distributes emissions based on GPU scoring
 
@@ -236,7 +236,7 @@ The validator employs a **two-tier verification strategy** that optimizes for bo
 
 #### ApiHandler
 
-**Location**: `crates/basilica-validator/src/api/mod.rs`
+**Location**: `crates/cathedral-validator/src/api/mod.rs`
 
 **Purpose**: REST API for external services
 
@@ -350,7 +350,7 @@ sudo ufw enable
 
 ## Understanding the System
 
-This section explains the deep technical theory of how validation works in Basilica.
+This section explains the deep technical theory of how validation works in Cathedral.
 
 ### Miner Discovery via Metagraph
 
@@ -408,7 +408,7 @@ ValidatorAuthRequest {
 
 ```rust
 let payload = format!(
-    "BASILICA_AUTH_V1:{}:{}:{}",
+    "CATHEDRAL_AUTH_V1:{}:{}:{}",
     nonce,
     target_miner_hotkey,
     timestamp_secs
@@ -461,7 +461,7 @@ NodeConnectionDetails {
     node_id: "550e8400-e29b-41d4-a716-446655440000", // UUID
     host: "192.168.1.100",
     port: 22,
-    username: "basilica",
+    username: "cathedral",
     ssh_endpoint: "ssh://192.168.1.100:22",
 }
 ```
@@ -498,17 +498,17 @@ fn determine_strategy(node: &Node, last_validation: Option<Timestamp>) -> Strate
 1. **SSH Connection**:
 
    ```bash
-   ssh -i /tmp/validator_ssh_keys/ephemeral_key.pem basilica@node_ip
+   ssh -i /tmp/validator_ssh_keys/ephemeral_key.pem cathedral@node_ip
    ```
 
 2. **Binary Upload**:
 
    ```bash
    # Upload validator-binary (verification executor)
-   scp validator-binary basilica@node:/tmp/
+   scp validator-binary cathedral@node:/tmp/
 
    # Upload executor-binary (for GPU attestation)
-   scp executor-binary basilica@node:/tmp/
+   scp executor-binary cathedral@node:/tmp/
    ```
 
 3. **Remote Execution**:
@@ -524,7 +524,7 @@ fn determine_strategy(node: &Node, last_validation: Option<Timestamp>) -> Strate
 4. **Result Download**:
 
    ```bash
-   scp basilica@node:/tmp/validation_results.json ./results/
+   scp cathedral@node:/tmp/validation_results.json ./results/
    ```
 
 5. **Validation Parsing**:
@@ -568,7 +568,7 @@ fn determine_strategy(node: &Node, last_validation: Option<Timestamp>) -> Strate
 1. **SSH Connection Test**:
 
    ```bash
-   ssh -i ephemeral_key.pem -o ConnectTimeout=10 basilica@node echo "ok"
+   ssh -i ephemeral_key.pem -o ConnectTimeout=10 cathedral@node echo "ok"
    ```
 
 2. **Update Node Verification Timestamp**:
@@ -735,7 +735,7 @@ ssh_key_directory = "/tmp/validator_ssh_keys"
    ```rust
    ValidatorAuthRequest {
        validator_hotkey: "5G3qVa...",
-       ssh_public_key: "ssh-ed25519 AAAAC3Nza... validator@basilica",
+       ssh_public_key: "ssh-ed25519 AAAAC3Nza... validator@cathedral",
        ...
    }
    ```
@@ -751,7 +751,7 @@ ssh_key_directory = "/tmp/validator_ssh_keys"
 4. **Validator SSHs to Nodes**:
 
    ```bash
-   ssh -i /tmp/validator_ssh_keys/ephemeral_key basilica@node1
+   ssh -i /tmp/validator_ssh_keys/ephemeral_key cathedral@node1
    ```
 
 5. **Key Cleanup (after verification)**:
@@ -770,7 +770,7 @@ For long-term access (e.g., rentals), validators can use persistent keys:
 
 ```toml
 [ssh_session]
-persistent_ssh_key_path = "/opt/basilica/keys/validator_persistent.pem"
+persistent_ssh_key_path = "/opt/cathedral/keys/validator_persistent.pem"
 ssh_key_directory = "/tmp/validator_ssh_keys"
 ```
 
@@ -778,10 +778,10 @@ ssh_key_directory = "/tmp/validator_ssh_keys"
 
 ```bash
 # Generate persistent key
-ssh-keygen -t ed25519 -f /opt/basilica/keys/validator_persistent -C "validator-persistent"
+ssh-keygen -t ed25519 -f /opt/cathedral/keys/validator_persistent -C "validator-persistent"
 
 # Set secure permissions
-chmod 600 /opt/basilica/keys/validator_persistent
+chmod 600 /opt/cathedral/keys/validator_persistent
 ```
 
 **Use Cases**:
@@ -817,7 +817,7 @@ SshSessionConfig {
 ```toml
 [ssh_session]
 enable_audit_logging = true
-audit_log_path = "/var/log/basilica/ssh_audit.log"
+audit_log_path = "/var/log/cathedral/ssh_audit.log"
 ```
 
 **Audit Log Format**:
@@ -848,13 +848,13 @@ Comprehensive breakdown of all configuration options with examples and explanati
 
 ```bash
 # Override database URL
-export BASILICA_DATABASE__URL="postgresql://user:pass@localhost/validator"
+export CATHEDRAL_DATABASE__URL="postgresql://user:pass@localhost/validator"
 
 # Override verification interval
-export BASILICA_VERIFICATION__VERIFICATION_INTERVAL__SECS=300
+export CATHEDRAL_VERIFICATION__VERIFICATION_INTERVAL__SECS=300
 
 # Run validator
-./basilica-validator --config validator.toml start
+./cathedral-validator --config validator.toml start
 ```
 
 ### Complete Configuration Example
@@ -933,7 +933,7 @@ level = "info"
 format = "pretty"
 
 # Optional: Log to file
-# file = "/var/log/basilica/validator.log"
+# file = "/var/log/cathedral/validator.log"
 
 # === Metrics Configuration ===
 [metrics]
@@ -1106,7 +1106,7 @@ ssh_key_directory = "/tmp/validator_ssh_keys"
 key_algorithm = "ed25519"
 
 # Optional: Persistent SSH private key path
-# persistent_ssh_key_path = "/opt/basilica/keys/validator_persistent.pem"
+# persistent_ssh_key_path = "/opt/cathedral/keys/validator_persistent.pem"
 
 # Default session duration (seconds)
 default_session_duration = 300  # 5 minutes
@@ -1135,7 +1135,7 @@ session_rate_limit = 20
 enable_audit_logging = true
 
 # Audit log file path
-audit_log_path = "/var/log/basilica/ssh_audit.log"
+audit_log_path = "/var/log/cathedral/ssh_audit.log"
 
 # SSH connection timeout
 [ssh_session.ssh_connection_timeout]
@@ -1213,7 +1213,7 @@ nanos = 0
 
 ```bash
 # Validate configuration file
-./basilica-validator --config validator.toml config validate
+./cathedral-validator --config validator.toml config validate
 
 # Example output:
 # ✓ Configuration validation passed
@@ -1268,14 +1268,14 @@ Four deployment methods for different use cases: Binary, Systemd, Docker, and Do
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/basilica.git
-cd basilica/basilica
+git clone https://github.com/your-org/cathedral.git
+cd cathedral/cathedral
 
 # Build using the build script
 ./scripts/validator/build.sh
 
 # Verify build
-ls -lh basilica-validator
+ls -lh cathedral-validator
 # Should show ~50MB binary
 ```
 
@@ -1308,13 +1308,13 @@ chmod 700 /tmp/validator_ssh_keys
 
 ```bash
 # Run in foreground (for testing)
-./basilica-validator --config config/validator.toml start
+./cathedral-validator --config config/validator.toml start
 
 # Run in background with nohup
-nohup ./basilica-validator --config config/validator.toml start > logs/validator.log 2>&1 &
+nohup ./cathedral-validator --config config/validator.toml start > logs/validator.log 2>&1 &
 
 # Check process
-ps aux | grep basilica-validator
+ps aux | grep cathedral-validator
 
 # View logs
 tail -f logs/validator.log
@@ -1346,44 +1346,44 @@ curl http://localhost:9090/metrics
 ./scripts/validator/build.sh
 
 # Create installation directory
-sudo mkdir -p /opt/basilica/{bin,config,data,logs}
+sudo mkdir -p /opt/cathedral/{bin,config,data,logs}
 
 # Copy binary
-sudo cp basilica-validator /opt/basilica/bin/
+sudo cp cathedral-validator /opt/cathedral/bin/
 
 # Copy configuration
-sudo cp config/validator.toml /opt/basilica/config/
+sudo cp config/validator.toml /opt/cathedral/config/
 
 # Set ownership
-sudo chown -R $USER:$USER /opt/basilica
+sudo chown -R $USER:$USER /opt/cathedral
 ```
 
 **Step 2: Create Systemd Service File**
 
-Create `/etc/systemd/system/basilica-validator.service`:
+Create `/etc/systemd/system/cathedral-validator.service`:
 
 ```ini
 [Unit]
-Description=Basilica Validator
+Description=Cathedral Validator
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/basilica
-ExecStart=/opt/basilica/bin/basilica-validator --config /opt/basilica/config/validator.toml start
+WorkingDirectory=/opt/cathedral
+ExecStart=/opt/cathedral/bin/cathedral-validator --config /opt/cathedral/config/validator.toml start
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=basilica-validator
+SyslogIdentifier=cathedral-validator
 
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/basilica/data /opt/basilica/logs /tmp/validator_ssh_keys
+ReadWritePaths=/opt/cathedral/data /opt/cathedral/logs /tmp/validator_ssh_keys
 ProtectHome=yes
 
 # Resource limits
@@ -1401,35 +1401,35 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 
 # Enable service (start on boot)
-sudo systemctl enable basilica-validator
+sudo systemctl enable cathedral-validator
 
 # Start service
-sudo systemctl start basilica-validator
+sudo systemctl start cathedral-validator
 
 # Check status
-sudo systemctl status basilica-validator
+sudo systemctl status cathedral-validator
 
 # View logs
-sudo journalctl -u basilica-validator -f
+sudo journalctl -u cathedral-validator -f
 
 # View recent logs
-sudo journalctl -u basilica-validator -n 100
+sudo journalctl -u cathedral-validator -n 100
 ```
 
 **Step 4: Service Management**
 
 ```bash
 # Stop service
-sudo systemctl stop basilica-validator
+sudo systemctl stop cathedral-validator
 
 # Restart service
-sudo systemctl restart basilica-validator
+sudo systemctl restart cathedral-validator
 
 # Disable service (don't start on boot)
-sudo systemctl disable basilica-validator
+sudo systemctl disable cathedral-validator
 
 # View service configuration
-sudo systemctl cat basilica-validator
+sudo systemctl cat cathedral-validator
 ```
 
 ---
@@ -1446,27 +1446,27 @@ cd scripts/validator
 ./build.sh --docker
 
 # Or build manually
-docker build -t basilica-validator:latest -f Dockerfile ../..
+docker build -t cathedral-validator:latest -f Dockerfile ../..
 
 # Verify image
-docker images | grep basilica-validator
+docker images | grep cathedral-validator
 ```
 
 **Step 2: Prepare Configuration and Volumes**
 
 ```bash
 # Create host directories
-mkdir -p /opt/basilica/{config,data,logs,wallets,ssh_keys}
+mkdir -p /opt/cathedral/{config,data,logs,wallets,ssh_keys}
 
 # Copy configuration
-cp ../../config/validator.toml /opt/basilica/config/
+cp ../../config/validator.toml /opt/cathedral/config/
 
 # Copy Bittensor wallet (or mount existing)
-cp -r ~/.bittensor/wallets /opt/basilica/
+cp -r ~/.bittensor/wallets /opt/cathedral/
 
 # Set permissions
-chmod 700 /opt/basilica/ssh_keys
-chmod 700 /opt/basilica/wallets
+chmod 700 /opt/cathedral/ssh_keys
+chmod 700 /opt/cathedral/wallets
 ```
 
 **Step 3: Run Container**
@@ -1474,48 +1474,48 @@ chmod 700 /opt/basilica/wallets
 ```bash
 # Run with Docker
 docker run -d \
-  --name basilica-validator \
+  --name cathedral-validator \
   --restart unless-stopped \
   -p 9090:9090 \
   -p 8080:8080 \
   -p 9090:9090 \
-  -v /opt/basilica/config:/opt/basilica/config:ro \
-  -v /opt/basilica/data:/opt/basilica/data \
-  -v /opt/basilica/logs:/opt/basilica/logs \
-  -v /opt/basilica/wallets:/root/.bittensor/wallets:ro \
-  -v /opt/basilica/ssh_keys:/tmp/validator_ssh_keys \
-  basilica-validator:latest \
-  --config /opt/basilica/config/validator.toml start
+  -v /opt/cathedral/config:/opt/cathedral/config:ro \
+  -v /opt/cathedral/data:/opt/cathedral/data \
+  -v /opt/cathedral/logs:/opt/cathedral/logs \
+  -v /opt/cathedral/wallets:/root/.bittensor/wallets:ro \
+  -v /opt/cathedral/ssh_keys:/tmp/validator_ssh_keys \
+  cathedral-validator:latest \
+  --config /opt/cathedral/config/validator.toml start
 
 # Check container status
-docker ps | grep basilica-validator
+docker ps | grep cathedral-validator
 
 # View logs
-docker logs -f basilica-validator
+docker logs -f cathedral-validator
 
 # View recent logs
-docker logs --tail 100 basilica-validator
+docker logs --tail 100 cathedral-validator
 ```
 
 **Step 4: Container Management**
 
 ```bash
 # Stop container
-docker stop basilica-validator
+docker stop cathedral-validator
 
 # Start container
-docker start basilica-validator
+docker start cathedral-validator
 
 # Restart container
-docker restart basilica-validator
+docker restart cathedral-validator
 
 # Remove container
-docker rm -f basilica-validator
+docker rm -f cathedral-validator
 
 # Update to new version
-docker pull basilica-validator:latest
-docker stop basilica-validator
-docker rm basilica-validator
+docker pull cathedral-validator:latest
+docker stop cathedral-validator
+docker rm cathedral-validator
 # Re-run docker run command from Step 3
 ```
 
@@ -1534,25 +1534,25 @@ version: '3.8'
 
 services:
   validator:
-    image: basilica-validator:latest
-    container_name: basilica-validator
+    image: cathedral-validator:latest
+    container_name: cathedral-validator
     restart: unless-stopped
-    command: --config /opt/basilica/config/validator.toml start
+    command: --config /opt/cathedral/config/validator.toml start
     ports:
       - "9090:9090"  # Bittensor axon
       - "8080:8080"  # API server
       - "9090:9090"  # Metrics
     volumes:
-      - /opt/basilica/config:/opt/basilica/config:ro
-      - /opt/basilica/data:/opt/basilica/data
-      - /opt/basilica/logs:/opt/basilica/logs
+      - /opt/cathedral/config:/opt/cathedral/config:ro
+      - /opt/cathedral/data:/opt/cathedral/data
+      - /opt/cathedral/logs:/opt/cathedral/logs
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
       - validator_ssh_keys:/tmp/validator_ssh_keys
     environment:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     networks:
-      - basilica_network
+      - cathedral_network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -1561,7 +1561,7 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: basilica-prometheus
+    container_name: cathedral-prometheus
     restart: unless-stopped
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -1573,11 +1573,11 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     networks:
-      - basilica_network
+      - cathedral_network
 
   grafana:
     image: grafana/grafana:latest
-    container_name: basilica-grafana
+    container_name: cathedral-grafana
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -1589,7 +1589,7 @@ services:
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
     networks:
-      - basilica_network
+      - cathedral_network
     depends_on:
       - prometheus
 
@@ -1599,7 +1599,7 @@ volumes:
   grafana_data:
 
 networks:
-  basilica_network:
+  cathedral_network:
     driver: bridge
 ```
 
@@ -1613,7 +1613,7 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'basilica-validator'
+  - job_name: 'cathedral-validator'
     static_configs:
       - targets: ['validator:9090']
         labels:
@@ -1627,7 +1627,7 @@ scrape_configs:
 cd scripts/validator
 
 # Ensure configuration exists
-ls /opt/basilica/config/validator.toml
+ls /opt/cathedral/config/validator.toml
 
 # Deploy with Docker Compose
 docker compose -f compose.prod.yml up -d
@@ -1787,7 +1787,7 @@ let response = miner_client.authenticate_validator(auth_request).await?;
 **Authentication Payload**:
 
 ```
-BASILICA_AUTH_V1:123456:5FHneW...:1704067200
+CATHEDRAL_AUTH_V1:123456:5FHneW...:1704067200
 ```
 
 **Example Auth Log**:
@@ -1833,7 +1833,7 @@ while let Some(node_details) = node_stream.message().await? {
   "node_id": "550e8400-e29b-41d4-a716-446655440000",
   "host": "192.168.1.100",
   "port": 22,
-  "username": "basilica",
+  "username": "cathedral",
   "ssh_endpoint": "ssh://192.168.1.100:22"
 }
 ```
@@ -1842,9 +1842,9 @@ while let Some(node_details) = node_stream.message().await? {
 
 ```
 2024-01-01T12:00:07Z INFO  Discovered 3 nodes from miner UID 5
-2024-01-01T12:00:07Z DEBUG Node 550e8400: ssh://192.168.1.100:22 (basilica@192.168.1.100)
-2024-01-01T12:00:07Z DEBUG Node 660f9511: ssh://192.168.1.101:22 (basilica@192.168.1.101)
-2024-01-01T12:00:07Z DEBUG Node 770fa622: ssh://192.168.1.102:22 (basilica@192.168.1.102)
+2024-01-01T12:00:07Z DEBUG Node 550e8400: ssh://192.168.1.100:22 (cathedral@192.168.1.100)
+2024-01-01T12:00:07Z DEBUG Node 660f9511: ssh://192.168.1.101:22 (cathedral@192.168.1.101)
+2024-01-01T12:00:07Z DEBUG Node 770fa622: ssh://192.168.1.102:22 (cathedral@192.168.1.102)
 ```
 
 ---
@@ -1901,7 +1901,7 @@ let strategy = match last_validation {
 ssh -i /tmp/validator_ssh_keys/ephemeral_550e8400.pem \
     -o ConnectTimeout=30 \
     -o StrictHostKeyChecking=no \
-    basilica@192.168.1.100
+    cathedral@192.168.1.100
 ```
 
 **5a.2: Binary Upload**:
@@ -2010,7 +2010,7 @@ SET gpu_counts_json = '{"H100": 1}', total_score = 1.0, last_updated = NOW();
 ```bash
 ssh -i /tmp/validator_ssh_keys/ephemeral_550e8400.pem \
     -o ConnectTimeout=10 \
-    basilica@192.168.1.100 \
+    cathedral@192.168.1.100 \
     echo "ok"
 ```
 
@@ -2416,24 +2416,24 @@ Generate → Send to Miner → Miner Deploys → Validation → Cleanup
 ```toml
 [ssh_session]
 enable_audit_logging = true
-audit_log_path = "/var/log/basilica/ssh_audit.log"
+audit_log_path = "/var/log/cathedral/ssh_audit.log"
 ```
 
 **Audit Log Analysis**:
 
 ```bash
 # View recent SSH activity
-tail -f /var/log/basilica/ssh_audit.log
+tail -f /var/log/cathedral/ssh_audit.log
 
 # Count connections per node
-grep "connected to" /var/log/basilica/ssh_audit.log | \
+grep "connected to" /var/log/cathedral/ssh_audit.log | \
     awk '{print $6}' | sort | uniq -c | sort -rn
 
 # Find failed connections
-grep "connection failed" /var/log/basilica/ssh_audit.log
+grep "connection failed" /var/log/cathedral/ssh_audit.log
 
 # Calculate average session duration
-grep "disconnected from" /var/log/basilica/ssh_audit.log | \
+grep "disconnected from" /var/log/cathedral/ssh_audit.log | \
     awk '{print $NF}' | sed 's/[^0-9]//g' | \
     awk '{sum+=$1; count++} END {print sum/count "s"}'
 ```
@@ -2614,10 +2614,10 @@ chown validator:validator data/validator.db
 
 ```bash
 # Automated backups
-*/15 * * * * sqlite3 /opt/basilica/data/validator.db ".backup '/opt/basilica/backups/validator_$(date +\%Y\%m\%d_\%H\%M\%S).db'"
+*/15 * * * * sqlite3 /opt/cathedral/data/validator.db ".backup '/opt/cathedral/backups/validator_$(date +\%Y\%m\%d_\%H\%M\%S).db'"
 
 # Retention policy (keep 7 days)
-0 0 * * * find /opt/basilica/backups/ -name "validator_*.db" -mtime +7 -delete
+0 0 * * * find /opt/cathedral/backups/ -name "validator_*.db" -mtime +7 -delete
 ```
 
 #### PostgreSQL Security (Production)
@@ -2626,7 +2626,7 @@ chown validator:validator data/validator.db
 
 ```toml
 [database]
-url = "postgresql://validator:STRONG_PASSWORD@localhost:5432/basilica?sslmode=require"
+url = "postgresql://validator:STRONG_PASSWORD@localhost:5432/cathedral?sslmode=require"
 ```
 
 **PostgreSQL Configuration**:
@@ -2639,7 +2639,7 @@ ssl_key_file = '/etc/ssl/private/server.key'
 
 # /etc/postgresql/15/main/pg_hba.conf
 # Require SSL connections
-hostssl    basilica    validator    127.0.0.1/32    scram-sha-256
+hostssl    cathedral    validator    127.0.0.1/32    scram-sha-256
 ```
 
 **User Privileges** (principle of least privilege):
@@ -2649,7 +2649,7 @@ hostssl    basilica    validator    127.0.0.1/32    scram-sha-256
 CREATE USER validator WITH PASSWORD 'STRONG_PASSWORD';
 
 -- Grant only necessary privileges
-GRANT CONNECT ON DATABASE basilica TO validator;
+GRANT CONNECT ON DATABASE cathedral TO validator;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO validator;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO validator;
 
@@ -2668,36 +2668,36 @@ REVOKE DROP ON ALL TABLES IN SCHEMA public FROM validator;
 
 ```promql
 # Up/down status
-up{job="basilica-validator"}
+up{job="cathedral-validator"}
 
 # API response time
-basilica_api_request_duration_seconds{quantile="0.95"}
+cathedral_api_request_duration_seconds{quantile="0.95"}
 
 # Verification success rate
-rate(basilica_verification_success_total[5m]) / rate(basilica_verification_total[5m])
+rate(cathedral_verification_success_total[5m]) / rate(cathedral_verification_total[5m])
 ```
 
 **Verification Performance**:
 
 ```promql
 # Verifications per minute
-rate(basilica_verification_total[1m]) * 60
+rate(cathedral_verification_total[1m]) * 60
 
 # Average verification duration
-rate(basilica_verification_duration_seconds_sum[5m]) / rate(basilica_verification_duration_seconds_count[5m])
+rate(cathedral_verification_duration_seconds_sum[5m]) / rate(cathedral_verification_duration_seconds_count[5m])
 
 # Failed verifications
-rate(basilica_verification_failed_total[5m])
+rate(cathedral_verification_failed_total[5m])
 ```
 
 **Weight Setting**:
 
 ```promql
 # Time since last weight set
-time() - basilica_last_weight_set_timestamp
+time() - cathedral_last_weight_set_timestamp
 
 # Weight set errors
-rate(basilica_weight_set_errors_total[1h])
+rate(cathedral_weight_set_errors_total[1h])
 ```
 
 #### Alerting Rules
@@ -2706,11 +2706,11 @@ rate(basilica_weight_set_errors_total[1h])
 
 ```yaml
 groups:
-  - name: basilica_validator
+  - name: cathedral_validator
     interval: 30s
     rules:
       - alert: ValidatorDown
-        expr: up{job="basilica-validator"} == 0
+        expr: up{job="cathedral-validator"} == 0
         for: 2m
         labels:
           severity: critical
@@ -2720,8 +2720,8 @@ groups:
 
       - alert: VerificationFailureRate
         expr: |
-          rate(basilica_verification_failed_total[5m]) /
-          rate(basilica_verification_total[5m]) > 0.1
+          rate(cathedral_verification_failed_total[5m]) /
+          rate(cathedral_verification_total[5m]) > 0.1
         for: 10m
         labels:
           severity: warning
@@ -2730,7 +2730,7 @@ groups:
           description: "More than 10% of verifications are failing"
 
       - alert: WeightSetStale
-        expr: time() - basilica_last_weight_set_timestamp > 7200
+        expr: time() - cathedral_last_weight_set_timestamp > 7200
         for: 5m
         labels:
           severity: critical
@@ -2739,7 +2739,7 @@ groups:
           description: "Weights haven't been set in over 2 hours"
 
       - alert: DatabaseErrors
-        expr: rate(basilica_database_errors_total[5m]) > 0
+        expr: rate(cathedral_database_errors_total[5m]) > 0
         for: 5m
         labels:
           severity: warning
@@ -2761,7 +2761,7 @@ groups:
 curl http://localhost:8080/health
 
 # Check recent verifications
-journalctl -u basilica-validator --since "1 hour ago" | grep "Verification"
+journalctl -u cathedral-validator --since "1 hour ago" | grep "Verification"
 
 # Check database size
 du -sh data/validator.db
@@ -2774,10 +2774,10 @@ du -sh data/validator.db
 curl http://localhost:8080/verification/results | jq '.success_rate'
 
 # Check disk space
-df -h /opt/basilica
+df -h /opt/cathedral
 
 # Review error logs
-journalctl -u basilica-validator -p err --since "1 week ago"
+journalctl -u cathedral-validator -p err --since "1 week ago"
 
 # Test backup restoration (on separate system)
 cp backups/latest.db test/validator.db
@@ -2790,7 +2790,7 @@ sqlite3 test/validator.db "PRAGMA integrity_check;"
 # Update validator software
 git pull
 ./scripts/validator/build.sh
-sudo systemctl restart basilica-validator
+sudo systemctl restart cathedral-validator
 
 # Review and rotate logs
 journalctl --vacuum-time=30d
@@ -2818,11 +2818,11 @@ sudo ufw status
 
    ```bash
    # On new server
-   git clone https://github.com/your-org/basilica.git
+   git clone https://github.com/your-org/cathedral.git
    ./scripts/validator/build.sh
 
    # Restore configuration
-   cp backup/validator.toml /opt/basilica/config/
+   cp backup/validator.toml /opt/cathedral/config/
 
    # Restore wallet
    mkdir -p ~/.bittensor/wallets/validator/hotkeys/
@@ -2830,17 +2830,17 @@ sudo ufw status
    chmod 600 ~/.bittensor/wallets/validator/hotkeys/default
 
    # Restore database
-   cp backup/validator.db /opt/basilica/data/
+   cp backup/validator.db /opt/cathedral/data/
 
    # Start validator
-   sudo systemctl start basilica-validator
+   sudo systemctl start cathedral-validator
    ```
 
 2. **Database Corruption**:
 
    ```bash
    # Stop validator
-   sudo systemctl stop basilica-validator
+   sudo systemctl stop cathedral-validator
 
    # Restore from backup
    cp backups/validator_LATEST.db data/validator.db
@@ -2849,14 +2849,14 @@ sudo ufw status
    sqlite3 data/validator.db "PRAGMA integrity_check;"
 
    # Restart validator
-   sudo systemctl start basilica-validator
+   sudo systemctl start cathedral-validator
    ```
 
 3. **Wallet Compromise**:
 
    ```bash
    # IMMEDIATE: Stop validator
-   sudo systemctl stop basilica-validator
+   sudo systemctl stop cathedral-validator
 
    # Create new hotkey
    btcli wallet new_hotkey --wallet.name validator --wallet.hotkey new_hotkey
@@ -2868,7 +2868,7 @@ sudo ufw status
    sed -i 's/hotkey_name = "default"/hotkey_name = "new_hotkey"/' config/validator.toml
 
    # Restart validator
-   sudo systemctl start basilica-validator
+   sudo systemctl start cathedral-validator
    ```
 
 ---
@@ -2885,86 +2885,86 @@ Comprehensive monitoring setup for validators using Prometheus and Grafana.
 
 ```promql
 # CPU usage
-basilica_cpu_usage_percent
+cathedral_cpu_usage_percent
 
 # Memory usage
-basilica_memory_usage_bytes
-basilica_memory_available_bytes
+cathedral_memory_usage_bytes
+cathedral_memory_available_bytes
 
 # Disk usage
-basilica_disk_usage_bytes{path="/opt/basilica/data"}
-basilica_disk_available_bytes{path="/opt/basilica/data"}
+cathedral_disk_usage_bytes{path="/opt/cathedral/data"}
+cathedral_disk_available_bytes{path="/opt/cathedral/data"}
 
 # Network I/O
-rate(basilica_network_received_bytes_total[1m])
-rate(basilica_network_transmitted_bytes_total[1m])
+rate(cathedral_network_received_bytes_total[1m])
+rate(cathedral_network_transmitted_bytes_total[1m])
 ```
 
 #### Verification Metrics
 
 ```promql
 # Total verifications
-basilica_verification_total{type="full"}
-basilica_verification_total{type="lightweight"}
+cathedral_verification_total{type="full"}
+cathedral_verification_total{type="lightweight"}
 
 # Verification success/failure
-basilica_verification_success_total
-basilica_verification_failed_total
+cathedral_verification_success_total
+cathedral_verification_failed_total
 
 # Verification duration
-basilica_verification_duration_seconds{quantile="0.5"}
-basilica_verification_duration_seconds{quantile="0.95"}
-basilica_verification_duration_seconds{quantile="0.99"}
+cathedral_verification_duration_seconds{quantile="0.5"}
+cathedral_verification_duration_seconds{quantile="0.95"}
+cathedral_verification_duration_seconds{quantile="0.99"}
 
 # Active verifications
-basilica_verification_active
+cathedral_verification_active
 
 # Miner discovery
-basilica_miners_discovered_total
-basilica_miners_verified_total
+cathedral_miners_discovered_total
+cathedral_miners_verified_total
 ```
 
 #### Weight Setting Metrics
 
 ```promql
 # Weight set operations
-basilica_weight_set_total
-basilica_weight_set_errors_total
+cathedral_weight_set_total
+cathedral_weight_set_errors_total
 
 # Last weight set timestamp
-basilica_last_weight_set_timestamp
+cathedral_last_weight_set_timestamp
 
 # Weight set duration
-basilica_weight_set_duration_seconds
+cathedral_weight_set_duration_seconds
 ```
 
 #### API Metrics
 
 ```promql
 # HTTP requests
-basilica_http_requests_total{method="GET",path="/miners"}
-basilica_http_requests_total{status="200"}
+cathedral_http_requests_total{method="GET",path="/miners"}
+cathedral_http_requests_total{status="200"}
 
 # Request duration
-basilica_http_request_duration_seconds{quantile="0.95"}
+cathedral_http_request_duration_seconds{quantile="0.95"}
 
 # Active connections
-basilica_http_connections_active
+cathedral_http_connections_active
 ```
 
 #### Database Metrics
 
 ```promql
 # Database connections
-basilica_database_connections_active
-basilica_database_connections_idle
+cathedral_database_connections_active
+cathedral_database_connections_idle
 
 # Query duration
-basilica_database_query_duration_seconds{operation="select"}
-basilica_database_query_duration_seconds{operation="insert"}
+cathedral_database_query_duration_seconds{operation="select"}
+cathedral_database_query_duration_seconds{operation="insert"}
 
 # Database size
-basilica_database_size_bytes
+cathedral_database_size_bytes
 ```
 
 ### Grafana Dashboard
@@ -3013,13 +3013,13 @@ basilica_database_size_bytes
 ```json
 {
   "dashboard": {
-    "title": "Basilica Validator",
+    "title": "Cathedral Validator",
     "panels": [
       {
         "title": "Verification Success Rate",
         "targets": [
           {
-            "expr": "rate(basilica_verification_success_total[5m]) / rate(basilica_verification_total[5m]) * 100"
+            "expr": "rate(cathedral_verification_success_total[5m]) / rate(cathedral_verification_total[5m]) * 100"
           }
         ],
         "type": "gauge"
@@ -3028,7 +3028,7 @@ basilica_database_size_bytes
         "title": "Verifications per Minute",
         "targets": [
           {
-            "expr": "rate(basilica_verification_total[1m]) * 60",
+            "expr": "rate(cathedral_verification_total[1m]) * 60",
             "legendFormat": "{{type}}"
           }
         ],
@@ -3113,21 +3113,21 @@ healthcheck:
 
 ```bash
 # Verification activity
-journalctl -u basilica-validator | grep "Verification"
+journalctl -u cathedral-validator | grep "Verification"
 
 # Weight setting events
-journalctl -u basilica-validator | grep "Weight set"
+journalctl -u cathedral-validator | grep "Weight set"
 
 # Error tracking
-journalctl -u basilica-validator -p err
+journalctl -u cathedral-validator -p err
 
 # Performance analysis (verification duration)
-journalctl -u basilica-validator | grep "Validation complete" | \
+journalctl -u cathedral-validator | grep "Validation complete" | \
     awk '{print $(NF-1)}' | sed 's/[^0-9.]//g' | \
     awk '{sum+=$1; count++} END {print "Average:", sum/count "s"}'
 
 # Miner discovery trends
-journalctl -u basilica-validator --since "24 hours ago" | \
+journalctl -u cathedral-validator --since "24 hours ago" | \
     grep "Discovered.*miners" | \
     awk '{print $1, $2, $NF}' | sed 's/miners//'
 ```
@@ -3149,13 +3149,13 @@ clients:
   - url: http://loki:3100/loki/api/v1/push
 
 scrape_configs:
-  - job_name: basilica-validator
+  - job_name: cathedral-validator
     journal:
       json: false
       max_age: 12h
       labels:
         job: systemd-journal
-        service: basilica-validator
+        service: cathedral-validator
     relabel_configs:
       - source_labels: ['__journal__systemd_unit']
         target_label: 'unit'
@@ -3198,7 +3198,7 @@ Common issues and solutions for validator operation.
    curl -v wss://entrypoint-finney.opentensor.ai:443
 
    # Check logs for connection errors
-   journalctl -u basilica-validator | grep "chain"
+   journalctl -u cathedral-validator | grep "chain"
 
    # Try alternative chain endpoint
    # Edit config/validator.toml:
@@ -3231,13 +3231,13 @@ Common issues and solutions for validator operation.
 
    ```bash
    # Check if validator's SSH key was provided in auth request
-   journalctl -u basilica-validator | grep "ssh_public_key"
+   journalctl -u cathedral-validator | grep "ssh_public_key"
 
    # Verify ephemeral key generation
    ls -la /tmp/validator_ssh_keys/
 
    # Test manual SSH (won't work if key not deployed)
-   ssh -i /tmp/validator_ssh_keys/latest.pem basilica@192.168.1.100
+   ssh -i /tmp/validator_ssh_keys/latest.pem cathedral@192.168.1.100
    ```
 
 2. **Network Connectivity**:
@@ -3301,7 +3301,7 @@ Common issues and solutions for validator operation.
 
    ```bash
    # Check logs for specific error
-   journalctl -u basilica-validator | grep "set weights"
+   journalctl -u cathedral-validator | grep "set weights"
 
    # Common issues:
    # - Weights don't sum to 65535 (u16::MAX)
@@ -3316,7 +3316,7 @@ Common issues and solutions for validator operation.
 
    ```bash
    # Check for chain errors
-   journalctl -u basilica-validator | grep -i "transaction\|extrinsic"
+   journalctl -u cathedral-validator | grep -i "transaction\|extrinsic"
 
    # Possible solutions:
    # - Wait for next block and retry
@@ -3361,7 +3361,7 @@ free -h
 
    ```bash
    # Restart validator
-   sudo systemctl restart basilica-validator
+   sudo systemctl restart cathedral-validator
 
    # Monitor memory over time
    watch -n 5 free -h
@@ -3398,16 +3398,16 @@ free -h
    sqlite3 data/validator.db "PRAGMA integrity_check;"
 
    # If corrupted, restore from backup
-   sudo systemctl stop basilica-validator
+   sudo systemctl stop cathedral-validator
    cp backups/validator_LATEST.db data/validator.db
-   sudo systemctl start basilica-validator
+   sudo systemctl start cathedral-validator
    ```
 
 3. **Disk Full**:
 
    ```bash
    # Check disk space
-   df -h /opt/basilica
+   df -h /opt/cathedral
 
    # Clean up old logs
    journalctl --vacuum-time=7d
@@ -3435,10 +3435,10 @@ curl http://localhost:8080/health
 
    ```bash
    # Check if validator is running
-   sudo systemctl status basilica-validator
+   sudo systemctl status cathedral-validator
 
    # Check logs for API startup
-   journalctl -u basilica-validator | grep "API server listening"
+   journalctl -u cathedral-validator | grep "API server listening"
 
    # Should see: "API server listening on 0.0.0.0:8080"
    ```
@@ -3541,7 +3541,7 @@ curl http://localhost:8080/health
 
    # Should have:
    scrape_configs:
-     - job_name: 'basilica-validator'
+     - job_name: 'cathedral-validator'
        static_configs:
          - targets: ['validator:9090']
    ```
@@ -3550,7 +3550,7 @@ curl http://localhost:8080/health
 
    ```bash
    # Test from Prometheus container
-   docker exec basilica-prometheus curl http://validator:9090/metrics
+   docker exec cathedral-prometheus curl http://validator:9090/metrics
 
    # Should return metrics output
    ```
@@ -3583,14 +3583,14 @@ curl http://localhost:8080/health
 
    ```bash
    # Verify volume mount
-   docker inspect basilica-validator | grep Mounts -A 20
+   docker inspect cathedral-validator | grep Mounts -A 20
 
    # Should show:
    # "Source": "/home/user/.bittensor/wallets",
    # "Destination": "/root/.bittensor/wallets"
 
    # Recreate container with correct mount
-   docker rm basilica-validator
+   docker rm cathedral-validator
    docker run -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro ...
    ```
 
@@ -3647,7 +3647,7 @@ fn determine_strategy_custom(node: &Node, history: &VerificationHistory) -> Stra
 }
 ```
 
-**Configuration Location**: `crates/basilica-validator/src/miner_prover/validation_strategy.rs`
+**Configuration Location**: `crates/cathedral-validator/src/miner_prover/validation_strategy.rs`
 
 ### High Availability Setup
 
@@ -3681,13 +3681,13 @@ fn determine_strategy_custom(node: &Node, history: &VerificationHistory) -> Stra
    ```toml
    # Both validators use same PostgreSQL database
    [database]
-   url = "postgresql://validator:pass@db-server:5432/basilica"
+   url = "postgresql://validator:pass@db-server:5432/cathedral"
    ```
 
 2. **Distributed Locking** (prevent duplicate work):
 
    ```rust
-   // Implemented in: crates/basilica-common/src/distributed/postgres_lock.rs
+   // Implemented in: crates/cathedral-common/src/distributed/postgres_lock.rs
    // Ensures only one validator performs verification/weight-setting at a time
    ```
 
@@ -3840,7 +3840,7 @@ impl SshConnectionPool {
 }
 ```
 
-**Implementation Location**: `crates/basilica-validator/src/ssh/connection_pool.rs` (to be implemented)
+**Implementation Location**: `crates/cathedral-validator/src/ssh/connection_pool.rs` (to be implemented)
 
 ### Custom GPU Categories
 
@@ -3992,4 +3992,4 @@ This guide covered comprehensive validator operation from setup to advanced opti
 - Custom verification strategies
 - API authentication and external integration
 
-For additional support, refer to specific sections or consult the codebase at `/root/workspace/spacejar/basilica/basilica/crates/basilica-validator/`.
+For additional support, refer to specific sections or consult the codebase at `/root/workspace/spacejar/cathedral/cathedral/crates/cathedral-validator/`.

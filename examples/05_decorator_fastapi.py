@@ -6,10 +6,10 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 05_decorator_fastapi.py
 """
-import basilica
+import cathedral
 
 
-@basilica.deployment(
+@cathedral.deployment(
     name="decorator-api",
     port=8000,
     pip_packages=["fastapi", "uvicorn"],

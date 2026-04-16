@@ -1,15 +1,15 @@
 """
-Streamlit demo app for Basilica deployment.
+Streamlit demo app for Cathedral deployment.
 
 This file is deployed by 14_streamlit.py
 """
 import streamlit as st
 import random
 
-st.set_page_config(page_title="Basilica Streamlit Demo", page_icon="rocket")
+st.set_page_config(page_title="Cathedral Streamlit Demo", page_icon="rocket")
 
-st.title("Basilica Streamlit Demo")
-st.markdown("An interactive app deployed on Basilica GPU cloud.")
+st.title("Cathedral Streamlit Demo")
+st.markdown("An interactive app deployed on Cathedral GPU cloud.")
 
 # Sidebar
 st.sidebar.header("Settings")
@@ -49,4 +49,4 @@ st.line_chart(st.session_state.chart_data)
 
 # Footer
 st.divider()
-st.caption("Deployed with Basilica - https://basilica.ai")
+st.caption("Deployed with Cathedral - https://basilica.ai")

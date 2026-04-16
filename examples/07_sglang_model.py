@@ -14,12 +14,12 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 07_sglang_model.py
 """
-import basilica
+import cathedral
 
-compile_cache = basilica.Volume.from_name("sglang-cache", create_if_missing=True)
+compile_cache = cathedral.Volume.from_name("sglang-cache", create_if_missing=True)
 
 
-@basilica.deployment(
+@cathedral.deployment(
     name="sglang-qwen",
     image="lmsysorg/sglang:latest",
     port=30000,

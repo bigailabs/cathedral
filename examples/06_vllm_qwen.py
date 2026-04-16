@@ -10,12 +10,12 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 06_vllm_qwen.py
 """
-import basilica
+import cathedral
 
-compile_cache = basilica.Volume.from_name("vllm-compile-cache", create_if_missing=True)
+compile_cache = cathedral.Volume.from_name("vllm-compile-cache", create_if_missing=True)
 
 
-@basilica.deployment(
+@cathedral.deployment(
     name="vllm-qwen",
     image="vllm/vllm-openai:latest",
     port=8000,

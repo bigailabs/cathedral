@@ -5,7 +5,7 @@ Deploy a pre-built container image.
 This example shows how to deploy existing Docker images without custom code.
 Useful for standard services like nginx, redis, or your own pre-built images.
 
-Note: Basilica runs containers as non-root (UID 1000).
+Note: Cathedral runs containers as non-root (UID 1000).
 Use images designed for non-root execution.
 
 Usage:
@@ -13,9 +13,9 @@ Usage:
     python3 09_container_image.py
 """
 import requests
-from basilica import BasilicaClient
+from cathedral import CathedralClient
 
-client = BasilicaClient()
+client = CathedralClient()
 
 print("Deploying nginx (non-root image)...")
 

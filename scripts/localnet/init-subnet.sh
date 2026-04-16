@@ -1,5 +1,5 @@
 #!/bin/bash
-# Basilica Localnet - Initialize Subnet
+# Cathedral Localnet - Initialize Subnet
 # Dissolves genesis subnet 1, re-registers with deep AMM pool (10,000 TAO),
 # creates wallets, funds them, and registers neurons.
 #
@@ -12,7 +12,7 @@ WALLETS_DIR="${SCRIPT_DIR}/wallets"
 NETUID=1
 
 show_help() {
-    echo "Basilica Localnet - Initialize Subnet"
+    echo "Cathedral Localnet - Initialize Subnet"
     echo ""
     echo "Usage: ./init-subnet.sh [-h|--help]"
     echo ""
@@ -46,7 +46,7 @@ show_help() {
 [[ "${1:-}" =~ ^(-h|--help)$ ]] && show_help && exit 0
 
 echo "========================================"
-echo "  Basilica Localnet - Subnet Init"
+echo "  Cathedral Localnet - Subnet Init"
 echo "========================================"
 echo ""
 

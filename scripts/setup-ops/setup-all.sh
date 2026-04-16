@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Complete Basilica server setup automation
+# Complete Cathedral server setup automation
 # Usage: ./scripts/setup-ops/setup-all.sh [config_file]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +28,7 @@ parse_server() {
     echo "$user_host -p $port"
 }
 
-echo "=== Basilica Complete Server Setup ==="
+echo "=== Cathedral Complete Server Setup ==="
 echo "Using configuration: $CONFIG_FILE"
 echo ""
 
@@ -56,7 +56,7 @@ echo "=== All Setup Complete ==="
 echo "✅ All three servers configured"
 echo "✅ SSH keys distributed"
 echo "✅ Cross-machine connectivity working"
-echo "✅ Ready for Basilica development!"
+echo "✅ Ready for Cathedral development!"
 echo ""
 echo "Server details:"
 echo "  Validator: $VALIDATOR"
