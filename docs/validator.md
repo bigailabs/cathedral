@@ -1,6 +1,10 @@
-# Basilica Validator Guide
+# Cathedral Validator Guide
 
-Comprehensive guide for running a Basilica validator node that verifies GPU compute resources and maintains network quality on the Bittensor network.
+> **Note:** This doc is inherited from upstream Basilica and is being rewritten for Cathedral. Crate names, binary names, and many specifics still reference `basilica-*`. The technical content below is still accurate for the architecture and configuration model. For a concise Cathedral-specific overview, see [architecture.md](architecture.md) and [policy.md](policy.md).
+>
+> If you're running a validator, file an issue at [bigailabs/cathedral](https://github.com/bigailabs/cathedral/issues) and I'll help directly.
+
+Comprehensive guide for running a Cathedral validator node that verifies GPU compute resources and maintains network quality on Bittensor Subnet 39.
 
 ---
 
