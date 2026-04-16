@@ -1,10 +1,12 @@
 # Architecture Guide
 
-This guide provides a comprehensive overview of Basilica's system architecture and design principles.
+> **Note:** This doc is inherited from upstream Basilica and uses `basilica-*` naming throughout. Cathedral is a fork; the architecture described here is accurate for both. Binary names have changed to `cathedral-validator` and `cathedral-miner`; crate names still reference `basilica-*` pending a full rename. See [policy.md](policy.md) for Cathedral-specific governance.
+
+This guide provides a comprehensive overview of the Cathedral (formerly Basilica) system architecture and design principles.
 
 ## System Overview
 
-Basilica is a decentralized GPU compute platform built on the Bittensor network. It creates a trustless environment where GPU providers (miners) can offer compute resources, and validators ensure quality and reliability through **hardware verification**.
+Cathedral is a decentralized GPU compute platform built on the Bittensor network. It creates a trustless environment where GPU providers (miners) can offer compute resources, and validators ensure quality and reliability through **hardware verification**.
 
 ## Core Components
 
