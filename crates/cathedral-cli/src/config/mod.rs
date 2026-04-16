@@ -43,6 +43,7 @@ impl Default for ApiConfig {
         let base_url = if cathedral_common::is_development_environment() {
             "http://localhost:8000".to_string()
         } else {
+            // TODO(cathedral-rename): API URL kept as basilica.ai until DNS migration is complete
             "https://api.basilica.ai".to_string()
         };
 

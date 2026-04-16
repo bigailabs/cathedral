@@ -17,6 +17,7 @@ use std::env as std_env;
 use super::common::{create_with_retry, parse_env_vars, wait_for_ready, WaitResult};
 
 /// Default Tau Docker image
+// TODO(cathedral-rename): Docker image kept as basilica-tau until registry migration
 const TAU_IMAGE: &str = "ghcr.io/one-covenant/basilica-tau:latest";
 
 /// Default port (Tau does not expose HTTP, but a port is required)

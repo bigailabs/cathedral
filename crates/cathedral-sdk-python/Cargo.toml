@@ -7,6 +7,8 @@ description = "Python bindings for the Cathedral SDK"
 license = "MIT OR Apache-2.0"
 
 [lib]
+# TODO(cathedral-rename): Python binding module name kept as "basilica" for backwards compatibility.
+# Change to "cathedral" once PyPI package migration is complete.
 name = "basilica"
 crate-type = ["cdylib", "rlib"]
 

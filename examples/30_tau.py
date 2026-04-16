@@ -63,6 +63,7 @@ storage = StorageSpec(
 
 response = client.create_deployment(
     instance_name="tau",
+    # TODO(cathedral-rename): Docker image kept as basilica-tau until registry migration
     image="ghcr.io/one-covenant/basilica-tau:latest",
     port=8080,
     command=["/usr/local/bin/cathedral-entrypoint.sh"],

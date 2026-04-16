@@ -54,6 +54,7 @@ pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpe
     });
 
     let cr = json!({
+        // TODO(cathedral-rename): K8s CRD API group basilica.ai/v1 - requires CRD migration
         "apiVersion": "basilica.ai/v1",
         "kind": "GpuRental",
         "metadata": { "name": name, "namespace": namespace },

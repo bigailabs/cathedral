@@ -21,6 +21,7 @@
 set -e
 
 # Configuration
+# TODO(cathedral-rename): env var and URL kept as basilica for backwards compatibility
 BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
 INSTANCE_NAME="curl-fastapi-$(date +%s)"
 

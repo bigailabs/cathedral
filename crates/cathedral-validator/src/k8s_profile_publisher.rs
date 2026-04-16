@@ -50,6 +50,7 @@ impl K8sNodeProfilePublisher {
         failure_reasons: Option<&[String]>,
     ) -> anyhow::Result<DynamicObject> {
         let val = serde_json::json!({
+            // TODO(cathedral-rename): K8s CRD API group basilica.ai/v1 - requires CRD migration
             "apiVersion": "basilica.ai/v1",
             "kind": "BasilicaNodeProfile",
             "metadata": {"name": name, "namespace": ns},

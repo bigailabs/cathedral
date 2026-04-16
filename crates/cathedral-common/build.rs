@@ -25,6 +25,7 @@ fn main() {
     let defaults = [
         ("AUTH0_DOMAIN", "dev-ndynjuhl74mrh162.us.auth0.com"),
         ("AUTH0_CLIENT_ID", "CVwgCKL9MT5txAGRLCUQu89rvKXAwOVB"),
+        // TODO(cathedral-rename): Auth0 audience URL kept as basilica.ai until Auth0 config is updated
         ("AUTH0_AUDIENCE", "https://api.basilica.ai/"),
         ("AUTH0_ISSUER", "https://dev-ndynjuhl74mrh162.us.auth0.com/"),
     ];

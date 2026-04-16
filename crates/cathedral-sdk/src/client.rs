@@ -21,7 +21,7 @@
 //! # async fn example() -> cathedral_sdk::Result<()> {
 //! // Direct token authentication with refresh support
 //! let client = ClientBuilder::default()
-//!     .base_url("https://api.basilica.ai")
+//!     .base_url("https://api.basilica.ai") // TODO(cathedral-rename): update URL
 //!     .with_tokens("access_token", "refresh_token")
 //!     .build()?;
 //!
@@ -57,6 +57,7 @@ use crate::{
 };
 
 /// Default API URL when not specified
+// TODO(cathedral-rename): API URL kept as basilica.ai until DNS migration is complete
 pub const DEFAULT_API_URL: &str = "https://api.basilica.ai";
 
 /// Default timeout in seconds for API requests

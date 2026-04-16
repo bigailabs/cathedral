@@ -113,6 +113,7 @@ pub fn labels_from_validation(
     let mut labels = BTreeMap::new();
 
     // CRITICAL: Mark as miner node (distinguishes from control plane)
+    // TODO(cathedral-rename): K8s labels use basilica.ai domain - requires coordinated CRD migration
     labels.insert("basilica.ai/node-role".into(), "miner".into());
     labels.insert("basilica.ai/validated".into(), "true".into());
     labels.insert("basilica.ai/provider".into(), provider.to_string());

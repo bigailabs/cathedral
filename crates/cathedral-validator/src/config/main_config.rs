@@ -568,6 +568,7 @@ fn default_rental_session_duration() -> u64 {
 }
 
 fn default_api_endpoint() -> String {
+    // TODO(cathedral-rename): API URL kept as basilica.ai until DNS migration is complete
     "https://api.basilica.ai".to_string()
 }
 

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use super::common::{create_with_retry, parse_env_vars, wait_for_ready, WaitResult};
 
 /// Default OpenClaw Docker image
+// TODO(cathedral-rename): Docker image kept as basilica-openclaw until registry migration
 const OPENCLAW_IMAGE: &str = "ghcr.io/one-covenant/basilica-openclaw:latest";
 
 /// Default port for OpenClaw gateway

@@ -22,6 +22,7 @@ client = CathedralClient()
 
 deployment = client.deploy(
     name="clawdbot",
+    # TODO(cathedral-rename): Docker image kept as basilica-clawdbot until registry migration
     image="ghcr.io/one-covenant/basilica-clawdbot:latest",
     port=18789,
     env={k: os.environ[k] for k in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] if k in os.environ},

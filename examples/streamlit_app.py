@@ -49,4 +49,4 @@ st.line_chart(st.session_state.chart_data)
 
 # Footer
 st.divider()
-st.caption("Deployed with Cathedral - https://basilica.ai")
+st.caption("Deployed with Cathedral - https://basilica.ai")  # TODO(cathedral-rename): URL

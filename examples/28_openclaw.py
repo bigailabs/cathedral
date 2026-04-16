@@ -30,6 +30,7 @@ if os.getenv("OPENAI_API_KEY"):
 
 deployment = client.deploy(
     name="openclaw",
+    # TODO(cathedral-rename): Docker image kept as basilica-openclaw until registry migration
     image="ghcr.io/one-covenant/basilica-openclaw:latest",
     port=18789,
     env=env,

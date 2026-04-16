@@ -36,6 +36,7 @@ impl TokenManager {
     /// Create a new token manager with file-based authentication
     pub fn new_file_based() -> AuthResult<Self> {
         // Check for API key in environment variable first
+        // TODO(cathedral-rename): BASILICA_API_TOKEN env var kept for backwards compatibility
         let api_key = std::env::var("BASILICA_API_TOKEN").ok();
 
         let data_dir = get_sdk_data_dir()?;

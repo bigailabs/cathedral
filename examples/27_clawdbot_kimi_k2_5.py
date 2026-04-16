@@ -41,6 +41,7 @@ client = CathedralClient()
 
 deployment = client.deploy(
     name="clawdbot-kimi-k2-5",
+    # TODO(cathedral-rename): Docker image kept as basilica-clawdbot until registry migration
     image="ghcr.io/one-covenant/basilica-clawdbot:kimi-k2.5",
     port=18789,
     env={

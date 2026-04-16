@@ -600,7 +600,7 @@ impl VerificationEngine {
             // Mark NodeProfile health=Invalid (best-effort)
             if let Some(publisher) = &self.node_profile_publisher {
                 let ns =
-                    std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+                    std::env::var("BASILICA_NAMESPACE") // TODO(cathedral-rename): env var kept for backwards compat.unwrap_or_else(|_| "default".to_string());
                 let node_name = node_result.node_id.to_string();
                 let _ = publisher
                     .set_node_profile_health(&ns, &node_name, "Invalid")
@@ -838,6 +838,7 @@ impl VerificationEngine {
     }
 
     async fn maybe_join_k3s(&self, miner_uid: u16, node_id: &str) {
+        // TODO(cathedral-rename): BASILICA_* env vars kept for backwards compatibility
         if std::env::var("BASILICA_ENABLE_K3S_JOIN").ok().as_deref() != Some("true") {
             return;
         }

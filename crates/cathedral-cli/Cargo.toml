@@ -8,6 +8,8 @@ license = "MIT"
 repository = "https://github.com/bigailabs/substrate"
 
 [[bin]]
+# TODO(cathedral-rename): CLI binary name kept as "basilica" for backwards compatibility.
+# Change to "cathedral" once users have migrated their scripts and aliases.
 name = "basilica"
 path = "src/main.rs"
 
