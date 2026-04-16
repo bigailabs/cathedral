@@ -61,7 +61,7 @@
   <line x1="130" y1="585" x2="635" y2="585" stroke="#4CC9F0" stroke-width="2" opacity="0.3"/>
 
   <!-- Wordmark -->
-  <text x="400" y="670" text-anchor="middle" font-family="monospace, 'Courier New'" font-size="64" font-weight="bold" fill="#FFFFFF" letter-spacing="8">SUBSTRATE</text>
+  <text x="400" y="670" text-anchor="middle" font-family="monospace, 'Courier New'" font-size="64" font-weight="bold" fill="#FFFFFF" letter-spacing="8">CATHEDRAL</text>
 
   <!-- Tagline -->
   <text x="400" y="710" text-anchor="middle" font-family="monospace, 'Courier New'" font-size="18" fill="#8b5cf6" letter-spacing="4">COMPUTE LAYER FOR BITTENSOR</text>
