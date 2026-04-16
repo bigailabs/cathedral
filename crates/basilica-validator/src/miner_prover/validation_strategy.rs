@@ -5,7 +5,9 @@
 //! of different validation strategies (lightweight vs full validation).
 
 use super::types::{
-    NodeInfoDetailed, NodeResult, NodeVerificationResult, ValidationDetails, ValidationType,
+    BinaryCpuInfo, BinaryMemoryInfo, BinaryNetworkInfo, CompressedMatrix, GpuInfo,
+    NodeInfoDetailed, NodeResult, NodeVerificationResult, SmUtilizationStats, ValidationDetails,
+    ValidationType,
 };
 use super::validation_binary::BinaryValidator;
 use super::validation_docker::DockerCollector;
@@ -1121,9 +1123,53 @@ impl ValidationNode {
                 }
             }
         } else if !binary_validation_enabled && quality_validations_successful {
-            // Binary validation is disabled - use SSH score only (0.8 max)
+            // Binary validation is disabled — discover GPUs via SSH nvidia-smi
+            // so that gpu_uuid_assignments get populated and the node isn't
+            // marked offline for having gpu_count=0.
             binary_validation_successful = true;
             binary_score = 1.0;
+
+            match self.discover_gpus_via_ssh(ssh_details, miner_uid, &node_id).await {
+                Ok(gpu_infos) => {
+                    gpu_count = gpu_infos.len() as u64;
+                    if !gpu_infos.is_empty() {
+                        let first = &gpu_infos[0];
+                        node_result = Some(NodeResult {
+                            gpu_name: first.gpu_name.clone(),
+                            gpu_uuid: first.gpu_uuid.clone(),
+                            gpu_infos,
+                            cpu_info: BinaryCpuInfo { model: String::new(), cores: 0, threads: 0, frequency_mhz: 0 },
+                            memory_info: BinaryMemoryInfo { total_gb: 0.0, available_gb: 0.0 },
+                            network_info: BinaryNetworkInfo { interfaces: vec![] },
+                            cpu_pow: None,
+                            storage_pow: None,
+                            matrix_c: CompressedMatrix { rows: 0, cols: 0, data: vec![] },
+                            computation_time_ns: 0,
+                            checksum: [0u8; 32],
+                            sm_utilization: SmUtilizationStats { min_utilization: 0.0, max_utilization: 0.0, avg_utilization: 0.0, per_sm_stats: vec![] },
+                            active_sms: 0,
+                            total_sms: 0,
+                            memory_bandwidth_gbps: 0.0,
+                            anti_debug_passed: true,
+                            timing_fingerprint: 0,
+                        });
+                        info!(
+                            miner_uid = miner_uid,
+                            node_id = %node_id,
+                            gpu_count = gpu_count,
+                            "[EVAL_FLOW] Discovered GPUs via SSH (binary validation disabled)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        miner_uid = miner_uid,
+                        node_id = %node_id,
+                        error = %e,
+                        "[EVAL_FLOW] Failed to discover GPUs via SSH, node will have gpu_count=0"
+                    );
+                }
+            }
         }
 
         let combined_score = self.calculate_combined_verification_score(
@@ -1266,6 +1312,62 @@ impl ValidationNode {
         );
 
         Ok(average_score)
+    }
+
+    /// Discover GPUs on a remote node via SSH using nvidia-smi.
+    /// Used as a fallback when binary validation is disabled, so that
+    /// gpu_uuid_assignments still gets populated and nodes aren't marked offline.
+    async fn discover_gpus_via_ssh(
+        &self,
+        ssh_details: &SshConnectionDetails,
+        miner_uid: u16,
+        node_id: &str,
+    ) -> Result<Vec<GpuInfo>> {
+        let cmd = "nvidia-smi --query-gpu=name,uuid,memory.total --format=csv,noheader 2>/dev/null";
+        let output = self.ssh_client.execute_command(ssh_details, cmd, true).await?;
+
+        let mut gpu_infos = Vec::new();
+        for (index, line) in output.lines().enumerate() {
+            let parts: Vec<&str> = line.split(", ").collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let gpu_name = parts[0].trim().to_string();
+            let gpu_uuid = parts[1].trim().to_string();
+            let memory_str = parts[2].trim();
+            let gpu_memory_gb = memory_str
+                .replace(" MiB", "")
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                / 1024.0;
+
+            gpu_infos.push(GpuInfo {
+                index: index as u32,
+                gpu_name,
+                gpu_uuid,
+                gpu_memory_gb,
+                computation_time_ns: 0,
+                memory_bandwidth_gbps: 0.0,
+                sm_utilization: SmUtilizationStats {
+                    min_utilization: 0.0,
+                    max_utilization: 0.0,
+                    avg_utilization: 0.0,
+                    per_sm_stats: vec![],
+                },
+                active_sms: 0,
+                total_sms: 0,
+                anti_debug_passed: true,
+            });
+        }
+
+        info!(
+            miner_uid = miner_uid,
+            node_id = %node_id,
+            gpu_count = gpu_infos.len(),
+            "[EVAL_FLOW] SSH GPU discovery completed"
+        );
+
+        Ok(gpu_infos)
     }
 
     /// Calculate combined verification score from SSH and binary validation
