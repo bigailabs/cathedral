@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-//! # Basilca Validator
+//! # Cathedral Validator
 //!
 //! Bittensor neuron for verifying and scoring miners/nodes.
 

@@ -1,4 +1,4 @@
-//! # Basilca Miner
+//! # Cathedral Miner
 //!
 //! Bittensor neuron that manages a fleet of nodes and serves
 //! validator requests for GPU rental and computational challenges.
@@ -282,12 +282,12 @@ async fn main() -> Result<()> {
         return Err(e);
     }
 
-    info!("Starting Basilca Miner (UID: {})", state.miner_uid.as_u16());
+    info!("Starting Cathedral Miner (UID: {})", state.miner_uid.as_u16());
 
     // Start all services
     state.start_services().await?;
 
-    info!("Basilca Miner stopped");
+    info!("Cathedral Miner stopped");
     Ok(())
 }
 
