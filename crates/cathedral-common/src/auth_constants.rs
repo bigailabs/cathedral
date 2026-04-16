@@ -15,7 +15,8 @@ include!(concat!(env!("OUT_DIR"), "/build_constants.rs"));
 /// Get Auth0 domain, checking runtime env var first, then falling back to compile-time constant
 pub fn auth0_domain() -> &'static str {
     static RUNTIME_VALUE: Lazy<Option<String>> =
-        Lazy::new(|| env::var("BASILICA_AUTH0_DOMAIN") // TODO(cathedral-rename): env var kept for backwards compat.ok());
+        // TODO(cathedral-rename): BASILICA_AUTH0_DOMAIN env var kept for backwards compatibility
+        Lazy::new(|| env::var("BASILICA_AUTH0_DOMAIN").ok());
 
     RUNTIME_VALUE.as_deref().unwrap_or(AUTH0_DOMAIN)
 }

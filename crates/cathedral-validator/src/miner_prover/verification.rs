@@ -599,8 +599,9 @@ impl VerificationEngine {
         {
             // Mark NodeProfile health=Invalid (best-effort)
             if let Some(publisher) = &self.node_profile_publisher {
+                // TODO(cathedral-rename): BASILICA_NAMESPACE env var kept for backwards compatibility
                 let ns =
-                    std::env::var("BASILICA_NAMESPACE") // TODO(cathedral-rename): env var kept for backwards compat.unwrap_or_else(|_| "default".to_string());
+                    std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
                 let node_name = node_result.node_id.to_string();
                 let _ = publisher
                     .set_node_profile_health(&ns, &node_name, "Invalid")

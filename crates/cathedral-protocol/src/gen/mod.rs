@@ -21,30 +21,30 @@ pub mod basilca {
         }
     }
 }
-pub mod cathedral {
+pub mod basilica {
     pub mod billing {
         pub mod v1 {
-            include!("cathedral.billing.v1.rs");
+            include!("basilica.billing.v1.rs");
         }
     }
     pub mod incentive {
         pub mod v1 {
-            include!("cathedral.incentive.v1.rs");
+            include!("basilica.incentive.v1.rs");
         }
     }
     pub mod payments {
         pub mod v1 {
-            include!("cathedral.payments.v1.rs");
+            include!("basilica.payments.v1.rs");
         }
     }
     pub mod payouts {
         pub mod v1 {
-            include!("cathedral.payouts.v1.rs");
+            include!("basilica.payouts.v1.rs");
         }
     }
     pub mod rental {
         pub mod v1 {
-            include!("cathedral.rental.v1.rs");
+            include!("basilica.rental.v1.rs");
         }
     }
 }

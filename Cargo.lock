@@ -1342,230 +1342,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "basilica-cli"
-version = "0.25.1"
-dependencies = [
- "axum 0.7.9",
- "base64 0.21.7",
- "basilica-common",
- "basilica-sdk",
- "basilica-validator",
- "chrono",
- "clap",
- "clap-verbosity-flag",
- "clap_complete",
- "color-eyre",
- "console",
- "dialoguer",
- "etcetera",
- "eventsource-stream",
- "futures",
- "futures-util",
- "indicatif",
- "oauth2",
- "rand 0.8.5",
- "regex",
- "reqwest 0.11.27",
- "rust_decimal",
- "self_update",
- "semver 1.0.27",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shellexpand",
- "ssh-key",
- "tabled",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tracing",
- "url",
- "urlencoding",
- "uuid",
- "webbrowser",
-]
-
-[[package]]
-name = "basilica-common"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "argon2",
- "async-trait",
- "base64 0.21.7",
- "bittensor-rs",
- "blake3",
- "chrono",
- "clap-verbosity-flag",
- "data-encoding",
- "dotenvy",
- "ed25519-dalek",
- "figment",
- "hex",
- "libc",
- "oci-client",
- "once_cell",
- "p256 0.13.2",
- "pbkdf2",
- "rand 0.8.5",
- "regex",
- "reqwest 0.11.27",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-journald",
- "tracing-subscriber",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "basilica-miner"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "basilica-common",
- "basilica-protocol",
- "bittensor-rs",
- "blake3",
- "chrono",
- "clap",
- "clap-verbosity-flag",
- "hex",
- "metrics",
- "metrics-exporter-prometheus",
- "prost",
- "prost-types",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "serde_with",
- "sqlx",
- "ssh-key",
- "tokio",
- "toml",
- "tonic",
- "tonic-health",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "basilica-protocol"
-version = "0.1.0"
-dependencies = [
- "basilica-common",
- "prost",
- "prost-types",
- "serde",
- "thiserror 1.0.69",
- "tonic",
- "tonic-build",
- "tracing",
-]
-
-[[package]]
-name = "basilica-sdk"
-version = "0.25.0"
-dependencies = [
- "base64 0.21.7",
- "basilica-common",
- "basilica-validator",
- "chrono",
- "etcetera",
- "oauth2",
- "reqwest 0.11.27",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "urlencoding",
- "wiremock",
-]
-
-[[package]]
-name = "basilica-sdk-python"
-version = "0.25.2"
-dependencies = [
- "basilica-sdk",
- "basilica-validator",
- "pyo3",
- "pyo3-stub-gen",
- "pyo3-stub-gen-derive",
- "pythonize",
- "serde",
- "tokio",
-]
-
-[[package]]
-name = "basilica-validator"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "anyhow",
- "async-stream",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "aws-sdk-secretsmanager",
- "axum 0.7.9",
- "basilica-common",
- "basilica-protocol",
- "bigdecimal",
- "bittensor-rs",
- "chrono",
- "clap",
- "clap-verbosity-flag",
- "eventsource-stream",
- "fastrand",
- "futures",
- "futures-util",
- "hex",
- "k8s-openapi",
- "kube",
- "libc",
- "lru 0.12.5",
- "metrics",
- "metrics-exporter-prometheus",
- "num_cpus",
- "once_cell",
- "prost-types",
- "rand 0.8.5",
- "regex",
- "reqwest 0.11.27",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "ssh-key",
- "sysinfo",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
- "tonic",
- "tonic-health",
- "tower-http 0.5.2",
- "tracing",
- "url",
- "uuid",
- "wiremock",
-]
-
-[[package]]
 name = "bigdecimal"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1874,6 +1650,230 @@ checksum = "7dafe3a8757b027e2be6e4e5601ed563c55989fcf1546e933c66c8eb3a058d35"
 dependencies = [
  "bytes",
  "either",
+]
+
+[[package]]
+name = "cathedral-cli"
+version = "0.25.1"
+dependencies = [
+ "axum 0.7.9",
+ "base64 0.21.7",
+ "cathedral-common",
+ "cathedral-sdk",
+ "cathedral-validator",
+ "chrono",
+ "clap",
+ "clap-verbosity-flag",
+ "clap_complete",
+ "color-eyre",
+ "console",
+ "dialoguer",
+ "etcetera",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "indicatif",
+ "oauth2",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.11.27",
+ "rust_decimal",
+ "self_update",
+ "semver 1.0.27",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shellexpand",
+ "ssh-key",
+ "tabled",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
+ "webbrowser",
+]
+
+[[package]]
+name = "cathedral-common"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "base64 0.21.7",
+ "bittensor-rs",
+ "blake3",
+ "chrono",
+ "clap-verbosity-flag",
+ "data-encoding",
+ "dotenvy",
+ "ed25519-dalek",
+ "figment",
+ "hex",
+ "libc",
+ "oci-client",
+ "once_cell",
+ "p256 0.13.2",
+ "pbkdf2",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.11.27",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "cathedral-miner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bittensor-rs",
+ "blake3",
+ "cathedral-common",
+ "cathedral-protocol",
+ "chrono",
+ "clap",
+ "clap-verbosity-flag",
+ "hex",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sqlx",
+ "ssh-key",
+ "tokio",
+ "toml",
+ "tonic",
+ "tonic-health",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "cathedral-protocol"
+version = "0.1.0"
+dependencies = [
+ "cathedral-common",
+ "prost",
+ "prost-types",
+ "serde",
+ "thiserror 1.0.69",
+ "tonic",
+ "tonic-build",
+ "tracing",
+]
+
+[[package]]
+name = "cathedral-sdk"
+version = "0.25.0"
+dependencies = [
+ "base64 0.21.7",
+ "cathedral-common",
+ "cathedral-validator",
+ "chrono",
+ "etcetera",
+ "oauth2",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "wiremock",
+]
+
+[[package]]
+name = "cathedral-sdk-python"
+version = "0.25.2"
+dependencies = [
+ "cathedral-sdk",
+ "cathedral-validator",
+ "pyo3",
+ "pyo3-stub-gen",
+ "pyo3-stub-gen-derive",
+ "pythonize",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "cathedral-validator"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-sdk-secretsmanager",
+ "axum 0.7.9",
+ "bigdecimal",
+ "bittensor-rs",
+ "cathedral-common",
+ "cathedral-protocol",
+ "chrono",
+ "clap",
+ "clap-verbosity-flag",
+ "eventsource-stream",
+ "fastrand",
+ "futures",
+ "futures-util",
+ "hex",
+ "k8s-openapi",
+ "kube",
+ "libc",
+ "lru 0.12.5",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "num_cpus",
+ "once_cell",
+ "prost-types",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.11.27",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "ssh-key",
+ "sysinfo",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tonic",
+ "tonic-health",
+ "tower-http 0.5.2",
+ "tracing",
+ "url",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
