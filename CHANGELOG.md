@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-04-16
+
+- Project renamed from Substrate to Cathedral. Repo moved to github.com/bigailabs/cathedral (#8)
+- Binaries renamed to cathedral-validator and cathedral-miner (#7)
+- Fixed validator bug where verified nodes were marked offline when binary validation is disabled. SSH-based GPU discovery populates gpu_uuid_assignments so nodes stay online without the prover binary (#7)
+- Rewrote docs/miner.md for Cathedral with concise quickstart and current validator endpoint (#9)
+- First miner fully registered, verified, and scoring 1.0 on the validator (2x A100-SXM4-80GB)
+
 ## 2026-04-14
 
 - Published v0 policy doc (docs/policy.md)
