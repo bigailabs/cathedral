@@ -1,156 +1,81 @@
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
+// TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility.
+// These error codes are returned to API clients and changing them would break existing integrations.
 //! Error types for the Cathedral SDK
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 use serde::{Deserialize, Serialize};
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 use thiserror::Error;
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 /// Main error type for the Cathedral SDK
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 #[derive(Debug, Error)]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 pub enum ApiError {
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// HTTP client error
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("HTTP client error: {0}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     HttpClient(#[from] reqwest::Error),
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Missing authentication (no token provided)
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Authentication required: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     MissingAuthentication { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Authentication error (expired/invalid token)
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Authentication error: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     Authentication { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Authorization error
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Authorization error: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     Authorization { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Rate limit exceeded
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Rate limit exceeded")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     RateLimitExceeded,
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Invalid request
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Invalid request: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     InvalidRequest { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Not found
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Resource not found: {resource}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     NotFound { resource: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Bad request with message
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Bad request: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     BadRequest { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Conflict error (e.g., duplicate resource)
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Conflict: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     Conflict { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Internal server error
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Internal server error: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     Internal { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Service unavailable
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Service temporarily unavailable")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     ServiceUnavailable,
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Timeout error
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Request timeout")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     Timeout,
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Validator communication error
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Validator communication error: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     ValidatorCommunication { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Quota exceeded error
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("Quota exceeded: {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     QuotaExceeded { message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Generic API response error with status code
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     #[error("API error ({status}): {message}")]
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     ApiResponse { status: u16, message: String },
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 }
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 /// Result type alias
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 pub type Result<T> = std::result::Result<T, ApiError>;
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
 impl ApiError {
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     /// Get error code for this error
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
     pub fn error_code(&self) -> &'static str {
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
         match self {
-    // TODO(cathedral-rename): BASILICA_API_* error codes kept for API backwards compatibility
             ApiError::HttpClient(_) => "BASILICA_API_HTTP_CLIENT_ERROR",
             ApiError::MissingAuthentication { .. } => "BASILICA_API_AUTH_MISSING",
             ApiError::Authentication { .. } => "BASILICA_API_AUTH_ERROR",
