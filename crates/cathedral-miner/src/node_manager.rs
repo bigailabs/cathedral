@@ -4,10 +4,10 @@
 //! Nodes are compute resources with SSH access that validators can use directly.
 
 use anyhow::Result;
-use basilica_common::ssh::{
+use cathedral_common::ssh::{
     SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
 };
-use basilica_common::types::GpuCategory;
+use cathedral_common::types::GpuCategory;
 use serde::{Deserialize, Serialize};
 use ssh_key::PublicKey;
 use std::collections::HashMap;
@@ -469,7 +469,7 @@ mod tests {
         let config = NodeConfig {
             host: "192.168.1.100".to_string(),
             port: 22,
-            username: "basilica".to_string(),
+            username: "cathedral".to_string(),
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,

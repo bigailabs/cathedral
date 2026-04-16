@@ -955,7 +955,7 @@ impl SimplePersistence {
 mod tests {
     use super::*;
     use crate::miner_prover::types::MinerInfo;
-    use basilica_common::identity::{Hotkey, MinerUid};
+    use cathedral_common::identity::{Hotkey, MinerUid};
 
     #[tokio::test]
     async fn test_get_miner_hotkey_by_uid() {

@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use basilica_common::config::GrpcServerConfig;
-use basilica_common::crypto::verify_signature_bittensor;
-use basilica_common::identity::Hotkey;
-use basilica_common::types::GpuCategory;
-use basilica_protocol::miner_discovery::{
+use cathedral_common::config::GrpcServerConfig;
+use cathedral_common::crypto::verify_signature_bittensor;
+use cathedral_common::identity::Hotkey;
+use cathedral_common::types::GpuCategory;
+use cathedral_protocol::miner_discovery::{
     miner_registration_server::{MinerRegistration, MinerRegistrationServer},
     HealthCheckRequest, HealthCheckResponse, RegisterBidRequest, RegisterBidResponse,
     RemoveBidRequest, RemoveBidResponse, UpdateBidRequest, UpdateBidResponse,
@@ -24,7 +24,7 @@ use tonic_health::server::health_reporter;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::basilica_api::BasilicaApiClient;
+use crate::cathedral_api::CathedralApiClient;
 use crate::config::bidding::BiddingConfig;
 use crate::persistence::SimplePersistence;
 
@@ -33,7 +33,7 @@ pub struct RegistrationService {
     persistence: Arc<SimplePersistence>,
     bidding_config: BiddingConfig,
     validator_ssh_public_key: String,
-    api_client: Option<Arc<BasilicaApiClient>>,
+    api_client: Option<Arc<CathedralApiClient>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -42,7 +42,7 @@ impl RegistrationService {
         persistence: Arc<SimplePersistence>,
         bidding_config: BiddingConfig,
         validator_ssh_public_key: String,
-        api_client: Option<Arc<BasilicaApiClient>>,
+        api_client: Option<Arc<CathedralApiClient>>,
     ) -> Self {
         Self {
             persistence,
@@ -243,7 +243,7 @@ impl MinerRegistration for RegistrationService {
             }
 
             // Compute node_id server-side from host (deterministic, not trusting miner)
-            let node_id = basilica_common::node_identity::NodeId::new(&node.host)
+            let node_id = cathedral_common::node_identity::NodeId::new(&node.host)
                 .map_err(|e| Status::internal(format!("failed to compute node_id: {e}")))?
                 .uuid
                 .to_string();
@@ -333,7 +333,7 @@ impl MinerRegistration for RegistrationService {
         let miner_id = self.resolve_miner_id(&req.miner_hotkey).await?;
 
         // Compute node_id server-side from host
-        let node_id = basilica_common::node_identity::NodeId::new(&req.host)
+        let node_id = cathedral_common::node_identity::NodeId::new(&req.host)
             .map_err(|e| Status::internal(format!("failed to compute node_id: {e}")))?
             .uuid
             .to_string();
@@ -451,7 +451,7 @@ impl MinerRegistration for RegistrationService {
             .hosts
             .iter()
             .map(|host| {
-                basilica_common::node_identity::NodeId::new(host).map(|id| id.uuid.to_string())
+                cathedral_common::node_identity::NodeId::new(host).map(|id| id.uuid.to_string())
             })
             .collect::<Result<_, _>>()
             .map_err(|e| Status::internal(format!("failed to compute node_ids: {e}")))?;
@@ -505,7 +505,7 @@ impl MinerRegistration for RegistrationService {
             .hosts
             .iter()
             .map(|host| {
-                basilica_common::node_identity::NodeId::new(host).map(|id| id.uuid.to_string())
+                cathedral_common::node_identity::NodeId::new(host).map(|id| id.uuid.to_string())
             })
             .collect::<Result<_, _>>()
             .map_err(|e| Status::internal(format!("failed to compute node_ids: {e}")))?;
@@ -531,7 +531,7 @@ pub async fn start_registration_server(
     persistence: Arc<SimplePersistence>,
     bidding_config: BiddingConfig,
     validator_ssh_public_key: String,
-    api_client: Option<Arc<BasilicaApiClient>>,
+    api_client: Option<Arc<CathedralApiClient>>,
 ) -> Result<()> {
     let service = RegistrationService::new(
         persistence,

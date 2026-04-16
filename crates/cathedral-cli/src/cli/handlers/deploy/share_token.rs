@@ -3,7 +3,7 @@
 use crate::cli::commands::ShareTokenAction;
 use crate::error::{CliError, DeployError};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::{ApiError, BasilicaClient};
+use cathedral_sdk::{ApiError, CathedralClient};
 use color_eyre::eyre::eyre;
 use console::style;
 
@@ -29,7 +29,7 @@ fn map_share_token_error(e: ApiError, name: &str) -> CliError {
 }
 
 pub async fn handle_share_token(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     action: ShareTokenAction,
 ) -> Result<(), CliError> {
     match action {
@@ -39,7 +39,7 @@ pub async fn handle_share_token(
     }
 }
 
-async fn handle_regenerate(client: &BasilicaClient, name: Option<String>) -> Result<(), CliError> {
+async fn handle_regenerate(client: &CathedralClient, name: Option<String>) -> Result<(), CliError> {
     let name = resolve_private_deployment_name(client, name).await?;
 
     let spinner = create_spinner(&format!(
@@ -77,7 +77,7 @@ async fn handle_regenerate(client: &BasilicaClient, name: Option<String>) -> Res
 }
 
 async fn handle_token_status(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: Option<String>,
 ) -> Result<(), CliError> {
     let name = resolve_private_deployment_name(client, name).await?;
@@ -113,7 +113,7 @@ async fn handle_token_status(
 }
 
 async fn handle_revoke(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: Option<String>,
     skip_confirmation: bool,
 ) -> Result<(), CliError> {
@@ -159,7 +159,7 @@ async fn handle_revoke(
 /// Resolve deployment name, with interactive selection filtering to private deployments only.
 /// If name is explicitly provided, validates it belongs to a private deployment.
 async fn resolve_private_deployment_name(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: Option<String>,
 ) -> Result<String, CliError> {
     match name {

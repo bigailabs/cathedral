@@ -51,7 +51,7 @@ pub struct PortMapping {
 }
 
 /// Resource requirements
-// TODO: make this type compatible with the one in basilica-api
+// TODO: make this type compatible with the one in cathedral-api
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceRequirements {
     pub cpu_cores: f64,

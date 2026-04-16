@@ -6,11 +6,11 @@ use crate::cli::commands::{TauOptions, TemplateCommonOptions};
 use crate::error::{CliError, DeployError};
 use crate::output::print_success;
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::types::{
+use cathedral_sdk::types::{
     CreateDeploymentRequest, HealthCheckConfig, PersistentStorageSpec, ProbeConfig,
     ResourceRequirements, StorageBackend, StorageSpec,
 };
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::CathedralClient;
 use std::collections::HashMap;
 use std::env as std_env;
 
@@ -24,7 +24,7 @@ const TAU_PORT: u32 = 8080;
 
 /// Handle Tau deployment
 pub async fn handle_tau_deploy(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     common: TemplateCommonOptions,
     tau: TauOptions,
 ) -> Result<(), CliError> {
@@ -72,7 +72,7 @@ pub async fn handle_tau_deploy(
         image: TAU_IMAGE.to_string(),
         replicas: 1,
         port: TAU_PORT,
-        command: Some(vec!["/usr/local/bin/basilica-entrypoint.sh".to_string()]),
+        command: Some(vec!["/usr/local/bin/cathedral-entrypoint.sh".to_string()]),
         args: None,
         env: Some(env),
         resources: Some(resources),
@@ -126,7 +126,7 @@ pub async fn handle_tau_deploy(
             "Tau summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica summon status {}", actual_name);
+        println!("  Check status: cathedral summon status {}", actual_name);
     }
 
     Ok(())
@@ -170,7 +170,7 @@ fn build_tau_storage() -> StorageSpec {
             bucket: String::new(),
             region: Some("auto".to_string()),
             endpoint: None,
-            credentials_secret: Some("basilica-r2-credentials".to_string()),
+            credentials_secret: Some("cathedral-r2-credentials".to_string()),
             sync_interval_ms: 1000,
             cache_size_mb: 2048,
             mount_path: "/data".to_string(),
@@ -195,9 +195,9 @@ fn build_tau_health_check() -> HealthCheckConfig {
     }
 }
 
-fn print_tau_success(deployment: &basilica_sdk::types::DeploymentResponse, name: &str) {
+fn print_tau_success(deployment: &cathedral_sdk::types::DeploymentResponse, name: &str) {
     print_success(&format!("Tau summons '{}' is ready!", name));
     println!("  URL: {}", deployment.url);
     println!("  Next: send a message to your Telegram bot to initialize chat_id.txt");
-    println!("  Logs: basilica summon logs {}", name);
+    println!("  Logs: cathedral summon logs {}", name);
 }

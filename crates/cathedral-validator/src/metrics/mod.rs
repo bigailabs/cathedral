@@ -1,6 +1,6 @@
 //! Validator Prometheus Metrics Implementation
 //!
-//! Provides comprehensive business and operational metrics for the Basilica Validator component.
+//! Provides comprehensive business and operational metrics for the Cathedral Validator component.
 //! Implements Prometheus metrics according to the Grafana dashboard compatibility requirements.
 
 pub mod api_metrics;
@@ -14,7 +14,7 @@ pub use prometheus_metrics::*;
 
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
-use basilica_common::config::MetricsConfig;
+use cathedral_common::config::MetricsConfig;
 use std::sync::Arc;
 
 /// Complete validator metrics collection system

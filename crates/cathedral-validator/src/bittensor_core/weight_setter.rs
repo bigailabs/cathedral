@@ -3,7 +3,7 @@
 //! Manages Bittensor weight setting operations for the Validator.
 //! Sets weights every N blocks based on miner scores from node validations.
 
-use crate::basilica_api::{BasilicaApiClient, IncentiveConfigResponse};
+use crate::cathedral_api::{CathedralApiClient, IncentiveConfigResponse};
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
@@ -15,9 +15,9 @@ use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::{SimplePersistence, WeightSetEpoch, WeightSetEpochRepository};
 use anyhow::Result;
-use basilica_common::config::BittensorConfig;
-use basilica_common::identity::{Hotkey, MinerUid, NodeId};
-use basilica_common::{KeyValueStorage, MemoryStorage};
+use cathedral_common::config::BittensorConfig;
+use cathedral_common::identity::{Hotkey, MinerUid, NodeId};
+use cathedral_common::{KeyValueStorage, MemoryStorage};
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -94,7 +94,7 @@ pub struct WeightSetter {
     gpu_scoring_engine: Arc<GpuScoringEngine>,
     emission_config: EmissionConfig,
     epoch_repository: Arc<WeightSetEpochRepository>,
-    api_client: Arc<BasilicaApiClient>,
+    api_client: Arc<CathedralApiClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
 }
@@ -110,7 +110,7 @@ impl WeightSetter {
         blocks_per_weight_set: u64,
         gpu_scoring_engine: Arc<GpuScoringEngine>,
         emission_config: EmissionConfig,
-        api_client: Arc<BasilicaApiClient>,
+        api_client: Arc<CathedralApiClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         metrics: Option<Arc<ValidatorMetrics>>,
     ) -> Result<Self> {
@@ -457,8 +457,8 @@ impl WeightSetter {
     fn compute_miner_breakdown(
         &self,
         config: &IncentiveConfigResponse,
-        cu_rows: &[crate::basilica_api::CuLedgerRowResponse],
-        ru_rows: &[crate::basilica_api::RuLedgerRowResponse],
+        cu_rows: &[crate::cathedral_api::CuLedgerRowResponse],
+        ru_rows: &[crate::cathedral_api::RuLedgerRowResponse],
         epoch_start: DateTime<Utc>,
         epoch_end: DateTime<Utc>,
         hotkey_to_uid: &HashMap<String, u16>,

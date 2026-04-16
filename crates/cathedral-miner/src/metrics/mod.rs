@@ -1,6 +1,6 @@
 //! Miner Prometheus Metrics Implementation
 //!
-//! Provides comprehensive business and operational metrics for the Basilica Miner component.
+//! Provides comprehensive business and operational metrics for the Cathedral Miner component.
 //! Tracks node management, validator interactions, SSH sessions, and deployment operations.
 
 pub mod business_metrics;
@@ -12,7 +12,7 @@ pub use node_metrics::*;
 pub use prometheus_metrics::*;
 
 use anyhow::Result;
-use basilica_common::config::MetricsConfig;
+use cathedral_common::config::MetricsConfig;
 use std::sync::Arc;
 
 /// Complete miner metrics collection system

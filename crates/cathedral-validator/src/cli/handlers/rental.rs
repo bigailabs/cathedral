@@ -3,7 +3,7 @@
 //! Handles CLI commands for container rental operations via the Validator API
 
 use anyhow::{Context, Result};
-use basilica_common::types::GpuCategory;
+use cathedral_common::types::GpuCategory;
 use std::time::Duration;
 use tracing::info;
 
@@ -16,7 +16,7 @@ use crate::api::types::{ListAvailableNodesQuery, LogQuery, TerminateRentalReques
 use crate::cli::commands::RentalAction;
 use crate::config::ValidatorConfig;
 use crate::rental::types::RentalState;
-use basilica_common::utils::{parse_env_vars, parse_port_mappings};
+use cathedral_common::utils::{parse_env_vars, parse_port_mappings};
 
 /// Create a ValidatorClient from configuration
 #[cfg(feature = "client")]
@@ -308,7 +308,7 @@ async fn handle_ls_nodes(
     info!("Found {} available nodes:", response.total_count);
     info!("");
 
-    // Format output similar to basilica-cli
+    // Format output similar to cathedral-cli
     info!("GPU                                   | Node ID                              | CPU        | RAM");
     info!("--------------------------------------+--------------------------------------+------------+--------");
 

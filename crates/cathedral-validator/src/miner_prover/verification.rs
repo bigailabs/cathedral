@@ -23,8 +23,8 @@ use crate::persistence::{
 };
 use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
 use anyhow::Result;
-use basilica_common::identity::{Hotkey, MinerUid, NodeId};
-use basilica_common::types::GpuCategory;
+use cathedral_common::identity::{Hotkey, MinerUid, NodeId};
+use cathedral_common::types::GpuCategory;
 use chrono::Utc;
 use futures::future::join_all;
 use serde_json;
@@ -821,7 +821,7 @@ impl VerificationEngine {
         &self,
         miner_uid: u16,
         node_id: &str,
-    ) -> Result<basilica_common::ssh::SshConnectionDetails> {
+    ) -> Result<cathedral_common::ssh::SshConnectionDetails> {
         let miner_id = format!("miner_{}", miner_uid);
         let endpoint = self
             .persistence

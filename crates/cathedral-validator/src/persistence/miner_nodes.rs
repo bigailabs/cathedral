@@ -7,7 +7,7 @@ use crate::persistence::availability_log::{AvailabilityEventRequest, Availabilit
 use crate::persistence::types::{AvailableNodeData, NodeData};
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
-use basilica_common::types::GpuCategory;
+use cathedral_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::str::FromStr;
@@ -755,7 +755,7 @@ impl SimplePersistence {
         min_gpu_memory: Option<u32>,
         gpu_type: Option<String>,
         min_gpu_count: Option<u32>,
-        location: Option<basilica_common::LocationProfile>,
+        location: Option<cathedral_common::LocationProfile>,
     ) -> Result<Vec<AvailableNodeData>, anyhow::Error> {
         // A node is only rentable/visible once we have at least one validated GPU UUID assignment.
         let effective_min_gpu_count = std::cmp::max(min_gpu_count.unwrap_or(0), 1);
@@ -868,7 +868,7 @@ impl SimplePersistence {
             let region: Option<String> = row.get("region");
             let country: Option<String> = row.get("country");
 
-            let location_profile = basilica_common::LocationProfile::new(city, region, country);
+            let location_profile = cathedral_common::LocationProfile::new(city, region, country);
             let location = Some(location_profile.to_string());
 
             let download_mbps: Option<f64> = row.get("download_mbps");
@@ -1165,7 +1165,7 @@ impl SimplePersistence {
             let region: Option<String> = row.get("region");
             let country: Option<String> = row.get("country");
 
-            let location_profile = basilica_common::LocationProfile::new(city, region, country);
+            let location_profile = cathedral_common::LocationProfile::new(city, region, country);
             let location = Some(location_profile.to_string());
 
             nodes.push(NodeData {
@@ -1311,7 +1311,7 @@ impl SimplePersistence {
 
             let final_location =
                 if net_city.is_some() || net_region.is_some() || net_country.is_some() {
-                    let loc_profile = basilica_common::LocationProfile {
+                    let loc_profile = cathedral_common::LocationProfile {
                         city: net_city,
                         region: net_region,
                         country: net_country,
@@ -1606,7 +1606,7 @@ impl SimplePersistence {
         extra_mount_path: Option<&str>,
     ) -> Result<bool> {
         // Compute node_id deterministically from host (validator-side, not trusting miner)
-        let node_id = basilica_common::node_identity::NodeId::new(host)?
+        let node_id = cathedral_common::node_identity::NodeId::new(host)?
             .uuid
             .to_string();
 
@@ -2603,7 +2603,7 @@ mod tests {
         let metadata = persistence
             .get_node_bid_metadata(
                 miner_id,
-                &basilica_common::node_identity::NodeId::new(host)
+                &cathedral_common::node_identity::NodeId::new(host)
                     .expect("valid host")
                     .uuid
                     .to_string(),
@@ -2621,7 +2621,7 @@ mod tests {
         )
         .bind(miner_id)
         .bind(
-            basilica_common::node_identity::NodeId::new(host)
+            cathedral_common::node_identity::NodeId::new(host)
                 .expect("valid host")
                 .uuid
                 .to_string(),
@@ -2646,7 +2646,7 @@ mod tests {
         let metadata_after = persistence
             .get_node_bid_metadata(
                 miner_id,
-                &basilica_common::node_identity::NodeId::new(host)
+                &cathedral_common::node_identity::NodeId::new(host)
                     .expect("valid host")
                     .uuid
                     .to_string(),
@@ -2664,7 +2664,7 @@ mod tests {
         )
         .bind(miner_id)
         .bind(
-            basilica_common::node_identity::NodeId::new(host)
+            cathedral_common::node_identity::NodeId::new(host)
                 .expect("valid host")
                 .uuid
                 .to_string(),
@@ -2689,7 +2689,7 @@ mod tests {
         let persistence = create_test_persistence().await;
         let miner_id = "miner_1";
         let host = "10.0.1.12";
-        let node_id = basilica_common::node_identity::NodeId::new(host)
+        let node_id = cathedral_common::node_identity::NodeId::new(host)
             .expect("valid host")
             .uuid
             .to_string();
@@ -2729,7 +2729,7 @@ mod tests {
         let persistence = create_test_persistence().await;
         let miner_id = "miner_1";
         let host = "10.0.1.11";
-        let existing_node_id = basilica_common::node_identity::NodeId::new(host)
+        let existing_node_id = cathedral_common::node_identity::NodeId::new(host)
             .expect("valid host")
             .uuid
             .to_string();

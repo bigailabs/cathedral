@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
-use basilica_common::ssh::SshConnectionDetails;
+use cathedral_common::ssh::SshConnectionDetails;
 
 /// Individual filesystem mount point information
 #[derive(Debug, Clone, Serialize, Deserialize)]

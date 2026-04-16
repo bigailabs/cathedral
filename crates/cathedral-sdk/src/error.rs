@@ -1,9 +1,9 @@
-//! Error types for the Basilica SDK
+//! Error types for the Cathedral SDK
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Main error type for the Basilica SDK
+/// Main error type for the Cathedral SDK
 #[derive(Debug, Error)]
 pub enum ApiError {
     /// HTTP client error

@@ -1,7 +1,7 @@
 //! Environment variable parsing utilities
 //!
 //! This module provides utilities for parsing environment variable strings
-//! in KEY=VALUE format, commonly used throughout Basilica for container configuration.
+//! in KEY=VALUE format, commonly used throughout Cathedral for container configuration.
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 /// # Examples
 ///
 /// ```
-/// use basilica_common::utils::parse_env_vars;
+/// use cathedral_common::utils::parse_env_vars;
 /// use std::collections::HashMap;
 ///
 /// let vars = vec![

@@ -6,12 +6,12 @@ use crate::error::{CliError, DeployError};
 use crate::output::{print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
 use crate::source::{Framework, SourcePackager, SourceType};
-use basilica_sdk::types::{
+use cathedral_sdk::types::{
     CreateDeploymentRequest, DeploymentResponse, GpuRequirementsSpec, HealthCheckConfig,
     PersistentStorageSpec, ProbeConfig, ResourceRequirements, SpreadMode, StorageBackend,
     StorageSpec, TopologySpreadConfig, WebSocketConfig,
 };
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::CathedralClient;
 use std::time::{Duration, Instant};
 
 /// Maximum retries for transient failures
@@ -22,7 +22,7 @@ const INITIAL_RETRY_DELAY_MS: u64 = 500;
 
 /// Create a new deployment
 pub async fn handle_create(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     source: &str,
     cmd: DeployCommand,
 ) -> Result<(), CliError> {
@@ -170,7 +170,7 @@ pub async fn handle_create(
             "Summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica summon status {}", actual_name);
+        println!("  Check status: cathedral summon status {}", actual_name);
     }
 
     Ok(())
@@ -178,7 +178,7 @@ pub async fn handle_create(
 
 /// Create deployment with exponential backoff retry and jitter
 async fn create_with_retry(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     request: CreateDeploymentRequest,
 ) -> Result<DeploymentResponse, CliError> {
     use rand::Rng;
@@ -213,10 +213,10 @@ async fn create_with_retry(
 }
 
 /// Check if API error indicates quota exceeded
-fn is_quota_exceeded(error: &basilica_sdk::error::ApiError) -> bool {
+fn is_quota_exceeded(error: &cathedral_sdk::error::ApiError) -> bool {
     match error {
-        basilica_sdk::error::ApiError::QuotaExceeded { .. } => true,
-        basilica_sdk::error::ApiError::ApiResponse { status, message } => {
+        cathedral_sdk::error::ApiError::QuotaExceeded { .. } => true,
+        cathedral_sdk::error::ApiError::ApiResponse { status, message } => {
             *status == 403
                 || *status == 429
                 || message.to_lowercase().contains("quota")
@@ -228,10 +228,10 @@ fn is_quota_exceeded(error: &basilica_sdk::error::ApiError) -> bool {
 }
 
 /// Extract quota-specific message from API error
-fn extract_quota_message(error: &basilica_sdk::error::ApiError) -> String {
+fn extract_quota_message(error: &cathedral_sdk::error::ApiError) -> String {
     match error {
-        basilica_sdk::error::ApiError::QuotaExceeded { message } => message.clone(),
-        basilica_sdk::error::ApiError::ApiResponse { message, .. } => message.clone(),
+        cathedral_sdk::error::ApiError::QuotaExceeded { message } => message.clone(),
+        cathedral_sdk::error::ApiError::ApiResponse { message, .. } => message.clone(),
         _ => error.to_string(),
     }
 }
@@ -245,7 +245,7 @@ enum WaitResult {
 
 /// Wait for deployment with phase-aware progress display
 async fn wait_for_ready_with_phases(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: &str,
     timeout_secs: u32,
     verbose: bool,
@@ -348,7 +348,7 @@ fn format_phase_message(phase: &str, status: &DeploymentResponse) -> String {
 }
 
 /// Fetch and print summons events for debugging failures
-async fn fetch_and_print_events(client: &BasilicaClient, name: &str) {
+async fn fetch_and_print_events(client: &CathedralClient, name: &str) {
     match client.get_deployment_events(name, Some(10)).await {
         Ok(response) if !response.events.is_empty() => {
             eprintln!("\nRecent events for summons '{}':", name);
@@ -426,8 +426,8 @@ fn build_storage_spec(storage: &crate::cli::commands::StorageOptions) -> Storage
             bucket: String::new(),
             region: Some("auto".to_string()),
             endpoint: None,
-            // Secret "basilica-r2-credentials" must be provisioned by operator in user namespace
-            credentials_secret: Some("basilica-r2-credentials".to_string()),
+            // Secret "cathedral-r2-credentials" must be provisioned by operator in user namespace
+            credentials_secret: Some("cathedral-r2-credentials".to_string()),
             sync_interval_ms: storage.storage_sync_ms,
             cache_size_mb: storage.storage_cache_mb,
             mount_path: storage.storage_path.clone(),

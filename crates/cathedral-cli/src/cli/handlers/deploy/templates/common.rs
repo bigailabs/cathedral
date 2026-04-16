@@ -6,8 +6,8 @@
 use crate::error::{CliError, DeployError};
 use crate::output::print_info;
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::types::{CreateDeploymentRequest, DeploymentResponse};
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::types::{CreateDeploymentRequest, DeploymentResponse};
+use cathedral_sdk::CathedralClient;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -45,7 +45,7 @@ pub fn parse_env_vars(env: &[String]) -> Result<HashMap<String, String>, DeployE
 
 /// Create deployment with exponential backoff retry
 pub async fn create_with_retry(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     request: CreateDeploymentRequest,
 ) -> Result<DeploymentResponse, CliError> {
     use rand::Rng;
@@ -78,10 +78,10 @@ pub async fn create_with_retry(
 }
 
 /// Check if API error indicates quota exceeded
-pub fn is_quota_exceeded(error: &basilica_sdk::error::ApiError) -> bool {
+pub fn is_quota_exceeded(error: &cathedral_sdk::error::ApiError) -> bool {
     match error {
-        basilica_sdk::error::ApiError::QuotaExceeded { .. } => true,
-        basilica_sdk::error::ApiError::ApiResponse { status, message } => {
+        cathedral_sdk::error::ApiError::QuotaExceeded { .. } => true,
+        cathedral_sdk::error::ApiError::ApiResponse { status, message } => {
             *status == 403
                 || *status == 429
                 || message.to_lowercase().contains("quota")
@@ -92,10 +92,10 @@ pub fn is_quota_exceeded(error: &basilica_sdk::error::ApiError) -> bool {
 }
 
 /// Extract quota message from API error
-pub fn extract_quota_message(error: &basilica_sdk::error::ApiError) -> String {
+pub fn extract_quota_message(error: &cathedral_sdk::error::ApiError) -> String {
     match error {
-        basilica_sdk::error::ApiError::QuotaExceeded { message } => message.clone(),
-        basilica_sdk::error::ApiError::ApiResponse { message, .. } => message.clone(),
+        cathedral_sdk::error::ApiError::QuotaExceeded { message } => message.clone(),
+        cathedral_sdk::error::ApiError::ApiResponse { message, .. } => message.clone(),
         _ => error.to_string(),
     }
 }
@@ -103,12 +103,12 @@ pub fn extract_quota_message(error: &basilica_sdk::error::ApiError) -> String {
 /// Wait for deployment to become ready with status updates
 ///
 /// # Arguments
-/// * `client` - The Basilica API client
+/// * `client` - The Cathedral API client
 /// * `name` - The deployment name to monitor
 /// * `timeout_secs` - Maximum time to wait in seconds
 /// * `service_name` - Display name for the service (e.g., "vLLM", "SGLang")
 pub async fn wait_for_ready(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: &str,
     timeout_secs: u32,
     service_name: &str,

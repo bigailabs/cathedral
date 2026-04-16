@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 pub async fn handle_start(config_path: PathBuf) -> Result<()> {
-    HandlerUtils::print_info("Starting Basilica Validator...");
+    HandlerUtils::print_info("Starting Cathedral Validator...");
 
     let config = HandlerUtils::load_config(config_path)?;
 
@@ -17,7 +17,7 @@ pub async fn handle_start(config_path: PathBuf) -> Result<()> {
 }
 
 pub async fn handle_stop() -> Result<()> {
-    HandlerUtils::print_info("Stopping Basilica Validator...");
+    HandlerUtils::print_info("Stopping Cathedral Validator...");
 
     let start_time = SystemTime::now();
 
@@ -30,7 +30,7 @@ pub async fn handle_stop() -> Result<()> {
 }
 
 pub async fn handle_status(config_path: PathBuf) -> Result<()> {
-    println!("=== Basilica Validator Status ===");
+    println!("=== Cathedral Validator Status ===");
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
 
     let start_time = SystemTime::now();

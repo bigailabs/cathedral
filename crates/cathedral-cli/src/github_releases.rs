@@ -18,11 +18,11 @@ pub struct GitHubConfig {
 }
 
 impl GitHubConfig {
-    /// Default configuration for Basilica repository
-    pub const fn basilica() -> Self {
+    /// Default configuration for Cathedral repository
+    pub const fn cathedral() -> Self {
         Self {
             owner: "one-covenant",
-            repo: "basilica",
+            repo: "cathedral",
         }
     }
 }
@@ -32,27 +32,27 @@ impl GitHubConfig {
 pub struct ReleaseInfo {
     /// Semantic version of the release
     pub version: Version,
-    /// Full Git tag name (e.g., "basilica-cli-v0.5.5")
+    /// Full Git tag name (e.g., "cathedral-cli-v0.5.5")
     pub tag: String,
 }
 
 /// Extract version from a CLI release tag
 ///
-/// Handles tags in format "basilica-cli-vX.Y.Z" or "basilica-cli-X.Y.Z"
+/// Handles tags in format "cathedral-cli-vX.Y.Z" or "cathedral-cli-X.Y.Z"
 /// Returns None if tag doesn't match expected format or version is invalid
 ///
 /// # Examples
 /// ```
-/// use basilica_cli::github_releases::extract_version_from_tag;
+/// use cathedral_cli::github_releases::extract_version_from_tag;
 ///
-/// assert!(extract_version_from_tag("basilica-cli-v0.5.5").is_some());
-/// assert!(extract_version_from_tag("basilica-cli-0.5.5").is_some());
+/// assert!(extract_version_from_tag("cathedral-cli-v0.5.5").is_some());
+/// assert!(extract_version_from_tag("cathedral-cli-0.5.5").is_some());
 /// assert!(extract_version_from_tag("invalid").is_none());
 /// ```
 pub fn extract_version_from_tag(tag: &str) -> Option<Version> {
     let version_str = tag
-        .trim_start_matches("basilica-cli-v")
-        .trim_start_matches("basilica-cli-")
+        .trim_start_matches("cathedral-cli-v")
+        .trim_start_matches("cathedral-cli-")
         .trim_start_matches('v');
 
     Version::parse(version_str).ok()
@@ -64,14 +64,14 @@ pub fn extract_version_from_tag(tag: &str) -> Option<Version> {
 ///
 /// # Examples
 /// ```
-/// use basilica_cli::github_releases::format_cli_tag;
+/// use cathedral_cli::github_releases::format_cli_tag;
 ///
-/// assert_eq!(format_cli_tag("0.5.5"), "basilica-cli-v0.5.5");
-/// assert_eq!(format_cli_tag("v0.5.5"), "basilica-cli-v0.5.5");
+/// assert_eq!(format_cli_tag("0.5.5"), "cathedral-cli-v0.5.5");
+/// assert_eq!(format_cli_tag("v0.5.5"), "cathedral-cli-v0.5.5");
 /// ```
 pub fn format_cli_tag(version: &str) -> String {
     let clean_version = version.trim_start_matches('v');
-    format!("basilica-cli-v{}", clean_version)
+    format!("cathedral-cli-v{}", clean_version)
 }
 
 /// Check if a version is supported for auto-updates
@@ -120,7 +120,7 @@ struct GitHubRelease {
 
 /// Fetch all releases from GitHub
 fn fetch_cli_releases() -> Result<Vec<GitHubRelease>> {
-    let config = GitHubConfig::basilica();
+    let config = GitHubConfig::cathedral();
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases?per_page=100",
         config.owner, config.repo
@@ -130,7 +130,7 @@ fn fetch_cli_releases() -> Result<Vec<GitHubRelease>> {
     let response = client
         .get(&url)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "basilica-cli")
+        .header("User-Agent", "cathedral-cli")
         .send()
         .map_err(|e| eyre!("Failed to fetch releases from GitHub: {}", e))?;
 
@@ -146,7 +146,7 @@ fn fetch_cli_releases() -> Result<Vec<GitHubRelease>> {
 /// Find the latest compatible CLI release
 ///
 /// Filters releases to find the latest version that:
-/// - Matches the "basilica-cli-v*" tag pattern
+/// - Matches the "cathedral-cli-v*" tag pattern
 /// - Is >= MIN_SUPPORTED_VERSION
 /// - Is newer than current_version (if check_newer is true)
 ///
@@ -173,7 +173,7 @@ pub fn find_latest_cli_release(
             }
 
             // Must match CLI release tag pattern
-            if !r.tag_name.starts_with("basilica-cli-v") {
+            if !r.tag_name.starts_with("cathedral-cli-v") {
                 return None;
             }
 

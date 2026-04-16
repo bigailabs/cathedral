@@ -7,11 +7,11 @@ use crate::cli::commands::{SglangOptions, TemplateCommonOptions};
 use crate::error::{CliError, DeployError};
 use crate::output::{print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::types::{
+use cathedral_sdk::types::{
     CreateDeploymentRequest, DeploymentResponse, GpuRequirementsSpec, HealthCheckConfig,
     PersistentStorageSpec, ProbeConfig, ResourceRequirements, StorageBackend, StorageSpec,
 };
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::CathedralClient;
 
 use super::common::{create_with_retry, parse_env_vars, wait_for_ready, WaitResult};
 use super::model_size::estimate_gpu_requirements;
@@ -27,7 +27,7 @@ const SGLANG_PORT: u32 = 30000;
 
 /// Handle SGLang deployment
 pub async fn handle_sglang_deploy(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     model: Option<String>,
     common: TemplateCommonOptions,
     sglang: SglangOptions,
@@ -146,7 +146,7 @@ pub async fn handle_sglang_deploy(
             "SGLang summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica summon status {}", actual_name);
+        println!("  Check status: cathedral summon status {}", actual_name);
     }
 
     Ok(())
@@ -262,7 +262,7 @@ fn build_sglang_storage() -> StorageSpec {
             bucket: String::new(), // API assigns default
             region: Some("auto".to_string()),
             endpoint: None,
-            credentials_secret: Some("basilica-r2-credentials".to_string()),
+            credentials_secret: Some("cathedral-r2-credentials".to_string()),
             sync_interval_ms: 1000,
             cache_size_mb: 4096, // 4GB cache for model files
             mount_path: "/root/.cache".to_string(),
@@ -327,15 +327,15 @@ fn print_sglang_success(deployment: &DeploymentResponse, model: &str) {
     println!();
     println!("Commands:");
     println!(
-        "  View status:  basilica summon status {}",
+        "  View status:  cathedral summon status {}",
         deployment.instance_name
     );
     println!(
-        "  View logs:    basilica summon logs {}",
+        "  View logs:    cathedral summon logs {}",
         deployment.instance_name
     );
     println!(
-        "  Delete:       basilica summon delete {}",
+        "  Delete:       cathedral summon delete {}",
         deployment.instance_name
     );
 }

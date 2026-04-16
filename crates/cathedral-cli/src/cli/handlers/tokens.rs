@@ -1,15 +1,15 @@
-//! Token management handlers for the Basilica CLI
+//! Token management handlers for the Cathedral CLI
 
 use crate::error::CliError;
 use crate::output::{json_output, print_success, table_output};
-use basilica_common::{ApiKeyName, ApiKeyNameError};
-use basilica_sdk::BasilicaClient;
+use cathedral_common::{ApiKeyName, ApiKeyNameError};
+use cathedral_sdk::CathedralClient;
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
 /// Handle creating a new token
 pub async fn handle_create_token(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: Option<String>,
 ) -> Result<(), CliError> {
     // Get name interactively if not provided
@@ -94,7 +94,7 @@ pub async fn handle_create_token(
 }
 
 /// Handle listing all tokens
-pub async fn handle_list_tokens(client: &BasilicaClient, json: bool) -> Result<(), CliError> {
+pub async fn handle_list_tokens(client: &CathedralClient, json: bool) -> Result<(), CliError> {
     let keys = client.list_api_keys().await.map_err(CliError::Api)?;
 
     if json {
@@ -106,7 +106,7 @@ pub async fn handle_list_tokens(client: &BasilicaClient, json: bool) -> Result<(
         println!("No API keys exist.");
         println!(
             "Create one with: {} tokens create [name]",
-            style("basilica").cyan()
+            style("cathedral").cyan()
         );
     } else {
         table_output::display_api_keys(&keys).map_err(|e| {
@@ -119,7 +119,7 @@ pub async fn handle_list_tokens(client: &BasilicaClient, json: bool) -> Result<(
 
 /// Handle revoking a token
 pub async fn handle_revoke_token(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: Option<String>,
     skip_confirm: bool,
 ) -> Result<(), CliError> {

@@ -25,155 +25,155 @@ impl ValidatorPrometheusMetrics {
 
         // Validation metrics
         describe_counter!(
-            "basilica_validator_validations_total",
+            "cathedral_validator_validations_total",
             "Total number of validations performed"
         );
         describe_histogram!(
-            "basilica_validator_validation_duration_seconds",
+            "cathedral_validator_validation_duration_seconds",
             "Duration of validation operations"
         );
         describe_histogram!(
-            "basilica_validator_validation_score",
+            "cathedral_validator_validation_score",
             "Validation scores assigned to nodes"
         );
         describe_counter!(
-            "basilica_validator_validation_errors_total",
+            "cathedral_validator_validation_errors_total",
             "Total validation errors"
         );
 
         // SSH metrics
         describe_counter!(
-            "basilica_validator_ssh_connections_total",
+            "cathedral_validator_ssh_connections_total",
             "Total SSH connections made"
         );
         describe_histogram!(
-            "basilica_validator_ssh_connection_duration_seconds",
+            "cathedral_validator_ssh_connection_duration_seconds",
             "SSH connection duration"
         );
         describe_counter!(
-            "basilica_validator_ssh_failures_total",
+            "cathedral_validator_ssh_failures_total",
             "Total SSH connection failures"
         );
         describe_gauge!(
-            "basilica_validator_ssh_active_connections",
+            "cathedral_validator_ssh_active_connections",
             "Currently active SSH connections"
         );
 
         // Database metrics
         describe_gauge!(
-            "basilica_validator_database_connections_total",
+            "cathedral_validator_database_connections_total",
             "Active database connections"
         );
         describe_histogram!(
-            "basilica_validator_database_query_duration_seconds",
+            "cathedral_validator_database_query_duration_seconds",
             "Database query duration"
         );
         describe_counter!(
-            "basilica_validator_database_errors_total",
+            "cathedral_validator_database_errors_total",
             "Total database errors"
         );
         describe_counter!(
-            "basilica_validator_database_operations_total",
+            "cathedral_validator_database_operations_total",
             "Total database operations"
         );
 
         // API metrics
         describe_counter!(
-            "basilica_validator_http_requests_total",
+            "cathedral_validator_http_requests_total",
             "Total HTTP requests processed"
         );
         describe_histogram!(
-            "basilica_validator_http_request_duration_seconds",
+            "cathedral_validator_http_request_duration_seconds",
             "HTTP request duration"
         );
         describe_histogram!(
-            "basilica_validator_http_response_size_bytes",
+            "cathedral_validator_http_response_size_bytes",
             "HTTP response size"
         );
 
         // System metrics
         describe_gauge!(
-            "basilica_validator_cpu_usage_percent",
+            "cathedral_validator_cpu_usage_percent",
             "CPU usage percentage"
         );
         describe_gauge!(
-            "basilica_validator_memory_usage_bytes",
+            "cathedral_validator_memory_usage_bytes",
             "Memory usage in bytes"
         );
         describe_gauge!(
-            "basilica_validator_memory_total_bytes",
+            "cathedral_validator_memory_total_bytes",
             "Total memory in bytes"
         );
-        describe_gauge!("basilica_validator_disk_usage_bytes", "Disk usage in bytes");
+        describe_gauge!("cathedral_validator_disk_usage_bytes", "Disk usage in bytes");
         describe_gauge!(
-            "basilica_validator_disk_total_bytes",
+            "cathedral_validator_disk_total_bytes",
             "Total disk space in bytes"
         );
 
         // Business metrics
         describe_gauge!(
-            "basilica_validator_node_health_status",
+            "cathedral_validator_node_health_status",
             "Node health status (1=healthy, 0=unhealthy)"
         );
         describe_counter!(
-            "basilica_validator_consensus_weight_sets_total",
+            "cathedral_validator_consensus_weight_sets_total",
             "Total consensus weight sets"
         );
         describe_histogram!(
-            "basilica_validator_verification_session_duration_seconds",
+            "cathedral_validator_verification_session_duration_seconds",
             "Verification session duration"
         );
         describe_counter!(
-            "basilica_validator_attestation_verification_total",
+            "cathedral_validator_attestation_verification_total",
             "Total attestation verifications"
         );
 
         // GPU metrics
         describe_gauge!(
-            "basilica_validator_miner_gpu_count",
+            "cathedral_validator_miner_gpu_count",
             "Total GPU count per miner"
         );
         describe_histogram!(
-            "basilica_validator_miner_gpu_weighted_score",
+            "cathedral_validator_miner_gpu_weighted_score",
             "GPU count weighted scores for miners"
         );
-        describe_gauge!("basilica_validator_node_gpu_count", "GPU count per node");
+        describe_gauge!("cathedral_validator_node_gpu_count", "GPU count per node");
 
         // Weight metrics
         describe_gauge!(
-            "basilica_validator_miner_weight",
+            "cathedral_validator_miner_weight",
             "Weight assigned to each miner"
         );
 
         // Validation metrics
         describe_counter!(
-            "basilica_validator_miner_successful_validations",
+            "cathedral_validator_miner_successful_validations",
             "Count of successful validations per miner"
         );
 
         // GPU profile metrics
         describe_gauge!(
-            "basilica_validator_miner_gpu_profiles",
+            "cathedral_validator_miner_gpu_profiles",
             "GPU profiles for miners"
         );
 
         // Node uptime metrics
         describe_gauge!(
-            "basilica_node_uptime_minutes",
+            "cathedral_node_uptime_minutes",
             "Node uptime in minutes for ramp-up calculation"
         );
         describe_gauge!(
-            "basilica_node_uptime_multiplier",
+            "cathedral_node_uptime_multiplier",
             "Node uptime-based reward multiplier (0.0-1.0)"
         );
 
         // Rental metrics
         describe_gauge!(
-            "basilica_validator_node_rental_status",
+            "cathedral_validator_node_rental_status",
             "Node rental status (1=rented, 0=available)"
         );
         describe_counter!(
-            "basilica_validator_rentals_created_total",
+            "cathedral_validator_rentals_created_total",
             "Total number of rentals created"
         );
         describe_gauge!(
@@ -183,53 +183,53 @@ impl ValidatorPrometheusMetrics {
 
         // RPC failure metrics
         describe_counter!(
-            "basilica_validator_rpc_critical_failures_total",
+            "cathedral_validator_rpc_critical_failures_total",
             "Total RPC failures after all retry attempts exhausted"
         );
 
         // Discovered miners metrics
         describe_gauge!(
-            "basilica_validator_discovered_miners_total",
+            "cathedral_validator_discovered_miners_total",
             "Total number of miners currently discovered from metagraph"
         );
 
         // Validation state tracking metrics
         describe_gauge!(
-            "basilica_validator_node_validation_state",
+            "cathedral_validator_node_validation_state",
             "Current validation state of nodes (0=not in state, 1=current, 2=failed)"
         );
 
         // Billing telemetry metrics
         describe_counter!(
-            "basilica_validator_billing_telemetry_collected_total",
+            "cathedral_validator_billing_telemetry_collected_total",
             "Total billing telemetry records collected"
         );
         describe_counter!(
-            "basilica_validator_billing_telemetry_sent_total",
+            "cathedral_validator_billing_telemetry_sent_total",
             "Total billing telemetry records successfully sent"
         );
         describe_counter!(
-            "basilica_validator_billing_telemetry_dropped_total",
+            "cathedral_validator_billing_telemetry_dropped_total",
             "Total billing telemetry records dropped"
         );
         describe_gauge!(
-            "basilica_validator_billing_queue_depth",
+            "cathedral_validator_billing_queue_depth",
             "Current depth of billing telemetry queue"
         );
         describe_gauge!(
-            "basilica_validator_billing_channel_utilization_percent",
+            "cathedral_validator_billing_channel_utilization_percent",
             "Channel buffer utilization percentage"
         );
         describe_gauge!(
-            "basilica_validator_billing_circuit_breaker_state",
+            "cathedral_validator_billing_circuit_breaker_state",
             "Circuit breaker state (0=closed, 1=half_open, 2=open)"
         );
         describe_histogram!(
-            "basilica_validator_billing_retry_attempts",
+            "cathedral_validator_billing_retry_attempts",
             "Number of retry attempts before success or final failure"
         );
         describe_histogram!(
-            "basilica_validator_billing_telemetry_latency_seconds",
+            "cathedral_validator_billing_telemetry_latency_seconds",
             "End-to-end latency from collection to successful send"
         );
 
@@ -247,15 +247,15 @@ impl ValidatorPrometheusMetrics {
         duration: Duration,
         score: Option<f64>,
     ) {
-        counter!("basilica_validator_validations_total").increment(1);
-        histogram!("basilica_validator_validation_duration_seconds").record(duration.as_secs_f64());
+        counter!("cathedral_validator_validations_total").increment(1);
+        histogram!("cathedral_validator_validation_duration_seconds").record(duration.as_secs_f64());
 
         if let Some(score_value) = score {
-            histogram!("basilica_validator_validation_score").record(score_value);
+            histogram!("cathedral_validator_validation_score").record(score_value);
         }
 
         if !success {
-            counter!("basilica_validator_validation_errors_total").increment(1);
+            counter!("cathedral_validator_validation_errors_total").increment(1);
         }
 
         debug!(
@@ -266,29 +266,29 @@ impl ValidatorPrometheusMetrics {
 
     /// Record SSH connection operation
     pub fn record_ssh_connection(&self, _host: &str, success: bool, duration: Duration) {
-        counter!("basilica_validator_ssh_connections_total").increment(1);
-        histogram!("basilica_validator_ssh_connection_duration_seconds")
+        counter!("cathedral_validator_ssh_connections_total").increment(1);
+        histogram!("cathedral_validator_ssh_connection_duration_seconds")
             .record(duration.as_secs_f64());
 
         if !success {
-            counter!("basilica_validator_ssh_failures_total").increment(1);
+            counter!("cathedral_validator_ssh_failures_total").increment(1);
         }
     }
 
     /// Record database operation
     pub fn record_database_operation(&self, _operation: &str, success: bool, duration: Duration) {
-        counter!("basilica_validator_database_operations_total").increment(1);
-        histogram!("basilica_validator_database_query_duration_seconds")
+        counter!("cathedral_validator_database_operations_total").increment(1);
+        histogram!("cathedral_validator_database_query_duration_seconds")
             .record(duration.as_secs_f64());
 
         if !success {
-            counter!("basilica_validator_database_errors_total").increment(1);
+            counter!("cathedral_validator_database_errors_total").increment(1);
         }
     }
 
     /// Set database connections count
     pub fn set_database_connections(&self, count: i64) {
-        gauge!("basilica_validator_database_connections_total").set(count as f64);
+        gauge!("cathedral_validator_database_connections_total").set(count as f64);
     }
 
     /// Record HTTP request
@@ -300,31 +300,31 @@ impl ValidatorPrometheusMetrics {
         duration: Duration,
         response_size: usize,
     ) {
-        counter!("basilica_validator_http_requests_total").increment(1);
-        histogram!("basilica_validator_http_request_duration_seconds")
+        counter!("cathedral_validator_http_requests_total").increment(1);
+        histogram!("cathedral_validator_http_request_duration_seconds")
             .record(duration.as_secs_f64());
-        histogram!("basilica_validator_http_response_size_bytes").record(response_size as f64);
+        histogram!("cathedral_validator_http_response_size_bytes").record(response_size as f64);
     }
 
     /// Set node health status
     pub fn set_node_health(&self, _node_id: &str, healthy: bool) {
-        gauge!("basilica_validator_node_health_status").set(if healthy { 1.0 } else { 0.0 });
+        gauge!("cathedral_validator_node_health_status").set(if healthy { 1.0 } else { 0.0 });
     }
 
     /// Record consensus weight set operation
     pub fn record_consensus_weight_set(&self, _success: bool) {
-        counter!("basilica_validator_consensus_weight_sets_total").increment(1);
+        counter!("cathedral_validator_consensus_weight_sets_total").increment(1);
     }
 
     /// Record verification session
     pub fn record_verification_session(&self, _session_type: &str, duration: Duration) {
-        histogram!("basilica_validator_verification_session_duration_seconds")
+        histogram!("cathedral_validator_verification_session_duration_seconds")
             .record(duration.as_secs_f64());
     }
 
     /// Record attestation verification
     pub fn record_attestation_verification(&self, _success: bool, _attestation_type: &str) {
-        counter!("basilica_validator_attestation_verification_total").increment(1);
+        counter!("cathedral_validator_attestation_verification_total").increment(1);
     }
 
     /// Record GPU profile metrics for a miner
@@ -334,9 +334,9 @@ impl ValidatorPrometheusMetrics {
         gpu_count: u32,
         weighted_score: f64,
     ) {
-        gauge!("basilica_validator_miner_gpu_count", "miner_uid" => miner_uid.to_string())
+        gauge!("cathedral_validator_miner_gpu_count", "miner_uid" => miner_uid.to_string())
             .set(gpu_count as f64);
-        histogram!("basilica_validator_miner_gpu_weighted_score", "miner_uid" => miner_uid.to_string())
+        histogram!("cathedral_validator_miner_gpu_weighted_score", "miner_uid" => miner_uid.to_string())
             .record(weighted_score);
     }
 
@@ -348,7 +348,7 @@ impl ValidatorPrometheusMetrics {
         gpu_model: &str,
         gpu_count: usize,
     ) {
-        gauge!("basilica_validator_node_gpu_count",
+        gauge!("cathedral_validator_node_gpu_count",
             "miner_uid" => miner_uid.to_string(),
             "node_id" => node_id.to_string(),
             "gpu_model" => gpu_model.to_string()
@@ -358,7 +358,7 @@ impl ValidatorPrometheusMetrics {
 
     /// Record weight assigned to a miner
     pub fn record_miner_weight(&self, miner_uid: u16, weight: u16) {
-        gauge!("basilica_validator_miner_weight",
+        gauge!("cathedral_validator_miner_weight",
             "miner_uid" => miner_uid.to_string()
         )
         .set(weight as f64);
@@ -366,7 +366,7 @@ impl ValidatorPrometheusMetrics {
 
     /// Record successful validation for a miner
     pub fn record_miner_successful_validation(&self, miner_uid: u16, node_id: &str) {
-        counter!("basilica_validator_miner_successful_validations",
+        counter!("cathedral_validator_miner_successful_validations",
             "miner_uid" => miner_uid.to_string(),
             "node_id" => node_id.to_string()
         )
@@ -381,7 +381,7 @@ impl ValidatorPrometheusMetrics {
         node_id: &str,
         count: u32,
     ) {
-        gauge!("basilica_validator_miner_gpu_profiles",
+        gauge!("cathedral_validator_miner_gpu_profiles",
             "miner_uid" => miner_uid.to_string(),
             "gpu_profile" => gpu_profile.to_string(),
             "node_id" => node_id.to_string()
@@ -397,13 +397,13 @@ impl ValidatorPrometheusMetrics {
         uptime_minutes: f64,
         multiplier: f64,
     ) {
-        gauge!("basilica_node_uptime_minutes",
+        gauge!("cathedral_node_uptime_minutes",
             "node_id" => node_id.to_string(),
             "miner_uid" => miner_uid.to_string()
         )
         .set(uptime_minutes);
 
-        gauge!("basilica_node_uptime_multiplier",
+        gauge!("cathedral_node_uptime_multiplier",
             "node_id" => node_id.to_string(),
             "miner_uid" => miner_uid.to_string()
         )
@@ -412,13 +412,13 @@ impl ValidatorPrometheusMetrics {
 
     /// Reset node uptime metrics for a node that has been removed
     pub fn reset_node_uptime_metrics(&self, miner_uid: u16, node_id: &str) {
-        gauge!("basilica_node_uptime_minutes",
+        gauge!("cathedral_node_uptime_minutes",
             "node_id" => node_id.to_string(),
             "miner_uid" => miner_uid.to_string()
         )
         .set(0.0);
 
-        gauge!("basilica_node_uptime_multiplier",
+        gauge!("cathedral_node_uptime_multiplier",
             "node_id" => node_id.to_string(),
             "miner_uid" => miner_uid.to_string()
         )
@@ -439,7 +439,7 @@ impl ValidatorPrometheusMetrics {
         gpu_type: &str,
         is_rented: bool,
     ) {
-        gauge!("basilica_validator_node_rental_status",
+        gauge!("cathedral_validator_node_rental_status",
             "node_id" => node_id.to_string(),
             "miner_uid" => miner_uid.to_string(),
             "gpu_type" => gpu_type.to_string()
@@ -449,7 +449,7 @@ impl ValidatorPrometheusMetrics {
 
     /// Record rental creation
     pub fn record_rental_created(&self, miner_uid: u16, gpu_type: &str) {
-        counter!("basilica_validator_rentals_created_total",
+        counter!("cathedral_validator_rentals_created_total",
             "miner_uid" => miner_uid.to_string(),
             "gpu_type" => gpu_type.to_string()
         )
@@ -488,19 +488,19 @@ impl ValidatorPrometheusMetrics {
 
         // Collect CPU usage
         if let Ok(cpu_info) = self.get_cpu_usage().await {
-            gauge!("basilica_validator_cpu_usage_percent").set(cpu_info);
+            gauge!("cathedral_validator_cpu_usage_percent").set(cpu_info);
         }
 
         // Collect memory usage
         if let Ok((used, total)) = self.get_memory_usage().await {
-            gauge!("basilica_validator_memory_usage_bytes").set(used as f64);
-            gauge!("basilica_validator_memory_total_bytes").set(total as f64);
+            gauge!("cathedral_validator_memory_usage_bytes").set(used as f64);
+            gauge!("cathedral_validator_memory_total_bytes").set(total as f64);
         }
 
         // Collect disk usage
         if let Ok((used, total)) = self.get_disk_usage().await {
-            gauge!("basilica_validator_disk_usage_bytes").set(used as f64);
-            gauge!("basilica_validator_disk_total_bytes").set(total as f64);
+            gauge!("cathedral_validator_disk_usage_bytes").set(used as f64);
+            gauge!("cathedral_validator_disk_total_bytes").set(total as f64);
         }
 
         Ok(())
@@ -606,7 +606,7 @@ impl ValidatorPrometheusMetrics {
                     miner_uid, node_uuid, gpu_model, gpu_count, gpu_memory_gb
                 );
 
-                gauge!("basilica_validator_node_gpu_count",
+                gauge!("cathedral_validator_node_gpu_count",
                     "miner_uid" => miner_uid.to_string(),
                     "node_id" => node_uuid.to_string(),
                     "gpu_model" => gpu_model.to_string()
@@ -626,7 +626,7 @@ impl ValidatorPrometheusMetrics {
                 total_count
             );
 
-            gauge!("basilica_validator_miner_gpu_count",
+            gauge!("cathedral_validator_miner_gpu_count",
                 "miner_uid" => miner_uid.to_string()
             )
             .set(total_count as f64);
@@ -640,7 +640,7 @@ impl ValidatorPrometheusMetrics {
 
     /// Record RPC critical failure
     pub fn record_rpc_critical_failure(&self, method: &str, error_type: &str) {
-        counter!("basilica_validator_rpc_critical_failures_total",
+        counter!("cathedral_validator_rpc_critical_failures_total",
             "method" => method.to_string(),
             "error_type" => error_type.to_string()
         )
@@ -654,7 +654,7 @@ impl ValidatorPrometheusMetrics {
 
     /// Set total discovered miners count
     pub fn set_discovered_miners_total(&self, count: u64) {
-        gauge!("basilica_validator_discovered_miners_total").set(count as f64);
+        gauge!("cathedral_validator_discovered_miners_total").set(count as f64);
     }
 
     /// Sets node validation state atomically, clearing all other states for the validation type
@@ -682,7 +682,7 @@ impl ValidatorPrometheusMetrics {
                 0.0
             };
 
-            gauge!("basilica_validator_node_validation_state",
+            gauge!("cathedral_validator_node_validation_state",
                 "node_id" => node_id.to_string(),
                 "miner_uid" => miner_uid.to_string(),
                 "validation_type" => validation_type_str.to_string(),
@@ -707,7 +707,7 @@ impl ValidatorPrometheusMetrics {
         let all_states = ValidationState::states_for_type(validation_type);
 
         for state in all_states {
-            gauge!("basilica_validator_node_validation_state",
+            gauge!("cathedral_validator_node_validation_state",
                 "node_id" => node_id.to_string(),
                 "miner_uid" => miner_uid.to_string(),
                 "validation_type" => validation_type_str.to_string(),
@@ -718,29 +718,29 @@ impl ValidatorPrometheusMetrics {
     }
 
     pub fn record_billing_telemetry_collected(&self, rental_id: &str) {
-        counter!("basilica_validator_billing_telemetry_collected_total",
+        counter!("cathedral_validator_billing_telemetry_collected_total",
             "rental_id" => rental_id.to_string()
         )
         .increment(1);
     }
 
     pub fn record_billing_telemetry_sent(&self, count: usize) {
-        counter!("basilica_validator_billing_telemetry_sent_total").increment(count as u64);
+        counter!("cathedral_validator_billing_telemetry_sent_total").increment(count as u64);
     }
 
     pub fn record_billing_telemetry_dropped(&self, reason: &str, count: usize) {
-        counter!("basilica_validator_billing_telemetry_dropped_total",
+        counter!("cathedral_validator_billing_telemetry_dropped_total",
             "reason" => reason.to_string()
         )
         .increment(count as u64);
     }
 
     pub fn set_billing_queue_depth(&self, depth: usize) {
-        gauge!("basilica_validator_billing_queue_depth").set(depth as f64);
+        gauge!("cathedral_validator_billing_queue_depth").set(depth as f64);
     }
 
     pub fn set_billing_channel_utilization(&self, utilization_percent: f64) {
-        gauge!("basilica_validator_billing_channel_utilization_percent").set(utilization_percent);
+        gauge!("cathedral_validator_billing_channel_utilization_percent").set(utilization_percent);
     }
 
     pub fn set_billing_circuit_breaker_state(&self, state: &str) {
@@ -750,15 +750,15 @@ impl ValidatorPrometheusMetrics {
             "open" => 2.0,
             _ => -1.0,
         };
-        gauge!("basilica_validator_billing_circuit_breaker_state").set(state_value);
+        gauge!("cathedral_validator_billing_circuit_breaker_state").set(state_value);
     }
 
     pub fn record_billing_retry_attempts(&self, attempts: u32) {
-        histogram!("basilica_validator_billing_retry_attempts").record(attempts as f64);
+        histogram!("cathedral_validator_billing_retry_attempts").record(attempts as f64);
     }
 
     pub fn record_billing_telemetry_latency(&self, latency: Duration) {
-        histogram!("basilica_validator_billing_telemetry_latency_seconds")
+        histogram!("cathedral_validator_billing_telemetry_latency_seconds")
             .record(latency.as_secs_f64());
     }
 }

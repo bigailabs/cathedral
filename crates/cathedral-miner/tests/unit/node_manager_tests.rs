@@ -1,7 +1,7 @@
 //! Unit tests for NodeManager
 
-use basilica_miner::config::NodeSshConfig;
-use basilica_miner::node_manager::{NodeConfig, NodeManager};
+use cathedral_miner::config::NodeSshConfig;
+use cathedral_miner::node_manager::{NodeConfig, NodeManager};
 
 #[tokio::test]
 async fn test_node_registration() {
@@ -10,7 +10,7 @@ async fn test_node_registration() {
     let config = NodeConfig {
         host: "192.168.1.100".to_string(),
         port: 22,
-        username: "basilica".to_string(),
+        username: "cathedral".to_string(),
         gpu_category: "H100".to_string(),
         gpu_count: 8,
         additional_opts: None,
@@ -38,7 +38,7 @@ async fn test_list_nodes() {
         .register_node(NodeConfig {
             host: "192.168.1.100".to_string(),
             port: 22,
-            username: "basilica".to_string(),
+            username: "cathedral".to_string(),
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,
@@ -51,7 +51,7 @@ async fn test_list_nodes() {
         .register_node(NodeConfig {
             host: "192.168.1.101".to_string(),
             port: 22,
-            username: "basilica".to_string(),
+            username: "cathedral".to_string(),
             gpu_category: "A100".to_string(),
             gpu_count: 4,
             additional_opts: None,
@@ -64,7 +64,7 @@ async fn test_list_nodes() {
         .register_node(NodeConfig {
             host: "192.168.1.102".to_string(),
             port: 22,
-            username: "basilica".to_string(),
+            username: "cathedral".to_string(),
             gpu_category: "RTX4090".to_string(),
             gpu_count: 2,
             additional_opts: None,
@@ -92,7 +92,7 @@ async fn test_unregister_node() {
         .register_node(NodeConfig {
             host: host.to_string(),
             port: 22,
-            username: "basilica".to_string(),
+            username: "cathedral".to_string(),
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,
@@ -120,7 +120,7 @@ async fn test_register_node_rejects_duplicate_ip() {
     let original = NodeConfig {
         host: "192.168.1.100".to_string(),
         port: 22,
-        username: "basilica".to_string(),
+        username: "cathedral".to_string(),
         gpu_category: "H100".to_string(),
         gpu_count: 8,
         additional_opts: None,
@@ -148,7 +148,7 @@ async fn test_register_node_rejects_duplicate_ip() {
     assert!(existing.is_some());
     let existing = existing.unwrap();
     assert_eq!(existing.port, 22);
-    assert_eq!(existing.username, "basilica");
+    assert_eq!(existing.username, "cathedral");
     assert_eq!(existing.gpu_category, "H100");
     assert_eq!(existing.gpu_count, 8);
 }
@@ -233,7 +233,7 @@ async fn test_deploy_validator_keys_without_nodes() {
 
 #[test]
 fn test_normalize_ssh_key() {
-    use basilica_miner::node_manager::NodeManager;
+    use cathedral_miner::node_manager::NodeManager;
 
     let validator_hotkey = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
 
@@ -273,7 +273,7 @@ fn test_normalize_ssh_key() {
 
 #[test]
 fn test_extract_key_core() {
-    use basilica_miner::node_manager::NodeManager;
+    use cathedral_miner::node_manager::NodeManager;
 
     // Test with key that has comment
     let key_with_comment = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC user@hostname";

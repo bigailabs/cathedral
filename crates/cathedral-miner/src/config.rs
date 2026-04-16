@@ -10,10 +10,10 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use basilica_common::config::{
+use cathedral_common::config::{
     loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig, DEFAULT_BID_GRPC_PORT,
 };
-use basilica_common::error::ConfigurationError;
+use cathedral_common::error::ConfigurationError;
 
 use crate::node_manager::NodeConfig;
 
@@ -505,7 +505,7 @@ mod tests {
         NodeConfig {
             host: host.to_string(),
             port: 22,
-            username: "basilica".to_string(),
+            username: "cathedral".to_string(),
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,

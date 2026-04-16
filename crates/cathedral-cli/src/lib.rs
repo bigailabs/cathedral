@@ -1,6 +1,6 @@
-//! # Basilica CLI
+//! # Cathedral CLI
 //!
-//! Unified command-line interface for Basilica GPU rental and network management.
+//! Unified command-line interface for Cathedral GPU rental and network management.
 //!
 //! This crate provides a comprehensive CLI that combines:
 //! - GPU rental operations (ls, up, down, exec, ssh, etc.)
@@ -9,11 +9,11 @@
 //!
 //! ## Architecture
 //!
-//! The CLI follows the same patterns as other Basilica components:
+//! The CLI follows the same patterns as other Cathedral components:
 //! - Clap-based argument parsing with derive macros
 //! - Handler-based command processing
 //! - Shared configuration and error handling
-//! - Integration with existing basilica-common utilities
+//! - Integration with existing cathedral-common utilities
 
 pub mod auth;
 pub mod cli;

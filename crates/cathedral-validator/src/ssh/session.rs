@@ -4,7 +4,7 @@
 //! Validators connect directly to nodes using SSH credentials provided during discovery.
 
 use anyhow::{Context, Result};
-use basilica_common::ssh::SshConnectionDetails;
+use cathedral_common::ssh::SshConnectionDetails;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -185,14 +185,14 @@ mod tests {
             node_id: "test-node-1".to_string(),
             host: "192.168.1.100".to_string(),
             port: 22,
-            username: "basilica".to_string(),
+            username: "cathedral".to_string(),
             ssh_key_path: None,
         };
 
         let ssh_details = manager.connect_to_node(&node_details).await.unwrap();
         assert_eq!(ssh_details.host, "192.168.1.100");
         assert_eq!(ssh_details.port, 22);
-        assert_eq!(ssh_details.username, "basilica");
+        assert_eq!(ssh_details.username, "cathedral");
 
         assert!(manager.is_node_active("test-node-1").await);
 
@@ -212,7 +212,7 @@ mod tests {
                 node_id: format!("test-node-{}", i),
                 host: format!("192.168.1.{}", 100 + i),
                 port: 22,
-                username: "basilica".to_string(),
+                username: "cathedral".to_string(),
                 ssh_key_path: None,
             };
             manager.connect_to_node(&node_details).await.unwrap();

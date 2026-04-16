@@ -1,10 +1,10 @@
-//! Volume management handlers for the Basilica CLI
+//! Volume management handlers for the Cathedral CLI
 
 use crate::error::CliError;
 use crate::output::{json_output, print_success, table_output};
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
-use basilica_sdk::types::{AttachVolumeRequest, CreateVolumeRequest, VolumeResponse, VolumeStatus};
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::types::{AttachVolumeRequest, CreateVolumeRequest, VolumeResponse, VolumeStatus};
+use cathedral_sdk::CathedralClient;
 use console::{style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
@@ -144,11 +144,11 @@ fn truncate(s: &str, max_len: usize) -> String {
 /// Select a volume interactively
 ///
 /// # Arguments
-/// * `client` - Basilica client
+/// * `client` - Cathedral client
 /// * `prompt` - Prompt text to display
 /// * `status_filter` - Optional filter for volume status (None = all statuses)
 async fn select_volume(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     prompt: &str,
     status_filter: Option<VolumeStatus>,
 ) -> Result<VolumeResponse, CliError> {
@@ -170,10 +170,10 @@ async fn select_volume(
     if filtered_volumes.is_empty() {
         let msg = match status_filter {
             Some(VolumeStatus::Available) => {
-                "No available volumes found.\nCreate one with: basilica volumes create"
+                "No available volumes found.\nCreate one with: cathedral volumes create"
             }
             Some(VolumeStatus::Attached) => "No attached volumes found.",
-            _ => "No volumes found.\nCreate one with: basilica volumes create",
+            _ => "No volumes found.\nCreate one with: cathedral volumes create",
         };
         return Err(CliError::Internal(color_eyre::eyre::eyre!(msg)));
     }
@@ -239,10 +239,10 @@ async fn select_volume(
 /// Select a rental compatible with a volume (same provider and region)
 ///
 /// # Arguments
-/// * `client` - Basilica client
+/// * `client` - Cathedral client
 /// * `volume` - Volume to find compatible rentals for
 async fn select_rental_for_volume(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     volume: &VolumeResponse,
 ) -> Result<String, CliError> {
     // Fetch both GPU and CPU secure cloud rentals in parallel
@@ -292,7 +292,7 @@ async fn select_rental_for_volume(
             "No compatible rentals found.\n\n\
              Volume '{}' is in provider '{}' region '{}'.\n\
              You need an active rental in the same provider and region to attach this volume.\n\n\
-             Start a new rental with: basilica up --compute secure-cloud",
+             Start a new rental with: cathedral up --compute secure-cloud",
             volume.name,
             volume.provider,
             volume.region
@@ -357,7 +357,7 @@ async fn select_rental_for_volume(
 
 /// Find a volume by ID or name from the user's volumes
 async fn find_volume_by_id_or_name(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     volume_identifier: &str,
 ) -> Result<VolumeResponse, CliError> {
     let response = client.list_volumes().await.map_err(CliError::Api)?;
@@ -382,14 +382,14 @@ async fn find_volume_by_id_or_name(
     }
 
     Err(CliError::Internal(color_eyre::eyre::eyre!(
-        "Volume '{}' not found. Use 'basilica volumes list' to see your volumes.",
+        "Volume '{}' not found. Use 'cathedral volumes list' to see your volumes.",
         volume_identifier
     )))
 }
 
 /// Handle creating a new volume
 pub async fn handle_create_volume(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: Option<String>,
     size: Option<u32>,
     provider: Option<String>,
@@ -489,7 +489,7 @@ pub async fn handle_create_volume(
 }
 
 /// Handle listing volumes
-pub async fn handle_list_volumes(client: &BasilicaClient, json: bool) -> Result<(), CliError> {
+pub async fn handle_list_volumes(client: &CathedralClient, json: bool) -> Result<(), CliError> {
     let response = client.list_volumes().await.map_err(CliError::Api)?;
 
     if json {
@@ -502,7 +502,7 @@ pub async fn handle_list_volumes(client: &BasilicaClient, json: bool) -> Result<
         println!();
         println!(
             "Create one with: {}",
-            style("basilica volumes create").cyan()
+            style("cathedral volumes create").cyan()
         );
         return Ok(());
     }
@@ -517,7 +517,7 @@ pub async fn handle_list_volumes(client: &BasilicaClient, json: bool) -> Result<
 
 /// Handle deleting a volume
 pub async fn handle_delete_volume(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     volume_identifier: Option<String>,
     skip_confirm: bool,
     json: bool,
@@ -541,7 +541,7 @@ pub async fn handle_delete_volume(
         let message = match volume.status {
             VolumeStatus::Attached => {
                 format!(
-                    "Cannot delete volume '{}' because it is attached to rental '{}'.\nDetach it first with: basilica volumes detach {}",
+                    "Cannot delete volume '{}' because it is attached to rental '{}'.\nDetach it first with: cathedral volumes detach {}",
                     volume.name,
                     volume.rental_id.as_deref().unwrap_or("unknown"),
                     volume.name
@@ -626,7 +626,7 @@ pub async fn handle_delete_volume(
 
 /// Handle attaching a volume to a rental
 pub async fn handle_attach_volume(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     volume_identifier: Option<String>,
     rental_id: Option<String>,
     json: bool,
@@ -648,7 +648,7 @@ pub async fn handle_attach_volume(
     // Check if volume is already attached
     if volume.status == VolumeStatus::Attached {
         return Err(CliError::Internal(color_eyre::eyre::eyre!(
-            "Volume '{}' is already attached to rental '{}'.\nDetach it first with: basilica volumes detach {}",
+            "Volume '{}' is already attached to rental '{}'.\nDetach it first with: cathedral volumes detach {}",
             volume.name,
             volume.rental_id.as_deref().unwrap_or("unknown"),
             volume.name
@@ -702,7 +702,7 @@ pub async fn handle_attach_volume(
 
 /// Handle detaching a volume from a rental
 pub async fn handle_detach_volume(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     volume_identifier: Option<String>,
     skip_confirm: bool,
     json: bool,

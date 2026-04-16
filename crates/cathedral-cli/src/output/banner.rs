@@ -21,48 +21,48 @@ pub fn print_command_suggestions() {
     // List available GPUs
     println!(
         "  {} {}",
-        style("basilica ls").yellow().bold(),
+        style("cathedral ls").yellow().bold(),
         style("- View available GPUs for rental").dim()
     );
 
     // Start a rental
     println!(
         "  {} {}",
-        style("basilica up").yellow().bold(),
+        style("cathedral up").yellow().bold(),
         style("- Start a GPU rental session").dim()
     );
 
     // List active rentals
     println!(
         "  {} {}",
-        style("basilica ps").yellow().bold(),
+        style("cathedral ps").yellow().bold(),
         style("- List active rentals").dim()
     );
 
     // Check specific rental status
     println!(
         "  {} {}",
-        style("basilica status").yellow().bold(),
+        style("cathedral status").yellow().bold(),
         style("- Check status of a specific rental").dim()
     );
 
     // SSH into rental
     println!(
         "  {} {}",
-        style("basilica ssh").yellow().bold(),
+        style("cathedral ssh").yellow().bold(),
         style("- Connect to your rental").dim()
     );
 
     // Stop a rental
     println!(
         "  {} {}",
-        style("basilica down").yellow().bold(),
+        style("cathedral down").yellow().bold(),
         style("- Stop a GPU rental").dim()
     );
 
     println!();
     println!(
         "For more information, run {}",
-        style("basilica --help").green(),
+        style("cathedral --help").green(),
     );
 }

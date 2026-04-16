@@ -30,9 +30,9 @@ pub async fn refresh_access_token(
     debug!("Refreshing access token");
 
     // Use provided values or fall back to Auth0 defaults
-    let client_id = client_id.unwrap_or_else(|| basilica_common::auth0_client_id());
+    let client_id = client_id.unwrap_or_else(|| cathedral_common::auth0_client_id());
     let token_endpoint = token_endpoint.map(|s| s.to_string()).unwrap_or_else(|| {
-        let domain = basilica_common::auth0_domain();
+        let domain = cathedral_common::auth0_domain();
         format!("https://{}/oauth/token", domain)
     });
 
@@ -42,7 +42,7 @@ pub async fn refresh_access_token(
         None, // No client secret for PKCE flow
         AuthUrl::new(format!(
             "https://{}/authorize",
-            basilica_common::auth0_domain()
+            cathedral_common::auth0_domain()
         ))
         .map_err(|e| AuthError::ConfigError(format!("Invalid auth endpoint: {}", e)))?,
         Some(

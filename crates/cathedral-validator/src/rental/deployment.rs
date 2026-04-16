@@ -4,7 +4,7 @@
 //! including validation, resource allocation, and lifecycle management.
 
 use anyhow::{Context, Result};
-use basilica_common::utils::validate_docker_image;
+use cathedral_common::utils::validate_docker_image;
 use tracing::{debug, info, warn};
 
 use super::container_client::ContainerClient;
@@ -423,7 +423,7 @@ impl DeploymentManager {
         );
         secured_spec
             .labels
-            .insert("basilica.security.isolated".to_string(), "true".to_string());
+            .insert("cathedral.security.isolated".to_string(), "true".to_string());
 
         // Remove dangerous capabilities
         let dangerous_caps = [

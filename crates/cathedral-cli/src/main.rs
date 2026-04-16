@@ -1,8 +1,8 @@
-//! Main entry point for the Basilica CLI
+//! Main entry point for the Cathedral CLI
 
-use basilica_cli::cli::commands::Commands;
-use basilica_cli::cli::Args;
-use basilica_cli::update_check;
+use cathedral_cli::cli::commands::Commands;
+use cathedral_cli::cli::Args;
+use cathedral_cli::update_check;
 use clap::{CommandFactory, Parser};
 use clap_complete::env::CompleteEnv;
 use clap_verbosity_flag::{LevelFilter, OffLevel, Verbosity};
@@ -17,7 +17,7 @@ fn main() -> Result<()> {
 
     // Handle upgrade command WITHOUT Tokio runtime to avoid conflicts with self_update
     if let Commands::Upgrade { version, dry_run } = &args.command {
-        use basilica_cli::cli::handlers;
+        use cathedral_cli::cli::handlers;
 
         // Configure color-eyre first
         color_eyre::config::HookBuilder::default()
@@ -26,7 +26,7 @@ fn main() -> Result<()> {
             .install()?;
 
         return handlers::upgrade::handle_upgrade(version.clone(), *dry_run).map_err(|e| match e {
-            basilica_cli::CliError::Internal(report) => report,
+            cathedral_cli::CliError::Internal(report) => report,
             other => eyre!("{}", other),
         });
     }
@@ -63,7 +63,7 @@ async fn run_async(args: Args) -> Result<()> {
     // Initialize logging here in the binary context where CARGO_BIN_NAME is available
     let binary_name = env!("CARGO_BIN_NAME").replace("-", "_");
     let default_filter = format!("{}=error", binary_name);
-    basilica_common::logging::init_logging(
+    cathedral_common::logging::init_logging(
         // disable verbosity by default for CLI, if needed it needs to be enabled with RUST_LOG
         &Verbosity::<OffLevel>::default(),
         &binary_name,
@@ -75,7 +75,7 @@ async fn run_async(args: Args) -> Result<()> {
     if let Err(err) = args.run().await {
         // Extract and format the inner error properly
         match err {
-            basilica_cli::CliError::Internal(report) => {
+            cathedral_cli::CliError::Internal(report) => {
                 // For Internal errors (which contain eyre Reports with suggestions),
                 // use Debug formatting to show the full error report
                 eprintln!("Error: {:?}", report);

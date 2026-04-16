@@ -3,11 +3,11 @@
 use crate::cli::handlers::region_mapping::{extract_country_code, region_matches_country};
 use crate::error::CliError;
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
-use basilica_common::types::ComputeCategory;
-use basilica_common::types::{GpuCategory, GpuOffering};
-use basilica_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, RentalState};
-use basilica_sdk::{ApiError, BasilicaClient};
-use basilica_validator::api::types::AvailableNode;
+use cathedral_common::types::ComputeCategory;
+use cathedral_common::types::{GpuCategory, GpuOffering};
+use cathedral_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, RentalState};
+use cathedral_sdk::{ApiError, CathedralClient};
+use cathedral_validator::api::types::AvailableNode;
 use color_eyre::eyre::{eyre, Result};
 use color_eyre::Help;
 use console::{style, Term};
@@ -141,7 +141,7 @@ pub fn aggregate_nodes_by_gpu_category(nodes: &[AvailableNode]) -> Vec<GpuCatego
 /// * `require_ssh` - If true, only show rentals with SSH access
 pub async fn resolve_target_rental(
     target: Option<String>,
-    api_client: &BasilicaClient,
+    api_client: &CathedralClient,
     require_ssh: bool,
 ) -> Result<String> {
     if let Some(t) = target {
@@ -214,7 +214,7 @@ struct UnifiedRentalItem {
 pub async fn resolve_target_rental_unified(
     target: Option<String>,
     compute_filter: Option<ComputeCategory>,
-    api_client: &BasilicaClient,
+    api_client: &CathedralClient,
     exclude_vip: bool,
 ) -> Result<(String, ComputeCategory)> {
     // If target provided, determine type based on filter or default
@@ -492,7 +492,7 @@ pub enum SelectedOffering {
     /// Community cloud offering (GPU category and count for bid-based selection)
     CommunityCloud(CommunityCloudSelection),
     /// Secure cloud CPU-only offering (no GPU)
-    CpuOnly(basilica_sdk::types::CpuOffering),
+    CpuOnly(cathedral_sdk::types::CpuOffering),
 }
 
 /// Offering type for display
@@ -515,7 +515,7 @@ struct UnifiedOfferingItem {
     // Original data for creating the offering
     secure_offering: Option<GpuOffering>,
     community_nodes: Option<Vec<AvailableNode>>,
-    cpu_offering: Option<basilica_sdk::types::CpuOffering>,
+    cpu_offering: Option<cathedral_sdk::types::CpuOffering>,
 }
 
 /// Resolve GPU offering with unified selection across compute types
@@ -543,7 +543,7 @@ pub struct FlavourFilters {
 }
 
 pub async fn resolve_offering_unified(
-    api_client: &BasilicaClient,
+    api_client: &CathedralClient,
     gpu_filter: Option<&str>,
     gpu_count_filter: Option<u32>,
     country_filter: Option<&str>,
@@ -564,7 +564,7 @@ pub async fn resolve_offering_unified(
         min_gpu_memory: min_gpu_memory_filter,
         gpu_type: gpu_filter.map(|s| s.to_string()),
         min_gpu_count: gpu_count_filter,
-        location: country_filter.map(|c| basilica_common::LocationProfile {
+        location: country_filter.map(|c| cathedral_common::LocationProfile {
             city: None,
             region: None,
             country: Some(c.to_string()),
@@ -572,7 +572,7 @@ pub async fn resolve_offering_unified(
     };
 
     // Build GPU price query with flavour filters
-    let gpu_price_query = basilica_sdk::types::GpuPriceQuery {
+    let gpu_price_query = cathedral_sdk::types::GpuPriceQuery {
         interconnect: flavour.interconnect.clone(),
         region: flavour.region.clone(),
         spot_only: if flavour.spot { Some(true) } else { None },
@@ -961,7 +961,7 @@ pub async fn resolve_offering_unified(
 /// and determines which cloud the rental belongs to.
 pub async fn resolve_rental_by_id(
     target_id: &str,
-    api_client: &BasilicaClient,
+    api_client: &CathedralClient,
 ) -> Result<ComputeCategory, CliError> {
     let spinner = create_spinner("Looking up rental...");
 
@@ -999,7 +999,7 @@ pub async fn resolve_rental_by_id(
     // Not found in either - provide helpful error
     Err(CliError::Internal(
         eyre!("Rental '{}' not found", target_id)
-            .suggestion("Try 'basilica ps' to see your active rentals")
+            .suggestion("Try 'cathedral ps' to see your active rentals")
             .note("The rental may have expired or been terminated"),
     ))
 }
@@ -1016,14 +1016,14 @@ pub struct RentalWithSsh {
 ///
 /// This is a common operation needed when displaying SSH connection instructions.
 /// Returns an error if no SSH key is registered or the private key cannot be found locally.
-pub async fn get_ssh_private_key_path(api_client: &BasilicaClient) -> Result<std::path::PathBuf> {
+pub async fn get_ssh_private_key_path(api_client: &CathedralClient) -> Result<std::path::PathBuf> {
     let ssh_key = api_client
         .get_ssh_key()
         .await
         .map_err(|e| eyre!(e))?
         .ok_or_else(|| {
-            eyre!("No SSH key registered with Basilica")
-                .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
+            eyre!("No SSH key registered with Cathedral")
+                .suggestion("Run 'cathedral ssh-keys add' to register your SSH key")
         })?;
 
     crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
@@ -1035,7 +1035,7 @@ pub async fn get_ssh_private_key_path(api_client: &BasilicaClient) -> Result<std
 /// When `target_id` is None, uses interactive selector then fetches SSH credentials.
 pub async fn resolve_rental_with_ssh(
     target_id: Option<&str>,
-    api_client: &BasilicaClient,
+    api_client: &CathedralClient,
 ) -> Result<RentalWithSsh, CliError> {
     if let Some(target_id) = target_id {
         // Rental ID provided - find it and get SSH credentials
@@ -1094,7 +1094,7 @@ pub async fn resolve_rental_with_ssh(
 
         Err(CliError::Internal(
             eyre!("Rental '{}' not found", target_id)
-                .suggestion("Try 'basilica ps' to see your active rentals"),
+                .suggestion("Try 'cathedral ps' to see your active rentals"),
         ))
     } else {
         // No rental ID - use interactive selector
@@ -1121,7 +1121,7 @@ pub async fn resolve_rental_with_ssh(
 /// Fetch SSH info (credentials and public key) for a community cloud rental
 async fn fetch_community_ssh_info(
     rental_id: &str,
-    api_client: &BasilicaClient,
+    api_client: &CathedralClient,
 ) -> Result<(String, Option<String>), CliError> {
     let rental_status = api_client
         .get_rental_status(rental_id)
@@ -1145,7 +1145,7 @@ async fn fetch_community_ssh_info(
 /// Fetch SSH info (command and public key) for a secure cloud rental
 async fn fetch_secure_ssh_info(
     rental_id: &str,
-    api_client: &BasilicaClient,
+    api_client: &CathedralClient,
 ) -> Result<(String, Option<String>), CliError> {
     let (cpu_result, secure_result) = tokio::join!(
         api_client.list_cpu_rentals(),
@@ -1199,8 +1199,8 @@ async fn fetch_secure_ssh_info(
 /// Common SSH info extraction for secure cloud GPU/CPU rentals
 async fn secure_rental_ssh_info(
     rental_id: &str,
-    rental: &basilica_sdk::types::SecureCloudRentalListItem,
-    api_client: &BasilicaClient,
+    rental: &cathedral_sdk::types::SecureCloudRentalListItem,
+    api_client: &CathedralClient,
 ) -> Result<(String, Option<String>), CliError> {
     let ssh_command = rental.ssh_command.clone().ok_or_else(|| {
         CliError::Internal(

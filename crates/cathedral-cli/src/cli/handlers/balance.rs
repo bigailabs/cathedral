@@ -1,4 +1,4 @@
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::CathedralClient;
 use color_eyre::{eyre::eyre, Help, Result as EyreResult};
 
 use console::style;
@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Handle the balance check command
-pub async fn handle_check_balance(client: &BasilicaClient, json: bool) -> EyreResult<(), CliError> {
+pub async fn handle_check_balance(client: &CathedralClient, json: bool) -> EyreResult<(), CliError> {
     let spinner = create_spinner("Fetching account balance...");
 
     let balance = client.get_balance().await.map_err(|e| {
@@ -33,7 +33,7 @@ pub async fn handle_check_balance(client: &BasilicaClient, json: bool) -> EyreRe
     Ok(())
 }
 
-fn display_balance(balance: &basilica_sdk::BalanceResponse) {
+fn display_balance(balance: &cathedral_sdk::BalanceResponse) {
     println!("{}", style("Account Balance").bold());
     println!(
         "  {}: {} credits",

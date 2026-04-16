@@ -1,8 +1,8 @@
-//! Error handling for Basilica
+//! Error handling for Cathedral
 //!
 //! This module defines the core error handling infrastructure used throughout
-//! the Basilica system. It provides:
-//! - `BasilicaError` trait for consistent error handling
+//! the Cathedral system. It provides:
+//! - `CathedralError` trait for consistent error handling
 //! - Specific error types for different domains (Network, Crypto, Config, etc.)
 //! - Integration with `thiserror` for ergonomic error handling
 //!
@@ -14,9 +14,9 @@
 
 use thiserror::Error;
 
-/// Base trait for all Basilica-specific errors
+/// Base trait for all Cathedral-specific errors
 ///
-/// This trait ensures all Basilica errors are:
+/// This trait ensures all Cathedral errors are:
 /// - Thread-safe (Send + Sync)
 /// - Static lifetime (no borrowed data)
 /// - Implement standard Error trait
@@ -24,11 +24,11 @@ use thiserror::Error;
 /// # Implementation Notes for Developers
 /// When creating new error types:
 /// 1. Derive from thiserror::Error
-/// 2. Implement BasilicaError trait
+/// 2. Implement CathedralError trait
 /// 3. Use `#[from]` for automatic conversions from underlying errors
 /// 4. Provide clear, user-facing error messages
 /// 5. Include context information where helpful
-pub trait BasilicaError: std::error::Error + Send + Sync + 'static {}
+pub trait CathedralError: std::error::Error + Send + Sync + 'static {}
 
 /// Network-related errors
 ///
@@ -77,7 +77,7 @@ pub enum NetworkError {
     ConfigurationError { details: String },
 }
 
-impl BasilicaError for NetworkError {}
+impl CathedralError for NetworkError {}
 
 /// Cryptographic operation errors
 ///
@@ -126,7 +126,7 @@ pub enum CryptoError {
     Generic { message: String },
 }
 
-impl BasilicaError for CryptoError {}
+impl CathedralError for CryptoError {}
 
 /// Configuration-related errors
 ///
@@ -170,7 +170,7 @@ pub enum ConfigurationError {
     ValidationFailed { details: String },
 }
 
-impl BasilicaError for ConfigurationError {}
+impl CathedralError for ConfigurationError {}
 
 /// Database and persistence-related errors
 ///
@@ -226,7 +226,7 @@ pub enum PersistenceError {
     NotFound { details: String },
 }
 
-impl BasilicaError for PersistenceError {}
+impl CathedralError for PersistenceError {}
 
 /// System-level errors
 ///
@@ -263,7 +263,7 @@ pub enum SystemError {
     ValidationError { component: String, message: String },
 }
 
-impl BasilicaError for SystemError {}
+impl CathedralError for SystemError {}
 
 /// Validation errors
 ///
@@ -296,7 +296,7 @@ pub enum ValidationError {
     InvalidEnum { enum_name: String, value: String },
 }
 
-impl BasilicaError for ValidationError {}
+impl CathedralError for ValidationError {}
 
 /// Verification-related errors
 ///
@@ -329,7 +329,7 @@ pub enum VerificationError {
     Generic { details: String },
 }
 
-impl BasilicaError for VerificationError {}
+impl CathedralError for VerificationError {}
 
 /// Utility functions for error handling
 impl NetworkError {
@@ -402,15 +402,15 @@ mod tests {
     }
 
     #[test]
-    fn test_basilica_error_trait() {
-        fn test_basilica_error(_: impl BasilicaError) {}
+    fn test_cathedral_error_trait() {
+        fn test_cathedral_error(_: impl CathedralError) {}
 
-        // These should compile, proving they implement BasilicaError
-        test_basilica_error(NetworkError::ConnectionLost {
+        // These should compile, proving they implement CathedralError
+        test_cathedral_error(NetworkError::ConnectionLost {
             endpoint: "test".to_string(),
         });
-        test_basilica_error(CryptoError::RandomGenerationFailed);
-        test_basilica_error(ConfigurationError::ValidationFailed {
+        test_cathedral_error(CryptoError::RandomGenerationFailed);
+        test_cathedral_error(ConfigurationError::ValidationFailed {
             details: "test".to_string(),
         });
     }

@@ -8,7 +8,7 @@ use super::types::{AuthConfig, AuthError, AuthResult};
 use crate::output::print_info;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use basilica_sdk::auth::TokenSet;
+use cathedral_sdk::auth::TokenSet;
 use console::{style, Term};
 use oauth2::{
     basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
@@ -166,8 +166,8 @@ impl OAuthFlow {
             auth_request = auth_request.add_extra_param(key, value);
         }
 
-        // Add audience parameter from basilica-common
-        let audience = basilica_common::auth0_audience();
+        // Add audience parameter from cathedral-common
+        let audience = cathedral_common::auth0_audience();
         debug!("Adding audience parameter: {}", audience);
         auth_request = auth_request.add_extra_param("audience", audience);
 
@@ -180,7 +180,7 @@ impl OAuthFlow {
         debug!("Client ID: {}", self.config.client_id);
         debug!("Redirect URI: {}", self.config.redirect_uri);
         debug!("Requested Scopes: {:?}", self.config.scopes);
-        debug!("Audience: {}", basilica_common::auth0_audience());
+        debug!("Audience: {}", cathedral_common::auth0_audience());
         debug!("Full Authorization URL: {}", url_string);
         debug!("===================================================");
 
@@ -299,7 +299,7 @@ impl OAuthFlow {
     /// Refresh an expired access token using the refresh token
     pub async fn refresh_access_token(&self, refresh_token: &str) -> AuthResult<TokenSet> {
         // Use the SDK's refresh function with our OAuth config
-        basilica_sdk::auth::refresh_access_token(
+        cathedral_sdk::auth::refresh_access_token(
             refresh_token,
             Some(&self.config.client_id),
             Some(&self.config.token_endpoint),

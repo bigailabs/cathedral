@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use basilica_protocol::miner_discovery::{
+use cathedral_protocol::miner_discovery::{
     miner_registration_client::MinerRegistrationClient, HealthCheckRequest, NodeRegistration,
     RegisterBidRequest, RemoveBidRequest, UpdateBidRequest,
 };

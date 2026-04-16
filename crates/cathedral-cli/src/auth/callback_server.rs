@@ -57,7 +57,7 @@ impl CallbackServer {
 
     /// Find an available port for the callback server from a list of registered ports
     pub fn find_available_port() -> AuthResult<u16> {
-        let allowed_ports = basilica_common::auth0_callback_ports();
+        let allowed_ports = cathedral_common::auth0_callback_ports();
 
         // Try each port in the list until we find an available one
         for &port in allowed_ports {
@@ -143,7 +143,7 @@ impl CallbackServer {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authorization Successful - Basilica CLI</title>
+    <title>Authorization Successful - Cathedral CLI</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -203,9 +203,9 @@ impl CallbackServer {
 </head>
 <body>
     <div class="container">
-        <img src="https://www.synapz.org/assets/basilica/basilica_logo200x200.png" alt="Basilica" class="logo">
+        <img src="https://www.synapz.org/assets/cathedral/cathedral_logo200x200.png" alt="Cathedral" class="logo">
         <div class="success-icon">✓</div>
-        <h1>Welcome to Basilica CLI</h1>
+        <h1>Welcome to Cathedral CLI</h1>
         <p class="close-instruction">You can now close this window and return to the CLI.</p>
     </div>
 </body>
@@ -223,7 +223,7 @@ impl CallbackServer {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authorization Failed - Basilica CLI</title>
+    <title>Authorization Failed - Cathedral CLI</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -295,7 +295,7 @@ impl CallbackServer {
 </head>
 <body>
     <div class="container">
-        <img src="https://www.synapz.org/assets/basilica/basilica_logo200x200.png" alt="Basilica" class="logo">
+        <img src="https://www.synapz.org/assets/cathedral/cathedral_logo200x200.png" alt="Cathedral" class="logo">
         <div class="error-icon">✗</div>
         <h1>Authorization Failed</h1>
         <div class="error-details">{}</div>

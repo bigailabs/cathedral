@@ -41,7 +41,7 @@ impl Default for SshConfig {
             key_directory: "./ssh_keys".to_string(),
             default_algorithm: SshKeyAlgorithm::Rsa,
             default_key_size: 2048,
-            username_prefix: "basilica_user".to_string(),
+            username_prefix: "cathedral_user".to_string(),
             default_shell: "/bin/rbash".to_string(),
             default_groups: vec!["docker".to_string()],
             port_range: (2200, 2299),
@@ -140,7 +140,7 @@ impl SshConfig {
         }
 
         // Warn about default key directory
-        if self.key_directory == "/tmp/basilica_ssh_keys" {
+        if self.key_directory == "/tmp/cathedral_ssh_keys" {
             warnings.push(
                 "Using temporary directory for SSH keys - keys will be lost on reboot".to_string(),
             );

@@ -1,9 +1,9 @@
 //! CLI-specific client creation and authentication management
 //!
-//! This module handles creating authenticated BasilicaClient instances specifically
+//! This module handles creating authenticated CathedralClient instances specifically
 //! for CLI usage, including JWT token retrieval, refresh, and fallback authentication.
 //!
-//! This is distinct from the general HTTP client library in basilica-api/src/client.rs
+//! This is distinct from the general HTTP client library in cathedral-api/src/client.rs
 //! which provides the underlying HTTP client functionality.
 
 use std::time::Duration;
@@ -11,11 +11,11 @@ use std::time::Duration;
 use crate::auth::{AuthError, OAuthFlow, TokenStore};
 use crate::config::CliConfig;
 use crate::error::{CliError, Result};
-use basilica_sdk::{BasilicaClient, ClientBuilder};
+use cathedral_sdk::{CathedralClient, ClientBuilder};
 use color_eyre::eyre::{eyre, Context};
 use tracing::{debug, warn};
 
-/// Creates an authenticated BasilicaClient with JWT
+/// Creates an authenticated CathedralClient with JWT
 ///
 /// This function:
 /// 1. Attempts to use JWT tokens from TokenStore
@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 ///
 /// # Arguments
 /// * `config` - CLI configuration
-pub async fn create_authenticated_client(config: &CliConfig) -> Result<BasilicaClient> {
+pub async fn create_authenticated_client(config: &CliConfig) -> Result<CathedralClient> {
     let api_url = config.api.base_url.clone();
 
     let mut builder = ClientBuilder::default()
@@ -45,7 +45,7 @@ pub async fn create_authenticated_client(config: &CliConfig) -> Result<BasilicaC
 }
 
 /// Alias for create_authenticated_client for backward compatibility
-pub async fn create_client(config: &CliConfig) -> Result<BasilicaClient> {
+pub async fn create_client(config: &CliConfig) -> Result<CathedralClient> {
     create_authenticated_client(config).await
 }
 
@@ -53,7 +53,7 @@ pub async fn create_client(config: &CliConfig) -> Result<BasilicaClient> {
 ///
 /// This function checks if the stored token needs refresh and refreshes it
 /// before returning, ensuring the API client always gets valid tokens.
-async fn get_valid_jwt_tokens(_config: &CliConfig) -> Result<basilica_sdk::auth::TokenSet> {
+async fn get_valid_jwt_tokens(_config: &CliConfig) -> Result<cathedral_sdk::auth::TokenSet> {
     let data_dir = CliConfig::data_dir().wrap_err("Failed to get data directory")?;
     let token_store = TokenStore::new(data_dir)
         .await

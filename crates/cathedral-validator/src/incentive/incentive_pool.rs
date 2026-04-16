@@ -1,9 +1,9 @@
-use crate::basilica_api::{CuLedgerRowResponse, IncentiveConfigResponse, RuLedgerRowResponse};
+use crate::cathedral_api::{CuLedgerRowResponse, IncentiveConfigResponse, RuLedgerRowResponse};
 use crate::bittensor_core::weight_allocation::{
     BurnAllocation, CategoryAllocation, NormalizedWeight, WeightDistribution,
 };
 use anyhow::Result;
-use basilica_common::types::GpuCategory;
+use cathedral_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -486,7 +486,7 @@ struct WeightCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::basilica_api::{IncentiveGpuCategoryConfig, PostSlashResponse};
+    use crate::cathedral_api::{IncentiveGpuCategoryConfig, PostSlashResponse};
     use chrono::TimeZone;
     use std::str::FromStr;
     use uuid::Uuid;

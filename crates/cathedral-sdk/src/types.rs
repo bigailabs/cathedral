@@ -1,9 +1,9 @@
-//! Type definitions for the Basilica SDK
+//! Type definitions for the Cathedral SDK
 
 use serde::{Deserialize, Serialize};
 
-// Re-export types from basilica-validator that are used by the client
-pub use basilica_validator::api::types::{
+// Re-export types from cathedral-validator that are used by the client
+pub use cathedral_validator::api::types::{
     AvailabilityInfo, AvailableNode, CpuSpec, GpuRequirements, GpuSpec, ListAvailableNodesQuery,
     ListAvailableNodesResponse, LogQuery, NetworkSpeedInfo, NodeDetails, RentCapacityRequest,
     RentCapacityResponse, RentalListItem, RentalStatus,
@@ -11,15 +11,15 @@ pub use basilica_validator::api::types::{
 };
 
 // Re-export LocationProfile for SDK consumers
-pub use basilica_common::LocationProfile;
+pub use cathedral_common::LocationProfile;
 
 // Re-export rental-specific types from validator
-pub use basilica_validator::api::routes::rentals::{
+pub use cathedral_validator::api::routes::rentals::{
     PortMappingRequest, ResourceRequirementsRequest, StartRentalRequest, VolumeMountRequest,
 };
 
 // Re-export RentalState from validator for SDK consumers
-pub use basilica_validator::rental::types::RentalState;
+pub use cathedral_validator::rental::types::RentalState;
 
 // SDK-specific types
 
@@ -86,7 +86,7 @@ pub struct ApiRentalListItem {
     pub network_speed: Option<NetworkSpeedInfo>,
     /// Port mappings for this rental
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
+    pub port_mappings: Option<Vec<cathedral_validator::rental::PortMapping>>,
     /// Hourly cost rate for this rental (includes markup)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hourly_cost: Option<f64>,
@@ -210,7 +210,7 @@ pub struct RentalStatusWithSshResponse {
 
     /// Port mappings (from database)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
+    pub port_mappings: Option<Vec<cathedral_validator::rental::PortMapping>>,
 
     /// SSH public key used at rental creation (for local key matching)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,7 +228,7 @@ impl RentalStatusWithSshResponse {
     pub fn from_validator_response(
         response: ValidatorRentalStatusResponse,
         ssh_credentials: Option<String>,
-        port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
+        port_mappings: Option<Vec<cathedral_validator::rental::PortMapping>>,
         ssh_public_key: Option<String>,
     ) -> Self {
         Self {
@@ -496,8 +496,8 @@ pub struct RentalUsageResponse {
 
 // Secure Cloud (GPU Aggregator) Types
 
-// Re-export ComputeCategory and GpuOffering from basilica-common
-pub use basilica_common::types::{ComputeCategory, GpuOffering};
+// Re-export ComputeCategory and GpuOffering from cathedral-common
+pub use cathedral_common::types::{ComputeCategory, GpuOffering};
 
 /// Query parameters for filtering GPU price listings
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

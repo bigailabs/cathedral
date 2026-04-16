@@ -1,6 +1,6 @@
-//! HTTP client for the Basilica API
+//! HTTP client for the Cathedral API
 //!
-//! This module provides a type-safe client for interacting with the Basilica API.
+//! This module provides a type-safe client for interacting with the Cathedral API.
 //! It supports both authenticated and unauthenticated requests.
 //!
 //! # Authentication
@@ -15,17 +15,17 @@
 //! # Usage Examples
 //!
 //! ```rust,no_run
-//! use basilica_sdk::{BasilicaClient, ClientBuilder};
+//! use cathedral_sdk::{CathedralClient, ClientBuilder};
 //! use std::sync::Arc;
 //!
-//! # async fn example() -> basilica_sdk::Result<()> {
+//! # async fn example() -> cathedral_sdk::Result<()> {
 //! // Direct token authentication with refresh support
 //! let client = ClientBuilder::default()
 //!     .base_url("https://api.basilica.ai")
 //!     .with_tokens("access_token", "refresh_token")
 //!     .build()?;
 //!
-//! // Or use file-based authentication (reads from ~/.local/share/basilica/)
+//! // Or use file-based authentication (reads from ~/.local/share/cathedral/)
 //! let client = ClientBuilder::default()
 //!     .base_url("https://api.basilica.ai")
 //!     .with_file_auth()
@@ -61,23 +61,23 @@ pub const DEFAULT_API_URL: &str = "https://api.basilica.ai";
 
 /// Default timeout in seconds for API requests
 pub const DEFAULT_TIMEOUT_SECS: u64 = 1200;
-use basilica_common::ApiKeyName;
-use basilica_validator::api::types::ListAvailableNodesResponse;
-use basilica_validator::rental::RentalResponse;
+use cathedral_common::ApiKeyName;
+use cathedral_validator::api::types::ListAvailableNodesResponse;
+use cathedral_validator::rental::RentalResponse;
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// HTTP client for interacting with the Basilica API
+/// HTTP client for interacting with the Cathedral API
 #[derive(Debug)]
-pub struct BasilicaClient {
+pub struct CathedralClient {
     http_client: reqwest::Client,
     base_url: String,
     token_manager: Arc<TokenManager>,
 }
 
-impl BasilicaClient {
+impl CathedralClient {
     /// Create a new client (private - use ClientBuilder instead)
     fn new(
         base_url: impl Into<String>,
@@ -131,7 +131,7 @@ impl BasilicaClient {
     pub async fn restart_rental(
         &self,
         rental_id: &str,
-    ) -> Result<basilica_validator::rental::RentalRestartResponse> {
+    ) -> Result<cathedral_validator::rental::RentalRestartResponse> {
         let path = format!("/rentals/{rental_id}/restart");
         self.post(&path, &serde_json::json!({})).await
     }
@@ -637,7 +637,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```no_run
-    /// use basilica_sdk::{ClientBuilder, CreateDeploymentRequest};
+    /// use cathedral_sdk::{ClientBuilder, CreateDeploymentRequest};
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = ClientBuilder::default()
@@ -696,7 +696,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use basilica_sdk::ClientBuilder;
+    /// # use cathedral_sdk::ClientBuilder;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = ClientBuilder::default().with_api_key("key").build()?;
     /// let deployment = client.get_deployment("my-nginx").await?;
@@ -734,7 +734,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use basilica_sdk::ClientBuilder;
+    /// # use cathedral_sdk::ClientBuilder;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = ClientBuilder::default().with_api_key("key").build()?;
     /// let result = client.delete_deployment("my-nginx").await?;
@@ -784,7 +784,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use basilica_sdk::ClientBuilder;
+    /// # use cathedral_sdk::ClientBuilder;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = ClientBuilder::default().with_api_key("key").build()?;
     /// let deployments = client.list_deployments().await?;
@@ -816,7 +816,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use basilica_sdk::ClientBuilder;
+    /// # use cathedral_sdk::ClientBuilder;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = ClientBuilder::default().with_api_key("key").build()?;
     /// let logs = client.get_deployment_logs("my-app", false, Some(100)).await?;
@@ -901,7 +901,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use basilica_sdk::ClientBuilder;
+    /// # use cathedral_sdk::ClientBuilder;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = ClientBuilder::default().with_api_key("key").build()?;
     /// let result = client.scale_deployment("my-app", 3).await?;
@@ -939,7 +939,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```ignore
-    /// use basilica_sdk::{ClientBuilder, WaitOptions, WaitResult};
+    /// use cathedral_sdk::{ClientBuilder, WaitOptions, WaitResult};
     ///
     /// let client = ClientBuilder::default()
     ///     .with_api_key("key")
@@ -1058,7 +1058,7 @@ impl BasilicaClient {
     /// # Example
     ///
     /// ```ignore
-    /// use basilica_sdk::ClientBuilder;
+    /// use cathedral_sdk::ClientBuilder;
     ///
     /// let client = ClientBuilder::default()
     ///     .with_api_key("key")
@@ -1421,7 +1421,7 @@ fn format_phase_message(phase: &str) -> &'static str {
     }
 }
 
-/// Builder for constructing a BasilicaClient with custom configuration
+/// Builder for constructing a CathedralClient with custom configuration
 #[derive(Default)]
 pub struct ClientBuilder {
     base_url: Option<String>,
@@ -1458,7 +1458,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Use file-based authentication (reads tokens from ~/.local/share/basilica/)
+    /// Use file-based authentication (reads tokens from ~/.local/share/cathedral/)
     pub fn with_file_auth(mut self) -> Self {
         self.use_file_auth = true;
         self.access_token = None;
@@ -1492,7 +1492,7 @@ impl ClientBuilder {
 
     /// Build the client with automatic authentication detection
     /// This will automatically find and use CLI tokens if available
-    pub async fn build_auto(self) -> Result<BasilicaClient> {
+    pub async fn build_auto(self) -> Result<CathedralClient> {
         let base_url = self.base_url.unwrap_or_else(|| DEFAULT_API_URL.to_string());
 
         // Always try file-based auth for auto mode
@@ -1504,11 +1504,11 @@ impl ClientBuilder {
             .timeout
             .unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
 
-        BasilicaClient::new(base_url, timeout, Arc::new(token_manager))
+        CathedralClient::new(base_url, timeout, Arc::new(token_manager))
     }
 
     /// Build the client
-    pub fn build(self) -> Result<BasilicaClient> {
+    pub fn build(self) -> Result<CathedralClient> {
         let base_url = self.base_url.unwrap_or_else(|| DEFAULT_API_URL.to_string());
 
         // Create token manager based on auth configuration
@@ -1535,7 +1535,7 @@ impl ClientBuilder {
             .timeout
             .unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
 
-        BasilicaClient::new(base_url, timeout, Arc::new(token_manager))
+        CathedralClient::new(base_url, timeout, Arc::new(token_manager))
     }
 }
 

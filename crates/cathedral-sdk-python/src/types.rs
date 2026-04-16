@@ -1,4 +1,4 @@
-//! Python type exposures for Basilica SDK responses
+//! Python type exposures for Cathedral SDK responses
 //!
 //! This module provides PyO3 bindings for response types, enabling
 //! direct attribute access with full IDE autocomplete support.
@@ -6,7 +6,7 @@
 // pyo3-stub-gen uses deprecated PyO3 APIs internally, we need to allow them
 #![cfg_attr(feature = "stub-gen", allow(deprecated))]
 
-use basilica_sdk::types::{
+use cathedral_sdk::types::{
     AvailabilityInfo as SdkAvailabilityInfo, AvailableNode as SdkAvailableNode,
     CpuOffering as SdkCpuOffering, CpuSpec as SdkCpuSpec, GpuOffering as SdkGpuOffering,
     GpuPriceQuery as SdkGpuPriceQuery, GpuRequirements as SdkGpuRequirements,
@@ -24,7 +24,7 @@ use basilica_sdk::types::{
     StopSecureCloudRentalResponse as SdkStopSecureCloudRentalResponse,
     VolumeMountRequest as SdkVolumeMountRequest,
 };
-use basilica_validator::rental::RentalResponse as SdkRentalResponse;
+use cathedral_validator::rental::RentalResponse as SdkRentalResponse;
 use pyo3::prelude::*;
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen_derive::{gen_stub_pyclass, gen_stub_pyclass_enum, gen_stub_pymethods};
@@ -267,8 +267,8 @@ pub struct HealthCheckResponse {
     pub total_validators: usize,
 }
 
-impl From<basilica_sdk::types::HealthCheckResponse> for HealthCheckResponse {
-    fn from(response: basilica_sdk::types::HealthCheckResponse) -> Self {
+impl From<cathedral_sdk::types::HealthCheckResponse> for HealthCheckResponse {
+    fn from(response: cathedral_sdk::types::HealthCheckResponse) -> Self {
         Self {
             status: response.status,
             version: response.version,
@@ -669,7 +669,7 @@ impl From<ListRentalsQuery> for SdkListRentalsQuery {
 
 // Deployment types
 
-use basilica_sdk::types::{
+use cathedral_sdk::types::{
     CreateDeploymentRequest as SdkCreateDeploymentRequest,
     DeleteDeploymentResponse as SdkDeleteDeploymentResponse,
     DeploymentListResponse as SdkDeploymentListResponse,
@@ -2139,7 +2139,7 @@ impl From<SdkListSecureCloudRentalsResponse> for ListSecureCloudRentalsResponse 
 // Share Token Types
 // ============================================================================
 
-use basilica_sdk::types::{
+use cathedral_sdk::types::{
     DeleteShareTokenResponse as SdkDeleteShareTokenResponse,
     RegenerateShareTokenResponse as SdkRegenerateShareTokenResponse,
     ShareTokenStatusResponse as SdkShareTokenStatusResponse,
@@ -2207,7 +2207,7 @@ impl From<SdkDeleteShareTokenResponse> for DeleteShareTokenResponse {
 // Public Deployment Metadata Types
 // ============================================================================
 
-use basilica_sdk::types::PublicDeploymentMetadataResponse as SdkPublicDeploymentMetadataResponse;
+use cathedral_sdk::types::PublicDeploymentMetadataResponse as SdkPublicDeploymentMetadataResponse;
 
 /// Response for metadata enrollment status
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]

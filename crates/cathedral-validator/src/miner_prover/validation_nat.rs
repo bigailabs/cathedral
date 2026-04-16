@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
-use basilica_common::ssh::SshConnectionDetails;
+use cathedral_common::ssh::SshConnectionDetails;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatProfile {

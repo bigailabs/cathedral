@@ -1,7 +1,7 @@
-//! Utility functions shared across Basilica components
+//! Utility functions shared across Cathedral components
 //!
 //! This module provides common utility functions that are used by multiple
-//! Basilica crates to avoid code duplication and ensure consistent behavior.
+//! Cathedral crates to avoid code duplication and ensure consistent behavior.
 
 pub mod docker_validation;
 pub mod env_vars;

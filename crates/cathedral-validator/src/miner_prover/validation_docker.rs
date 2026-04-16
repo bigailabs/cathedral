@@ -1,6 +1,6 @@
 use anyhow::Result;
-use basilica_common::ssh::SshConnectionDetails;
-use basilica_common::utils::validate_docker_image;
+use cathedral_common::ssh::SshConnectionDetails;
+use cathedral_common::utils::validate_docker_image;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
@@ -627,11 +627,11 @@ impl DockerCollector {
         image: &str,
     ) -> Result<bool> {
         validate_docker_image(image)?;
-        let container_name = format!("basilica-eval-test-{}", Uuid::new_v4());
+        let container_name = format!("cathedral-eval-test-{}", Uuid::new_v4());
         let check_timeout = Duration::from_secs(60);
 
         let gpu_command = format!(
-            "docker run --rm --name {} --label basilica.security.isolated=true --gpus all --runtime nvidia --network bridge {} nvidia-smi 2>&1; echo EXIT_CODE=$?",
+            "docker run --rm --name {} --label cathedral.security.isolated=true --gpus all --runtime nvidia --network bridge {} nvidia-smi 2>&1; echo EXIT_CODE=$?",
             container_name, image
         );
 

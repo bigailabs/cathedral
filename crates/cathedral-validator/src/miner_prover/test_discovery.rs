@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use crate::miner_prover::types::{MinerInfo, NodeInfo};
-    use basilica_common::identity::{Hotkey, MinerUid, NodeId};
+    use cathedral_common::identity::{Hotkey, MinerUid, NodeId};
 
     #[tokio::test]
     async fn test_miner_discovery_ip_conversion() {

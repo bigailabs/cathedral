@@ -12,9 +12,9 @@ pub const REQUIRED_STORAGE_SECRET_KEYS: &[&str] = &[
 
 /// Allowed secret name prefixes (security policy)
 pub const ALLOWED_SECRET_PREFIXES: &[&str] = &[
-    "basilica-r2-credentials",
-    "basilica-s3-credentials",
-    "basilica-gcs-credentials",
+    "cathedral-r2-credentials",
+    "cathedral-s3-credentials",
+    "cathedral-gcs-credentials",
     "user-storage-",
 ];
 
@@ -93,9 +93,9 @@ mod tests {
 
     #[test]
     fn test_validate_secret_name_valid() {
-        assert!(validate_secret_name("basilica-r2-credentials").is_ok());
-        assert!(validate_secret_name("basilica-s3-credentials").is_ok());
-        assert!(validate_secret_name("basilica-gcs-credentials").is_ok());
+        assert!(validate_secret_name("cathedral-r2-credentials").is_ok());
+        assert!(validate_secret_name("cathedral-s3-credentials").is_ok());
+        assert!(validate_secret_name("cathedral-gcs-credentials").is_ok());
         assert!(validate_secret_name("user-storage-custom").is_ok());
         assert!(validate_secret_name("user-storage-123").is_ok());
     }

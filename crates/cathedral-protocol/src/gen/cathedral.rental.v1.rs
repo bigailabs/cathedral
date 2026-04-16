@@ -459,12 +459,12 @@ pub mod rental_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.rental.v1.RentalService/StartRental",
+                "/cathedral.rental.v1.RentalService/StartRental",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.rental.v1.RentalService", "StartRental"),
+                    GrpcMethod::new("cathedral.rental.v1.RentalService", "StartRental"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -487,13 +487,13 @@ pub mod rental_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.rental.v1.RentalService/GetRentalStatus",
+                "/cathedral.rental.v1.RentalService/GetRentalStatus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.rental.v1.RentalService",
+                        "cathedral.rental.v1.RentalService",
                         "GetRentalStatus",
                     ),
                 );
@@ -518,12 +518,12 @@ pub mod rental_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.rental.v1.RentalService/StopRental",
+                "/cathedral.rental.v1.RentalService/StopRental",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.rental.v1.RentalService", "StopRental"),
+                    GrpcMethod::new("cathedral.rental.v1.RentalService", "StopRental"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -546,12 +546,12 @@ pub mod rental_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.rental.v1.RentalService/StreamLogs",
+                "/cathedral.rental.v1.RentalService/StreamLogs",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.rental.v1.RentalService", "StreamLogs"),
+                    GrpcMethod::new("cathedral.rental.v1.RentalService", "StreamLogs"),
                 );
             self.inner.server_streaming(req, path, codec).await
         }
@@ -574,13 +574,13 @@ pub mod rental_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.rental.v1.RentalService/UpdateContainerState",
+                "/cathedral.rental.v1.RentalService/UpdateContainerState",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.rental.v1.RentalService",
+                        "cathedral.rental.v1.RentalService",
                         "UpdateContainerState",
                     ),
                 );
@@ -716,7 +716,7 @@ pub mod rental_service_server {
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             let inner = self.inner.clone();
             match req.uri().path() {
-                "/basilica.rental.v1.RentalService/StartRental" => {
+                "/cathedral.rental.v1.RentalService/StartRental" => {
                     #[allow(non_camel_case_types)]
                     struct StartRentalSvc<T: RentalService>(pub Arc<T>);
                     impl<
@@ -762,7 +762,7 @@ pub mod rental_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.rental.v1.RentalService/GetRentalStatus" => {
+                "/cathedral.rental.v1.RentalService/GetRentalStatus" => {
                     #[allow(non_camel_case_types)]
                     struct GetRentalStatusSvc<T: RentalService>(pub Arc<T>);
                     impl<
@@ -809,7 +809,7 @@ pub mod rental_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.rental.v1.RentalService/StopRental" => {
+                "/cathedral.rental.v1.RentalService/StopRental" => {
                     #[allow(non_camel_case_types)]
                     struct StopRentalSvc<T: RentalService>(pub Arc<T>);
                     impl<
@@ -855,7 +855,7 @@ pub mod rental_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.rental.v1.RentalService/StreamLogs" => {
+                "/cathedral.rental.v1.RentalService/StreamLogs" => {
                     #[allow(non_camel_case_types)]
                     struct StreamLogsSvc<T: RentalService>(pub Arc<T>);
                     impl<
@@ -902,7 +902,7 @@ pub mod rental_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.rental.v1.RentalService/UpdateContainerState" => {
+                "/cathedral.rental.v1.RentalService/UpdateContainerState" => {
                     #[allow(non_camel_case_types)]
                     struct UpdateContainerStateSvc<T: RentalService>(pub Arc<T>);
                     impl<
@@ -990,6 +990,6 @@ pub mod rental_service_server {
         }
     }
     impl<T: RentalService> tonic::server::NamedService for RentalServiceServer<T> {
-        const NAME: &'static str = "basilica.rental.v1.RentalService";
+        const NAME: &'static str = "cathedral.rental.v1.RentalService";
     }
 }

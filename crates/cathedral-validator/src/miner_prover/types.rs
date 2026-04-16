@@ -2,7 +2,7 @@
 //!
 //! Shared data structures used across the miner verification system.
 
-use basilica_common::identity::{Hotkey, MinerUid, NodeId};
+use cathedral_common::identity::{Hotkey, MinerUid, NodeId};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 

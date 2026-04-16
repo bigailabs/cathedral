@@ -18,13 +18,13 @@ use crate::output::{
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use crate::ssh::{find_private_key_for_public_key, parse_ssh_credentials, SshClient};
 use crate::CliError;
-use basilica_common::types::{ComputeCategory, GpuCategory};
-use basilica_common::utils::{parse_env_vars, parse_port_mappings};
-use basilica_sdk::types::{
+use cathedral_common::types::{ComputeCategory, GpuCategory};
+use cathedral_common::utils::{parse_env_vars, parse_port_mappings};
+use cathedral_sdk::types::{
     HistoricalRentalItem, HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery,
     LocationProfile, RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
-use basilica_sdk::ApiError;
+use cathedral_sdk::ApiError;
 use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use console::style;
@@ -81,8 +81,8 @@ mod conversion_tests {
 
 /// Enum representing the type of rental offering (GPU or CPU-only)
 enum RentalOffering {
-    SecureCloud(basilica_common::types::GpuOffering),
-    CpuOnly(basilica_sdk::types::CpuOffering),
+    SecureCloud(cathedral_common::types::GpuOffering),
+    CpuOnly(cathedral_sdk::types::CpuOffering),
 }
 
 impl RentalOffering {
@@ -131,11 +131,11 @@ impl FromStr for GpuTarget {
 
 /// Helper function to fetch and filter secure cloud GPUs
 async fn fetch_and_filter_secure_cloud(
-    api_client: &basilica_sdk::BasilicaClient,
+    api_client: &cathedral_sdk::CathedralClient,
     gpu_category: Option<GpuCategory>,
     filters: &ListFilters,
-) -> Result<Vec<basilica_common::types::GpuOffering>, CliError> {
-    let query = basilica_sdk::types::GpuPriceQuery {
+) -> Result<Vec<cathedral_common::types::GpuOffering>, CliError> {
+    let query = cathedral_sdk::types::GpuPriceQuery {
         interconnect: filters.interconnect.clone(),
         region: filters.region.clone(),
         spot_only: if filters.spot { Some(true) } else { None },
@@ -224,10 +224,10 @@ async fn fetch_and_filter_secure_cloud(
 
 /// Helper function to fetch and filter community cloud nodes
 async fn fetch_and_filter_community_cloud(
-    api_client: &basilica_sdk::BasilicaClient,
+    api_client: &cathedral_sdk::CathedralClient,
     gpu_category: Option<GpuCategory>,
     filters: &ListFilters,
-) -> Result<(Vec<basilica_sdk::AvailableNode>, HashMap<String, String>), CliError> {
+) -> Result<(Vec<cathedral_sdk::AvailableNode>, HashMap<String, String>), CliError> {
     // Convert GPU category to string if provided
     let gpu_type = gpu_category.map(|gc| gc.as_str());
 
@@ -301,7 +301,7 @@ async fn fetch_and_filter_community_cloud(
 
 /// Helper function to display secure cloud GPUs
 fn display_secure_cloud_table(
-    gpus: &[basilica_common::types::GpuOffering],
+    gpus: &[cathedral_common::types::GpuOffering],
 ) -> Result<(), CliError> {
     if gpus.is_empty() {
         print_info("No GPUs available matching your criteria");
@@ -314,7 +314,7 @@ fn display_secure_cloud_table(
 }
 
 /// Helper function to display community cloud nodes (aggregated by GPU category)
-fn display_community_cloud_table(nodes: &[basilica_sdk::AvailableNode]) -> Result<(), CliError> {
+fn display_community_cloud_table(nodes: &[cathedral_sdk::AvailableNode]) -> Result<(), CliError> {
     if nodes.is_empty() {
         print_info("No GPUs available matching your criteria");
         return Ok(());
@@ -331,9 +331,9 @@ fn display_community_cloud_table(nodes: &[basilica_sdk::AvailableNode]) -> Resul
 ///
 /// Applies gpu_type and min_gpu_count filters to secure cloud rentals.
 fn filter_secure_cloud_rentals<'a>(
-    rentals: &'a [basilica_sdk::types::SecureCloudRentalListItem],
+    rentals: &'a [cathedral_sdk::types::SecureCloudRentalListItem],
     filters: &PsFilters,
-) -> Vec<&'a basilica_sdk::types::SecureCloudRentalListItem> {
+) -> Vec<&'a cathedral_sdk::types::SecureCloudRentalListItem> {
     rentals
         .iter()
         .filter(|r| {
@@ -369,9 +369,9 @@ fn is_secure_cpu_history_item(rental: &HistoricalRentalItem) -> bool {
 ///
 /// Applies country, memory, and price filters to CPU offerings.
 fn filter_cpu_offerings(
-    offerings: Vec<basilica_sdk::types::CpuOffering>,
+    offerings: Vec<cathedral_sdk::types::CpuOffering>,
     filters: &ListFilters,
-) -> Vec<basilica_sdk::types::CpuOffering> {
+) -> Vec<cathedral_sdk::types::CpuOffering> {
     offerings
         .into_iter()
         .filter(|offering| {
@@ -453,9 +453,9 @@ pub async fn handle_ls(
             if json {
                 #[derive(serde::Serialize)]
                 struct CombinedSecureCloudOfferings<'a> {
-                    gpu_offerings: &'a [basilica_common::types::GpuOffering],
+                    gpu_offerings: &'a [cathedral_common::types::GpuOffering],
                     #[serde(skip_serializing_if = "<[_]>::is_empty")]
-                    cpu_offerings: &'a [basilica_sdk::types::CpuOffering],
+                    cpu_offerings: &'a [cathedral_sdk::types::CpuOffering],
                 }
                 let response = CombinedSecureCloudOfferings {
                     gpu_offerings: &filtered_gpus,
@@ -487,7 +487,7 @@ pub async fn handle_ls(
                 // Create a simple response structure for JSON output
                 #[derive(serde::Serialize)]
                 struct NodesResponse<'a> {
-                    available_nodes: &'a [basilica_sdk::AvailableNode],
+                    available_nodes: &'a [cathedral_sdk::AvailableNode],
                 }
                 let response = NodesResponse {
                     available_nodes: &nodes,
@@ -566,10 +566,10 @@ pub async fn handle_ls(
             if json {
                 #[derive(serde::Serialize)]
                 struct CombinedResponse<'a> {
-                    secure_cloud: &'a [basilica_common::types::GpuOffering],
-                    community_cloud: &'a [basilica_sdk::AvailableNode],
+                    secure_cloud: &'a [cathedral_common::types::GpuOffering],
+                    community_cloud: &'a [cathedral_sdk::AvailableNode],
                     #[serde(skip_serializing_if = "<[_]>::is_empty")]
-                    cpu_offerings: &'a [basilica_sdk::types::CpuOffering],
+                    cpu_offerings: &'a [cathedral_sdk::types::CpuOffering],
                 }
                 let response = CombinedResponse {
                     secure_cloud: &secure_gpus,
@@ -600,13 +600,13 @@ pub async fn handle_ls(
     Ok(())
 }
 
-/// Ensure user has SSH key registered with Basilica API
+/// Ensure user has SSH key registered with Cathedral API
 ///
 /// Checks if user already has a key registered. If not, discovers SSH keys
 /// in ~/.ssh, lets user select one interactively, and registers it.
 /// Returns the SSH key ID if successful.
 pub async fn ensure_ssh_key_registered(
-    api_client: &basilica_sdk::BasilicaClient,
+    api_client: &cathedral_sdk::CathedralClient,
 ) -> Result<String, CliError> {
     // Check if user already has SSH key registered
     if let Some(key) = api_client.get_user_ssh_key().await? {
@@ -661,7 +661,7 @@ pub async fn ensure_ssh_key_registered(
 
 /// Unified handler for both secure cloud (GPU) and CPU-only rentals
 async fn handle_rental_with_offering(
-    api_client: basilica_sdk::BasilicaClient,
+    api_client: cathedral_sdk::CathedralClient,
     offering: RentalOffering,
     options: UpOptions,
     config: &CliConfig,
@@ -677,8 +677,8 @@ async fn handle_rental_with_offering(
         .map_err(|e| CliError::Internal(eyre!(e)))?
         .ok_or_else(|| {
             CliError::Internal(
-                eyre!("No SSH key registered with Basilica")
-                    .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                eyre!("No SSH key registered with Cathedral")
+                    .suggestion("Run 'cathedral ssh-keys add' to register your SSH key"),
             )
         })?
         .id;
@@ -686,7 +686,7 @@ async fn handle_rental_with_offering(
     // Start rental
     let spinner = create_spinner(&format!("Starting {}...", rental_type));
 
-    use basilica_sdk::types::StartSecureCloudRentalRequest;
+    use cathedral_sdk::types::StartSecureCloudRentalRequest;
 
     let request = StartSecureCloudRentalRequest {
         offering_id: offering.id().to_string(),
@@ -728,10 +728,10 @@ async fn handle_rental_with_offering(
         } else {
             println!();
             print_info(&format!(
-                "{} is starting up. Use 'basilica ps' to check status.",
+                "{} is starting up. Use 'cathedral ps' to check status.",
                 instance_noun
             ));
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+            print_info(&format!("SSH with: cathedral ssh {}", response.rental_id));
         }
         return Ok(());
     }
@@ -801,7 +801,7 @@ async fn handle_rental_with_offering(
                     .collect::<String>()
                     + &rental_noun[1..]
             ));
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+            print_info(&format!("SSH with: cathedral ssh {}", response.rental_id));
         }
     } else {
         println!();
@@ -815,8 +815,8 @@ async fn handle_rental_with_offering(
                 .collect::<String>()
                 + &rental_noun[1..]
         ));
-        print_info("Check status with: basilica ps");
-        print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        print_info("Check status with: cathedral ps");
+        print_info(&format!("SSH with: cathedral ssh {}", response.rental_id));
     }
 
     Ok(())
@@ -825,8 +825,8 @@ async fn handle_rental_with_offering(
 /// Poll CPU rental status until it becomes active or times out
 async fn poll_cpu_rental_status(
     rental_id: &str,
-    api_client: &basilica_sdk::BasilicaClient,
-) -> Result<Option<basilica_sdk::types::SecureCloudRentalListItem>, CliError> {
+    api_client: &cathedral_sdk::CathedralClient,
+) -> Result<Option<cathedral_sdk::types::SecureCloudRentalListItem>, CliError> {
     let start_time = std::time::Instant::now();
     let poll_interval = Duration::from_secs(5);
 
@@ -869,7 +869,7 @@ async fn poll_cpu_rental_status(
 
 /// Handle community cloud rental with a pre-selected GPU category (from unified selector)
 async fn handle_community_cloud_rental_with_selection(
-    api_client: basilica_sdk::BasilicaClient,
+    api_client: cathedral_sdk::CathedralClient,
     selection: CommunityCloudSelection,
     options: UpOptions,
     config: &CliConfig,
@@ -899,7 +899,7 @@ async fn handle_community_cloud_rental_with_selection(
             complete_spinner_error(spinner.clone(), "Environment variable parsing failed");
         })?;
 
-    let port_mappings: Vec<basilica_sdk::types::PortMappingRequest> =
+    let port_mappings: Vec<cathedral_sdk::types::PortMappingRequest> =
         parse_port_mappings(&options.ports)
             .map_err(|e| eyre!("Invalid argument: {}", e.to_string()))
             .inspect_err(|_e| {
@@ -926,8 +926,8 @@ async fn handle_community_cloud_rental_with_selection(
         .ok_or_else(|| {
             complete_spinner_error(spinner.clone(), "No SSH key registered");
             CliError::Internal(
-                eyre!("No SSH key registered with Basilica")
-                    .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                eyre!("No SSH key registered with Cathedral")
+                    .suggestion("Run 'cathedral ssh-keys add' to register your SSH key"),
             )
         })?;
 
@@ -957,7 +957,7 @@ async fn handle_community_cloud_rental_with_selection(
         CliError::Internal(
             eyre!(e)
                 .note("The selected node is experiencing issues.")
-                .suggestion("Try running 'basilica up' again to select a different node."),
+                .suggestion("Try running 'cathedral up' again to select a different node."),
         )
     })?;
 
@@ -1035,8 +1035,8 @@ async fn handle_community_cloud_rental_with_selection(
         } else {
             println!();
             print_info("Rental is taking longer than expected to become active");
-            print_info("Check status with: basilica ps");
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+            print_info("Check status with: cathedral ps");
+            print_info(&format!("SSH with: cathedral ssh {}", response.rental_id));
         }
     }
 
@@ -1167,7 +1167,7 @@ pub async fn handle_ps(
     json: bool,
     config: &CliConfig,
 ) -> Result<(), CliError> {
-    use basilica_common::types::ComputeCategory;
+    use cathedral_common::types::ComputeCategory;
 
     // Convert to Option<ComputeCategory> - None means show both
     let compute_category = compute.map(ComputeCategory::from);
@@ -1582,7 +1582,7 @@ pub async fn handle_ps(
                 // Graceful degradation: use empty results on community cloud timeout
                 let community_rentals_list = community_result.unwrap_or_else(|e| {
                     warn!("Failed to load community cloud rentals: {}", e);
-                    basilica_sdk::types::ApiListRentalsResponse {
+                    cathedral_sdk::types::ApiListRentalsResponse {
                         rentals: vec![],
                         total_count: 0,
                     }
@@ -1594,7 +1594,7 @@ pub async fn handle_ps(
 
                 let cpu_rentals_list = cpu_result.unwrap_or_else(|e| {
                     warn!("Failed to load CPU-only rentals: {}", e);
-                    basilica_sdk::types::ListSecureCloudRentalsResponse {
+                    cathedral_sdk::types::ListSecureCloudRentalsResponse {
                         rentals: vec![],
                         total_count: 0,
                     }
@@ -1697,7 +1697,7 @@ pub async fn handle_status(
                         complete_spinner_error(spinner.clone(), "Failed to get status");
                         let report = match e {
                             ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
-                                .suggestion("Try 'basilica ps' to see your active rentals")
+                                .suggestion("Try 'cathedral ps' to see your active rentals")
                                 .note("The rental may have expired or been terminated"),
                             _ => {
                                 eyre!(e).suggestion("Check your internet connection and try again")
@@ -1895,7 +1895,7 @@ pub async fn handle_status(
             complete_spinner_error(spinner.clone(), "Rental not found");
             return Err(CliError::Internal(
                 eyre!("Rental '{}' not found", rental_id)
-                    .suggestion("Try 'basilica ps' to see your active rentals")
+                    .suggestion("Try 'cathedral ps' to see your active rentals")
                     .note("The rental may have expired or been terminated"),
             ));
         }
@@ -1930,7 +1930,7 @@ pub async fn handle_logs(
             eyre!("Log streaming is not yet available for secure cloud rentals")
                 .note("Secure cloud logs support is coming soon")
                 .suggestion(format!(
-                    "For now, use SSH to access logs manually: basilica ssh {}",
+                    "For now, use SSH to access logs manually: cathedral ssh {}",
                     rental_id
                 )),
         ));
@@ -1965,7 +1965,7 @@ pub async fn handle_logs(
 
         if status == StatusCode::NOT_FOUND {
             return Err(eyre!(
-                "Rental '{}' not found. Run 'basilica ps' to see active rentals",
+                "Rental '{}' not found. Run 'cathedral ps' to see active rentals",
                 target
             )
             .into());
@@ -1997,7 +1997,7 @@ pub async fn handle_down(
     config: &CliConfig,
 ) -> Result<(), CliError> {
     use super::gpu_rental_helpers::resolve_target_rental_unified;
-    use basilica_common::types::ComputeCategory;
+    use cathedral_common::types::ComputeCategory;
 
     let api_client = create_authenticated_client(config).await?;
     let compute_filter = compute.map(ComputeCategory::from);
@@ -2183,7 +2183,7 @@ pub async fn handle_down(
                         complete_spinner_error(spinner.clone(), "Failed to stop rental");
                         let report = match e {
                             ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
-                                .suggestion("Try 'basilica ps' to see your active rentals")
+                                .suggestion("Try 'cathedral ps' to see your active rentals")
                                 .note("The rental may have already been stopped"),
                             _ => {
                                 eyre!(e).suggestion("Check your internet connection and try again")
@@ -2216,7 +2216,7 @@ pub async fn handle_down(
                                     rental_id
                                 )
                                 .suggestion(
-                                    "Try 'basilica ps --compute secure-cloud' to see your rentals",
+                                    "Try 'cathedral ps --compute secure-cloud' to see your rentals",
                                 )
                                 .note("The rental may have already been stopped"),
                                 _ => eyre!(e)
@@ -2243,7 +2243,7 @@ pub async fn handle_down(
                                     rental_id
                                 )
                                 .suggestion(
-                                    "Try 'basilica ps --compute secure-cloud' to see your rentals",
+                                    "Try 'cathedral ps --compute secure-cloud' to see your rentals",
                                 )
                                 .note("The rental may have already been stopped"),
                                 _ => eyre!(e)
@@ -2282,10 +2282,10 @@ pub async fn handle_restart(target: Option<String>, config: &CliConfig) -> Resul
             complete_spinner_error(spinner.clone(), "Failed to restart rental");
             let report = match e {
                 ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
-                    .suggestion("Try 'basilica ps' to see your active rentals"),
+                    .suggestion("Try 'cathedral ps' to see your active rentals"),
                 ApiError::Conflict { message } => {
                     eyre!("Cannot restart rental: {}", message).suggestion(
-                        "Only Active rentals can be restarted. Check rental status with 'basilica status'",
+                        "Only Active rentals can be restarted. Check rental status with 'cathedral status'",
                     )
                 }
                 _ => eyre!(e).suggestion("Check your internet connection and try again"),
@@ -2518,7 +2518,7 @@ pub async fn handle_cp(
 /// Poll rental status until it becomes active or timeout
 async fn poll_rental_status(
     rental_id: &str,
-    api_client: &basilica_sdk::BasilicaClient,
+    api_client: &cathedral_sdk::CathedralClient,
 ) -> Result<bool, CliError> {
     const INITIAL_INTERVAL: Duration = Duration::from_secs(2);
     const MAX_INTERVAL: Duration = Duration::from_secs(10);
@@ -2532,7 +2532,7 @@ async fn poll_rental_status(
         // Check if we've exceeded the maximum wait time
         if start_time.elapsed() > RENTAL_READY_TIMEOUT {
             complete_spinner_and_clear(spinner);
-            println!("The rental is not yet up. Please wait for a while and SSH manually using `basilica ssh`.");
+            println!("The rental is not yet up. Please wait for a while and SSH manually using `cathedral ssh`.");
             return Ok(false);
         }
 
@@ -2542,7 +2542,7 @@ async fn poll_rental_status(
         // Check rental status
         match api_client.get_rental_status(rental_id).await {
             Ok(status) => {
-                use basilica_sdk::types::RentalStatus;
+                use cathedral_sdk::types::RentalStatus;
                 match status.status {
                     RentalStatus::Active => {
                         complete_spinner_and_clear(spinner);
@@ -2606,8 +2606,8 @@ fn is_private_ip(ip: &str) -> bool {
 /// Poll secure cloud rental status until it becomes running or timeout
 async fn poll_secure_cloud_rental_status(
     rental_id: &str,
-    api_client: &basilica_sdk::BasilicaClient,
-) -> Result<Option<basilica_sdk::types::SecureCloudRentalListItem>, CliError> {
+    api_client: &cathedral_sdk::CathedralClient,
+) -> Result<Option<cathedral_sdk::types::SecureCloudRentalListItem>, CliError> {
     const INITIAL_INTERVAL: Duration = Duration::from_secs(5);
     const MAX_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -2620,7 +2620,7 @@ async fn poll_secure_cloud_rental_status(
         // Check if we've exceeded the maximum wait time
         if start_time.elapsed() > RENTAL_READY_TIMEOUT {
             complete_spinner_and_clear(spinner);
-            println!("The rental is not yet up. Please wait for a while and SSH manually using `basilica ssh`.");
+            println!("The rental is not yet up. Please wait for a while and SSH manually using `cathedral ssh`.");
             return Ok(None);
         }
 
@@ -2736,7 +2736,7 @@ async fn retry_ssh_connection(
                     attempt - 1,
                     start_time.elapsed().as_secs(),
                 )
-                .suggestion("The SSH service may not be ready yet. Wait a minute and try 'basilica ssh <rental_id>'"),
+                .suggestion("The SSH service may not be ready yet. Wait a minute and try 'cathedral ssh <rental_id>'"),
             ));
         }
 
@@ -2803,11 +2803,11 @@ fn display_ssh_connection_instructions(
     print_info(message);
     println!();
 
-    // Option 1: Using basilica CLI (simplest)
-    println!("  1. Using Basilica CLI:");
+    // Option 1: Using cathedral CLI (simplest)
+    println!("  1. Using Cathedral CLI:");
     println!(
         "     {}",
-        console::style(format!("basilica ssh {}", rental_id))
+        console::style(format!("cathedral ssh {}", rental_id))
             .cyan()
             .bold()
     );
@@ -2845,11 +2845,11 @@ fn display_secure_cloud_reconnection_instructions(
     print_info(message);
     println!();
 
-    // Option 1: Using basilica CLI (simplest)
-    println!("  1. Using Basilica CLI:");
+    // Option 1: Using cathedral CLI (simplest)
+    println!("  1. Using Cathedral CLI:");
     println!(
         "     {}",
-        console::style(format!("basilica ssh {}", rental_id))
+        console::style(format!("cathedral ssh {}", rental_id))
             .cyan()
             .bold()
     );
@@ -2882,7 +2882,7 @@ fn split_remote_path(path: &str) -> (Option<String>, String) {
 }
 
 fn display_rental_status_with_details(
-    status: &basilica_sdk::types::RentalStatusWithSshResponse,
+    status: &cathedral_sdk::types::RentalStatusWithSshResponse,
     private_key_path: Option<&std::path::Path>,
 ) {
     println!("Rental Status: {}", status.rental_id);
@@ -2916,11 +2916,11 @@ fn display_rental_status_with_details(
             print_info("SSH Connection:");
             println!();
 
-            // Option 1: Using basilica CLI (simplest)
-            println!("  1. Using Basilica CLI:");
+            // Option 1: Using cathedral CLI (simplest)
+            println!("  1. Using Cathedral CLI:");
             println!(
                 "     {}",
-                console::style(format!("basilica ssh {}", status.rental_id))
+                console::style(format!("cathedral ssh {}", status.rental_id))
                     .cyan()
                     .bold()
             );
@@ -2962,31 +2962,31 @@ fn display_ps_quick_start_commands() {
 
     println!(
         "  {} {}",
-        style("basilica ssh").yellow().bold(),
+        style("cathedral ssh").yellow().bold(),
         style("- Connect to your rental").dim()
     );
 
     println!(
         "  {} {}",
-        style("basilica exec").yellow().bold(),
+        style("cathedral exec").yellow().bold(),
         style("- Run commands on your rental").dim()
     );
 
     println!(
         "  {} {}",
-        style("basilica logs").yellow().bold(),
+        style("cathedral logs").yellow().bold(),
         style("- Stream container logs").dim()
     );
 
     println!(
         "  {} {}",
-        style("basilica status").yellow().bold(),
+        style("cathedral status").yellow().bold(),
         style("- Check status of a specific rental").dim()
     );
 
     println!(
         "  {} {}",
-        style("basilica down").yellow().bold(),
+        style("cathedral down").yellow().bold(),
         style("- Stop a GPU rental").dim()
     );
 }

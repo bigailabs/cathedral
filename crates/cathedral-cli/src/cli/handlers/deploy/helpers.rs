@@ -3,8 +3,8 @@
 use crate::error::{CliError, DeployError};
 use crate::output::{print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::types::{DeploymentResponse, DeploymentSummary};
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::types::{DeploymentResponse, DeploymentSummary};
+use cathedral_sdk::CathedralClient;
 use color_eyre::eyre::eyre;
 use console::{style, Term};
 use dialoguer::{theme::ColorfulTheme, Select};
@@ -108,15 +108,15 @@ pub fn print_deployment_success(deployment: &DeploymentResponse) {
     println!();
     println!("Commands:");
     println!(
-        "  View status:  basilica summon status {}",
+        "  View status:  cathedral summon status {}",
         deployment.instance_name
     );
     println!(
-        "  View logs:    basilica summon logs {}",
+        "  View logs:    cathedral summon logs {}",
         deployment.instance_name
     );
     println!(
-        "  Delete:       basilica summon delete {}",
+        "  Delete:       cathedral summon delete {}",
         deployment.instance_name
     );
 }
@@ -374,7 +374,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 /// Resolve summons name - if not provided, fetch summons and prompt for selection
 pub async fn resolve_deployment_name(
     name: Option<String>,
-    client: &BasilicaClient,
+    client: &CathedralClient,
 ) -> Result<String, CliError> {
     if let Some(n) = name {
         return Ok(n);
@@ -386,7 +386,7 @@ pub async fn resolve_deployment_name(
 
     if response.deployments.is_empty() {
         return Err(CliError::Internal(eyre!(
-            "No summons found. Create one with 'basilica summon <source>'"
+            "No summons found. Create one with 'cathedral summon <source>'"
         )));
     }
 

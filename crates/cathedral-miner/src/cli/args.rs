@@ -5,7 +5,7 @@ use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Basilica Miner - Bittensor neuron managing node fleets", long_about = None)]
+#[command(author, version, about = "Cathedral Miner - Bittensor neuron managing node fleets", long_about = None)]
 pub struct Args {
     /// Configuration file path
     #[arg(short, long, default_value = "miner.toml")]

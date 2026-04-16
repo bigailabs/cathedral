@@ -1,7 +1,7 @@
 //! SSH Connection Management
 //!
 //! Provides core SSH connection functionality that can be reused across
-//! different crates in the Basilica project.
+//! different crates in the Cathedral project.
 
 use anyhow::Result;
 use async_trait::async_trait;

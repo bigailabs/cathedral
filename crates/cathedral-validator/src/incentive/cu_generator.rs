@@ -1,5 +1,5 @@
-use crate::basilica_api::{
-    BasilicaApiClient, BasilicaApiError, IncentiveConfigResponse, NewCuLedgerRowRequest,
+use crate::cathedral_api::{
+    CathedralApiClient, CathedralApiError, IncentiveConfigResponse, NewCuLedgerRowRequest,
     PostSlashResponse,
 };
 use crate::config::SlashMode;
@@ -24,34 +24,34 @@ const MAX_RETRIES: usize = 3;
 pub trait IncentiveApi: Send + Sync {
     async fn get_incentive_config(
         &self,
-    ) -> std::result::Result<IncentiveConfigResponse, BasilicaApiError>;
+    ) -> std::result::Result<IncentiveConfigResponse, CathedralApiError>;
 
     async fn submit_cus(
         &self,
         rows: Vec<NewCuLedgerRowRequest>,
-    ) -> std::result::Result<usize, BasilicaApiError>;
+    ) -> std::result::Result<usize, CathedralApiError>;
 
     async fn slash_node(
         &self,
         node_id: &str,
         slash_pct: u32,
         idempotency_key: &str,
-    ) -> std::result::Result<PostSlashResponse, BasilicaApiError>;
+    ) -> std::result::Result<PostSlashResponse, CathedralApiError>;
 }
 
 #[async_trait]
-impl IncentiveApi for BasilicaApiClient {
+impl IncentiveApi for CathedralApiClient {
     async fn get_incentive_config(
         &self,
-    ) -> std::result::Result<IncentiveConfigResponse, BasilicaApiError> {
-        BasilicaApiClient::get_incentive_config(self).await
+    ) -> std::result::Result<IncentiveConfigResponse, CathedralApiError> {
+        CathedralApiClient::get_incentive_config(self).await
     }
 
     async fn submit_cus(
         &self,
         rows: Vec<NewCuLedgerRowRequest>,
-    ) -> std::result::Result<usize, BasilicaApiError> {
-        BasilicaApiClient::submit_cus(self, rows).await
+    ) -> std::result::Result<usize, CathedralApiError> {
+        CathedralApiClient::submit_cus(self, rows).await
     }
 
     async fn slash_node(
@@ -59,8 +59,8 @@ impl IncentiveApi for BasilicaApiClient {
         node_id: &str,
         slash_pct: u32,
         idempotency_key: &str,
-    ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
-        BasilicaApiClient::slash_node(self, node_id, slash_pct, idempotency_key).await
+    ) -> std::result::Result<PostSlashResponse, CathedralApiError> {
+        CathedralApiClient::slash_node(self, node_id, slash_pct, idempotency_key).await
     }
 }
 
@@ -450,7 +450,7 @@ fn floor_to_hour_ms(timestamp_ms: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::basilica_api::{IncentiveGpuCategoryConfig, PostSlashResponse};
+    use crate::cathedral_api::{IncentiveGpuCategoryConfig, PostSlashResponse};
     use crate::persistence::availability_log::AvailabilityLogRow;
     use crate::persistence::incentive_state::{IncentiveStateRepository, SlashEventRequest};
     use anyhow::Result;
@@ -472,14 +472,14 @@ mod tests {
     impl IncentiveApi for FakeIncentiveApi {
         async fn get_incentive_config(
             &self,
-        ) -> std::result::Result<IncentiveConfigResponse, BasilicaApiError> {
+        ) -> std::result::Result<IncentiveConfigResponse, CathedralApiError> {
             Ok(test_config())
         }
 
         async fn submit_cus(
             &self,
             rows: Vec<NewCuLedgerRowRequest>,
-        ) -> std::result::Result<usize, BasilicaApiError> {
+        ) -> std::result::Result<usize, CathedralApiError> {
             let mut submitted_batches = self.submitted_batches.lock().await;
             submitted_batches.push(rows.clone());
             let mut keys = self.submitted_keys.lock().await;
@@ -497,7 +497,7 @@ mod tests {
             node_id: &str,
             _slash_pct: u32,
             _idempotency_key: &str,
-        ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
+        ) -> std::result::Result<PostSlashResponse, CathedralApiError> {
             self.slash_calls.lock().await.push(node_id.to_string());
             Ok(PostSlashResponse {
                 slashed_cu_count: 1,

@@ -1,4 +1,4 @@
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::CathedralClient;
 use color_eyre::{eyre::eyre, Help, Result as EyreResult};
 use console::style;
 
@@ -10,7 +10,7 @@ use crate::{
 
 /// Handle the main fund command - show deposit address
 pub async fn handle_show_deposit_address(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     json: bool,
 ) -> EyreResult<(), CliError> {
     let spinner = create_spinner("Fetching deposit account...");
@@ -29,7 +29,7 @@ pub async fn handle_show_deposit_address(
             match client.create_deposit_account().await {
                 Ok(created) => {
                     complete_spinner_and_clear(spinner);
-                    basilica_sdk::DepositAccountResponse {
+                    cathedral_sdk::DepositAccountResponse {
                         user_id: created.user_id,
                         address: created.address,
                         exists: true,
@@ -40,7 +40,7 @@ pub async fn handle_show_deposit_address(
                     return Err(CliError::Internal(
                         eyre!(e)
                             .suggestion("Check your authentication and try again")
-                            .note("Ensure you are logged in with 'basilica login'"),
+                            .note("Ensure you are logged in with 'cathedral login'"),
                     ));
                 }
             }
@@ -69,7 +69,7 @@ pub async fn handle_show_deposit_address(
         );
         println!();
         println!("Track status:");
-        println!("  {}", style("basilica fund list").yellow());
+        println!("  {}", style("cathedral fund list").yellow());
     }
 
     Ok(())
@@ -77,7 +77,7 @@ pub async fn handle_show_deposit_address(
 
 /// Handle the fund list subcommand - show deposit history
 pub async fn handle_list_deposits(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     limit: u32,
     offset: u32,
     json: bool,
@@ -106,12 +106,12 @@ pub async fn handle_list_deposits(
         println!("{}", style("Quick Commands:").cyan().bold());
         println!(
             "  {} {}",
-            style("basilica fund").yellow().bold(),
+            style("cathedral fund").yellow().bold(),
             style("- Add TAO credits to your account").dim()
         );
         println!(
             "  {} {}",
-            style("basilica balance").yellow().bold(),
+            style("cathedral balance").yellow().bold(),
             style("- Show your current credit balance").dim()
         );
     } else {

@@ -1,4 +1,4 @@
-//! Identity types for Basilica
+//! Identity types for Cathedral
 //!
 //! This module defines the core identity types used throughout the system:
 //! - `Hotkey`: Bittensor hotkey in SS58 format (re-exported from bittensor crate)

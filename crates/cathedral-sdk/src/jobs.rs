@@ -1,6 +1,6 @@
 //! Jobs API client methods
 //!
-//! Provides methods for managing stateful jobs on the Basilica platform.
+//! Provides methods for managing stateful jobs on the Cathedral platform.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -12,8 +12,8 @@ use tracing::{debug, info, warn};
 use crate::gpu::MinerGpuProfile;
 use crate::persistence::availability_log::{AvailabilityEventRequest, AvailabilitySource};
 use crate::persistence::SimplePersistence;
-use basilica_common::identity::MinerUid;
-use basilica_common::types::GpuCategory;
+use cathedral_common::identity::MinerUid;
+use cathedral_common::types::GpuCategory;
 use std::str::FromStr;
 
 /// Repository for GPU profile operations
@@ -863,7 +863,7 @@ impl GpuProfileRepository {
 mod tests {
     use super::*;
     use crate::persistence::SimplePersistence;
-    use basilica_common::identity::MinerUid;
+    use cathedral_common::identity::MinerUid;
     use chrono::Utc;
     use std::collections::HashMap;
 

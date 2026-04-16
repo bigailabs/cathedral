@@ -1,6 +1,6 @@
 //! Integration tests for crypto module
 
-use basilica_common::crypto::{
+use cathedral_common::crypto::{
     argon2_derive_key, generate_ephemeral_ed25519_keypair, generate_p256_keypair_formatted,
     pbkdf2_derive_key, KdfParams,
 };
@@ -15,7 +15,7 @@ fn test_ed25519_keypair_no_placeholder() {
     assert!(priv1.contains("-----BEGIN PRIVATE KEY-----"));
     assert!(priv1.contains("-----END PRIVATE KEY-----"));
     assert!(pub1.starts_with("ssh-ed25519"));
-    assert!(pub1.contains("basilica-ephemeral-key"));
+    assert!(pub1.contains("cathedral-ephemeral-key"));
 
     // Keys should be different (no placeholders)
     assert_ne!(priv1, priv2);
@@ -83,7 +83,7 @@ fn test_argon2_key_derivation() {
 #[test]
 fn test_crypto_module_exports_all_functions() {
     // This test ensures all functions are properly exported
-    use basilica_common::crypto::{
+    use cathedral_common::crypto::{
         generate_random_key,
         // Core functions
         hash_blake3,
@@ -98,7 +98,7 @@ fn test_crypto_module_exports_all_functions() {
 
 #[test]
 fn test_no_placeholder_implementations() {
-    use basilica_common::crypto::{
+    use cathedral_common::crypto::{
         derive_key_simple, generate_ed25519_keypair, generate_p256_keypair, generate_random_key,
     };
 

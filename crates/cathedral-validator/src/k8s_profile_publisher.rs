@@ -35,7 +35,7 @@ impl K8sNodeProfilePublisher {
     }
 
     fn cr_api(&self, ns: &str) -> Api<DynamicObject> {
-        let gvk = GroupVersionKind::gvk("basilica.ai", "v1", "BasilicaNodeProfile");
+        let gvk = GroupVersionKind::gvk("cathedral.ai", "v1", "BasilicaNodeProfile");
         let ar = ApiResource::from_gvk(&gvk);
         Api::namespaced_with(self.client.clone(), ns, &ar)
     }

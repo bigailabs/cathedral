@@ -1,4 +1,4 @@
-//! Unified logging initialization for all Basilica binaries
+//! Unified logging initialization for all Cathedral binaries
 //!
 //! This module provides a standardized logging setup that respects the following priority order:
 //! 1. CLI flags (`-v/-q`) - highest priority
@@ -14,20 +14,20 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 /// # Arguments
 ///
 /// * `verbosity` - The verbosity flags from clap (-v/-q)
-/// * `base_filter` - The base filter string to scope verbose flags to (e.g., "basilica_protocol=info,basilica_miner")
+/// * `base_filter` - The base filter string to scope verbose flags to (e.g., "cathedral_protocol=info,cathedral_miner")
 /// * `default_filter` - The default filter string if no CLI flags or RUST_LOG are set
 ///
 /// # Example
 ///
 /// ```no_run
 /// use clap_verbosity_flag::{Verbosity, InfoLevel};
-/// use basilica_common::logging;
+/// use cathedral_common::logging;
 ///
 /// // Example: initialize with default verbosity (as if no -v/-q provided)
 /// let verbosity = Verbosity::<InfoLevel>::default();
 /// // In doctests, CARGO_BIN_NAME may be unset; use a fallback.
-/// let binary_name = std::env::var("CARGO_BIN_NAME").unwrap_or_else(|_| "basilica_binary".to_string());
-/// logging::init_logging(&verbosity, &binary_name, "basilica_miner=info").unwrap();
+/// let binary_name = std::env::var("CARGO_BIN_NAME").unwrap_or_else(|_| "cathedral_binary".to_string());
+/// logging::init_logging(&verbosity, &binary_name, "cathedral_miner=info").unwrap();
 /// ```
 pub fn init_logging<L: LogLevel>(
     verbosity: &Verbosity<L>,

@@ -1,4 +1,4 @@
-//! Error types for the Basilica CLI
+//! Error types for the Cathedral CLI
 
 use color_eyre::eyre::Report;
 use std::path::PathBuf;
@@ -61,7 +61,7 @@ pub enum DeployError {
     Source(#[from] SourceError),
 
     #[error("API error: {0}")]
-    Api(#[from] basilica_sdk::error::ApiError),
+    Api(#[from] cathedral_sdk::error::ApiError),
 }
 
 /// CLI error type with minimal variants
@@ -71,11 +71,11 @@ pub enum DeployError {
 pub enum CliError {
     /// Configuration file issues
     #[error("Configuration error")]
-    Config(#[from] basilica_common::ConfigurationError),
+    Config(#[from] cathedral_common::ConfigurationError),
 
     /// API communication errors
     #[error("API error: {0}")]
-    Api(#[from] basilica_sdk::error::ApiError),
+    Api(#[from] cathedral_sdk::error::ApiError),
 
     /// Authentication/authorization issues
     #[error(transparent)]

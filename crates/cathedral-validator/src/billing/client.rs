@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use basilica_protocol::billing::{
+use cathedral_protocol::billing::{
     billing_service_client::BillingServiceClient, IngestResponse, TelemetryData,
 };
 use futures::stream;
@@ -341,7 +341,7 @@ impl BillingClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basilica_protocol::billing::ResourceUsage as ProtoResourceUsage;
+    use cathedral_protocol::billing::ResourceUsage as ProtoResourceUsage;
 
     #[tokio::test]
     async fn test_billing_client_disabled() {

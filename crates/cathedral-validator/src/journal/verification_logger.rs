@@ -2,7 +2,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::journal::events::{SecuritySeverity, VerificationEvent};
-use basilica_common::journal::*;
+use cathedral_common::journal::*;
 
 /// Validator-specific journal logger for verification events
 pub struct VerificationLogger {
@@ -251,12 +251,12 @@ impl VerificationLogger {
             SecuritySeverity::Critical => "CRITICAL",
         };
 
-        // Convert internal SecuritySeverity to basilica_common::journal::SecuritySeverity
+        // Convert internal SecuritySeverity to cathedral_common::journal::SecuritySeverity
         let common_severity = match severity {
-            SecuritySeverity::Low => basilica_common::journal::SecuritySeverity::Low,
-            SecuritySeverity::Medium => basilica_common::journal::SecuritySeverity::Medium,
-            SecuritySeverity::High => basilica_common::journal::SecuritySeverity::High,
-            SecuritySeverity::Critical => basilica_common::journal::SecuritySeverity::Critical,
+            SecuritySeverity::Low => cathedral_common::journal::SecuritySeverity::Low,
+            SecuritySeverity::Medium => cathedral_common::journal::SecuritySeverity::Medium,
+            SecuritySeverity::High => cathedral_common::journal::SecuritySeverity::High,
+            SecuritySeverity::Critical => cathedral_common::journal::SecuritySeverity::Critical,
         };
 
         log_security_violation(
@@ -314,7 +314,7 @@ impl VerificationLogger {
         limit: Option<usize>,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let mut filters = vec![
-            format!("_SYSTEMD_UNIT=basilica-validator.service"),
+            format!("_SYSTEMD_UNIT=cathedral-validator.service"),
             format!("VALIDATOR_HOTKEY={}", self.validator_hotkey),
         ];
 

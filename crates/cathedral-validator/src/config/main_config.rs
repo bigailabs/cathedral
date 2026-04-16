@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use basilica_common::config::{
+use cathedral_common::config::{
     loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig, ServerConfig,
 };
-use basilica_common::error::ConfigurationError;
+use cathedral_common::error::ConfigurationError;
 
 /// Enhanced validator Bittensor configuration with advertised address support
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ pub struct ValidatorConfig {
 
     /// gRPC server for bid submission
     #[serde(default)]
-    pub bid_grpc: basilica_common::config::GrpcServerConfig,
+    pub bid_grpc: cathedral_common::config::GrpcServerConfig,
 
     /// SSH session configuration
     pub ssh_session: SshSessionConfig,
@@ -82,7 +82,7 @@ pub struct ValidatorConfig {
     #[serde(default)]
     pub cleanup: crate::persistence::cleanup_task::CleanupConfig,
 
-    /// Basilica API endpoint (used for pricing, delivery, and token data)
+    /// Cathedral API endpoint (used for pricing, delivery, and token data)
     #[serde(default = "default_api_endpoint")]
     pub api_endpoint: String,
 
@@ -536,7 +536,7 @@ fn default_enable_audit_logging() -> bool {
 }
 
 fn default_audit_log_path() -> PathBuf {
-    PathBuf::from("/var/log/basilica/ssh_audit.log")
+    PathBuf::from("/var/log/cathedral/ssh_audit.log")
 }
 
 fn default_ssh_connection_timeout() -> Duration {
@@ -877,10 +877,10 @@ impl Default for ValidatorConfig {
                 max_body_size: 1024 * 1024, // 1MB
                 bind_address: "0.0.0.0:8080".to_string(),
             },
-            bid_grpc: basilica_common::config::GrpcServerConfig {
+            bid_grpc: cathedral_common::config::GrpcServerConfig {
                 listen_address: format!(
                     "0.0.0.0:{}",
-                    basilica_common::config::DEFAULT_BID_GRPC_PORT
+                    cathedral_common::config::DEFAULT_BID_GRPC_PORT
                 ),
                 ..Default::default()
             },

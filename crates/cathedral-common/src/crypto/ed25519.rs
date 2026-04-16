@@ -163,7 +163,7 @@ impl Ed25519PublicKey {
         let base64_key = BASE64.encode(&key_data);
 
         // Format as OpenSSH with comment
-        Ok(format!("ssh-ed25519 {base64_key} basilica-ephemeral-key"))
+        Ok(format!("ssh-ed25519 {base64_key} cathedral-ephemeral-key"))
     }
 
     /// Export as PEM format
@@ -267,7 +267,7 @@ mod tests {
         // Test public key export
         let public_openssh = keypair.public_key().to_openssh().unwrap();
         assert!(public_openssh.starts_with("ssh-ed25519"));
-        assert!(public_openssh.contains("basilica-ephemeral-key"));
+        assert!(public_openssh.contains("cathedral-ephemeral-key"));
 
         let public_pem = keypair.public_key().to_pem();
         assert!(public_pem.contains("-----BEGIN PUBLIC KEY-----"));

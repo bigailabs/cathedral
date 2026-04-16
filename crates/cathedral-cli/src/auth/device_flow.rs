@@ -5,7 +5,7 @@
 
 use super::types::{AuthConfig, AuthError, AuthResult};
 use crate::output::print_info;
-use basilica_sdk::auth::TokenSet;
+use cathedral_sdk::auth::TokenSet;
 use console::{style, Term};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -69,7 +69,7 @@ impl DeviceFlow {
         let request_body = DeviceAuthRequest {
             client_id: self.config.client_id.clone(),
             scope,
-            audience: Some(basilica_common::auth0_audience().to_string()),
+            audience: Some(cathedral_common::auth0_audience().to_string()),
         };
 
         let client = reqwest::Client::new();

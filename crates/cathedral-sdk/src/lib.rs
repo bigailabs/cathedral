@@ -1,8 +1,8 @@
-//! # Basilica SDK
+//! # Cathedral SDK
 //!
-//! Official SDK for interacting with the Basilica GPU rental network.
+//! Official SDK for interacting with the Cathedral GPU rental network.
 //!
-//! This crate provides a type-safe client for the Basilica API, supporting
+//! This crate provides a type-safe client for the Cathedral API, supporting
 //! both authenticated and unauthenticated requests.
 
 pub mod auth;
@@ -12,7 +12,7 @@ pub mod jobs;
 pub mod types;
 
 // Re-export main types
-pub use client::{BasilicaClient, ClientBuilder};
+pub use client::{CathedralClient, ClientBuilder};
 pub use error::{ApiError, ErrorResponse, Result};
 pub use jobs::*;
 pub use types::*;

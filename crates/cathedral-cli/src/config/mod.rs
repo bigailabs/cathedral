@@ -1,6 +1,6 @@
-//! Configuration management for the Basilica CLI
+//! Configuration management for the Cathedral CLI
 
-use basilica_common::config::loader;
+use cathedral_common::config::loader;
 use color_eyre::eyre::{eyre, WrapErr};
 use etcetera::{choose_base_strategy, BaseStrategy};
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub struct CliConfig {
 /// API configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
-    /// Base URL for the Basilica API
+    /// Base URL for the Cathedral API
     pub base_url: String,
 
     /// Request timeout in seconds
@@ -40,7 +40,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         // Use localhost for development environment, production URL otherwise
-        let base_url = if basilica_common::is_development_environment() {
+        let base_url = if cathedral_common::is_development_environment() {
             "http://localhost:8000".to_string()
         } else {
             "https://api.basilica.ai".to_string()
@@ -118,7 +118,7 @@ pub fn create_auth_config_with_port(port: u16) -> crate::auth::types::AuthConfig
     // Validate that the port is in the allowed list (for OAuth flow)
     // Device flow uses port 0 and doesn't need validation
     if port != 0 {
-        let allowed_ports = basilica_common::auth0_callback_ports();
+        let allowed_ports = cathedral_common::auth0_callback_ports();
         if !allowed_ports.contains(&port) {
             tracing::warn!(
                 "Port {} is not in the list of registered callback ports: {:?}",
@@ -128,11 +128,11 @@ pub fn create_auth_config_with_port(port: u16) -> crate::auth::types::AuthConfig
         }
     }
 
-    // Use constants from basilica-common
-    let domain = basilica_common::auth0_domain();
+    // Use constants from cathedral-common
+    let domain = cathedral_common::auth0_domain();
 
     crate::auth::types::AuthConfig {
-        client_id: basilica_common::auth0_client_id().to_string(),
+        client_id: cathedral_common::auth0_client_id().to_string(),
         auth_endpoint: format!("https://{}/authorize", domain),
         token_endpoint: format!("https://{}/oauth/token", domain),
         device_auth_endpoint: Some(format!("https://{}/oauth/device/code", domain)),
@@ -295,7 +295,7 @@ impl CliConfig {
         let strategy = choose_base_strategy().map_err(|e| -> crate::error::CliError {
             eyre!("Failed to determine base directories: {}", e).into()
         })?;
-        Ok(strategy.config_dir().join("basilica"))
+        Ok(strategy.config_dir().join("cathedral"))
     }
 
     /// Get data directory
@@ -303,7 +303,7 @@ impl CliConfig {
         let strategy = choose_base_strategy().map_err(|e| -> crate::error::CliError {
             eyre!("Failed to determine base directories: {}", e).into()
         })?;
-        Ok(strategy.data_dir().join("basilica"))
+        Ok(strategy.data_dir().join("cathedral"))
     }
 
     /// Get cache file path

@@ -17,43 +17,43 @@ const USAGE_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Green.on_default())
     .placeholder(AnsiColor::Green.on_default());
 
-/// Basilica CLI - Unified GPU rental and network management
+/// Cathedral CLI - Unified GPU rental and network management
 #[derive(Parser, Debug)]
 #[clap(styles = USAGE_STYLES)]
 #[command(
-    name = "basilica",
-    author = "Basilica Team",
+    name = "cathedral",
+    author = "Cathedral Team",
     version,
-    about = "Basilica CLI - Unified GPU rental and network management",
-    long_about = "Unified command-line interface for Basilica GPU compute marketplace.
+    about = "Cathedral CLI - Unified GPU rental and network management",
+    long_about = "Unified command-line interface for Cathedral GPU compute marketplace.
 
 QUICK START:
-  basilica login                    # Login and authentication
-  basilica up <spec>                # Start GPU rental with specification
-  basilica exec <uid> \"python train.py\"  # Run your code
-  basilica down <uid>               # Terminate specific rental
+  cathedral login                    # Login and authentication
+  cathedral up <spec>                # Start GPU rental with specification
+  cathedral exec <uid> \"python train.py\"  # Run your code
+  cathedral down <uid>               # Terminate specific rental
 
 GPU RENTAL:
-  basilica ls                       # List available GPUs with pricing
-  basilica ps                       # List active rentals
-  basilica status <uid>             # Check rental status
-  basilica logs <uid>               # Stream logs
-  basilica ssh <uid>                # SSH into instance
-  basilica cp <src> <dst>           # Copy files
+  cathedral ls                       # List available GPUs with pricing
+  cathedral ps                       # List active rentals
+  cathedral status <uid>             # Check rental status
+  cathedral logs <uid>               # Stream logs
+  cathedral ssh <uid>                # SSH into instance
+  cathedral cp <src> <dst>           # Copy files
 
 AUTHENTICATION:
-  basilica login                    # Log in to Basilica
-  basilica login --device-code      # Log in using device flow
-  basilica logout                   # Log out of Basilica
+  cathedral login                    # Log in to Cathedral
+  cathedral login --device-code      # Log in using device flow
+  cathedral logout                   # Log out of Cathedral
 
 AUTH TOKEN MANAGEMENT:
-  basilica tokens create <name>     # Create API token
-  basilica tokens list              # List API tokens
-  basilica tokens revoke <name>     # Revoke API token
+  cathedral tokens create <name>     # Create API token
+  cathedral tokens list              # List API tokens
+  cathedral tokens revoke <name>     # Revoke API token
 
 FUND MANAGEMENT:
-  basilica fund                     # Show deposit address
-  basilica fund list --limit 100    # List deposits
+  cathedral fund                     # Show deposit address
+  cathedral fund list --limit 100    # List deposits
 "
 )]
 pub struct Args {

@@ -7,7 +7,7 @@
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
 use anyhow::Result;
-use basilica_common::ssh::SshConnectionDetails;
+use cathedral_common::ssh::SshConnectionDetails;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -121,7 +121,7 @@ impl NetworkSpeedCollector {
 
         let speedtest_script = include_str!("scripts/speedtest.sh");
 
-        let script_path = "/tmp/speedtest_basilica.sh";
+        let script_path = "/tmp/speedtest_cathedral.sh";
         let create_script_cmd =
             format!("cat > {} << 'EOF'\n{}\nEOF", script_path, speedtest_script);
 

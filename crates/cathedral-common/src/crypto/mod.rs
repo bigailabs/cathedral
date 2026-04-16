@@ -1,4 +1,4 @@
-//! Cryptographic utilities module for Basilica
+//! Cryptographic utilities module for Cathedral
 //!
 //! This module provides comprehensive cryptographic operations including:
 //! - Ed25519 key generation and management

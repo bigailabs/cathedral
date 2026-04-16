@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::error::{BasilicaError, ConfigurationError};
+use crate::error::{CathedralError, ConfigurationError};
 
 /// Default port for the validator's bidding gRPC service.
 pub const DEFAULT_BID_GRPC_PORT: u16 = 50052;
@@ -305,7 +305,7 @@ impl Default for PrometheusConfig {
 
 /// Common configuration validation trait
 pub trait ConfigValidation {
-    type Error: BasilicaError;
+    type Error: CathedralError;
 
     /// Validate the configuration
     fn validate(&self) -> Result<(), Self::Error>;

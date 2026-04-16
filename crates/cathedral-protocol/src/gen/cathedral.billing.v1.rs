@@ -760,12 +760,12 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/ApplyCredits",
+                "/cathedral.billing.v1.BillingService/ApplyCredits",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.billing.v1.BillingService", "ApplyCredits"),
+                    GrpcMethod::new("cathedral.billing.v1.BillingService", "ApplyCredits"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -787,12 +787,12 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/GetBalance",
+                "/cathedral.billing.v1.BillingService/GetBalance",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.billing.v1.BillingService", "GetBalance"),
+                    GrpcMethod::new("cathedral.billing.v1.BillingService", "GetBalance"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -815,12 +815,12 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/TrackRental",
+                "/cathedral.billing.v1.BillingService/TrackRental",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.billing.v1.BillingService", "TrackRental"),
+                    GrpcMethod::new("cathedral.billing.v1.BillingService", "TrackRental"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -842,13 +842,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/UpdateRentalStatus",
+                "/cathedral.billing.v1.BillingService/UpdateRentalStatus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "UpdateRentalStatus",
                     ),
                 );
@@ -872,13 +872,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/GetActiveRentals",
+                "/cathedral.billing.v1.BillingService/GetActiveRentals",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "GetActiveRentals",
                     ),
                 );
@@ -902,13 +902,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/FinalizeRental",
+                "/cathedral.billing.v1.BillingService/FinalizeRental",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "FinalizeRental",
                     ),
                 );
@@ -930,13 +930,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/IngestTelemetry",
+                "/cathedral.billing.v1.BillingService/IngestTelemetry",
             );
             let mut req = request.into_streaming_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "IngestTelemetry",
                     ),
                 );
@@ -960,13 +960,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/GetUsageReport",
+                "/cathedral.billing.v1.BillingService/GetUsageReport",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "GetUsageReport",
                     ),
                 );
@@ -991,13 +991,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/GetMinerDelivery",
+                "/cathedral.billing.v1.BillingService/GetMinerDelivery",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "GetMinerDelivery",
                     ),
                 );
@@ -1022,13 +1022,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/GetRentalStatus",
+                "/cathedral.billing.v1.BillingService/GetRentalStatus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "GetRentalStatus",
                     ),
                 );
@@ -1053,13 +1053,13 @@ pub mod billing_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/GetRevenueEvents",
+                "/cathedral.billing.v1.BillingService/GetRevenueEvents",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
+                        "cathedral.billing.v1.BillingService",
                         "GetRevenueEvents",
                     ),
                 );
@@ -1235,7 +1235,7 @@ pub mod billing_service_server {
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             let inner = self.inner.clone();
             match req.uri().path() {
-                "/basilica.billing.v1.BillingService/ApplyCredits" => {
+                "/cathedral.billing.v1.BillingService/ApplyCredits" => {
                     #[allow(non_camel_case_types)]
                     struct ApplyCreditsSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1281,7 +1281,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/GetBalance" => {
+                "/cathedral.billing.v1.BillingService/GetBalance" => {
                     #[allow(non_camel_case_types)]
                     struct GetBalanceSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1327,7 +1327,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/TrackRental" => {
+                "/cathedral.billing.v1.BillingService/TrackRental" => {
                     #[allow(non_camel_case_types)]
                     struct TrackRentalSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1373,7 +1373,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/UpdateRentalStatus" => {
+                "/cathedral.billing.v1.BillingService/UpdateRentalStatus" => {
                     #[allow(non_camel_case_types)]
                     struct UpdateRentalStatusSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1420,7 +1420,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/GetActiveRentals" => {
+                "/cathedral.billing.v1.BillingService/GetActiveRentals" => {
                     #[allow(non_camel_case_types)]
                     struct GetActiveRentalsSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1467,7 +1467,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/FinalizeRental" => {
+                "/cathedral.billing.v1.BillingService/FinalizeRental" => {
                     #[allow(non_camel_case_types)]
                     struct FinalizeRentalSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1514,7 +1514,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/IngestTelemetry" => {
+                "/cathedral.billing.v1.BillingService/IngestTelemetry" => {
                     #[allow(non_camel_case_types)]
                     struct IngestTelemetrySvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1563,7 +1563,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/GetUsageReport" => {
+                "/cathedral.billing.v1.BillingService/GetUsageReport" => {
                     #[allow(non_camel_case_types)]
                     struct GetUsageReportSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1610,7 +1610,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/GetMinerDelivery" => {
+                "/cathedral.billing.v1.BillingService/GetMinerDelivery" => {
                     #[allow(non_camel_case_types)]
                     struct GetMinerDeliverySvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1657,7 +1657,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/GetRentalStatus" => {
+                "/cathedral.billing.v1.BillingService/GetRentalStatus" => {
                     #[allow(non_camel_case_types)]
                     struct GetRentalStatusSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1704,7 +1704,7 @@ pub mod billing_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.billing.v1.BillingService/GetRevenueEvents" => {
+                "/cathedral.billing.v1.BillingService/GetRevenueEvents" => {
                     #[allow(non_camel_case_types)]
                     struct GetRevenueEventsSvc<T: BillingService>(pub Arc<T>);
                     impl<
@@ -1789,6 +1789,6 @@ pub mod billing_service_server {
         }
     }
     impl<T: BillingService> tonic::server::NamedService for BillingServiceServer<T> {
-        const NAME: &'static str = "basilica.billing.v1.BillingService";
+        const NAME: &'static str = "cathedral.billing.v1.BillingService";
     }
 }

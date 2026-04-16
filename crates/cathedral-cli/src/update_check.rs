@@ -1,4 +1,4 @@
-//! Background update checker for the Basilica CLI
+//! Background update checker for the Cathedral CLI
 //!
 //! Checks for new versions once per day and displays a notification if available.
 //! Inspired by Deno's upgrade notification system.
@@ -53,14 +53,14 @@ pub fn check_cache_and_show_notification() {
                 // Show the notification
                 eprintln!(
                     "{} {} → {}",
-                    style("A new version of Basilica is available:").yellow(),
+                    style("A new version of Cathedral is available:").yellow(),
                     style(current_version).cyan(),
                     style(latest_version).green().bold()
                 );
                 eprintln!(
                     "{} {}",
                     style("Run").dim(),
-                    style("basilica upgrade").cyan().bold()
+                    style("cathedral upgrade").cyan().bold()
                 );
                 eprintln!(); // Empty line for spacing
 
@@ -141,7 +141,7 @@ fn perform_update_check(cache_path: PathBuf) {
 /// Get the path to the update check cache file
 fn get_cache_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let strategy = choose_base_strategy()?;
-    let cache_dir = strategy.cache_dir().join("basilica");
+    let cache_dir = strategy.cache_dir().join("cathedral");
 
     // Ensure directory exists
     fs::create_dir_all(&cache_dir)?;

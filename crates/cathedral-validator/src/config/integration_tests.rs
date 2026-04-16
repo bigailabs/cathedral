@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::config::{emission::DEFAULT_BURN_UID, ValidatorConfig};
-    use basilica_common::config::ConfigValidation;
+    use cathedral_common::config::ConfigValidation;
 
     #[test]
     fn test_validator_config_includes_emission_config() {
@@ -75,6 +75,6 @@ mod tests {
     fn test_default_endpoints_use_api_gateway() {
         let config = ValidatorConfig::default();
         assert_ne!(config.api_endpoint, config.billing.billing_endpoint);
-        assert!(config.api_endpoint.contains("basilica"));
+        assert!(config.api_endpoint.contains("cathedral"));
     }
 }

@@ -84,12 +84,12 @@ impl ValidatorApiMetrics {
                 // For now, we'll use the global metrics registry
                 use metrics::{counter, histogram};
 
-                counter!("basilica_validator_http_requests_total").increment(1);
-                histogram!("basilica_validator_http_request_duration_seconds")
+                counter!("cathedral_validator_http_requests_total").increment(1);
+                histogram!("cathedral_validator_http_request_duration_seconds")
                     .record(duration.as_secs_f64());
 
                 if response_size > 0 {
-                    histogram!("basilica_validator_http_response_size_bytes")
+                    histogram!("cathedral_validator_http_response_size_bytes")
                         .record(response_size as f64);
                 }
 

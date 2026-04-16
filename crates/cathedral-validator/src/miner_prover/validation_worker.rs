@@ -2,7 +2,7 @@ use super::scheduler::VerificationTask;
 use super::types::{NodeInfoDetailed, ValidationType};
 use super::verification::VerificationEngine;
 use anyhow::Result;
-use basilica_common::identity::NodeId;
+use cathedral_common::identity::NodeId;
 use lru::LruCache;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -315,10 +315,10 @@ impl ValidationWorkerQueue {
         item: &WorkItem,
         verification_score: f64,
     ) -> Result<super::types::MinerInfo> {
-        let hotkey = basilica_common::identity::Hotkey::new(item.miner_hotkey.clone())
+        let hotkey = cathedral_common::identity::Hotkey::new(item.miner_hotkey.clone())
             .map_err(|e| anyhow::anyhow!("Invalid hotkey: {}", e))?;
         Ok(super::types::MinerInfo {
-            uid: basilica_common::identity::MinerUid::new(item.miner_uid),
+            uid: cathedral_common::identity::MinerUid::new(item.miner_uid),
             hotkey,
             endpoint: item.miner_endpoint.clone(),
             stake_tao: item.task.stake_tao,
@@ -1222,12 +1222,12 @@ mod tests {
     use super::*;
     use crate::config::VerificationConfig;
     use crate::miner_prover::verification_engine_builder::VerificationEngineBuilder;
-    use basilica_common::identity::Hotkey;
+    use cathedral_common::identity::Hotkey;
 
     fn create_test_node_info(id: &str) -> NodeInfoDetailed {
         NodeInfoDetailed {
             id: NodeId::new("test-node").unwrap(),
-            miner_uid: basilica_common::identity::MinerUid::new(1),
+            miner_uid: cathedral_common::identity::MinerUid::new(1),
             status: "online".to_string(),
             capabilities: vec!["gpu".to_string()],
             node_ssh_endpoint: format!("http://node-{}.test:8080", id),

@@ -8,7 +8,7 @@ use std::path::Path;
 use tokio::fs;
 use tracing::{debug, info};
 
-use basilica_common::config::DatabaseConfig;
+use cathedral_common::config::DatabaseConfig;
 
 /// Registration database client
 #[derive(Debug, Clone)]

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "validator")]
-#[command(about = "Basilica Validator - Bittensor neuron for verification and scoring")]
+#[command(about = "Cathedral Validator - Bittensor neuron for verification and scoring")]
 #[command(version)]
 pub struct Args {
     #[command(subcommand)]

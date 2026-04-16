@@ -16,8 +16,8 @@ const CLI_ALIAS: &str = "bs";
 /// Resolve the actual binary path by following symlinks.
 ///
 /// `std::env::current_exe()` on macOS does NOT resolve symlinks — when invoked
-/// as `bs` (a symlink to `basilica`), it returns `.../bin/bs`. This helper
-/// canonicalizes the path so we always operate on the real `basilica` binary.
+/// as `bs` (a symlink to `cathedral`), it returns `.../bin/bs`. This helper
+/// canonicalizes the path so we always operate on the real `cathedral` binary.
 fn resolve_binary_path() -> Option<std::path::PathBuf> {
     let current_exe = std::env::current_exe().ok()?;
     Some(std::fs::canonicalize(&current_exe).unwrap_or(current_exe))
@@ -74,7 +74,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
     };
 
     // Configure and execute the update
-    let config = GitHubConfig::basilica();
+    let config = GitHubConfig::cathedral();
     let resolved_exe = resolve_binary_path()
         .ok_or_else(|| CliError::Internal(eyre!("Failed to determine executable path")))?;
     let mut update_builder = self_update::backends::github::Update::configure();
@@ -82,7 +82,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
     update_builder
         .repo_owner(config.owner)
         .repo_name(config.repo)
-        .bin_name("basilica")
+        .bin_name("cathedral")
         .bin_install_path(resolved_exe.parent().unwrap())
         .current_version(current_version)
         .show_download_progress(true)
@@ -107,7 +107,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
             if error_msg.contains("permission") || error_msg.contains("Permission") {
                 CliError::Internal(eyre!(
                     "Failed to replace binary: {}. You may need elevated permissions.\n\
-                     Try running: sudo -E basilica upgrade",
+                     Try running: sudo -E cathedral upgrade",
                     e
                 ))
             } else if error_msg.contains("not found") || error_msg.contains("404") {
@@ -144,7 +144,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
 
             println!(
                 "\nRun {} or {} to verify the new version",
-                style("basilica --version").cyan(),
+                style("cathedral --version").cyan(),
                 style("bs --version").cyan()
             );
         }
@@ -205,7 +205,7 @@ fn handle_dry_run(current_version: &str) -> Result<(), CliError> {
             );
             println!(
                 "\nRun {} to upgrade",
-                style("basilica upgrade").cyan().bold()
+                style("cathedral upgrade").cyan().bold()
             );
         }
         None => {

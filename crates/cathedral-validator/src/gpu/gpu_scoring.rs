@@ -7,7 +7,7 @@ use super::categorization::{MinerGpuProfile, NodeValidationResult};
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
-use basilica_common::identity::MinerUid;
+use cathedral_common::identity::MinerUid;
 
 pub struct GpuScoringEngine {
     gpu_profile_repo: Arc<GpuProfileRepository>,
@@ -193,7 +193,7 @@ impl GpuScoringEngine {
 mod tests {
     use super::*;
     use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-    use basilica_common::identity::MinerUid;
+    use cathedral_common::identity::MinerUid;
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
     use std::sync::Arc;

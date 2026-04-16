@@ -2,9 +2,9 @@
 
 use super::format_usd;
 use crate::error::Result;
-use basilica_common::types::GpuOffering;
-use basilica_common::{types::GpuCategory, LocationProfile};
-use basilica_sdk::{
+use cathedral_common::types::GpuOffering;
+use cathedral_common::{types::GpuCategory, LocationProfile};
+use cathedral_sdk::{
     types::{
         ApiKeyInfo, ApiRentalListItem, GpuSpec, HistoricalRentalItem, ListDepositsResponse,
         RentalUsageResponse, UsageHistoryResponse, VolumeResponse,
@@ -144,7 +144,7 @@ pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
 
 /// Helper function to format port mappings
 fn format_port_mappings(
-    port_mappings: &Option<Vec<basilica_validator::rental::PortMapping>>,
+    port_mappings: &Option<Vec<cathedral_validator::rental::PortMapping>>,
     max_count: Option<usize>,
 ) -> String {
     match port_mappings {
@@ -650,7 +650,7 @@ pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
     println!("{}", style("Quick Commands:").cyan().bold());
     println!(
         "  {} {}",
-        style("basilica ps").yellow().bold(),
+        style("cathedral ps").yellow().bold(),
         style("- List active rentals with pricing and cost information").dim()
     );
 
@@ -735,7 +735,7 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
     println!("{}", style("Quick Commands:").cyan().bold());
     println!(
         "  {} {}",
-        style("basilica balance").yellow().bold(),
+        style("cathedral balance").yellow().bold(),
         style("- Show your current credit balance").dim()
     );
 
@@ -883,7 +883,7 @@ pub fn display_cpu_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<(
 
 /// Display secure cloud rentals in table format
 pub fn display_secure_cloud_rentals(
-    rentals: &[&basilica_sdk::types::SecureCloudRentalListItem],
+    rentals: &[&cathedral_sdk::types::SecureCloudRentalListItem],
 ) -> Result<()> {
     if rentals.is_empty() {
         println!("{}", style("No Citadel rentals found").yellow());
@@ -985,7 +985,7 @@ pub fn display_secure_cloud_rentals(
 
 /// Display CPU-only offerings in detailed table format
 pub fn display_cpu_offerings_detailed(
-    offerings: &[basilica_sdk::types::CpuOffering],
+    offerings: &[cathedral_sdk::types::CpuOffering],
 ) -> Result<()> {
     if offerings.is_empty() {
         println!("{}", style("No CPU instances available").yellow());
@@ -1038,7 +1038,7 @@ pub fn display_cpu_offerings_detailed(
 
 /// Display CPU-only rentals in table format (no GPU column)
 pub fn display_cpu_rentals(
-    rentals: &[&basilica_sdk::types::SecureCloudRentalListItem],
+    rentals: &[&cathedral_sdk::types::SecureCloudRentalListItem],
 ) -> Result<()> {
     if rentals.is_empty() {
         println!("{}", style("No CPU-only rentals found").yellow());
@@ -1156,11 +1156,11 @@ pub fn display_volumes(volumes: &[VolumeResponse]) -> Result<()> {
         .map(|volume| {
             // Format status
             let status = match volume.status {
-                basilica_sdk::types::VolumeStatus::Available => "Available".to_string(),
-                basilica_sdk::types::VolumeStatus::Attached => "Attached".to_string(),
-                basilica_sdk::types::VolumeStatus::Pending => "Pending".to_string(),
-                basilica_sdk::types::VolumeStatus::Deleting => "Deleting".to_string(),
-                basilica_sdk::types::VolumeStatus::Error => "Error".to_string(),
+                cathedral_sdk::types::VolumeStatus::Available => "Available".to_string(),
+                cathedral_sdk::types::VolumeStatus::Attached => "Attached".to_string(),
+                cathedral_sdk::types::VolumeStatus::Pending => "Pending".to_string(),
+                cathedral_sdk::types::VolumeStatus::Deleting => "Deleting".to_string(),
+                cathedral_sdk::types::VolumeStatus::Error => "Error".to_string(),
             };
 
             // Use accumulated cost from billing service

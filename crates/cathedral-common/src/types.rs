@@ -1,4 +1,4 @@
-//! Common types used across Basilica components
+//! Common types used across Cathedral components
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -105,7 +105,7 @@ impl AsRef<str> for ApiKeyName {
 /// GPU category for network-wide GPU classification and scoring
 ///
 /// This enum represents the GPU models that are officially supported and scored
-/// by the Basilica validator network. Any GPU that doesn't match one of these
+/// by the Cathedral validator network. Any GPU that doesn't match one of these
 /// categories is classified as "Other" for general compute purposes.
 ///
 /// Serializes as a plain string (e.g., `"A100"`, `"RTX6000"`).
@@ -182,7 +182,7 @@ impl GpuCategory {
     ///
     /// # Example
     /// ```
-    /// use basilica_common::types::GpuCategory;
+    /// use cathedral_common::types::GpuCategory;
     ///
     /// let supported = GpuCategory::supported_models();
     /// assert_eq!(supported, vec!["A100", "H100", "H200", "B200", "B300"]);

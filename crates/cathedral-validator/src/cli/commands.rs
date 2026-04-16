@@ -75,7 +75,7 @@ pub enum Command {
         #[arg(long)]
         gpu_attestor_path: Option<PathBuf>,
 
-        /// Remote working directory (default: /tmp/basilica_validation)
+        /// Remote working directory (default: /tmp/cathedral_validation)
         #[arg(long)]
         remote_work_dir: Option<String>,
 

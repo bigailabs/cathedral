@@ -1,7 +1,7 @@
 //! High-level key generation and management functions
 //!
 //! This module provides convenient functions for generating various types of
-//! cryptographic keys used throughout the Basilica system.
+//! cryptographic keys used throughout the Cathedral system.
 
 use super::{ed25519::Ed25519KeyPair, p256::P256KeyPair};
 use crate::error::CryptoError;
@@ -13,7 +13,7 @@ use crate::error::CryptoError;
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::keys::generate_ed25519_keypair;
+/// use cathedral_common::crypto::keys::generate_ed25519_keypair;
 ///
 /// let (private_pem, public_openssh) = generate_ed25519_keypair();
 /// assert!(private_pem.contains("-----BEGIN PRIVATE KEY-----"));
@@ -38,7 +38,7 @@ pub fn generate_ed25519_keypair() -> (String, String) {
             // This should not happen with a properly generated keypair
             (
                 "-----BEGIN PRIVATE KEY-----\nERROR: Key generation failed\n-----END PRIVATE KEY-----".to_string(),
-                "ssh-ed25519 ERROR basilica-ephemeral-key".to_string()
+                "ssh-ed25519 ERROR cathedral-ephemeral-key".to_string()
             )
         }
     }
@@ -52,7 +52,7 @@ pub fn generate_ed25519_keypair() -> (String, String) {
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::keys::generate_p256_keypair;
+/// use cathedral_common::crypto::keys::generate_p256_keypair;
 ///
 /// let keypair = generate_p256_keypair().unwrap();
 /// let private_pem = keypair.private_key().to_pem().unwrap();
@@ -75,7 +75,7 @@ pub fn generate_p256_keypair() -> Result<P256KeyPair, CryptoError> {
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::keys::generate_p256_keypair_formatted;
+/// use cathedral_common::crypto::keys::generate_p256_keypair_formatted;
 ///
 /// let (private_pem, public_pem, public_hex) = generate_p256_keypair_formatted().unwrap();
 /// assert!(private_pem.contains("-----BEGIN PRIVATE KEY-----"));
@@ -102,7 +102,7 @@ pub fn generate_p256_keypair_formatted() -> Result<(String, String, String), Cry
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::keys::generate_ed25519_keypair_pem;
+/// use cathedral_common::crypto::keys::generate_ed25519_keypair_pem;
 ///
 /// let (private_pem, public_pem) = generate_ed25519_keypair_pem().unwrap();
 /// assert!(private_pem.contains("-----BEGIN PRIVATE KEY-----"));
@@ -129,7 +129,7 @@ mod tests {
         assert!(private_pem.contains("-----BEGIN PRIVATE KEY-----"));
         assert!(private_pem.contains("-----END PRIVATE KEY-----"));
         assert!(public_openssh.starts_with("ssh-ed25519"));
-        assert!(public_openssh.contains("basilica-ephemeral-key"));
+        assert!(public_openssh.contains("cathedral-ephemeral-key"));
 
         // Generate another pair - should be different
         let (private_pem2, public_openssh2) = generate_ed25519_keypair();

@@ -1,6 +1,6 @@
-//! Stub file generator for the basilica Python module
+//! Stub file generator for the cathedral Python module
 //!
-//! This binary generates Python type stub files (.pyi) for the basilica module.
+//! This binary generates Python type stub files (.pyi) for the cathedral module.
 //! Run with: cargo run --bin stub_gen --features stub-gen
 
 #[cfg(feature = "stub-gen")]
@@ -8,10 +8,10 @@ use pyo3_stub_gen::Result;
 
 #[cfg(feature = "stub-gen")]
 fn main() -> Result<()> {
-    // Get the stub information from the basilica module
-    let stub = basilica::stub_info()?;
+    // Get the stub information from the cathedral module
+    let stub = cathedral::stub_info()?;
 
-    // Generate the stub file to python/basilica/_basilica.pyi
+    // Generate the stub file to python/cathedral/_cathedral.pyi
     stub.generate()?;
 
     println!("Successfully generated Python stub file!");

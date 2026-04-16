@@ -1,4 +1,4 @@
-//! Build script for protocol_basilca crate
+//! Build script for cathedral-protocol crate
 //!
 //! This script compiles .proto files into Rust code using tonic-build.
 //! Generated code is placed in src/gen/ directory.

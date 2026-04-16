@@ -1,4 +1,4 @@
-//! Build script for basilica-common
+//! Build script for cathedral-common
 //!
 //! This script generates compile-time constants that can be overridden
 //! by environment variables during the build process.

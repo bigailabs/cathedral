@@ -1,9 +1,9 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use basilica_common::rental::RentalSpec;
+use cathedral_common::rental::RentalSpec;
 
-/// Convert a RentalSpec into a Basilica GpuRental CustomResource JSON document.
+/// Convert a RentalSpec into a Cathedral GpuRental CustomResource JSON document.
 pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpec) -> Value {
     let ports: Vec<Value> = spec
         .container
@@ -61,10 +61,10 @@ pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpe
             "container": container,
             "duration": { "hours": spec.duration.hours, "autoExtend": spec.duration.auto_extend, "maxExtensions": spec.duration.max_extensions },
             "accessType": match spec.access_type {
-                basilica_common::rental::AccessType::Ssh => "Ssh",
-                basilica_common::rental::AccessType::Jupyter => "Jupyter",
-                basilica_common::rental::AccessType::Vscode => "Vscode",
-                basilica_common::rental::AccessType::Custom => "Custom",
+                cathedral_common::rental::AccessType::Ssh => "Ssh",
+                cathedral_common::rental::AccessType::Jupyter => "Jupyter",
+                cathedral_common::rental::AccessType::Vscode => "Vscode",
+                cathedral_common::rental::AccessType::Custom => "Custom",
             },
             "network": network,
             "storage": spec.storage.as_ref().map(|s| json!({
@@ -108,8 +108,8 @@ impl<W: K8sWriter> RentalAdapter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basilica_common::compute::{GpuSpec, Resources};
-    use basilica_common::rental::{
+    use cathedral_common::compute::{GpuSpec, Resources};
+    use cathedral_common::rental::{
         AccessType, IngressRule, RentalContainer, RentalDuration, RentalNetwork, RentalSpec,
         VolumeMount,
     };

@@ -3,8 +3,8 @@
 use crate::error::CliError;
 use crate::output::{print_error, print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::error::ApiError;
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::error::ApiError;
+use cathedral_sdk::CathedralClient;
 
 /// Handle the enroll-metadata subcommand.
 ///
@@ -12,7 +12,7 @@ use basilica_sdk::BasilicaClient;
 /// With --enable: enable metadata enrollment.
 /// With --disable: disable metadata enrollment.
 pub async fn handle_enroll_metadata(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: &str,
     enable: bool,
     disable: bool,
@@ -39,7 +39,7 @@ pub async fn handle_enroll_metadata(
                     name
                 ));
                 println!("  Validators can now verify this deployment via:");
-                println!("  basilica deploy metadata {}", name);
+                println!("  cathedral deploy metadata {}", name);
             } else {
                 print_success(&format!(
                     "Public metadata enrollment disabled for '{}'",
@@ -57,7 +57,7 @@ pub async fn handle_enroll_metadata(
 }
 
 /// Display current enrollment status.
-async fn show_enrollment_status(client: &BasilicaClient, name: &str) -> Result<(), CliError> {
+async fn show_enrollment_status(client: &CathedralClient, name: &str) -> Result<(), CliError> {
     let spinner = create_spinner(&format!("Checking enrollment status for '{}'...", name));
     let result = client.get_enrollment_status(name).await;
     complete_spinner_and_clear(spinner);
@@ -113,7 +113,7 @@ pub async fn handle_get_public_metadata(
         )));
     }
 
-    let metadata: basilica_sdk::types::PublicDeploymentMetadataResponse =
+    let metadata: cathedral_sdk::types::PublicDeploymentMetadataResponse =
         response.json().await.map_err(|e| {
             CliError::Internal(color_eyre::eyre::eyre!("Failed to parse response: {}", e))
         })?;

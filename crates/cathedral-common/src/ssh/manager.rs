@@ -72,7 +72,7 @@ impl StandardSshKeyManager {
             params
                 .comment
                 .as_deref()
-                .unwrap_or(&format!("basilica-{id}")),
+                .unwrap_or(&format!("cathedral-{id}")),
         ]);
 
         let output = cmd.output().map_err(|e| {
@@ -197,7 +197,7 @@ impl SshKeyManager for StandardSshKeyManager {
 
         // Append public key to authorized_keys
         let key_entry = format!(
-            "# Basilica SSH Key - {} - {}\n{}\n",
+            "# Cathedral SSH Key - {} - {}\n{}\n",
             key_info.id,
             key_info
                 .created_at

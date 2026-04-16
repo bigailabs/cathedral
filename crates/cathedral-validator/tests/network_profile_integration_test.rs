@@ -1,7 +1,7 @@
 //! Integration test for network profile collection
 
-use basilica_validator::miner_prover::validation_network::NetworkProfile;
-use basilica_validator::persistence::SimplePersistence;
+use cathedral_validator::miner_prover::validation_network::NetworkProfile;
+use cathedral_validator::persistence::SimplePersistence;
 
 #[tokio::test]
 async fn test_network_profile_database_integration() -> Result<(), anyhow::Error> {

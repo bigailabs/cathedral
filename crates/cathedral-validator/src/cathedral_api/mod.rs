@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
 
 #[derive(Debug, thiserror::Error)]
-pub enum BasilicaApiError {
+pub enum CathedralApiError {
     #[error("api transport error: {0}")]
     Transport(String),
     #[error("api parse error: {0}")]
@@ -37,12 +37,12 @@ pub trait ValidatorSigner: Send + Sync {
 fn classify_incentive_status(
     status: reqwest::StatusCode,
     body: Option<String>,
-) -> std::result::Result<(), BasilicaApiError> {
+) -> std::result::Result<(), CathedralApiError> {
     if status.is_success() {
         return Ok(());
     }
 
-    Err(BasilicaApiError::HttpStatus {
+    Err(CathedralApiError::HttpStatus {
         status,
         body: body.unwrap_or_default(),
     })
@@ -139,19 +139,19 @@ impl CircuitBreaker {
 
 #[async_trait]
 pub trait BaselinePriceFetcher: Send + Sync {
-    async fn fetch(&self, client: &BasilicaApiClient) -> Result<HashMap<String, f64>>;
+    async fn fetch(&self, client: &CathedralApiClient) -> Result<HashMap<String, f64>>;
 }
 
 #[async_trait]
 pub trait TokenPriceFetcher: Send + Sync {
-    async fn fetch(&self, client: &BasilicaApiClient, netuid: u16) -> Result<TokenPriceSnapshot>;
+    async fn fetch(&self, client: &CathedralApiClient, netuid: u16) -> Result<TokenPriceSnapshot>;
 }
 
 pub struct HttpBaselinePriceFetcher;
 
 #[async_trait]
 impl BaselinePriceFetcher for HttpBaselinePriceFetcher {
-    async fn fetch(&self, client: &BasilicaApiClient) -> Result<HashMap<String, f64>> {
+    async fn fetch(&self, client: &CathedralApiClient) -> Result<HashMap<String, f64>> {
         let url = format!(
             "{}/v1/prices/baseline",
             client.api_endpoint.trim_end_matches('/')
@@ -170,7 +170,7 @@ pub struct HttpTokenPriceFetcher;
 
 #[async_trait]
 impl TokenPriceFetcher for HttpTokenPriceFetcher {
-    async fn fetch(&self, client: &BasilicaApiClient, netuid: u16) -> Result<TokenPriceSnapshot> {
+    async fn fetch(&self, client: &CathedralApiClient, netuid: u16) -> Result<TokenPriceSnapshot> {
         let query = TokenPricesQuery {
             netuid: netuid as u32,
         };
@@ -196,7 +196,7 @@ impl TokenPriceFetcher for HttpTokenPriceFetcher {
     }
 }
 
-pub struct BasilicaApiClient {
+pub struct CathedralApiClient {
     api_endpoint: String,
     signer: Arc<dyn ValidatorSigner>,
     http_client: Client,
@@ -210,7 +210,7 @@ pub struct BasilicaApiClient {
     token_fetch_lock: Arc<Mutex<()>>,
 }
 
-impl BasilicaApiClient {
+impl CathedralApiClient {
     pub fn new(
         api_endpoint: String,
         signer: Arc<dyn ValidatorSigner>,
@@ -339,7 +339,7 @@ impl BasilicaApiClient {
 
     pub async fn get_incentive_config(
         &self,
-    ) -> std::result::Result<IncentiveConfigResponse, BasilicaApiError> {
+    ) -> std::result::Result<IncentiveConfigResponse, CathedralApiError> {
         let url = format!(
             "{}/v1/incentive/config",
             self.api_endpoint.trim_end_matches('/')
@@ -353,7 +353,7 @@ impl BasilicaApiClient {
         &self,
         epoch_start: DateTime<Utc>,
         epoch_end: DateTime<Utc>,
-    ) -> std::result::Result<Vec<CuLedgerRowResponse>, BasilicaApiError> {
+    ) -> std::result::Result<Vec<CuLedgerRowResponse>, CathedralApiError> {
         let query = EpochWindowQuery {
             epoch_start: epoch_start.to_rfc3339(),
             epoch_end: epoch_end.to_rfc3339(),
@@ -372,7 +372,7 @@ impl BasilicaApiClient {
         &self,
         epoch_start: DateTime<Utc>,
         epoch_end: DateTime<Utc>,
-    ) -> std::result::Result<Vec<RuLedgerRowResponse>, BasilicaApiError> {
+    ) -> std::result::Result<Vec<RuLedgerRowResponse>, CathedralApiError> {
         let query = EpochWindowQuery {
             epoch_start: epoch_start.to_rfc3339(),
             epoch_end: epoch_end.to_rfc3339(),
@@ -390,7 +390,7 @@ impl BasilicaApiClient {
     pub async fn submit_cus(
         &self,
         rows: Vec<NewCuLedgerRowRequest>,
-    ) -> std::result::Result<usize, BasilicaApiError> {
+    ) -> std::result::Result<usize, CathedralApiError> {
         let payload = PostCusRequest { cus: rows };
         let url = format!(
             "{}/v1/incentive/cus",
@@ -407,7 +407,7 @@ impl BasilicaApiClient {
         node_id: &str,
         slash_pct: u32,
         idempotency_key: &str,
-    ) -> std::result::Result<PostSlashResponse, BasilicaApiError> {
+    ) -> std::result::Result<PostSlashResponse, CathedralApiError> {
         let payload = PostSlashRequest {
             node_id: node_id.to_string(),
             slash_pct,
@@ -437,15 +437,15 @@ impl BasilicaApiClient {
     fn signed_headers_typed<T: Serialize>(
         &self,
         payload: &T,
-    ) -> std::result::Result<(String, String), BasilicaApiError> {
+    ) -> std::result::Result<(String, String), CathedralApiError> {
         let timestamp = Utc::now().timestamp().to_string();
         let payload_json =
-            serde_json::to_string(payload).map_err(|e| BasilicaApiError::Parse(e.to_string()))?;
+            serde_json::to_string(payload).map_err(|e| CathedralApiError::Parse(e.to_string()))?;
         let message = format!("{timestamp}:{payload_json}");
         let signature = self
             .signer
             .sign(message.as_bytes())
-            .map_err(|e| BasilicaApiError::Signing(e.to_string()))?;
+            .map_err(|e| CathedralApiError::Signing(e.to_string()))?;
         Ok((signature, timestamp))
     }
 
@@ -453,7 +453,7 @@ impl BasilicaApiClient {
         &self,
         url: &str,
         query: &Q,
-    ) -> std::result::Result<reqwest::Response, BasilicaApiError> {
+    ) -> std::result::Result<reqwest::Response, CathedralApiError> {
         let (signature, timestamp) = self.signed_headers_typed(query)?;
         debug!(url = url, "Sending signed GET request");
         let response = self
@@ -466,7 +466,7 @@ impl BasilicaApiClient {
             .send()
             .await
             .map_err(|e| {
-                BasilicaApiError::Transport(format!("API request to {url} failed: {e}"))
+                CathedralApiError::Transport(format!("API request to {url} failed: {e}"))
             })?;
         debug!(url = url, status = %response.status(), "Received API response");
         Ok(response)
@@ -476,7 +476,7 @@ impl BasilicaApiClient {
         &self,
         url: &str,
         body: &B,
-    ) -> std::result::Result<reqwest::Response, BasilicaApiError> {
+    ) -> std::result::Result<reqwest::Response, CathedralApiError> {
         let (signature, timestamp) = self.signed_headers_typed(body)?;
         debug!(url = url, "Sending signed POST request");
         let response = self
@@ -489,7 +489,7 @@ impl BasilicaApiClient {
             .send()
             .await
             .map_err(|e| {
-                BasilicaApiError::Transport(format!("API request to {url} failed: {e}"))
+                CathedralApiError::Transport(format!("API request to {url} failed: {e}"))
             })?;
         debug!(url = url, status = %response.status(), "Received API response");
         Ok(response)
@@ -507,7 +507,7 @@ impl BasilicaApiClient {
     async fn read_json_response_typed<T: DeserializeOwned>(
         &self,
         response: reqwest::Response,
-    ) -> std::result::Result<T, BasilicaApiError> {
+    ) -> std::result::Result<T, CathedralApiError> {
         if !response.status().is_success() {
             let status = response.status();
             let body: Option<Value> = response.json().await.ok();
@@ -519,7 +519,7 @@ impl BasilicaApiClient {
         response
             .json::<T>()
             .await
-            .map_err(|e| BasilicaApiError::Parse(e.to_string()))
+            .map_err(|e| CathedralApiError::Parse(e.to_string()))
     }
 
     async fn get_cached_token_prices_if_valid(&self, netuid: u16) -> Option<TokenPriceSnapshot> {
@@ -720,7 +720,7 @@ mod tests {
 
     #[async_trait]
     impl BaselinePriceFetcher for TestBaselineFetcher {
-        async fn fetch(&self, _client: &BasilicaApiClient) -> Result<HashMap<String, f64>> {
+        async fn fetch(&self, _client: &CathedralApiClient) -> Result<HashMap<String, f64>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             (self.response)()
         }
@@ -735,7 +735,7 @@ mod tests {
     impl TokenPriceFetcher for TestTokenFetcher {
         async fn fetch(
             &self,
-            _client: &BasilicaApiClient,
+            _client: &CathedralApiClient,
             _netuid: u16,
         ) -> Result<TokenPriceSnapshot> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -807,8 +807,8 @@ mod tests {
         baseline_fetcher: Arc<dyn BaselinePriceFetcher>,
         token_fetcher: Arc<dyn TokenPriceFetcher>,
         signer: Arc<dyn ValidatorSigner>,
-    ) -> BasilicaApiClient {
-        BasilicaApiClient::new_with_fetchers(
+    ) -> CathedralApiClient {
+        CathedralApiClient::new_with_fetchers(
             "http://localhost".to_string(),
             signer,
             Client::new(),
@@ -822,8 +822,8 @@ mod tests {
     fn build_http_client(
         api_endpoint: String,
         signer: Arc<dyn ValidatorSigner>,
-    ) -> BasilicaApiClient {
-        BasilicaApiClient::new_with_fetchers(
+    ) -> CathedralApiClient {
+        CathedralApiClient::new_with_fetchers(
             api_endpoint,
             signer,
             Client::new(),
@@ -1038,7 +1038,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            BasilicaApiError::HttpStatus {
+            CathedralApiError::HttpStatus {
                 status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 ..
             }
@@ -1052,7 +1052,7 @@ mod tests {
             foo: String,
         }
 
-        let client = BasilicaApiClient::new_with_fetchers(
+        let client = CathedralApiClient::new_with_fetchers(
             "http://localhost".to_string(),
             Arc::new(FailingSigner),
             Client::new(),
@@ -1068,7 +1068,7 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(matches!(err, BasilicaApiError::Signing(_)));
+        assert!(matches!(err, CathedralApiError::Signing(_)));
     }
 
     #[tokio::test]
@@ -1095,7 +1095,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, BasilicaApiError::Transport(_)));
+        assert!(matches!(err, CathedralApiError::Transport(_)));
     }
 
     #[tokio::test]
@@ -1123,7 +1123,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, BasilicaApiError::Parse(_)));
+        assert!(matches!(err, CathedralApiError::Parse(_)));
     }
 
     #[tokio::test]
@@ -1166,7 +1166,7 @@ mod tests {
         let err = client.get_incentive_config().await.unwrap_err();
         assert!(matches!(
             err,
-            BasilicaApiError::HttpStatus {
+            CathedralApiError::HttpStatus {
                 status: reqwest::StatusCode::NOT_FOUND,
                 ..
             }
@@ -1188,7 +1188,7 @@ mod tests {
         let err = client.get_incentive_config().await.unwrap_err();
         assert!(matches!(
             err,
-            BasilicaApiError::HttpStatus {
+            CathedralApiError::HttpStatus {
                 status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 ..
             }
@@ -1208,7 +1208,7 @@ mod tests {
         let client = build_http_client(server.uri(), signer);
 
         let err = client.get_incentive_config().await.unwrap_err();
-        assert!(matches!(err, BasilicaApiError::Parse(_)));
+        assert!(matches!(err, CathedralApiError::Parse(_)));
     }
 
     #[tokio::test]
@@ -1396,7 +1396,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            BasilicaApiError::HttpStatus {
+            CathedralApiError::HttpStatus {
                 status: reqwest::StatusCode::FORBIDDEN,
                 ..
             }
@@ -1562,7 +1562,7 @@ mod tests {
         }
 
         let signer = RecordingSigner::new();
-        let client = BasilicaApiClient::new_with_fetchers(
+        let client = CathedralApiClient::new_with_fetchers(
             "http://localhost".to_string(),
             Arc::new(signer.clone()),
             Client::new(),

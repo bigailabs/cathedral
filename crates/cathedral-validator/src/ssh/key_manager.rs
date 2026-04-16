@@ -282,7 +282,7 @@ impl ValidatorSshKeyManager {
     pub fn get_ssh_connection_details(
         &self,
         node_ssh_endpoint: &str,
-    ) -> Result<basilica_common::ssh::SshConnectionDetails> {
+    ) -> Result<cathedral_common::ssh::SshConnectionDetails> {
         // Get node's SSH credentials from node_ssh_endpoint
         // node_ssh_endpoint format is expected to be "user@host:port" or similar
         let endpoint_parts: Vec<&str> = node_ssh_endpoint.split('@').collect();
@@ -306,7 +306,7 @@ impl ValidatorSshKeyManager {
             .get_persistent_key()
             .ok_or_else(|| anyhow::anyhow!("No persistent validator SSH key available"))?;
 
-        Ok(basilica_common::ssh::SshConnectionDetails {
+        Ok(cathedral_common::ssh::SshConnectionDetails {
             host: host.to_string(),
             port,
             username: username.to_string(),

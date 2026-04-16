@@ -204,7 +204,7 @@ pub fn validate_description(description: &str) -> Result<(), ValidationError> {
 ///
 /// Note: This provides basic injection prevention validation, not strict Docker
 /// image format validation. For strict OCI image reference parsing, use
-/// `validate_docker_image()` from `basilica_common::utils` instead.
+/// `validate_docker_image()` from `cathedral_common::utils` instead.
 pub fn validate_image_reference(image: &str) -> Result<(), ValidationError> {
     if image.is_empty() {
         return Err(ValidationError::InvalidFormat {
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_validate_namespace_valid() {
         assert!(validate_namespace("u-user-123").is_ok());
-        assert!(validate_namespace("basilica-system").is_ok());
+        assert!(validate_namespace("cathedral-system").is_ok());
         assert!(validate_namespace("default").is_ok());
     }
 

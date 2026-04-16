@@ -197,7 +197,7 @@ pub enum AuthError {
     Timeout,
 
     /// User is not logged in / no tokens found
-    #[error("Authentication required. Please use one of the following methods:\n  • Run 'basilica login' to authenticate via CLI\n  • Provide access_token and refresh_token to the client\n  • Set BASILICA_API_TOKEN and BASILICA_REFRESH_TOKEN environment variables")]
+    #[error("Authentication required. Please use one of the following methods:\n  • Run 'cathedral login' to authenticate via CLI\n  • Provide access_token and refresh_token to the client\n  • Set BASILICA_API_TOKEN and BASILICA_REFRESH_TOKEN environment variables")]
     UserNotLoggedIn,
 
     /// Generic IO error
@@ -210,12 +210,12 @@ pub enum AuthError {
 }
 
 /// Get the default data directory for SDK token storage
-/// Returns platform-specific data directory (e.g., ~/.local/share/basilica on Linux)
+/// Returns platform-specific data directory (e.g., ~/.local/share/cathedral on Linux)
 pub fn get_sdk_data_dir() -> AuthResult<PathBuf> {
     let strategy = choose_base_strategy().map_err(|e| {
         AuthError::ConfigError(format!("Failed to determine base directories: {}", e))
     })?;
 
     // Use the same path as the CLI for consistency
-    Ok(strategy.data_dir().join("basilica"))
+    Ok(strategy.data_dir().join("cathedral"))
 }

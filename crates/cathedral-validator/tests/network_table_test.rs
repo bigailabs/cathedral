@@ -1,4 +1,4 @@
-use basilica_validator::persistence::SimplePersistence;
+use cathedral_validator::persistence::SimplePersistence;
 use sqlx::Row;
 
 #[tokio::test]

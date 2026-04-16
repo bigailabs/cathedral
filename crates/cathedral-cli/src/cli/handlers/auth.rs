@@ -24,7 +24,7 @@ pub async fn handle_login_with_options(
 
     println!(
         "{}",
-        console::style("⛪ Basilica - Sacred Compute ⛪")
+        console::style("⛪ Cathedral - Sacred Compute ⛪")
             .red()
             .bold()
     );
@@ -42,7 +42,7 @@ pub async fn handle_login_with_options(
         let port = CallbackServer::find_available_port().map_err(|e| {
             eyre!(e)
                 .wrap_err("Failed to find available port")
-                .suggestion("Try 'basilica login --device-code' for device flow")
+                .suggestion("Try 'cathedral login --device-code' for device flow")
                 .note("The standard OAuth flow requires an available local port")
         })?;
         crate::config::create_auth_config_with_port(port)
@@ -86,7 +86,7 @@ pub async fn handle_login_with_options(
         complete_spinner_error(spinner, "Failed to store tokens");
         return Err(eyre!("Failed to store tokens: {}", e)
             .suggestion("Check that you have permission to access the CLI data directory and auth.json file")
-            .note("The auth file is located at: ~/.local/share/basilica/auth.json. Ensure the directory exists and is writable.")
+            .note("The auth file is located at: ~/.local/share/cathedral/auth.json. Ensure the directory exists and is writable.")
             .into());
     }
 
@@ -163,7 +163,7 @@ pub async fn handle_logout(_config: &CliConfig) -> Result<(), CliError> {
     if let Err(e) = token_store.delete_tokens().await {
         complete_spinner_error(spinner, "Failed to clear tokens");
         return Err(eyre!("Failed to clear authentication data: {}", e)
-            .note("The auth file is located at: ~/.local/share/basilica/auth.json. Ensure you have write permissions to delete the file.")
+            .note("The auth file is located at: ~/.local/share/cathedral/auth.json. Ensure you have write permissions to delete the file.")
             .into());
     }
 

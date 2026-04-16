@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Default burn UID for Basilica validator emissions
+/// Default burn UID for Cathedral validator emissions
 pub const DEFAULT_BURN_UID: u16 = 204;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

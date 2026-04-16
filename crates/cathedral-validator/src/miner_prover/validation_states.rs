@@ -14,11 +14,11 @@
 //!
 //! **Example** (node failed at NAT validation):
 //! ```text
-//! basilica_validator_node_validation_state{node_id="e1",state="in_queue"} 0.0
-//! basilica_validator_node_validation_state{node_id="e1",state="connecting"} 0.0
-//! basilica_validator_node_validation_state{node_id="e1",state="connected"} 0.0
-//! basilica_validator_node_validation_state{node_id="e1",state="nat_validating"} 2.0
-//! basilica_validator_node_validation_state{node_id="e1",state="completed"} 0.0
+//! cathedral_validator_node_validation_state{node_id="e1",state="in_queue"} 0.0
+//! cathedral_validator_node_validation_state{node_id="e1",state="connecting"} 0.0
+//! cathedral_validator_node_validation_state{node_id="e1",state="connected"} 0.0
+//! cathedral_validator_node_validation_state{node_id="e1",state="nat_validating"} 2.0
+//! cathedral_validator_node_validation_state{node_id="e1",state="completed"} 0.0
 //! ```
 
 use super::types::ValidationType;

@@ -28,12 +28,12 @@ pub struct ApiState {
     persistence: Arc<crate::persistence::SimplePersistence>,
     gpu_profile_repo: Arc<crate::persistence::gpu_profile_repository::GpuProfileRepository>,
     #[allow(dead_code)]
-    storage: basilica_common::MemoryStorage,
+    storage: cathedral_common::MemoryStorage,
     validator_config: crate::config::ValidatorConfig,
     #[allow(dead_code)]
     rental_manager: Option<Arc<rental::RentalManager>>,
     #[allow(dead_code)]
-    validator_hotkey: basilica_common::identity::Hotkey,
+    validator_hotkey: cathedral_common::identity::Hotkey,
 }
 
 impl ApiState {
@@ -41,9 +41,9 @@ impl ApiState {
         config: ApiConfig,
         persistence: Arc<crate::persistence::SimplePersistence>,
         gpu_profile_repo: Arc<crate::persistence::gpu_profile_repository::GpuProfileRepository>,
-        storage: basilica_common::MemoryStorage,
+        storage: cathedral_common::MemoryStorage,
         validator_config: crate::config::ValidatorConfig,
-        validator_hotkey: basilica_common::identity::Hotkey,
+        validator_hotkey: cathedral_common::identity::Hotkey,
     ) -> Self {
         Self {
             config,
@@ -73,9 +73,9 @@ impl ApiHandler {
         config: ApiConfig,
         persistence: Arc<crate::persistence::SimplePersistence>,
         gpu_profile_repo: Arc<crate::persistence::gpu_profile_repository::GpuProfileRepository>,
-        storage: basilica_common::MemoryStorage,
+        storage: cathedral_common::MemoryStorage,
         validator_config: crate::config::ValidatorConfig,
-        validator_hotkey: basilica_common::identity::Hotkey,
+        validator_hotkey: cathedral_common::identity::Hotkey,
     ) -> Self {
         Self {
             state: ApiState::new(

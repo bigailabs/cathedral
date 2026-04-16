@@ -79,7 +79,7 @@ pub enum AuthError {
     Timeout,
 
     /// User is not logged in / no tokens found
-    #[error("User not logged in. Run 'basilica login' to authenticate")]
+    #[error("User not logged in. Run 'cathedral login' to authenticate")]
     UserNotLoggedIn,
 
     /// Generic IO error

@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::gpu::categorization::*;
-    use basilica_common::identity::MinerUid;
-    use basilica_common::types::GpuCategory;
+    use cathedral_common::identity::MinerUid;
+    use cathedral_common::types::GpuCategory;
     use chrono::Utc;
     use std::str::FromStr;
 

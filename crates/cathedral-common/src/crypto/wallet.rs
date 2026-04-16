@@ -25,7 +25,7 @@ pub struct Sr25519Wallet {
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::wallet::generate_sr25519_wallet;
+/// use cathedral_common::crypto::wallet::generate_sr25519_wallet;
 ///
 /// let wallet = generate_sr25519_wallet(42).unwrap();
 /// assert!(wallet.address.len() > 0);
@@ -69,7 +69,7 @@ pub fn generate_sr25519_wallet(ss58_prefix: u16) -> Result<Sr25519Wallet, Crypto
 ///
 /// # Example
 /// ```rust,no_run
-/// use basilica_common::crypto::wallet::generate_sr25519_wallet_from_mnemonic;
+/// use cathedral_common::crypto::wallet::generate_sr25519_wallet_from_mnemonic;
 ///
 /// let mnemonic = "...";
 /// let wallet = generate_sr25519_wallet_from_mnemonic(mnemonic, 42).unwrap();

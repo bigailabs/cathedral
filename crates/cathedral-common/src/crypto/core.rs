@@ -40,9 +40,9 @@ pub const AES_NONCE_SIZE: usize = 12;
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::hash_blake3_string;
+/// use cathedral_common::crypto::hash_blake3_string;
 ///
-/// let data = b"Hello, Basilica!";
+/// let data = b"Hello, Cathedral!";
 /// let hash = hash_blake3_string(data);
 /// assert_eq!(hash.len(), 64); // 32 bytes * 2 hex chars
 /// ```
@@ -158,7 +158,7 @@ pub fn verify_signature_bittensor(
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::generate_ephemeral_ed25519_keypair;
+/// use cathedral_common::crypto::generate_ephemeral_ed25519_keypair;
 ///
 /// let (private_pem, public_openssh) = generate_ephemeral_ed25519_keypair();
 /// assert!(private_pem.contains("-----BEGIN PRIVATE KEY-----"));
@@ -207,7 +207,7 @@ pub fn derive_key_from_gpu_info(gpu_info_str: &str) -> [u8; 32] {
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::{generate_random_key, AES_KEY_SIZE};
+/// use cathedral_common::crypto::{generate_random_key, AES_KEY_SIZE};
 ///
 /// let key = generate_random_key(AES_KEY_SIZE);
 /// assert_eq!(key.len(), AES_KEY_SIZE);
@@ -344,7 +344,7 @@ pub fn decrypt_aes_gcm(
 ///
 /// # Example
 /// ```rust
-/// use basilica_common::crypto::derive_key_simple;
+/// use cathedral_common::crypto::derive_key_simple;
 ///
 /// let password = "my_secure_password";
 /// let salt = b"unique_salt_16by";
@@ -615,7 +615,7 @@ mod tests {
         assert!(private_key.contains("-----BEGIN PRIVATE KEY-----"));
         assert!(private_key.contains("-----END PRIVATE KEY-----"));
         assert!(public_key.starts_with("ssh-ed25519"));
-        assert!(public_key.contains("basilica-ephemeral-key"));
+        assert!(public_key.contains("cathedral-ephemeral-key"));
 
         // Should generate different keys each time (though this is placeholder)
         let (_private_key2, _public_key2) = generate_ephemeral_ed25519_keypair();

@@ -1,12 +1,12 @@
 //! # Validator Library
 //!
-//! Core library for the Basilica validator component that performs verification,
+//! Core library for the Cathedral validator component that performs verification,
 //! scoring, and participates in the Bittensor network.
 
 pub mod agent_installer;
 pub mod api;
 pub mod ban_system;
-pub mod basilica_api;
+pub mod cathedral_api;
 pub mod billing;
 pub mod bittensor_core;
 pub mod cli;

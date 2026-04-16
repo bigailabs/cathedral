@@ -1,9 +1,9 @@
-//! SSH key management handlers for the Basilica CLI
+//! SSH key management handlers for the Cathedral CLI
 
 use crate::error::CliError;
 use crate::output::{compress_path, json_output, print_success};
 use crate::ssh::find_local_public_key_path;
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::CathedralClient;
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use etcetera::{choose_base_strategy, BaseStrategy};
@@ -11,7 +11,7 @@ use ssh_key::PublicKey;
 use std::fs;
 use std::path::PathBuf;
 
-/// Generate a new SSH key for Basilica
+/// Generate a new SSH key for Cathedral
 async fn generate_ssh_key() -> Result<PathBuf, CliError> {
     let strategy = choose_base_strategy().map_err(|e| {
         CliError::Internal(color_eyre::eyre::eyre!(
@@ -21,8 +21,8 @@ async fn generate_ssh_key() -> Result<PathBuf, CliError> {
     })?;
     let home = strategy.home_dir();
     let ssh_dir = home.join(".ssh");
-    let private_key_path = ssh_dir.join("basilica_ed25519");
-    let public_key_path = ssh_dir.join("basilica_ed25519.pub");
+    let private_key_path = ssh_dir.join("cathedral_ed25519");
+    let public_key_path = ssh_dir.join("cathedral_ed25519.pub");
 
     // Check if key already exists (check both public and private key)
     if public_key_path.exists() {
@@ -78,7 +78,7 @@ async fn generate_ssh_key() -> Result<PathBuf, CliError> {
             "-N",
             "", // Empty passphrase
             "-C",
-            "basilica",
+            "cathedral",
         ])
         .output()
         .await
@@ -229,7 +229,7 @@ pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
 
 /// Handle adding a new SSH key
 pub async fn handle_add_ssh_key(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     name: Option<String>,
     file: Option<PathBuf>,
 ) -> Result<(), CliError> {
@@ -397,7 +397,7 @@ pub async fn handle_add_ssh_key(
 }
 
 /// Handle listing SSH keys
-pub async fn handle_list_ssh_keys(client: &BasilicaClient, json: bool) -> Result<(), CliError> {
+pub async fn handle_list_ssh_keys(client: &CathedralClient, json: bool) -> Result<(), CliError> {
     let key = client.get_ssh_key().await.map_err(CliError::Api)?;
 
     if json {
@@ -435,7 +435,7 @@ pub async fn handle_list_ssh_keys(client: &BasilicaClient, json: bool) -> Result
         None => {
             println!("No SSH key registered.");
             println!();
-            println!("Add one with: {} ssh-keys add", style("basilica").cyan());
+            println!("Add one with: {} ssh-keys add", style("cathedral").cyan());
         }
     }
 
@@ -444,7 +444,7 @@ pub async fn handle_list_ssh_keys(client: &BasilicaClient, json: bool) -> Result
 
 /// Handle deleting SSH key
 pub async fn handle_delete_ssh_key(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     skip_confirm: bool,
 ) -> Result<(), CliError> {
     // Check if SSH key exists

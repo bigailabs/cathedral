@@ -6,11 +6,11 @@ pub use key_matcher::{find_local_public_key_path, find_private_key_for_public_ke
 
 use crate::config::SshConfig;
 use crate::error::{CliError, Result};
-use basilica_common::ssh::{
+use cathedral_common::ssh::{
     SshConnectionConfig, SshConnectionDetails, SshConnectionManager, SshFileTransferManager,
     StandardSshClient,
 };
-use basilica_sdk::types::{RentalStatusResponse, SshAccess};
+use cathedral_sdk::types::{RentalStatusResponse, SshAccess};
 use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use std::path::Path;
@@ -70,7 +70,7 @@ impl SshClient {
                 "SSH private key not found at: {}",
                 private_key_path.display()
             )
-            .suggestion("Generate SSH keys with 'basilica ssh-keys generate' or 'ssh-keygen -t ed25519 -f ~/.ssh/basilica_ed25519'")
+            .suggestion("Generate SSH keys with 'cathedral ssh-keys generate' or 'ssh-keygen -t ed25519 -f ~/.ssh/cathedral_ed25519'")
             .into());
         }
 
@@ -112,7 +112,7 @@ impl SshClient {
             .map_err(|e| {
                 eyre!("Command execution failed: {}", e)
                     .suggestion("Check if the rental is still active and SSH port is exposed")
-                    .note("Run 'basilica status <rental-id>' to check rental status")
+                    .note("Run 'cathedral status <rental-id>' to check rental status")
             })?;
 
         println!("{}", output);
@@ -312,7 +312,7 @@ impl SshClient {
         if status.code() == Some(255) {
             return Err(eyre!("SSH connection failed")
                 .suggestion("Check if the rental is still active and SSH port is exposed")
-                .note("Run 'basilica status <rental-id>' to check rental status")
+                .note("Run 'cathedral status <rental-id>' to check rental status")
                 .into());
         }
 
@@ -471,7 +471,7 @@ impl SshClient {
         if status.code() == Some(255) {
             return Err(eyre!("SSH connection failed")
                 .suggestion("Check if the rental is still active and SSH port is exposed")
-                .note("Run 'basilica status <rental-id>' to check rental status")
+                .note("Run 'cathedral status <rental-id>' to check rental status")
                 .into());
         }
 

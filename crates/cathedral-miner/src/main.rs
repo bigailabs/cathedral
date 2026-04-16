@@ -4,7 +4,7 @@
 //! validator requests for GPU rental and computational challenges.
 
 use anyhow::Result;
-use basilica_common::identity::MinerUid;
+use cathedral_common::identity::MinerUid;
 use clap::Parser;
 use std::path::Path;
 use std::sync::Arc;
@@ -262,7 +262,7 @@ async fn main() -> Result<()> {
     // Initialize logging using the unified system
     let binary_name = env!("CARGO_BIN_NAME").replace("-", "_");
     let default_filter = format!("{}=info", binary_name);
-    basilica_common::logging::init_logging(&args.verbosity, &binary_name, &default_filter)?;
+    cathedral_common::logging::init_logging(&args.verbosity, &binary_name, &default_filter)?;
 
     // Load configuration
     let config = load_config(&args.config)?;
@@ -311,7 +311,7 @@ async fn handle_cli_command(command: Commands, config: &MinerConfig) -> Result<(
 
 /// Load configuration from file and environment
 fn load_config(config_path: &Path) -> Result<MinerConfig> {
-    use basilica_common::config::ConfigValidation;
+    use cathedral_common::config::ConfigValidation;
 
     let path = config_path;
     let config = if path.exists() {

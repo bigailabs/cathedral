@@ -213,13 +213,13 @@ pub mod miner_payout_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.payouts.v1.MinerPayoutService/GetMinerUptimes",
+                "/cathedral.payouts.v1.MinerPayoutService/GetMinerUptimes",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.payouts.v1.MinerPayoutService",
+                        "cathedral.payouts.v1.MinerPayoutService",
                         "GetMinerUptimes",
                     ),
                 );
@@ -244,13 +244,13 @@ pub mod miner_payout_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.payouts.v1.MinerPayoutService/OnEpochComplete",
+                "/cathedral.payouts.v1.MinerPayoutService/OnEpochComplete",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.payouts.v1.MinerPayoutService",
+                        "cathedral.payouts.v1.MinerPayoutService",
                         "OnEpochComplete",
                     ),
                 );
@@ -275,13 +275,13 @@ pub mod miner_payout_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.payouts.v1.MinerPayoutService/GetMinerUptime",
+                "/cathedral.payouts.v1.MinerPayoutService/GetMinerUptime",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.payouts.v1.MinerPayoutService",
+                        "cathedral.payouts.v1.MinerPayoutService",
                         "GetMinerUptime",
                     ),
                 );
@@ -398,7 +398,7 @@ pub mod miner_payout_service_server {
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             let inner = self.inner.clone();
             match req.uri().path() {
-                "/basilica.payouts.v1.MinerPayoutService/GetMinerUptimes" => {
+                "/cathedral.payouts.v1.MinerPayoutService/GetMinerUptimes" => {
                     #[allow(non_camel_case_types)]
                     struct GetMinerUptimesSvc<T: MinerPayoutService>(pub Arc<T>);
                     impl<
@@ -448,7 +448,7 @@ pub mod miner_payout_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.payouts.v1.MinerPayoutService/OnEpochComplete" => {
+                "/cathedral.payouts.v1.MinerPayoutService/OnEpochComplete" => {
                     #[allow(non_camel_case_types)]
                     struct OnEpochCompleteSvc<T: MinerPayoutService>(pub Arc<T>);
                     impl<
@@ -498,7 +498,7 @@ pub mod miner_payout_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.payouts.v1.MinerPayoutService/GetMinerUptime" => {
+                "/cathedral.payouts.v1.MinerPayoutService/GetMinerUptime" => {
                     #[allow(non_camel_case_types)]
                     struct GetMinerUptimeSvc<T: MinerPayoutService>(pub Arc<T>);
                     impl<
@@ -584,6 +584,6 @@ pub mod miner_payout_service_server {
     }
     impl<T: MinerPayoutService> tonic::server::NamedService
     for MinerPayoutServiceServer<T> {
-        const NAME: &'static str = "basilica.payouts.v1.MinerPayoutService";
+        const NAME: &'static str = "cathedral.payouts.v1.MinerPayoutService";
     }
 }

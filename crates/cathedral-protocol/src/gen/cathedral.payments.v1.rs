@@ -198,13 +198,13 @@ pub mod payments_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.payments.v1.PaymentsService/CreateDepositAccount",
+                "/cathedral.payments.v1.PaymentsService/CreateDepositAccount",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.payments.v1.PaymentsService",
+                        "cathedral.payments.v1.PaymentsService",
                         "CreateDepositAccount",
                     ),
                 );
@@ -228,13 +228,13 @@ pub mod payments_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.payments.v1.PaymentsService/GetDepositAccount",
+                "/cathedral.payments.v1.PaymentsService/GetDepositAccount",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.payments.v1.PaymentsService",
+                        "cathedral.payments.v1.PaymentsService",
                         "GetDepositAccount",
                     ),
                 );
@@ -258,13 +258,13 @@ pub mod payments_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.payments.v1.PaymentsService/ListDeposits",
+                "/cathedral.payments.v1.PaymentsService/ListDeposits",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.payments.v1.PaymentsService",
+                        "cathedral.payments.v1.PaymentsService",
                         "ListDeposits",
                     ),
                 );
@@ -288,13 +288,13 @@ pub mod payments_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.payments.v1.PaymentsService/GetTokenPrices",
+                "/cathedral.payments.v1.PaymentsService/GetTokenPrices",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.payments.v1.PaymentsService",
+                        "cathedral.payments.v1.PaymentsService",
                         "GetTokenPrices",
                     ),
                 );
@@ -417,7 +417,7 @@ pub mod payments_service_server {
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             let inner = self.inner.clone();
             match req.uri().path() {
-                "/basilica.payments.v1.PaymentsService/CreateDepositAccount" => {
+                "/cathedral.payments.v1.PaymentsService/CreateDepositAccount" => {
                     #[allow(non_camel_case_types)]
                     struct CreateDepositAccountSvc<T: PaymentsService>(pub Arc<T>);
                     impl<
@@ -467,7 +467,7 @@ pub mod payments_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.payments.v1.PaymentsService/GetDepositAccount" => {
+                "/cathedral.payments.v1.PaymentsService/GetDepositAccount" => {
                     #[allow(non_camel_case_types)]
                     struct GetDepositAccountSvc<T: PaymentsService>(pub Arc<T>);
                     impl<
@@ -514,7 +514,7 @@ pub mod payments_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.payments.v1.PaymentsService/ListDeposits" => {
+                "/cathedral.payments.v1.PaymentsService/ListDeposits" => {
                     #[allow(non_camel_case_types)]
                     struct ListDepositsSvc<T: PaymentsService>(pub Arc<T>);
                     impl<
@@ -560,7 +560,7 @@ pub mod payments_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.payments.v1.PaymentsService/GetTokenPrices" => {
+                "/cathedral.payments.v1.PaymentsService/GetTokenPrices" => {
                     #[allow(non_camel_case_types)]
                     struct GetTokenPricesSvc<T: PaymentsService>(pub Arc<T>);
                     impl<
@@ -645,6 +645,6 @@ pub mod payments_service_server {
         }
     }
     impl<T: PaymentsService> tonic::server::NamedService for PaymentsServiceServer<T> {
-        const NAME: &'static str = "basilica.payments.v1.PaymentsService";
+        const NAME: &'static str = "cathedral.payments.v1.PaymentsService";
     }
 }

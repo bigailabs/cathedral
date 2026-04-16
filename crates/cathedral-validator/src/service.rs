@@ -1,5 +1,5 @@
 use crate::api::ApiHandler;
-use crate::basilica_api::{BasilicaApiClient, ValidatorSigner};
+use crate::cathedral_api::{CathedralApiClient, ValidatorSigner};
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
@@ -12,7 +12,7 @@ use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
 
 use anyhow::{Context, Result};
-use basilica_common::MemoryStorage;
+use cathedral_common::MemoryStorage;
 use bittensor::Service as BittensorService;
 use reqwest::Client;
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ struct TaskInputs {
     persistence: Arc<SimplePersistence>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     validator_ssh_public_key: String,
-    api_client: Arc<BasilicaApiClient>,
+    api_client: Arc<CathedralApiClient>,
 }
 
 impl ValidatorService {
@@ -63,7 +63,7 @@ impl ValidatorService {
         let bittensor_service = self.init_bittensor_service().await?;
 
         let signer: Arc<dyn ValidatorSigner> = bittensor_service.clone();
-        let api_client = Arc::new(BasilicaApiClient::new(
+        let api_client = Arc::new(CathedralApiClient::new(
             self.config.api_endpoint.clone(),
             signer,
             self.config.billing.timeout_secs,
@@ -225,7 +225,7 @@ impl ValidatorService {
         storage: MemoryStorage,
         persistence: Arc<SimplePersistence>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
-        api_client: Arc<BasilicaApiClient>,
+        api_client: Arc<CathedralApiClient>,
         validator_metrics: Option<&ValidatorMetrics>,
     ) -> Result<Arc<WeightSetter>> {
         let gpu_scoring_engine = if let Some(metrics) = validator_metrics {
@@ -259,10 +259,10 @@ impl ValidatorService {
     fn build_validator_hotkey(
         &self,
         bittensor_service: &BittensorService,
-    ) -> Result<basilica_common::identity::Hotkey> {
+    ) -> Result<cathedral_common::identity::Hotkey> {
         let account_id = bittensor_service.get_account_id();
         let ss58_address = format!("{account_id}");
-        basilica_common::identity::Hotkey::new(ss58_address)
+        cathedral_common::identity::Hotkey::new(ss58_address)
             .map_err(|e| anyhow::anyhow!("Failed to create hotkey: {}", e))
     }
 
@@ -271,7 +271,7 @@ impl ValidatorService {
         persistence: Arc<SimplePersistence>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         storage: MemoryStorage,
-        validator_hotkey: basilica_common::identity::Hotkey,
+        validator_hotkey: cathedral_common::identity::Hotkey,
     ) -> ApiHandler {
         ApiHandler::new(
             self.config.api.clone(),

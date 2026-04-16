@@ -10,7 +10,7 @@ use clap::Parser;
 mod agent_installer;
 mod api;
 mod ban_system;
-mod basilica_api;
+mod cathedral_api;
 mod billing;
 mod bittensor_core;
 mod cli;
@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     // Initialize logging using the unified system
     let binary_name = env!("CARGO_BIN_NAME").replace("-", "_");
     let default_filter = format!("{}=info", binary_name);
-    basilica_common::logging::init_logging(&args.verbosity, &binary_name, &default_filter)?;
+    cathedral_common::logging::init_logging(&args.verbosity, &binary_name, &default_filter)?;
 
     args.run().await
 }

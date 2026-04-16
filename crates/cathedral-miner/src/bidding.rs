@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use basilica_protocol::miner_discovery::NodeRegistration;
+use cathedral_protocol::miner_discovery::NodeRegistration;
 
 use crate::config::{BiddingConfig, BiddingStrategy};
 use crate::node_manager::{NodeManager, RegisteredNode};

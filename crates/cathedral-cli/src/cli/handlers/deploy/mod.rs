@@ -6,7 +6,7 @@ use crate::config::CliConfig;
 use crate::error::{CliError, DeployError};
 use crate::output::{json_output, print_error, print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::ApiError;
+use cathedral_sdk::ApiError;
 use console::style;
 
 mod create;
@@ -92,7 +92,7 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
                 create::handle_create(&client, &source, cmd).await
             } else {
                 print_error(
-                    "No source specified. Use 'basilica summon <source>' or 'basilica summon ls'",
+                    "No source specified. Use 'cathedral summon <source>' or 'cathedral summon ls'",
                 );
                 Ok(())
             }
@@ -101,7 +101,7 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
 }
 
 /// List all deployments
-async fn handle_list(client: &basilica_sdk::BasilicaClient, json: bool) -> Result<(), CliError> {
+async fn handle_list(client: &cathedral_sdk::CathedralClient, json: bool) -> Result<(), CliError> {
     let spinner = create_spinner("Fetching summons...");
     let result = client.list_deployments().await;
     complete_spinner_and_clear(spinner);
@@ -118,7 +118,7 @@ async fn handle_list(client: &basilica_sdk::BasilicaClient, json: bool) -> Resul
 
 /// Get deployment status with phase tracking
 async fn handle_status(
-    client: &basilica_sdk::BasilicaClient,
+    client: &cathedral_sdk::CathedralClient,
     name: &str,
     json: bool,
     verbose: bool,
@@ -128,7 +128,7 @@ async fn handle_status(
     let result = client.get_deployment(name).await;
     complete_spinner_and_clear(spinner);
     let response = result.map_err(|e| {
-        if matches!(e, basilica_sdk::error::ApiError::NotFound { .. }) {
+        if matches!(e, cathedral_sdk::error::ApiError::NotFound { .. }) {
             CliError::Deploy(DeployError::NotFound {
                 name: name.to_string(),
             })
@@ -152,7 +152,7 @@ async fn handle_status(
 
 /// Show token status for a deployment
 async fn handle_show_token_status(
-    client: &basilica_sdk::BasilicaClient,
+    client: &cathedral_sdk::CathedralClient,
     name: &str,
 ) -> Result<(), CliError> {
     match client.get_share_token_status(name).await {
@@ -191,7 +191,7 @@ async fn handle_show_token_status(
 
 /// Stream deployment logs
 async fn handle_logs(
-    client: &basilica_sdk::BasilicaClient,
+    client: &cathedral_sdk::CathedralClient,
     name: &str,
     follow: bool,
     tail: Option<u32>,
@@ -206,7 +206,7 @@ async fn handle_logs(
 
 /// Delete a deployment
 async fn handle_delete(
-    client: &basilica_sdk::BasilicaClient,
+    client: &cathedral_sdk::CathedralClient,
     name: &str,
     skip_confirm: bool,
 ) -> Result<(), CliError> {
@@ -239,7 +239,7 @@ async fn handle_delete(
 
 /// Scale deployment replicas
 async fn handle_scale(
-    client: &basilica_sdk::BasilicaClient,
+    client: &cathedral_sdk::CathedralClient,
     name: &str,
     replicas: u32,
 ) -> Result<(), CliError> {
@@ -253,7 +253,7 @@ async fn handle_scale(
     if let Err(e) = verify_result {
         complete_spinner_and_clear(spinner);
         return Err(
-            if matches!(e, basilica_sdk::error::ApiError::NotFound { .. }) {
+            if matches!(e, cathedral_sdk::error::ApiError::NotFound { .. }) {
                 CliError::Deploy(DeployError::NotFound {
                     name: name.to_string(),
                 })
@@ -277,7 +277,7 @@ async fn handle_scale(
 }
 
 /// Restart a deployment (rolling restart)
-async fn handle_restart(client: &basilica_sdk::BasilicaClient, name: &str) -> Result<(), CliError> {
+async fn handle_restart(client: &cathedral_sdk::CathedralClient, name: &str) -> Result<(), CliError> {
     let spinner = create_spinner(&format!("Restarting summons '{}'...", name));
 
     // Verify deployment exists before restarting
@@ -285,7 +285,7 @@ async fn handle_restart(client: &basilica_sdk::BasilicaClient, name: &str) -> Re
     if let Err(e) = verify_result {
         complete_spinner_and_clear(spinner);
         return Err(
-            if matches!(e, basilica_sdk::error::ApiError::NotFound { .. }) {
+            if matches!(e, cathedral_sdk::error::ApiError::NotFound { .. }) {
                 CliError::Deploy(DeployError::NotFound {
                     name: name.to_string(),
                 })

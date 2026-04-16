@@ -13,7 +13,7 @@ use crate::{
     api::{types::ApiError, ApiState},
     gpu::{GpuCategorizer, MinerGpuProfile},
 };
-use basilica_common::types::GpuCategory;
+use cathedral_common::types::GpuCategory;
 
 pub async fn list_gpu_profiles(
     State(state): State<ApiState>,

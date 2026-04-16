@@ -7,7 +7,7 @@
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
 use anyhow::Result;
-use basilica_common::ssh::SshConnectionDetails;
+use cathedral_common::ssh::SshConnectionDetails;
 use std::sync::Arc;
 use tracing::{info, warn};
 

@@ -1,8 +1,8 @@
 //! Interactive selection utilities
 
 use crate::error::Result;
-use basilica_common::types::GpuCategory;
-use basilica_sdk::types::ApiRentalListItem;
+use cathedral_common::types::GpuCategory;
+use cathedral_sdk::types::ApiRentalListItem;
 use color_eyre::eyre::eyre;
 use console::Term;
 use dialoguer::{theme::ColorfulTheme, MultiSelect, Select};

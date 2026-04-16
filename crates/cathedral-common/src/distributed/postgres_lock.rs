@@ -108,7 +108,7 @@ impl AdvisoryLock {
     ///
     /// # Example
     /// ```no_run
-    /// use basilica_common::distributed::{AdvisoryLock, LockKey};
+    /// use cathedral_common::distributed::{AdvisoryLock, LockKey};
     ///
     /// async fn become_leader(lock_manager: &AdvisoryLock) -> Result<(), Box<dyn std::error::Error>> {
     ///     let guard = lock_manager.try_acquire(LockKey::PAYMENTS_MONITOR).await?;
@@ -144,7 +144,7 @@ impl AdvisoryLock {
     ///
     /// # Example
     /// ```no_run
-    /// use basilica_common::distributed::{AdvisoryLock, LockKey};
+    /// use cathedral_common::distributed::{AdvisoryLock, LockKey};
     ///
     /// async fn wait_for_leadership(lock_manager: &AdvisoryLock) -> Result<(), Box<dyn std::error::Error>> {
     ///     // Wait up to 30 seconds to become leader
@@ -274,7 +274,7 @@ impl LeaderElection {
     ///
     /// # Example
     /// ```no_run
-    /// use basilica_common::distributed::{LeaderElection, LockKey};
+    /// use cathedral_common::distributed::{LeaderElection, LockKey};
     /// use sqlx::PgPool;
     ///
     /// async fn monitor_blockchain() -> Result<(), Box<dyn std::error::Error>> {

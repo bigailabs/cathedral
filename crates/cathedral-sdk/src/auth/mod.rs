@@ -1,4 +1,4 @@
-//! Authentication module for Basilica SDK
+//! Authentication module for Cathedral SDK
 //!
 //! This module provides OAuth 2.0 authentication capabilities including:
 //! - Secure token storage and management

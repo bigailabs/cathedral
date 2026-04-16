@@ -7,7 +7,7 @@ use super::types::{
     NodeResult, SmUtilizationStats, StoragePowResult, ValidatorBinaryOutput,
 };
 use anyhow::{Context, Result};
-use basilica_common::ssh::SshConnectionDetails;
+use cathedral_common::ssh::SshConnectionDetails;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

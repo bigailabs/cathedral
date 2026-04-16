@@ -283,13 +283,13 @@ pub mod incentive_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.incentive.v1.IncentiveService/GetConfig",
+                "/cathedral.incentive.v1.IncentiveService/GetConfig",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.incentive.v1.IncentiveService",
+                        "cathedral.incentive.v1.IncentiveService",
                         "GetConfig",
                     ),
                 );
@@ -310,12 +310,12 @@ pub mod incentive_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.incentive.v1.IncentiveService/GetCus",
+                "/cathedral.incentive.v1.IncentiveService/GetCus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.incentive.v1.IncentiveService", "GetCus"),
+                    GrpcMethod::new("cathedral.incentive.v1.IncentiveService", "GetCus"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -334,12 +334,12 @@ pub mod incentive_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.incentive.v1.IncentiveService/GetRus",
+                "/cathedral.incentive.v1.IncentiveService/GetRus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("basilica.incentive.v1.IncentiveService", "GetRus"),
+                    GrpcMethod::new("cathedral.incentive.v1.IncentiveService", "GetRus"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -361,13 +361,13 @@ pub mod incentive_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.incentive.v1.IncentiveService/SubmitCus",
+                "/cathedral.incentive.v1.IncentiveService/SubmitCus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.incentive.v1.IncentiveService",
+                        "cathedral.incentive.v1.IncentiveService",
                         "SubmitCus",
                     ),
                 );
@@ -391,13 +391,13 @@ pub mod incentive_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/basilica.incentive.v1.IncentiveService/SlashNode",
+                "/cathedral.incentive.v1.IncentiveService/SlashNode",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
-                        "basilica.incentive.v1.IncentiveService",
+                        "cathedral.incentive.v1.IncentiveService",
                         "SlashNode",
                     ),
                 );
@@ -521,7 +521,7 @@ pub mod incentive_service_server {
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             let inner = self.inner.clone();
             match req.uri().path() {
-                "/basilica.incentive.v1.IncentiveService/GetConfig" => {
+                "/cathedral.incentive.v1.IncentiveService/GetConfig" => {
                     #[allow(non_camel_case_types)]
                     struct GetConfigSvc<T: IncentiveService>(pub Arc<T>);
                     impl<
@@ -567,7 +567,7 @@ pub mod incentive_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.incentive.v1.IncentiveService/GetCus" => {
+                "/cathedral.incentive.v1.IncentiveService/GetCus" => {
                     #[allow(non_camel_case_types)]
                     struct GetCusSvc<T: IncentiveService>(pub Arc<T>);
                     impl<
@@ -613,7 +613,7 @@ pub mod incentive_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.incentive.v1.IncentiveService/GetRus" => {
+                "/cathedral.incentive.v1.IncentiveService/GetRus" => {
                     #[allow(non_camel_case_types)]
                     struct GetRusSvc<T: IncentiveService>(pub Arc<T>);
                     impl<
@@ -659,7 +659,7 @@ pub mod incentive_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.incentive.v1.IncentiveService/SubmitCus" => {
+                "/cathedral.incentive.v1.IncentiveService/SubmitCus" => {
                     #[allow(non_camel_case_types)]
                     struct SubmitCusSvc<T: IncentiveService>(pub Arc<T>);
                     impl<
@@ -705,7 +705,7 @@ pub mod incentive_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/basilica.incentive.v1.IncentiveService/SlashNode" => {
+                "/cathedral.incentive.v1.IncentiveService/SlashNode" => {
                     #[allow(non_camel_case_types)]
                     struct SlashNodeSvc<T: IncentiveService>(pub Arc<T>);
                     impl<
@@ -789,6 +789,6 @@ pub mod incentive_service_server {
         }
     }
     impl<T: IncentiveService> tonic::server::NamedService for IncentiveServiceServer<T> {
-        const NAME: &'static str = "basilica.incentive.v1.IncentiveService";
+        const NAME: &'static str = "cathedral.incentive.v1.IncentiveService";
     }
 }

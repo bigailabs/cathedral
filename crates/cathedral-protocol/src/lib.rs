@@ -1,6 +1,6 @@
 //! # Protocol
 //!
-//! gRPC protocol definitions and message types for Basilca communication.
+//! gRPC protocol definitions and message types for Cathedral communication.
 //! This crate provides typed interfaces for all inter-service communication.
 //!
 //! ## Services
@@ -26,8 +26,8 @@
 //! ### Client Example
 //!
 //! ```rust,ignore
-//! use basilica_protocol::miner_discovery::miner_discovery_client::MinerDiscoveryClient;
-//! use basilica_protocol::miner_discovery::DiscoverNodesRequest;
+//! use cathedral_protocol::miner_discovery::miner_discovery_client::MinerDiscoveryClient;
+//! use cathedral_protocol::miner_discovery::DiscoverNodesRequest;
 //! use tonic::Request;
 //!
 //! let mut client = MinerDiscoveryClient::connect("http://[::1]:50051").await?;
@@ -51,7 +51,7 @@ pub mod basilca {
 
     pub mod rental {
         pub mod v1 {
-            include!("gen/basilica.rental.v1.rs");
+            include!("gen/cathedral.rental.v1.rs");
         }
     }
 
@@ -75,19 +75,19 @@ pub mod basilca {
 
     pub mod billing {
         pub mod v1 {
-            include!("gen/basilica.billing.v1.rs");
+            include!("gen/cathedral.billing.v1.rs");
         }
     }
 
     pub mod payments {
         pub mod v1 {
-            include!("gen/basilica.payments.v1.rs");
+            include!("gen/cathedral.payments.v1.rs");
         }
     }
 
     pub mod incentive {
         pub mod v1 {
-            include!("gen/basilica.incentive.v1.rs");
+            include!("gen/cathedral.incentive.v1.rs");
         }
     }
 }
@@ -150,7 +150,7 @@ pub mod incentive {
 }
 
 // Re-export common types at crate root for convenience
-pub use basilica_common::*;
+pub use cathedral_common::*;
 
 // Utility functions for working with protocol types
 pub mod utils {

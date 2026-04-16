@@ -9,8 +9,8 @@ use axum::{
     response::{sse::Event, IntoResponse, Sse},
     Json,
 };
-use basilica_common::types::GpuCategory;
-use basilica_common::utils::validate_docker_image;
+use cathedral_common::types::GpuCategory;
+use cathedral_common::utils::validate_docker_image;
 use futures::stream::Stream;
 use serde::Deserialize;
 use ssh_key::PublicKey;
@@ -102,8 +102,8 @@ impl Default for PortMappingRequest {
     }
 }
 
-impl From<basilica_common::utils::PortMapping> for PortMappingRequest {
-    fn from(mapping: basilica_common::utils::PortMapping) -> Self {
+impl From<cathedral_common::utils::PortMapping> for PortMappingRequest {
+    fn from(mapping: cathedral_common::utils::PortMapping) -> Self {
         Self {
             container_port: mapping.container_port,
             host_port: mapping.host_port,

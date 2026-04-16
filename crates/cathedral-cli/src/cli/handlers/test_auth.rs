@@ -172,7 +172,7 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
         .await
         .map_err(|e| eyre!(format!("Failed to retrieve tokens: {}", e)))?
         .ok_or_else(|| {
-            eyre!("No authentication tokens found. Please run 'basilica login' first")
+            eyre!("No authentication tokens found. Please run 'cathedral login' first")
         })?;
 
     // Show current token status
@@ -237,7 +237,7 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
     let _client = create_authenticated_client(config).await?;
 
     // Use Auth0 domain from constants
-    let userinfo_url = format!("https://{}/userinfo", basilica_common::auth0_domain());
+    let userinfo_url = format!("https://{}/userinfo", cathedral_common::auth0_domain());
 
     debug!("Calling Auth0 userinfo endpoint: {}", userinfo_url);
 
@@ -250,7 +250,7 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
     let tokens = token_store
         .retrieve_tokens()
         .await?
-        .ok_or_else(|| eyre!("No authentication token found. Please run 'basilica login' first"))?;
+        .ok_or_else(|| eyre!("No authentication token found. Please run 'cathedral login' first"))?;
     let token = tokens.access_token;
 
     let response = http_client
@@ -364,7 +364,7 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
 
         // Create new client with API key
         println!("\nCreating client with API key authentication...");
-        let api_key_client = basilica_sdk::ClientBuilder::default()
+        let api_key_client = cathedral_sdk::ClientBuilder::default()
             .base_url(config.api.base_url.clone())
             .with_api_key(&api_key_token)
             .timeout(std::time::Duration::from_secs(30))
@@ -382,17 +382,17 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
                 println!("❌ API key authentication test failed");
                 // Check if it's specifically an auth error
                 match &e {
-                    basilica_sdk::ApiError::MissingAuthentication { .. } => {
+                    cathedral_sdk::ApiError::MissingAuthentication { .. } => {
                         println!("   The API key was not accepted by the server");
                         println!("   This indicates the key format may be incorrect");
                     }
-                    basilica_sdk::ApiError::Authentication { .. } => {
+                    cathedral_sdk::ApiError::Authentication { .. } => {
                         println!("   The API key was rejected - it may be invalid or expired");
                     }
-                    basilica_sdk::ApiError::Authorization { .. } => {
+                    cathedral_sdk::ApiError::Authorization { .. } => {
                         println!("   The API key lacks required permissions");
                     }
-                    basilica_sdk::ApiError::Internal { .. } => {
+                    cathedral_sdk::ApiError::Internal { .. } => {
                         println!("   Server error occurred while processing the request");
                         println!("   This might be a temporary issue with the API");
                         println!("   Note: The API key itself was created successfully");
@@ -403,7 +403,7 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
                 }
 
                 // For internal server errors, we might want to note that auth might still be working
-                if matches!(e, basilica_sdk::ApiError::Internal { .. }) {
+                if matches!(e, cathedral_sdk::ApiError::Internal { .. }) {
                     println!("\n   ℹ️  The API key was created successfully, but the test endpoint failed.");
                     println!("   This may not indicate an authentication problem.");
                 }
@@ -415,7 +415,7 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
         println!("\n🎉 All authentication tests passed successfully!");
     } else if status.as_u16() == 401 {
         println!("Token is invalid or expired");
-        println!("\nPlease run 'basilica login' to get a new token");
+        println!("\nPlease run 'cathedral login' to get a new token");
         return Err(eyre!("Invalid or expired token").into());
     } else if status.as_u16() == 429 {
         println!("Rate limited (max 5 requests per minute)");
@@ -434,9 +434,9 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Test API authentication by making a request to your Basilica API
+/// Test API authentication by making a request to your Cathedral API
 pub async fn handle_test_api_auth(config: &CliConfig) -> Result<(), CliError> {
-    println!("Testing Basilica API authentication...\n");
+    println!("Testing Cathedral API authentication...\n");
 
     // Create authenticated client
     let client = create_authenticated_client(config).await?;
@@ -444,16 +444,16 @@ pub async fn handle_test_api_auth(config: &CliConfig) -> Result<(), CliError> {
     // Try to call the health endpoint
     match client.health_check().await {
         Ok(health) => {
-            println!("Successfully connected to Basilica API");
+            println!("Successfully connected to Cathedral API");
             println!("  Status: {}", health.status);
             println!("  Version: {}", health.version);
             println!("  Timestamp: {}", health.timestamp);
         }
         Err(e) => {
-            println!("Failed to connect to Basilica API");
+            println!("Failed to connect to Cathedral API");
             println!("  Error: {}", e);
             println!("  Note: Health endpoint requires full authentication");
-            println!("  Run 'basilica login' to authenticate if you haven't already");
+            println!("  Run 'cathedral login' to authenticate if you haven't already");
             return Err(eyre!(format!("API connection failed: {}", e)).into());
         }
     }

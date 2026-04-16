@@ -1,5 +1,5 @@
-use basilica_common::types::GpuCategory;
-use basilica_sdk::types::RentalState;
+use cathedral_common::types::GpuCategory;
+use cathedral_sdk::types::RentalState;
 use clap::{Subcommand, ValueEnum, ValueHint};
 use std::path::PathBuf;
 
@@ -26,12 +26,12 @@ pub enum ComputeCategoryArg {
     CommunityCloud,
 }
 
-impl From<ComputeCategoryArg> for basilica_common::types::ComputeCategory {
+impl From<ComputeCategoryArg> for cathedral_common::types::ComputeCategory {
     fn from(arg: ComputeCategoryArg) -> Self {
         match arg {
-            ComputeCategoryArg::SecureCloud => basilica_common::types::ComputeCategory::SecureCloud,
+            ComputeCategoryArg::SecureCloud => cathedral_common::types::ComputeCategory::SecureCloud,
             ComputeCategoryArg::CommunityCloud => {
-                basilica_common::types::ComputeCategory::CommunityCloud
+                cathedral_common::types::ComputeCategory::CommunityCloud
             }
         }
     }
@@ -145,20 +145,20 @@ pub enum Commands {
         destination: String,
     },
 
-    /// Log in to Basilica
+    /// Log in to Cathedral
     Login {
         /// Use device authorization flow (for WSL, SSH, containers)
         #[arg(long)]
         device_code: bool,
     },
 
-    /// Log out of Basilica
+    /// Log out of Cathedral
     Logout,
 
     /// Test authentication token
     #[cfg(debug_assertions)]
     TestAuth {
-        /// Test against Basilica API instead of Auth0
+        /// Test against Cathedral API instead of Auth0
         #[arg(long)]
         api: bool,
     },
@@ -184,7 +184,7 @@ pub enum Commands {
     /// Check your account balance
     Balance,
 
-    /// Upgrade the Basilica CLI to a newer version
+    /// Upgrade the Cathedral CLI to a newer version
     Upgrade {
         /// Specific version to upgrade to (e.g., "0.5.4")
         #[arg(long)]
@@ -195,7 +195,7 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// Deploy applications to Basilica
+    /// Deploy applications to Cathedral
     #[command(name = "deploy", visible_alias = "summon", alias = "d")]
     Deploy(Box<DeployCommand>),
 

@@ -1,5 +1,5 @@
-use basilica_common::identity::MinerUid;
-use basilica_common::types::GpuCategory;
+use cathedral_common::identity::MinerUid;
+use cathedral_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;

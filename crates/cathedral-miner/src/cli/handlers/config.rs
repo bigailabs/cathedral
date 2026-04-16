@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
 
-use basilica_common::config::ConfigValidation;
+use cathedral_common::config::ConfigValidation;
 
 /// Configuration operation types
 #[derive(Debug, Clone)]
@@ -171,7 +171,7 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
 
 /// Validate database configuration
 fn validate_database_config(
-    config: &basilica_common::config::DatabaseConfig,
+    config: &cathedral_common::config::DatabaseConfig,
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {

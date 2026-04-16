@@ -4,7 +4,7 @@
 //! to manage containers on remote node machines.
 
 use anyhow::{Context, Result};
-use basilica_common::ssh::{
+use cathedral_common::ssh::{
     SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
 };
 use serde_json::Value;
@@ -202,13 +202,13 @@ impl ContainerClient {
 
         // Add container name with sanitized rental ID
         let sanitized_rental_id = self.sanitize_rental_id(rental_id);
-        let container_name = format!("basilica-{sanitized_rental_id}");
+        let container_name = format!("cathedral-{sanitized_rental_id}");
         docker_cmd_parts.push("--name");
         docker_cmd_parts.push(&container_name);
 
         // Add labels
         docker_cmd_parts.push("--label");
-        let rental_label = format!("basilica.rental_id={sanitized_rental_id}");
+        let rental_label = format!("cathedral.rental_id={sanitized_rental_id}");
         docker_cmd_parts.push(&rental_label);
 
         // Collect all label strings first

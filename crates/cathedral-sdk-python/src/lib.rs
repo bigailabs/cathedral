@@ -1,11 +1,11 @@
-//! Python bindings for the Basilica SDK
+//! Python bindings for the Cathedral SDK
 #![allow(clippy::useless_conversion)]
 
 mod types;
 
-use basilica_sdk::{
+use cathedral_sdk::{
     client::{DEFAULT_API_URL, DEFAULT_TIMEOUT_SECS},
-    BasilicaClient as RustClient, ClientBuilder,
+    CathedralClient as RustClient, ClientBuilder,
 };
 use pyo3::exceptions::{
     PyConnectionError, PyKeyError, PyPermissionError, PyRuntimeError, PyValueError,
@@ -29,10 +29,10 @@ use crate::types::{
     StartCpuRentalRequest, StartRentalApiRequest, StopCpuRentalResponse,
 };
 
-/// Python wrapper for BasilicaClient
+/// Python wrapper for CathedralClient
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass]
-struct BasilicaClient {
+struct CathedralClient {
     inner: Arc<RustClient>,
     runtime: Runtime,
 }
@@ -45,17 +45,17 @@ fn to_pyobject<T: serde::Serialize>(py: Python<'_>, value: &T) -> PyResult<Py<py
 }
 
 #[pymethods]
-impl BasilicaClient {
-    /// Create a new BasilicaClient
+impl CathedralClient {
+    /// Create a new CathedralClient
     ///
     /// Args:
-    ///     base_url: The base URL of the Basilica API
-    ///     api_key: Optional authentication token from 'basilica tokens create'
+    ///     base_url: The base URL of the Cathedral API
+    ///     api_key: Optional authentication token from 'cathedral tokens create'
     ///
     /// Authentication priority:
     ///   1. Explicit `api_key` parameter
     ///   2. `BASILICA_API_TOKEN` environment variable
-    ///   3. File-based auth (reads CLI tokens from `basilica login`)
+    ///   3. File-based auth (reads CLI tokens from `cathedral login`)
     #[new]
     #[pyo3(signature = (base_url, api_key=None))]
     fn new(base_url: String, api_key: Option<String>) -> PyResult<Self> {
@@ -135,7 +135,7 @@ impl BasilicaClient {
         let client = Arc::clone(&self.inner);
 
         // Convert Python request to SDK request
-        let request = basilica_sdk::types::StartRentalApiRequest::try_from(request)
+        let request = cathedral_sdk::types::StartRentalApiRequest::try_from(request)
             .map_err(PyValueError::new_err)?;
 
         let response = py
@@ -629,7 +629,7 @@ impl BasilicaClient {
         query: Option<types::GpuPriceQuery>,
     ) -> PyResult<Vec<types::GpuOffering>> {
         let client = Arc::clone(&self.inner);
-        let sdk_query: basilica_sdk::types::GpuPriceQuery =
+        let sdk_query: cathedral_sdk::types::GpuPriceQuery =
             query.map(Into::into).unwrap_or_default();
 
         let response = py
@@ -704,10 +704,10 @@ impl BasilicaClient {
     }
 }
 
-impl BasilicaClient {
+impl CathedralClient {
     /// Map Rust errors to appropriate Python exception types
-    fn map_error_to_python(&self, error: basilica_sdk::ApiError) -> PyErr {
-        use basilica_sdk::ApiError;
+    fn map_error_to_python(&self, error: cathedral_sdk::ApiError) -> PyErr {
+        use cathedral_sdk::ApiError;
 
         match error {
             ApiError::InvalidRequest { message } => PyValueError::new_err(message),
@@ -726,9 +726,9 @@ impl BasilicaClient {
     }
 }
 
-/// Python module for Basilica SDK
+/// Python module for Cathedral SDK
 #[pymodule]
-fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _cathedral(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Add constants
     m.add("DEFAULT_API_URL", DEFAULT_API_URL)?;
     m.add("DEFAULT_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS)?;
@@ -747,7 +747,7 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DEFAULT_SSH_PORT", 22)?;
 
     // Core client
-    m.add_class::<BasilicaClient>()?;
+    m.add_class::<CathedralClient>()?;
 
     // Response types
     m.add_class::<types::HealthCheckResponse>()?;

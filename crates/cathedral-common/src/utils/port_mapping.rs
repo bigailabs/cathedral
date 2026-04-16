@@ -1,7 +1,7 @@
 //! Port mapping utilities for container networking
 //!
 //! This module provides utilities for parsing and validating port mapping configurations
-//! used throughout Basilica for GPU rental and container management.
+//! used throughout Cathedral for GPU rental and container management.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ pub struct PortMapping {
 /// # Examples
 ///
 /// ```
-/// use basilica_common::utils::parse_port_mappings;
+/// use cathedral_common::utils::parse_port_mappings;
 ///
 /// // Simple TCP mapping (default protocol)
 /// let mappings = parse_port_mappings(&["8080:80".to_string()])?;

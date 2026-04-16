@@ -7,7 +7,7 @@
 //!
 //! ## Security Architecture
 //!
-//! The SSH-based validation approach is fundamental to Basilica's security model:
+//! The SSH-based validation approach is fundamental to Cathedral's security model:
 //!
 //! ### Why SSH Instead of gRPC?
 //!
@@ -46,8 +46,8 @@ pub type SshSessionManager = DirectSshSessionManager; // Alias for backward comp
 mod tests;
 
 use anyhow::Result;
-use basilica_common::identity::NodeId;
-use basilica_common::ssh::{
+use cathedral_common::identity::NodeId;
+use cathedral_common::ssh::{
     PackageManager, SshConnectionConfig, SshConnectionDetails, SshConnectionManager,
     SshFileTransferManager, StandardSshClient,
 };

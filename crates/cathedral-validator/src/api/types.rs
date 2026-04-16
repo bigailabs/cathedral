@@ -3,7 +3,7 @@
 //! All request/response types, enums, and shared data structures for the validator API
 
 use crate::rental::RentalState;
-use basilica_common::LocationProfile;
+use cathedral_common::LocationProfile;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -29,7 +29,7 @@ pub fn find_private_key_for_public_key(registered_public_key: &str) -> Result<Pa
     if !ssh_dir.exists() {
         return Err(eyre!("SSH directory not found at {}", ssh_dir.display())
             .note("Your registered SSH key is not available on this machine")
-            .suggestion("Run 'basilica ssh-keys add' to register a key from this machine"));
+            .suggestion("Run 'cathedral ssh-keys add' to register a key from this machine"));
     }
 
     // Parse the registered public key (format: "key-type key-data [optional-comment]")
@@ -74,8 +74,8 @@ pub fn find_private_key_for_public_key(registered_public_key: &str) -> Result<Pa
         0 => Err(eyre!(
             "Could not find private key matching your registered public key in ~/.ssh/"
         )
-        .note("The SSH key you registered with Basilica is not available on this machine")
-        .suggestion("Either copy your SSH key to this machine or register a new key with 'basilica ssh-keys add'")),
+        .note("The SSH key you registered with Cathedral is not available on this machine")
+        .suggestion("Either copy your SSH key to this machine or register a new key with 'cathedral ssh-keys add'")),
 
         1 => {
             let pub_key_path = &matches[0];

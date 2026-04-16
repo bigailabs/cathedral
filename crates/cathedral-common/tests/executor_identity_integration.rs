@@ -5,7 +5,7 @@
 
 #![cfg(feature = "sqlite")]
 
-use basilica_common::node_identity::{
+use cathedral_common::node_identity::{
     validate_identifier, IdentityDisplay, IdentityPersistence, NodeId, NodeIdentity,
     SqliteIdentityStore,
 };
@@ -53,7 +53,7 @@ async fn test_e2e_node_lifecycle() {
     assert_eq!(found_by_uuid.created_at(), node.created_at());
 
     // Step 3: Test display formatting
-    use basilica_common::node_identity::NodeIdentityDisplay;
+    use cathedral_common::node_identity::NodeIdentityDisplay;
     let display = NodeIdentityDisplay::new(&*node);
 
     let compact = display.format_compact();

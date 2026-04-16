@@ -3,7 +3,7 @@
 //! This module provides secure storage for OAuth tokens using file-based storage.
 
 use super::types::{AuthError, AuthResult};
-use basilica_sdk::auth::TokenSet;
+use cathedral_sdk::auth::TokenSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs;
@@ -19,7 +19,7 @@ impl TokenStore {
     /// Create a new token store with the provided data directory
     ///
     /// The token file name is determined by the current Auth0 domain:
-    /// - Development (matches basilica_common::AUTH0_DOMAIN): auth.dev.json
+    /// - Development (matches cathedral_common::AUTH0_DOMAIN): auth.dev.json
     /// - Production (different domain via env var): auth.json
     pub async fn new(data_dir: PathBuf) -> AuthResult<Self> {
         fs::create_dir_all(&data_dir).await.map_err(|e| {
@@ -27,7 +27,7 @@ impl TokenStore {
         })?;
 
         // Detect environment based on Auth0 domain
-        let auth_file_name = if basilica_common::is_development_environment() {
+        let auth_file_name = if cathedral_common::is_development_environment() {
             "auth.dev.json"
         } else {
             "auth.json"

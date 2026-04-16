@@ -5,7 +5,7 @@
 //!
 //! # Example
 //! ```
-//! use basilica_common::node_identity::{NodeId, NodeIdentity};
+//! use cathedral_common::node_identity::{NodeId, NodeIdentity};
 //!
 //! let id = NodeId::new("my-seed").unwrap();
 //! println!("UUID: {}", id.uuid());

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::config::ValidatorConfig;
 use anyhow::Result;
-use basilica_common::config::ConfigValidation;
+use cathedral_common::config::ConfigValidation;
 
 pub mod rental;
 pub mod service;

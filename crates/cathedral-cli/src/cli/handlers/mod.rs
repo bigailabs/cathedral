@@ -1,4 +1,4 @@
-//! Command handlers for the Basilica CLI
+//! Command handlers for the Cathedral CLI
 
 pub mod auth;
 pub mod balance;

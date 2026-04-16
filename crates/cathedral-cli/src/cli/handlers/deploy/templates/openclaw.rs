@@ -7,11 +7,11 @@ use crate::cli::commands::{OpenclawOptions, OpenclawProvider, TemplateCommonOpti
 use crate::error::{CliError, DeployError};
 use crate::output::print_success;
 use crate::progress::{complete_spinner_and_clear, create_spinner};
-use basilica_sdk::types::{
+use cathedral_sdk::types::{
     CreateDeploymentRequest, HealthCheckConfig, PersistentStorageSpec, ProbeConfig,
     ResourceRequirements, StorageBackend, StorageSpec, WebSocketConfig,
 };
-use basilica_sdk::BasilicaClient;
+use cathedral_sdk::CathedralClient;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ const OPENCLAW_PORT: u32 = 18789;
 
 /// Handle OpenClaw deployment
 pub async fn handle_openclaw_deploy(
-    client: &BasilicaClient,
+    client: &CathedralClient,
     common: TemplateCommonOptions,
     openclaw: OpenclawOptions,
 ) -> Result<(), CliError> {
@@ -131,7 +131,7 @@ pub async fn handle_openclaw_deploy(
         image: OPENCLAW_IMAGE.to_string(),
         replicas: 1,
         port: OPENCLAW_PORT,
-        command: Some(vec!["/usr/local/bin/basilica-entrypoint.sh".to_string()]),
+        command: Some(vec!["/usr/local/bin/cathedral-entrypoint.sh".to_string()]),
         args: None,
         env: Some(env),
         resources: Some(resources),
@@ -187,7 +187,7 @@ pub async fn handle_openclaw_deploy(
             "OpenClaw summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica summon status {}", actual_name);
+        println!("  Check status: cathedral summon status {}", actual_name);
     }
 
     Ok(())
@@ -314,7 +314,7 @@ fn build_openclaw_storage() -> StorageSpec {
             bucket: String::new(),
             region: Some("auto".to_string()),
             endpoint: None,
-            credentials_secret: Some("basilica-r2-credentials".to_string()),
+            credentials_secret: Some("cathedral-r2-credentials".to_string()),
             sync_interval_ms: 1000,
             cache_size_mb: 2048,
             mount_path: "/data".to_string(),
@@ -361,7 +361,7 @@ fn build_openclaw_health_check() -> HealthCheckConfig {
 }
 
 fn print_openclaw_success(
-    deployment: &basilica_sdk::types::DeploymentResponse,
+    deployment: &cathedral_sdk::types::DeploymentResponse,
     name: &str,
     token: &str,
 ) {
@@ -394,7 +394,7 @@ async fn wait_for_public_url_ready(url: &str, timeout_secs: u64) -> Result<(), C
     }))
 }
 
-async fn wait_for_gateway_token(client: &BasilicaClient, name: &str) -> Result<String, CliError> {
+async fn wait_for_gateway_token(client: &CathedralClient, name: &str) -> Result<String, CliError> {
     let deadline = Instant::now() + Duration::from_secs(120);
     let re = Regex::new(r"(?:CLAWDBOT|OPENCLAW)_GATEWAY_TOKEN=([a-fA-F0-9]{64})")
         .map_err(|e| CliError::Internal(color_eyre::eyre::eyre!(e)))?;

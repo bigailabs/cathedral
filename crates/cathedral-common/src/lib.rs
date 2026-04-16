@@ -1,11 +1,11 @@
-//! # Common Basilica
+//! # Common Cathedral
 //!
-//! Core shared types, error definitions, and cryptographic utilities for the Basilica .
-//! This crate provides the fundamental building blocks that all other Basilica crates depend on.
+//! Core shared types, error definitions, and cryptographic utilities for the Cathedral .
+//! This crate provides the fundamental building blocks that all other Cathedral crates depend on.
 //!
 //! ## Key Features
 //! - Identity types (Hotkey, NodeId, ValidatorUid, MinerUid)
-//! - Comprehensive error handling with BasilicaError trait
+//! - Comprehensive error handling with CathedralError trait
 //! - Cryptographic utilities for hashing and signature verification
 //! - Shared persistence abstractions and repository patterns
 //! - Common service lifecycle management

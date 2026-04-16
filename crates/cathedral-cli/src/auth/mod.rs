@@ -1,4 +1,4 @@
-//! Authentication module for Basilica CLI
+//! Authentication module for Cathedral CLI
 //!
 //! This module provides OAuth 2.0 authentication capabilities including:
 //! - PKCE (Proof Key for Code Exchange) flow
@@ -13,7 +13,7 @@ pub mod token_store;
 pub mod types;
 
 // Re-export commonly used types and functions
-pub use basilica_sdk::auth::TokenSet;
+pub use cathedral_sdk::auth::TokenSet;
 pub use callback_server::CallbackServer;
 pub use device_flow::DeviceFlow;
 pub use oauth_flow::OAuthFlow;

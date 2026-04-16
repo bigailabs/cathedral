@@ -1,4 +1,4 @@
-//! Auth0 configuration constants for Basilica authentication
+//! Auth0 configuration constants for Cathedral authentication
 //!
 //! These constants can be overridden at compile-time via environment variables
 //! or at runtime via environment variables. The priority order is:
@@ -65,7 +65,7 @@ const DEV_AUTH0_DOMAIN: &str = "dev-ndynjuhl74mrh162.us.auth0.com";
 /// # Examples
 ///
 /// ```
-/// use basilica_common::is_development_environment;
+/// use cathedral_common::is_development_environment;
 ///
 /// if is_development_environment() {
 ///     println!("Running in development mode");

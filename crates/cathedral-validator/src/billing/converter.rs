@@ -1,5 +1,5 @@
 use anyhow::Result;
-use basilica_protocol::billing::{
+use cathedral_protocol::billing::{
     GpuUsage as ProtoGpuUsage, ResourceUsage as ProtoResourceUsage, TelemetryData,
 };
 use chrono::Utc;
