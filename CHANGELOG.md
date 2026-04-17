@@ -32,7 +32,7 @@
 
 - Binary GPU attestation is off; verification runs over SSH via `nvidia-smi`. Spoofable, honor-system for now — will swap in the prover binary when ready.
 - Only A100 and H100 priced today.
-- No rental marketplace yet — that's act 2.
+- Act 2 is about making mining economically coherent; we're still working out the model in public.
 
 ## 2026-04-16
 
