@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-04-18
+
+### Validator migrated off rented infra
+
+- **The rented validator host (Verda VM) was terminated by the provider.** The wallet was recovered from a local backup, and the validator was re-hosted on a self-owned home box running WSL Ubuntu 22.04.
+- **New public endpoint:** `tcp://polarisserver.tail02a2a.ts.net:443` (Tailscale Funnel TCP forwarder → validator gRPC on `127.0.0.1:50052`).
+- **Same validator identity:** hotkey `5DnvAg…ThWPb`, SN39 UID 123, 131.82α stake — nothing changed on-chain; the key moved, the IP moved, the box is different.
+- **UID 115 (cathedral-miner) orphaned.** The miner was previously registered against a GPU node on the terminated Verda VM. The on-chain registration is stale but preserved; we'll re-register once we have a new GPU node to point it at.
+
+### Operational lessons baked in
+
+- Validator and miner processes now launch with `stdbuf -oL` on both sides of the `tee` pipe — fixes the silent-log buffering bug we hit previously where a quiet miner looked "dead" because glibc block-buffered the pipe.
+- Deployment is reproducible from the repo: `~/cathedral-bin/start-all.sh` spins both processes inside named tmux sessions. systemd units are staged in `~/cathedral-config/systemd/` for when we want reboot-safety.
+
+### Site
+
+- Dashboard shows a migration banner explaining the host move.
+- `/mine` quickstart updated to point at the new gRPC endpoint (`polarisserver.tail02a2a.ts.net:443`, TLS over TCP via Funnel).
+- `/ledger` now reflects that UID 115 is orphaned pending re-registration.
+
+### Known rough edges
+
+- Log streaming from the new validator to `cathedral.computer` is not yet reconnected. The Railway backend talks SSH to the old IP; we need a Tailscale sidecar on Railway, or a reverse HTTP tailer on the home box, to restore live logs on the site. Validator is running and logging locally — the site just can't see it yet.
+- Funnel wraps outbound traffic in TLS. Miners connecting in must speak TLS on port 443. Bittensor gRPC typically does; this is being tested with external miners.
+- Home-box GPU is consumer-grade (RTX 5060); our validator only prices A100/H100, so we do not yet have a billable local GPU node.
+
 ## 2026-04-17
 
 ### Site
