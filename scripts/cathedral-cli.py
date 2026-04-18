@@ -35,6 +35,9 @@ def _req(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    # Cloudflare bot-challenges the default Python-urllib UA and returns 403
+    # before the request reaches our Railway backend. Any real UA avoids that.
+    req.add_header("User-Agent", "cathedral-cli/0.1")
     if API_KEY:
         req.add_header("X-Polaris-API-Key", API_KEY)
     try:
