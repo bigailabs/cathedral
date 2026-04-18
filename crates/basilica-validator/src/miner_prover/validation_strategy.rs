@@ -1135,13 +1135,37 @@ impl ValidationNode {
                 }
             }
         } else if !binary_validation_enabled && quality_validations_successful {
-            // Binary validation is disabled — discover GPUs via SSH nvidia-smi
-            // so that gpu_uuid_assignments get populated and the node isn't
-            // marked offline for having gpu_count=0.
+            // Binary validation is disabled — verify the node via SSH. Two
+            // branches:
+            //   - GPU nodes: run nvidia-smi, fabricate GpuInfo rows
+            //   - CPU-only nodes (gpu_category starts with "CPU_"): run
+            //     lscpu + free, record cores/RAM, fabricate a synthetic
+            //     GpuInfo so downstream persistence stays happy
+            // Both branches populate gpu_uuid_assignments-equivalent state
+            // so the node isn't stuck at gpu_count=0.
             binary_validation_successful = true;
             binary_score = 1.0;
 
-            match self.discover_gpus_via_ssh(ssh_details, miner_uid, &node_id).await {
+            let miner_id_str = format!("miner_{}", miner_uid);
+            let declared_category = self
+                .persistence
+                .get_node_bid_metadata(&miner_id_str, &node_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| m.gpu_category)
+                .unwrap_or_default();
+            let is_cpu_only = declared_category
+                .to_uppercase()
+                .starts_with("CPU_");
+
+            let discovery_result = if is_cpu_only {
+                self.discover_cpu_via_ssh(ssh_details, miner_uid, &node_id, &declared_category).await
+            } else {
+                self.discover_gpus_via_ssh(ssh_details, miner_uid, &node_id).await
+            };
+
+            match discovery_result {
                 Ok(gpu_infos) => {
                     gpu_count = gpu_infos.len() as u64;
                     if !gpu_infos.is_empty() {
@@ -1169,7 +1193,8 @@ impl ValidationNode {
                             miner_uid = miner_uid,
                             node_id = %node_id,
                             gpu_count = gpu_count,
-                            "[EVAL_FLOW] Discovered GPUs via SSH (binary validation disabled)"
+                            is_cpu_only = is_cpu_only,
+                            "[EVAL_FLOW] SSH discovery completed (binary validation disabled)"
                         );
                     }
                 }
@@ -1380,6 +1405,91 @@ impl ValidationNode {
         );
 
         Ok(gpu_infos)
+    }
+
+    /// Verify a CPU-only node via SSH. Cathedral's Africa-comp track and
+    /// similar CPU-first programmes don't have nvidia-smi — probe lscpu +
+    /// /proc/cpuinfo + free -m instead and fabricate a synthetic GpuInfo so
+    /// downstream persistence stays unchanged. `gpu_memory_gb` is repurposed
+    /// to carry RAM GB; `gpu_name` encodes the CPU model so rental listings
+    /// can display "AMD EPYC 7543 (32 vCPU, 128 GB)" etc.
+    async fn discover_cpu_via_ssh(
+        &self,
+        ssh_details: &SshConnectionDetails,
+        miner_uid: u16,
+        node_id: &str,
+        declared_category: &str,
+    ) -> Result<Vec<GpuInfo>> {
+        // Compact one-shot probe: CPU model, vCPU count, total RAM in MB.
+        // Pipe-separated so we only need one SSH round-trip.
+        let cmd = r#"printf '%s|%s|%s\n' \
+          "$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo)" \
+          "$(nproc)" \
+          "$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)""#;
+
+        let output = self
+            .ssh_client
+            .execute_command(ssh_details, cmd, true)
+            .await?;
+
+        let line = output.lines().next().unwrap_or("").trim().to_string();
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 3 {
+            return Err(anyhow::anyhow!(
+                "CPU probe returned malformed output: {:?}",
+                line
+            ));
+        }
+        let cpu_model = parts[0].trim().to_string();
+        let vcpu_count = parts[1].trim().parse::<u32>().unwrap_or(0);
+        let ram_mb = parts[2].trim().parse::<f64>().unwrap_or(0.0);
+        let ram_gb = ram_mb / 1024.0;
+
+        if vcpu_count == 0 || ram_gb < 1.0 {
+            return Err(anyhow::anyhow!(
+                "CPU probe returned implausible values: vcpu={}, ram_gb={}",
+                vcpu_count,
+                ram_gb
+            ));
+        }
+
+        // Synthetic UUID keeps the persistence layer happy. Deterministic per
+        // node so re-verification doesn't churn gpu_uuid_assignments rows.
+        let synth_uuid = format!("CPU-{}", node_id);
+        let gpu_name = format!(
+            "{} ({} vCPU, {:.0} GB · {})",
+            cpu_model, vcpu_count, ram_gb, declared_category
+        );
+
+        info!(
+            miner_uid = miner_uid,
+            node_id = %node_id,
+            cpu_model = %cpu_model,
+            vcpu = vcpu_count,
+            ram_gb = ram_gb,
+            declared_category = %declared_category,
+            "[EVAL_FLOW] SSH CPU discovery completed"
+        );
+
+        // Fabricate a single GpuInfo record representing the CPU node.
+        // gpu_memory_gb carries RAM so listings can rank by memory.
+        Ok(vec![GpuInfo {
+            index: 0,
+            gpu_name,
+            gpu_uuid: synth_uuid,
+            gpu_memory_gb: ram_gb,
+            computation_time_ns: 0,
+            memory_bandwidth_gbps: 0.0,
+            sm_utilization: SmUtilizationStats {
+                min_utilization: 0.0,
+                max_utilization: 0.0,
+                avg_utilization: 0.0,
+                per_sm_stats: vec![],
+            },
+            active_sms: 0,
+            total_sms: 0,
+            anti_debug_passed: true,
+        }])
     }
 
     /// Calculate combined verification score from SSH and binary validation
