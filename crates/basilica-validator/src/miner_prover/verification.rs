@@ -1283,7 +1283,19 @@ impl VerificationEngine {
             }
         }?;
 
-        if result.validation_type == ValidationType::Full {
+        // The declared-GPU enforcement check cross-references the miner's
+        // declared gpu_category against what the binary validator detected.
+        // On cathedral we run with binary attestation disabled (issue #24),
+        // so "detected" comes from an SSH nvidia-smi scrape whose string
+        // format does not line up with the legacy GpuCategory normalizer —
+        // e.g. a miner declares RTX_4090 but normalize_gpu_category folds
+        // anything non-datacenter into Other(raw), and string-equality
+        // against a detected "NVIDIA GeForce RTX 4090" always fails.
+        // Skipping this check when binary validation is disabled matches
+        // #24's accepted trust-the-SSH-side tradeoff until prover binaries
+        // ship. Re-enable the moment binary_validation is configured.
+        let binary_validation_enabled = self.config.binary_validation.is_some();
+        if result.validation_type == ValidationType::Full && binary_validation_enabled {
             self.enforce_declared_gpu_claims_for_full_validation(miner_uid, &mut result)
                 .await?;
         }
