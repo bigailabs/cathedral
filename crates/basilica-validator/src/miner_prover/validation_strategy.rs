@@ -933,13 +933,25 @@ impl ValidationNode {
                 .as_ref()
                 .map(|m| !m.is_banned)
                 .unwrap_or(true);
-            quality_validations_successful =
-                docker_result.is_some() && nat_successful && not_banned;
+
+            // Cathedral pivoted to home-ownable compute (issue #24). Home miners
+            // are behind NAT and cannot serve inbound HTTP from a random port,
+            // so the upstream Basilica NAT check is a blanket disqualifier for
+            // our target audience. When binary attestation is disabled (our
+            // fork's default until prover binaries ship), we trust SSH reach
+            // + docker GPU runtime as sufficient proof of a live node. NAT
+            // is still run for diagnostics but no longer blocks admission.
+            let nat_required = binary_config.is_some();
+            quality_validations_successful = if nat_required {
+                docker_result.is_some() && nat_successful && not_banned
+            } else {
+                docker_result.is_some() && not_banned
+            };
 
             if docker_result.is_none() {
                 failure_reasons.push("docker_validation_failed".to_string());
             }
-            if nat_result.is_none() || !nat_successful {
+            if nat_required && (nat_result.is_none() || !nat_successful) {
                 failure_reasons.push("nat_validation_failed".to_string());
             }
             if storage_result.is_none() {
