@@ -6,8 +6,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
@@ -603,8 +604,19 @@ impl StandardSshClient {
 
         debug!("Executing SSH command: {:?}", cmd);
 
-        let output = cmd
-            .output()
+        // Wrap in tokio::time::timeout so a hanging ssh child (network black-hole,
+        // unreachable node, stuck handshake) can't block this await indefinitely
+        // and starve the verification scheduler. Upstream Basilica hit this class
+        // of bug four times (PRs #58, #112, #116, #122); we are re-closing the gap
+        // after a refactor landed a blocking std::process::Command here.
+        let output = timeout(self.config.execution_timeout, cmd.output())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "SSH command timed out after {:?}",
+                    self.config.execution_timeout
+                )
+            })?
             .map_err(|e| anyhow::anyhow!("Failed to execute SSH command: {}", e))?;
 
         if output.status.success() {
@@ -785,7 +797,7 @@ impl SshFileTransferManager for StandardSshClient {
         debug!("Executing SCP command: {:?}", cmd);
 
         let result = timeout(self.config.execution_timeout, async {
-            let output = cmd.output()?;
+            let output = cmd.output().await?;
             if output.status.success() {
                 Ok(())
             } else {
@@ -861,7 +873,7 @@ impl SshFileTransferManager for StandardSshClient {
         debug!("Executing SCP download command: {:?}", cmd);
 
         let result = timeout(self.config.execution_timeout, async {
-            let output = cmd.output()?;
+            let output = cmd.output().await?;
             if output.status.success() {
                 Ok(())
             } else {
