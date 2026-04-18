@@ -414,8 +414,15 @@ impl ValidationNode {
         gpu_count: u64,
         _binary_validation_successful: bool,
         _validator_hotkey: &Hotkey,
-        _config: &crate::config::VerificationConfig,
+        config: &crate::config::VerificationConfig,
     ) -> Result<NodeVerificationResult> {
+        // Home-ownable mode: when binary attestation is disabled we drop
+        // the NAT requirement (home routers don't forward inbound ports)
+        // and the strict GPU-UUID comparison (upstream's dash normalizer
+        // currently drifts between Full's stored form and Lightweight's
+        // rescrape, flagging good nodes as mismatched). SSH reach +
+        // not-banned is the floor.
+        let strict_quality_required = config.binary_validation.is_some();
         info!(
             miner_uid = miner_uid,
             node_id = %node_info.id,
@@ -606,7 +613,13 @@ impl ValidationNode {
             }
         };
 
-        let nat_validation_successful = if !connectivity_successful
+        // In home-ownable mode we skip NAT entirely (it blocks home boxes)
+        // and still run the short-circuits below to keep the structure
+        // obvious. strict_quality_required is `true` iff binary attestation
+        // is configured.
+        let nat_validation_successful = if !strict_quality_required {
+            true
+        } else if !connectivity_successful
             || !misbehaviour_check_passed
             || !nonce_challenge_ok
             || !gpu_uuid_matches
@@ -661,11 +674,20 @@ impl ValidationNode {
             }
         };
 
-        let validation_successful = connectivity_successful
-            && misbehaviour_check_passed
-            && nonce_challenge_ok
-            && gpu_uuid_matches
-            && nat_validation_successful;
+        let validation_successful = if strict_quality_required {
+            connectivity_successful
+                && misbehaviour_check_passed
+                && nonce_challenge_ok
+                && gpu_uuid_matches
+                && nat_validation_successful
+        } else {
+            // Home-ownable: require the miner's box is reachable and the
+            // nonce round-trip worked (proves live shell, not a replay);
+            // skip NAT and UUID match for reasons above.
+            connectivity_successful
+                && misbehaviour_check_passed
+                && nonce_challenge_ok
+        };
         if !validation_successful {
             error!(
                 miner_uid = miner_uid,
@@ -934,24 +956,24 @@ impl ValidationNode {
                 .map(|m| !m.is_banned)
                 .unwrap_or(true);
 
-            // Cathedral pivoted to home-ownable compute (issue #24). Home miners
-            // are behind NAT and cannot serve inbound HTTP from a random port,
-            // so the upstream Basilica NAT check is a blanket disqualifier for
-            // our target audience. When binary attestation is disabled (our
-            // fork's default until prover binaries ship), we trust SSH reach
-            // + docker GPU runtime as sufficient proof of a live node. NAT
-            // is still run for diagnostics but no longer blocks admission.
-            let nat_required = binary_config.is_some();
-            quality_validations_successful = if nat_required {
+            // Cathedral pivoted to home-ownable compute (issue #24). Three
+            // upstream Basilica quality checks lock out home miners: NAT (no
+            // inbound port), Docker (not every home box has it), and strict
+            // attestation. When binary attestation is disabled (our default
+            // until prover binaries ship), we only require that the miner's
+            // box is SSH-reachable and not banned. Docker + NAT probes still
+            // run for diagnostics but don't block admission.
+            let strict_quality_required = binary_config.is_some();
+            quality_validations_successful = if strict_quality_required {
                 docker_result.is_some() && nat_successful && not_banned
             } else {
-                docker_result.is_some() && not_banned
+                not_banned
             };
 
-            if docker_result.is_none() {
+            if strict_quality_required && docker_result.is_none() {
                 failure_reasons.push("docker_validation_failed".to_string());
             }
-            if nat_required && (nat_result.is_none() || !nat_successful) {
+            if strict_quality_required && (nat_result.is_none() || !nat_successful) {
                 failure_reasons.push("nat_validation_failed".to_string());
             }
             if storage_result.is_none() {
