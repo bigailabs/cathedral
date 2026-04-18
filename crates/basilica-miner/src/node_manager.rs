@@ -69,14 +69,21 @@ impl<'de> Deserialize<'de> for NodeConfig {
     {
         let raw = NodeConfigRaw::deserialize(deserializer)?;
 
-        // Validate gpu_category is a known GPU type
-        let gpu_cat: GpuCategory = raw.gpu_category.parse().unwrap(); // Infallible
-        if matches!(&gpu_cat, GpuCategory::Other(_)) {
-            return Err(serde::de::Error::custom(format!(
-                "GPU type '{}' is not supported",
-                raw.gpu_category
-            )));
+        // Cathedral pivoted to home-ownable compute (cathedral#24). The legacy
+        // GpuCategory enum only recognises data-center SKUs (A100/H100/H200/
+        // B200/B300); rejecting everything else locks out every consumer card,
+        // workstation card, Apple Silicon box, and DGX Spark that the subnet
+        // is now built for. Pricing lives on the validator side keyed by the
+        // raw string; the only requirement here is that the category isn't
+        // empty. Keep GpuCategory parsing so known data-center strings still
+        // normalise the same way (e.g. "nvidia a100" → "A100").
+        let raw_category = raw.gpu_category.trim();
+        if raw_category.is_empty() {
+            return Err(serde::de::Error::custom(
+                "gpu_category must not be empty",
+            ));
         }
+        let gpu_cat: GpuCategory = raw_category.parse().unwrap(); // Infallible
 
         Ok(NodeConfig {
             host: raw.host,
