@@ -397,9 +397,31 @@ async fn spawn_verification_task(
             "[EVAL_FLOW] Starting verification workflow",
         );
 
-        let result = verification_engine
-            .execute_verification_workflow(&task)
-            .await;
+        // Workflow-wide timeout independent of per-step SSH timeouts: a cascade of
+        // slow/hung steps can still accumulate beyond any reasonable verification
+        // window. Cap at 10 minutes so one unreachable miner cannot hold a task
+        // handle open forever and starve cleanup.
+        let workflow_timeout = std::time::Duration::from_secs(600);
+        let result = match tokio::time::timeout(
+            workflow_timeout,
+            verification_engine.execute_verification_workflow(&task),
+        )
+        .await
+        {
+            Ok(inner) => inner,
+            Err(_) => {
+                error!(
+                    miner_uid = task.miner_uid,
+                    task_id = %task_id,
+                    "[EVAL_FLOW] Verification workflow exceeded {:?} — aborting task {}",
+                    workflow_timeout, task_id
+                );
+                Err(anyhow::anyhow!(
+                    "verification workflow timed out after {:?}",
+                    workflow_timeout
+                ))
+            }
+        };
 
         match result {
             Ok(verification_result) => {
