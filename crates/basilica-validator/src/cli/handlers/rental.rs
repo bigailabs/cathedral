@@ -119,11 +119,11 @@ async fn handle_start_rental(
     memory_mb: Option<i64>,
     storage_mb: Option<i64>,
 ) -> Result<()> {
-    // Validate gpu_category is a known GPU type
-    let gpu_cat: GpuCategory = gpu_category.parse().unwrap(); // Infallible
-    if matches!(&gpu_cat, GpuCategory::Other(_)) {
-        anyhow::bail!("GPU type '{}' is not supported", gpu_category);
+    // Cathedral prices by raw category string (#24); accept any non-empty.
+    if gpu_category.trim().is_empty() {
+        anyhow::bail!("gpu_category is required");
     }
+    let gpu_cat: GpuCategory = gpu_category.parse().unwrap(); // Infallible
 
     info!(
         "Starting rental for {} x {} GPU(s)",

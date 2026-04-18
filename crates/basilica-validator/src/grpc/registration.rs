@@ -205,14 +205,12 @@ impl MinerRegistration for RegistrationService {
             if node.gpu_category.trim().is_empty() {
                 return Err(Status::invalid_argument("gpu_category is required"));
             }
-            // Validate gpu_category is a known GPU type
+            // Normalize the category (e.g. "nvidia a100" → "A100") but accept
+            // any non-empty string. Cathedral prices by raw category string
+            // (issue #24), so rejecting Other(raw) locks out every consumer
+            // GPU, workstation card, Apple Silicon box, and DGX Spark — the
+            // exact audience we pivoted to serve.
             let gpu_cat: GpuCategory = node.gpu_category.parse().unwrap(); // Infallible
-            if matches!(&gpu_cat, GpuCategory::Other(_)) {
-                return Err(Status::invalid_argument(format!(
-                    "GPU type '{}' is not supported",
-                    node.gpu_category
-                )));
-            }
             if node.gpu_count == 0 {
                 return Err(Status::invalid_argument("gpu_count must be greater than 0"));
             }

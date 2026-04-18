@@ -208,15 +208,14 @@ pub async fn start_rental(
     State(state): State<ApiState>,
     Json(request): Json<StartRentalRequest>,
 ) -> Result<Json<RentalResponse>, StatusCode> {
-    // Parse and validate gpu_category using GpuCategory enum
-    let gpu_category: GpuCategory = request.gpu_category.parse().unwrap(); // Infallible
-    if matches!(&gpu_category, GpuCategory::Other(_)) {
-        error!(
-            gpu_category = %request.gpu_category,
-            "[RENTAL_FLOW] GPU type '{}' is not supported", request.gpu_category
-        );
+    // Parse gpu_category; accept any non-empty value. Cathedral prices by
+    // raw category string (#24) so consumer GPUs and Apple Silicon are
+    // legitimate — don't reject them here.
+    if request.gpu_category.trim().is_empty() {
+        error!("[RENTAL_FLOW] gpu_category is empty");
         return Err(StatusCode::BAD_REQUEST);
     }
+    let gpu_category: GpuCategory = request.gpu_category.parse().unwrap(); // Infallible
 
     info!(
         gpu_category = %gpu_category,
