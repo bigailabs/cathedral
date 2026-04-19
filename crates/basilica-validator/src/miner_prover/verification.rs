@@ -557,14 +557,19 @@ impl VerificationEngine {
             (true, ValidationType::Full) => "online".to_string(),
             (true, ValidationType::Lightweight) => {
                 if is_rented {
+                    // Active rentals keep "online" — flipping to "verified"
+                    // mid-rental confuses downstream consumers that assume
+                    // "verified" implies idle-ready.
                     "online".to_string()
                 } else {
-                    self.persistence
-                        .get_node_status(&verification_log.node_id, &miner_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| "verified".to_string())
+                    // Non-rented Lightweight success graduates the node.
+                    // Full sets "online" (confirms presence + attestation).
+                    // Lightweight re-confirms without the full probe — the
+                    // correct next state is "verified". Previously this
+                    // path looked up the current status and fell back only
+                    // on None, which meant existing online rows stayed
+                    // online forever (verified count stuck at 0).
+                    "verified".to_string()
                 }
             }
         };
