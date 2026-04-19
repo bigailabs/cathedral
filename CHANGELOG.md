@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-04-19
+
+### First verified miners, home-ownable pivot landed
+
+- **UID 115** (our miner, RTX 5090 on a Lium container) and **UID 155** (McDee, RTX 3090 + 2× RTX 3060 at home) both reached `status=verified` — the first real end-to-end verifications on the subnet.
+- The pivot promised in issue #24 is now operational: consumer GPUs, workstations, Apple Silicon, DGX Spark, and CPUs all admit. Data-center SKUs (A100/H100/MI300/etc.) remain rejected.
+- 23 GPU tiers + 3 CPU tiers live in the incentive API (`/v1/incentive/config`).
+
+### CPU mining verified end-to-end on testnet
+
+- **Cathedral testnet SN292** now running alongside mainnet. Our validator at UID 32, test CPU miner at UID 33 (AMD EPYC 7B12, 4 vCPU, 16 GB) reached `status=verified` with score 1.00.
+- New validation path: when a miner declares a `CPU_*` category, the validator probes `lscpu` + `free -m` + `nproc` over SSH instead of `nvidia-smi`. Synthetic GPU UUID keeps downstream persistence unchanged.
+- Pricing tiers: `CPU_BASIC` ($0.02 / vCPU-hr), `CPU_STANDARD` ($0.04), `CPU_PERFORMANCE` ($0.08). Opt-in; remove from the pricing table to disable.
+
+### Validator hardened for home miners
+
+- Dropped the NAT inbound-port requirement when binary attestation is disabled. Home routers don't forward random ports; requiring it was a blanket disqualifier.
+- Dropped the Docker requirement on the same condition. Many home boxes don't run Docker.
+- Dropped strict GPU-UUID matching on Lightweight re-checks; the upstream normalizer drifted between the Full-scan stored form and the Lightweight rescrape, flagging good nodes as mismatched.
+- SSH scheduler deadlock hardened with a `tokio::time::timeout` and a 10-minute workflow-wide cap (cathedral#29 — precedent in 4 upstream Basilica fixes).
+- Lightweight success on a non-rented node now graduates status to `verified` (previously stuck at `online`).
+- `RegisterBid` and rental APIs no longer reject `GpuCategory::Other(_)` — consumer/Apple/DGX categories all pass.
+
+### Site
+
+- Three-tier funnel on the home page: **declared on SN39** (cheap on-chain signal), **registered with us** (called RegisterBid), **verified** (SSH-confirmed). Was one misleading count before.
+- Miners Register pins verified + registered rows at the top; declared-only chain rows are now hidden from the list (header counts still show the full funnel).
+- `/ledger` replaced the stale "Our miner orphaned" block with a live **Registered miners** table off `/api/substrate/validator/registry`.
+- New sage `--ok` palette token. "verified" pills render in sage, "registered" in accent blue.
+
+### Infrastructure
+
+- Single VPS (`135.181.8.214`) now runs both validators: `cathedral-validator.service` (SN39 finney) and `cathedral-validator-testnet.service` (SN292 test). Distinct configs, data dirs, ports.
+- `cathedral-miner-testnet` process running on the VPS too as the CPU test miner. SSH target is a dedicated `cathedral-miner` user on the same box.
+- Daily launchd job `com.cathedral.basilica-watch` tracks upstream `one-covenant/basilica` commits/PRs into `research/basilica-history/DELTA.md`.
+- 15-min launchd job `com.cathedral.miner-watch` snapshots validator.db state transitions to `docs/overnight-miner-watch.log`.
+
+### CLI scope corrected
+
+- `cathedral-cli` is miner and validator operator tooling only — `status`, `miners`, `miner <uid>`, `validators`. Cathedral is the subnet; user-facing rent/run/deploy surfaces belong under `polaris-cli` on Polaris.
+
 ## 2026-04-18
 
 ### Validator migrated off rented infra

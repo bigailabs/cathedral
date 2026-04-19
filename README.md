@@ -5,59 +5,96 @@
 # <p align="center">Cathedral</p>
 
 <p align="center">
-  <em>Compute Layer for Bittensor</em>
+  <em>A cathedral is built slowly, by many hands, over long time.</em>
+</p>
+
+<p align="center">
+  <a href="https://cathedral.computer">cathedral.computer</a>
 </p>
 
 ---
 
-<p align="center">
-  <a href="docs/miner.md">Miner</a> •
-  <a href="docs/validator.md">Validator</a> •
-  <a href="docs/architecture.md">Architecture</a> •
-  <a href="docs/policy.md">Policy</a>
-</p>
-
 ## Status
 
-Validator running. Not setting weights yet (stake threshold).
-See [docs/policy.md](docs/policy.md) for how the incentive mechanism works.
-Live dashboard: https://polaris.computer/substrate
+- **Validator:** running on mainnet SN39 (UID 123) and testnet SN292 (UID 32)
+- **Miners verified:** 2 on mainnet (UID 115 RTX 5090, UID 155 RTX 3090 + 2× 3060), 1 on testnet (UID 33 AMD EPYC CPU)
+- **Weights:** parked on mainnet — below the permit stake threshold, compute units accrue against the ledger
+- **Act 1: Baseline stability** — validator + miners end-to-end, external masons onboarding
 
-## Why
+Live dashboard: [cathedral.computer](https://cathedral.computer) — block, stake, miners, weights, updated every 10s.
 
-Bittensor needs a compute layer. Not a product. Not a platform with a token narrative. A base layer that miners provide, validators verify, and applications consume.
+It is recommended not to stake to SN39 at this time. See [docs/policy.md](docs/policy.md).
 
-Cathedral is a fork of [Basilica](https://github.com/one-covenant/basilica), one of the strongest compute codebases ever built on Bittensor. When its original team walked away in April 2026, the architecture survived. The code was sound. The miners and builders who believed in it stayed.
+## What Cathedral is
 
-Cathedral carries that work forward.
+A compute subnet on Bittensor. Miners — the masons — bring hardware and raise it into the wall. Validators — the master masons — inspect each stone: is it real, does it hold, is it the GPU (or CPU) it claims to be. Applications consume the compute that emerges from the cathedral.
 
-## Overview
+Forked from [Basilica](https://github.com/one-covenant/basilica) under MIT. The code survived. Cathedral carries it forward on home-ownable hardware instead of data-center SKUs.
 
-Cathedral creates a trustless marketplace for GPU compute by:
+## Lay a stone
 
-- **Hardware Verification**: Validates GPUs through a mix of binary challenges and SSH-based discovery, with cryptographic attestation where available
-- **Remote Validation**: SSH-based verification of hardware, network, storage, and container runtime
-- **Bittensor Integration**: Native participation in consensus, weight-setting, and emission distribution on Subnet 39
-- **Fleet Management**: Orchestration of distributed GPU nodes across miners, with exclusive access enforcement
-- **Incentive Engine**: CU and RU dual-stream payouts, linear vesting, and category-based dilution — documented in [docs/policy.md](docs/policy.md)
+Start on testnet with free test TAO — the apprentice yard. When your setup holds, step into mainnet.
 
-## Key Components
+- Narrative onboarding (start here): [cathedral.computer/afrotensor](https://cathedral.computer/afrotensor)
+- Technical reference: [cathedral.computer/mine](https://cathedral.computer/mine)
+- Long-form walkthrough: [docs/miner.md](docs/miner.md)
 
-- **Validator**: Verifies hardware, scores miners, computes weights, submits to chain
-- **Miner**: Registers GPU nodes with validators, deploys validator SSH keys, serves health checks
-- **Executor**: GPU machine agent for container lifecycle, system monitoring, and secure task execution
-- **API Gateway**: HTTP gateway with authentication, caching, and request aggregation
-- **Common**: Shared utilities — crypto, SSH, persistence, identity, config
-- **Protocol**: gRPC/protobuf definitions for inter-component communication
+Minimum: a machine with SSH access, reachable from the validator. A laptop, a cheap VPS, a gaming PC in a bedroom — all acceptable stones.
 
-## Network Information
+## Networks
 
-- **Mainnet**: Bittensor Finney, Subnet 39
-- **Chain Endpoint**: `wss://entrypoint-finney.opentensor.ai:443`
+- **Mainnet:** Bittensor finney · SN39 · `wss://entrypoint-finney.opentensor.ai:443`
+- **Testnet:** Bittensor test · SN292 · `wss://test.finney.opentensor.ai:443`
+
+## Supported hardware
+
+| Class | Examples | Slug | Floor $/hr |
+|---|---|---|---|
+| Consumer GPU | RTX 3060–5090, Apple Silicon, DGX Spark | `RTX_*`, `APPLE_*`, `NVIDIA_DGX_SPARK` | $0.08 – $1.30 |
+| Workstation | RTX 6000 Ada, W7900, Pro 6000 Blackwell | `RTX_6000_ADA`, `W7900`, `RTX_PRO_6000_BLACKWELL` | $0.75 – $1.30 |
+| CPU | Any Linux box with SSH | `CPU_BASIC`, `CPU_STANDARD`, `CPU_PERFORMANCE` | $0.02 – $0.08 / vCPU-hr |
+
+Data-center SKUs (A100, H100, H200, MI300, etc.) are rejected at registration. The cathedral is built from stones a person can lay.
+
+## Roadmap
+
+- **Act 1** — Baseline stability. End-to-end validator + miners. External masons on-boarding. *Now.*
+- **Act 2** — Profitability. Miners earn real emissions. Compute economics proven.
+- **Act 3** — Ecosystem. Cathedral compute flows into applications on top.
+
+Live roadmap: [cathedral.computer/roadmap](https://cathedral.computer/roadmap)
+
+## How it separates from Polaris
+
+- **Cathedral** — the protocol. The yard where masons work. On-chain. Open source. Community owned.
+- **Polaris** — the product. The guild office where users pay and compute is routed. Off-chain. Commercial.
+
+Both are in the same group, but the concerns are clean. `cathedral-cli` does miner + validator ops. User-facing compute rental and agent deploy lives under `polaris-cli` on [polaris.computer](https://polaris.computer).
+
+## Trust
+
+- Code is open source (MIT)
+- Changelog is public: [cathedral.computer/changelog](https://cathedral.computer/changelog)
+- Known limitations are documented on the site and here
+- We do not own the subnet slot. We carry the code forward with whoever else wants to pick up a chisel.
+
+## Links
+
+- Site: [cathedral.computer](https://cathedral.computer)
+- Onboarding: [cathedral.computer/afrotensor](https://cathedral.computer/afrotensor)
+- Register: [cathedral.computer/ledger](https://cathedral.computer/ledger)
+- Mine reference: [cathedral.computer/mine](https://cathedral.computer/mine)
+- Roadmap: [cathedral.computer/roadmap](https://cathedral.computer/roadmap)
+- Changelog: [cathedral.computer/changelog](https://cathedral.computer/changelog)
+- Policy: [docs/policy.md](docs/policy.md)
+- Architecture: [docs/architecture.md](docs/architecture.md)
+- Validator: [docs/validator.md](docs/validator.md)
 
 ## Origins
 
-Forked from [one-covenant/basilica](https://github.com/one-covenant/basilica) under the MIT License. The original Basilica code was written by the Covenant team between 2025 and 2026. Their work is what made this possible.
+Forked from [one-covenant/basilica](https://github.com/one-covenant/basilica) under MIT. The original code was written by the Covenant team between 2025 and 2026. Their work made this possible.
+
+Operated by [polaris.computer](https://polaris.computer).
 
 ## License
 
