@@ -444,14 +444,32 @@ impl ValidationNode {
             );
         }
 
+        // Fork on declared category: CPU-only nodes don't have nvidia-smi.
+        // Probe with nproc instead — any positive output means the SSH shell
+        // is live and the box is a real machine. GPU nodes retain the
+        // upstream nvidia-smi probe since it also proves the GPU is present.
+        let miner_id_str = format!("miner_{}", miner_uid);
+        let declared_category = self
+            .persistence
+            .get_node_bid_metadata(&miner_id_str, &node_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|m| m.gpu_category)
+            .unwrap_or_default();
+        let is_cpu_only = declared_category
+            .to_uppercase()
+            .starts_with("CPU_");
+        let probe_cmd = if is_cpu_only {
+            "nproc"
+        } else {
+            "nvidia-smi --query-gpu=uuid --format=csv,noheader"
+        };
+
         let mut nvidia_smi_output: Option<String> = None;
         let connectivity_successful = match self
             .ssh_client
-            .execute_command_with_retry(
-                ssh_details,
-                "nvidia-smi --query-gpu=uuid --format=csv,noheader",
-                true,
-            )
+            .execute_command_with_retry(ssh_details, probe_cmd, true)
             .await
         {
             Ok(output) => {
@@ -483,17 +501,27 @@ impl ValidationNode {
                     .map(|l| l.trim())
                     .filter(|l| !l.is_empty())
                     .collect();
-                let gpus_detected = lines.iter().filter(|l| l.starts_with("GPU-")).count();
-                let gpu_present = gpus_detected > 0;
+                // For CPU-only nodes, `nproc` returns a bare integer line.
+                // Treat any positive vCPU count as "hardware present".
+                let hw_present = if is_cpu_only {
+                    lines
+                        .first()
+                        .and_then(|l| l.parse::<u32>().ok())
+                        .map(|n| n > 0)
+                        .unwrap_or(false)
+                } else {
+                    let gpus_detected = lines.iter().filter(|l| l.starts_with("GPU-")).count();
+                    gpus_detected > 0
+                };
                 info!(
                     miner_uid = miner_uid,
                     node_id = %node_info.id,
-                    gpu_present = gpu_present,
-                    gpus_detected = gpus_detected,
-                    "[EVAL_FLOW] GPU availability check completed"
+                    hw_present = hw_present,
+                    is_cpu_only = is_cpu_only,
+                    "[EVAL_FLOW] Hardware availability check completed"
                 );
 
-                if !gpu_present {
+                if !hw_present {
                     // Failed at connectivity check
                     if let Some(ref metrics) = self.metrics {
                         metrics.prometheus().set_node_validation_state(
@@ -505,7 +533,7 @@ impl ValidationNode {
                         );
                     }
                 }
-                gpu_present
+                hw_present
             }
             Err(e) => {
                 warn!(
