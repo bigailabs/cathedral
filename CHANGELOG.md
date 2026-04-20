@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-04-20
+
+### Acknowledgement
+
+- **New [CREDITS.md](CREDITS.md)** names the Basilica engineering team — Evan Pappas (epappas), itzlambda, open-junius (Opentensor Foundation), Covenant AI — and includes a "What Cathedral is" section making explicit what's distinct to this project: the thesis, brand, frame, audience, editorial surface, operating decisions.
+- `README.md` fork references now point to CREDITS.md; Origins section names the three engineers directly.
+- `LICENSE` preserves upstream `© 2025 tplr.ai` (required by MIT) and adds `Portions © 2026 bigailabs (cathedral fork modifications)` — the standard MIT fork form.
+- Marketing-site mirror shipped in parallel as [cathedral.computer/origins](https://cathedral.computer/origins), linked from every page footer.
+
+### Site
+
+- **New `/masons` public register** and `/mason?h=<hotkey>` per-mason page. Each verified mason gets a permanent, shareable URL with an embed snippet for bio use. Founding-mason designation for the first 10 verified (ordering by uid-asc as a proxy until the backend exposes verification timestamps). Not linked from header nav — intentionally a slow surface.
+- **`/ledger` redesigned.** A subnet-wide pipeline band sits above the existing dashboard: apprentice signups → verified masons → with income → ambassador (stub) → mentor (stub) → patron (stub) → clerk (stub). Live rows read from `/api/v1/cathedral/signups/stats`, `/api/substrate/validator/registry`, `/api/v1/cathedral/rentals`.
+- **`/ledger` correctness fix.** Registered-masons table was joining to machines by array index, which showed wrong hardware for the wrong mason whenever either list reordered. Hardware column removed from the per-row table (`/machines` and registry share no safe join key); now rendered as an aggregate summary beneath the table instead.
+- **`/ledger` XSS hardening.** All `innerHTML` interpolation of backend fields replaced with `createElement + textContent`. Same safe pattern the home-page MinersRegister uses.
+- **`/afrotensor` refactored to step-through.** One stage visible at a time with `?s=N` URL param, horizontal `01 … 08` pip indicator, prev / mark-complete-next buttons. Existing progress state (`afrotensor_progress_v1` localStorage + `POST /api/v1/cathedral/progress`) untouched. Previous version was one long scroll.
+- **Home hero reshape** (multi-PR). Data-first left column — `01 Live state` meta leads, thesis quote follows with breathing room. Log pane message formatter strips seven layers of substrate error-wrapping into one clean line (e.g. `weight (1010) · no-permit · attempt N · netuid=39`); raw message preserved on hover. Decoder dedupe prevents the same "means / doing" block repeating per retry cycle. "Posture tags" (expected · no action / informational / needs attention) added to annotation titles.
+- **Resilient fetches.** 20s `AbortController` timeouts on home-page substrate fetches; visible stale-state messaging replaces perpetual "loading…" when the upstream is down. Mirrors the backend resilience work on polariscomputer (`asyncio.Lock` + `asyncio.wait_for` on `/state` and `/validator/registry`).
+- **Copy pass — roles.** Final label set is **apprentice, mason, clerk, patron, master** — five labels derived from evidence, not assigned. Dropped "freemason" (Masonic-Order baggage) and "carpenter" (invented slot-filler with no concrete definition). Mason-who-ships-code stays just a mason; contributions show up on the ledger as work, no new label needed.
+- **Copy pass — "miners" → "masons"** in user-facing text. Thesis lede restructured: "A cathedral is a commons." stands alone, body stanza follows with breathing room.
+- **Dark mode default.** First-visit users always get dark; OS `prefers-color-scheme` no longer consulted. Saved toggle still wins on return.
+- **Hero layout hygiene.** Breakpoint to stacked moved from 1100px to 900px so side-by-side holds through normal laptop widths. `min-width: 0` on grid children, mobile nav wraps cleanly.
+
 ## 2026-04-19
 
 ### First verified miners, home-ownable pivot landed
