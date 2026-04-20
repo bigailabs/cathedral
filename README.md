@@ -29,7 +29,7 @@ It is recommended not to stake to SN39 at this time. See [docs/policy.md](docs/p
 
 A compute subnet on Bittensor. Miners — the masons — bring hardware and raise it into the wall. Validators — the master masons — inspect each stone: is it real, does it hold, is it the GPU (or CPU) it claims to be. Applications consume the compute that emerges from the cathedral.
 
-Forked from [Basilica](https://github.com/one-covenant/basilica) under MIT. The code survived. Cathedral carries it forward on home-ownable hardware instead of data-center SKUs.
+Forked from [Basilica](https://github.com/one-covenant/basilica) under MIT. The code survived. Cathedral carries it forward on home-ownable hardware instead of data-center SKUs. See [CREDITS.md](CREDITS.md) for the full acknowledgement.
 
 ## Lay a stone
 
@@ -92,10 +92,12 @@ Both are in the same group, but the concerns are clean. `cathedral-cli` does min
 
 ## Origins
 
-Forked from [one-covenant/basilica](https://github.com/one-covenant/basilica) under MIT. The original code was written by the Covenant team between 2025 and 2026. Their work made this possible.
+Forked from [one-covenant/basilica](https://github.com/one-covenant/basilica) under MIT. The original code was written by the **Covenant AI** team between 2025 and 2026 — Evan Pappas (epappas), itzlambda, and open-junius at the Opentensor Foundation. Their work made this possible.
+
+Full acknowledgement and what's distinct to cathedral: [CREDITS.md](CREDITS.md).
 
 Operated by [polaris.computer](https://polaris.computer).
 
 ## License
 
-MIT
+MIT. Upstream copyright (`© 2025 tplr.ai`) preserved in [LICENSE](LICENSE). Modifications in this fork are © 2026 bigailabs, offered under the same terms.
