@@ -79,8 +79,16 @@ from cathedral.eval.polaris_runner import (
     PolarisRunResult,
 )
 from cathedral.v1_types import EvalTask
+from cathedral.v3.claim_extraction import (
+    ClaimExtractionError,
+    extract_claim,
+    is_repair_worthy,
+)
 from cathedral.v3.corpus.schema import ChallengeRow
-from cathedral.v3.prompts import build_bug_isolation_prompt
+from cathedral.v3.prompts import (
+    build_bug_isolation_prompt,
+    build_bug_isolation_repair_prompt,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -276,8 +284,10 @@ class BugIsolationHermesRun:
     """Raw Hermes result for one bug_isolation_v1 challenge."""
 
     stdout: str
-    duration_ms: int
-    trace: dict[str, Any]
+    repair_stdout: str | None = None
+    duration_ms: int = 0
+    trace: dict[str, Any] = field(default_factory=dict)
+    trace_bundle: TraceBundle | None = None
 
 
 # --------------------------------------------------------------------------
@@ -547,13 +557,55 @@ class SshHermesRunner:
                 resolved_home=resolved_home,
             )
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
+
+            # One-shot repair: only when the first stdout had no parseable
+            # JSON at all (not when JSON came back with the wrong shape).
+            public_view = challenge.public_view()
+            challenge_id_public = public_view["challenge_id"]
+            repair_stdout: str | None = None
+            try:
+                extract_claim(stdout)
+            except ClaimExtractionError as exc:
+                if is_repair_worthy(exc):
+                    repair_stdout = await self._invoke_hermes_text(
+                        conn,
+                        eval_profile=eval_profile,
+                        prompt=build_bug_isolation_repair_prompt(challenge_id_public),
+                        eval_round=eval_round,
+                        resolved_home=resolved_home,
+                    )
+
+            synthetic_card: dict[str, Any] = {
+                "task_type": "bug_isolation_v1",
+                "challenge_id_public": challenge_id_public,
+            }
+            extra: dict[str, str] | None = (
+                {"hermes_repair_stdout.txt": repair_stdout}
+                if repair_stdout is not None
+                else None
+            )
+            bundle = await self._collect_and_assemble(
+                conn,
+                eval_profile=eval_profile,
+                eval_id=run_id,
+                submission_id=str(submission["id"]),
+                eval_round=eval_round,
+                hermes_version=hermes_version,
+                card_json=synthetic_card,
+                hermes_stdout=stdout,
+                resolved_home=resolved_home,
+                extra_files=extra,
+            )
+
             trace.visit_ended_at = datetime.now(UTC).isoformat()
             await self._delete_profile(conn, eval_profile)
             profile_deleted = True
             return BugIsolationHermesRun(
                 stdout=stdout,
+                repair_stdout=repair_stdout,
                 duration_ms=int((time.monotonic() - t_start) * 1000),
                 trace=trace.to_dict(),
+                trace_bundle=bundle,
             )
         except SshHermesError:
             trace.visit_ended_at = datetime.now(UTC).isoformat()
@@ -887,6 +939,7 @@ class SshHermesRunner:
         card_json: dict[str, Any],
         hermes_stdout: str,
         resolved_home: str,
+        extra_files: dict[str, str] | None = None,
     ) -> TraceBundle:
         """Snapshot state.db via sqlite3.backup(), SCP back the rest,
         compute hashes, write manifest, tar.gz the bundle, blake3 it.
@@ -1043,6 +1096,13 @@ class SshHermesRunner:
 
             # Also preserve the raw `hermes chat -q` stdout for audit
             (local_root / "hermes_stdout.txt").write_text(hermes_stdout, encoding="utf-8")
+
+            # Per-caller sidecar files (e.g. v3 bug_isolation repair stdout).
+            if extra_files:
+                for rel_path, content in extra_files.items():
+                    dest = local_root / rel_path
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_text(content, encoding="utf-8")
 
             # Compute proof-of-loop from what we collected
             proof = _compute_proof_of_loop(local_root)

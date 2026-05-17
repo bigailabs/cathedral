@@ -50,9 +50,11 @@ from cathedral.v3.corpus.private_loader import load_private_corpus
 from cathedral.v3.corpus.sampler import sample_challenge_id_for_hotkey
 from cathedral.v3.publisher import (
     persist_bug_isolation_result,
+    publish_score_sidecar,
     score_and_sign_bug_isolation_stdout,
     v3_feed_enabled,
 )
+from cathedral.v3.score_sidecar import build_score_record
 
 logger = structlog.get_logger(__name__)
 
@@ -481,8 +483,60 @@ class EvalOrchestrator:
             stdout=hermes_run.stdout,
             ran_at_iso=_ms_iso(datetime.now(UTC)),
             signer=self.signer,
+            repair_stdout=getattr(hermes_run, "repair_stdout", None),
             epoch_salt=f"epoch_{epoch}:bug_isolation_v1",
         )
+
+        # Publish the trace bundle + private score sidecar.
+        # Both are best-effort: a sidecar upload failure must not crash
+        # the eval. The score row + signed payload still land in the
+        # publisher DB; the sidecar is data substrate for later training,
+        # not a precondition for emitting the v3 row.
+        trace_bundle = getattr(hermes_run, "trace_bundle", None)
+        published_artifact = await self._maybe_publish_bundle(trace_bundle, log)
+        score_sidecar_url: str | None = None
+        if trace_bundle is not None and published_artifact is not None:
+            try:
+                score_record = build_score_record(
+                    signed_row=signed.row,
+                    challenge=challenge,
+                    submission=submission,
+                    duration_ms=int(hermes_run.duration_ms),
+                    repair_was_attempted=signed.dispatch.repair_was_attempted,
+                    package_blake3=trace_bundle.bundle_blake3,
+                    manifest_hash=published_artifact.manifest_hash,
+                )
+                score_sidecar_url = await publish_score_sidecar(
+                    hippius=self.hippius,
+                    eval_id=trace_bundle.eval_id,
+                    score_record=score_record,
+                )
+                log.info(
+                    "v3_score_sidecar_published",
+                    eval_id=trace_bundle.eval_id,
+                    url=score_sidecar_url,
+                )
+            except Exception as exc:
+                log.warning(
+                    "v3_score_sidecar_publish_failed",
+                    eval_id=getattr(trace_bundle, "eval_id", None),
+                    error=str(exc),
+                )
+
+        # Enrich trace_json with bundle/manifest/sidecar handles so the
+        # operator-only export and catalog can locate the package later.
+        # These fields stay out of output_card_json (public feed firewall).
+        trace_json: dict[str, Any] = dict(hermes_run.trace or {})
+        if trace_bundle is not None:
+            trace_json["bundle_blake3"] = trace_bundle.bundle_blake3
+            trace_json["cathedral_eval_round"] = trace_bundle.cathedral_eval_round
+        if published_artifact is not None:
+            trace_json["bundle_url"] = published_artifact.bundle_url
+            trace_json["manifest_url"] = published_artifact.manifest_url
+            trace_json["manifest_hash"] = published_artifact.manifest_hash
+        if score_sidecar_url is not None:
+            trace_json["score_record_url"] = score_sidecar_url
+
         await persist_bug_isolation_result(
             self.db,
             submission=submission,
@@ -491,7 +545,7 @@ class EvalOrchestrator:
             epoch=epoch,
             round_index=round_index,
             duration_ms=int(hermes_run.duration_ms),
-            trace_json=hermes_run.trace,
+            trace_json=trace_json,
         )
         log.info(
             "v3_bug_isolation_eval_complete",
