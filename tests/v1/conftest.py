@@ -40,10 +40,16 @@ CONTRACT_LOGO_MAX_BYTES = 200 * 1024  # 200 KiB — Section 2.1
 CONTRACT_SIGNATURE_HEADER = "X-Cathedral-Signature"
 CONTRACT_HOTKEY_HEADER = "X-Cathedral-Hotkey"
 
-# v1 launch card_ids. Collapsed to EU AI Act only; the earlier 5-card
-# plan is deprecated and archived at Docker startup. Kept as a tuple so
+# v1 launch card_ids. Five jurisdictions ship at launch (eu-ai-act +
+# the four reopened from the v1.1.18 collapse). Kept as a tuple so
 # future cards land here as the launch set expands.
-CONTRACT_V1_CARD_IDS: tuple[str, ...] = ("eu-ai-act",)
+CONTRACT_V1_CARD_IDS: tuple[str, ...] = (
+    "eu-ai-act",
+    "us-ai-eo",
+    "uk-ai-whitepaper",
+    "singapore-pdpc",
+    "japan-meti-mic",
+)
 
 # First-mover constants per Section 7.2.
 FIRST_MOVER_DELTA = 0.05
@@ -122,9 +128,7 @@ def make_valid_bundle(
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("soul.md", soul_md)
-        zf.writestr(
-            "AGENTS.md", "Maintain the regulatory card. Refresh every 4 hours.\n"
-        )
+        zf.writestr("AGENTS.md", "Maintain the regulatory card. Refresh every 4 hours.\n")
         zf.writestr("config.yaml", "model: claude-3-opus\n")
         if extra_files:
             for name, data in extra_files.items():
