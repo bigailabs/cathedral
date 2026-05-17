@@ -10,6 +10,52 @@ need to know about.
 
 ---
 
+## v1.1.20 - v3 full Hermes package capture (feed off)
+
+**Date:** 2026-05-17
+
+**Headline:** v3 `bug_isolation_v1` now captures task-scoped full
+Hermes packages and private score records, so the lane can collect
+labeled trajectory data once operators intentionally enable the feed.
+
+### Added
+
+- **Full Hermes package capture for v3 bug isolation (#134).**
+  `SshHermesRunner.run_bug_isolation_challenge()` now mirrors the
+  v1 card path by assembling a task-scoped Hermes package for each
+  v3 challenge: state database snapshot, sessions, request dumps,
+  memories, skills, logs, stdout, optional repair stdout, manifest,
+  and bundle hash.
+- **Private v3 score sidecar (#134).** The publisher can write a
+  private `score_record.json` beside each package with the hidden
+  oracle, parsed claim, score parts, weighted score, signature, bundle
+  hash, and manifest hash. Public feed rows do not expose oracle
+  fields, package URLs, manifest URLs, or score sidecar URLs.
+- **v3 dataset catalog/export skeleton (#134).** New private catalog
+  and export helpers create training-oriented JSONL shapes from score
+  records while keeping hidden oracle data out of public and SFT/RM
+  outputs.
+- **Operator launch docs (#134).** New v3 launch-readiness, testnet
+  E2E, mainnet launch-rule, and dataset docs describe the required
+  testnet row, package upload, score sidecar, public-feed leak check,
+  and rollback path.
+
+### Operator note
+
+- This release does **not** launch v3 on mainnet.
+- `CATHEDRAL_V3_FEED_ENABLED` remains off unless an operator explicitly
+  sets it.
+- `config/mainnet.toml` still routes 95% to burn with
+  `forced_burn_percentage = 95.0`.
+- `config/mainnet.toml` still keeps v3 at zero weight with
+  `v3_bug_isolation_weight = 0.0`.
+- Do not move meaningful emissions to v3 until the SN292 testnet E2E
+  has produced a signed v3 row, a full package, a private score
+  sidecar, validator pull verification, and 24 hours of clean mainnet
+  collection with no public oracle leakage.
+
+---
+
 ## v1.1.19 - protective mainnet burn while v3 corpus hardens
 
 **Date:** 2026-05-17
