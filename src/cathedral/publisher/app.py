@@ -523,7 +523,13 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
 
 
 # v1 launch card_ids per CONTRACTS.md §9 lock #12. Seeded into a fresh DB
-# so contract tests against `eu-ai-act` etc. find a card definition.
+# so contract tests against `eu-ai-act` etc. find a card definition. The
+# original v1.1.18 launch shipped one card (eu-ai-act) and archived the
+# other four. They are reopened here because the single-card surface
+# saturated: a clear "template farmer" cohort scores >=0.99 by passing
+# schema without producing insight, and copyists can fast-follow within
+# one refresh cycle. Multi-jurisdiction coverage stratifies the
+# population without redesigning the scorer.
 _V1_LAUNCH_CARDS: tuple[dict[str, Any], ...] = (
     {
         "id": "eu-ai-act",
@@ -531,19 +537,38 @@ _V1_LAUNCH_CARDS: tuple[dict[str, Any], ...] = (
         "jurisdiction": "eu",
         "topic": "EU AI Act enforcement and guidance",
     },
+    {
+        "id": "us-ai-eo",
+        "display_name": "US AI Executive Order",
+        "jurisdiction": "us",
+        "topic": "US executive orders, federal AI guidance, and agency rulemaking",
+    },
+    {
+        "id": "uk-ai-whitepaper",
+        "display_name": "UK AI White Paper",
+        "jurisdiction": "uk",
+        "topic": "UK pro-innovation AI regulation and regulator guidance",
+    },
+    {
+        "id": "singapore-pdpc",
+        "display_name": "Singapore PDPC",
+        "jurisdiction": "sg",
+        "topic": "Singapore PDPC, IMDA, and Model AI Governance Framework guidance",
+    },
+    {
+        "id": "japan-meti-mic",
+        "display_name": "Japan METI / MIC",
+        "jurisdiction": "jp",
+        "topic": "Japan METI, MIC, and Cabinet Office AI strategy and guidance",
+    },
 )
 
-# Card IDs that were part of an earlier 5-card launch plan and have been
-# deprecated. Existing production rows for these IDs are archived at
-# Docker startup (see `cathedral-publisher archive-cards` in cli.py) so
-# submit and eval-spec lookups return 404. Keeping the list here in code
-# (not just docs) so the archival is idempotent and self-documenting.
-_V1_DEPRECATED_CARD_IDS: tuple[str, ...] = (
-    "us-ai-eo",
-    "uk-ai-whitepaper",
-    "singapore-pdpc",
-    "japan-meti-mic",
-)
+# Card IDs that the publisher archives at Docker startup. Empty in the
+# multi-jurisdiction launch: every v1 card listed above is active. The
+# tuple stays for the archival code path (and for the
+# `set_card_definition_status` regression test) so future deprecations
+# remain one-line changes here, not a re-introduction of the helper.
+_V1_DEPRECATED_CARD_IDS: tuple[str, ...] = ()
 
 
 _DEFAULT_RUBRIC: dict[str, Any] = {

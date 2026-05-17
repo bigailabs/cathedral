@@ -31,22 +31,24 @@ ENV PYTHONFAULTHANDLER=1
 
 # Bootstrap on every container start:
 # 1. seed-cards: idempotent INSERT-or-UPDATE of the launch card_definitions
-#    row (EU AI Act). Cheap; runs even if the row already exists.
-# 2. load-eval-spec: pulls real EU AI Act content from the public
-#    cathedral-eval-spec GitHub repo and updates the row. Idempotent.
+#    rows (eu-ai-act, us-ai-eo, uk-ai-whitepaper, singapore-pdpc,
+#    japan-meti-mic). Cheap; runs even if the rows already exist.
+# 2. load-eval-spec: pulls real per-card content from the public
+#    cathedral-eval-spec GitHub repo and updates each row. Idempotent.
 #    Failure is non-fatal (logs to stderr, container still starts); we'd
 #    rather serve placeholder content than refuse to start.
-# 3. archive-cards: marks the 4 deprecated launch-plan card IDs as
-#    status='archived' so submit and eval-spec endpoints return 404 for
-#    them. Idempotent; no-op on a fresh DB that never seeded them.
-# 4. serve: start uvicorn + the FastAPI app + background eval orchestrator.
+# 3. serve: start uvicorn + the FastAPI app + background eval orchestrator.
+#
+# The earlier archive-cards step (which marked us-ai-eo / uk-ai-whitepaper /
+# singapore-pdpc / japan-meti-mic as status='archived') is intentionally
+# absent: those cards reopened in this multi-jurisdiction launch and
+# need to be active again. The archive-cards CLI still exists for future
+# deprecations; the production startup just no longer invokes it.
 CMD ["sh", "-c", "\
   echo '[startup] seed-cards' && \
   cathedral-publisher seed-cards --db ${CATHEDRAL_DB_PATH} && \
   echo '[startup] load-eval-spec' && \
   cathedral-publisher load-eval-spec --db ${CATHEDRAL_DB_PATH} || echo '[startup] load-eval-spec failed; continuing with placeholder content' && \
-  echo '[startup] archive-cards (deprecated launch-plan IDs)' && \
-  cathedral-publisher archive-cards us-ai-eo uk-ai-whitepaper singapore-pdpc japan-meti-mic --db ${CATHEDRAL_DB_PATH} && \
   echo '[startup] serve --db '${CATHEDRAL_DB_PATH}' --port '${PORT:-8080} && \
   cathedral-publisher serve --db ${CATHEDRAL_DB_PATH} --port ${PORT:-8080} --host 0.0.0.0 \
 "]

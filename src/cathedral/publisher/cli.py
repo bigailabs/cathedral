@@ -53,9 +53,7 @@ def migrate(
 def merkle_close(
     epoch: int = typer.Option(..., "--epoch", "-e", help="ISO calendar epoch (year * 100 + week)"),
     database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
-    on_chain: bool = typer.Option(
-        False, "--on-chain", help="Submit anchor to chain"
-    ),
+    on_chain: bool = typer.Option(False, "--on-chain", help="Submit anchor to chain"),
     network: str = typer.Option("finney", "--network"),
     wallet_name: str = typer.Option("default", "--wallet-name"),
     wallet_hotkey: str = typer.Option("default", "--wallet-hotkey"),
@@ -105,6 +103,30 @@ def seed_cards(
 
     launch_cards = [
         ("eu-ai-act", "EU AI Act", "eu", "EU AI Act enforcement and guidance"),
+        (
+            "us-ai-eo",
+            "US AI Executive Order",
+            "us",
+            "US executive orders, federal AI guidance, and agency rulemaking",
+        ),
+        (
+            "uk-ai-whitepaper",
+            "UK AI White Paper",
+            "uk",
+            "UK pro-innovation AI regulation and regulator guidance",
+        ),
+        (
+            "singapore-pdpc",
+            "Singapore PDPC",
+            "sg",
+            "Singapore PDPC, IMDA, and Model AI Governance Framework guidance",
+        ),
+        (
+            "japan-meti-mic",
+            "Japan METI / MIC",
+            "jp",
+            "Japan METI, MIC, and Cabinet Office AI strategy and guidance",
+        ),
     ]
 
     async def _run() -> None:
@@ -118,8 +140,7 @@ def seed_cards(
                     jurisdiction=juris,
                     topic=topic,
                     description=(
-                        f"## {name}\n\n"
-                        "Placeholder definition. Owned by cathedral-eval-spec."
+                        f"## {name}\n\nPlaceholder definition. Owned by cathedral-eval-spec."
                     ),
                     eval_spec_md="Placeholder eval spec — owned by cathedral-eval-spec.",
                     source_pool=[],
@@ -158,7 +179,7 @@ def load_eval_spec(
         help="Base URL of the cathedral-eval-spec content (raw GitHub).",
     ),
     cards: str = typer.Option(
-        "eu-ai-act",
+        "eu-ai-act,us-ai-eo,uk-ai-whitepaper,singapore-pdpc,japan-meti-mic",
         "--cards",
         help="Comma-separated card IDs to load.",
     ),
@@ -175,6 +196,7 @@ def load_eval_spec(
     configure()
 
     import sys
+
     if sys.version_info >= (3, 11):
         import tomllib
     else:
@@ -230,8 +252,10 @@ def load_eval_spec(
                     refresh_cadence_hours=int(cadence),
                     status=card.get("status", "active"),
                 )
-                typer.echo(f"  loaded {card_id}: {len(source_pool)} sources, "
-                           f"{len(task_templates)} task templates")
+                typer.echo(
+                    f"  loaded {card_id}: {len(source_pool)} sources, "
+                    f"{len(task_templates)} task templates"
+                )
         finally:
             await conn.close()
 

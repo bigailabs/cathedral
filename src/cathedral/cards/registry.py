@@ -35,6 +35,27 @@ class CardRegistry:
         `cathedral-eval-spec` content repo. The in-process registry
         kept here is the lightweight scoring-side view used by the
         existing `score_card`/`preflight` code paths.
+
+        Five jurisdictions ship at launch:
+
+        - ``eu-ai-act`` (EU): saturated single-card target. Same shape
+          as the v1.1 collapse, untouched in this expansion.
+        - ``us-ai-eo`` (US): federal AI policy actions, EOs, agency
+          rulemaking (NIST AI RMF, OMB), FTC guidance, congressional
+          activity. Post-EO 14110 the landscape is fragmented across
+          agencies, so coverage accepts any of NIST/FTC/DOC/OMB/
+          Congress/WH as primary.
+        - ``uk-ai-whitepaper`` (UK): regulator-led pro-innovation
+          framework. CMA, ICO, Ofcom, FCA guidance + parliamentary
+          inquiries. Weight ``regulator`` heavily.
+        - ``singapore-pdpc`` (SG): PDPC AI guidance, IMDA frameworks,
+          Singapore Model AI Governance Framework, AI Verify. Well
+          organised primary sources; pdpc.gov.sg may need Playwright
+          for Akamai but the agent handles that.
+        - ``japan-meti-mic`` (JP): METI AI guidelines, MIC AI policy,
+          Cabinet Office AI Strategy. JP primary sources are mostly
+          Japanese-language; English coverage is sparse and this is
+          the most contested jurisdiction in source-quality terms.
         """
         return cls(
             entries=(
@@ -48,6 +69,51 @@ class CardRegistry:
                         SourceClass.LAW_TEXT,
                     ),
                     refresh_cadence_hours=24,
+                ),
+                RegistryEntry(
+                    card_id="us-ai-eo",
+                    jurisdiction=Jurisdiction.US,
+                    topic="US executive orders, federal AI guidance, and agency rulemaking",
+                    required_source_classes=(
+                        SourceClass.OFFICIAL_JOURNAL,
+                        SourceClass.GOVERNMENT,
+                        SourceClass.REGULATOR,
+                        SourceClass.LAW_TEXT,
+                    ),
+                    refresh_cadence_hours=24,
+                ),
+                RegistryEntry(
+                    card_id="uk-ai-whitepaper",
+                    jurisdiction=Jurisdiction.UK,
+                    topic="UK pro-innovation AI regulation and regulator guidance",
+                    required_source_classes=(
+                        SourceClass.GOVERNMENT,
+                        SourceClass.REGULATOR,
+                        SourceClass.PARLIAMENT,
+                    ),
+                    refresh_cadence_hours=48,
+                ),
+                RegistryEntry(
+                    card_id="singapore-pdpc",
+                    jurisdiction=Jurisdiction.SG,
+                    topic="Singapore PDPC, IMDA, and Model AI Governance Framework guidance",
+                    required_source_classes=(
+                        SourceClass.REGULATOR,
+                        SourceClass.GOVERNMENT,
+                        SourceClass.LAW_TEXT,
+                    ),
+                    refresh_cadence_hours=48,
+                ),
+                RegistryEntry(
+                    card_id="japan-meti-mic",
+                    jurisdiction=Jurisdiction.JP,
+                    topic="Japan METI, MIC, and Cabinet Office AI strategy and guidance",
+                    required_source_classes=(
+                        SourceClass.GOVERNMENT,
+                        SourceClass.REGULATOR,
+                        SourceClass.LAW_TEXT,
+                    ),
+                    refresh_cadence_hours=48,
                 ),
             )
         )
