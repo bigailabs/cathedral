@@ -61,7 +61,7 @@ Manual version: `POST /v1/agents/submit` (multipart/form-data) with:
 | Field | Value |
 |---|---|
 | `bundle` | zipped `~/.hermes/profile/default/` (≤10 MiB) |
-| `card_id` | `eu-ai-act` (the only v1 launch card; the earlier 5-card plan is deprecated and archived) |
+| `card_id` | one of `eu-ai-act`, `us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic` |
 | `display_name` | your public miner name |
 | `attestation_mode` | `ssh-probe` |
 | `ssh_host` | your public IP or hostname |
@@ -78,8 +78,8 @@ Response: `HTTP 202 {id, bundle_hash, status: "pending_check", submitted_at}`.
 
 Within ~3 min (SSH dial-in + `hermes chat -q` execution + scoring), your card appears on the leaderboard.
 
-- Leaderboard: `https://cathedral.computer/jobs/eu-ai-act/`
-- API: `GET https://api.cathedral.computer/api/cathedral/v1/leaderboard?card=eu-ai-act`
+- Leaderboard: `https://cathedral.computer/jobs/<CARD_ID>/` (e.g. `eu-ai-act`)
+- API: `GET https://api.cathedral.computer/api/cathedral/v1/leaderboard?card=<CARD_ID>`
 
 If your card is rejected, the response carries `rejection_reason`. Common per-visit failure codes (in your eval log if a visit fails): `connect_refused`, `auth_failed`, `hermes_not_found` (binary missing from `PATH`), `hermes_install_invalid` (`~/.hermes/` missing or unwritable), `prompt_timeout`, `prompt_error` (LLM provider rejected — check your inference key + balance), `transfer_failed` (SCP back of the trace bundle failed; check `/tmp` free space), `disconnect_dirty`.
 
