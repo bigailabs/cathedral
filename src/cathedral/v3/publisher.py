@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from uuid import uuid4
 import aiosqlite
 import blake3
 
+from cathedral.storage import HippiusClient
 from cathedral.v1_types import canonical_json
 from cathedral.v3.corpus.schema import ChallengeRow
 from cathedral.v3.dispatch import DispatchResult, dispatch_bug_isolation_claim
@@ -145,9 +147,44 @@ def _parse_ms_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
+async def publish_score_sidecar(
+    *,
+    hippius: HippiusClient,
+    eval_id: str,
+    score_record: dict[str, Any],
+) -> str:
+    """Upload the v3 score record as a private JSON sidecar.
+
+    Sibling to the encrypted Hermes bundle under the same
+    ``eval-artifacts/`` prefix. Returns the ``s3://`` URI so the caller
+    can stash it in the operator-only trace_json (never the public feed).
+    """
+    client = hippius._ensure_client()
+    bucket = hippius.config.bucket
+    env_prefix = hippius.config.env_prefix
+    key = f"{env_prefix}eval-artifacts/{eval_id}.score_record.json"
+    body = canonical_json(score_record)
+
+    def _put() -> str:
+        client.put_object(  # type: ignore[attr-defined]
+            Bucket=bucket,
+            Key=key,
+            Body=body,
+            Metadata={
+                "cathedral-version": "v1.1.0",
+                "artifact-kind": "v3-score-record",
+            },
+            ContentType="application/json",
+        )
+        return f"s3://{bucket}/{key}"
+
+    return await asyncio.to_thread(_put)
+
+
 __all__ = [
     "BugIsolationSignedResult",
     "persist_bug_isolation_result",
+    "publish_score_sidecar",
     "score_and_sign_bug_isolation_stdout",
     "v3_feed_enabled",
 ]
