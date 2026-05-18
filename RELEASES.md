@@ -10,6 +10,42 @@ need to know about.
 
 ---
 
+## v1.1.21 - v4 cathedral_engine on main (dark-shipped)
+
+**Date:** 2026-05-18
+
+**Headline:** v4 publisher-side challenge runtime lands on main. Dark-shipped: no v4 weight, no v4 feed, no validator pull loop, no SSH transport wired yet. Cuts a clean rollback point for the engine merge so the remaining v4 launch work (transport, validator integration, real signing in driver, production corpus) can ship as independent releases.
+
+### Added
+
+- **v4 cathedral_engine (#133).** Publisher-side private challenge runtime: `CathedralEngine` with `load_task`, `load_and_scramble_task`, `build_bundle_and_handle`, `verify_miner_submission`, `package_elite_telemetry`. Jailed oracle subprocess with `REPRO_BUDGET_SECONDS=3.0` and `BOOKKEEPING_BUDGET_SECONDS=0.20`. Bookkeeping/repro budgets asserted by `tests/v4/test_benchmark.py`.
+- **v4 wire types.** `MinerBundle` (wire-safe broken-state, no answer) + `PublisherHandle` (operator-only clean_state, rename_map). Type system enforces the split.
+- **v4 isomorphic scrambler.** `IsomorphicScrambler` / `MinerArena` in `arena/sandbox.py` rotate identifiers + file paths so identical synthetic bug surfaces in unique scrambled forms per task.
+- **v4 jailed oracle.** `oracle/jail.py` + `oracle/patch_runner.py`: namespaced (unshare) subprocess with pgrp-kill on timeout, RLIMIT_CPU + RLIMIT_AS bounded, network-isolated, tmpfs scratch.
+- **v4 sign/verify helpers.** `cathedral.v4.sign.build_signed_v4_row` delegates to the existing v3 `EvalSigner` rather than reinventing signing. Validator no-execution guarantee in `tests/v4/test_validator_no_execution.py`.
+- **v4 vault bases.** `python_fastapi_base` + `ts_prisma_base` for synthetic challenges.
+- **v4 test fixtures.** Three in-tree synthetic rows under `tests/v4/fixtures/synthetic_rows/` (toy sign-flips, exercise the loader only). Production v4 corpus rows live under `CATHEDRAL_V4_CORPUS_PATH`, operator-only.
+- **v4 test suite.** 58 tests across engine, oracle (incl. jailed), schemas, sign/verify, arena, benchmark, validator-no-execution, ts_prisma_vault.
+
+### Not yet wired
+
+- No SSH transport. `SshHermesRunner` only has `run_bug_isolation_challenge` (v3); no `run_v4_*` method exists.
+- No validator v4 pull loop. `config/mainnet.toml` has `v3_bug_isolation_weight` only; no `v4_*_weight` yet.
+- No production v4 corpus. Only 3 in-tree test fixtures.
+- The local v4 E2E driver in `~/Documents/TOOLS/scripts/cathedral-v4-e2e/` exercises engine + oracle + canonical envelope but not the final signed wire row (`build_signed_v4_row`).
+
+### Mainnet behavior
+
+- `config/mainnet.toml` unchanged: `forced_burn_percentage = 95.0`, `v3_bug_isolation_weight = 0.0`.
+- No `v4_*_weight` setting introduced (would have zero effect without validator pull).
+- v3 feed remains gated by `CATHEDRAL_V3_FEED_ENABLED`.
+
+### Do not move v4 emissions
+
+Until transport (SSH or other), validator pull loop, real signed-row driver path, and production corpus are all wired and pass testnet E2E for at least one week. v3 stays the launch lever; v4 is dark-shipped engine code only.
+
+---
+
 ## v1.1.20 - v3 full Hermes package capture (feed off)
 
 **Date:** 2026-05-17
