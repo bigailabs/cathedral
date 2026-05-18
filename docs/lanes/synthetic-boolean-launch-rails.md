@@ -124,6 +124,19 @@ manifest_url
 score_record_url
 ```
 
+## Public repo leak guard
+
+The public repository must never contain Serge's private corpus, production
+generator, real solutions, private timings, or private formula names. The CI
+guard in `tests/lanes/test_public_repo_leak_guard.py` fails when:
+
+- known private formula filenames are present
+- private corpus or generator markers are present in text files
+- large `.cnf`, `.dimacs`, or `.sol` artifacts are committed
+
+Only toy fixtures should live in git. Production formulas and generator
+material must be mounted or installed privately on the publisher host.
+
 ## Failure posture
 
 - Unregistered lane: log `task_family_skipped reason=unregistered`.
