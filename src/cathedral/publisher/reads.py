@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
+from cathedral.lanes.publisher import task_family_feed_enabled
 from cathedral.publisher import repository
 from cathedral.v3.publisher import v3_feed_enabled
 
@@ -469,8 +470,14 @@ async def get_leaderboard_recent(
         cursor_id = since_id
 
     include_v3 = v3_feed_enabled()
+    include_task_families = task_family_feed_enabled()
     runs = await repository.list_eval_runs_recent(
-        ctx.db, since=since_dt, since_id=cursor_id, limit=limit, include_v3=include_v3
+        ctx.db,
+        since=since_dt,
+        since_id=cursor_id,
+        limit=limit,
+        include_v3=include_v3,
+        include_task_families=include_task_families,
     )
     items: list[dict[str, Any]] = []
     for r in runs:

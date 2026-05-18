@@ -20,6 +20,83 @@ validator weight stay off until the lane author lands `generate`, `verify`,
   solutions stay publisher-private until an explicit reveal or export path
   is added.
 
+## First launch operating model
+
+The first launch path is the **single active formula** model. This is
+the model Cathedral commits to for v1; per-miner hidden challenges
+are explicitly **not** the first launch shape.
+
+```text
+1. Cathedral publishes ONE active boolean formula at a time.
+2. All miners attempt to solve the same active formula.
+3. The first valid private submission wins. "Valid" means:
+     - DIMACS solution parses
+     - every clause is satisfied
+     - the submission arrived before any other valid submission for the
+       same active formula
+4. Cathedral locks the winner: weight credit attaches to that hotkey
+   for that formula; no later submission for the same formula scores.
+5. Cathedral retires the formula and advances to the next one.
+```
+
+Why single-active and not per-miner hidden:
+
+- Verification is uniform: every validator checks the same accepted
+  assignment against the same public formula text. No per-miner
+  formula-state to reconcile across the network.
+- Dedup is simple: the publisher locks first-valid; later submissions
+  for that formula are dropped at the publisher, never proliferated as
+  separate scored rows. Avoids the v1 copy-farm gameability shape.
+- Reveal posture is clean: the formula and the winning solution can be
+  revealed together at retirement without privacy bookkeeping per
+  miner.
+- It keeps Serge's generator, seeds, solutions, and per-instance
+  timings entirely private during the active window. Only the
+  formula text reaches miners; only the winning answer hash + score
+  reach the public feed.
+
+Operational notes:
+
+- "First valid" is determined by publisher-side arrival order against
+  the active formula. Network-level miner-vs-miner timing is not a
+  Cathedral concern.
+- A formula in `active` state never has its solution or hidden
+  metadata on the public surface. Reveal only happens at `retired`,
+  and reveal of the solution is an operator-gated decision per
+  formula.
+- The next formula is loaded from the private corpus / private
+  generator mount; the public repo carries only toy fixtures.
+
+### What this is NOT
+
+- NOT per-miner hidden challenges, where each miner gets a different
+  formula. That model is on the deferred shelf; it requires
+  per-miner state tracking, per-miner verification cost, and a
+  different dedup story. Skipping it for v1.
+- NOT a continuous open-submission pool where many miners can score
+  on the same formula. Only the first valid solve scores.
+- NOT a public formula feed. The active formula text goes to miners
+  only, not to the public read endpoints. The public feed sees the
+  hash + score after retirement.
+
+## Answer schema
+
+For `synthetic_boolean_v1`, the miner returns a single fenced
+`FINAL_ANSWER` JSON block. The JSON object has exactly one key:
+
+```json
+{"dimacs_solution": "s SATISFIABLE\nv -1 2 3 0\n"}
+```
+
+The verifier parses the solver-style block (`s SATISFIABLE` followed
+by one or more `v <lit> ... 0` lines covering every variable). No
+other answer shape is accepted; previous draft prompts used a
+`{"assignment": {...}}` dict, that shape is retired for v1.
+
+The dimacs_solution string is private input to the verifier. It does
+not appear in the signed wire row or the public feed. Only the
+`answer_hash` does.
+
 ## Current code path
 
 1. `EvalOrchestrator.evaluate_one` runs the normal v1 card eval.
@@ -117,8 +194,13 @@ hidden_metadata
 seed
 generator_state
 formula
+cnf
+dimacs
 assignment
 solution
+dimacs_solution
+planted_assignment
+generator_version
 bundle_url
 manifest_url
 score_record_url

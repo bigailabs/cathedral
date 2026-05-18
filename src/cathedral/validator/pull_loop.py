@@ -108,6 +108,11 @@ async def upsert_pulled_eval(
     weighted = float(eval_run["weighted_score"])
     ran_at = eval_run["ran_at"]
     task_type = str(eval_run.get("task_type") or eval_run.get("card_id") or "unknown")
+    schema_version_raw = eval_run.get("eval_output_schema_version", 1)
+    try:
+        schema_version = int(schema_version_raw)
+    except (TypeError, ValueError):
+        schema_version = 1
     if isinstance(ran_at, datetime):
         ran_at = ran_at.isoformat()
 
@@ -123,14 +128,15 @@ async def upsert_pulled_eval(
         """
         INSERT INTO pulled_eval_runs (
             eval_run_id, miner_hotkey, weighted_score,
-            ran_at, pulled_at, synth_claim_id, task_type
+            ran_at, pulled_at, synth_claim_id, task_type, schema_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(eval_run_id) DO UPDATE SET
             weighted_score=excluded.weighted_score,
             ran_at=excluded.ran_at,
             pulled_at=excluded.pulled_at,
-            task_type=excluded.task_type
+            task_type=excluded.task_type,
+            schema_version=excluded.schema_version
         """,
         (
             eval_run_id,
@@ -140,6 +146,7 @@ async def upsert_pulled_eval(
             datetime.now(UTC).isoformat(),
             synth_id,
             task_type,
+            schema_version,
         ),
     )
     await conn.commit()
@@ -166,7 +173,7 @@ async def latest_pulled_score_per_hotkey(
     since = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
     cur = await conn.execute(
         """
-        SELECT miner_hotkey, task_type, weighted_score
+        SELECT miner_hotkey, task_type, weighted_score, schema_version
         FROM pulled_eval_runs
         WHERE ran_at >= ?
         """,
@@ -177,10 +184,16 @@ async def latest_pulled_score_per_hotkey(
     for row in rows:
         hotkey = str(row[0])
         task_type = str(row[1] or "unknown")
-        if task_type == "bug_isolation_v1":
-            score_bucket = "v3"
-        elif task_type in lane_weights:
+        try:
+            schema_version = int(row[3])
+        except (TypeError, ValueError):
+            schema_version = 1
+        if schema_version == 5:
+            if task_type not in lane_weights:
+                continue
             score_bucket = task_type
+        elif task_type == "bug_isolation_v1":
+            score_bucket = "v3"
         else:
             score_bucket = "v1"
         score = float(row[2])
@@ -241,7 +254,8 @@ async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
             ran_at TEXT NOT NULL,
             pulled_at TEXT NOT NULL,
             synth_claim_id INTEGER NOT NULL,
-            task_type TEXT NOT NULL DEFAULT 'unknown'
+            task_type TEXT NOT NULL DEFAULT 'unknown',
+            schema_version INTEGER NOT NULL DEFAULT 1
         )
         """
     )
@@ -251,6 +265,14 @@ async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
         try:
             await conn.execute(
                 "ALTER TABLE pulled_eval_runs ADD COLUMN task_type TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    if "schema_version" not in cols:
+        try:
+            await conn.execute(
+                "ALTER TABLE pulled_eval_runs ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
             )
         except aiosqlite.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():

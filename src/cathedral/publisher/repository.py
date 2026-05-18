@@ -109,8 +109,7 @@ async def set_card_definition_status(
     caller is responsible for the transaction boundary.
     """
     cur = await conn.execute(
-        "UPDATE card_definitions SET status=?, updated_at=CURRENT_TIMESTAMP "
-        "WHERE id=?",
+        "UPDATE card_definitions SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
         (status, card_id),
     )
     return (cur.rowcount or 0) > 0
@@ -885,6 +884,7 @@ async def list_eval_runs_recent(
     since_id: str | None = None,
     limit: int = 200,
     include_v3: bool = True,
+    include_task_families: bool = True,
 ) -> list[dict[str, Any]]:
     """Cross-card recent feed used by the validator pull loop AND the
     public `/v1/leaderboard/recent` endpoint.
@@ -927,7 +927,12 @@ async def list_eval_runs_recent(
     the join is defense-in-depth in case a future code path inserts one.
     """
     since_str = _ms_z(since)
-    schema_gate = "" if include_v3 else "AND er.eval_output_schema_version != 3"
+    schema_gates: list[str] = []
+    if not include_v3:
+        schema_gates.append("er.eval_output_schema_version != 3")
+    if not include_task_families:
+        schema_gates.append("er.eval_output_schema_version != 5")
+    schema_gate = "AND " + " AND ".join(schema_gates) if schema_gates else ""
     if since_id is None:
         # Legacy v1.0.7-style cursor: strict `>` on ran_at only.
         cur = await conn.execute(

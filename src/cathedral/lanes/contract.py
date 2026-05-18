@@ -15,11 +15,22 @@ Rules (enforced by ``tests/lanes/test_contract.py``):
   2. **No I/O.** Lane modules must not import ``requests``, ``httpx``,
      ``aiohttp``, ``socket``, ``urllib.request``, ``urllib3``, or any
      other network library. No file reads outside the lane's own
-     ``fixtures/`` directory. No subprocess.
+     ``fixtures/`` directory. No subprocess. This is enforced by two
+     static AST passes in ``tests/lanes/test_contract.py``: a banned-
+     imports scan and a banned-call-sites scan that flags ``open(...)``,
+     ``Path.read_text()``, ``os.system(...)``, ``subprocess.*``,
+     ``urllib.request.urlopen(...)`` and related patterns. The checks
+     are conservative -- they catch the realistic attack surface but
+     are not a sandbox; a determined lane could still construct calls
+     dynamically. The expectation is that lane reviews enforce the
+     spirit of the rule and the contract tests catch the obvious
+     mistakes.
 
   3. **No clock.** No ``time.time()``, ``time.monotonic()``,
      ``datetime.now()``, ``datetime.utcnow()``. The publisher provides
-     any timestamp the lane needs through ``GenerateCtx``.
+     any timestamp the lane needs through ``GenerateCtx``. Enforced by
+     the banned-imports scan (``time`` and ``datetime`` are banned at
+     the import level).
 
   4. **No unseeded randomness.** Use a ``random.Random(seed)`` instance
      or ``numpy.random.default_rng(seed)``. Never the module-level

@@ -103,12 +103,13 @@ def build_task_family_prompt(problem: PublicProblem) -> str:
         "Challenge:\n"
         f"{json.dumps(payload, sort_keys=True, indent=2)}\n\n"
         "Return exactly one fenced FINAL_ANSWER JSON block. The JSON object "
-        "inside the fence must be the answer payload for this task family:\n"
+        "inside the fence must be the answer payload for this task family. "
+        "For the boolean family this is the solver-style DIMACS solution: "
+        "an `s SATISFIABLE` line followed by one or more `v <lit> ... 0` "
+        "lines covering every variable.\n"
         "```FINAL_ANSWER\n"
         "{\n"
-        '  "assignment": {\n'
-        '    "1": true\n'
-        "  }\n"
+        '  "dimacs_solution": "s SATISFIABLE\\nv 1 -2 3 0\\n"\n'
         "}\n"
         "```\n\n"
         "Do not include prose outside the FINAL_ANSWER block."
