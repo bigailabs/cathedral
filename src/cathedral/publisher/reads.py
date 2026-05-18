@@ -29,9 +29,7 @@ router = APIRouter()
 # --------------------------------------------------------------------------
 
 
-async def get_active_card_definition_or_404(
-    db: Any, card_id: str
-) -> dict[str, Any]:
+async def get_active_card_definition_or_404(db: Any, card_id: str) -> dict[str, Any]:
     """Look up a card_definitions row by id; 404 if missing OR archived.
 
     Mirrors the submit gate at ``publisher/submit.py`` so every public
@@ -655,6 +653,31 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             "eval_output_schema_version": 3,
             "cathedral_signature": run["cathedral_signature"],
             "failure_reason": output.get("failure_reason"),
+            "merkle_epoch": run.get("merkle_epoch"),
+        }
+    if schema_version == 5:
+        task_json = run.get("task_json") or {}
+        output = run.get("output_card_json") or {}
+        return {
+            "id": run["id"],
+            "agent_id": sub["id"],
+            "agent_display_name": sub["display_name"],
+            "miner_hotkey": sub["miner_hotkey"],
+            "task_type": task_json.get("task_type") or output.get("task_type"),
+            "task_id_public": task_json.get("task_id_public") or output.get("task_id_public"),
+            "epoch_salt": task_json.get("epoch_salt"),
+            "difficulty_tier": task_json.get("difficulty_tier")
+            if "difficulty_tier" in task_json
+            else output.get("difficulty_tier"),
+            "weighted_score": run["weighted_score"],
+            "score_parts": run["score_parts"],
+            "answer_hash": task_json.get("answer_hash") or output.get("answer_hash"),
+            "verifier_details_hash": task_json.get("verifier_details_hash")
+            or output.get("verifier_details_hash"),
+            "rejection_reason": output.get("rejection_reason"),
+            "ran_at": run["ran_at"],
+            "eval_output_schema_version": 5,
+            "cathedral_signature": run["cathedral_signature"],
             "merkle_epoch": run.get("merkle_epoch"),
         }
     if schema_version == 2:

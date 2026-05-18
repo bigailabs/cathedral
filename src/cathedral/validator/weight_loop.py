@@ -29,6 +29,33 @@ def _resolve_v3_bug_isolation_weight(configured: float | None) -> float | None:
         return configured
 
 
+def _resolve_task_family_weights(configured: dict[str, float] | None) -> dict[str, float]:
+    import json
+    import os
+
+    out = dict(configured or {})
+    raw_json = os.environ.get("CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON")
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            logger.warning("task_family_weights_json_invalid")
+        else:
+            if isinstance(parsed, dict):
+                out.update(parsed)
+            else:
+                logger.warning("task_family_weights_json_invalid", reason="not_object")
+
+    raw_boolean = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT")
+    if raw_boolean is not None:
+        try:
+            out["synthetic_boolean_v1"] = float(raw_boolean)
+        except ValueError:
+            logger.warning("synthetic_boolean_v1_weight_invalid", value=raw_boolean)
+
+    return out
+
+
 async def run_weight_loop(
     conn: aiosqlite.Connection,
     chain: Chain,
@@ -38,6 +65,7 @@ async def run_weight_loop(
     burn_uid: int = 204,
     forced_burn_percentage: float = 0.0,
     v3_bug_isolation_weight: float | None = None,
+    task_family_weights: dict[str, float] | None = None,
     stop: asyncio.Event | None = None,
     initial_backfill_complete: asyncio.Event | None = None,
     initial_backfill_timeout_secs: float = 120.0,
@@ -126,6 +154,7 @@ async def run_weight_loop(
                     v3_bug_isolation_weight=_resolve_v3_bug_isolation_weight(
                         v3_bug_isolation_weight
                     ),
+                    task_family_weights=_resolve_task_family_weights(task_family_weights),
                 )
                 scores.update(pulled)
             except Exception as ex:

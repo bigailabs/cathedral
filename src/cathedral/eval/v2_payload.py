@@ -86,6 +86,29 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
             "ran_at",
         }
     ),
+    # v5, generic Task Family lane rows. Used first by
+    # synthetic_boolean_v1. The signed row intentionally omits raw
+    # problem payloads and submitted answers. Validators authenticate
+    # score and hashes; publisher-side private storage owns reveal and
+    # audit material.
+    5: frozenset(
+        {
+            "id",
+            "agent_id",
+            "agent_display_name",
+            "miner_hotkey",
+            "task_type",
+            "task_id_public",
+            "epoch_salt",
+            "difficulty_tier",
+            "weighted_score",
+            "score_parts",
+            "answer_hash",
+            "verifier_details_hash",
+            "rejection_reason",
+            "ran_at",
+        }
+    ),
 }
 
 

@@ -23,6 +23,7 @@ disabled = false
 burn_uid = 0
 forced_burn_percentage = 98.0
 v3_bug_isolation_weight = 0.0
+task_family_weights = { synthetic_boolean_v1 = 0.0 }
 
 [publisher]
 url = "https://api.cathedral.computer"
