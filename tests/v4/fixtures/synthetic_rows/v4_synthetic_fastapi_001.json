@@ -1,0 +1,12 @@
+{
+  "task_id": "v4_synthetic_fastapi_001",
+  "base_repo": "python_fastapi_base",
+  "seed": 101,
+  "difficulty_tier": "bronze",
+  "language": "python",
+  "injected_fault_type": "sign_error_off_by_operator",
+  "_comment": "Synthetic in-tree fixture. The production corpus lives at $CATHEDRAL_V4_CORPUS_PATH and is operator-only; these fixtures exercise the load_task path hermetically. Vault repo: python_fastapi_base, seed=101. The bug_patch flips '+' to '*' in compute_discount; the winning_patch flips it to '-' (the real fix). Line numbers target the scrambled-but-structurally-identical file (scrambling renames identifiers; it does not change line counts).",
+  "bug_patch": "--- a/app/calculator.py\n+++ b/app/calculator.py\n@@ -18,1 +18,1 @@\n-    return price + price * factor\n+    return price * price * factor\n",
+  "winning_patch_template": "--- a/app/calculator.py\n+++ b/app/calculator.py\n@@ -18,1 +18,1 @@\n-    return price * price * factor\n+    return price - price * factor\n",
+  "hidden_test_template": "import sys\nsys.path.insert(0, '.')\nfrom app.calculator import {{rename:compute_discount}}\nassert {{rename:compute_discount}}(100.0, 10.0) == 90.0\nassert {{rename:compute_discount}}(200.0, 25.0) == 150.0\nprint('HIDDEN_TEST_PASSED')\n"
+}

@@ -116,6 +116,10 @@ ignore = ["S101", "S104", "S105", "UP036", "UP042"]
 "src/cathedral/v3/jobs/generator.py" = ["S311"]
 # CLI print formatting uses long status lines; word-wrapping degrades UX.
 "src/cathedral/v3/cli/main.py" = ["E501"]
+# v4 oracle jail emits a bash setup script that mounts /tmp inside the
+# jail. The literal "/tmp" is the in-jail mountpoint, not a host temp
+# directory; S108 (hardcoded /tmp) does not apply.
+"src/cathedral/v4/oracle/jail.py" = ["S108"]
 # Sandbox runner intentionally executes subprocesses; that is its job.
 # Inputs are validated by SandboxConfig.validate() before reaching subprocess.run.
 "src/cathedral/v3/sandbox/runner.py" = ["S603"]

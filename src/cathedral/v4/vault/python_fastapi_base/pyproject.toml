@@ -1,0 +1,5 @@
+[project]
+name = "v4-python-fastapi-base"
+version = "0.1.0"
+description = "v4 vault base repo: minimal FastAPI app with one injected fault."
+requires-python = ">=3.11"

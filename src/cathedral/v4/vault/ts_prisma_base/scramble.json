@@ -1,0 +1,20 @@
+{
+  "language": "typescript",
+  "renamable_identifiers": [
+    "formatGreeting",
+    "userKey",
+    "UserLike"
+  ],
+  "renamable_files": [],
+  "string_rotations": {
+    "stranger": ["stranger", "guest", "visitor", "anon"]
+  },
+  "compile_command": [
+    "bun",
+    "test"
+  ],
+  "test_entry": "tests/user_format.test.ts",
+  "hidden_test_template": "import { {{rename:formatGreeting}} } from './src/user_format';\nconst out = {{rename:formatGreeting}}({ email: 'a@b.c', fullName: 'Alice' });\nif (out !== 'Hello, Alice!') { console.error('FAIL: ' + out); process.exit(1); }\nconsole.log('HIDDEN_TEST_PASSED');\n",
+  "winning_patch_template": "--- a/src/user_format.ts\n+++ b/src/user_format.ts\n@@\n-  return `Hello, stranger!`;\n+  return `Hello, ${user.fullName}!`;\n",
+  "injected_fault_type": "string_literal_substitution"
+}

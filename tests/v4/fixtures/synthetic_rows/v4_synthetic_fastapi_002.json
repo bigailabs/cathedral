@@ -1,0 +1,12 @@
+{
+  "task_id": "v4_synthetic_fastapi_002",
+  "base_repo": "python_fastapi_base",
+  "seed": 202,
+  "difficulty_tier": "silver",
+  "language": "python",
+  "injected_fault_type": "tax_subtracts_instead_of_adds",
+  "_comment": "Synthetic in-tree fixture. apply_tax (line 23) is mutated to subtract; miner must restore add.",
+  "bug_patch": "--- a/app/calculator.py\n+++ b/app/calculator.py\n@@ -23,1 +23,1 @@\n-    return amount + amount * tax_rate\n+    return amount - amount * tax_rate\n",
+  "winning_patch_template": "--- a/app/calculator.py\n+++ b/app/calculator.py\n@@ -23,1 +23,1 @@\n-    return amount - amount * tax_rate\n+    return amount + amount * tax_rate\n",
+  "hidden_test_template": "import sys\nsys.path.insert(0, '.')\nfrom app.calculator import {{rename:apply_tax}}\nassert {{rename:apply_tax}}(100.0, 0.08) == 108.0\nassert {{rename:apply_tax}}(50.0, 0.20) == 60.0\nprint('HIDDEN_TEST_PASSED')\n"
+}

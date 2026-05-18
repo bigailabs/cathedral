@@ -1,0 +1,12 @@
+{
+  "task_id": "v4_synthetic_fastapi_003",
+  "base_repo": "python_fastapi_base",
+  "seed": 303,
+  "difficulty_tier": "gold",
+  "language": "python",
+  "injected_fault_type": "compound_discount_then_tax",
+  "_comment": "Synthetic in-tree fixture. Same compute_discount fault, but the hidden test composes discount + tax to catch any miner that only memorized one example.",
+  "bug_patch": "--- a/app/calculator.py\n+++ b/app/calculator.py\n@@ -18,1 +18,1 @@\n-    return price + price * factor\n+    return price + price * factor * 2\n",
+  "winning_patch_template": "--- a/app/calculator.py\n+++ b/app/calculator.py\n@@ -18,1 +18,1 @@\n-    return price + price * factor * 2\n+    return price - price * factor\n",
+  "hidden_test_template": "import sys\nsys.path.insert(0, '.')\nfrom app.calculator import {{rename:compute_discount}}, {{rename:apply_tax}}\ndiscounted = {{rename:compute_discount}}(100.0, 10.0)\nfinal = {{rename:apply_tax}}(discounted, 0.08)\nassert abs(final - 97.2) < 1e-6, f'composed result {final} != 97.2'\nprint('HIDDEN_TEST_PASSED')\n"
+}

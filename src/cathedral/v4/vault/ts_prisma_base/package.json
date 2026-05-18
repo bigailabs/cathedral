@@ -1,0 +1,16 @@
+{
+  "name": "v4-ts-prisma-base",
+  "version": "0.1.0",
+  "description": "v4 vault base repo: minimal TS + Prisma with one injected fault.",
+  "type": "module",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.20.0",
+    "typescript": "^5.5.0"
+  }
+}

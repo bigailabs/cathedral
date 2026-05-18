@@ -1,0 +1,21 @@
+{
+  "language": "python",
+  "renamable_identifiers": [
+    "compute_discount",
+    "apply_tax",
+    "price_endpoint",
+    "PriceRequest",
+    "PriceResponse"
+  ],
+  "renamable_files": [],
+  "string_rotations": {},
+  "compile_command": [
+    "python3",
+    "-c",
+    "import importlib, sys; sys.path.insert(0, '.'); importlib.import_module('app.calculator'); importlib.import_module('app.main'); print('ok')"
+  ],
+  "test_entry": "tests/test_smoke.py",
+  "hidden_test_template": "import sys\nsys.path.insert(0, '.')\nfrom app.calculator import {{rename:compute_discount}}, {{rename:apply_tax}}\n\nassert {{rename:compute_discount}}(100.0, 10.0) == 90.0, 'discount should subtract'\nassert {{rename:compute_discount}}(200.0, 25.0) == 150.0, 'discount should subtract (200/25)'\nassert {{rename:apply_tax}}(100.0, 0.08) == 108.0, 'tax should add'\nprint('HIDDEN_TEST_PASSED')\n",
+  "winning_patch_template": "--- a/app/calculator.py\n+++ b/app/calculator.py\n@@ -16,3 +16,3 @@\n     factor = percent / 100.0\n     # INJECTED FAULT: should be `price - price * factor`\n-    return price + price * factor\n+    return price - price * factor\n",
+  "injected_fault_type": "sign_error_off_by_operator"
+}
