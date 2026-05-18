@@ -7,6 +7,7 @@ only a small, audited slice of the host filesystem:
 
   * ``/work``      -- the workspace dir bind-mounted read-write
   * ``/python``    -- the pinned interpreter prefix bind-mounted read-only
+  * ELF loader/libs -- only the pinned interpreter's ``ldd`` dependency files
   * ``/dev/null``  -- bind-mounted from host
   * ``/dev/urandom`` -- bind-mounted from host
   * ``/tmp``       -- fresh tmpfs
@@ -41,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import structlog
@@ -121,12 +123,106 @@ def jail_available() -> bool:
         return False
     if not Path("/dev/null").exists() or not Path("/dev/urandom").exists():
         return False
-    if not Path(sys.prefix).is_dir():
+    if not Path(sys.base_prefix).is_dir():
         return False
     return True
 
 
-def assemble_jail(workspace_dir: Path, python_prefix: Path) -> Path:
+def _parse_ldd_paths(output: str) -> tuple[Path, ...]:
+    """Return absolute dependency paths from ``ldd`` output."""
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("linux-vdso"):
+            continue
+        if "=>" in line:
+            candidate = line.split("=>", 1)[1].strip().split(" ", 1)[0]
+        else:
+            candidate = line.split(" ", 1)[0]
+        if not candidate.startswith("/"):
+            continue
+        path = Path(candidate)
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        paths.append(path)
+    return tuple(paths)
+
+
+def _ldd_dependency_paths(binary: Path) -> tuple[Path, ...]:
+    """Return dynamic loader/shared-library paths for one trusted binary."""
+    ldd = shutil.which("ldd")
+    if ldd is None or not binary.exists():
+        return ()
+    try:
+        result = subprocess.run(  # noqa: S603 -- fixed ldd binary against trusted runtime file
+            [ldd, str(binary)],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return ()
+    return _parse_ldd_paths(result.stdout + result.stderr)
+
+
+@lru_cache(maxsize=8)
+def _python_runtime_bind_paths(python_prefix: Path, interpreter_relpath: str) -> tuple[Path, ...]:
+    """Return the pinned Python runtime's dynamic dependency closure.
+
+    The jail binds the Python prefix at ``/python``, but ELF loaders
+    still resolve their own absolute loader path plus libc/libm style
+    dependencies before Python starts. Stdlib extension modules used
+    by the cleanup bootstrap and hermetic network guard (``ctypes``,
+    ``ssl``, etc.) have their own shared-library dependencies too.
+
+    Bind only the files reported by ``ldd`` for the pinned interpreter
+    plus its stdlib extension modules instead of exposing broad host
+    directories like ``/lib`` or ``/usr``.
+    """
+    interpreter = python_prefix / interpreter_relpath
+    paths: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_many(candidates: tuple[Path, ...]) -> None:
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            paths.append(candidate)
+
+    add_many(_ldd_dependency_paths(interpreter))
+
+    for dynload_dir in (python_prefix / "lib").glob("python*/lib-dynload"):
+        if not dynload_dir.is_dir():
+            continue
+        for extension in dynload_dir.glob("*.so"):
+            add_many(_ldd_dependency_paths(extension))
+
+    return tuple(paths)
+
+
+def _ensure_runtime_bind_targets(
+    jail_root: Path,
+    python_prefix: Path,
+    interpreter_relpath: str,
+) -> tuple[Path, ...]:
+    """Create in-jail mount target files for interpreter runtime deps."""
+    paths = _python_runtime_bind_paths(python_prefix, interpreter_relpath)
+    for source in paths:
+        target = jail_root / source.relative_to("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch(exist_ok=True)
+    return paths
+
+
+def assemble_jail(
+    workspace_dir: Path,
+    python_prefix: Path,
+    interpreter_relpath: str = "bin/python3",
+) -> Path:
     """Assemble a fresh jail tree under a tmpdir and return the root.
 
     The caller owns the tmpdir lifetime via ``tempfile.mkdtemp`` --
@@ -141,12 +237,12 @@ def assemble_jail(workspace_dir: Path, python_prefix: Path) -> Path:
             tmp/    (mountpoint for fresh tmpfs)
             work/   (mountpoint for the workspace bind)
             python/ (mountpoint for the read-only python prefix bind)
-            lib  -> python/lib   (symlink, only if python_prefix/lib exists)
-            lib64 -> python/lib64 (symlink, only if python_prefix/lib64 exists)
+            <runtime deps> (empty files for bind-mounted ELF loader/libs)
 
-    The lib / lib64 symlinks let the dynamic linker resolve
-    ELF-hardcoded interpreter paths (e.g. /lib64/ld-linux-x86-64.so.2)
-    inside the jail without binding any host fs outside python_prefix.
+    The runtime dependency targets are the pinned interpreter's
+    ``ldd`` file paths. This lets Python start when its ELF loader
+    lives outside ``python_prefix`` without exposing broad host
+    library directories.
 
     The actual bind mounts happen INSIDE the new mount namespace
     (see ``run_in_jail``); on the host we only create the empty
@@ -164,20 +260,7 @@ def assemble_jail(workspace_dir: Path, python_prefix: Path) -> Path:
     # `mount --bind <file> <file>` has a destination inode.
     (jail_root / "dev" / "null").touch()
     (jail_root / "dev" / "urandom").touch()
-    # The python interpreter's ELF header hardcodes its dynamic linker
-    # path (typically /lib64/ld-linux-x86-64.so.2 on Linux x86_64) and
-    # that lookup happens INSIDE the jail after pivot_root. On usrmerge
-    # distros (Ubuntu / Debian / Fedora) /lib and /lib64 are themselves
-    # symlinks into /usr, so the python_prefix bind at /python already
-    # holds the real files at /python/lib... -- we just need /lib and
-    # /lib64 inside the jail to point at /python/lib and /python/lib64
-    # so the kernel can follow the chain. We only create the symlinks
-    # for prefix subdirs that actually exist; a python install rooted
-    # at a non-usrmerge prefix (conda, asdf, relocatable build) ships
-    # its libs under /python directly and does not need the redirect.
-    for libdir in ("lib", "lib64"):
-        if (python_prefix / libdir).is_dir():
-            (jail_root / libdir).symlink_to(f"python/{libdir}")
+    _ensure_runtime_bind_targets(jail_root, python_prefix, interpreter_relpath)
     return jail_root
 
 
@@ -201,6 +284,21 @@ def _build_setup_script(
     Passing the program via a file (not -c) sidesteps shell escaping
     bugs and keeps the bash heredoc layer minimal.
     """
+    runtime_paths = _python_runtime_bind_paths(python_prefix, interpreter_relpath)
+    runtime_mounts = "\n".join(
+        f"mount --bind {path} {jail_root}{path}\n"
+        f"mount -o remount,bind,ro {jail_root}{path}"
+        for path in runtime_paths
+    )
+    if runtime_mounts:
+        runtime_mounts += "\n"
+    ld_dirs = ["/python/lib", "/python/lib64"]
+    for path in runtime_paths:
+        parent = os.path.normpath(str(path.parent))
+        if parent not in ld_dirs:
+            ld_dirs.append(parent)
+    ld_library_path = ":".join(ld_dirs)
+
     # Convert paths to absolute strings; assume no shell-special chars
     # because they originate from tempfile.mkdtemp / sys.prefix.
     #
@@ -232,7 +330,7 @@ mount --bind {jail_root} {jail_root}
 # private mount namespace and we made it rprivate above.
 mount --bind {python_prefix} {jail_root}/python
 mount -o remount,bind,ro {jail_root}/python
-mount --bind {workspace_dir} {jail_root}/work
+{runtime_mounts}mount --bind {workspace_dir} {jail_root}/work
 mount --bind /dev/null {jail_root}/dev/null
 mount -o remount,bind,ro {jail_root}/dev/null
 mount --bind /dev/urandom {jail_root}/dev/urandom
@@ -257,6 +355,7 @@ cd /
 # --mount-proc; after pivot_root it lives at /proc.
 
 cd /work
+export LD_LIBRARY_PATH={ld_library_path}
 exec /python/{interpreter_relpath} -I -c '
 import ctypes, os, resource, sys
 libc = ctypes.CDLL(None, use_errno=True)
