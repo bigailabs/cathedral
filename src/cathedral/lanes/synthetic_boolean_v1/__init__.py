@@ -1,4 +1,4 @@
-"""synthetic_maxsat_v1 — weighted Max-SAT challenge lane.
+"""synthetic_boolean_v1 -- boolean challenge lane scaffold.
 
 Implements ``cathedral.lanes.contract.TaskFamily``.
 
@@ -16,11 +16,11 @@ from cathedral.lanes.contract import (
     VerifierResult,
 )
 
-FAMILY_ID = "synthetic_maxsat_v1"
+FAMILY_ID = "synthetic_boolean_v1"
 SCHEMA_VERSION = 1
 
 
-class MaxsatV1:
+class SyntheticBooleanV1:
     """Stub. The lane author fills in these three methods. The contract
     test suite at ``tests/lanes/test_contract.py`` enforces the rules;
     if it passes, the lane is mergeable."""
@@ -29,7 +29,7 @@ class MaxsatV1:
     schema_version: int = SCHEMA_VERSION
 
     def generate(self, ctx: GenerateCtx) -> tuple[PublicProblem, HiddenMetadata]:
-        raise NotImplementedError("synthetic_maxsat_v1.generate: implement me")
+        raise NotImplementedError("synthetic_boolean_v1.generate: implement me")
 
     def verify(
         self,
@@ -37,7 +37,7 @@ class MaxsatV1:
         hidden: HiddenMetadata,
         submission: Submission,
     ) -> VerifierResult:
-        raise NotImplementedError("synthetic_maxsat_v1.verify: implement me")
+        raise NotImplementedError("synthetic_boolean_v1.verify: implement me")
 
     def score(self, problem: PublicProblem, verifier: VerifierResult) -> ScoreResult:
-        raise NotImplementedError("synthetic_maxsat_v1.score: implement me")
+        raise NotImplementedError("synthetic_boolean_v1.score: implement me")

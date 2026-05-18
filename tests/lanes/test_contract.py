@@ -127,7 +127,7 @@ def lane(request: pytest.FixtureRequest) -> TaskFamily:
     if inst is None:
         pytest.skip(f"no TaskFamily class found in {request.param}")
     if _is_stub(inst):
-        pytest.skip(f"{inst.family_id} is a stub — contract gates kick in once generate() returns")
+        pytest.skip(f"{inst.family_id} is a stub; contract gates kick in once generate() returns")
     return inst
 
 

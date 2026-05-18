@@ -75,7 +75,7 @@ class PublicProblem(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    task_family: str = Field(description="Lane family_id, e.g. 'synthetic_maxsat_v1'.")
+    task_family: str = Field(description="Lane family_id, e.g. 'synthetic_boolean_v1'.")
     schema_version: int = Field(ge=1, description="Public-payload schema version.")
     task_id: str = Field(description="Unique id for this (seed, tier) instance.")
     difficulty_tier: int = Field(ge=0)
