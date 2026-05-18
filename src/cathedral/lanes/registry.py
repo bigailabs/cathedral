@@ -34,5 +34,6 @@ def active() -> list[TaskFamily]:
 # Eager registration of in-tree lanes. New lanes append here.
 # --------------------------------------------------------------------------
 
-# from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
-# register(SyntheticBooleanV1())
+from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1  # noqa: E402
+
+register(SyntheticBooleanV1())

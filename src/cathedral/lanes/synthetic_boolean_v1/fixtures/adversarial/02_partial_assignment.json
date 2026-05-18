@@ -1,0 +1,13 @@
+{
+  "name": "partial_assignment_missing_vars",
+  "seed": 42,
+  "tier": 0,
+  "submission": {
+    "assignment": {
+      "1": true,
+      "2": false,
+      "3": false
+    }
+  },
+  "expected_rejection_reason": "partial_assignment"
+}

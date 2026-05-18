@@ -1,0 +1,14 @@
+{
+  "name": "extra_var_in_assignment",
+  "_comment": "Variable 99 doesn't exist in the formula (num_vars=10). Must reject as partial/extra.",
+  "seed": 42,
+  "tier": 0,
+  "submission": {
+    "assignment": {
+      "1": true, "2": false, "3": false, "4": true, "5": false,
+      "6": true, "7": false, "8": false, "9": true, "10": false,
+      "99": true
+    }
+  },
+  "expected_rejection_reason": "partial_assignment"
+}

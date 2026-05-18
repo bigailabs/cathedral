@@ -1,0 +1,10 @@
+{
+  "name": "missing_answer_key",
+  "seed": 42,
+  "tier": 0,
+  "submission": {
+    "thoughts": "I solved it trust me",
+    "confidence": 0.99
+  },
+  "expected_rejection_reason": "missing_answer"
+}

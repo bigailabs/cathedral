@@ -1,0 +1,9 @@
+{
+  "name": "wrong_type_assignment_is_list",
+  "seed": 42,
+  "tier": 0,
+  "submission": {
+    "assignment": [true, false, true, false, true, false, true, false, true, false]
+  },
+  "expected_rejection_reason": "wrong_answer_type"
+}

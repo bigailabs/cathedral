@@ -1,0 +1,9 @@
+{
+  "name": "malformed_solver_output_no_terminator",
+  "seed": 42,
+  "tier": 0,
+  "submission": {
+    "solver_output": "s SATISFIABLE\nv 1 -2 -3 4 -5 6 -7 -8 9 -10\n"
+  },
+  "expected_rejection_reason": "solver_output_parse_failed"
+}

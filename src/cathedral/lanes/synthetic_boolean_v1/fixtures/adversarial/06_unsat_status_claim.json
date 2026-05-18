@@ -1,0 +1,10 @@
+{
+  "name": "unsat_status_claim_unsupported",
+  "_comment": "v1 only accepts s SATISFIABLE. UNSAT requires DRAT/LRAT proof handling we have not built.",
+  "seed": 42,
+  "tier": 0,
+  "submission": {
+    "solver_output": "s UNSATISFIABLE\n"
+  },
+  "expected_rejection_reason": "solver_output_parse_failed"
+}
