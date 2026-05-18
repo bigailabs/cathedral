@@ -457,6 +457,67 @@ async def test_v3_bug_isolation_weight_blends_without_diluting_v1_only_rows(tmp_
 
 
 @pytest.mark.asyncio
+async def test_v3_bug_isolation_weight_one_excludes_v1_only_rows(tmp_path) -> None:
+    """v3 weight 1.0 is an explicit hidden-oracle-only cutover."""
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        now = datetime.now(UTC).isoformat()
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-v1-only",
+                "card_id": "eu-ai-act",
+                "weighted_score": 0.70,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-v1-only",
+        )
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-mixed-v1",
+                "card_id": "eu-ai-act",
+                "weighted_score": 0.80,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-mixed",
+        )
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-mixed-v3",
+                "task_type": "bug_isolation_v1",
+                "eval_output_schema_version": 3,
+                "weighted_score": 0.20,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-mixed",
+        )
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-v3-only",
+                "task_type": "bug_isolation_v1",
+                "eval_output_schema_version": 3,
+                "weighted_score": 0.60,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-v3-only",
+        )
+
+        scores = await latest_pulled_score_per_hotkey(
+            conn,
+            since_days=7,
+            v3_bug_isolation_weight=1.0,
+        )
+        assert "hk-v1-only" not in scores
+        assert scores["hk-mixed"] == pytest.approx(0.20)
+        assert scores["hk-v3-only"] == pytest.approx(0.60)
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_v1_pool_averages_rows_not_task_type_averages(tmp_path) -> None:
     """Migrated unknown rows and new card rows belong to one v1 pool."""
     conn = await connect(str(tmp_path / "v.db"))

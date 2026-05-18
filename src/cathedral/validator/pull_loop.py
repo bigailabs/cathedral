@@ -153,9 +153,10 @@ async def latest_pulled_score_per_hotkey(
 ) -> dict[str, float]:
     """Rolling mean per hotkey from the pull-side table.
 
-    v1 card scores remain primary. bug_isolation_v1 can contribute a
-    small configurable share once enabled, without letting v3 rows
-    dilute or replace EU AI Act scores by accident.
+    v1 card scores remain primary while v3 contributes less than the
+    full weight. Setting v3_bug_isolation_weight to 1.0 is an explicit
+    emergency cutover to the hidden-oracle lane: hotkeys without a v3
+    score receive no v1 fallback.
     """
     await _ensure_pulled_eval_runs_table(conn)
     v3_weight = max(0.0, min(1.0, float(v3_bug_isolation_weight or 0.0)))
@@ -191,7 +192,8 @@ async def latest_pulled_score_per_hotkey(
         v3_score = scores.get("v3")
         if v1_score is not None:
             if v3_score is None:
-                out[hotkey] = v1_score
+                if v3_weight < 1.0:
+                    out[hotkey] = v1_score
             else:
                 out[hotkey] = (v1_score * v1_weight) + (v3_score * v3_weight)
         elif v3_score is not None and v3_weight > 0.0:
