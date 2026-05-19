@@ -212,3 +212,68 @@ def test_updater_refuses_untrusted_latest_tag_before_checkout(tmp_path: Path) ->
     assert not pip_log.exists()
     assert not validator_log.exists()
     assert not pm2_log.exists()
+
+
+def test_updater_exits_after_successful_update_so_pm2_respawns_from_new_script(
+    tmp_path: Path,
+) -> None:
+    """A live updater bug fix only takes effect if the running bash process
+    exits after writing the new updater.sh to disk. Otherwise PM2 keeps
+    executing the old loop and updater changes never reach production.
+
+    This test runs the updater in daemon mode (no RUN_ONCE) with a long
+    POLL_SECS, so the only way the script can exit is via the explicit
+    post-restart `exit 0`. A bounded subprocess timeout ensures the test
+    fails loudly if the self-exit ever regresses.
+    """
+    work, _allowed_key, allowed_signer = _create_signed_repo(tmp_path)
+    install_prefix = tmp_path / "install"
+    etc_dir = tmp_path / "etc" / "cathedral"
+    bin_dir = tmp_path / "bin"
+    install_prefix.mkdir()
+    etc_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+    (install_prefix / "allowed_signers").write_text(allowed_signer)
+
+    pip_log = tmp_path / "pip.log"
+    validator_log = tmp_path / "validator.log"
+    pm2_log = tmp_path / "pm2.log"
+    _write_executable(bin_dir / "pip", pip_log)
+    _write_executable(bin_dir / "cathedral-validator", validator_log)
+    _write_executable(bin_dir / "pm2", pm2_log)
+
+    env = {
+        **os.environ,
+        "CATHEDRAL_UPDATER_REPO_DIR": str(work),
+        "CATHEDRAL_INSTALL_PREFIX": str(install_prefix),
+        "CATHEDRAL_VALIDATOR_ENV": str(etc_dir / "validator.env"),
+        "CATHEDRAL_ETC_DIR": str(etc_dir),
+        # No CATHEDRAL_UPDATER_RUN_ONCE: this is daemon mode.
+        "CATHEDRAL_UPDATER_POLL_SECS": "3600",
+        "CATHEDRAL_UPDATER_PIP_BIN": str(bin_dir / "pip"),
+        "CATHEDRAL_UPDATER_VALIDATOR_BIN": str(bin_dir / "cathedral-validator"),
+        "CATHEDRAL_UPDATER_PM2_BIN": str(bin_dir / "pm2"),
+    }
+
+    result = subprocess.run(
+        [str(work / "bin" / "updater.sh")],
+        cwd=work,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "exiting to let PM2 respawn from new on-disk script" in result.stdout
+    current_tag = _run(
+        ["git", "describe", "--tags", "--exact-match", "HEAD"],
+        cwd=work,
+    ).stdout.strip()
+    assert current_tag == "v0.0.2"
+    expected_pm2 = (
+        f" startOrReload {install_prefix / 'ecosystem.config.cjs'} "
+        "--only cathedral-validator --update-env"
+    )
+    assert expected_pm2 in pm2_log.read_text()

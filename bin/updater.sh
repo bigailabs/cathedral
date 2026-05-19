@@ -107,6 +107,14 @@ while true; do
 
     echo "$(date -u +%FT%TZ) updater: restart validator"
     "$PM2_BIN" startOrReload "$ECOSYSTEM_PATH" --only cathedral-validator --update-env
+
+    # The validator is now running the new code. The updater process,
+    # however, is still executing the OLD bash loop from before the
+    # checkout. Exit so PM2's autorestart (60s delay) respawns us from
+    # the freshly-installed bin/updater.sh on disk. Without this, an
+    # updater bug fix would never take effect on a live host.
+    echo "$(date -u +%FT%TZ) updater: exiting to let PM2 respawn from new on-disk script"
+    exit 0
   fi
 
   sleep_or_exit 0
