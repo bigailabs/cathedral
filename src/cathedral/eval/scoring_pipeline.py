@@ -272,6 +272,29 @@ async def score_and_sign(
     verified_multiplier = _TIER_A_MULTIPLIER if (polaris_verified and _tier_a_enabled) else 1.0
     weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)
 
+    # Operator kill switch: when CATHEDRAL_ZERO_ALL_SCORES=true, every signed
+    # row goes out with weighted_score=0.0. Validators average pulled scores
+    # in a rolling window; a sustained stream of zeros collapses every
+    # miner's average to 0, which in chain/weights.apply_burn falls into the
+    # "no positive scores" branch and routes 100% of weight to burn_uid. This
+    # is the publisher-side equivalent of forced_burn_percentage=100.0 but
+    # requires zero validator updates and works against the full fleet,
+    # including operators on stale tags. Flip back to false to restore
+    # normal scoring on next eval cycle.
+    _zero_all_scores = _os.environ.get("CATHEDRAL_ZERO_ALL_SCORES", "").lower() == "true"
+    if _zero_all_scores:
+        logger.info(
+            "score_killswitch_engaged",
+            submission_id=submission_id,
+            card_id=card_id,
+            weighted_pre=weighted_pre,
+            weighted_final_before_killswitch=weighted_final,
+            reason="CATHEDRAL_ZERO_ALL_SCORES=true",
+        )
+        weighted_final = 0.0
+        weighted_after_first_mover = 0.0
+        weighted_pre = 0.0
+
     # CRIT-8: hash the literal `output_card_json` bytes that the publisher
     # both STORES (eval_runs.output_card_json) AND SERVES (EvalOutput.output_card).
     # Do NOT hash the Pydantic-rendered Card — Pydantic re-rendering applies
