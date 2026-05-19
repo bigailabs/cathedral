@@ -108,6 +108,11 @@ async def upsert_pulled_eval(
     weighted = float(eval_run["weighted_score"])
     ran_at = eval_run["ran_at"]
     task_type = str(eval_run.get("task_type") or eval_run.get("card_id") or "unknown")
+    schema_version_raw = eval_run.get("eval_output_schema_version", 1)
+    try:
+        schema_version = int(schema_version_raw)
+    except (TypeError, ValueError):
+        schema_version = 1
     if isinstance(ran_at, datetime):
         ran_at = ran_at.isoformat()
 
@@ -123,14 +128,15 @@ async def upsert_pulled_eval(
         """
         INSERT INTO pulled_eval_runs (
             eval_run_id, miner_hotkey, weighted_score,
-            ran_at, pulled_at, synth_claim_id, task_type
+            ran_at, pulled_at, synth_claim_id, task_type, schema_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(eval_run_id) DO UPDATE SET
             weighted_score=excluded.weighted_score,
             ran_at=excluded.ran_at,
             pulled_at=excluded.pulled_at,
-            task_type=excluded.task_type
+            task_type=excluded.task_type,
+            schema_version=excluded.schema_version
         """,
         (
             eval_run_id,
@@ -140,6 +146,7 @@ async def upsert_pulled_eval(
             datetime.now(UTC).isoformat(),
             synth_id,
             task_type,
+            schema_version,
         ),
     )
     await conn.commit()
@@ -150,53 +157,91 @@ async def latest_pulled_score_per_hotkey(
     *,
     since_days: int = 30,
     v3_bug_isolation_weight: float | None = None,
+    task_family_weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Rolling mean per hotkey from the pull-side table.
 
     v1 card scores remain primary. bug_isolation_v1 can contribute a
-    small configurable share once enabled, without letting v3 rows
-    dilute or replace EU AI Act scores by accident.
+    small configurable share once enabled. Generic Task Family rows
+    follow the same rule: they contribute only their configured slice
+    and default to zero weight.
     """
     await _ensure_pulled_eval_runs_table(conn)
     v3_weight = max(0.0, min(1.0, float(v3_bug_isolation_weight or 0.0)))
-    v1_weight = 1.0 - v3_weight
+    lane_weights = _normalized_task_family_weights(task_family_weights)
 
     since = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
     cur = await conn.execute(
         """
-        SELECT
-            miner_hotkey,
-            CASE
-                WHEN task_type = 'bug_isolation_v1' THEN 'v3'
-                ELSE 'v1'
-            END AS score_bucket,
-            AVG(weighted_score)
+        SELECT miner_hotkey, task_type, weighted_score, schema_version
         FROM pulled_eval_runs
         WHERE ran_at >= ?
-        GROUP BY miner_hotkey, score_bucket
         """,
         (since,),
     )
     rows = await cur.fetchall()
-    by_hotkey: dict[str, dict[str, float]] = {}
+    samples_by_hotkey: dict[str, dict[str, list[float]]] = {}
     for row in rows:
         hotkey = str(row[0])
-        score_bucket = str(row[1] or "v1")
+        task_type = str(row[1] or "unknown")
+        try:
+            schema_version = int(row[3])
+        except (TypeError, ValueError):
+            schema_version = 1
+        if schema_version == 5:
+            if task_type not in lane_weights:
+                continue
+            score_bucket = task_type
+        elif task_type == "bug_isolation_v1":
+            score_bucket = "v3"
+        else:
+            score_bucket = "v1"
         score = float(row[2])
-        by_hotkey.setdefault(hotkey, {})[score_bucket] = score
+        samples_by_hotkey.setdefault(hotkey, {}).setdefault(score_bucket, []).append(score)
+
+    by_hotkey: dict[str, dict[str, float]] = {}
+    for hotkey, buckets in samples_by_hotkey.items():
+        by_hotkey[hotkey] = {
+            bucket: sum(values) / len(values) for bucket, values in buckets.items() if values
+        }
 
     out: dict[str, float] = {}
     for hotkey, scores in by_hotkey.items():
         v1_score = scores.get("v1")
+        weighted_total = 0.0
+        active_special_weight = 0.0
         v3_score = scores.get("v3")
+        if v3_score is not None and v3_weight > 0.0:
+            weighted_total += v3_score * v3_weight
+            active_special_weight += v3_weight
+        for task_type, lane_weight in lane_weights.items():
+            lane_score = scores.get(task_type)
+            if lane_score is not None and lane_weight > 0.0:
+                weighted_total += lane_score * lane_weight
+                active_special_weight += lane_weight
+
+        active_special_weight = min(active_special_weight, 1.0)
+        weighted_total = min(weighted_total, 1.0)
         if v1_score is not None:
-            if v3_score is None:
+            if active_special_weight == 0.0:
                 out[hotkey] = v1_score
             else:
-                out[hotkey] = (v1_score * v1_weight) + (v3_score * v3_weight)
-        elif v3_score is not None and v3_weight > 0.0:
-            out[hotkey] = v3_score * v3_weight
+                out[hotkey] = (v1_score * (1.0 - active_special_weight)) + weighted_total
+        elif weighted_total > 0.0:
+            out[hotkey] = weighted_total
     return out
+
+
+def _normalized_task_family_weights(
+    configured: dict[str, float] | None,
+) -> dict[str, float]:
+    weights = {"synthetic_boolean_v1": 0.0}
+    for key, value in (configured or {}).items():
+        try:
+            weights[str(key)] = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            continue
+    return weights
 
 
 async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
@@ -209,7 +254,8 @@ async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
             ran_at TEXT NOT NULL,
             pulled_at TEXT NOT NULL,
             synth_claim_id INTEGER NOT NULL,
-            task_type TEXT NOT NULL DEFAULT 'unknown'
+            task_type TEXT NOT NULL DEFAULT 'unknown',
+            schema_version INTEGER NOT NULL DEFAULT 1
         )
         """
     )
@@ -219,6 +265,14 @@ async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
         try:
             await conn.execute(
                 "ALTER TABLE pulled_eval_runs ADD COLUMN task_type TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    if "schema_version" not in cols:
+        try:
+            await conn.execute(
+                "ALTER TABLE pulled_eval_runs ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
             )
         except aiosqlite.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
@@ -637,7 +691,7 @@ def _hotkey_for(eval_output: dict[str, Any]) -> str | None:
         version = int(version_raw)
     except (TypeError, ValueError):
         version = 1
-    if version == 3:
+    if version in {3, 5}:
         hk = eval_output.get("miner_hotkey")
         return hk if isinstance(hk, str) and hk else None
 
@@ -751,6 +805,28 @@ _SIGNED_EVAL_OUTPUT_KEYS_V3 = frozenset(
     }
 )
 
+# v5, generic Task Family lane row. The publisher signs score and hashes
+# only. Raw problem payloads and submitted answers stay publisher-private
+# until an explicit reveal/export path exists.
+_SIGNED_EVAL_OUTPUT_KEYS_V5 = frozenset(
+    {
+        "id",
+        "agent_id",
+        "agent_display_name",
+        "miner_hotkey",
+        "task_type",
+        "task_id_public",
+        "epoch_salt",
+        "difficulty_tier",
+        "weighted_score",
+        "score_parts",
+        "answer_hash",
+        "verifier_details_hash",
+        "rejection_reason",
+        "ran_at",
+    }
+)
+
 # Version-keyed dispatcher. A record's signed payload schema is selected
 # by ``eval_output_schema_version`` (defaulting to 1 when the field is
 # absent — the v1.0.x wire shape).
@@ -758,6 +834,7 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
     1: _SIGNED_EVAL_OUTPUT_KEYS_V1,
     2: _SIGNED_EVAL_OUTPUT_KEYS_V2,
     3: _SIGNED_EVAL_OUTPUT_KEYS_V3,
+    5: _SIGNED_EVAL_OUTPUT_KEYS_V5,
 }
 
 # Back-compat alias — the prior constant name. Tests and downstream code

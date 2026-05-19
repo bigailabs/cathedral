@@ -78,6 +78,7 @@ from cathedral.eval.polaris_runner import (
     PolarisRunnerError,
     PolarisRunResult,
 )
+from cathedral.lanes.contract import PublicProblem
 from cathedral.v1_types import EvalTask
 from cathedral.v3.claim_extraction import (
     ClaimExtractionError,
@@ -285,6 +286,16 @@ class BugIsolationHermesRun:
 
     stdout: str
     repair_stdout: str | None = None
+    duration_ms: int = 0
+    trace: dict[str, Any] = field(default_factory=dict)
+    trace_bundle: TraceBundle | None = None
+
+
+@dataclass
+class TaskFamilyHermesRun:
+    """Raw Hermes result for one Task Family challenge."""
+
+    stdout: str
     duration_ms: int = 0
     trace: dict[str, Any] = field(default_factory=dict)
     trace_bundle: TraceBundle | None = None
@@ -580,9 +591,7 @@ class SshHermesRunner:
                 "challenge_id_public": challenge_id_public,
             }
             extra: dict[str, str] | None = (
-                {"hermes_repair_stdout.txt": repair_stdout}
-                if repair_stdout is not None
-                else None
+                {"hermes_repair_stdout.txt": repair_stdout} if repair_stdout is not None else None
             )
             bundle = await self._collect_and_assemble(
                 conn,
@@ -603,6 +612,121 @@ class SshHermesRunner:
             return BugIsolationHermesRun(
                 stdout=stdout,
                 repair_stdout=repair_stdout,
+                duration_ms=int((time.monotonic() - t_start) * 1000),
+                trace=trace.to_dict(),
+                trace_bundle=bundle,
+            )
+        except SshHermesError:
+            trace.visit_ended_at = datetime.now(UTC).isoformat()
+            if profile_created and not profile_deleted:
+                try:
+                    await self._delete_profile(conn, eval_profile)
+                    profile_deleted = True
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "ssh_hermes_cleanup_failed",
+                        eval_profile=eval_profile,
+                        error=str(cleanup_exc),
+                    )
+            raise
+        finally:
+            if profile_created and not profile_deleted:
+                try:
+                    await self._delete_profile(conn, eval_profile)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "ssh_hermes_cleanup_failed",
+                        eval_profile=eval_profile,
+                        error=str(cleanup_exc),
+                    )
+            try:
+                conn.close()
+                await conn.wait_closed()
+            except Exception as close_exc:
+                logger.debug("ssh_hermes_close_error", error=str(close_exc))
+
+    async def run_task_family_challenge(
+        self,
+        *,
+        problem: PublicProblem,
+        prompt: str,
+        miner_hotkey: str,
+        submission: dict[str, Any],
+    ) -> TaskFamilyHermesRun:
+        """Run one generic Task Family prompt over SSH Hermes.
+
+        Returns raw stdout plus the trace bundle. The publisher owns answer
+        extraction, deterministic verification, scoring, signing, and
+        persistence.
+        """
+        ssh_host = submission.get("ssh_host")
+        ssh_port = submission.get("ssh_port") or 22
+        ssh_user = submission.get("ssh_user")
+        if not (ssh_host and ssh_user):
+            raise SshHermesError(
+                "config_invalid",
+                "submission missing ssh_host/ssh_user "
+                f"(ssh_host={bool(ssh_host)} ssh_user={bool(ssh_user)})",
+            )
+
+        run_id = str(uuid.uuid4())
+        task_slug = blake3.blake3(problem.task_id.encode("utf-8")).hexdigest()[:12]
+        eval_round = f"{problem.task_family}-{task_slug}-{run_id[:8]}"
+        eval_profile = f"cathedral-eval-{eval_round}"
+        trace = HermesVisitTrace(visit_started_at=datetime.now(UTC).isoformat())
+        t_start = time.monotonic()
+
+        import asyncssh
+
+        conn = await self._connect_with_retries(
+            asyncssh,
+            host=ssh_host,
+            port=int(ssh_port),
+            username=ssh_user,
+            miner_hotkey=miner_hotkey,
+        )
+        profile_created = False
+        profile_deleted = False
+        try:
+            hermes_version = await self._hermes_version(conn)
+            trace.hermes_version = hermes_version
+            resolved_home = await self._resolve_hermes_home(conn)
+            await self._verify_hermes_install(conn, resolved_home)
+            await self._clone_profile(conn, eval_profile)
+            profile_created = True
+            trace.eval_profile_name = eval_profile
+
+            t_invoke = time.monotonic()
+            stdout = await self._invoke_hermes_text(
+                conn,
+                eval_profile=eval_profile,
+                prompt=prompt,
+                eval_round=eval_round,
+                resolved_home=resolved_home,
+            )
+            trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
+
+            synthetic_card: dict[str, Any] = {
+                "task_type": problem.task_family,
+                "task_id": problem.task_id,
+            }
+            bundle = await self._collect_and_assemble(
+                conn,
+                eval_profile=eval_profile,
+                eval_id=run_id,
+                submission_id=str(submission["id"]),
+                eval_round=eval_round,
+                hermes_version=hermes_version,
+                card_json=synthetic_card,
+                hermes_stdout=stdout,
+                resolved_home=resolved_home,
+            )
+
+            trace.visit_ended_at = datetime.now(UTC).isoformat()
+            await self._delete_profile(conn, eval_profile)
+            profile_deleted = True
+            return TaskFamilyHermesRun(
+                stdout=stdout,
                 duration_ms=int((time.monotonic() - t_start) * 1000),
                 trace=trace.to_dict(),
                 trace_bundle=bundle,
@@ -1343,5 +1467,6 @@ __all__ = [
     "SshHermesError",
     "SshHermesRunner",
     "SshHermesRunnerConfig",
+    "TaskFamilyHermesRun",
     "TraceBundle",
 ]

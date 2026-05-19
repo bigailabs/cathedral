@@ -63,6 +63,7 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                     burn_uid=ctx.settings.weights.burn_uid,
                     forced_burn_percentage=ctx.settings.weights.forced_burn_percentage,
                     v3_bug_isolation_weight=ctx.settings.weights.v3_bug_isolation_weight,
+                    task_family_weights=ctx.settings.weights.task_family_weights,
                     stop=stop,
                     initial_backfill_complete=initial_backfill_complete,
                 )

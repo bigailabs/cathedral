@@ -168,6 +168,115 @@ def test_lane_has_no_banned_imports(lane_module_path: Path) -> None:
     assert not offenders, f"banned imports in lane: {offenders}"
 
 
+# Call-site patterns that bypass the import-name check. A lane that
+# avoids the banned import list can still violate the contract by
+# calling these directly (e.g. open("/etc/passwd"), os.system("...")).
+# We flag the call attribute or the bare name; the lane author can add
+# justified allowlist entries here with a comment if a real reason
+# arises.
+_BANNED_BARE_CALL_NAMES = frozenset(
+    {
+        "open",  # file I/O outside fixtures (use Path.read_text in
+        # a fixture loader if absolutely needed; lanes prefer in-memory)
+        "input",  # interactive read
+        "compile",  # arbitrary code compile then exec
+        "exec",
+        "eval",
+    }
+)
+
+# attribute-call patterns like ``os.system(...)`` or ``Path(...).read_text()``.
+# We match on the attribute name as the leaf of the call target.
+_BANNED_ATTRIBUTE_CALLS = frozenset(
+    {
+        "system",  # os.system
+        "popen",  # os.popen
+        "spawn",  # os.spawn*, asyncio.create_subprocess_exec
+        "spawnv",
+        "spawnve",
+        "Popen",  # subprocess.Popen
+        "run",  # subprocess.run (overly broad; covered via subprocess import)
+        "call",  # subprocess.call
+        "check_call",
+        "check_output",
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+        "read_text",  # Path.read_text -- fixtures load via JSON, not direct read
+        "read_bytes",
+        "write_text",
+        "write_bytes",
+        "open",  # Path.open
+        "urlopen",  # urllib.request.urlopen
+        "request",  # generic HTTP client method
+        "get",  # requests.get (overly broad — relies on import check too)
+        "post",  # requests.post
+        "connect",  # socket / db connect
+    }
+)
+
+
+# Names that benign attribute calls share with the banned set. We
+# avoid false positives by checking the call target's receiver name
+# when it's a `Name` node. Receivers in this set get the call
+# attribute allowed.
+_RECEIVER_ALLOWLIST_FOR_RUN = frozenset(
+    {
+        # rng.choice / rng.sample / rng.random / rng.shuffle are fine
+        "rng",
+        # dict.get, set.get, model.get -- ubiquitous; we only ban
+        # attribute "get" when receiver is plausibly a client (no
+        # cheap way to distinguish statically). The import-name ban
+        # of requests/httpx already covers HTTP; we keep the
+        # attribute "get" in _BANNED_ATTRIBUTE_CALLS but allowlist
+        # receivers seen in practice.
+    }
+)
+
+
+def test_lane_has_no_banned_call_sites(lane_module_path: Path) -> None:
+    """Static check beyond import-name scanning: flag direct calls
+    that perform I/O, subprocess, or eval, even when the originating
+    module isn't itself banned.
+
+    Catches e.g. ``open(path)``, ``os.system("...")``,
+    ``Path(p).read_text()``, ``urllib.request.urlopen(...)`` -- patterns
+    the import-name ban misses.
+
+    This is "partially enforced": the AST cannot statically prove a
+    function is safe (a benign-looking ``conn.get(...)`` on a dict
+    versus an HTTP client is indistinguishable), so the ban here errs
+    on the side of catching new attack surface. Add a justified
+    allowlist entry if a real lane needs one.
+    """
+    offenders: list[tuple[str, str]] = []
+    for py in lane_module_path.rglob("*.py"):
+        if py.name.startswith("test_"):
+            continue
+        source = py.read_text()
+        tree = ast.parse(source, filename=str(py))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # Bare-name call: open(...), exec(...), input(...)
+            if isinstance(func, ast.Name) and func.id in _BANNED_BARE_CALL_NAMES:
+                offenders.append((str(py.relative_to(lane_module_path)), f"call:{func.id}"))
+                continue
+            # Attribute call: os.system(...), Path(p).read_text(), etc.
+            if isinstance(func, ast.Attribute) and func.attr in _BANNED_ATTRIBUTE_CALLS:
+                # Skip allowlisted receiver names (e.g. rng.run if it
+                # ever appeared -- defensive).
+                if (
+                    isinstance(func.value, ast.Name)
+                    and func.value.id in _RECEIVER_ALLOWLIST_FOR_RUN
+                ):
+                    continue
+                offenders.append((str(py.relative_to(lane_module_path)), f"call:.{func.attr}"))
+    assert not offenders, (
+        f"banned call site in lane (file IO, subprocess, eval, or HTTP): {offenders}"
+    )
+
+
 # --------------------------------------------------------------------------
 # Behavioural conformance (skipped for stub lanes)
 # --------------------------------------------------------------------------

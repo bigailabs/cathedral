@@ -36,6 +36,16 @@ from cathedral.cards.registry import CardRegistry
 from cathedral.eval.polaris_runner import PolarisRunner, PolarisRunnerError
 from cathedral.eval.scoring_pipeline import EvalSigner, score_and_sign
 from cathedral.eval.task_generator import generate_task
+from cathedral.lanes import registry as lane_registry
+from cathedral.lanes.publisher import (
+    build_generate_ctx,
+    build_task_family_prompt,
+    enabled_task_family_ids,
+    persist_task_family_result,
+    score_and_sign_task_family_stdout,
+    task_family_feed_enabled,
+    task_family_tier,
+)
 from cathedral.publisher import repository
 from cathedral.publisher.merkle import epoch_for
 from cathedral.storage import (
@@ -426,6 +436,16 @@ class EvalOrchestrator:
                 )
             except Exception as exc:
                 log.exception("v3_bug_isolation_failed", error=str(exc))
+            try:
+                await self._maybe_run_task_family_lanes(
+                    submission=submission,
+                    runner=runner,
+                    epoch=epoch,
+                    round_index=round_index,
+                    log=log,
+                )
+            except Exception as exc:
+                log.exception("task_family_eval_failed", error=str(exc))
             log.info("eval_run_complete", epoch=epoch, round_index=round_index)
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
@@ -552,6 +572,95 @@ class EvalOrchestrator:
             challenge_id_public=signed.row.get("challenge_id_public"),
             weighted_score=signed.row.get("weighted_score"),
         )
+
+    async def _maybe_run_task_family_lanes(
+        self,
+        *,
+        submission: dict[str, Any],
+        runner: Any,
+        epoch: int,
+        round_index: int,
+        log: structlog.stdlib.BoundLogger,
+    ) -> None:
+        if not task_family_feed_enabled():
+            return
+
+        run_challenge = getattr(runner, "run_task_family_challenge", None)
+        if run_challenge is None:
+            log.info("task_family_skipped", reason="runner_unsupported")
+            return
+
+        miner_hotkey = str(submission["miner_hotkey"])
+        issued_at_iso = _ms_iso(datetime.now(UTC))
+        for family_id in enabled_task_family_ids():
+            try:
+                lane = lane_registry.lookup(family_id)
+            except KeyError:
+                log.warning("task_family_skipped", family_id=family_id, reason="unregistered")
+                continue
+
+            tier = task_family_tier(family_id)
+            ctx = build_generate_ctx(
+                family_id=family_id,
+                miner_hotkey=miner_hotkey,
+                epoch=epoch,
+                round_index=round_index,
+                tier=tier,
+                issued_at_iso=issued_at_iso,
+            )
+            try:
+                problem, hidden = lane.generate(ctx)
+            except NotImplementedError:
+                log.info("task_family_skipped", family_id=family_id, reason="stub")
+                continue
+
+            prompt = build_task_family_prompt(problem)
+            hermes_run = await run_challenge(
+                problem=problem,
+                prompt=prompt,
+                miner_hotkey=miner_hotkey,
+                submission=submission,
+            )
+            epoch_salt = f"epoch_{epoch}:{family_id}"
+            signed = score_and_sign_task_family_stdout(
+                lane=lane,
+                problem=problem,
+                hidden=hidden,
+                submission_row=submission,
+                stdout=hermes_run.stdout,
+                ran_at_iso=_ms_iso(datetime.now(UTC)),
+                signer=self.signer,
+                epoch_salt=epoch_salt,
+            )
+
+            trace_bundle = getattr(hermes_run, "trace_bundle", None)
+            published_artifact = await self._maybe_publish_bundle(trace_bundle, log)
+            trace_json: dict[str, Any] = dict(hermes_run.trace or {})
+            if trace_bundle is not None:
+                trace_json["bundle_blake3"] = trace_bundle.bundle_blake3
+                trace_json["cathedral_eval_round"] = trace_bundle.cathedral_eval_round
+            if published_artifact is not None:
+                trace_json["bundle_url"] = published_artifact.bundle_url
+                trace_json["manifest_url"] = published_artifact.manifest_url
+                trace_json["manifest_hash"] = published_artifact.manifest_hash
+
+            await persist_task_family_result(
+                self.db,
+                submission_row=submission,
+                problem=problem,
+                signed=signed,
+                epoch=epoch,
+                round_index=round_index,
+                duration_ms=int(hermes_run.duration_ms),
+                trace_json=trace_json,
+                feed_enabled=True,
+            )
+            log.info(
+                "task_family_eval_complete",
+                family_id=family_id,
+                task_id_public=signed.row.get("task_id_public"),
+                weighted_score=signed.row.get("weighted_score"),
+            )
 
     async def _on_retryable_failure(
         self,
@@ -751,9 +860,7 @@ async def run_eval_loop(
             cadence_count=len(due),
         )
         try:
-            v3_active_hotkeys = (
-                await _v3_active_hotkeys_snapshot(db) if v3_feed_enabled() else None
-            )
+            v3_active_hotkeys = await _v3_active_hotkeys_snapshot(db) if v3_feed_enabled() else None
         except aiosqlite.Error as e:
             logger.warning("v3_active_hotkeys_query_failed", error=str(e))
             v3_active_hotkeys = None

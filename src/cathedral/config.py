@@ -55,6 +55,7 @@ class WeightsConfig(BaseModel):
     burn_uid: int = 204
     forced_burn_percentage: float = MAINNET_FORCED_BURN_PERCENTAGE
     v3_bug_isolation_weight: float = 0.0
+    task_family_weights: dict[str, float] = Field(default_factory=dict)
 
 
 class PublisherConfig(BaseModel):
@@ -253,9 +254,7 @@ def _sync_sn39_mainnet_weight_policy(config_path: Path) -> None:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             if in_weights and not replaced:
-                out.append(
-                    f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}"
-                )
+                out.append(f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}")
                 replaced = True
             in_weights = stripped == "[weights]"
             saw_weights = saw_weights or in_weights

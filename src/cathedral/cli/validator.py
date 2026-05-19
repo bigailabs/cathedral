@@ -126,6 +126,7 @@ def pull(
                     burn_uid=settings.weights.burn_uid,
                     forced_burn_percentage=settings.weights.forced_burn_percentage,
                     v3_bug_isolation_weight=settings.weights.v3_bug_isolation_weight,
+                    task_family_weights=settings.weights.task_family_weights,
                     stop=stop,
                 )
             ),

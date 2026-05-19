@@ -30,6 +30,8 @@ burn_uid = 204
 forced_burn_percentage = 95.0
 # Off until the bug_isolation_v1 feed is intentionally enabled.
 v3_bug_isolation_weight = 0.0
+# Off until synthetic_boolean_v1 is intentionally enabled.
+task_family_weights = { synthetic_boolean_v1 = 0.0 }
 
 [publisher]
 url = "https://api.cathedral.computer"
