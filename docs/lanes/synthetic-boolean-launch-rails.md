@@ -50,9 +50,9 @@ Why single-active and not per-miner hidden:
 - Reveal posture is clean: the formula and the winning solution can be
   revealed together at retirement without privacy bookkeeping per
   miner.
-- It keeps Serge's generator, seeds, solutions, and per-instance
-  timings entirely private during the active window. Only the
-  formula text reaches miners; only the winning answer hash + score
+- It keeps the private boolean corpus generator, seeds, solutions, and
+  per-instance timings entirely private during the active window. Only
+  the formula text reaches miners; only the winning answer hash + score
   reach the public feed.
 
 Operational notes:
@@ -208,7 +208,7 @@ score_record_url
 
 ## Public repo leak guard
 
-The public repository must never contain Serge's private corpus, production
+The public repository must never contain the private boolean corpus, production
 generator, real solutions, private timings, or private formula names. The CI
 guard in `tests/lanes/test_public_repo_leak_guard.py` fails when:
 

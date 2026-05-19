@@ -78,7 +78,7 @@ _TEXT_SUFFIXES = {
 _MAX_PUBLIC_CNF_BYTES = 10_000
 
 
-def _private_markers() -> tuple[str, ...]:
+def _private_corpus_markers() -> tuple[str, ...]:
     # Build strings from pieces so this guard does not trip on itself.
     return (
         "sro" + "gatch",
@@ -91,7 +91,7 @@ def _private_markers() -> tuple[str, ...]:
     )
 
 
-def _private_formula_names() -> tuple[str, ...]:
+def _private_sat_artifact_names() -> tuple[str, ...]:
     return (
         "1_" + "uf20-" + "01.cnf",
         "2_" + "uf50-" + "01000.cnf",
@@ -113,9 +113,9 @@ def _walk_repo_files() -> list[Path]:
     return files
 
 
-def test_private_serge_artifact_names_are_not_committed() -> None:
+def test_private_sat_artifact_names_are_not_committed() -> None:
     offenders: list[str] = []
-    private_names = set(_private_formula_names())
+    private_names = set(_private_sat_artifact_names())
     for path in _walk_repo_files():
         if path.name in private_names:
             offenders.append(str(path.relative_to(ROOT)))
@@ -137,9 +137,9 @@ def test_no_large_public_sat_formula_or_solution_artifacts() -> None:
     )
 
 
-def test_private_serge_markers_are_not_committed_in_text_files() -> None:
+def test_private_corpus_markers_are_not_committed_in_text_files() -> None:
     offenders: list[str] = []
-    markers = _private_markers()
+    markers = _private_corpus_markers()
     for path in _walk_repo_files():
         if path.suffix.lower() not in _TEXT_SUFFIXES:
             continue
