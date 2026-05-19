@@ -50,6 +50,7 @@ module.exports = {
       cwd: "/opt/cathedral",
       script: "/opt/cathedral/source/bin/updater.sh",
       interpreter: "/bin/bash",
+      env: validatorEnv,
       autorestart: true,
       restart_delay: 60000,
       out_file: "/var/log/cathedral/updater.out.log",
