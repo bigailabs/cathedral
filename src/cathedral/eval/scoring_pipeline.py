@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -32,6 +33,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cathedral.cards import preflight, score_card
 from cathedral.cards.preflight import PreflightError
 from cathedral.cards.registry import CardRegistry, RegistryEntry
+from cathedral.eval.scorer_metrics import (
+    bump_audit_failure,
+    set_scorer_misconfig,
+)
 from cathedral.eval.scoring import (
     FIRST_MOVER_DELTA,
     FIRST_MOVER_PENALTY_MULTIPLIER,
@@ -54,6 +59,69 @@ _FIRST_MOVER_PENALTY_MULTIPLIER = FIRST_MOVER_PENALTY_MULTIPLIER
 # kept in source so re-entry is a single env flip. DO NOT REMOVE — dead
 # code by design until Tier A returns as a paid tier.
 _TIER_A_MULTIPLIER = 1.10
+
+
+# cathedralai/cathedral#156: companion config the v2 scorer requires.
+# An operator who flips CATHEDRAL_SCORER=v2 without also flipping
+# CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true ends up silently scoring every
+# eval as ``trace_bundle_missing`` because the v2 wire path is dormant
+# while the v1 wire path keeps emitting under the old schema. The
+# startup probe + per-call probe below catch this and surface it as a
+# loud warning + a SCORER_MISCONFIG_GAUGE entry the validator runbook
+# tells operators to alert on.
+_V2_SCORER_COMPANION_FLAGS: tuple[str, ...] = ("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD",)
+
+
+def _v2_scorer_selected(env: dict[str, str] | None = None) -> bool:
+    values = os.environ if env is None else env
+    return values.get("CATHEDRAL_SCORER", "").lower() == "v2"
+
+
+def _v2_companion_missing(env: dict[str, str] | None = None) -> list[str]:
+    """Return the companion flag keys the v2 scorer needs but that are unset.
+
+    Empty list means the configuration is consistent. A non-empty list is
+    the misconfiguration signal: the gauge gets bumped for each missing
+    key so operators see exactly what to flip.
+    """
+    values = os.environ if env is None else env
+    missing: list[str] = []
+    for key in _V2_SCORER_COMPANION_FLAGS:
+        if values.get(key, "").lower() != "true":
+            missing.append(key)
+    return missing
+
+
+def check_v2_scorer_activation(env: dict[str, str] | None = None) -> list[str]:
+    """Loud startup probe for the v2 scorer activation flags.
+
+    Call from validator/publisher process startup. Returns the missing
+    companion-flag keys (empty when consistent). Emits a single
+    ``scorer_v2_misconfigured`` warning per missing key and sets the
+    ``SCORER_MISCONFIG_GAUGE`` so dashboards and the runbook alert can
+    fire without waiting for the first eval to hit the per-call probe.
+    The gauge is cleared for any companion that IS set so the alert
+    auto-resolves when the operator fixes the flag.
+    """
+    values = os.environ if env is None else env
+    if not _v2_scorer_selected(values):
+        for key in _V2_SCORER_COMPANION_FLAGS:
+            set_scorer_misconfig(key, 0)
+        return []
+    missing = _v2_companion_missing(values)
+    for key in _V2_SCORER_COMPANION_FLAGS:
+        set_scorer_misconfig(key, 1 if key in missing else 0)
+    if missing:
+        logger.warning(
+            "scorer_v2_misconfigured",
+            scorer="v2",
+            missing_companions=missing,
+            remediation=(
+                "set CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true or unset "
+                "CATHEDRAL_SCORER; see docs/validator/RUNBOOK.md"
+            ),
+        )
+    return missing
 
 
 # Re-export from v2_payload (no-publisher-cycle module) so existing
@@ -172,6 +240,76 @@ async def score_and_sign(
     submission_id = submission["id"]
     card_id = submission["card_id"]
 
+    # cathedralai/cathedral#75 PR 4 / #156: decide the eval-output
+    # schema version up front so the v2 path can take its early-exit
+    # branches (skip the v1-only first-mover delta, omit the v1 score
+    # dimensions) before any v1-shaped state is built up.
+    emit_v2 = (
+        os.environ.get("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD", "").lower() == "true"
+        and published_artifact is not None
+    )
+    schema_version = 2 if emit_v2 else 1
+
+    # #156: per-call misconfiguration probe. ``CATHEDRAL_SCORER=v2``
+    # was set explicitly by the operator, so they expect every row to
+    # ride the v2 wire shape. If a row reaches scoring without the
+    # companion flag or without a published artifact, surface it loud
+    # and bump the gauge instead of silently scoring it as a zero-
+    # weighted ``trace_bundle_missing``. The startup probe (see
+    # ``check_v2_scorer_activation``) sets the env-level signal; this
+    # block catches the runtime case where the bundle never lands.
+    if _v2_scorer_selected() and not emit_v2:
+        missing_companions = _v2_companion_missing()
+        reason = "missing_companion_flag" if missing_companions else "trace_bundle_missing"
+        for key in missing_companions:
+            set_scorer_misconfig(key, 1)
+        set_scorer_misconfig("trace_bundle_missing", 0 if published_artifact is not None else 1)
+        logger.warning(
+            "scorer_v2_misconfigured",
+            scorer="v2",
+            reason=reason,
+            missing_companions=missing_companions,
+            has_published_artifact=published_artifact is not None,
+            submission_id=str(submission_id),
+            remediation=(
+                "set CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true and confirm "
+                "the publisher emits a PublishedArtifact; see "
+                "docs/validator/RUNBOOK.md"
+            ),
+        )
+
+    # #156: durable v2 audit write happens before any of the scoring
+    # work so the audit row survives a downstream rollback. Swallowed
+    # failures bump SCORER_METRICS.AUDIT_FAILURE_COUNTER per exception
+    # class; we keep going either way so the eval still gets scored.
+    eval_run_id = str(uuid4())
+    ran_at = datetime.now(UTC)
+    ran_at_iso = _ms_iso(ran_at)
+    if emit_v2:
+        try:
+            await repository.record_v2_audit(
+                conn,
+                audit_id=str(uuid4()),
+                eval_run_id=eval_run_id,
+                submission_id=str(submission_id),
+                miner_hotkey=str(miner_hotkey),
+                card_id=str(card_id),
+                schema_version=schema_version,
+                manifest_hash=getattr(published_artifact, "manifest_hash", None),
+                bundle_url=getattr(published_artifact, "bundle_url", None),
+                weighted_score_pre=None,
+                written_at=ran_at,
+            )
+        except Exception as audit_exc:
+            bump_audit_failure(type(audit_exc).__name__)
+            logger.warning(
+                "v2_audit_write_failed",
+                eval_run_id=eval_run_id,
+                submission_id=str(submission_id),
+                exception_class=type(audit_exc).__name__,
+                error=str(audit_exc),
+            )
+
     # Card decode + preflight + score.
     # CONTRACTS §1.4: worker_owner_hotkey, polaris_agent_id, and id are
     # "filled by validator from claim" — they MUST come from server-trusted
@@ -189,14 +327,23 @@ async def score_and_sign(
     output_card_json["id"] = card_id
 
     weighted_pre = 0.0
-    score_dict: dict[str, Any] = {
-        "source_quality": 0.0,
-        "freshness": 0.0,
-        "specificity": 0.0,
-        "usefulness": 0.0,
-        "clarity": 0.0,
-        "maintenance": 0.0,
-    }
+    # #156: v1 rows carry the six-dimension breakdown; v2 rows do not.
+    # On the v2 path we leave score_parts empty so the stored row does
+    # not advertise misleading zero v1 dimensions that the v2 lane
+    # never produced. The v1 path keeps the zero-default behaviour so
+    # an early preflight/validation failure still shows the dimension
+    # names (with zeros) consumers already expect.
+    if emit_v2:
+        score_dict: dict[str, Any] = {}
+    else:
+        score_dict = {
+            "source_quality": 0.0,
+            "freshness": 0.0,
+            "specificity": 0.0,
+            "usefulness": 0.0,
+            "clarity": 0.0,
+            "maintenance": 0.0,
+        }
     try:
         card = Card.model_validate(raw_card)
     except (ValueError, TypeError) as e:
@@ -232,12 +379,22 @@ async def score_and_sign(
             errors=[e for e in errors if "card validation" in e],
         )
 
-    # First-mover delta lookup
-    multiplier = await _first_mover_multiplier(
-        conn,
-        submission=submission,
-        weighted_score_pre=weighted_pre,
-    )
+    # #156: the first-mover delta is a v1-only concept — it lives on the
+    # ``metadata_fingerprint`` similarity key that the v1 submit path
+    # writes per Card+bundle. v2 rows come from the Polaris-native
+    # deploy / Hermes pipeline and do not carry a meaningful
+    # fingerprint, so the v1 multiplier query against
+    # ``first_mover_for_fingerprint`` is undefined for them. Gate the
+    # call here and emit a 1.0 pass-through so v2 weighted_score is
+    # the raw preflight + scorer output.
+    if emit_v2:
+        multiplier = 1.0
+    else:
+        multiplier = await _first_mover_multiplier(
+            conn,
+            submission=submission,
+            weighted_score_pre=weighted_pre,
+        )
     weighted_after_first_mover = weighted_pre * multiplier
 
     # Verified-runtime multiplier per CONTRACTS.md §7.3 + Fred's Moltbook
@@ -266,9 +423,7 @@ async def score_and_sign(
     # cathedralai/cathedral#70: the 1.10x verified-runtime multiplier is
     # gated behind CATHEDRAL_ENABLE_POLARIS_DEPLOY. v1 ships with the flag
     # off so every scored run uses the raw weighted score.
-    import os as _os
-
-    _tier_a_enabled = _os.environ.get("CATHEDRAL_ENABLE_POLARIS_DEPLOY", "").lower() == "true"
+    _tier_a_enabled = os.environ.get("CATHEDRAL_ENABLE_POLARIS_DEPLOY", "").lower() == "true"
     verified_multiplier = _TIER_A_MULTIPLIER if (polaris_verified and _tier_a_enabled) else 1.0
     weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)
 
@@ -278,9 +433,6 @@ async def score_and_sign(
     # defaults/normalization and yields different bytes than what gets served,
     # making the hash externally unverifiable.
     output_card_hash = card_hash(output_card_json)
-    eval_run_id = str(uuid4())
-    ran_at = datetime.now(UTC)
-    ran_at_iso = _ms_iso(ran_at)
 
     # CONTRACTS.md §1.10 + §4.2 + L8 + tests/v1: the cathedral_signature
     # covers the public EvalOutput projection (the wire shape the validator
@@ -302,18 +454,10 @@ async def score_and_sign(
     # cutover window so v1.1.0 validators continue verifying.
     display_name = submission.get("display_name", "")
 
-    # v1.1.0 PR 4: eval-output schema version dispatch.
-    # CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true tells the publisher to
-    # emit the new shape. Validators dispatch per-record via the
-    # `eval_output_schema_version` field on the wire (see
-    # validator/pull_loop.py _SIGNED_KEYS_BY_VERSION).
-    import os as _os
-
-    emit_v2 = (
-        _os.environ.get("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD", "").lower() == "true"
-        and published_artifact is not None
-    )
-    schema_version = 2 if emit_v2 else 1
+    # v1.1.0 PR 4 + #156: ``emit_v2`` and ``schema_version`` were
+    # decided at the top of this function so the v1-only first-mover
+    # delta and the v1-only score dimensions could be skipped on v2
+    # rows. Reuse them here without rebinding.
 
     # Build the v2 excerpt by default whenever the artifact bundle was
     # produced — the DB column lights up in BOTH schemas so the env

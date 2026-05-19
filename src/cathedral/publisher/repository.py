@@ -777,6 +777,57 @@ async def insert_eval_run(
         await conn.commit()
 
 
+async def record_v2_audit(
+    conn: aiosqlite.Connection,
+    *,
+    audit_id: str,
+    eval_run_id: str,
+    submission_id: str,
+    miner_hotkey: str,
+    card_id: str,
+    schema_version: int,
+    manifest_hash: str | None,
+    bundle_url: str | None,
+    weighted_score_pre: float | None,
+    written_at: datetime,
+) -> None:
+    """Insert a v2 audit row and commit immediately.
+
+    cathedralai/cathedral#156: the v2 scorer path writes this row
+    BEFORE the main eval_runs INSERT and commits in its own
+    transaction. If the downstream scoring/persistence work raises
+    and rolls back, the audit row remains as the durable forensic
+    anchor for what cathedral attempted to score.
+
+    The function takes the caller's ``conn`` so we share the WAL-mode
+    sqlite file and avoid opening a second handle; durability comes
+    from the explicit commit at the end of this call, not from a
+    separate connection.
+    """
+    await conn.execute(
+        """
+        INSERT INTO eval_runs_audit (
+            audit_id, eval_run_id, submission_id, miner_hotkey, card_id,
+            schema_version, manifest_hash, bundle_url,
+            weighted_score_pre, written_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            audit_id,
+            eval_run_id,
+            submission_id,
+            miner_hotkey,
+            card_id,
+            int(schema_version),
+            manifest_hash,
+            bundle_url,
+            float(weighted_score_pre) if weighted_score_pre is not None else None,
+            written_at.isoformat(),
+        ),
+    )
+    await conn.commit()
+
+
 async def list_eval_runs_for_submission(
     conn: aiosqlite.Connection, submission_id: str, limit: int = 20
 ) -> list[dict[str, Any]]:

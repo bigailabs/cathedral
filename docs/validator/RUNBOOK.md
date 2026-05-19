@@ -217,7 +217,85 @@ Prints `registered: true` once the metagraph has been read and the validator's h
 | `pull_loop_disabled` in startup logs | `CATHEDRAL_PUBLIC_KEY_HEX` not set in `validator.env`; pull loop is not spawned, validator runs legacy-only |
 | `pull_eval_signature_invalid` repeating | Pubkey mismatch; re-fetch `kid: cathedral-eval-signing` from `https://api.cathedral.computer/.well-known/cathedral-jwks.json` |
 | `cathedral-updater: bad signature on vX.Y.Z` | Maintainer key not in keyring, or tag truly unsigned; do NOT bypass |
+| `scorer_v2_misconfigured` in logs | See "v2 scorer activation" below |
+| `AUDIT_FAILURE_COUNTER` nonzero | See "v2 audit failures" below |
 | Disk full on `data/` | Vacuum old `evidence_bundles`, snapshot, restart |
+
+## v2 scorer activation
+
+cathedralai/cathedral#156. The v2 wire shape (eval card excerpt plus
+artifact manifest hash) is selected by two coordinated environment
+flags. If they get out of sync, the validator silently drops back to
+the legacy v1 path or scores every row as zero — neither is what the
+operator who set `CATHEDRAL_SCORER=v2` asked for.
+
+Required flags when running the v2 scorer:
+
+| Var | Value | Purpose |
+|---|---|---|
+| `CATHEDRAL_SCORER` | `v2` | Explicit operator opt-in to the v2 scorer path. Read by the activation probe; mismatch with the companion flag triggers the misconfig signal. |
+| `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD` | `true` | Companion flag the scoring pipeline reads to actually emit v2 wire bytes. Without it, the v2 scorer is dormant and every row falls back to v1. |
+| `CATHEDRAL_ENABLE_POLARIS_DEPLOY` | `true` (optional) | Re-enables the 1.10x Tier A verified-runtime multiplier. Off by default; ship v2 alone first, layer the multiplier later. |
+
+The publisher process exposes `SCORER_MISCONFIG_GAUGE` (a process-local
+dict keyed by env-var name). The gauge is `1` for any companion flag
+the v2 scorer needs but that is not set; `0` once the operator fixes
+it. The startup probe (`check_v2_scorer_activation`) sets the gauge on
+process start; per-call probes inside `score_and_sign` also set it
+when a v2 row reaches scoring without a published artifact (gauge key
+`trace_bundle_missing`).
+
+Operator response when the gauge is nonzero:
+
+1. Confirm `CATHEDRAL_SCORER=v2` is the intended scorer in
+   `validator.env`. If not, unset it and restart — the gauge clears
+   on the next startup probe.
+2. If v2 is intended, set `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true` in
+   the same `validator.env`. Restart so the startup probe re-reads
+   the env.
+3. If the gauge keeps reporting `trace_bundle_missing` even with
+   both flags set, the publisher is not handing a `PublishedArtifact`
+   to `score_and_sign`. Check that the Hippius bundle publisher is
+   reachable and that the orchestrator wired the artifact through
+   (look for `bundle_published` log lines on each scored eval).
+4. Never silently swap back to v1 while `CATHEDRAL_SCORER=v2` is set
+   — flip the operator opt-in first so the gauge clears, then change
+   the companion flag.
+
+## v2 audit failures
+
+The v2 scorer writes a forensic audit row to `eval_runs_audit` BEFORE
+the main `eval_runs` insert and commits in its own transaction. The
+audit row is the durable anchor for what cathedral attempted to
+score; it survives a downstream rollback of the main eval row.
+
+Audit-write exceptions are logged at `warning` level with event
+`v2_audit_write_failed` and bump `AUDIT_FAILURE_COUNTER`, keyed by
+the exception class name (for example `OperationalError`,
+`IntegrityError`). The counter is intentionally not reset on its own
+— a nonzero value is the post-incident anchor for forensic review.
+
+Operator response when the counter is nonzero:
+
+1. Pull recent `v2_audit_write_failed` log lines. The
+   `exception_class` and `error` fields name the underlying sqlite
+   error.
+2. Inspect the `eval_runs_audit` table for the affected
+   `submission_id` / `eval_run_id` window. Rows that ARE present
+   anchor the scoring intent even if the matching `eval_runs` row
+   never landed; missing audit rows for known evals indicate the
+   audit write itself failed (typically database file lock or disk
+   full).
+3. The scoring path keeps going after a swallowed audit exception so
+   the eval still scores. Treat the counter as a degraded-mode signal,
+   not a hard failure: backfill missing audit rows from the eval
+   record (audit fields are a subset of the eval row) once the
+   underlying cause is fixed.
+4. If the counter rises sharply for a single exception class, treat
+   that as the new top-priority alert. Persistent `OperationalError`
+   typically means the sqlite file is busy or read-only; persistent
+   `IntegrityError` means an upstream wire-shape change crept in
+   without a coordinated migration.
 
 ## Handing off
 

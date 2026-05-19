@@ -239,6 +239,29 @@ CREATE TABLE IF NOT EXISTS eval_run_to_epoch (
     epoch       INTEGER NOT NULL REFERENCES merkle_anchors(epoch)
 );
 CREATE INDEX IF NOT EXISTS idx_eval_run_epoch ON eval_run_to_epoch(epoch);
+
+-- v2 scorer audit log (cathedralai/cathedral#156).
+-- Durable forensic trail for v2-shaped eval rows. Written in its own
+-- commit boundary BEFORE the main eval_runs INSERT so the row survives
+-- any rollback in downstream scoring/persistence. Intentionally has no
+-- foreign key on eval_runs.id: the audit row anchors what we INTENDED
+-- to score even when the eval row never lands.
+CREATE TABLE IF NOT EXISTS eval_runs_audit (
+    audit_id           TEXT PRIMARY KEY,
+    eval_run_id        TEXT NOT NULL,
+    submission_id      TEXT NOT NULL,
+    miner_hotkey       TEXT NOT NULL,
+    card_id            TEXT NOT NULL,
+    schema_version     INTEGER NOT NULL,
+    manifest_hash      TEXT,
+    bundle_url         TEXT,
+    weighted_score_pre REAL,
+    written_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_audit_run
+    ON eval_runs_audit(eval_run_id);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_audit_submission
+    ON eval_runs_audit(submission_id, written_at DESC);
 """
 
 
