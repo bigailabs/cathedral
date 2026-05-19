@@ -1,0 +1,58 @@
+name: Task Family Security Guard
+
+on:
+  pull_request:
+    branches:
+      - main
+      - feature/lanes-task-family-contract
+    paths:
+      - .github/workflows/task-family-security-guard.yml
+      - pyproject.toml
+      - src/cathedral/lanes/**
+      - tests/lanes/**
+  push:
+    branches:
+      - main
+      - feature/lanes-task-family-contract
+      - feature/synthetic-boolean-launch-rails
+    paths:
+      - .github/workflows/task-family-security-guard.yml
+      - pyproject.toml
+      - src/cathedral/lanes/**
+      - tests/lanes/**
+
+jobs:
+  leak-guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Lint public task-family guard surface
+        run: |
+          python -m ruff check \
+            src/cathedral/lanes/contract.py \
+            src/cathedral/lanes/registry.py \
+            tests/lanes/test_contract.py \
+            tests/lanes/test_task_family_launch_rails.py \
+            tests/lanes/test_public_repo_leak_guard.py
+
+      - name: Run public leak guard and lane contract tests
+        run: |
+          PYTHONPATH=src pytest \
+            tests/lanes/test_contract.py \
+            tests/lanes/test_task_family_launch_rails.py \
+            tests/lanes/test_public_repo_leak_guard.py \
+            -q
