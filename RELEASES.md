@@ -10,6 +10,30 @@ need to know about.
 
 ---
 
+## v1.1.24 - Public SAT readiness surfaces
+
+**Date:** 2026-05-20
+
+**Headline:** Signed public release for validator fleet readiness ahead of SAT shadow cutover. SAT weight remains `0.0` by default.
+
+### Changed
+
+- **API root index.** `GET /` now returns stable operator and miner links for health, docs, `skill.md`, JWKS, eval-spec, recent signed evals, and agent submission.
+- **SAT miner contract in `skill.md`.** The public onboarding doc now describes the generic `synthetic_boolean_v1` prompt shape, CNF hash check, `FINAL_ANSWER` format, and first-submitted winner rule without challenge material.
+- **Public SAT docs tightened.** Miner docs use authorized URL language and avoid publishing transport internals, challenge construction details, corpus names, or private filenames.
+
+### Verification
+
+- Focused public checks passed for the API root route, `skill.md`, SAT lane, and public leak guard.
+- Marker scan over touched public docs found no private challenge markers, generator names, corpus names, formula files, or solution files.
+
+### Operator note
+
+- This release does not enable scored SAT emissions. `config/mainnet.toml` still keeps `task_family_weights = { synthetic_boolean_v1 = 0.0 }` and `forced_burn_percentage = 95.0`.
+- Tag-watching validators can update to this release through the signed-tag updater.
+
+---
+
 ## v1.1.23 - SAT shadow hardening on public main
 
 **Date:** 2026-05-20
