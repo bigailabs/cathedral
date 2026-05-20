@@ -61,10 +61,13 @@ def test_api_root_points_to_public_entrypoints(publisher_client: object) -> None
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "cathedral-publisher"
+    assert body["description"] == "Publisher API for Cathedral SN39."
     assert body["links"]["health"] == "/health"
     assert body["links"]["skill"] == "/skill.md"
-    assert body["links"]["api_base"] == "/api/cathedral"
-    assert body["links"]["submit"] == "/api/cathedral/v1/agents/submit"
+    assert body["links"]["api"] == "/api/cathedral"
+    assert body["links"]["eval_spec"] == "/api/cathedral/v1/cards/eu-ai-act/eval-spec"
+    assert body["links"]["recent_signed_evals"] == "/api/cathedral/v1/leaderboard/recent"
+    assert body["links"]["submit_agent"] == "/api/cathedral/v1/agents/submit"
 
 
 def test_skill_md_mentions_byo_path(publisher_client: object) -> None:
@@ -80,6 +83,62 @@ def test_skill_md_mentions_byo_path(publisher_client: object) -> None:
     r = publisher_client.get("/skill.md")  # type: ignore[attr-defined]
     body = r.text.lower()
     assert "byo" in body or "bring your own" in body
+
+
+def test_skill_md_includes_public_safe_sat_contract(publisher_client: object) -> None:
+    """skill.md must include the generic SAT miner contract."""
+    if publisher_client is None:
+        pytest.skip("publisher app not buildable")
+    r = publisher_client.get("/skill.md")  # type: ignore[attr-defined]
+    body = r.text
+    lowered = body.lower()
+
+    assert "synthetic_boolean_v1" in body
+    assert "static contract and onboarding reference" in lowered
+    assert "not a challenge feed" in lowered
+    assert "sat challenges are not listed" in lowered
+    assert "public_input.cnf_url" in body
+    assert "public_input.cnf_sha256" in body
+    assert "num_vars" in body
+    assert "num_clauses" in body
+    assert "fetch `public_input.cnf_url` exactly as given" in lowered
+    assert "SHA-256" in body
+    assert "```FINAL_ANSWER" in body
+    assert '"dimacs_solution"' in body
+    assert "first submitted among valid receipts, not first verified" in lowered
+    assert "sat mainnet weight remains disabled" in lowered
+
+
+def test_skill_md_sat_contract_has_no_private_challenge_material(
+    publisher_client: object,
+) -> None:
+    """The public onboarding doc must not expose private SAT artifacts."""
+    if publisher_client is None:
+        pytest.skip("publisher app not buildable")
+    r = publisher_client.get("/skill.md")  # type: ignore[attr-defined]
+    lowered = r.text.lower()
+
+    forbidden = (
+        "p cnf",
+        "active.cnf",
+        "operator-input.cnf",
+        ".dimacs",
+        ".sol",
+        "fetch_token",
+        "token-bearing",
+        "planted_assignment",
+        "generator_version",
+        "private_corpus",
+        "/private/",
+        "sro" + "gatch",
+        "rse" + "rge",
+        "uf20-" + "01",
+        "uf50-" + "01000",
+        "uf250-" + "0100",
+        "sha" + "1.cnf",
+    )
+    offenders = [needle for needle in forbidden if needle in lowered]
+    assert not offenders, f"skill.md leaked private SAT marker(s): {offenders}"
 
 
 def test_verified_multiplier_capped_at_one() -> None:

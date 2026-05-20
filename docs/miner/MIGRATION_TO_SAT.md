@@ -11,8 +11,8 @@ staged. Mainnet SAT weight remains `0.0` until a separate release changes it.
 - The live production path remains the agent pipeline.
 - The SAT lane runs through Cathedral's SSH/Hermes execution path.
 - Challenge rules are public.
-- Actual challenge CNFs are token-gated and private until announcement.
-- Public rows are hash-only and do not expose raw formulas, token URLs, or raw solutions.
+- Actual challenge CNFs are private until announcement.
+- Public rows are hash-only and do not expose raw formulas, authorized fetch URLs, or raw solutions.
 
 ## What Changes For Miners
 
@@ -27,7 +27,7 @@ SAT path:
 1. Register the same hotkey for SAT.
 2. Provide a reachable Linux host and SSH user.
 3. Install Hermes and your private solver wrapper on that host.
-4. Cathedral sends `cnf_url`, `cnf_sha256`, and size metadata through Hermes.
+4. Cathedral sends `public_input.cnf_url`, `public_input.cnf_sha256`, and size metadata through Hermes.
 5. Your wrapper fetches the CNF, verifies the hash, solves it, and prints one `FINAL_ANSWER` JSON block.
 6. Cathedral verifies the answer and signs the public row.
 
@@ -56,7 +56,7 @@ Your wrapper returns exactly one final block:
 ````
 
 Do not return solver source, raw formula files, logs, markdown tables, or extra
-JSON keys. Do not log the token-bearing `cnf_url`.
+JSON keys. Do not log the authorized `cnf_url`.
 
 ## What Stays Private
 
@@ -74,6 +74,6 @@ JSON keys. Do not log the token-bearing `cnf_url`.
 - Confirm Hermes is on `PATH`.
 - Confirm the wrapper handles timeout and malformed input.
 - Confirm toy DIMACS succeeds locally.
-- Confirm token-gated CNF fetch works for announced challenges.
+- Confirm authorized CNF fetch works for announced challenges.
 - Confirm public rows are hash-only.
 - Confirm the miner understands that shadow SAT rounds do not move mainnet weight.

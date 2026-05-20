@@ -367,16 +367,17 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     async def _root() -> dict[str, Any]:
         return {
             "service": "cathedral-publisher",
-            "message": "Cathedral Publisher API",
+            "description": "Publisher API for Cathedral SN39.",
             "links": {
                 "health": "/health",
                 "docs": "/docs",
                 "skill": "/skill.md",
                 "jwks": "/.well-known/cathedral-jwks.json",
-                "api_base": "/api/cathedral",
+                "api": "/api/cathedral",
                 "cards": "/api/cathedral/v1/cards",
-                "leaderboard": "/api/cathedral/v1/leaderboard?card=eu-ai-act",
-                "submit": "/api/cathedral/v1/agents/submit",
+                "eval_spec": "/api/cathedral/v1/cards/eu-ai-act/eval-spec",
+                "recent_signed_evals": "/api/cathedral/v1/leaderboard/recent",
+                "submit_agent": "/api/cathedral/v1/agents/submit",
             },
         }
 
