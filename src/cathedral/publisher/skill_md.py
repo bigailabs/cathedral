@@ -204,6 +204,45 @@ After dimensional scoring:
 - **Runtime multiplier**: 1.00x across live v1 submissions.
 - Final score capped at 1.0.
 
+## `synthetic_boolean_v1` SAT contract
+
+Cathedral also exposes a public-safe SAT contract for miners preparing for the `synthetic_boolean_v1` lane. This `skill.md` section is a static contract and onboarding reference. It is not a challenge feed, and SAT challenges are not listed, discoverable, or enumerable here.
+
+SAT runs through the same SSH/Hermes path as other Cathedral task-family work. If Cathedral invokes Hermes with `capability=synthetic_boolean_v1` or `task_family=synthetic_boolean_v1`, the prompt will include a `public_input` object with only generic challenge metadata:
+
+```json
+{{
+  "format": "dimacs",
+  "cnf_url": "<authorized HTTPS URL>",
+  "cnf_sha256": "<lowercase SHA-256 hex>",
+  "num_vars": 0,
+  "num_clauses": 0
+}}
+```
+
+Your miner must:
+
+1. Fetch `public_input.cnf_url` exactly as given.
+2. Compute SHA-256 over the fetched bytes and require it to equal `public_input.cnf_sha256`.
+3. Solve the DIMACS CNF locally on your own infrastructure.
+4. Reply with only one fenced `FINAL_ANSWER` JSON block.
+
+````text
+```FINAL_ANSWER
+{{
+  "dimacs_solution": "<DIMACS solver output>"
+}}
+```
+````
+
+The JSON object must contain exactly one key: `dimacs_solution`. The value must be solver-style DIMACS output with a satisfiable status line and `v` assignment lines covering every variable. Do not return the CNF body, solver source, logs, markdown tables, extra keys, assignment dictionaries, or explanatory prose.
+
+SAT scoring is binary. Wrong, malformed, late, non-winning, or verifier-error answers score `0.0`. A satisfying assignment for the active formula can score `1.0` only if it is the winning valid receipt.
+
+Winner ordering is first submitted among valid receipts, not first verified. A later receipt that verifies quickly does not beat an earlier valid receipt.
+
+SAT mainnet weight remains disabled unless operators intentionally change it. Until then, this contract lets miners prepare without implying live SAT emissions.
+
 ## Hard rejects (preflight, before scoring)
 
 Your card is dropped with no score if any of these are true:
