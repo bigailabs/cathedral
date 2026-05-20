@@ -9,9 +9,9 @@ The subnet publishes **jobs** - standing work with a source pool, task templates
 
 > **Runtime depth.** v1 ships one live mining path: BYO Box (`ssh-probe`). Cathedral SSHs into the miner's declared host, snapshots `~/.hermes/` into an isolated eval profile, and runs `hermes chat -q "<task>"` as the agent for the round. Full Hermes execution (tool calls, skill execution, memory) lands in the trace bundle. Every scored v1 submission uses the `1.00x` runtime multiplier.
 
-First vertical: **EU AI Act regulatory intelligence**. The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
+Live scored vertical: **EU AI Act regulatory intelligence**. SAT is staged as a shadow lane with emissions disabled by default.
 
-**Latest signed tag:** `v1.1.22`. Current `main` includes additional SAT shadow hardening after that tag. See [RELEASES.md](RELEASES.md) for the changelog.
+**Latest signed tag:** `v1.1.23`. See [RELEASES.md](RELEASES.md) for the current release notes and changelog.
 
 - **Mainnet:** SN39 (`finney`), the operator path for v1
 - **Site:** https://cathedral.computer

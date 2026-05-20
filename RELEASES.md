@@ -10,11 +10,11 @@ need to know about.
 
 ---
 
-## Unreleased - SAT shadow hardening on public main
+## v1.1.23 - SAT shadow hardening on public main
 
 **Date:** 2026-05-20
 
-**Headline:** Public main now has the SAT shadow path hardened for end-to-end testing while SAT weight remains `0.0` by default.
+**Headline:** Signed public release for the SAT shadow path hardening on main while SAT weight remains `0.0` by default.
 
 ### Added
 
@@ -35,7 +35,7 @@ need to know about.
 ### Operator note
 
 - This is not a scored SAT launch. Challenge corpus material is operator-held and not committed to this repo.
-- Cut a new signed release tag before expecting tag-watching validators to pick up these post-`v1.1.22` commits.
+- Tag-watching validators can update to this release through the signed-tag updater.
 
 ---
 
