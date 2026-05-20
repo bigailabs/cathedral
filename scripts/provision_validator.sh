@@ -79,6 +79,7 @@ SRC_DIR="/opt/cathedral/source"
 VENV_DIR="/opt/cathedral/.venv"
 ETC_DIR="/etc/cathedral"
 LOG_DIR="/var/log/cathedral"
+STATE_DIR="/var/lib/cathedral"
 ECOSYSTEM_DST="/opt/cathedral/ecosystem.config.cjs"
 
 echo "==> step 1: validate inputs"
@@ -140,7 +141,7 @@ fi
 # --- Step 4: directory layout ----------------------------------------------
 
 echo "==> step 4: create directories"
-sudo install -d -o cathedral -g cathedral /opt/cathedral "$ETC_DIR" "$LOG_DIR"
+sudo install -d -o cathedral -g cathedral /opt/cathedral "$ETC_DIR" "$LOG_DIR" "$STATE_DIR"
 
 # --- Step 5: clone or update source ----------------------------------------
 
@@ -219,6 +220,7 @@ CATHEDRAL_PUBLIC_KEY_HEX=${CATHEDRAL_PUBLIC_KEY_HEX}
 CATHEDRAL_PUBLISHER_TOKEN=
 CATHEDRAL_NETWORK=${CATHEDRAL_NETWORK}
 CATHEDRAL_CONFIG_PATH=${CONFIG_DST}
+CATHEDRAL_UPDATER_EXPECTED_REMOTE_URL=${REPO_URL}
 EOF
 sudo install -o cathedral -g cathedral -m 0600 "$TMP_ENV" "$ETC_DIR/validator.env"
 
