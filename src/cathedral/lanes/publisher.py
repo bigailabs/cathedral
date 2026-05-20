@@ -260,6 +260,15 @@ def score_and_sign_task_family_stdout(
                 details={"error": str(exc)[:512]},
             )
 
+    if os.environ.get("CATHEDRAL_ZERO_ALL_SCORES", "").lower() == "true":
+        score_parts = dict(score.score_parts)
+        score_parts["lock_winner"] = 0.0
+        score = ScoreResult(
+            weighted_score=0.0,
+            rejection_reason=score.rejection_reason,
+            score_parts=score_parts,
+        )
+
     row = build_signed_task_family_row(
         eval_run_id=eval_run_id or str(uuid4()),
         submission_id=str(submission_row["id"]),
