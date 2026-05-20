@@ -74,7 +74,6 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                     stop=stop,
                 )
             )
-            initial_backfill_complete.set()
             weight_task = asyncio.create_task(
                 weight_loop.run_weight_loop(
                     conn,

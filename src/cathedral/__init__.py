@@ -4,7 +4,7 @@ Verifies signed Polaris evidence about regulatory and legal intelligence
 cards, scores them, and sets weights on the Bittensor chain.
 """
 
-__version__ = "1.1.24"
+__version__ = "1.1.25"
 
 # Encoded version stamped on every `set_weights` extrinsic so on-chain
 # observers can distinguish Cathedral-binary weight-sets from generic

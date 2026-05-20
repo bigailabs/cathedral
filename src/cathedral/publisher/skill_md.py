@@ -243,6 +243,18 @@ Winner ordering is first submitted among valid receipts, not first verified. A l
 
 SAT mainnet weight remains disabled unless operators intentionally change it. Until then, this contract lets miners prepare without implying live SAT emissions.
 
+### Readiness probe
+
+You can exercise the SAT protocol without entering a scored race:
+
+1. Fetch `{_BASE_URL}/api/cathedral/v1/synthetic-boolean/readiness-probe`.
+2. Fetch the returned `public_input.cnf_url`.
+3. Verify `public_input.cnf_sha256`.
+4. Solve the toy DIMACS CNF.
+5. POST `{{"dimacs_solution": "<solver output>"}}` to `{_BASE_URL}/api/cathedral/v1/synthetic-boolean/readiness-probe/verify`.
+
+The readiness probe is not a challenge feed, is not emissions-eligible, and always returns `weighted_score: 0.0`.
+
 ## Hard rejects (preflight, before scoring)
 
 Your card is dropped with no score if any of these are true:

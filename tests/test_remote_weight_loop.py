@@ -60,6 +60,27 @@ def _chain(hotkeys: list[str]) -> MockChain:
 
 
 @pytest.mark.asyncio
+async def test_apply_without_cached_vector_reports_remote_unavailable(tmp_path) -> None:
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        applied = await remote_weight_loop.apply_cached_remote_vector_once(
+            conn,
+            _chain(["burn-hotkey"]),
+            Health(),
+            public_key=Ed25519PrivateKey.generate().public_key(),
+            expected_key_id="pinned",
+            network="finney",
+            netuid=39,
+            disabled=False,
+            fallback_after_stale_minutes=0.0,
+            refuse_after_stale_minutes=30.0,
+        )
+        assert applied is False
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_503_startup_without_cached_vector_refuses_set_weights(tmp_path) -> None:
     conn = await connect(str(tmp_path / "v.db"))
     sk = Ed25519PrivateKey.generate()

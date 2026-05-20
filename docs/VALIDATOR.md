@@ -84,13 +84,17 @@ The canonical bytes for verification are `json.dumps(dict_minus_excluded, sort_k
 
 The Cathedral signing pubkey is published at `GET /.well-known/cathedral-jwks.json` on the publisher. Validators should fetch it once during setup, then pin it locally as `CATHEDRAL_PUBLIC_KEY_HEX`. The validator binary reads only the pinned env var at startup; it does not auto-rotate from the same publisher it then trusts (key handoff must happen out of band).
 
-### Remote signed weight source darkship
+### Remote signed weight source
 
-Local weight computation remains the default. Remote signed weights are opt-in
-through `[weight_source].mode = "remote"` or `CATHEDRAL_WEIGHT_SOURCE=remote`.
-Remote mode refuses startup unless the validator has a pinned policy public key
-through `CATHEDRAL_POLICY_PUBLIC_KEY_HEX` or
-`weight_source.cathedral_policy_public_key_hex`.
+Managed SN39 mainnet validators use remote signed weights by default. The
+validator verifies every policy vector against the pinned Cathedral policy
+public key in `weight_source.cathedral_policy_public_key_hex`, maps hotkeys to
+live metagraph uids locally, and then calls `set_weights`.
+
+If no remote vector has ever been accepted, the validator falls back to the
+local configured burn policy for that tick. Once a remote vector has been
+accepted, stale or invalid vectors fail closed instead of silently reverting to
+local weighting.
 
 The corrected #155 vector contract is:
 

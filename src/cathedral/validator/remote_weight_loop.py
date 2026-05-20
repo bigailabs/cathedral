@@ -214,12 +214,12 @@ async def apply_cached_remote_vector_once(
     fallback_after_stale_minutes: float,
     refuse_after_stale_minutes: float,
     now: datetime | None = None,
-) -> None:
+) -> bool:
     state = await remote_state.load_state(conn)
     if state.cached_vector is None:
         logger.warning("remote_weight_no_cached_vector")
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return
+        return False
 
     now = (now or datetime.now(UTC)).astimezone(UTC)
     try:
@@ -234,7 +234,7 @@ async def apply_cached_remote_vector_once(
     except (ValidationError, VectorVerificationError, ValueError) as exc:
         logger.warning("remote_weight_cached_vector_rejected", error=str(exc))
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return
+        return True
 
     stale = _stale_state(
         vector,
@@ -249,7 +249,7 @@ async def apply_cached_remote_vector_once(
             expires_at=vector.expires_at,
         )
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return
+        return True
     if stale == "fallback":
         logger.warning(
             "remote_weight_using_stale_fallback",
@@ -281,11 +281,11 @@ async def apply_cached_remote_vector_once(
             burn_hotkey_prefix=vector.burn_hotkey[:8],
         )
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return
+        return True
     if not normalized:
         logger.warning("remote_weight_no_mapped_entries", vector_id=vector.vector_id)
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return
+        return True
 
     status = WeightStatus.DISABLED if disabled else await chain.set_weights(normalized)
     await health.update(weight_status=status)
@@ -304,6 +304,7 @@ async def apply_cached_remote_vector_once(
         count=len(normalized),
         uids=[uid for uid, _ in normalized][:20],
     )
+    return True
 
 
 async def _run_one_tick(

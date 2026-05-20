@@ -104,6 +104,55 @@ async def test_disabled_weight_loop_computes_without_submitting(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_remote_weight_loop_falls_back_to_local_before_first_vector(tmp_path) -> None:
+    """Managed remote mode must not stop validators before the first vector exists."""
+    conn = await connect(str(tmp_path / "validator.db"))
+    chain = MockChain(
+        Metagraph(
+            block=7,
+            miners=(MinerNode(uid=0, hotkey="burn-hotkey", last_update_block=1),),
+        )
+    )
+    health = Health()
+    stop = weight_loop.asyncio.Event()
+    calls = 0
+
+    async def remote_unavailable() -> bool:
+        nonlocal calls
+        calls += 1
+        return False
+
+    task = weight_loop.asyncio.create_task(
+        weight_loop.run_weight_loop(
+            conn,
+            chain,
+            health,
+            interval_secs=60,
+            disabled=True,
+            burn_uid=0,
+            forced_burn_percentage=95.0,
+            stop=stop,
+            remote_weight_apply=remote_unavailable,
+        )
+    )
+    try:
+        for _ in range(50):
+            snapshot = await health.get()
+            if snapshot.last_weight_set_at is not None:
+                break
+            await weight_loop.asyncio.sleep(0.02)
+        else:
+            raise AssertionError("weight loop did not fall back to local policy")
+
+        assert calls == 1
+        assert (await health.get()).weight_status is WeightStatus.DISABLED
+    finally:
+        stop.set()
+        await weight_loop.asyncio.wait_for(task, timeout=1)
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_weight_loop_waits_for_backfill_event_before_first_tick(
     tmp_path, monkeypatch
 ) -> None:

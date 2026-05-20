@@ -34,12 +34,13 @@ v3_bug_isolation_weight = 0.0
 task_family_weights = { synthetic_boolean_v1 = 0.0 }
 
 [weight_source]
-mode = "local"
+mode = "remote"
 publisher_weights_url = "https://api.cathedral.computer/v1/validator/weights/next"
 poll_interval_secs = 60.0
 request_timeout_secs = 10.0
 fallback_after_stale_minutes = 10.0
 refuse_after_stale_minutes = 30.0
+cathedral_policy_public_key_hex = "8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd"
 cathedral_policy_public_key_env = "CATHEDRAL_POLICY_PUBLIC_KEY_HEX"
 cathedral_policy_key_id = "cathedral-weight-policy"
 
