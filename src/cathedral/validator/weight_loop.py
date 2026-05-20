@@ -70,7 +70,7 @@ async def run_weight_loop(
     stop: asyncio.Event | None = None,
     initial_backfill_complete: asyncio.Event | None = None,
     initial_backfill_timeout_secs: float = 120.0,
-    remote_weight_apply: Callable[[], Awaitable[None]] | None = None,
+    remote_weight_apply: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
     # Track whether the initial backfill ever signalled completion.
@@ -131,12 +131,19 @@ async def run_weight_loop(
             logger.info("weight_loop_backfill_signal_received_late")
         try:
             if remote_weight_apply is not None:
-                await remote_weight_apply()
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=interval_secs)
-                except TimeoutError:
-                    pass
-                continue
+                if await remote_weight_apply():
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=interval_secs)
+                    except TimeoutError:
+                        pass
+                    continue
+                logger.warning(
+                    "remote_weight_unavailable_falling_back_to_local",
+                    consequence=(
+                        "No signed remote vector has been accepted yet; using the "
+                        "local configured weight policy for this tick."
+                    ),
+                )
 
             metagraph = await chain.metagraph()
             registered = await chain.is_registered()

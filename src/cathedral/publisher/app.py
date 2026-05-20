@@ -377,6 +377,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                 "cards": "/api/cathedral/v1/cards",
                 "eval_spec": "/api/cathedral/v1/cards/eu-ai-act/eval-spec",
                 "recent_signed_evals": "/api/cathedral/v1/leaderboard/recent",
+                "sat_readiness": "/api/cathedral/v1/synthetic-boolean/readiness-probe",
                 "submit_agent": "/api/cathedral/v1/agents/submit",
             },
         }
@@ -402,6 +403,11 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
     app.include_router(challenge_cnf_router, prefix="/api/cathedral")
     app.include_router(challenge_cnf_router, include_in_schema=False)
+
+    from cathedral.publisher.sat_readiness import router as sat_readiness_router
+
+    app.include_router(sat_readiness_router, prefix="/api/cathedral")
+    app.include_router(sat_readiness_router, include_in_schema=False)
 
     # Agent-facing onboarding - Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the

@@ -67,6 +67,10 @@ def test_api_root_points_to_public_entrypoints(publisher_client: object) -> None
     assert body["links"]["api"] == "/api/cathedral"
     assert body["links"]["eval_spec"] == "/api/cathedral/v1/cards/eu-ai-act/eval-spec"
     assert body["links"]["recent_signed_evals"] == "/api/cathedral/v1/leaderboard/recent"
+    assert (
+        body["links"]["sat_readiness"]
+        == "/api/cathedral/v1/synthetic-boolean/readiness-probe"
+    )
     assert body["links"]["submit_agent"] == "/api/cathedral/v1/agents/submit"
 
 
@@ -107,6 +111,8 @@ def test_skill_md_includes_public_safe_sat_contract(publisher_client: object) ->
     assert '"dimacs_solution"' in body
     assert "first submitted among valid receipts, not first verified" in lowered
     assert "sat mainnet weight remains disabled" in lowered
+    assert "/api/cathedral/v1/synthetic-boolean/readiness-probe" in body
+    assert "always returns `weighted_score: 0.0`" in body
 
 
 def test_skill_md_sat_contract_has_no_private_challenge_material(
@@ -139,6 +145,43 @@ def test_skill_md_sat_contract_has_no_private_challenge_material(
     )
     offenders = [needle for needle in forbidden if needle in lowered]
     assert not offenders, f"skill.md leaked private SAT marker(s): {offenders}"
+
+
+def test_synthetic_boolean_readiness_probe_is_zero_weight(
+    publisher_client: object,
+) -> None:
+    if publisher_client is None:
+        pytest.skip("publisher app not buildable")
+
+    probe = publisher_client.get(  # type: ignore[attr-defined]
+        "/api/cathedral/v1/synthetic-boolean/readiness-probe"
+    )
+    assert probe.status_code == 200
+    body = probe.json()
+    assert body["capability"] == "synthetic_boolean_v1"
+    assert body["purpose"] == "readiness_probe"
+    assert body["emissions_eligible"] is False
+    assert body["weighted_score"] == 0.0
+    assert body["public_input"]["format"] == "dimacs"
+    assert body["public_input"]["cnf_url"].endswith(
+        "/api/cathedral/v1/synthetic-boolean/readiness-probe/cnf"
+    )
+    assert body["public_input"]["cnf_sha256"]
+
+    cnf = publisher_client.get(  # type: ignore[attr-defined]
+        "/api/cathedral/v1/synthetic-boolean/readiness-probe/cnf"
+    )
+    assert cnf.status_code == 200
+    assert cnf.text == "p cnf 3 3\n1 -2 3 0\n-1 2 3 0\n1 2 -3 0\n"
+
+    verify = publisher_client.post(  # type: ignore[attr-defined]
+        "/api/cathedral/v1/synthetic-boolean/readiness-probe/verify",
+        json={"dimacs_solution": "s SATISFIABLE\nv 1 2 3 0\n"},
+    )
+    assert verify.status_code == 200
+    assert verify.json()["valid"] is True
+    assert verify.json()["weighted_score"] == 0.0
+    assert verify.json()["emissions_eligible"] is False
 
 
 def test_verified_multiplier_capped_at_one() -> None:

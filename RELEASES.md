@@ -10,6 +10,26 @@ need to know about.
 
 ---
 
+## v1.1.25 - Managed remote weights and SAT readiness probe
+
+**Date:** 2026-05-20
+
+**Headline:** Signed release that lets managed SN39 validators pull Cathedral-signed weight policy by default while keeping SAT emissions disabled.
+
+### Added
+
+- **Managed remote signed weights by default.** `config/mainnet.toml` now points SN39 validators at the Cathedral signed-weight endpoint with a pinned policy public key.
+- **Managed config migration.** Existing SN39 mainnet configs are migrated from local weight computation to the remote signed-weight source on startup while preserving wallet, hotkey, wallet path, database path, and operator env.
+- **Remote-unavailable local fallback.** Before the first signed remote vector is accepted, validators fall back to the local configured burn policy for that tick. After a remote vector exists, stale or invalid vectors fail closed.
+- **SAT readiness probe.** The publisher exposes a public toy `synthetic_boolean_v1` readiness probe with the same `cnf_url`, `cnf_sha256`, and `dimacs_solution` protocol shape. The probe is not emissions-eligible and always returns `weighted_score: 0.0`.
+
+### Operator note
+
+- This release still does not enable scored SAT emissions. `synthetic_boolean_v1` remains `0.0` by default.
+- Validators only need to update to the signed tag. No manual weight-source env edit is required for managed SN39 hosts.
+
+---
+
 ## v1.1.24 - Public SAT readiness surfaces
 
 **Date:** 2026-05-20

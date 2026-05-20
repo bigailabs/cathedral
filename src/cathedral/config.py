@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MAINNET_FORCED_BURN_PERCENTAGE = 95.0
+MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX = (
+    "8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd"
+)
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -278,7 +281,7 @@ def _ensure_managed_env_path(env_path: Path, config_path: Path) -> None:
 
 
 def _sync_sn39_mainnet_weight_policy(config_path: Path) -> None:
-    """Keep SN39 mainnet configs on the current release burn policy."""
+    """Keep managed SN39 mainnet configs on the current release policy."""
     if not config_path.exists():
         return
     try:
@@ -292,17 +295,32 @@ def _sync_sn39_mainnet_weight_policy(config_path: Path) -> None:
         return
     if str(network.get("name")) != "finney" or int(network.get("netuid", -1)) != 39:
         return
-    if float(weights.get("forced_burn_percentage", MAINNET_FORCED_BURN_PERCENTAGE)) == (
-        MAINNET_FORCED_BURN_PERCENTAGE
-    ):
+    weight_source = current.get("weight_source", {})
+    if not isinstance(weight_source, dict):
+        weight_source = {}
+    already_current = (
+        float(weights.get("forced_burn_percentage", MAINNET_FORCED_BURN_PERCENTAGE))
+        == MAINNET_FORCED_BURN_PERCENTAGE
+        and str(weight_source.get("mode", "")).strip() == "remote"
+        and str(weight_source.get("publisher_weights_url", "")).strip()
+        == "https://api.cathedral.computer/v1/validator/weights/next"
+        and str(weight_source.get("cathedral_policy_public_key_hex", "")).strip()
+        == MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX
+        and str(weight_source.get("cathedral_policy_key_id", "")).strip()
+        == "cathedral-weight-policy"
+    )
+    if already_current:
         return
 
     text = config_path.read_text()
     lines = text.splitlines()
     out: list[str] = []
     in_weights = False
+    in_weight_source = False
     saw_weights = False
+    saw_weight_source = False
     replaced = False
+    weight_source_seen: set[str] = set()
 
     for line in lines:
         stripped = line.strip()
@@ -310,12 +328,20 @@ def _sync_sn39_mainnet_weight_policy(config_path: Path) -> None:
             if in_weights and not replaced:
                 out.append(f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}")
                 replaced = True
+            if in_weight_source:
+                _append_missing_weight_source_lines(out, weight_source_seen)
             in_weights = stripped == "[weights]"
+            in_weight_source = stripped == "[weight_source]"
             saw_weights = saw_weights or in_weights
+            saw_weight_source = saw_weight_source or in_weight_source
 
         if in_weights and stripped.startswith("forced_burn_percentage"):
             out.append(f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}")
             replaced = True
+        elif in_weight_source and _weight_source_key(stripped) in _MANAGED_WEIGHT_SOURCE:
+            key = _weight_source_key(stripped)
+            out.append(f"{key} = {_MANAGED_WEIGHT_SOURCE[key]}")
+            weight_source_seen.add(key)
         else:
             out.append(line)
 
@@ -329,8 +355,38 @@ def _sync_sn39_mainnet_weight_policy(config_path: Path) -> None:
                 f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}",
             ]
         )
+    if saw_weight_source and in_weight_source:
+        _append_missing_weight_source_lines(out, weight_source_seen)
+    elif not saw_weight_source:
+        out.extend(["", "[weight_source]"])
+        _append_missing_weight_source_lines(out, set())
 
     config_path.write_text("\n".join(out) + "\n")
+
+
+_MANAGED_WEIGHT_SOURCE = {
+    "mode": '"remote"',
+    "publisher_weights_url": '"https://api.cathedral.computer/v1/validator/weights/next"',
+    "poll_interval_secs": "60.0",
+    "request_timeout_secs": "10.0",
+    "fallback_after_stale_minutes": "10.0",
+    "refuse_after_stale_minutes": "30.0",
+    "cathedral_policy_public_key_hex": f'"{MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX}"',
+    "cathedral_policy_public_key_env": '"CATHEDRAL_POLICY_PUBLIC_KEY_HEX"',
+    "cathedral_policy_key_id": '"cathedral-weight-policy"',
+}
+
+
+def _weight_source_key(stripped_line: str) -> str:
+    if not stripped_line or stripped_line.startswith("#") or "=" not in stripped_line:
+        return ""
+    return stripped_line.split("=", 1)[0].strip()
+
+
+def _append_missing_weight_source_lines(out: list[str], seen: set[str]) -> None:
+    for key, value in _MANAGED_WEIGHT_SOURCE.items():
+        if key not in seen:
+            out.append(f"{key} = {value}")
 
 
 def _same_path(left: Path, right: Path) -> bool:

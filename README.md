@@ -26,7 +26,7 @@
 
 The live production path is the agent pipeline. Miners submit bundles through `POST /v1/agents/submit`; the publisher evaluates them and signs rows that validators pull. The legacy `/v1/claim` worker still exists for older Polaris-evidence submissions.
 
-Mainnet SAT is disabled by default. `config/mainnet.toml` keeps `task_family_weights = { synthetic_boolean_v1 = 0.0 }` and `forced_burn_percentage = 95.0`. Moving SAT weight above `0.0` requires an intentional operator release.
+Mainnet SAT is disabled by default. `config/mainnet.toml` keeps `task_family_weights = { synthetic_boolean_v1 = 0.0 }` and `forced_burn_percentage = 95.0`. Managed SN39 validators pull signed weight vectors by default, so Cathedral can change burn share or lane blend centrally through the pinned policy key once validators are on the current signed tag.
 
 Public main includes the SAT lane, CNF URL transport, signed schema-5 rows, first-submitted receipt ordering, and the global zero-score kill switch. Public feeds stay hash-only for SAT rows.
 
@@ -51,7 +51,7 @@ Miners keep solver source, wrappers, logs, and infrastructure private. Cathedral
 
 [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md)
 
-The validator pulls signed eval rows, verifies Ed25519 signatures, stores rows, maps hotkeys to uids, computes weights, and calls `set_weights`. The remote signed-weight path is opt-in and shipped behind a pinned public key.
+The validator pulls signed eval rows, verifies Ed25519 signatures, stores rows, maps hotkeys to uids, and calls `set_weights`. Managed SN39 validators use a remote signed-weight source by default. If no remote vector has been accepted yet, they fall back to the local configured burn policy for that tick.
 
 ### For operators
 

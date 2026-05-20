@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from cathedral.config import (
+    MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX,
     ValidatorSettings,
     apply_weight_source_env_overrides,
     resolve_validator_config_path,
@@ -58,8 +59,12 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     assert settings.weights.interval_secs == 1500
     assert settings.weights.burn_uid == 204
     assert settings.weights.forced_burn_percentage == 95.0
-    assert settings.weight_source.mode == "local"
+    assert settings.weight_source.mode == "remote"
     assert settings.weight_source.publisher_weights_url.endswith("/v1/validator/weights/next")
+    assert (
+        settings.weight_source.cathedral_policy_public_key_hex
+        == MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX
+    )
 
     env_text = (etc / "validator.env").read_text()
     assert f"CATHEDRAL_CONFIG_PATH={etc / 'mainnet.toml'}" in env_text
@@ -120,7 +125,15 @@ def test_managed_mainnet_config_syncs_current_burn_policy(tmp_path: Path) -> Non
     assert resolved == str(mainnet)
     settings = ValidatorSettings.from_toml(resolved)
     assert settings.weights.forced_burn_percentage == 95.0
-    assert "forced_burn_percentage = 95.0" in mainnet.read_text()
+    assert settings.weight_source.mode == "remote"
+    assert (
+        settings.weight_source.cathedral_policy_public_key_hex
+        == MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX
+    )
+    text = mainnet.read_text()
+    assert "forced_burn_percentage = 95.0" in text
+    assert 'mode = "remote"' in text
+    assert f'cathedral_policy_public_key_hex = "{MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX}"' in text
 
 
 def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> None:
@@ -159,7 +172,14 @@ def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> No
     assert resolved == str(custom)
     settings = ValidatorSettings.from_toml(resolved)
     assert settings.weights.forced_burn_percentage == 95.0
-    assert "forced_burn_percentage = 95.0" in custom.read_text()
+    assert settings.weight_source.mode == "remote"
+    assert (
+        settings.weight_source.cathedral_policy_public_key_hex
+        == MAINNET_WEIGHT_POLICY_PUBLIC_KEY_HEX
+    )
+    text = custom.read_text()
+    assert "forced_burn_percentage = 95.0" in text
+    assert 'mode = "remote"' in text
 
 
 def test_explicit_testnet_network_is_respected(tmp_path: Path) -> None:
