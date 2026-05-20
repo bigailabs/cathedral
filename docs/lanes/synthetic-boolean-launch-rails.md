@@ -5,9 +5,10 @@ These rails define the public SAT launch boundary for `synthetic_boolean_v1`.
 ## Status
 
 The public repo includes the SAT lane, toy fixtures, token-gated CNF URL
-transport, and a durable first-verified lock. Mainnet SAT remains disabled:
-validator SAT weight defaults to `0.0`, no production CNFs ship in this repo,
-and operators must not enable a nonzero mainnet SAT weight from this branch.
+transport, and durable first-submitted receipt ordering. Mainnet SAT remains
+disabled: validator SAT weight defaults to `0.0`, no production CNFs ship in
+this repo, and operators must not enable a nonzero mainnet SAT weight from
+this branch.
 
 The rules are public. Actual challenge CNFs are private until announcement.
 When a challenge is announced, eligible miners receive a `cnf_url` with an
@@ -23,13 +24,18 @@ The first launch model is one active formula.
 3. Cathedral sends challenge metadata through the SSH/Hermes path.
 4. Miners fetch the token-gated CNF URL and verify `cnf_sha256`.
 5. Miners return a JSON object with `dimacs_solution`.
-6. Cathedral verifies the assignment deterministically.
-7. The first answer Cathedral verifies and locks wins the SAT lane score.
-8. Later submissions for that locked challenge score `0.0`.
-9. The publisher advances to the next pending challenge.
+6. Cathedral records a publisher receipt timestamp when Hermes stdout returns.
+7. Cathedral verifies the assignment deterministically.
+8. The earliest valid receipt wins the SAT lane score.
+9. Later valid receipts for that challenge score `0.0`.
+10. Earlier invalid or expired receipts do not block a later valid receipt.
+11. The publisher advances to the next pending challenge.
 
-The winner ordering rule is first verified and locked. This branch does not
-change that rule into true first-submitted ordering.
+The winner ordering rule is first submitted by publisher receipt time, after
+verification proves the answer valid. A later receipt that verifies faster must
+wait while any earlier receipt is still `unverified` or `verifying`. The
+selector can finalize only when the earliest unresolved receipts are invalid or
+expired, or when the earliest unresolved receipt becomes valid and wins.
 
 This is not per-miner hidden challenges. It is not a public formula feed. It is
 not a pool where every correct late answer earns weight.
@@ -179,7 +185,8 @@ CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
 3. Activate one formula from operator-controlled private storage.
 4. Confirm miner prompts contain `cnf_url` and `cnf_sha256`, not inline CNF.
 5. Confirm token-gated fetch succeeds for eligible miners.
-6. Confirm the first verified solution locks the active challenge.
+6. Confirm the earliest valid receipt locks the active challenge, even if a
+   later receipt verifies first.
 7. Confirm later correct submissions for the same challenge score `0.0`.
 8. Confirm public feed rows are hash-only.
 9. Keep validator SAT weight at `0.0` until a separate release intentionally changes it.

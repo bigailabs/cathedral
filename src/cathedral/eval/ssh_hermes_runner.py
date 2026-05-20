@@ -67,6 +67,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -273,9 +274,10 @@ class HermesVisitTrace:
     bundle_path: str | None = None
     bundle_blake3: str | None = None
     proof_of_loop: dict[str, Any] | None = None
+    task_family_stdout_received_at_iso: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "visit_started_at": self.visit_started_at,
             "visit_ended_at": self.visit_ended_at,
             "hermes_version": self.hermes_version,
@@ -287,6 +289,9 @@ class HermesVisitTrace:
             "proof_of_loop": self.proof_of_loop or {},
             "tier": "ssh-hermes",
         }
+        if self.task_family_stdout_received_at_iso is not None:
+            out["task_family_stdout_received_at_iso"] = self.task_family_stdout_received_at_iso
+        return out
 
 
 @dataclass
@@ -308,6 +313,7 @@ class TaskFamilyHermesRun:
     duration_ms: int = 0
     trace: dict[str, Any] = field(default_factory=dict)
     trace_bundle: TraceBundle | None = None
+    stdout_received_at_iso: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -661,6 +667,7 @@ class SshHermesRunner:
         prompt: str,
         miner_hotkey: str,
         submission: dict[str, Any],
+        receipt_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> TaskFamilyHermesRun:
         """Run one generic Task Family prompt over SSH Hermes.
 
@@ -713,6 +720,10 @@ class SshHermesRunner:
                 eval_round=eval_round,
                 resolved_home=resolved_home,
             )
+            stdout_received_at_iso = _now_utc_iso()
+            trace.task_family_stdout_received_at_iso = stdout_received_at_iso
+            if receipt_callback is not None:
+                await receipt_callback(stdout, stdout_received_at_iso)
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
             synthetic_card: dict[str, Any] = {
@@ -739,6 +750,7 @@ class SshHermesRunner:
                 duration_ms=int((time.monotonic() - t_start) * 1000),
                 trace=trace.to_dict(),
                 trace_bundle=bundle,
+                stdout_received_at_iso=stdout_received_at_iso,
             )
         except SshHermesError:
             trace.visit_ended_at = datetime.now(UTC).isoformat()
@@ -1333,6 +1345,10 @@ def _content_type_for(rel_path: str) -> str:
     if rel_path.endswith(".tar.gz") or rel_path.endswith(".tgz"):
         return "application/gzip"
     return "application/octet-stream"
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _extract_card_json(stdout: str) -> dict[str, Any] | None:

@@ -45,6 +45,10 @@ from cathedral.lanes.challenge_lock import (
 )
 from cathedral.lanes.challenge_lock import SqliteChallengeLock
 from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
+from cathedral.lanes.challenge_receipts import (
+    SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA,
+)
+from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_source import (
     SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
 )
@@ -161,12 +165,15 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         app.state.ctx = ctx
         await ctx.db.executescript(CHALLENGE_SOURCE_SCHEMA)
         await ctx.db.executescript(CHALLENGE_LOCK_SCHEMA)
+        await ctx.db.executescript(CHALLENGE_RECEIPT_SCHEMA)
         await ctx.db.commit()
         task_family_challenge_source = SqliteChallengeSource(ctx.db)
         task_family_challenge_lock = SqliteChallengeLock(ctx.db)
         task_family_fetch_token_store = SqliteFetchTokenStore(ctx.db)
+        task_family_receipt_store = SqliteChallengeReceiptStore(ctx.db)
         app.state.task_family_challenge_source = task_family_challenge_source
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
+        app.state.task_family_receipt_store = task_family_receipt_store
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
         vector_path = Path(
@@ -282,6 +289,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     task_family_challenge_source=task_family_challenge_source,
                     task_family_challenge_lock=task_family_challenge_lock,
                     task_family_fetch_token_store=task_family_fetch_token_store,
+                    task_family_receipt_store=task_family_receipt_store,
                     public_base_url=os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
                 )
             )
