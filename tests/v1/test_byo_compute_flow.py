@@ -53,6 +53,20 @@ def test_skill_md_route_returns_markdown(publisher_client: object) -> None:
     assert len(body) > 2000, "skill.md should be substantive (> 2 KiB)"
 
 
+def test_api_root_points_to_public_entrypoints(publisher_client: object) -> None:
+    """GET / gives humans a small map instead of FastAPI's default 404."""
+    if publisher_client is None:
+        pytest.skip("publisher app not buildable")
+    r = publisher_client.get("/")  # type: ignore[attr-defined]
+    assert r.status_code == 200
+    body = r.json()
+    assert body["service"] == "cathedral-publisher"
+    assert body["links"]["health"] == "/health"
+    assert body["links"]["skill"] == "/skill.md"
+    assert body["links"]["api_base"] == "/api/cathedral"
+    assert body["links"]["submit"] == "/api/cathedral/v1/agents/submit"
+
+
 def test_skill_md_mentions_byo_path(publisher_client: object) -> None:
     """skill.md must teach BYO-compute, the only live mining path in v1.
 

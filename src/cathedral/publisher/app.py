@@ -363,6 +363,23 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             content={"detail": str(detail) if detail else "error"},
         )
 
+    @app.get("/", include_in_schema=False)
+    async def _root() -> dict[str, Any]:
+        return {
+            "service": "cathedral-publisher",
+            "message": "Cathedral Publisher API",
+            "links": {
+                "health": "/health",
+                "docs": "/docs",
+                "skill": "/skill.md",
+                "jwks": "/.well-known/cathedral-jwks.json",
+                "api_base": "/api/cathedral",
+                "cards": "/api/cathedral/v1/cards",
+                "leaderboard": "/api/cathedral/v1/leaderboard?card=eu-ai-act",
+                "submit": "/api/cathedral/v1/agents/submit",
+            },
+        }
+
     # CONTRACTS Section 2 locks the public surface at `/api/cathedral/v1/...`
     # (matches the cross-repo contract test mirror, the frontend's API client,
     # and the polariscomputer-side routes already deployed). Mount BOTH:
