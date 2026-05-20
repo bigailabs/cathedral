@@ -443,7 +443,9 @@ async def test_score_and_sign_rollbacks_when_submission_score_update_fails(
     ) -> None:
         if not commit:
             raise RuntimeError("simulated score persistence failure")
-        await real_update(c, submission_id, current_score=current_score, current_rank=current_rank, commit=commit)
+        await real_update(
+            c, submission_id, current_score=current_score, current_rank=current_rank, commit=commit
+        )
 
     monkeypatch.setattr(repository, "update_submission_score", _raise_on_deferred_commit)
 
@@ -469,3 +471,97 @@ async def test_score_and_sign_rollbacks_when_submission_score_update_fails(
         (sub["id"],),
     )
     assert int((await cur2.fetchone())[0]) == 0
+
+
+@pytest.mark.asyncio
+async def test_zero_all_scores_killswitch_forces_weighted_zero(
+    conn: aiosqlite.Connection,
+    signer: Any,
+    registry: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator kill switch: CATHEDRAL_ZERO_ALL_SCORES=true must force every
+    signed row's weighted_score to 0.0 regardless of what the scorer
+    computed. This is the publisher-side equivalent of 100% burn,
+    effective without any validator update because all rolling averages
+    collapse to zero and chain/weights.apply_burn routes to burn_uid.
+    """
+    from cathedral.eval.scoring_pipeline import score_and_sign
+
+    sub = await _insert_minimal_submission(conn, hotkey_seed="killswitch")
+    card = _valid_card_dict()
+
+    # Baseline: with the env unset, the same card scores nonzero.
+    monkeypatch.delenv("CATHEDRAL_ZERO_ALL_SCORES", raising=False)
+    baseline = await score_and_sign(
+        conn,
+        submission=sub,
+        epoch=1,
+        round_index=0,
+        polaris_agent_id="",
+        polaris_run_id="killswitch-baseline",
+        task_json={"card_id": "eu-ai-act", "epoch": 1, "round_index": 0},
+        output_card_json=card,
+        duration_ms=1,
+        polaris_errors=[],
+        registry=registry,
+        signer=signer,
+        polaris_attestation=None,
+    )
+    assert baseline.weighted_score > 0.0, (
+        "test fixture invariant: the baseline card must produce a positive "
+        "score so the kill switch has something to clamp"
+    )
+
+    # Engage the kill switch on a fresh submission. weighted_score must be
+    # exactly 0.0 even though the scorer would have produced > 0.
+    sub2 = await _insert_minimal_submission(conn, hotkey_seed="killswitch_on")
+    monkeypatch.setenv("CATHEDRAL_ZERO_ALL_SCORES", "true")
+    zeroed = await score_and_sign(
+        conn,
+        submission=sub2,
+        epoch=1,
+        round_index=0,
+        polaris_agent_id="",
+        polaris_run_id="killswitch-zeroed",
+        task_json={"card_id": "eu-ai-act", "epoch": 1, "round_index": 0},
+        output_card_json=card,
+        duration_ms=1,
+        polaris_errors=[],
+        registry=registry,
+        signer=signer,
+        polaris_attestation=None,
+    )
+    assert zeroed.weighted_score == 0.0
+    assert zeroed.weighted_score_pre_multiplier == 0.0
+
+    # Read back from sqlite: the persisted row must also be zero so
+    # validators pulling the row see weighted_score=0.
+    cur = await conn.execute(
+        "SELECT weighted_score FROM eval_runs WHERE id = ?",
+        (zeroed.eval_run_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    assert float(row[0]) == 0.0
+
+    # Flip back off: a fresh submission scores normally again, proving
+    # the switch is fully reversible without a code change.
+    sub3 = await _insert_minimal_submission(conn, hotkey_seed="killswitch_off")
+    monkeypatch.setenv("CATHEDRAL_ZERO_ALL_SCORES", "false")
+    restored = await score_and_sign(
+        conn,
+        submission=sub3,
+        epoch=1,
+        round_index=0,
+        polaris_agent_id="",
+        polaris_run_id="killswitch-restored",
+        task_json={"card_id": "eu-ai-act", "epoch": 1, "round_index": 0},
+        output_card_json=card,
+        duration_ms=1,
+        polaris_errors=[],
+        registry=registry,
+        signer=signer,
+        polaris_attestation=None,
+    )
+    assert restored.weighted_score > 0.0
