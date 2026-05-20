@@ -10,6 +10,54 @@ need to know about.
 
 ---
 
+## Unreleased - SAT shadow hardening on public main
+
+**Date:** 2026-05-20
+
+**Headline:** Public main now has the SAT shadow path hardened for end-to-end testing while SAT weight remains `0.0` by default.
+
+### Added
+
+- **Public SAT CNF transport.** Miners receive a public CNF URL plus hash metadata rather than an inline CNF body in the prompt. Fetch tokens gate the public endpoint so challenge bodies are not fetchable before announcement.
+- **First-submitted SAT receipt ordering (#166).** The publisher records SAT stdout receipt before trace collection, verification updates receipt state, and durable winner selection picks the earliest valid receipt only after earlier receipts resolve.
+- **Remote signed weights.** Validators can opt into a signed remote weight vector path while preserving the local fallback path.
+
+### Changed
+
+- **Global zero-score kill switch (#158).** `CATHEDRAL_ZERO_ALL_SCORES=true` now zeros both legacy EvalRun rows and SAT schema-5 rows.
+- **Public feed remains hash-only for SAT.** Schema-5 rows expose hashes and score metadata, not raw CNF bodies, fetch tokens, raw answers, or verifier details.
+
+### Verification
+
+- Public shadow E2E ran a toy SAT challenge through miner stub -> publisher -> signed schema-5 row -> validator pull.
+- SAT aggregation stayed inert with SAT weight `0.0`; a nonzero test weight proved the gate without changing the default.
+
+### Operator note
+
+- This is not a scored SAT launch. Challenge corpus material is operator-held and not committed to this repo.
+- Cut a new signed release tag before expecting tag-watching validators to pick up these post-`v1.1.22` commits.
+
+---
+
+## v1.1.22 - SAT launch rails and hardened updater
+
+**Date:** 2026-05-19
+
+**Headline:** Public release tag for SAT launch rails, the synthetic boolean task-family scaffold, and the hardened validator updater.
+
+### Added
+
+- **Task Family Contract scaffold + `synthetic_boolean_v1` stub (#150).** Adds the lane contract boundary for public problem data versus publisher-side hidden metadata.
+- **Synthetic boolean launch rails (#152).** Wires the SAT task-family path behind launch controls while keeping SAT weight disabled by default.
+- **Validator updater hardening (#161).** Pins the expected remote, checks ancestry before updating, supports operator env overrides, runs migrations after checkout, and exits after a successful update so PM2 respawns from the new on-disk script.
+
+### Operator note
+
+- `v1.1.22` is the latest public signed tag in this repo.
+- The SAT path remains shadow-only unless an operator intentionally configures positive SAT weight and operator-held challenge material.
+
+---
+
 ## v1.1.21 - v4 cathedral_engine on main (dark-shipped)
 
 **Date:** 2026-05-18
