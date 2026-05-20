@@ -11,7 +11,7 @@ The subnet publishes **jobs** - standing work with a source pool, task templates
 
 First vertical: **EU AI Act regulatory intelligence**. The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
 
-**Latest release:** see [RELEASES.md](RELEASES.md) for the current shipped version and changelog.
+**Latest signed tag:** `v1.1.22`. Current `main` includes additional SAT shadow hardening after that tag. See [RELEASES.md](RELEASES.md) for the changelog.
 
 - **Mainnet:** SN39 (`finney`), the operator path for v1
 - **Site:** https://cathedral.computer
@@ -21,6 +21,17 @@ First vertical: **EU AI Act regulatory intelligence**. The mechanism generalizes
 > Testnet (SN292, `test`) ships with `config/testnet.toml` for protocol development; operators target SN39 mainnet.
 
 > **Vocabulary note.** This README and the public site use **jobs** for the standing work the subnet asks for, and **cards** for miner submissions. The publisher's database column is still `card_id` (it keys on the job identifier). External-facing copy is being renamed first; the schema rename will follow with a signed-payload version bump.
+
+## Current public status
+
+Public `main` now includes the v1 BYO Box path plus SAT shadow rails. The SAT lane is not moving emissions by default: `synthetic_boolean_v1` remains weight-gated, public shadow verification holds it at `0.0`, and challenge corpus material is operator-held rather than committed to this repo.
+
+Verified on public `main`, 2026-05-20:
+
+- SAT toy challenge path ran miner stub -> publisher -> signed schema-5 row -> validator pull.
+- Public feed stayed hash-only: no raw CNF body, CNF fetch token, raw answer, or verifier details entered the public row.
+- `CATHEDRAL_ZERO_ALL_SCORES=true` now zeros both legacy EvalRun rows and SAT schema-5 rows.
+- SAT winner ordering is first submitted among valid receipts. The publisher records stdout receipt before trace collection, verification updates receipt state, and durable selection waits behind earlier unresolved receipts before picking the earliest valid receipt.
 
 ## What a miner ships
 
@@ -128,7 +139,7 @@ Hardware-attestation contract: [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_C
 
 ## Status
 
-Verified live, 2026-05-13:
+Verified live v1 path, 2026-05-13:
 
 - One job definition seeded (`eu-ai-act`), eval-spec served at `/v1/cards/eu-ai-act/eval-spec`. The earlier 4-card plan (`us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic`) is archived at Docker startup and returns 404.
 - End-to-end ssh-probe pipeline: submit -> encrypt to R2 -> SSH into miner host -> snapshot `~/.hermes/` -> `hermes chat -q "<task>"` -> capture trace -> score -> sign -> publish.
@@ -139,6 +150,7 @@ Verified live, 2026-05-13:
 Wired in code, not yet running by default:
 
 - On-chain Merkle anchoring (weekly `system.remarkWithEvent`). Merkle code path exists in `cathedral.publisher.merkle` and `cathedral.chain.anchor`; not running on a schedule yet.
+- `synthetic_boolean_v1` SAT shadow lane. Public main has CNF URL transport, signed schema-5 rows, first-submitted receipt ordering, and validator pull support. Emissions stay disabled until operators set a positive SAT weight and seed operator-held challenges.
 
 Not yet built:
 
