@@ -919,6 +919,69 @@ async def test_hermes_invocation_uses_chat_q_not_z(runner_config, eval_task, sub
     assert not bare_z_cmds, f"v1.1.7 must not invoke hermes -z anywhere; saw: {bare_z_cmds!r}"
 
 
+@pytest.mark.asyncio
+async def test_task_family_records_stdout_receipt_before_trace_collection(
+    runner_config, submission
+):
+    events: list[str] = []
+    receipt_at = "2026-05-20T12:34:56.123456Z"
+    problem = _module.PublicProblem(
+        task_family="synthetic_boolean_v1",
+        schema_version=5,
+        task_id="sat_public_001",
+        difficulty_tier=0,
+        public_input={"num_vars": 1, "cnf_sha256": "a" * 64},
+        time_limit_seconds=30,
+    )
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+
+    def _route(cmd, **kwargs):
+        if "hermes --version" in cmd:
+            return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
+        if "hermes chat -Q" in cmd:
+            events.append("hermes_stdout")
+            stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+            return _mk_run_result(stdout=stdout)
+        return _mk_run_result()
+
+    async def fake_collect(*args, **kwargs):
+        events.append("collect")
+        assert events == ["hermes_stdout", "receipt_clock", "collect"]
+        return MagicMock()
+
+    def fake_now() -> str:
+        events.append("receipt_clock")
+        return receipt_at
+
+    conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.connect = AsyncMock(return_value=conn)
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+    runner = SshHermesRunner(runner_config)
+    runner._collect_and_assemble = AsyncMock(side_effect=fake_collect)
+    with (
+        patch.dict(sys.modules, {"asyncssh": fake_asyncssh}),
+        patch.object(_module, "_now_utc_iso", side_effect=fake_now),
+    ):
+        result = await runner.run_task_family_challenge(
+            problem=problem,
+            prompt="Solve the SAT challenge.",
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+        )
+
+    assert result.stdout_received_at_iso == receipt_at
+    assert result.trace["task_family_stdout_received_at_iso"] == receipt_at
+    assert "cnf_url" not in result.trace
+    assert "dimacs_solution" not in result.trace
+
+
 # --------------------------------------------------------------------------
 # Prober version dispatch — CATHEDRAL_PROBER_VERSION env flag
 # --------------------------------------------------------------------------
