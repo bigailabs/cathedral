@@ -84,6 +84,55 @@ The canonical bytes for verification are `json.dumps(dict_minus_excluded, sort_k
 
 The Cathedral signing pubkey is published at `GET /.well-known/cathedral-jwks.json` on the publisher. Validators should fetch it once during setup, then pin it locally as `CATHEDRAL_PUBLIC_KEY_HEX`. The validator binary reads only the pinned env var at startup; it does not auto-rotate from the same publisher it then trusts (key handoff must happen out of band).
 
+### Remote signed weight source darkship
+
+Local weight computation remains the default. Remote signed weights are opt-in
+through `[weight_source].mode = "remote"` or `CATHEDRAL_WEIGHT_SOURCE=remote`.
+Remote mode refuses startup unless the validator has a pinned policy public key
+through `CATHEDRAL_POLICY_PUBLIC_KEY_HEX` or
+`weight_source.cathedral_policy_public_key_hex`.
+
+The corrected #155 vector contract is:
+
+```python
+class SignedWeightVector(BaseModel):
+    schema_version: int = 1
+    policy_version: int
+    vector_id: str
+    issued_at: str
+    expires_at: str
+    network: str
+    netuid: int
+    metagraph_block: int
+    burn_hotkey: str
+    burn_uid_snapshot: int | None
+    weights_by_hotkey: dict[str, float]
+    policy_hash: str
+    key_id: str
+    signature: str
+```
+
+`burn_hotkey` must appear in `weights_by_hotkey`; the optional
+`burn_uid_snapshot` is logging context only. The validator maps every signed
+hotkey, including the burn hotkey, to the live metagraph locally. Hotkeys that
+are no longer registered are dropped and the remaining weights are normalized.
+If no signed weight maps to a live UID, the validator refuses to call
+`set_weights`.
+
+Remote vector polling and chain weight setting use separate cadences.
+`weight_source.poll_interval_secs` fetches and verifies vectors into durable
+state. `weights.interval_secs` remains the only cadence that calls
+`set_weights`, and the chain `version_key` remains `SPEC_VERSION`. The
+validator persists accepted and applied policy versions in SQLite so rollback
+protection survives restart. During publisher outage it can reuse the cached
+accepted vector until `refuse_after_stale_minutes`; after that window it
+refuses to set weights.
+
+Publisher-side policy changes stay publisher-side. Burn share, lane shares,
+and miner hotkey overrides are read while producing the signed vector, so
+validators in remote mode do not need another binary update when those inputs
+change.
+
 ## Anti-cheating
 
 Each row below names a concrete attack and the mechanism that catches it. Citations point at the file enforcing the check.

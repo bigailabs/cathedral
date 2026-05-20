@@ -17,7 +17,7 @@ from cathedral.chain import BittensorChain, Chain
 from cathedral.evidence import EvidenceCollector, HttpPolarisFetcher
 from cathedral.types import PolarisAgentClaim
 from cathedral.validator import cards as cards_store
-from cathedral.validator import pull_loop, queue, weight_loop, worker
+from cathedral.validator import pull_loop, queue, remote_weight_loop, weight_loop, worker
 from cathedral.validator.auth import make_bearer_dep
 from cathedral.validator.config_runtime import RuntimeContext
 from cathedral.validator.db import connect
@@ -41,19 +41,69 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
         # Prevents a freshly-upgraded validator from publishing a vector
         # computed off a half-hydrated 7-day window. Set once, never reset.
         initial_backfill_complete = asyncio.Event()
-        tasks = [
-            asyncio.create_task(
-                worker.run_worker(
+        remote_fetch_task: asyncio.Task[None] | None = None
+        if ctx.settings.weight_source.mode == "remote":
+            if ctx.remote_weight_public_key is None:
+                logger.error(
+                    "remote_weight_source_enabled_but_key_missing",
+                    env=ctx.settings.weight_source.cathedral_policy_public_key_env,
+                )
+                raise RuntimeError(
+                    "weight_source.mode=remote requires a pinned Cathedral policy key"
+                )
+            if (
+                ctx.settings.weight_source.refuse_after_stale_minutes
+                < ctx.settings.weight_source.fallback_after_stale_minutes
+            ):
+                raise RuntimeError(
+                    "weight_source.refuse_after_stale_minutes must be greater than or "
+                    "equal to fallback_after_stale_minutes"
+                )
+            remote_key = ctx.remote_weight_public_key
+            remote_fetch_task = asyncio.create_task(
+                remote_weight_loop.run_remote_weight_loop(
                     conn,
-                    ctx.collector,
-                    ctx.registry,
                     ctx.health,
-                    poll_interval_secs=ctx.settings.worker.poll_interval_secs,
-                    max_concurrent=ctx.settings.worker.max_concurrent_verifications,
+                    publisher_weights_url=ctx.settings.weight_source.publisher_weights_url,
+                    public_key=remote_key,
+                    expected_key_id=ctx.settings.weight_source.cathedral_policy_key_id,
+                    network=ctx.settings.network.name,
+                    netuid=ctx.settings.network.netuid,
+                    poll_interval_secs=ctx.settings.weight_source.poll_interval_secs,
+                    request_timeout_secs=ctx.settings.weight_source.request_timeout_secs,
                     stop=stop,
                 )
-            ),
-            asyncio.create_task(
+            )
+            initial_backfill_complete.set()
+            weight_task = asyncio.create_task(
+                weight_loop.run_weight_loop(
+                    conn,
+                    ctx.chain,
+                    ctx.health,
+                    interval_secs=ctx.settings.weights.interval_secs,
+                    disabled=ctx.settings.weights.disabled,
+                    stop=stop,
+                    initial_backfill_complete=initial_backfill_complete,
+                    remote_weight_apply=lambda: remote_weight_loop.apply_cached_remote_vector_once(
+                        conn,
+                        ctx.chain,
+                        ctx.health,
+                        public_key=remote_key,
+                        expected_key_id=ctx.settings.weight_source.cathedral_policy_key_id,
+                        network=ctx.settings.network.name,
+                        netuid=ctx.settings.network.netuid,
+                        disabled=ctx.settings.weights.disabled,
+                        fallback_after_stale_minutes=(
+                            ctx.settings.weight_source.fallback_after_stale_minutes
+                        ),
+                        refuse_after_stale_minutes=(
+                            ctx.settings.weight_source.refuse_after_stale_minutes
+                        ),
+                    ),
+                )
+            )
+        else:
+            weight_task = asyncio.create_task(
                 weight_loop.run_weight_loop(
                     conn,
                     ctx.chain,
@@ -67,7 +117,20 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                     stop=stop,
                     initial_backfill_complete=initial_backfill_complete,
                 )
+            )
+        tasks = [
+            asyncio.create_task(
+                worker.run_worker(
+                    conn,
+                    ctx.collector,
+                    ctx.registry,
+                    ctx.health,
+                    poll_interval_secs=ctx.settings.worker.poll_interval_secs,
+                    max_concurrent=ctx.settings.worker.max_concurrent_verifications,
+                    stop=stop,
+                )
             ),
+            weight_task,
             asyncio.create_task(
                 run_stall_watchdog(
                     conn,
@@ -77,6 +140,8 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                 )
             ),
         ]
+        if remote_fetch_task is not None:
+            tasks.append(remote_fetch_task)
         if ctx.cathedral_public_key is not None:
             tasks.append(
                 asyncio.create_task(
@@ -154,11 +219,12 @@ def from_settings(settings_path: str) -> FastAPI:
     """Production builder — used by `cathedral-validator serve`."""
     from cathedral.config import (  # local import for CLI speed
         ValidatorSettings,
+        apply_weight_source_env_overrides,
         resolve_validator_config_path,
     )
 
     settings_path = resolve_validator_config_path(settings_path)
-    settings = ValidatorSettings.from_toml(settings_path)
+    settings = apply_weight_source_env_overrides(ValidatorSettings.from_toml(settings_path))
     bearer = os.environ.get(settings.http.bearer_token_env)
     if not bearer:
         raise RuntimeError(f"missing bearer token: env {settings.http.bearer_token_env} not set")
@@ -189,6 +255,23 @@ def from_settings(settings_path: str) -> FastAPI:
     if settings.publisher.api_token_env:
         publisher_api_token = os.environ.get(settings.publisher.api_token_env)
 
+    remote_weight_pubkey: Ed25519PublicKey | None = None
+    if settings.weight_source.mode == "remote":
+        remote_key_hex = (
+            settings.weight_source.cathedral_policy_public_key_hex
+            or os.environ.get(settings.weight_source.cathedral_policy_public_key_env, "")
+        ).strip()
+        if not remote_key_hex:
+            raise RuntimeError(
+                "weight_source.mode=remote requires "
+                f"{settings.weight_source.cathedral_policy_public_key_env} or "
+                "weight_source.cathedral_policy_public_key_hex"
+            )
+        try:
+            remote_weight_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(remote_key_hex))
+        except ValueError as exc:
+            raise RuntimeError("remote weight policy public key must be 32-byte hex") from exc
+
     ctx = RuntimeContext(
         settings=settings,
         bearer=bearer,
@@ -199,5 +282,6 @@ def from_settings(settings_path: str) -> FastAPI:
         cathedral_public_key=cathedral_pubkey,
         publisher_api_token=publisher_api_token,
         fetcher_close=fetcher.aclose,
+        remote_weight_public_key=remote_weight_pubkey,
     )
     return build_app(ctx)
