@@ -228,7 +228,9 @@ def test_ssh_hermes_task_family_runner_interface_is_launch_smoked() -> None:
         "prompt",
         "miner_hotkey",
         "submission",
+        "receipt_callback",
     ]
+    assert signature.parameters["receipt_callback"].default is None
 
 
 def test_ssh_hermes_redacts_cnf_fetch_tokens_from_errors() -> None:

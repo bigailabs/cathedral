@@ -950,7 +950,7 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
 
     async def fake_collect(*args, **kwargs):
         events.append("collect")
-        assert events == ["hermes_stdout", "receipt_clock", "collect"]
+        assert events == ["hermes_stdout", "receipt_clock", "receipt_callback", "collect"]
         return MagicMock()
 
     def fake_now() -> str:
@@ -965,6 +965,12 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
 
     runner = SshHermesRunner(runner_config)
     runner._collect_and_assemble = AsyncMock(side_effect=fake_collect)
+
+    async def receipt_callback(stdout: str, stdout_received_at_iso: str) -> None:
+        events.append("receipt_callback")
+        assert stdout_received_at_iso == receipt_at
+        assert "FINAL_ANSWER" in stdout
+
     with (
         patch.dict(sys.modules, {"asyncssh": fake_asyncssh}),
         patch.object(_module, "_now_utc_iso", side_effect=fake_now),
@@ -974,6 +980,7 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
             prompt="Solve the SAT challenge.",
             miner_hotkey="5Test" + "x" * 43,
             submission=submission,
+            receipt_callback=receipt_callback,
         )
 
     assert result.stdout_received_at_iso == receipt_at

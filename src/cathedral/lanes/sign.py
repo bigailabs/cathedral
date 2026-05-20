@@ -106,10 +106,42 @@ def build_signed_task_family_row(
     return row
 
 
+def resign_task_family_score(
+    row: dict[str, Any],
+    *,
+    signer: Any,
+    weighted_score: float,
+    score_parts: dict[str, Any],
+    rejection_reason: str | None,
+) -> dict[str, Any]:
+    """Re-sign an existing hash-only Task Family row with a final score.
+
+    Receipt ordering can verify a later-valid answer before the earlier
+    receipt resolves. The publisher stores the validated hash-only row
+    privately, then re-signs it as a zero-score loser once the durable
+    first-submitted winner is known.
+    """
+    signed_subset = {key: row[key] for key in TASK_FAMILY_SIGNED_KEYS if key in row}
+    missing = set(TASK_FAMILY_SIGNED_KEYS) - set(signed_subset)
+    if missing:
+        raise RuntimeError(f"cannot re-sign task family row, missing={sorted(missing)}")
+
+    signed_subset["weighted_score"] = float(weighted_score)
+    signed_subset["score_parts"] = dict(score_parts)
+    signed_subset["rejection_reason"] = rejection_reason
+    sig_b64 = base64.b64encode(signer._sk.sign(canonical_json(signed_subset))).decode("ascii")
+    out = dict(row)
+    out.update(signed_subset)
+    out["cathedral_signature"] = sig_b64
+    out["eval_output_schema_version"] = TASK_FAMILY_SCHEMA_VERSION
+    return out
+
+
 __all__ = [
     "TASK_FAMILY_SCHEMA_VERSION",
     "TASK_FAMILY_SIGNED_KEYS",
     "build_signed_task_family_row",
     "canonical_hash",
     "public_task_id",
+    "resign_task_family_score",
 ]

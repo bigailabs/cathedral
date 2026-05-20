@@ -67,6 +67,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -666,6 +667,7 @@ class SshHermesRunner:
         prompt: str,
         miner_hotkey: str,
         submission: dict[str, Any],
+        receipt_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> TaskFamilyHermesRun:
         """Run one generic Task Family prompt over SSH Hermes.
 
@@ -720,6 +722,8 @@ class SshHermesRunner:
             )
             stdout_received_at_iso = _now_utc_iso()
             trace.task_family_stdout_received_at_iso = stdout_received_at_iso
+            if receipt_callback is not None:
+                await receipt_callback(stdout, stdout_received_at_iso)
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
             synthetic_card: dict[str, Any] = {

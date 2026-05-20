@@ -1,14 +1,13 @@
-"""Single-active-challenge first-verified-lock-wins lock.
+"""Single-active-challenge winner lock primitive.
 
 The launch model is: one active DIMACS CNF challenge, every miner
-races the same problem, the first verified private solution to acquire
-the lock wins, and later submissions for that challenge cannot replace
-the winner.
+races the same problem, one verified winner is finalized, and later
+submissions for that challenge cannot replace the winner.
 
-This module provides the lock primitive that enforces that publisher
-ordering rule. The lane verifier scores each submission in isolation;
-the lock is the layer that decides which validated submission gets to
-flip the active challenge into the LOCKED state.
+This module provides the finalization primitive. Higher-level publisher
+code decides the ordering rule. For SAT, the first-submitted receipt
+selector decides which validated submission is eligible before this lock
+is attempted.
 
 The interface is small on purpose so an in-memory test fake and a
 SQLite-backed production implementation both fit. A future
@@ -19,7 +18,7 @@ Lock semantics:
 
 * The lock is keyed by ``(family_id, challenge_id)``.
 * ``try_lock`` is an atomic compare-and-set: it succeeds for the first
-  verified winner that reaches the lock and returns the resulting
+  eligible winner that reaches the lock and returns the resulting
   record. Every later call for the same ``challenge_id`` returns
   ``None`` (lock held by someone else) even if its submission was
   independently valid.
