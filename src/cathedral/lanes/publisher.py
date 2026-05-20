@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -57,18 +58,18 @@ class TaskFamilySignedResult:
     submission: Submission
 
 
-def task_family_feed_enabled(env: dict[str, str] | None = None) -> bool:
+def task_family_feed_enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
     return values.get("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "").lower() == "true"
 
 
-def enabled_task_family_ids(env: dict[str, str] | None = None) -> list[str]:
+def enabled_task_family_ids(env: Mapping[str, str] | None = None) -> list[str]:
     values = os.environ if env is None else env
     raw = values.get("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def task_family_tier(family_id: str, env: dict[str, str] | None = None) -> int:
+def task_family_tier(family_id: str, env: Mapping[str, str] | None = None) -> int:
     values = os.environ if env is None else env
     specific_key = f"CATHEDRAL_{family_id.upper()}_TIER"
     raw = values.get(specific_key, values.get("CATHEDRAL_TASK_FAMILY_TIER", "0"))
@@ -76,6 +77,34 @@ def task_family_tier(family_id: str, env: dict[str, str] | None = None) -> int:
         return max(0, int(raw))
     except ValueError:
         return 0
+
+
+def task_family_runner_skip_reason(runner: Any) -> dict[str, str] | None:
+    if getattr(runner, "run_task_family_challenge", None) is not None:
+        return None
+    return {
+        "reason": "runner_unsupported",
+        "required_runner_interface": "SshHermesRunner.run_task_family_challenge",
+        "recommended_env": (
+            "CATHEDRAL_EVAL_MODE=ssh-probe "
+            "CATHEDRAL_PROBER_VERSION=v2 "
+            "CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true"
+        ),
+    }
+
+
+def task_family_prober_version_warning(
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str] | None:
+    values = os.environ if env is None else env
+    if not task_family_feed_enabled(values):
+        return None
+    if values.get("CATHEDRAL_PROBER_VERSION", "v1").lower() == "v2":
+        return None
+    return {
+        "reason": "prober_version_not_v2",
+        "recommended_env": "CATHEDRAL_PROBER_VERSION=v2",
+    }
 
 
 def build_generate_ctx(
@@ -94,13 +123,39 @@ def build_generate_ctx(
 
 
 def build_task_family_prompt(problem: PublicProblem) -> str:
+    """Render the miner-facing prompt for one task-family problem.
+
+    For the SAT lane the CNF body is no longer inlined: the prompt
+    carries ``cnf_url`` + ``cnf_sha256`` so miners fetch the body from
+    the publisher's public CNF endpoint and verify integrity locally.
+    Inline CNF is retained for the toy/test path (when ``cnf_url`` is
+    absent) so existing fixtures keep working.
+    """
     payload = problem.model_dump(mode="json")
+    public_input = problem.public_input
+    has_cnf_url = isinstance(public_input, dict) and isinstance(
+        public_input["cnf_url"] if "cnf_url" in public_input else None, str
+    )
+    if has_cnf_url:
+        fetch_section = (
+            "Fetch the CNF from the URL in `public_input.cnf_url` with a plain "
+            "HTTP GET (no extra headers). Verify the body's sha256 matches "
+            "`public_input.cnf_sha256` before solving; abort the challenge "
+            "cleanly if it does not match. A 404 response means the challenge "
+            "is unavailable; give up on this challenge rather than retrying. "
+            "The URL is single-purpose (CNF body only) and is gated by an "
+            "unguessable token already embedded in the URL: never log the URL "
+            "or its query string."
+        )
+    else:
+        fetch_section = "The CNF body is inlined in `public_input.cnf` for this challenge."
     return (
         f"Capability: {problem.task_family}\n\n"
-        "Solve the boolean challenge below. You may use any tools available in "
-        "your Hermes environment. Cathedral verifies only the final answer, not "
-        "your prose.\n\n"
-        "Challenge:\n"
+        "Solve the boolean challenge described below. You may use any tools "
+        "available in your Hermes environment. Cathedral verifies only the "
+        "final answer, not your prose.\n\n"
+        f"{fetch_section}\n\n"
+        "Challenge metadata:\n"
         f"{json.dumps(payload, sort_keys=True, indent=2)}\n\n"
         "Return exactly one fenced FINAL_ANSWER JSON block. The JSON object "
         "inside the fence must be the answer payload for this task family. "
@@ -120,9 +175,14 @@ def extract_answer(stdout: str) -> dict[str, Any]:
     if not isinstance(stdout, str) or not stdout.strip():
         raise AnswerExtractionError("no_json_block_found", "stdout empty")
 
-    final = _FINAL_ANSWER_RE.search(stdout)
-    if final:
-        return _decode_json(final.group(1), source="FINAL_ANSWER")
+    final_blocks = list(_FINAL_ANSWER_RE.finditer(stdout))
+    if len(final_blocks) > 1:
+        raise AnswerExtractionError(
+            "multiple_final_answer_blocks",
+            f"found {len(final_blocks)} FINAL_ANSWER blocks",
+        )
+    if final_blocks:
+        return _decode_json(final_blocks[0].group(1), source="FINAL_ANSWER")
 
     json_blocks = list(_JSON_BLOCK_RE.finditer(stdout))
     if json_blocks:
@@ -146,6 +206,7 @@ def score_and_sign_task_family_stdout(
     signer: Any,
     eval_run_id: str | None = None,
     epoch_salt: str,
+    score_override: ScoreResult | None = None,
 ) -> TaskFamilySignedResult:
     prompt = build_task_family_prompt(problem)
     try:
@@ -179,16 +240,25 @@ def score_and_sign_task_family_stdout(
         miner_hotkey=str(submission_row["miner_hotkey"]),
         answer=answer,
     )
-    try:
-        score = lane.score(problem, verifier)
-    except Exception as exc:
-        score = ScoreResult(weighted_score=0.0, rejection_reason="scorer_error")
-        verifier = VerifierResult(
-            parsed_ok=False,
-            raw_metric=0.0,
-            rejection_reason="scorer_error",
-            details={"error": str(exc)[:512]},
+    if score_override is not None:
+        score = score_override
+    elif verifier.rejection_reason == "verifier_error":
+        score = ScoreResult(
+            weighted_score=0.0,
+            rejection_reason="verifier_error",
+            score_parts={"binary_correct": 0.0},
         )
+    else:
+        try:
+            score = lane.score(problem, verifier)
+        except Exception as exc:
+            score = ScoreResult(weighted_score=0.0, rejection_reason="scorer_error")
+            verifier = VerifierResult(
+                parsed_ok=False,
+                raw_metric=0.0,
+                rejection_reason="scorer_error",
+                details={"error": str(exc)[:512]},
+            )
 
     row = build_signed_task_family_row(
         eval_run_id=eval_run_id or str(uuid4()),
@@ -223,6 +293,7 @@ async def persist_task_family_result(
     duration_ms: int,
     trace_json: dict[str, Any] | None = None,
     feed_enabled: bool | None = None,
+    commit: bool = True,
 ) -> None:
     from cathedral.publisher import repository
 
@@ -243,7 +314,6 @@ async def persist_task_family_result(
     output_card_hash = blake3.blake3(canonical_json(output_card_json)).hexdigest()
     task_json = {
         "task_type": problem.task_family,
-        "task_id": problem.task_id,
         "task_id_public": row["task_id_public"],
         "epoch_salt": row["epoch_salt"],
         "difficulty_tier": problem.difficulty_tier,
@@ -274,6 +344,7 @@ async def persist_task_family_result(
         polaris_verified=False,
         trace_json=trace_json,
         eval_output_schema_version=int(row["eval_output_schema_version"]),
+        commit=commit,
     )
 
 
@@ -336,5 +407,7 @@ __all__ = [
     "public_problem_hash",
     "score_and_sign_task_family_stdout",
     "task_family_feed_enabled",
+    "task_family_prober_version_warning",
+    "task_family_runner_skip_reason",
     "task_family_tier",
 ]

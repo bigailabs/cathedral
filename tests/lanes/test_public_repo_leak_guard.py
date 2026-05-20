@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.contract import PublicProblem, ScoreResult, Submission, VerifierResult
 from cathedral.lanes.sign import build_signed_task_family_row
 
@@ -31,6 +32,15 @@ _FORBIDDEN_PUBLIC_SUBSTRINGS = (
     ".cnf",
     ".dimacs",
     ".sol",
+    # CNF URL transport: the fetch URL, its integrity hash, and the
+    # per-announcement token are operational artifacts. They live in
+    # public_input (PublicProblem) at announce time, but must never
+    # round-trip through the signed schema-5 row or the public
+    # leaderboard projection. A leak here would let a non-eligible
+    # observer pull the CNF body straight off the public feed.
+    "cnf_url",
+    "cnf_sha256",
+    "fetch_token",
 )
 
 _SKIP_DIRS = {
@@ -160,14 +170,6 @@ def test_private_corpus_markers_are_not_committed_in_text_files() -> None:
 # --------------------------------------------------------------------------
 
 
-class _StubSigner:
-    """Minimal stand-in for EvalSigner; build_signed_task_family_row reads
-    only ``_sk`` via duck-typing on cathedral.eval.v2_payload."""
-
-    def __init__(self, sk: Ed25519PrivateKey) -> None:
-        self._sk = sk
-
-
 def _schema5_signed_row() -> dict[str, object]:
     """Build a schema-5 signed task-family row that carries every
     private-shaped field the publisher could plausibly hold. The
@@ -214,7 +216,7 @@ def _schema5_signed_row() -> dict[str, object]:
         verifier=verifier,
         score=score,
         ran_at_iso="2026-05-18T20:00:00.000Z",
-        signer=_StubSigner(sk),
+        signer=EvalSigner(sk),
         epoch_salt="epoch_leak_canary:synthetic_boolean_v1",
     )
     return row
@@ -310,7 +312,9 @@ def test_schema5_public_projection_is_hash_only() -> None:
     assert wire["cathedral_signature"] == row["cathedral_signature"]
     assert wire["weighted_score"] == 1.0
 
-    # And no fields shaped like a payload body.
+    # And no fields shaped like a payload body, or like the operational
+    # CNF URL transport (cnf_url / cnf_sha256 / fetch_token belong only
+    # on PublicProblem.public_input at announce time).
     forbidden_keys = {
         "cnf",
         "dimacs",
@@ -321,6 +325,9 @@ def test_schema5_public_projection_is_hash_only() -> None:
         "generator_version",
         "public_input",
         "hidden_payload",
+        "cnf_url",
+        "cnf_sha256",
+        "fetch_token",
     }
     leaked_keys = forbidden_keys & set(wire.keys())
     assert not leaked_keys, f"schema-5 public projection exposes payload-shaped keys: {leaked_keys}"
@@ -328,7 +335,17 @@ def test_schema5_public_projection_is_hash_only() -> None:
 
 @pytest.mark.parametrize(
     "candidate_field",
-    ["cnf", "dimacs", "dimacs_solution", "assignment", "solution", "planted_assignment"],
+    [
+        "cnf",
+        "dimacs",
+        "dimacs_solution",
+        "assignment",
+        "solution",
+        "planted_assignment",
+        "cnf_url",
+        "cnf_sha256",
+        "fetch_token",
+    ],
 )
 def test_schema5_projection_drops_extra_private_fields_if_repo_grows_them(
     candidate_field: str,

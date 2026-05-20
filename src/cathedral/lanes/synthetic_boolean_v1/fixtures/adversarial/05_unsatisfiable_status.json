@@ -1,0 +1,9 @@
+{
+  "name": "tier1_unsatisfiable_status",
+  "seed": 42,
+  "tier": 1,
+  "submission": {
+    "dimacs_solution": "s UNSATISFIABLE\n"
+  },
+  "expected_rejection_reason": "solution_status_unsatisfiable"
+}

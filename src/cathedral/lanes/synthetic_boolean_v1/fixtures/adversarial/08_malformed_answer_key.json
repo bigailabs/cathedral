@@ -1,0 +1,9 @@
+{
+  "name": "tier1_wrong_key",
+  "seed": 42,
+  "tier": 1,
+  "submission": {
+    "assignment": {"1": true, "2": true, "3": true}
+  },
+  "expected_rejection_reason": "answer_missing_dimacs_solution"
+}

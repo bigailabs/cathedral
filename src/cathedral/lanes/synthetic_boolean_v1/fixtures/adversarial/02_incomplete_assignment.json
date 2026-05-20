@@ -1,0 +1,9 @@
+{
+  "name": "tier1_incomplete",
+  "seed": 42,
+  "tier": 1,
+  "submission": {
+    "dimacs_solution": "s SATISFIABLE\nv 1 2 0\n"
+  },
+  "expected_rejection_reason": "solution_incomplete_assignment"
+}

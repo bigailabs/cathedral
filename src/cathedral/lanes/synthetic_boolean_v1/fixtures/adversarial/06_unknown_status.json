@@ -1,0 +1,9 @@
+{
+  "name": "tier1_unknown_status",
+  "seed": 42,
+  "tier": 1,
+  "submission": {
+    "dimacs_solution": "s ROOMBA\n"
+  },
+  "expected_rejection_reason": "solution_unknown_status"
+}

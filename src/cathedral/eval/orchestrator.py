@@ -20,6 +20,8 @@ on Card JSON parse failure: record EvalRun with errors=[...], score=0
 from __future__ import annotations
 
 import asyncio
+import os
+import secrets
 import shutil
 import tempfile
 from collections import defaultdict
@@ -37,6 +39,14 @@ from cathedral.eval.polaris_runner import PolarisRunner, PolarisRunnerError
 from cathedral.eval.scoring_pipeline import EvalSigner, score_and_sign
 from cathedral.eval.task_generator import generate_task
 from cathedral.lanes import registry as lane_registry
+from cathedral.lanes.challenge_lock import ChallengeLock, SqliteChallengeLock
+from cathedral.lanes.challenge_source import (
+    ChallengeRecord,
+    ChallengeSource,
+    SqliteChallengeSource,
+    SqliteFetchTokenStore,
+)
+from cathedral.lanes.contract import HiddenMetadata, PublicProblem, ScoreResult
 from cathedral.lanes.publisher import (
     build_generate_ctx,
     build_task_family_prompt,
@@ -44,7 +54,15 @@ from cathedral.lanes.publisher import (
     persist_task_family_result,
     score_and_sign_task_family_stdout,
     task_family_feed_enabled,
+    task_family_prober_version_warning,
+    task_family_runner_skip_reason,
     task_family_tier,
+)
+from cathedral.lanes.synthetic_boolean_v1 import (
+    FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID,
+)
+from cathedral.lanes.synthetic_boolean_v1 import (
+    problem_from_challenge_record,
 )
 from cathedral.publisher import repository
 from cathedral.publisher.merkle import epoch_for
@@ -83,7 +101,7 @@ def _retry_backoffs() -> tuple[float, ...]:
     """Production retry policy (CONTRACTS.md §6 'Timeouts and policies').
 
     Tests set `CATHEDRAL_FAST_RETRIES=1` (or any `CATHEDRAL_EVAL_MODE`
-    starting with `stub`) to keep ticks bounded — same 3-attempt policy
+    starting with `stub`) to keep ticks bounded - same 3-attempt policy
     but with zero sleep between attempts.
     """
     import os
@@ -130,14 +148,18 @@ class EvalOrchestrator:
         signer: EvalSigner,
         registry: CardRegistry,
         runner_for: Callable[[dict[str, Any]], PolarisRunner] | None = None,
+        task_family_challenge_source: ChallengeSource | None = None,
+        task_family_challenge_lock: ChallengeLock | None = None,
+        task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
+        public_base_url: str | None = None,
     ) -> None:
         """Construct an orchestrator with either a single runner or a
         per-submission runner factory.
 
-        `polaris` (legacy) — one runner used for every submission. Kept
+        `polaris` (legacy) - one runner used for every submission. Kept
         for back-compat with existing callers and tests.
 
-        `runner_for` (preferred) — a callable `submission -> PolarisRunner`.
+        `runner_for` (preferred) - a callable `submission -> PolarisRunner`.
         Lets the orchestrator dispatch on the submission's
         `attestation_mode` so Tier A (polaris-hosted) goes to
         `PolarisRuntimeRunner`, BYO miners go to `BundleCardRunner`,
@@ -155,12 +177,20 @@ class EvalOrchestrator:
         self._runner_for = runner_for
         self.signer = signer
         self.registry = registry
+        self._task_family_challenge_source = task_family_challenge_source
+        self._task_family_challenge_lock = task_family_challenge_lock
+        self._task_family_fetch_token_store = task_family_fetch_token_store
+        # Constructor wins; env is the fallback. An empty string is
+        # treated as missing. See _announce_synthetic_boolean_problem.
+        self._public_base_url = (
+            public_base_url or os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "") or ""
+        ).strip()
         self._round_counter = _RoundCounter(epoch=epoch_for(datetime.now(UTC)))
         self._failure_counts: dict[str, int] = defaultdict(int)
         # Per-submission cooldown for cadence-refresh rows that hit a
         # retryable or terminal failure. Cadence rows stay 'ranked'
         # through failures (so the leaderboard doesn't churn), and the
-        # cadence query uses MAX(eval_runs.ran_at) — which does NOT
+        # cadence query uses MAX(eval_runs.ran_at) - which does NOT
         # advance on a failure that never reached score_and_sign. Without
         # this cooldown, a permanently broken bundle would re-pick on
         # every loop tick, spam logs, and consume cadence slots. Process-
@@ -173,7 +203,7 @@ class EvalOrchestrator:
         """Back-compat: a few callers read `orch.polaris` directly. When
         a per-submission factory is configured this returns whatever the
         factory yields for an empty submission, which is fine for the
-        cases that use this — they're inspecting type, not running."""
+        cases that use this - they're inspecting type, not running."""
         if self._fixed_polaris is not None:
             return self._fixed_polaris
         assert self._runner_for is not None
@@ -194,7 +224,7 @@ class EvalOrchestrator:
         flag is set, upload it to Hippius + sign the manifest. Returns
         the PublishedArtifact for score_and_sign to consume, or None.
 
-        Failures here MUST NOT crash the eval — we log + return None so
+        Failures here MUST NOT crash the eval - we log + return None so
         the eval still scores under v1 wire shape. The whole point of
         the dual-publish window is that v2 publishing is best-effort
         during the transition; the canonical record is still the v1
@@ -205,7 +235,7 @@ class EvalOrchestrator:
         import os as _os
 
         if _os.environ.get("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD", "").lower() != "true":
-            # Flag's off — skip the Hippius round-trip entirely.
+            # Flag's off - skip the Hippius round-trip entirely.
             # Storage cost matters here: every eval would otherwise
             # upload an encrypted tar.gz on every cadence tick even
             # though we're not emitting v2 on the wire.
@@ -236,13 +266,15 @@ class EvalOrchestrator:
         submission: dict[str, Any],
         *,
         v3_active_hotkeys: list[str] | None = None,
+        task_family_problem_overrides: dict[str, tuple[PublicProblem, HiddenMetadata]]
+        | None = None,
     ) -> None:
         log = logger.bind(submission_id=submission["id"], card_id=submission["card_id"])
 
         # Capture the entry status so failure paths know whether this is
         # a first-time eval (queued) or a cadence refresh of a previously
         # ranked row. A cadence refresh that fails must leave the row as
-        # 'ranked' with its prior score intact — flipping to 'rejected'
+        # 'ranked' with its prior score intact - flipping to 'rejected'
         # would silently strip a working agent off the leaderboard.
         original_status = submission.get("status")
         is_cadence_refresh = original_status == "ranked"
@@ -300,7 +332,7 @@ class EvalOrchestrator:
             )
             return
 
-        # Extract to ephemeral dir, then immediately drop the path —
+        # Extract to ephemeral dir, then immediately drop the path -
         # Polaris will get the bundle bytes directly via the runner API
         # (we keep the extraction step here so adversarial-zip checks
         # still run). Wipe the dir afterwards regardless of outcome.
@@ -349,7 +381,7 @@ class EvalOrchestrator:
 
             if polaris_result is None:
                 # Persist a zero-score eval_run with errors so the public
-                # API surfaces the failure (CONTRACTS.md §6 step 3-4 — the
+                # API surfaces the failure (CONTRACTS.md §6 step 3-4 - the
                 # contract test asserts on either weighted_score=0 OR
                 # errors!=None). Status moves to 'rejected' to match the
                 # 'evaluating -> rejected' state machine arrow.
@@ -377,7 +409,7 @@ class EvalOrchestrator:
                 )
                 # First-eval rows that exhaust retries get rejected. A
                 # cadence refresh that exhausts retries leaves status as
-                # 'ranked' — score_and_sign above already folded the 0
+                # 'ranked' - score_and_sign above already folded the 0
                 # into the 30-day rolling avg, so the score itself
                 # signals degradation without stripping the row off the
                 # leaderboard.
@@ -419,7 +451,7 @@ class EvalOrchestrator:
                 registry=self.registry,
                 signer=self.signer,
                 polaris_attestation=attestation_dict,
-                # v2 additions — None for every runner except
+                # v2 additions - None for every runner except
                 # PolarisDeployRunner, which always populates them.
                 trace_json=polaris_result.trace,
                 polaris_manifest=polaris_result.manifest,
@@ -443,6 +475,7 @@ class EvalOrchestrator:
                     epoch=epoch,
                     round_index=round_index,
                     log=log,
+                    problem_overrides=task_family_problem_overrides,
                 )
             except Exception as exc:
                 log.exception("task_family_eval_failed", error=str(exc))
@@ -450,7 +483,7 @@ class EvalOrchestrator:
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
             # Drop the plaintext binding so GC can reclaim it on the next
-            # collector pass. Best-effort — Python doesn't guarantee
+            # collector pass. Best-effort - Python doesn't guarantee
             # zeroing, but losing the only reference is the closest we
             # get without ctypes-level memzero.
             plaintext = b""
@@ -581,14 +614,20 @@ class EvalOrchestrator:
         epoch: int,
         round_index: int,
         log: structlog.stdlib.BoundLogger,
+        problem_overrides: dict[str, tuple[PublicProblem, HiddenMetadata]] | None = None,
     ) -> None:
         if not task_family_feed_enabled():
             return
 
-        run_challenge = getattr(runner, "run_task_family_challenge", None)
-        if run_challenge is None:
-            log.info("task_family_skipped", reason="runner_unsupported")
+        warning = task_family_prober_version_warning()
+        if warning is not None:
+            log.warning("task_family_launch_guard", **warning)
+
+        skip = task_family_runner_skip_reason(runner)
+        if skip is not None:
+            log.info("task_family_skipped", **skip)
             return
+        run_challenge = runner.run_task_family_challenge
 
         miner_hotkey = str(submission["miner_hotkey"])
         issued_at_iso = _ms_iso(datetime.now(UTC))
@@ -599,18 +638,24 @@ class EvalOrchestrator:
                 log.warning("task_family_skipped", family_id=family_id, reason="unregistered")
                 continue
 
-            tier = task_family_tier(family_id)
-            ctx = build_generate_ctx(
-                family_id=family_id,
-                miner_hotkey=miner_hotkey,
-                epoch=epoch,
-                round_index=round_index,
-                tier=tier,
-                issued_at_iso=issued_at_iso,
-            )
-            try:
-                problem, hidden = lane.generate(ctx)
-            except NotImplementedError:
+            if problem_overrides is not None and family_id in problem_overrides:
+                loaded: tuple[PublicProblem | None, HiddenMetadata | None] | None = (
+                    problem_overrides[family_id]
+                )
+            else:
+                loaded = await self._load_task_family_problem(
+                    lane=lane,
+                    family_id=family_id,
+                    miner_hotkey=miner_hotkey,
+                    epoch=epoch,
+                    round_index=round_index,
+                    issued_at_iso=issued_at_iso,
+                    log=log,
+                )
+            if loaded is None:
+                continue
+            problem, hidden = loaded
+            if problem is None or hidden is None:
                 log.info("task_family_skipped", family_id=family_id, reason="stub")
                 continue
 
@@ -632,35 +677,258 @@ class EvalOrchestrator:
                 signer=self.signer,
                 epoch_salt=epoch_salt,
             )
-
-            trace_bundle = getattr(hermes_run, "trace_bundle", None)
-            published_artifact = await self._maybe_publish_bundle(trace_bundle, log)
-            trace_json: dict[str, Any] = dict(hermes_run.trace or {})
-            if trace_bundle is not None:
-                trace_json["bundle_blake3"] = trace_bundle.bundle_blake3
-                trace_json["cathedral_eval_round"] = trace_bundle.cathedral_eval_round
-            if published_artifact is not None:
-                trace_json["bundle_url"] = published_artifact.bundle_url
-                trace_json["manifest_url"] = published_artifact.manifest_url
-                trace_json["manifest_hash"] = published_artifact.manifest_hash
-
-            await persist_task_family_result(
-                self.db,
-                submission_row=submission,
-                problem=problem,
-                signed=signed,
-                epoch=epoch,
-                round_index=round_index,
-                duration_ms=int(hermes_run.duration_ms),
-                trace_json=trace_json,
-                feed_enabled=True,
+            challenge_lock = self._task_family_challenge_lock
+            sat_lock_candidate = (
+                family_id == SYNTHETIC_BOOLEAN_FAMILY_ID
+                and challenge_lock is not None
+                and float(signed.score.weighted_score) >= 1.0
             )
+            locked = None
+            promoted = None
+
+            async def _build_trace_json(run: Any = hermes_run) -> dict[str, Any]:
+                trace_bundle = getattr(run, "trace_bundle", None)
+                published_artifact = await self._maybe_publish_bundle(trace_bundle, log)
+                out: dict[str, Any] = dict(run.trace or {})
+                if trace_bundle is not None:
+                    out["bundle_blake3"] = trace_bundle.bundle_blake3
+                    out["cathedral_eval_round"] = trace_bundle.cathedral_eval_round
+                if published_artifact is not None:
+                    out["bundle_url"] = published_artifact.bundle_url
+                    out["manifest_url"] = published_artifact.manifest_url
+                    out["manifest_hash"] = published_artifact.manifest_hash
+                return out
+
+            if sat_lock_candidate:
+                assert challenge_lock is not None
+                await self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    locked = await challenge_lock.try_lock(
+                        family_id=family_id,
+                        challenge_id=problem.task_id,
+                        miner_hotkey=miner_hotkey,
+                        eval_run_id=str(signed.row["id"]),
+                        weighted_score=float(signed.score.weighted_score),
+                        won_at_iso=str(signed.row["ran_at"]),
+                        commit=False,
+                    )
+                    if locked is None:
+                        signed = score_and_sign_task_family_stdout(
+                            lane=lane,
+                            problem=problem,
+                            hidden=hidden,
+                            submission_row=submission,
+                            stdout=hermes_run.stdout,
+                            ran_at_iso=str(signed.row["ran_at"]),
+                            signer=self.signer,
+                            eval_run_id=str(signed.row["id"]),
+                            epoch_salt=epoch_salt,
+                            score_override=ScoreResult(
+                                weighted_score=0.0,
+                                rejection_reason="challenge_already_locked",
+                                score_parts={"binary_correct": 0.0, "lock_winner": 0.0},
+                            ),
+                        )
+
+                    trace_json = await _build_trace_json()
+                    await persist_task_family_result(
+                        self.db,
+                        submission_row=submission,
+                        problem=problem,
+                        signed=signed,
+                        epoch=epoch,
+                        round_index=round_index,
+                        duration_ms=int(hermes_run.duration_ms),
+                        trace_json=trace_json,
+                        feed_enabled=True,
+                        commit=False,
+                    )
+                    if locked is not None and self._task_family_challenge_source is not None:
+                        promoted = (
+                            await self._task_family_challenge_source.mark_locked_and_promote_next(
+                                family_id=family_id,
+                                challenge_id=problem.task_id,
+                                now_iso=str(signed.row["ran_at"]),
+                                manage_transaction=False,
+                            )
+                        )
+                    await self.db.commit()
+                except Exception:
+                    await self.db.rollback()
+                    raise
+
+                if locked is None:
+                    log.info(
+                        "task_family_challenge_already_locked",
+                        family_id=family_id,
+                        challenge_id_public=signed.row.get("task_id_public"),
+                        miner_hotkey=miner_hotkey,
+                    )
+                else:
+                    log.info(
+                        "task_family_challenge_winner_recorded",
+                        family_id=family_id,
+                        challenge_id_public=signed.row.get("task_id_public"),
+                        miner_hotkey=miner_hotkey,
+                    )
+                    log.info(
+                        "task_family_challenge_locked",
+                        family_id=family_id,
+                        challenge_id_public=signed.row.get("task_id_public"),
+                        miner_hotkey=miner_hotkey,
+                        promoted_challenge_id=(promoted.challenge_id if promoted else None),
+                    )
+            else:
+                await persist_task_family_result(
+                    self.db,
+                    submission_row=submission,
+                    problem=problem,
+                    signed=signed,
+                    epoch=epoch,
+                    round_index=round_index,
+                    duration_ms=int(hermes_run.duration_ms),
+                    trace_json=await _build_trace_json(),
+                    feed_enabled=True,
+                )
             log.info(
                 "task_family_eval_complete",
                 family_id=family_id,
                 task_id_public=signed.row.get("task_id_public"),
                 weighted_score=signed.row.get("weighted_score"),
             )
+
+    async def _announce_synthetic_boolean_problem(
+        self,
+        record: ChallengeRecord,
+        *,
+        log: structlog.stdlib.BoundLogger,
+        family_id: str,
+    ) -> tuple[PublicProblem, HiddenMetadata] | None:
+        """Mint (or reuse) a fetch token and build lane inputs for one record.
+
+        Returns ``None`` and logs a structured warning when the feed is
+        enabled but ``CATHEDRAL_PUBLIC_BASE_URL`` is unset: a broken URL
+        in a miner prompt is worse than skipping a tick. Returns ``None``
+        when the token store isn't wired (test paths that pass the
+        challenge source but skip token plumbing). The caller treats
+        ``None`` the same way it treats a missing challenge.
+        """
+        if not self._public_base_url:
+            log.warning(
+                "task_family_skipped",
+                family_id=family_id,
+                reason="missing_public_base_url",
+                required_env="CATHEDRAL_PUBLIC_BASE_URL",
+            )
+            return None
+        if self._task_family_fetch_token_store is None:
+            log.warning(
+                "task_family_skipped",
+                family_id=family_id,
+                reason="missing_fetch_token_store",
+            )
+            return None
+        # INSERT OR IGNORE inside mint_if_absent guarantees every miner
+        # in the same announcement window gets the same token; a re-mint
+        # on a later tick is a no-op once the row exists. The lane's
+        # DEFAULT_TIME_LIMIT_SECONDS is captured at mint time so the
+        # endpoint's grace window survives later tier/release tweaks.
+        from cathedral.lanes.synthetic_boolean_v1 import DEFAULT_TIME_LIMIT_SECONDS
+
+        token = secrets.token_urlsafe(32)
+        minted_at_iso = _ms_iso(datetime.now(UTC))
+        try:
+            row = await self._task_family_fetch_token_store.mint_if_absent(
+                record.challenge_id,
+                fetch_token=token,
+                minted_at_iso=minted_at_iso,
+                announced_time_limit_secs=DEFAULT_TIME_LIMIT_SECONDS,
+            )
+        except Exception as exc:
+            log.error(
+                "task_family_skipped",
+                family_id=family_id,
+                reason="fetch_token_mint_failed",
+                error=str(exc)[:256],
+            )
+            return None
+        return problem_from_challenge_record(
+            record,
+            public_base_url=self._public_base_url,
+            fetch_token=row.fetch_token,
+            time_limit_seconds=DEFAULT_TIME_LIMIT_SECONDS,
+        )
+
+    async def snapshot_task_family_batch_problems(
+        self,
+        *,
+        log: structlog.stdlib.BoundLogger,
+    ) -> dict[str, tuple[PublicProblem, HiddenMetadata]]:
+        """Snapshot batch-stable task-family problems.
+
+        For the SAT first launch, a poll batch should race one active
+        formula. Without this snapshot, miner A can solve and promote the
+        next formula before miner B loads the task, so the same poll batch
+        accidentally spans two formulas. Families without an active
+        challenge source still fall back to per-miner generation.
+        """
+        out: dict[str, tuple[PublicProblem, HiddenMetadata]] = {}
+        if not task_family_feed_enabled() or self._task_family_challenge_source is None:
+            return out
+        for family_id in enabled_task_family_ids():
+            if family_id != SYNTHETIC_BOOLEAN_FAMILY_ID:
+                continue
+            try:
+                lane_registry.lookup(family_id)
+            except KeyError:
+                log.warning("task_family_skipped", family_id=family_id, reason="unregistered")
+                continue
+            record = await self._task_family_challenge_source.get_active(family_id)
+            if record is None:
+                log.info("task_family_skipped", family_id=family_id, reason="no_active_challenge")
+                continue
+            announced = await self._announce_synthetic_boolean_problem(
+                record, log=log, family_id=family_id
+            )
+            if announced is None:
+                continue
+            out[family_id] = announced
+        return out
+
+    async def _load_task_family_problem(
+        self,
+        *,
+        lane: Any,
+        family_id: str,
+        miner_hotkey: str,
+        epoch: int,
+        round_index: int,
+        issued_at_iso: str,
+        log: structlog.stdlib.BoundLogger,
+    ) -> tuple[PublicProblem | None, HiddenMetadata | None] | None:
+        if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and self._task_family_challenge_source:
+            record = await self._task_family_challenge_source.get_active(family_id)
+            if record is None:
+                log.info("task_family_skipped", family_id=family_id, reason="no_active_challenge")
+                return None
+            return await self._announce_synthetic_boolean_problem(
+                record, log=log, family_id=family_id
+            )
+
+        tier = task_family_tier(family_id)
+        ctx = build_generate_ctx(
+            family_id=family_id,
+            miner_hotkey=miner_hotkey,
+            epoch=epoch,
+            round_index=round_index,
+            tier=tier,
+            issued_at_iso=issued_at_iso,
+        )
+        try:
+            generated: tuple[PublicProblem | None, HiddenMetadata | None] = lane.generate(ctx)
+            return generated
+        except NotImplementedError:
+            return (None, None)
 
     async def _on_retryable_failure(
         self,
@@ -673,7 +941,7 @@ class EvalOrchestrator:
         self._failure_counts[submission["id"]] += 1
         if self._failure_counts[submission["id"]] >= 3:
             # Cadence refresh exhausted: keep the row 'ranked' with its
-            # prior score — the cadence loop will pick it up again next
+            # prior score - the cadence loop will pick it up again next
             # window. First-eval exhausted: terminal rejection.
             if is_cadence_refresh:
                 self._arm_cadence_cooldown(submission["id"])
@@ -692,7 +960,7 @@ class EvalOrchestrator:
         else:
             if is_cadence_refresh:
                 # Cadence rows are not in 'evaluating' (we never flipped
-                # them) — nothing to restore. Arm a cooldown so a row
+                # them) - nothing to restore. Arm a cooldown so a row
                 # whose underlying bundle is permanently broken doesn't
                 # re-pick on every tick (the cadence query uses
                 # MAX(eval_runs.ran_at), which a failed retryable does
@@ -717,7 +985,7 @@ class EvalOrchestrator:
 
     def _arm_cadence_cooldown(self, submission_id: str) -> None:
         """Mark a cadence row as in-cooldown so the loop's batch picker
-        skips it for `_CADENCE_FAILURE_COOLDOWN`. Idempotent — repeated
+        skips it for `_CADENCE_FAILURE_COOLDOWN`. Idempotent - repeated
         failures just push the deadline forward."""
         self._cadence_cooldown_until[submission_id] = datetime.now(UTC) + _CADENCE_FAILURE_COOLDOWN
 
@@ -745,7 +1013,7 @@ class EvalOrchestrator:
         """Terminal failure (e.g. decryption, structure, missing card_def).
 
         First-eval rows go to 'rejected' as before. Cadence refresh rows
-        stay 'ranked' — a previously verified bundle failing decryption
+        stay 'ranked' - a previously verified bundle failing decryption
         once should not strip the agent off the leaderboard. The cadence
         loop will pick it up again on the next tick, and if the failure
         is permanent the operator will see the repeated log lines.
@@ -788,8 +1056,12 @@ async def run_eval_loop(
     poll_interval_secs: float = 10.0,
     max_concurrent: int = 2,
     stop: asyncio.Event | None = None,
+    task_family_challenge_source: ChallengeSource | None = None,
+    task_family_challenge_lock: ChallengeLock | None = None,
+    task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
+    public_base_url: str | None = None,
 ) -> None:
-    """Long-running scheduler — picks queued submissions and evals them.
+    """Long-running scheduler: picks queued submissions and evals them.
 
     Pass either `polaris=` (legacy single runner) OR `runner_for=` (a
     callable that returns a runner per submission). Production wants
@@ -808,11 +1080,15 @@ async def run_eval_loop(
         runner_for=runner_for,
         signer=signer,
         registry=registry,
+        task_family_challenge_source=task_family_challenge_source,
+        task_family_challenge_lock=task_family_challenge_lock,
+        task_family_fetch_token_store=task_family_fetch_token_store,
+        public_base_url=public_base_url,
     )
     sem = asyncio.Semaphore(max_concurrent)
 
     while not stop.is_set():
-        # v1.1.0 PR 5 — cadence scheduler. Two queue sources:
+        # v1.1.0 PR 5 - cadence scheduler. Two queue sources:
         #   1. status='queued' rows (first eval after submit)
         #   2. status='ranked' rows whose card cadence window expired
         # Merged into one batch per tick, capped at max_concurrent.
@@ -864,14 +1140,28 @@ async def run_eval_loop(
         except aiosqlite.Error as e:
             logger.warning("v3_active_hotkeys_query_failed", error=str(e))
             v3_active_hotkeys = None
+        try:
+            task_family_problem_overrides = await orchestrator.snapshot_task_family_batch_problems(
+                log=logger
+            )
+        except Exception as e:
+            logger.warning("task_family_batch_snapshot_failed", error=str(e))
+            task_family_problem_overrides = {}
 
         async def _process(
             s: dict[str, Any],
             active_hotkeys: list[str] | None = v3_active_hotkeys,
+            problem_overrides: dict[str, tuple[PublicProblem, HiddenMetadata]] = (
+                task_family_problem_overrides
+            ),
         ) -> None:
             async with sem:
                 try:
-                    await orchestrator.evaluate_one(s, v3_active_hotkeys=active_hotkeys)
+                    await orchestrator.evaluate_one(
+                        s,
+                        v3_active_hotkeys=active_hotkeys,
+                        task_family_problem_overrides=problem_overrides,
+                    )
                 except Exception as e:
                     logger.exception("eval_one_crashed", submission_id=s["id"], error=str(e))
                     # An uncaught exception inside evaluate_one would
@@ -880,7 +1170,7 @@ async def run_eval_loop(
                     # the existing 3-attempt retry policy so the row
                     # either re-queues or eventually rejects rather than
                     # sitting in 'evaluating' forever. Cadence rows
-                    # stayed 'ranked' the whole time — nothing to do.
+                    # stayed 'ranked' the whole time - nothing to do.
                     if s.get("status") == "queued":
                         await orchestrator._on_retryable_failure(
                             s, logger.bind(submission_id=s["id"]), f"evaluate_one crash: {e}"
@@ -929,7 +1219,7 @@ async def _evaluating_submissions(conn: Any, limit: int = 10) -> list[dict[str, 
 def _resolve_polaris_runner_for_mode(mode: str) -> PolarisRunner:
     """Build a runner for an explicit attestation mode.
 
-    Mirrors `_resolve_polaris_runner_from_env` but skips the env lookup —
+    Mirrors `_resolve_polaris_runner_from_env` but skips the env lookup -
     the per-submission dispatch already knows which tier this row is.
     """
     import os as _os
@@ -956,12 +1246,12 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
       stub-fail-polaris    -> FailingStubPolarisRunner
       stub-bad-card        -> MalformedStubPolarisRunner
       bundle               -> BundleCardRunner (BYO-compute path)
-      polaris              -> PolarisRuntimeRunner (legacy Tier A —
+      polaris              -> PolarisRuntimeRunner (legacy Tier A -
                               cathedral-runtime shim; kept as backup
                               during v2 migration per POLARIS_NATIVE_V2.md)
-      polaris-deploy       -> PolarisDeployRunner (v2 paid — real Hermes
+      polaris-deploy       -> PolarisDeployRunner (v2 paid - real Hermes
                               via Polaris's native deploy pipeline)
-      ssh-probe            -> SshProbeRunner (v2 free — Cathedral SSHs
+      ssh-probe            -> SshProbeRunner (v2 free - Cathedral SSHs
                               into the miner's box, no Polaris attestation,
                               no verified-runtime multiplier)
       http-polaris (legacy)-> HttpPolarisRunner
@@ -996,7 +1286,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
     if mode == "bundle":
         return BundleCardRunner()
     if mode == "ssh-probe":
-        # Tier B free tier — Cathedral SSHs into the miner's box.
+        # Tier B free tier - Cathedral SSHs into the miner's box.
         #
         # v1 (legacy, default): SshProbeRunner. Assumes the miner runs
         # an HTTP server exposing /healthz + /chat. Built on the wrong
@@ -1007,7 +1297,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         # `hermes -z`). Snapshot-then-eval pattern per docs/HERMES.md
         # § L.1. Returns a TraceBundle with the full Hermes forensic
         # trail (state.db slice, sessions JSON, request dumps,
-        # memories, skills, logs) — the data moat.
+        # memories, skills, logs) - the data moat.
         #
         # Default is v1 while we smoke-test v2 on the rented Polaris
         # box. Flip via env var when ready to cut over.
@@ -1047,7 +1337,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
                 )
             )
 
-        # v1 (default — legacy HTTP-shaped path)
+        # v1 (default - legacy HTTP-shaped path)
         from cathedral.eval.ssh_probe_runner import (
             SshProbeRunner,
             SshProbeRunnerConfig,
@@ -1062,7 +1352,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
             )
         )
     if mode == "polaris-deploy":
-        # v2 — Polaris-native Hermes deploy. Skips the cathedral-runtime
+        # v2 - Polaris-native Hermes deploy. Skips the cathedral-runtime
         # image entirely; uses the standard marketplace-eval pipeline
         # against `ghcr.io/bigailabs/polaris-hermes`. Requires the
         # publisher app for the Hippius client (presigned URLs).
@@ -1108,7 +1398,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
             )
         )
     if mode in {"polaris", "polaris-runtime"}:
-        # Tier A — Polaris-hosted miners. Polaris fetches the bundle via
+        # Tier A - Polaris-hosted miners. Polaris fetches the bundle via
         # presigned URL, runs Cathedral's runtime image, signs an
         # attestation over the result.
         from cathedral.publisher.app import latest_ctx
@@ -1169,7 +1459,7 @@ async def _run_once_async() -> int:
     # a miner opted into Tier A (polaris) or BYO (bundle). The env-level
     # CATHEDRAL_EVAL_MODE remains the override for stub/legacy paths and
     # the fallback whenever attestation_mode is unset or its required
-    # env vars aren't configured — that way tests and dev environments
+    # env vars aren't configured - that way tests and dev environments
     # that pin a single mode globally keep working without seeding extra
     # config per submission.
     import os as _os
@@ -1190,7 +1480,7 @@ async def _run_once_async() -> int:
             )
             return r
         if mode == "polaris-deploy" and has_polaris_key:
-            # v2 — opted into the Polaris-native Hermes flow.
+            # v2 - opted into the Polaris-native Hermes flow.
             r = _resolve_polaris_runner_for_mode("polaris-deploy")
             logger.info(
                 "runner_dispatch",
@@ -1224,7 +1514,7 @@ async def _run_once_async() -> int:
             )
             return r
         if mode == "ssh-probe":
-            # v2 free tier — Cathedral SSHs into the miner's box. No
+            # v2 free tier - Cathedral SSHs into the miner's box. No
             # Polaris attestation chain (manifest will be None on the
             # PolarisRunResult), so the verified-runtime 1.10x multiplier
             # is not applied at scoring.
@@ -1256,6 +1546,10 @@ async def _run_once_async() -> int:
         runner_for=runner_for,
         signer=ctx.signer,
         registry=ctx.registry,
+        task_family_challenge_source=SqliteChallengeSource(ctx.db),
+        task_family_challenge_lock=SqliteChallengeLock(ctx.db),
+        task_family_fetch_token_store=SqliteFetchTokenStore(ctx.db),
+        public_base_url=_os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
     )
 
     advanced = 0
@@ -1290,7 +1584,7 @@ def run_once() -> int:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Inside an async context already — schedule and wait.
+            # Inside an async context already - schedule and wait.
             return asyncio.run_coroutine_threadsafe(_run_once_async(), loop).result(timeout=60)
     except RuntimeError:
         pass
