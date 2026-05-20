@@ -6,7 +6,7 @@ import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -58,6 +58,24 @@ class WeightsConfig(BaseModel):
     task_family_weights: dict[str, float] = Field(default_factory=dict)
 
 
+class WeightSourceConfig(BaseModel):
+    """Optional remote signed-weight source.
+
+    Default mode is local, preserving the existing validator behavior.
+    Remote mode is explicit and refuses startup without a pinned policy key.
+    """
+
+    mode: Literal["local", "remote"] = "local"
+    publisher_weights_url: str = "https://api.cathedral.computer/v1/validator/weights/next"
+    poll_interval_secs: float = 60.0
+    request_timeout_secs: float = 10.0
+    fallback_after_stale_minutes: float = 10.0
+    refuse_after_stale_minutes: float = 30.0
+    cathedral_policy_public_key_hex: str | None = None
+    cathedral_policy_public_key_env: str = "CATHEDRAL_POLICY_PUBLIC_KEY_HEX"
+    cathedral_policy_key_id: str = "cathedral-weight-policy"
+
+
 class PublisherConfig(BaseModel):
     """Where the validator pulls signed eval-runs from."""
 
@@ -87,6 +105,7 @@ class ValidatorSettings(BaseSettings):
     polaris: PolarisConfig
     http: HttpConfig = Field(default_factory=HttpConfig)
     weights: WeightsConfig = Field(default_factory=WeightsConfig)
+    weight_source: WeightSourceConfig = Field(default_factory=WeightSourceConfig)
     publisher: PublisherConfig = Field(default_factory=PublisherConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
@@ -96,6 +115,41 @@ class ValidatorSettings(BaseSettings):
     def from_toml(cls, path: str | Path) -> ValidatorSettings:
         data = _load_toml(Path(path))
         return cls.model_validate(data)
+
+
+def apply_weight_source_env_overrides(
+    settings: ValidatorSettings,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> ValidatorSettings:
+    """Apply flat env aliases from issue #155 on top of TOML settings."""
+    values = os.environ if env is None else env
+    updates: dict[str, object] = {}
+    string_aliases = {
+        "CATHEDRAL_WEIGHT_SOURCE": "mode",
+        "CATHEDRAL_PUBLISHER_WEIGHTS_URL": "publisher_weights_url",
+        "CATHEDRAL_POLICY_PUBLIC_KEY_HEX": "cathedral_policy_public_key_hex",
+        "CATHEDRAL_POLICY_PUBLIC_KEY_ENV": "cathedral_policy_public_key_env",
+        "CATHEDRAL_POLICY_KEY_ID": "cathedral_policy_key_id",
+    }
+    float_aliases = {
+        "CATHEDRAL_WEIGHT_SOURCE_POLL_INTERVAL_SECS": "poll_interval_secs",
+        "CATHEDRAL_WEIGHT_SOURCE_REQUEST_TIMEOUT_SECS": "request_timeout_secs",
+        "CATHEDRAL_WEIGHT_SOURCE_FALLBACK_AFTER_STALE_MINUTES": ("fallback_after_stale_minutes"),
+        "CATHEDRAL_WEIGHT_SOURCE_REFUSE_AFTER_STALE_MINUTES": "refuse_after_stale_minutes",
+    }
+    for env_key, field_name in string_aliases.items():
+        raw = values.get(env_key)
+        if raw is not None and raw.strip():
+            updates[field_name] = raw.strip()
+    for env_key, field_name in float_aliases.items():
+        raw = values.get(env_key)
+        if raw is not None and raw.strip():
+            updates[field_name] = float(raw)
+    if not updates:
+        return settings
+    weight_source = settings.weight_source.model_copy(update=updates)
+    return settings.model_copy(update={"weight_source": weight_source})
 
 
 def resolve_validator_config_path(

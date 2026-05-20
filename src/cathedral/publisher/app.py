@@ -57,6 +57,14 @@ from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_
 from cathedral.publisher import repository
 from cathedral.publisher.reads import router as reads_router
 from cathedral.publisher.submit import router as submit_router
+from cathedral.publisher.weight_policy import (
+    FileBackedWeightPolicyStore,
+    load_producer_from_env,
+    run_weight_policy_producer,
+)
+from cathedral.publisher.weight_policy import (
+    router as weight_policy_router,
+)
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
 
@@ -161,6 +169,29 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
+        vector_path = Path(
+            os.environ.get("CATHEDRAL_WEIGHT_POLICY_VECTOR_PATH", "data/current_vector.json")
+        )
+        weight_policy_store = FileBackedWeightPolicyStore(vector_path)
+        try:
+            await weight_policy_store.load()
+        except Exception as exc:
+            logger.warning("weight_policy_store_load_failed", error=str(exc))
+        app.state.weight_policy = weight_policy_store
+
+        producer = load_producer_from_env()
+        if producer is not None:
+            producer_config, producer_key = producer
+            ctx.background_tasks.append(
+                asyncio.create_task(
+                    run_weight_policy_producer(
+                        ctx.db,
+                        weight_policy_store,
+                        producer_key,
+                        config=producer_config,
+                    )
+                )
+            )
         # Make ctx visible to the orchestrator's env-resolver. Production
         # `from_settings` previously skipped this; the test-only `build_app`
         # set it inside its own factory. Hoisting to the shared lifespan
@@ -334,8 +365,10 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     # entries pointing at the same function - no duplicated state.
     app.include_router(submit_router, prefix="/api/cathedral")
     app.include_router(reads_router, prefix="/api/cathedral")
+    app.include_router(weight_policy_router, prefix="/api/cathedral")
     app.include_router(submit_router, include_in_schema=False)
     app.include_router(reads_router, include_in_schema=False)
+    app.include_router(weight_policy_router, include_in_schema=False)
 
     # Public CNF endpoint for the synthetic boolean lane. The route is
     # token-gated and exposes only active or locked-in-grace CNF bodies.

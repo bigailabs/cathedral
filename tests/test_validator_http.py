@@ -17,6 +17,7 @@ from cathedral.config import (
     StorageConfig,
     ValidatorSettings,
     WeightsConfig,
+    WeightSourceConfig,
     WorkerConfig,
 )
 from cathedral.evidence import EvidenceCollector
@@ -110,3 +111,22 @@ def test_claim_accepted_with_bearer(app_and_client) -> None:
     body = r.json()
     assert body["status"] == "pending"
     assert isinstance(body["id"], int)
+
+
+def test_remote_weight_source_refuses_missing_pinned_key(tmp_path) -> None:
+    sk = Ed25519PrivateKey.generate()
+    settings = _settings(str(tmp_path / "remote.db")).model_copy(
+        update={"weight_source": WeightSourceConfig(mode="remote")}
+    )
+    ctx = RuntimeContext(
+        settings=settings,
+        bearer="testtoken",
+        chain=MockChain(),
+        collector=EvidenceCollector(StubFetcher(), sk.public_key()),
+        registry=CardRegistry.baseline(),
+        health=Health(),
+    )
+    app = build_app(ctx)
+    with pytest.raises(RuntimeError, match="pinned Cathedral policy key"):
+        with TestClient(app):
+            pass
