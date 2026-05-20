@@ -1,0 +1,361 @@
+"""Endpoint tests for the public CNF route.
+
+These tests exercise ``cathedral.publisher.challenge_cnf`` against a
+minimal FastAPI app that mounts only the CNF router. The point is to
+keep the assertions sharp on the cardinal-sin guarantees -- one route,
+one threat model -- without dragging in the full publisher lifespan
+(Hippius, signer, eval loop).
+
+Coverage:
+
+* Token absent  -> 404 with the canonical detail string
+* Token present, no ?t=  -> 404
+* Token present, wrong ?t=  -> 404
+* Token present, correct ?t=, status=active  -> 200 with CNF body
+* Token present, correct ?t=, status=locked within grace  -> 200
+* Token present, correct ?t=, status=locked past grace  -> 404
+* Token present, correct ?t=, status=pending  -> 404
+* Unknown challenge_id  -> 404
+* All 404 responses share the same body shape
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+import pytest_asyncio
+import structlog
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from cathedral.eval.orchestrator import EvalOrchestrator
+from cathedral.eval.polaris_runner import StubPolarisRunner
+from cathedral.eval.scoring_pipeline import EvalSigner
+from cathedral.lanes.challenge_lock import (
+    SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA,
+)
+from cathedral.lanes.challenge_source import (
+    CHALLENGE_STATUS_ACTIVE,
+    CHALLENGE_STATUS_LOCKED,
+    CHALLENGE_STATUS_PENDING,
+    ChallengeRecord,
+    SqliteChallengeSource,
+    SqliteFetchTokenStore,
+)
+from cathedral.lanes.challenge_source import (
+    SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
+)
+from cathedral.lanes.publisher import score_and_sign_task_family_stdout
+from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
+from cathedral.publisher.challenge_cnf import router as challenge_cnf_router
+from cathedral.storage.hippius import StubHippiusClient
+from cathedral.validator.db import connect
+
+CNF_BODY = "p cnf 3 2\n1 -2 0\n2 3 0\n"
+EXPECTED_SHA = hashlib.sha256(CNF_BODY.encode("utf-8")).hexdigest()
+CHALLENGE_ID = "sat-endpoint-test-001"
+FAKE_TOKEN = "test-token-xyz123"
+NOT_FOUND_BODY = {"detail": "challenge_not_found"}
+
+
+def _ms_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    s = dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+    return s + "Z"
+
+
+@pytest_asyncio.fixture
+async def wired_app(tmp_path: Any) -> Any:
+    """Build a minimal FastAPI app with the CNF router mounted and the
+    challenge + token stores wired onto app.state. Each test gets a
+    fresh sqlite file via tmp_path."""
+    conn = await connect(str(tmp_path / "publisher.db"))
+    await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+    await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+    await conn.commit()
+    source = SqliteChallengeSource(conn)
+    tokens = SqliteFetchTokenStore(conn)
+    app = FastAPI()
+    app.include_router(challenge_cnf_router)
+    app.state.task_family_challenge_source = source
+    app.state.task_family_fetch_token_store = tokens
+    try:
+        yield {
+            "app": app,
+            "conn": conn,
+            "source": source,
+            "tokens": tokens,
+        }
+    finally:
+        await conn.close()
+
+
+async def _seed_active_with_token(
+    wired: dict[str, Any],
+    *,
+    challenge_id: str = CHALLENGE_ID,
+    cnf_text: str = CNF_BODY,
+    status: str = CHALLENGE_STATUS_ACTIVE,
+    minted_at: datetime | None = None,
+    time_limit_secs: int = 60,
+    fetch_token: str = FAKE_TOKEN,
+    now_iso: str | None = None,
+) -> None:
+    now = minted_at or datetime.now(UTC)
+    await wired["source"].upsert(
+        ChallengeRecord(
+            challenge_id=challenge_id,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text=cnf_text,
+            status=status,
+            audit_metadata={"source": "endpoint-test"},
+        ),
+        now_iso=now_iso or _ms_iso(now),
+    )
+    await wired["tokens"].mint_if_absent(
+        challenge_id,
+        fetch_token=fetch_token,
+        minted_at_iso=_ms_iso(now),
+        announced_time_limit_secs=time_limit_secs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_token_row_returns_404(wired_app: dict[str, Any]) -> None:
+    # Challenge row exists (status=active) but no token has been minted.
+    # This is the early-active case: announce hasn't happened.
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text=CNF_BODY,
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={},
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY
+
+
+@pytest.mark.asyncio
+async def test_unknown_challenge_returns_404(wired_app: dict[str, Any]) -> None:
+    client = TestClient(wired_app["app"])
+    r = client.get("/v1/challenges/nonexistent-id/cnf", params={"t": "anything"})
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY
+
+
+@pytest.mark.asyncio
+async def test_missing_query_param_returns_404(wired_app: dict[str, Any]) -> None:
+    await _seed_active_with_token(wired_app)
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf")
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY
+
+
+@pytest.mark.asyncio
+async def test_wrong_token_returns_404(wired_app: dict[str, Any]) -> None:
+    await _seed_active_with_token(wired_app)
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": "not-the-token"})
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY
+
+
+@pytest.mark.asyncio
+async def test_active_with_correct_token_returns_cnf(wired_app: dict[str, Any]) -> None:
+    await _seed_active_with_token(wired_app)
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert hashlib.sha256(r.text.encode("utf-8")).hexdigest() == EXPECTED_SHA
+    assert r.headers["content-type"].startswith("text/plain")
+    assert r.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_locked_within_grace_returns_cnf(wired_app: dict[str, Any]) -> None:
+    # Lock happened 30 seconds ago, time limit is 60s, grace is +30s -> 90s
+    # total. Still inside the window, so the URL stays live.
+    locked_at = datetime.now(UTC) - timedelta(seconds=30)
+    await _seed_active_with_token(
+        wired_app,
+        status=CHALLENGE_STATUS_LOCKED,
+        time_limit_secs=60,
+        now_iso=_ms_iso(locked_at),
+        minted_at=locked_at - timedelta(seconds=10),
+    )
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+
+
+@pytest.mark.asyncio
+async def test_locked_past_grace_returns_404(wired_app: dict[str, Any]) -> None:
+    # Lock happened 200s ago, time_limit 60s + 30s grace = 90s window.
+    # We're well past the grace window so the endpoint must close.
+    locked_at = datetime.now(UTC) - timedelta(seconds=200)
+    await _seed_active_with_token(
+        wired_app,
+        status=CHALLENGE_STATUS_LOCKED,
+        time_limit_secs=60,
+        now_iso=_ms_iso(locked_at),
+        minted_at=locked_at - timedelta(seconds=10),
+    )
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY
+
+
+@pytest.mark.asyncio
+async def test_pending_status_returns_404(wired_app: dict[str, Any]) -> None:
+    # Pending challenges should never serve, even with a (somehow minted)
+    # valid token. Defense in depth: pending should only become fetchable
+    # via the status flip to active, never by ad-hoc token mint.
+    await _seed_active_with_token(wired_app, status=CHALLENGE_STATUS_PENDING)
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY
+
+
+@pytest.mark.asyncio
+async def test_404_body_is_identical_across_miss_paths(wired_app: dict[str, Any]) -> None:
+    """Every miss path should produce a byte-identical 404 body so the
+    endpoint can't be turned into an existence oracle (probing which
+    challenge IDs exist vs which are pending vs which are locked-past-
+    grace must all look the same on the wire)."""
+    # Seed one active + token row so we can hit a "wrong token" miss.
+    await _seed_active_with_token(wired_app)
+    client = TestClient(wired_app["app"])
+
+    bodies = [
+        client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": "wrong"}).text,
+        client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf").text,
+        client.get("/v1/challenges/unknown-id/cnf", params={"t": FAKE_TOKEN}).text,
+        client.get("/v1/challenges/unknown-id/cnf").text,
+    ]
+    assert all(b == bodies[0] for b in bodies)
+
+
+@pytest.mark.asyncio
+async def test_route_works_under_canonical_prefix(wired_app: dict[str, Any]) -> None:
+    """Mounting under /api/cathedral should produce the same behaviour."""
+    # Re-mount the router under the canonical prefix on the same app so
+    # we can hit it via both URLs in the same fixture.
+    wired_app["app"].include_router(challenge_cnf_router, prefix="/api/cathedral")
+    await _seed_active_with_token(wired_app)
+    client = TestClient(wired_app["app"])
+    r = client.get(
+        f"/api/cathedral/v1/challenges/{CHALLENGE_ID}/cnf",
+        params={"t": FAKE_TOKEN},
+    )
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+
+
+@pytest.mark.asyncio
+async def test_announced_problem_fetches_scores_and_does_not_leak(
+    wired_app: dict[str, Any],
+) -> None:
+    """Exercise the announce URL, endpoint fetch, hash check, and verifier."""
+    cnf_body = "p cnf 2 2\n1 0\n2 0\n"
+    record = ChallengeRecord(
+        challenge_id="sat-local-e2e-001",
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text=cnf_body,
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={"source": "local-e2e"},
+    )
+    await wired_app["source"].upsert(record)
+    orchestrator = EvalOrchestrator(
+        db=wired_app["conn"],
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        registry=object(),
+        task_family_challenge_source=wired_app["source"],
+        task_family_challenge_lock=None,
+        task_family_fetch_token_store=wired_app["tokens"],
+        public_base_url="http://testserver",
+    )
+
+    announced = await orchestrator._announce_synthetic_boolean_problem(
+        record,
+        log=structlog.get_logger("test"),
+        family_id="synthetic_boolean_v1",
+    )
+    assert announced is not None
+    problem, hidden = announced
+    public_input = problem.public_input
+    assert "cnf" not in public_input
+    assert sorted(public_input) == ["cnf_sha256", "cnf_url", "format", "num_clauses", "num_vars"]
+
+    client = TestClient(wired_app["app"], base_url="http://testserver")
+    wrong_token = client.get(str(public_input["cnf_url"]).replace("t=", "t=wrong", 1))
+    assert wrong_token.status_code == 404
+    assert wrong_token.json() == NOT_FOUND_BODY
+
+    fetched = client.get(str(public_input["cnf_url"]))
+    assert fetched.status_code == 200
+    assert fetched.text == cnf_body
+    assert hashlib.sha256(fetched.text.encode("utf-8")).hexdigest() == public_input["cnf_sha256"]
+
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 2 0\\n"}\n```'
+    signed = score_and_sign_task_family_stdout(
+        lane=SyntheticBooleanV1(),
+        problem=problem,
+        hidden=hidden,
+        submission_row={
+            "id": "sub-local-e2e",
+            "miner_hotkey": "5MinerLocal",
+            "display_name": "Local Miner",
+        },
+        stdout=stdout,
+        ran_at_iso="2026-05-19T18:00:00.000Z",
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        eval_run_id="run-local-e2e",
+        epoch_salt="epoch_local:synthetic_boolean_v1",
+    )
+    assert signed.row["weighted_score"] == 1.0
+    serialized = json.dumps(signed.row, sort_keys=True, default=str)
+    for forbidden in (
+        "p cnf",
+        "cnf_url",
+        "cnf_sha256",
+        "fetch_token",
+        "sat-local-e2e-001",
+        "s SATISFIABLE",
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
+async def test_endpoint_disabled_when_stores_not_wired(tmp_path: Any) -> None:
+    """If app.state lacks the stores (feed disabled / test app), every
+    request must 404, never crash. Matches the cardinal-sin posture of
+    treating absence the same as a real miss."""
+    app = FastAPI()
+    app.include_router(challenge_cnf_router)
+    # Intentionally do NOT set app.state.task_family_challenge_source
+    # or app.state.task_family_fetch_token_store.
+    client = TestClient(app)
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY

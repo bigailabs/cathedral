@@ -1,0 +1,9 @@
+{
+  "name": "tier2_satisfied",
+  "seed": 7,
+  "tier": 2,
+  "submission": {
+    "dimacs_solution": "s SATISFIABLE\nv 1 -2 3 4 0\n"
+  },
+  "expected_weighted_score": 1.0
+}

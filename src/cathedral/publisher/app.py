@@ -8,7 +8,7 @@ Owns:
 Does NOT own:
 - Bittensor weight setting (that's the validator binary)
 - the existing /v1/claim Polaris-evidence flow (that's the validator
-  binary's `cathedral.validator.app` — left untouched for backward
+  binary's `cathedral.validator.app` - left untouched for backward
   compat with current miners until they migrate)
 """
 
@@ -21,8 +21,9 @@ import stat
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 import structlog
@@ -32,7 +33,6 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cathedral.cards.registry import CardRegistry
-from cathedral.eval.orchestrator import run_eval_loop
 from cathedral.eval.polaris_runner import (
     BundleCardRunner,
     HttpPolarisRunner,
@@ -40,7 +40,20 @@ from cathedral.eval.polaris_runner import (
     PolarisRunner,
     StubPolarisRunner,
 )
-from cathedral.eval.scoring_pipeline import EvalSigner
+from cathedral.lanes.challenge_lock import (
+    SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA,
+)
+from cathedral.lanes.challenge_lock import SqliteChallengeLock
+from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
+from cathedral.lanes.challenge_source import (
+    SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
+)
+from cathedral.lanes.challenge_source import (
+    ChallengeSourceError,
+    SqliteChallengeSource,
+    SqliteFetchTokenStore,
+)
+from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
 from cathedral.publisher import repository
 from cathedral.publisher.reads import router as reads_router
 from cathedral.publisher.submit import router as submit_router
@@ -48,6 +61,9 @@ from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
 
 logger = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from cathedral.eval.scoring_pipeline import EvalSigner
 
 
 @dataclass
@@ -69,7 +85,7 @@ _DEFAULT_SSH_PROBE_KEY_PATH = "/tmp/cathedral_probe_ed25519"  # noqa: S108
 def _materialize_ssh_probe_key() -> None:
     """Write the platform-wide SSH private key from env to disk at startup.
 
-    The Railway publisher container has no SSH private key baked in — it
+    The Railway publisher container has no SSH private key baked in - it
     only ships with the *public* key as ``CATHEDRAL_PROBE_SSH_PUBLIC_KEY``.
     The ``attestation_mode=ssh-probe`` runners (``SshHermesRunner`` and
     ``SshProbeRunner``) refuse to construct if their
@@ -83,9 +99,9 @@ def _materialize_ssh_probe_key() -> None:
     - Env var set: write to ``CATHEDRAL_SSH_KEY_PATH`` (default
       ``/tmp/cathedral_probe_ed25519``) with ``0600`` perms.
     - File already exists with identical content: short-circuit, no
-      rewrite — idempotent across restarts.
+      rewrite - idempotent across restarts.
     - File exists with different content: overwrite (operator rotated
-      the key — respect the new value).
+      the key - respect the new value).
     """
     target_str = os.environ.get("CATHEDRAL_SSH_KEY_PATH", _DEFAULT_SSH_PROBE_KEY_PATH)
     target = Path(target_str).expanduser()
@@ -119,7 +135,7 @@ def _materialize_ssh_probe_key() -> None:
 
 def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> FastAPI:
     """Build the FastAPI app. `ctx_factory` is an async callable returning
-    a `PublisherContext` — kept indirect so tests can inject mocks.
+    a `PublisherContext` - kept indirect so tests can inject mocks.
 
     `start_eval_loop=False` (used by `build_app` in tests) skips the
     background scheduler so tests can drive ticks deterministically via
@@ -129,12 +145,22 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Must run BEFORE the orchestrator constructs SshHermesRunner /
-        # SshProbeRunner — those raise on a missing private key file at
+        # SshProbeRunner - those raise on a missing private key file at
         # __init__, which would block every ssh-probe submission. Cheap,
         # idempotent, safe in test mode (no-op when env is unset).
         _materialize_ssh_probe_key()
         ctx: PublisherContext = await ctx_factory()
         app.state.ctx = ctx
+        await ctx.db.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await ctx.db.executescript(CHALLENGE_LOCK_SCHEMA)
+        await ctx.db.commit()
+        task_family_challenge_source = SqliteChallengeSource(ctx.db)
+        task_family_challenge_lock = SqliteChallengeLock(ctx.db)
+        task_family_fetch_token_store = SqliteFetchTokenStore(ctx.db)
+        app.state.task_family_challenge_source = task_family_challenge_source
+        app.state.task_family_fetch_token_store = task_family_fetch_token_store
+        await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
+
         # Make ctx visible to the orchestrator's env-resolver. Production
         # `from_settings` previously skipped this; the test-only `build_app`
         # set it inside its own factory. Hoisting to the shared lifespan
@@ -143,7 +169,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         _LATEST_CTX = ctx
 
         # One-shot startup repair for rows stranded in 'evaluating' with
-        # a prior current_score from pre-PR-#117 behavior. Idempotent —
+        # a prior current_score from pre-PR-#117 behavior. Idempotent -
         # zero rows match once the live data is clean, so it stays in
         # place as a safety net for any future stranding (process
         # crashes mid-eval, etc.) without runtime cost.
@@ -176,20 +202,21 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             from cathedral.eval.orchestrator import (
                 _resolve_polaris_runner_for_mode,
                 _resolve_polaris_runner_from_env,
+                run_eval_loop,
             )
 
             def _runner_for(submission: dict[str, Any]) -> Any:
-                # Per-submission runner dispatch — the production wiring
+                # Per-submission runner dispatch - the production wiring
                 # that mirrors the test-friendly `runner_for` in
                 # orchestrator.run_eval_loop. Order matters:
                 #   1. env-mode stub overrides (tests + dev)
-                #   2. attestation_mode='polaris-deploy' (v2 paid) — real
+                #   2. attestation_mode='polaris-deploy' (v2 paid) - real
                 #      Hermes via Polaris's native deploy pipeline
-                #   3. attestation_mode='ssh-probe' (v2 free) — Cathedral
+                #   3. attestation_mode='ssh-probe' (v2 free) - Cathedral
                 #      SSHs into the miner's box
-                #   4. attestation_mode='polaris' (legacy v1) — the
+                #   4. attestation_mode='polaris' (legacy v1) - the
                 #      cathedral-runtime LLM shim path, kept as backup
-                #   5. attestation_mode='tee' — bundled card, pre-verified
+                #   5. attestation_mode='tee' - bundled card, pre-verified
                 #   6. anything else falls back to CATHEDRAL_EVAL_MODE
                 mode = (submission.get("attestation_mode") or "").lower()
                 env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
@@ -219,8 +246,12 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     signer=ctx.signer,
                     registry=ctx.registry,
                     poll_interval_secs=10.0,
-                    max_concurrent=2,
+                    max_concurrent=_env_int("CATHEDRAL_EVAL_MAX_CONCURRENT", 2),
                     stop=stop,
+                    task_family_challenge_source=task_family_challenge_source,
+                    task_family_challenge_lock=task_family_challenge_lock,
+                    task_family_fetch_token_store=task_family_fetch_token_store,
+                    public_base_url=os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
                 )
             )
             ctx.background_tasks.append(eval_task)
@@ -228,7 +259,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             yield
         finally:
             stop.set()
-            _LATEST_CTX_RESET = None
             globals()["_LATEST_CTX"] = None
             for t in ctx.background_tasks:
                 t.cancel()
@@ -237,7 +267,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
     app = FastAPI(title="Cathedral Publisher", lifespan=lifespan)
 
-    # CORS — cathedral.computer (static site on Cloudflare Pages) fetches
+    # CORS - cathedral.computer (static site on Cloudflare Pages) fetches
     # /v1/agents/{id} directly from the publisher to populate the agent
     # profile modal. Without these headers the in-browser fetch fails and
     # the modal can only show the seed data baked into the page (no
@@ -266,7 +296,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         detail = exc.detail
         if isinstance(detail, dict):
             # Some endpoints (e.g. /health 503) intentionally pass a dict
-            # body — render it directly.
+            # body - render it directly.
             return JSONResponse(status_code=exc.status_code, content=detail)
         return JSONResponse(
             status_code=exc.status_code,
@@ -297,17 +327,24 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     # CONTRACTS Section 2 locks the public surface at `/api/cathedral/v1/...`
     # (matches the cross-repo contract test mirror, the frontend's API client,
     # and the polariscomputer-side routes already deployed). Mount BOTH:
-    # - /api/cathedral/v1/...   — canonical contract surface
-    # - /v1/... (and /health)   — back-compat for direct callers + infra
+    # - /api/cathedral/v1/...   - canonical contract surface
+    # - /v1/... (and /health)   - back-compat for direct callers + infra
     #   healthchecks (Railway, k8s) that expect `/health` at root
     # FastAPI handlers are stateless, so dual-mounting is just two route
-    # entries pointing at the same function — no duplicated state.
+    # entries pointing at the same function - no duplicated state.
     app.include_router(submit_router, prefix="/api/cathedral")
     app.include_router(reads_router, prefix="/api/cathedral")
     app.include_router(submit_router, include_in_schema=False)
     app.include_router(reads_router, include_in_schema=False)
 
-    # Agent-facing onboarding — Moltbook-style. A miner pastes
+    # Public CNF endpoint for the synthetic boolean lane. The route is
+    # token-gated and exposes only active or locked-in-grace CNF bodies.
+    from cathedral.publisher.challenge_cnf import router as challenge_cnf_router
+
+    app.include_router(challenge_cnf_router, prefix="/api/cathedral")
+    app.include_router(challenge_cnf_router, include_in_schema=False)
+
+    # Agent-facing onboarding - Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the
     # instructions to mine the eu-ai-act card` into their AI agent;
     # the agent fetches this URL and self-registers.
@@ -338,7 +375,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
         pub = _os.environ.get("CATHEDRAL_PROBE_SSH_PUBLIC_KEY", "").strip()
         if not pub:
-            # Surface a clear error rather than serve an empty file —
+            # Surface a clear error rather than serve an empty file -
             # miners would silently fail to authorize otherwise.
             return PlainTextResponse(
                 "# Cathedral probe SSH key not yet configured on the publisher.\n"
@@ -384,7 +421,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             "keys": [],
         }
 
-        # Cathedral signing pubkey — derived from the private seed in
+        # Cathedral signing pubkey - derived from the private seed in
         # CATHEDRAL_EVAL_SIGNING_KEY. We never serve the private key.
         sk_hex = _os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY", "").strip()
         if sk_hex:
@@ -408,10 +445,10 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                         ),
                     }
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("jwks_eval_signing_key_invalid", error=str(exc))
 
-        # Polaris attestation pubkey — the key the publisher pins when
+        # Polaris attestation pubkey - the key the publisher pins when
         # verifying Polaris's runtime attestations during scoring.
         polaris_hex = _os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY", "").strip()
         if polaris_hex:
@@ -434,12 +471,92 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                         ),
                     }
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("jwks_polaris_key_invalid", error=str(exc))
 
         return out
 
     return app
+
+
+async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSource) -> None:
+    """Seed one active SAT challenge from an operator-mounted CNF file.
+
+    The file path and raw CNF stay publisher-local. This helper never logs
+    the path or CNF body, and the public schema-5 row still exposes only
+    hash-backed fields.
+    """
+    cnf_path = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", "").strip()
+    if not cnf_path:
+        return
+
+    try:
+        cnf_text = await asyncio.to_thread(_read_text_file, cnf_path)
+    except OSError:
+        raise RuntimeError(
+            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH could not be read"
+        ) from None
+
+    challenge_id = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID", "").strip()
+    tier_raw = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER") or os.environ.get(
+        "CATHEDRAL_TASK_FAMILY_TIER", "0"
+    )
+    try:
+        tier = max(0, int(tier_raw))
+    except ValueError:
+        raise RuntimeError("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER must be an integer") from None
+
+    try:
+        active = await seed_synthetic_boolean_challenge(
+            source,
+            cnf_text=cnf_text,
+            tier=tier,
+            now_iso=_now_ms_iso(),
+            challenge_id=challenge_id or None,
+            activate=True,
+            input_source="operator_cnf_path",
+        )
+    except ChallengeSourceError as exc:
+        if "already locked" in str(exc):
+            logger.warning(
+                "synthetic_boolean_active_challenge_seed_skipped",
+                family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+                reason="challenge_already_locked",
+            )
+            return
+        raise RuntimeError(str(exc)) from None
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from None
+
+    audit = active.audit_metadata
+    logger.info(
+        "synthetic_boolean_active_challenge_seeded",
+        family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+        tier=tier,
+        num_vars=audit.get("num_vars"),
+        num_clauses=audit.get("num_clauses"),
+        cnf_sha256=audit.get("cnf_sha256"),
+    )
+
+
+def _read_text_file(path: str) -> str:
+    return Path(path).expanduser().read_text(encoding="utf-8")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("invalid_int_env", env=name, value=raw, default=default)
+        return default
+
+
+def _now_ms_iso() -> str:
+    now = datetime.now(UTC)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 # --------------------------------------------------------------------------
@@ -471,7 +588,7 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
         # because v1 launch can survive bundle loss on redeploy, but a
         # publisher that won't accept submissions is dead on arrival.
         # A startup probe (HEAD on the bucket) is what triggers the
-        # fallback — config-only checks miss the common case where keys
+        # fallback - config-only checks miss the common case where keys
         # parse fine but lack PutObject permission.
         hippius: Any
         try:
@@ -490,6 +607,8 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
         signing_hex = os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY")
         if not signing_hex:
             raise RuntimeError("CATHEDRAL_EVAL_SIGNING_KEY env var required (32-byte hex)")
+        from cathedral.eval.scoring_pipeline import EvalSigner
+
         signer = EvalSigner.from_env_hex(signing_hex)
 
         polaris: PolarisRunner
@@ -603,7 +722,7 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
       against `eu-ai-act` etc. find a card definition without external
       seeding).
     - Uses `StubHippiusClient` (in-memory) when Hippius env vars are
-      missing — the eval pipeline still round-trips bundles correctly.
+      missing - the eval pipeline still round-trips bundles correctly.
     - Auto-generates an Ed25519 signing key when
       `CATHEDRAL_EVAL_SIGNING_KEY` is unset (the publisher tests don't
       need a stable key; the validator pull-loop test brings its own).
@@ -611,13 +730,13 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
       CATHEDRAL_MASTER_ENCRYPTION_KEY are unset.
     - Wires `StubPolarisRunner` whenever CATHEDRAL_EVAL_MODE starts with
       "stub" (the default in tests).
-    - Does NOT auto-start the eval loop background task — tests drive
+    - Does NOT auto-start the eval loop background task - tests drive
       ticks via `cathedral.eval.orchestrator.run_once()`. Production
       deploys use `from_settings` which starts the loop.
     """
 
     async def _factory() -> PublisherContext:
-        # Master KEK — encryption depends on this; generate ephemeral if missing.
+        # Master KEK - encryption depends on this; generate ephemeral if missing.
         if not (
             os.environ.get("CATHEDRAL_KEK_HEX") or os.environ.get("CATHEDRAL_MASTER_ENCRYPTION_KEY")
         ):
@@ -625,21 +744,23 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
 
         conn = await connect(database_path)
 
-        # Hippius — try real config from env; fall back to stub.
+        # Hippius - try real config from env; fall back to stub.
         hippius: Any
         try:
             hippius = HippiusClient(HippiusConfig.from_env())
         except Exception:
             hippius = StubHippiusClient()
 
-        # Signing key — generate if missing.
+        # Signing key - generate if missing.
         signing_hex = os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY")
         if not signing_hex:
             signing_hex = secrets.token_bytes(32).hex()
             os.environ["CATHEDRAL_EVAL_SIGNING_KEY"] = signing_hex
+        from cathedral.eval.scoring_pipeline import EvalSigner
+
         signer = EvalSigner.from_env_hex(signing_hex)
 
-        # Polaris runner — stub mode unless explicitly configured.
+        # Polaris runner - stub mode unless explicitly configured.
         eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").lower()
         polaris: PolarisRunner
         if eval_mode.startswith("stub"):

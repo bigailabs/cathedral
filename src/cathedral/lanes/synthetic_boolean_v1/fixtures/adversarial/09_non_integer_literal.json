@@ -1,0 +1,9 @@
+{
+  "name": "tier1_non_integer_literal",
+  "seed": 42,
+  "tier": 1,
+  "submission": {
+    "dimacs_solution": "s SATISFIABLE\nv 1 two 3 0\n"
+  },
+  "expected_rejection_reason": "solution_non_integer_literal"
+}

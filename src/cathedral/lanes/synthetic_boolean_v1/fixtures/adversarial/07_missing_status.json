@@ -1,0 +1,9 @@
+{
+  "name": "tier1_missing_status",
+  "seed": 42,
+  "tier": 1,
+  "submission": {
+    "dimacs_solution": "v 1 2 3 0\n"
+  },
+  "expected_rejection_reason": "solution_missing_status"
+}

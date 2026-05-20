@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import importlib.util as ilu
+import inspect
 import sys
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.contract import PublicProblem, ScoreResult, Submission, VerifierResult
-from cathedral.lanes.publisher import build_task_family_prompt, extract_answer
+from cathedral.lanes.publisher import (
+    AnswerExtractionError,
+    build_task_family_prompt,
+    extract_answer,
+    task_family_prober_version_warning,
+    task_family_runner_skip_reason,
+)
 from cathedral.lanes.sign import (
     TASK_FAMILY_SCHEMA_VERSION,
     TASK_FAMILY_SIGNED_KEYS,
@@ -20,11 +28,6 @@ from cathedral.validator.db import connect
 from cathedral.validator.pull_loop import latest_pulled_score_per_hotkey, upsert_pulled_eval
 
 _ROOT = Path(__file__).resolve().parents[2]
-
-
-class _Signer:
-    def __init__(self, sk: Ed25519PrivateKey) -> None:
-        self._sk = sk
 
 
 def _load_v2_payload_module():
@@ -75,7 +78,7 @@ def _signed_row() -> tuple[dict[str, object], Ed25519PrivateKey]:
         verifier=verifier,
         score=score,
         ran_at_iso="2026-05-18T20:00:00.000Z",
-        signer=_Signer(sk),
+        signer=EvalSigner(sk),
         epoch_salt="epoch_123:synthetic_boolean_v1",
     )
     return row, sk
@@ -123,12 +126,123 @@ def test_task_family_answer_extraction_prefers_final_answer_block() -> None:
     assert extract_answer(stdout) == {"dimacs_solution": "s SATISFIABLE\nv 1 0\n"}
 
 
+def test_task_family_answer_extraction_rejects_multiple_final_answer_blocks() -> None:
+    stdout = """```FINAL_ANSWER
+{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}
+```
+```FINAL_ANSWER
+{"dimacs_solution": "s SATISFIABLE\\nv -1 0\\n"}
+```
+"""
+    with pytest.raises(AnswerExtractionError) as exc:
+        extract_answer(stdout)
+    assert exc.value.reason == "multiple_final_answer_blocks"
+
+
 def test_task_family_prompt_keeps_challenge_generic() -> None:
     prompt = build_task_family_prompt(_problem())
 
     assert "Capability: synthetic_boolean_v1" in prompt
     assert "FINAL_ANSWER" in prompt
     assert "p cnf 1 1" in prompt
+
+
+def test_task_family_prompt_omits_cnf_body_when_url_transport_in_use() -> None:
+    """When the publisher uses the CNF URL transport, ``public_input``
+    carries ``cnf_url`` + ``cnf_sha256`` instead of the inline ``cnf``.
+    The prompt must not contain the CNF body in that case -- the body
+    crosses the wire via the gated endpoint, not the prompt."""
+    url_problem = PublicProblem(
+        task_family="synthetic_boolean_v1",
+        schema_version=1,
+        task_id="url-task-id-001",
+        difficulty_tier=1,
+        public_input={
+            "format": "dimacs",
+            "cnf_url": "https://api.cathedral.test/v1/challenges/sat-x/cnf?t=opaque",
+            "cnf_sha256": "0" * 64,
+            "num_vars": 3,
+            "num_clauses": 2,
+        },
+        time_limit_seconds=60,
+    )
+    prompt = build_task_family_prompt(url_problem)
+
+    assert "Capability: synthetic_boolean_v1" in prompt
+    assert "cnf_url" in prompt
+    assert "cnf_sha256" in prompt
+    # The DIMACS marker for an inline body must not appear anywhere
+    # in the rendered prompt -- the URL transport carries the URL, not
+    # the body.
+    assert "p cnf" not in prompt
+    # Miner contract directives the prompt must convey under the URL
+    # transport: plain HTTP GET, sha256 verify, no retry-storm on 404,
+    # no logging of the token-bearing URL.
+    assert "plain HTTP GET" in prompt
+    assert "404" in prompt
+    assert "never log the URL" in prompt
+
+
+def test_task_family_runner_guard_names_required_transport_interface() -> None:
+    class UnsupportedRunner:
+        pass
+
+    skip = task_family_runner_skip_reason(UnsupportedRunner())
+    assert skip is not None
+    assert skip["reason"] == "runner_unsupported"
+    assert skip["required_runner_interface"] == "SshHermesRunner.run_task_family_challenge"
+    assert "CATHEDRAL_PROBER_VERSION=v2" in skip["recommended_env"]
+
+
+def test_task_family_prober_version_warning_is_explicit() -> None:
+    warning = task_family_prober_version_warning(
+        {
+            "CATHEDRAL_TASK_FAMILY_FEED_ENABLED": "true",
+            "CATHEDRAL_PROBER_VERSION": "v1",
+        }
+    )
+    assert warning == {
+        "reason": "prober_version_not_v2",
+        "recommended_env": "CATHEDRAL_PROBER_VERSION=v2",
+    }
+    assert (
+        task_family_prober_version_warning(
+            {
+                "CATHEDRAL_TASK_FAMILY_FEED_ENABLED": "true",
+                "CATHEDRAL_PROBER_VERSION": "v2",
+            }
+        )
+        is None
+    )
+
+
+def test_ssh_hermes_task_family_runner_interface_is_launch_smoked() -> None:
+    from cathedral.eval.ssh_hermes_runner import SshHermesRunner
+
+    method = SshHermesRunner.run_task_family_challenge
+    assert inspect.iscoroutinefunction(method)
+    signature = inspect.signature(method)
+    assert list(signature.parameters) == [
+        "self",
+        "problem",
+        "prompt",
+        "miner_hotkey",
+        "submission",
+    ]
+
+
+def test_ssh_hermes_redacts_cnf_fetch_tokens_from_errors() -> None:
+    from cathedral.eval.ssh_hermes_runner import _redact_query_tokens
+
+    msg = (
+        "cmd='hermes chat -q https://api.cathedral.test/v1/challenges/sat-x/cnf"
+        "?t=secret-token-123' stderr='retry https://host/cnf?t=another-token&x=1'"
+    )
+
+    redacted = _redact_query_tokens(msg)
+    assert "secret-token-123" not in redacted
+    assert "another-token" not in redacted
+    assert "?t=REDACTED" in redacted
 
 
 @pytest.mark.asyncio
