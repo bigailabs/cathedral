@@ -53,7 +53,7 @@ need to know about.
 
 ### Operator note
 
-- `v1.1.22` is the latest public signed tag in this repo.
+- `v1.1.23` supersedes this release as the latest public signed tag.
 - The SAT path remains shadow-only unless an operator intentionally configures positive SAT weight and operator-held challenge material.
 
 ---

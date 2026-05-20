@@ -21,8 +21,8 @@ I reviewed:
   `src/cathedral/v1_types.py`,
   diff to `src/cathedral/validator/db.py` adding card_definitions /
   agent_submissions / eval_runs / merkle_anchors / eval_run_to_epoch.
-- `/Users/dreamboat/Documents/PROJECTS/cathedral-redesign/CONTRACTS.md`
-- `/Users/dreamboat/Documents/PROJECTS/cathedral-redesign/ARCHITECTURE_V1.md`
+- historical local design doc `CONTRACTS.md`
+- historical local design doc `ARCHITECTURE_V1.md`
 
 The validator-side legacy module (Polaris claim verification with inline
 cards) and the new v1 publisher/eval/storage are TWO different code
@@ -67,7 +67,7 @@ split by which code path they hit.
 
 ### [CRIT-3] Inline-card path on legacy `/v1/claim` has no hotkey signature; bearer is the only auth
 **Where:** `src/cathedral/types.py:35-74`, `src/cathedral/validator/app.py:87-93`, `src/cathedral/validator/auth.py:1-18`
-**What:** The legacy `PolarisAgentClaim` endpoint has no `signature` field. Bearer token is shared and per-validator, not per-miner. Even after the new `/v1/agents/submit` ships with sr25519 signatures, `/v1/claim` remains the path described in the in-repo README and CLAUDE.md; until it's removed or hardened, anyone with the bearer can attribute claims to any hotkey.
+**What:** The legacy `PolarisAgentClaim` endpoint has no `signature` field. Bearer token is shared and per-validator, not per-miner. Even after the new `/v1/agents/submit` ships with sr25519 signatures, `/v1/claim` remains the path described in the old in-repo docs at review time; until it's removed or hardened, anyone with the bearer can attribute claims to any hotkey.
 **How to reproduce:** `tests/v1/exploits/no_hotkey_signature.py`. Returns 202 with arbitrary `miner_hotkey="5Victim"`.
 **Impact:** Two paths exist for claim submission:
 1. The new v1 `/v1/agents/submit` (sr25519-signed)
