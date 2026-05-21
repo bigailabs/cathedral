@@ -55,6 +55,54 @@ def migrate(
     typer.echo(f"schema ready at {settings.storage.database_path}")
 
 
+@app.command("sat-launch-preflight")
+def sat_launch_preflight(
+    config: str = typer.Option("config/mainnet.toml", "--config", "-c"),
+    require_remote_weight_source: bool = typer.Option(
+        True,
+        "--require-remote-weight-source/--allow-local-weight-source",
+        help="Require signed remote-weight opt-in before mainnet SAT weight.",
+    ),
+    require_zero_local_sat_weight: bool = typer.Option(
+        True,
+        "--require-zero-local-sat-weight/--allow-local-sat-weight",
+        help="Require local synthetic_boolean_v1 blending to remain 0.0.",
+    ),
+) -> None:
+    """Validate validator SAT launch config without touching Bittensor."""
+    configure()
+    from cathedral.config import ValidatorSettings, resolve_validator_config_path
+    from cathedral.validator.launch_preflight import run_validator_sat_launch_preflight
+
+    config = resolve_validator_config_path(config)
+    settings = ValidatorSettings.from_toml(config)
+    result = run_validator_sat_launch_preflight(
+        settings,
+        require_remote_weight_source=require_remote_weight_source,
+        require_zero_local_sat_weight=require_zero_local_sat_weight,
+    )
+
+    detail_keys = (
+        "network",
+        "netuid",
+        "validator_hotkey",
+        "remote_weight_source_enabled",
+        "local_sat_weight",
+        "weights_disabled",
+        "weights_interval_secs",
+        "forced_burn_percentage",
+    )
+    for key in detail_keys:
+        typer.echo(f"{key}: {result.details[key]}")
+    for warning in result.warnings:
+        typer.echo(f"WARNING: {warning}", err=True)
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(1)
+    typer.echo("Validator SAT launch preflight passed")
+
+
 @app.command("pull")
 def pull(
     config: str = typer.Option("config/testnet.toml", "--config", "-c"),

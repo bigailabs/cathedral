@@ -177,6 +177,22 @@ CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
 CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT=0.0
 ```
 
+Validator remote-weight opt-in after release:
+
+```toml
+[remote_weight_source]
+enabled = true
+url = "https://api.cathedral.computer"
+key_id = "cathedral-weight-policy"
+public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
+```
+
+Before moving SAT above zero weight on mainnet, validators should pass:
+
+```bash
+cathedral-validator sat-launch-preflight --config config/mainnet.toml
+```
+
 ## Leak Checks
 
 The public repo must not contain real `.cnf`, `.dimacs`, or `.sol` files.
