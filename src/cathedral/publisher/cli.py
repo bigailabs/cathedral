@@ -345,6 +345,28 @@ def sat_launch_preflight(
     typer.echo("SAT launch preflight passed")
 
 
+@app.command("remote-weight-vector-preflight")
+def remote_weight_vector_preflight(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+) -> None:
+    """Build and self-verify one signed remote weight vector from the DB."""
+    configure()
+
+    from cathedral.publisher.remote_weight_preflight import (
+        run_publisher_remote_weight_preflight,
+    )
+
+    result = asyncio.run(run_publisher_remote_weight_preflight(database_path))
+    typer.echo(json.dumps(result.details, indent=2, sort_keys=True))
+    for warning in result.warnings:
+        typer.echo(f"WARNING: {warning}", err=True)
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(1)
+    typer.echo("Publisher remote weight vector preflight passed")
+
+
 @app.command("sat-active-challenge-status")
 def sat_active_challenge_status(
     database_path: str = typer.Option("data/publisher.db", "--db", "-d"),

@@ -256,10 +256,18 @@ public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
 Before moving SAT above zero weight on mainnet, validators should pass:
 
 ```bash
+cathedral-publisher remote-weight-vector-preflight --db data/publisher.db
 cathedral-validator sat-launch-preflight --config config/mainnet.toml
 cathedral-validator chain-launch-preflight --config config/mainnet.toml
 cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
 ```
+
+`remote-weight-vector-preflight` opens the publisher DB read-only, builds one
+signed remote-weight vector from the current ranked scores and configured Task
+Family weights, self-verifies the signature/invariants against the configured
+weight-policy key id, and reports private-safe metadata such as vector id,
+policy version, expiry, entry count, burn policy, and policy hash. It does not
+print miner hotkeys or the full vector payload.
 
 `chain-launch-preflight` reads the live Bittensor subnet without submitting
 `set_weights`. It reports the current block, metagraph block/size,
