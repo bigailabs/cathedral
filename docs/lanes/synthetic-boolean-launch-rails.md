@@ -146,7 +146,13 @@ CATHEDRAL_EVAL_MODE=ssh-probe
 CATHEDRAL_PROBER_VERSION=v2
 CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true
 CATHEDRAL_TASK_FAMILY_IDS=synthetic_boolean_v1
+CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES=67108864
 ```
+
+`CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES` defaults to 64 MiB. Keep
+first-launch formulas under that limit while Cathedral uses the
+publisher SQLite/Python verifier path. Multi-GB formulas require a
+file-backed/native verifier path before they are safe to seed.
 
 Validator local testing:
 

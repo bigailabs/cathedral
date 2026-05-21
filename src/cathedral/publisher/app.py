@@ -84,6 +84,8 @@ class PublisherContext:
 
 
 _DEFAULT_SSH_PROBE_KEY_PATH = "/tmp/cathedral_probe_ed25519"  # noqa: S108
+_DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES = 64 * 1024 * 1024
+_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES"
 
 
 def _materialize_ssh_probe_key() -> None:
@@ -502,12 +504,19 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
     if not cnf_path:
         return
 
+    max_cnf_bytes = _env_int(
+        _SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV,
+        _DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
+    )
+
     try:
-        cnf_text = await asyncio.to_thread(_read_text_file, cnf_path)
+        cnf_text = await asyncio.to_thread(_read_text_file, cnf_path, max_cnf_bytes)
     except OSError:
         raise RuntimeError(
             "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH could not be read"
         ) from None
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from None
 
     challenge_id = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID", "").strip()
     tier_raw = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER") or os.environ.get(
@@ -542,8 +551,20 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
     )
 
 
-def _read_text_file(path: str) -> str:
-    return Path(path).expanduser().read_text(encoding="utf-8")
+def _read_text_file(path: str, max_bytes: int) -> str:
+    expanded = Path(path).expanduser()
+    if expanded.stat().st_size > max_bytes:
+        raise ValueError(
+            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH exceeds "
+            f"{_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV}"
+        )
+    text = expanded.read_text(encoding="utf-8")
+    if len(text.encode("utf-8")) > max_bytes:
+        raise ValueError(
+            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH exceeds "
+            f"{_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV}"
+        )
+    return text
 
 
 def _env_int(name: str, default: int) -> int:

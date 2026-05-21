@@ -228,6 +228,24 @@ async def test_env_seed_loads_operator_cnf_without_path_in_metadata(tmp_path, mo
         await conn.close()
 
 
+async def test_env_seed_rejects_operator_cnf_above_launch_limit(tmp_path, monkeypatch) -> None:
+    from cathedral.publisher.app import _seed_synthetic_boolean_challenge_from_env
+
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 2 1\n1 -2 0\n", encoding="utf-8")
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", str(cnf_path))
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES", "8")
+
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        with pytest.raises(RuntimeError, match="MAX_CNF_BYTES"):
+            await _seed_synthetic_boolean_challenge_from_env(src)
+        assert await src.get_active(_FAMILY) is None
+    finally:
+        await conn.close()
+
+
 async def test_seed_does_not_reactivate_locked_challenge_on_restart(tmp_path) -> None:
     conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
     try:

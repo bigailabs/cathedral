@@ -1870,6 +1870,14 @@ async def _run_once_async() -> int:
     ctx = latest_ctx()
     if ctx is None:
         return 0
+    from cathedral.lanes.challenge_lock import SQLITE_SCHEMA as _CHALLENGE_LOCK_SCHEMA
+    from cathedral.lanes.challenge_receipts import SQLITE_SCHEMA as _CHALLENGE_RECEIPT_SCHEMA
+    from cathedral.lanes.challenge_source import SQLITE_SCHEMA as _CHALLENGE_SOURCE_SCHEMA
+
+    await ctx.db.executescript(_CHALLENGE_SOURCE_SCHEMA)
+    await ctx.db.executescript(_CHALLENGE_LOCK_SCHEMA)
+    await ctx.db.executescript(_CHALLENGE_RECEIPT_SCHEMA)
+    await ctx.db.commit()
 
     # Per-submission runner dispatch. The submission's `attestation_mode`
     # column (added by the submit-attestation-modes PR) tells us whether
