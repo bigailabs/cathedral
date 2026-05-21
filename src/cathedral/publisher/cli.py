@@ -300,6 +300,11 @@ def sat_launch_preflight(
         "--require-weight-signing-key/--no-require-weight-signing-key",
         help="Require CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY for signed remote weights.",
     ),
+    require_runtime_env: bool = typer.Option(
+        True,
+        "--require-runtime-env/--no-require-runtime-env",
+        help="Require SAT feed, SSH/Hermes, prober v2, and public base URL env.",
+    ),
 ) -> None:
     """Validate SAT launch environment without writing to the publisher DB."""
     configure()
@@ -309,9 +314,17 @@ def sat_launch_preflight(
     result = run_synthetic_boolean_launch_preflight(
         require_eval_signing_key=require_eval_signing_key,
         require_weight_signing_key=require_weight_signing_key,
+        require_runtime_env=require_runtime_env,
     )
 
     detail_keys = (
+        "task_family_feed_enabled",
+        "task_family_ids",
+        "eval_mode",
+        "prober_version",
+        "public_base_url",
+        "storage_mode",
+        "max_cnf_bytes_enforced",
         "challenge_id",
         "tier",
         "num_vars",

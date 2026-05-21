@@ -146,6 +146,7 @@ CATHEDRAL_EVAL_MODE=ssh-probe
 CATHEDRAL_PROBER_VERSION=v2
 CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true
 CATHEDRAL_TASK_FAMILY_IDS=synthetic_boolean_v1
+CATHEDRAL_PUBLIC_BASE_URL=https://api.cathedral.computer
 CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES=67108864
 ```
 
@@ -180,16 +181,22 @@ Run the publisher-side SAT preflight before booting a launch candidate:
 cathedral-publisher sat-launch-preflight
 ```
 
-The command reads the current environment, verifies the operator CNF is
-readable UTF-8 DIMACS, applies the configured launch limit for
-`sqlite_text` mode or explicitly capped `file` mode, checks the tier and
-challenge id, and requires both eval-row and remote-weight signing keys
-by default. For a shadow run that intentionally does not produce signed
-remote weights, use:
+The command reads the current environment, requires the SAT feed/runtime
+gates (`CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true`, `CATHEDRAL_EVAL_MODE=ssh-probe`,
+`CATHEDRAL_PROBER_VERSION=v2`, and `CATHEDRAL_PUBLIC_BASE_URL`), verifies
+the operator CNF is readable UTF-8 DIMACS, applies the configured launch
+limit for `sqlite_text` mode or explicitly capped `file` mode, checks
+the tier and challenge id, and requires both eval-row and remote-weight
+signing keys by default. For a shadow run that intentionally does not
+produce signed remote weights, use:
 
 ```bash
 cathedral-publisher sat-launch-preflight --no-require-weight-signing-key
 ```
+
+For local one-off parser checks that intentionally do not wire the
+runtime feed, use `--no-require-runtime-env`; do not use that override
+for target publisher launch checks.
 
 Validator local testing:
 

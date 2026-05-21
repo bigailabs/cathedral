@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from cathedral.lanes.challenge_ops import build_synthetic_boolean_challenge_record
 from cathedral.lanes.challenge_source import CHALLENGE_STATUS_ACTIVE, ChallengeSourceError
@@ -20,10 +21,16 @@ MAX_CNF_BYTES_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES"
 STORAGE_MODE_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE"
 EVAL_SIGNING_KEY_ENV = "CATHEDRAL_EVAL_SIGNING_KEY"
 WEIGHT_POLICY_SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"
+TASK_FAMILY_FEED_ENABLED_ENV = "CATHEDRAL_TASK_FAMILY_FEED_ENABLED"
+TASK_FAMILY_IDS_ENV = "CATHEDRAL_TASK_FAMILY_IDS"
+EVAL_MODE_ENV = "CATHEDRAL_EVAL_MODE"
+PROBER_VERSION_ENV = "CATHEDRAL_PROBER_VERSION"
+PUBLIC_BASE_URL_ENV = "CATHEDRAL_PUBLIC_BASE_URL"
 
 DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES = 64 * 1024 * 1024
 STORAGE_MODE_SQLITE_TEXT = "sqlite_text"
 STORAGE_MODE_FILE = "file"
+SYNTHETIC_BOOLEAN_FAMILY_ID = "synthetic_boolean_v1"
 
 
 @dataclass(frozen=True)
@@ -77,11 +84,64 @@ def _hex_seed_is_32_bytes(value: str) -> bool:
         return False
 
 
+def _env_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _task_family_ids(env: Mapping[str, str]) -> list[str]:
+    raw = env.get(TASK_FAMILY_IDS_ENV, SYNTHETIC_BOOLEAN_FAMILY_ID)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _public_base_url_error(value: str) -> str | None:
+    if not value.strip():
+        return f"{PUBLIC_BASE_URL_ENV} is required for SAT cnf_url prompts"
+    parsed = urlparse(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return f"{PUBLIC_BASE_URL_ENV} must be an absolute http(s) URL"
+    return None
+
+
+def _check_runtime_env(
+    env: Mapping[str, str],
+    errors: list[str],
+    warnings: list[str],
+    details: dict[str, Any],
+) -> None:
+    feed_enabled = _env_bool(env.get(TASK_FAMILY_FEED_ENABLED_ENV, ""))
+    family_ids = _task_family_ids(env)
+    eval_mode = env.get(EVAL_MODE_ENV, "").strip().lower()
+    prober_version = env.get(PROBER_VERSION_ENV, "v1").strip().lower()
+    public_base_url = env.get(PUBLIC_BASE_URL_ENV, "").strip()
+
+    details["task_family_feed_enabled"] = feed_enabled
+    details["task_family_ids"] = family_ids
+    details["eval_mode"] = eval_mode or ""
+    details["prober_version"] = prober_version
+    details["public_base_url"] = public_base_url
+
+    if not feed_enabled:
+        errors.append(f"{TASK_FAMILY_FEED_ENABLED_ENV}=true is required")
+    if SYNTHETIC_BOOLEAN_FAMILY_ID not in family_ids:
+        errors.append(f"{TASK_FAMILY_IDS_ENV} must include {SYNTHETIC_BOOLEAN_FAMILY_ID}")
+    if eval_mode != "ssh-probe":
+        errors.append(f"{EVAL_MODE_ENV}=ssh-probe is required")
+    if prober_version != "v2":
+        errors.append(f"{PROBER_VERSION_ENV}=v2 is required")
+
+    public_url_error = _public_base_url_error(public_base_url)
+    if public_url_error:
+        errors.append(public_url_error)
+    elif urlparse(public_base_url).scheme == "http":
+        warnings.append(f"{PUBLIC_BASE_URL_ENV} uses http; production should use https")
+
+
 def run_synthetic_boolean_launch_preflight(
     env: Mapping[str, str] | None = None,
     *,
     require_eval_signing_key: bool = True,
     require_weight_signing_key: bool = True,
+    require_runtime_env: bool = True,
 ) -> SatLaunchPreflightResult:
     """Validate the operator-controlled SAT launch inputs without mutating state."""
 
@@ -89,6 +149,9 @@ def run_synthetic_boolean_launch_preflight(
     errors: list[str] = []
     warnings: list[str] = []
     details: dict[str, Any] = {}
+
+    if require_runtime_env:
+        _check_runtime_env(env, errors, warnings, details)
 
     storage_mode, storage_warning = _storage_mode(env)
     if storage_warning:
@@ -177,15 +240,20 @@ __all__ = [
     "ACTIVE_CNF_PATH_ENV",
     "CHALLENGE_ID_ENV",
     "DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES",
+    "EVAL_MODE_ENV",
     "EVAL_SIGNING_KEY_ENV",
     "LEGACY_TIER_ENV",
     "MAX_CNF_BYTES_ENV",
-    "SatLaunchPreflightResult",
+    "PROBER_VERSION_ENV",
+    "PUBLIC_BASE_URL_ENV",
     "STORAGE_MODE_ENV",
     "STORAGE_MODE_FILE",
     "STORAGE_MODE_SQLITE_TEXT",
+    "TASK_FAMILY_FEED_ENABLED_ENV",
+    "TASK_FAMILY_IDS_ENV",
     "TIER_ENV",
     "WEIGHT_POLICY_SIGNING_KEY_ENV",
+    "SatLaunchPreflightResult",
     "positive_int_env",
     "read_operator_cnf_file",
     "run_synthetic_boolean_launch_preflight",
