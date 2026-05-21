@@ -1,14 +1,14 @@
-"""Single-active-challenge first-verified-lock-wins lock.
+"""Single-active-challenge final winner lock.
 
 The launch model is: one active DIMACS CNF challenge, every miner
-races the same problem, the first verified private solution to acquire
-the lock wins, and later submissions for that challenge cannot replace
-the winner.
+races the same problem, the first-submitted valid receipt wins, and
+later submissions for that challenge cannot replace the winner.
 
-This module provides the lock primitive that enforces that publisher
-ordering rule. The lane verifier scores each submission in isolation;
-the lock is the layer that decides which validated submission gets to
-flip the active challenge into the LOCKED state.
+This module provides the final lock primitive. Receipt ordering lives in
+``cathedral.lanes.challenge_receipts``; once that state machine selects
+the eligible first-submitted valid receipt, this lock prevents any later
+finalizer from replacing it and flips the active challenge into the
+LOCKED state.
 
 The interface is small on purpose so an in-memory test fake and a
 SQLite-backed production implementation both fit. A future
@@ -19,7 +19,7 @@ Lock semantics:
 
 * The lock is keyed by ``(family_id, challenge_id)``.
 * ``try_lock`` is an atomic compare-and-set: it succeeds for the first
-  verified winner that reaches the lock and returns the resulting
+  selected receipt winner that reaches the lock and returns the resulting
   record. Every later call for the same ``challenge_id`` returns
   ``None`` (lock held by someone else) even if its submission was
   independently valid.
@@ -85,7 +85,7 @@ class ChallengeLock(Protocol):
 
 class InMemoryChallengeLock:
     """Process-local fake. Suitable for tests of the lane verifier and
-    of the launch loop's first-valid-wins behavior."""
+    of the launch loop's final lock behavior."""
 
     def __init__(self) -> None:
         self._winners: dict[tuple[str, str], LockRecord] = {}
@@ -152,7 +152,7 @@ async def init_sqlite_challenge_lock(database_path: str) -> aiosqlite.Connection
 
 
 class SqliteChallengeLock:
-    """SQLite-backed first-valid-wins lock.
+    """SQLite-backed final winner lock.
 
     Atomicity comes from the PRIMARY KEY UNIQUE constraint plus
     ``INSERT OR IGNORE``: the first inserter wins, every later inserter

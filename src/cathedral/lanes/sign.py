@@ -9,6 +9,7 @@ stable hashes until an explicit reveal/export path is added.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 from typing import Any
 

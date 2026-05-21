@@ -117,6 +117,10 @@ def _redact_query_tokens(s: str) -> str:
     return _QUERY_TOKEN_RE.sub(r"\1REDACTED", s)
 
 
+def _now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 # --------------------------------------------------------------------------
 # Failure codes
 # --------------------------------------------------------------------------
@@ -319,6 +323,7 @@ class TaskFamilyHermesRun:
     """Raw Hermes result for one Task Family challenge."""
 
     stdout: str
+    stdout_received_at_iso: str | None = None
     duration_ms: int = 0
     trace: dict[str, Any] = field(default_factory=dict)
     trace_bundle: TraceBundle | None = None
@@ -675,6 +680,7 @@ class SshHermesRunner:
         prompt: str,
         miner_hotkey: str,
         submission: dict[str, Any],
+        receipt_callback: Any | None = None,
     ) -> TaskFamilyHermesRun:
         """Run one generic Task Family prompt over SSH Hermes.
 
@@ -727,6 +733,9 @@ class SshHermesRunner:
                 eval_round=eval_round,
                 resolved_home=resolved_home,
             )
+            stdout_received_at_iso = _now_utc_iso()
+            if receipt_callback is not None:
+                await receipt_callback(stdout, stdout_received_at_iso)
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
             synthetic_card: dict[str, Any] = {
@@ -748,10 +757,13 @@ class SshHermesRunner:
             trace.visit_ended_at = datetime.now(UTC).isoformat()
             await self._delete_profile(conn, eval_profile)
             profile_deleted = True
+            trace_dict = trace.to_dict()
+            trace_dict["task_family_stdout_received_at_iso"] = stdout_received_at_iso
             return TaskFamilyHermesRun(
                 stdout=stdout,
+                stdout_received_at_iso=stdout_received_at_iso,
                 duration_ms=int((time.monotonic() - t_start) * 1000),
-                trace=trace.to_dict(),
+                trace=trace_dict,
                 trace_bundle=bundle,
             )
         except SshHermesError:

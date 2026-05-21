@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import blake3
 import structlog
 
 from cathedral.cards.registry import CardRegistry
@@ -40,17 +41,33 @@ from cathedral.eval.scoring_pipeline import EvalSigner, score_and_sign
 from cathedral.eval.task_generator import generate_task
 from cathedral.lanes import registry as lane_registry
 from cathedral.lanes.challenge_lock import ChallengeLock, SqliteChallengeLock
+from cathedral.lanes.challenge_receipts import (
+    RECEIPT_STATUS_INVALID,
+    RECEIPT_STATUS_VALID,
+    RECEIPT_STATUS_VERIFYING,
+    ChallengeReceipt,
+    ChallengeReceiptStore,
+    SqliteChallengeReceiptStore,
+)
 from cathedral.lanes.challenge_source import (
     ChallengeRecord,
     ChallengeSource,
     SqliteChallengeSource,
     SqliteFetchTokenStore,
 )
-from cathedral.lanes.contract import HiddenMetadata, PublicProblem, ScoreResult
+from cathedral.lanes.contract import (
+    HiddenMetadata,
+    PublicProblem,
+    ScoreResult,
+    Submission,
+    VerifierResult,
+)
 from cathedral.lanes.publisher import (
+    TaskFamilySignedResult,
     build_generate_ctx,
     build_task_family_prompt,
     enabled_task_family_ids,
+    extract_answer,
     persist_task_family_result,
     score_and_sign_task_family_stdout,
     task_family_feed_enabled,
@@ -58,6 +75,7 @@ from cathedral.lanes.publisher import (
     task_family_runner_skip_reason,
     task_family_tier,
 )
+from cathedral.lanes.sign import canonical_hash, resign_task_family_score
 from cathedral.lanes.synthetic_boolean_v1 import (
     FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID,
 )
@@ -120,6 +138,40 @@ def _ms_iso(dt: datetime) -> str:
     return s + "Z"
 
 
+def _receipt_answer_hash(stdout: str) -> str:
+    try:
+        answer = extract_answer(stdout)
+    except Exception:
+        return blake3.blake3(str(stdout).encode("utf-8")).hexdigest()
+    return canonical_hash(answer)
+
+
+def _task_family_signed_result_from_row(row: dict[str, Any]) -> TaskFamilySignedResult:
+    verifier = VerifierResult(
+        parsed_ok=float(row.get("weighted_score", 0.0)) > 0.0,
+        raw_metric=float(row.get("weighted_score", 0.0)),
+        rejection_reason=row.get("rejection_reason"),
+        details={},
+    )
+    score = ScoreResult(
+        weighted_score=float(row.get("weighted_score", 0.0)),
+        rejection_reason=row.get("rejection_reason"),
+        score_parts=dict(row.get("score_parts") or {}),
+    )
+    submission = Submission(
+        task_id=str(row.get("task_id_public") or ""),
+        miner_hotkey=str(row.get("miner_hotkey") or ""),
+        answer={},
+    )
+    return TaskFamilySignedResult(
+        row=row,
+        verifier=verifier,
+        score=score,
+        prompt="",
+        submission=submission,
+    )
+
+
 @dataclass
 class _RoundCounter:
     """Track per-card round_index across the current epoch."""
@@ -151,6 +203,7 @@ class EvalOrchestrator:
         task_family_challenge_source: ChallengeSource | None = None,
         task_family_challenge_lock: ChallengeLock | None = None,
         task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
+        task_family_receipt_store: ChallengeReceiptStore | None = None,
         public_base_url: str | None = None,
     ) -> None:
         """Construct an orchestrator with either a single runner or a
@@ -180,6 +233,7 @@ class EvalOrchestrator:
         self._task_family_challenge_source = task_family_challenge_source
         self._task_family_challenge_lock = task_family_challenge_lock
         self._task_family_fetch_token_store = task_family_fetch_token_store
+        self._task_family_receipt_store = task_family_receipt_store
         # Constructor wins; env is the fallback. An empty string is
         # treated as missing. See _announce_synthetic_boolean_problem.
         self._public_base_url = (
@@ -660,11 +714,37 @@ class EvalOrchestrator:
                 continue
 
             prompt = build_task_family_prompt(problem)
+            receipt_store = self._task_family_receipt_store
+            receipt: ChallengeReceipt | None = None
+
+            async def _record_receipt(stdout: str, stdout_received_at_iso: str) -> None:
+                nonlocal receipt
+                if (
+                    family_id != SYNTHETIC_BOOLEAN_FAMILY_ID
+                    or receipt_store is None
+                    or problem.task_id is None
+                ):
+                    return
+                receipt = await receipt_store.record_receipt(
+                    family_id=family_id,
+                    challenge_id=problem.task_id,
+                    submission_id=str(submission["id"]),
+                    miner_hotkey=miner_hotkey,
+                    received_at_iso=stdout_received_at_iso,
+                    answer_hash=_receipt_answer_hash(stdout),
+                    recorded_at_iso=_ms_iso(datetime.now(UTC)),
+                )
+
+            run_kwargs: dict[str, Any] = {
+                "problem": problem,
+                "prompt": prompt,
+                "miner_hotkey": miner_hotkey,
+                "submission": submission,
+            }
+            if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
+                run_kwargs["receipt_callback"] = _record_receipt
             hermes_run = await run_challenge(
-                problem=problem,
-                prompt=prompt,
-                miner_hotkey=miner_hotkey,
-                submission=submission,
+                **run_kwargs,
             )
             epoch_salt = f"epoch_{epoch}:{family_id}"
             signed = score_and_sign_task_family_stdout(
@@ -677,6 +757,42 @@ class EvalOrchestrator:
                 signer=self.signer,
                 epoch_salt=epoch_salt,
             )
+            if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
+                if receipt is None:
+                    received_at = (
+                        getattr(hermes_run, "stdout_received_at_iso", None)
+                        or str(signed.row["ran_at"])
+                    )
+                    receipt = await receipt_store.record_receipt(
+                        family_id=family_id,
+                        challenge_id=problem.task_id,
+                        submission_id=str(submission["id"]),
+                        miner_hotkey=miner_hotkey,
+                        received_at_iso=received_at,
+                        answer_hash=_receipt_answer_hash(hermes_run.stdout),
+                        recorded_at_iso=_ms_iso(datetime.now(UTC)),
+                    )
+                await self._finalize_sat_receipt_ordered_result(
+                    receipt_store=receipt_store,
+                    receipt=receipt,
+                    lane=lane,
+                    problem=problem,
+                    hidden=hidden,
+                    submission=submission,
+                    hermes_run=hermes_run,
+                    signed=signed,
+                    epoch=epoch,
+                    round_index=round_index,
+                    epoch_salt=epoch_salt,
+                    log=log,
+                )
+                log.info(
+                    "task_family_eval_complete",
+                    family_id=family_id,
+                    task_id_public=signed.row.get("task_id_public"),
+                    weighted_score=signed.row.get("weighted_score"),
+                )
+                continue
             challenge_lock = self._task_family_challenge_lock
             sat_lock_candidate = (
                 family_id == SYNTHETIC_BOOLEAN_FAMILY_ID
@@ -796,6 +912,305 @@ class EvalOrchestrator:
                 task_id_public=signed.row.get("task_id_public"),
                 weighted_score=signed.row.get("weighted_score"),
             )
+
+    async def _finalize_sat_receipt_ordered_result(
+        self,
+        *,
+        receipt_store: ChallengeReceiptStore,
+        receipt: ChallengeReceipt,
+        lane: Any,
+        problem: PublicProblem,
+        hidden: HiddenMetadata,
+        submission: dict[str, Any],
+        hermes_run: Any,
+        signed: TaskFamilySignedResult,
+        epoch: int,
+        round_index: int,
+        epoch_salt: str,
+        log: structlog.stdlib.BoundLogger,
+    ) -> None:
+        """Persist SAT rows under first-submitted valid-receipt ordering.
+
+        A valid answer does not immediately win. It becomes eligible only
+        when every earlier receipt for the same challenge has resolved
+        invalid/expired. Invalid answers can be published immediately as
+        zero-score rows. The winning valid row is persisted before the
+        challenge lock/source are advanced so a persistence failure cannot
+        silently retire the formula.
+        """
+
+        async def _build_trace_json(run: Any = hermes_run) -> dict[str, Any]:
+            trace_bundle = getattr(run, "trace_bundle", None)
+            published_artifact = await self._maybe_publish_bundle(trace_bundle, log)
+            out: dict[str, Any] = dict(run.trace or {})
+            if trace_bundle is not None:
+                out["bundle_blake3"] = trace_bundle.bundle_blake3
+                out["cathedral_eval_round"] = trace_bundle.cathedral_eval_round
+            if published_artifact is not None:
+                out["bundle_url"] = published_artifact.bundle_url
+                out["manifest_url"] = published_artifact.manifest_url
+                out["manifest_hash"] = published_artifact.manifest_hash
+            return out
+
+        now_iso = str(signed.row["ran_at"])
+        await receipt_store.update_status(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+            submission_id=receipt.submission_id,
+            status=RECEIPT_STATUS_VERIFYING,
+            now_iso=receipt.received_at_iso,
+        )
+        trace_json = await _build_trace_json()
+        await receipt_store.attach_result(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+            submission_id=receipt.submission_id,
+            eval_run_id=str(signed.row["id"]),
+            signed_row=signed.row,
+            trace_json=trace_json,
+            duration_ms=int(hermes_run.duration_ms),
+            epoch=epoch,
+            round_index=round_index,
+            now_iso=now_iso,
+        )
+
+        is_valid = float(signed.score.weighted_score) >= 1.0
+        await receipt_store.update_status(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+            submission_id=receipt.submission_id,
+            status=RECEIPT_STATUS_VALID if is_valid else RECEIPT_STATUS_INVALID,
+            now_iso=now_iso,
+            rejection_reason=None if is_valid else signed.row.get("rejection_reason"),
+            verifier_details_hash=str(signed.row["verifier_details_hash"]),
+        )
+
+        if not is_valid:
+            await persist_task_family_result(
+                self.db,
+                submission_row=submission,
+                problem=problem,
+                signed=signed,
+                epoch=epoch,
+                round_index=round_index,
+                duration_ms=int(hermes_run.duration_ms),
+                trace_json=trace_json,
+                feed_enabled=True,
+            )
+            return
+
+        await self._expire_stale_sat_receipts(
+            receipt_store=receipt_store,
+            receipt=receipt,
+            problem=problem,
+            now_iso=now_iso,
+        )
+        winner = await receipt_store.select_winner(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+        )
+        if winner is None:
+            log.info(
+                "task_family_receipt_waiting_for_earlier",
+                family_id=receipt.family_id,
+                challenge_id_public=signed.row.get("task_id_public"),
+                submission_id=receipt.submission_id,
+            )
+            return
+
+        challenge_lock = self._task_family_challenge_lock
+        existing_lock = (
+            await challenge_lock.get_winner(
+                family_id=winner.family_id,
+                challenge_id=winner.challenge_id,
+            )
+            if challenge_lock is not None
+            else None
+        )
+
+        if existing_lock is not None:
+            if winner.submission_id != receipt.submission_id:
+                loser = self._sat_loser_result(
+                    lane=lane,
+                    problem=problem,
+                    hidden=hidden,
+                    submission=submission,
+                    stdout=hermes_run.stdout,
+                    original=signed,
+                    epoch_salt=epoch_salt,
+                    reason="challenge_already_locked",
+                )
+                await persist_task_family_result(
+                    self.db,
+                    submission_row=submission,
+                    problem=problem,
+                    signed=loser,
+                    epoch=epoch,
+                    round_index=round_index,
+                    duration_ms=int(hermes_run.duration_ms),
+                    trace_json=trace_json,
+                    feed_enabled=True,
+                )
+            return
+
+        if winner.signed_row is None or winner.eval_run_id is None:
+            log.warning(
+                "task_family_winner_missing_private_payload",
+                family_id=winner.family_id,
+                challenge_id=winner.challenge_id,
+                submission_id=winner.submission_id,
+            )
+            return
+
+        winner_submission = {
+            "id": winner.submission_id,
+            "miner_hotkey": winner.miner_hotkey,
+        }
+        winner_result = _task_family_signed_result_from_row(winner.signed_row)
+        locked = None
+        promoted = None
+        await self.db.execute("BEGIN IMMEDIATE")
+        try:
+            await persist_task_family_result(
+                self.db,
+                submission_row=winner_submission,
+                problem=problem,
+                signed=winner_result,
+                epoch=int(winner.epoch if winner.epoch is not None else epoch),
+                round_index=int(
+                    winner.round_index if winner.round_index is not None else round_index
+                ),
+                duration_ms=int(winner.duration_ms if winner.duration_ms is not None else 0),
+                trace_json=winner.trace_json,
+                feed_enabled=True,
+                commit=False,
+            )
+            if challenge_lock is not None:
+                locked = await challenge_lock.try_lock(
+                    family_id=winner.family_id,
+                    challenge_id=winner.challenge_id,
+                    miner_hotkey=winner.miner_hotkey,
+                    eval_run_id=winner.eval_run_id,
+                    weighted_score=float(winner.signed_row["weighted_score"]),
+                    won_at_iso=str(winner.signed_row["ran_at"]),
+                    commit=False,
+                )
+            if locked is not None and self._task_family_challenge_source is not None:
+                promoted = await self._task_family_challenge_source.mark_locked_and_promote_next(
+                    family_id=winner.family_id,
+                    challenge_id=winner.challenge_id,
+                    now_iso=str(winner.signed_row["ran_at"]),
+                    manage_transaction=False,
+                )
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
+
+        if locked is not None:
+            log.info(
+                "task_family_challenge_locked",
+                family_id=winner.family_id,
+                challenge_id_public=winner.signed_row.get("task_id_public"),
+                miner_hotkey=winner.miner_hotkey,
+                promoted_challenge_id=(promoted.challenge_id if promoted else None),
+            )
+
+        await self._publish_resolved_sat_losers(
+            receipt_store=receipt_store,
+            winner=winner,
+            problem=problem,
+            reason="challenge_already_locked",
+        )
+
+    async def _publish_resolved_sat_losers(
+        self,
+        *,
+        receipt_store: ChallengeReceiptStore,
+        winner: ChallengeReceipt,
+        problem: PublicProblem,
+        reason: str,
+    ) -> None:
+        for candidate in await receipt_store.list_for_challenge(
+            family_id=winner.family_id,
+            challenge_id=winner.challenge_id,
+        ):
+            if candidate.submission_id == winner.submission_id:
+                continue
+            if candidate.status != RECEIPT_STATUS_VALID or candidate.signed_row is None:
+                continue
+            loser_row = resign_task_family_score(
+                candidate.signed_row,
+                signer=self.signer,
+                weighted_score=0.0,
+                score_parts={"binary_correct": 0.0, "receipt_winner": 0.0},
+                rejection_reason=reason,
+            )
+            await persist_task_family_result(
+                self.db,
+                submission_row={
+                    "id": candidate.submission_id,
+                    "miner_hotkey": candidate.miner_hotkey,
+                },
+                problem=problem,
+                signed=_task_family_signed_result_from_row(loser_row),
+                epoch=int(candidate.epoch if candidate.epoch is not None else 0),
+                round_index=int(candidate.round_index if candidate.round_index is not None else 0),
+                duration_ms=int(candidate.duration_ms if candidate.duration_ms is not None else 0),
+                trace_json=candidate.trace_json,
+                feed_enabled=True,
+            )
+
+    async def _expire_stale_sat_receipts(
+        self,
+        *,
+        receipt_store: ChallengeReceiptStore,
+        receipt: ChallengeReceipt,
+        problem: PublicProblem,
+        now_iso: str,
+    ) -> None:
+        try:
+            now = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).astimezone(UTC)
+        except ValueError:
+            return
+        cutoff = now - timedelta(seconds=int(problem.time_limit_seconds))
+        cutoff_iso = _ms_iso(cutoff)
+        await receipt_store.expire_unresolved_before(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+            cutoff_received_at_iso=cutoff_iso,
+            now_iso=now_iso,
+            rejection_reason="receipt_timed_out",
+        )
+
+    def _sat_loser_result(
+        self,
+        *,
+        lane: Any,
+        problem: PublicProblem,
+        hidden: HiddenMetadata,
+        submission: dict[str, Any],
+        stdout: str,
+        original: TaskFamilySignedResult,
+        epoch_salt: str,
+        reason: str,
+    ) -> TaskFamilySignedResult:
+        return score_and_sign_task_family_stdout(
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission_row=submission,
+            stdout=stdout,
+            ran_at_iso=str(original.row["ran_at"]),
+            signer=self.signer,
+            eval_run_id=str(original.row["id"]),
+            epoch_salt=epoch_salt,
+            score_override=ScoreResult(
+                weighted_score=0.0,
+                rejection_reason=reason,
+                score_parts={"binary_correct": 0.0, "receipt_winner": 0.0},
+            ),
+        )
 
     async def _announce_synthetic_boolean_problem(
         self,
@@ -1059,6 +1474,7 @@ async def run_eval_loop(
     task_family_challenge_source: ChallengeSource | None = None,
     task_family_challenge_lock: ChallengeLock | None = None,
     task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
+    task_family_receipt_store: ChallengeReceiptStore | None = None,
     public_base_url: str | None = None,
 ) -> None:
     """Long-running scheduler: picks queued submissions and evals them.
@@ -1083,6 +1499,7 @@ async def run_eval_loop(
         task_family_challenge_source=task_family_challenge_source,
         task_family_challenge_lock=task_family_challenge_lock,
         task_family_fetch_token_store=task_family_fetch_token_store,
+        task_family_receipt_store=task_family_receipt_store,
         public_base_url=public_base_url,
     )
     sem = asyncio.Semaphore(max_concurrent)
@@ -1549,6 +1966,7 @@ async def _run_once_async() -> int:
         task_family_challenge_source=SqliteChallengeSource(ctx.db),
         task_family_challenge_lock=SqliteChallengeLock(ctx.db),
         task_family_fetch_token_store=SqliteFetchTokenStore(ctx.db),
+        task_family_receipt_store=SqliteChallengeReceiptStore(ctx.db),
         public_base_url=_os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
     )
 

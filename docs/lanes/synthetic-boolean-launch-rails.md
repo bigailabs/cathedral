@@ -14,12 +14,13 @@ The first launch model is one active formula.
 2. All eligible miners race the same formula.
 3. Cathedral runs each miner through the SSH/Hermes path.
 4. Miners return a JSON object with `dimacs_solution`.
-5. Cathedral verifies the assignment deterministically.
-6. The first answer Cathedral verifies and locks wins the SAT lane score; the publisher then advances the active challenge.
-7. Later submissions for that locked challenge score `0.0`.
-8. Operator advances to the next formula.
+5. Cathedral records a hash-only receipt as soon as Hermes stdout returns.
+6. Cathedral verifies the assignment deterministically.
+7. The first-submitted valid receipt wins the SAT lane score; the publisher then advances the active challenge.
+8. Later valid receipts for that locked challenge score `0.0`.
+9. Operator advances to the next formula.
 
-The winner ordering rule is **first verified and locked**, not first submitted. The lock is acquired only after `SyntheticBooleanV1.verify` returns a valid satisfying assignment, so submissions that arrive earlier but verify later than another miner's parallel run can lose the race. See `src/cathedral/eval/orchestrator.py` for the call site. Open tracking issue for whether to keep this rule or move to a true first-submitted (publisher-receipt-time + miner-signed answer) model.
+The winner ordering rule is **first submitted among valid receipts**, not first verified. The publisher records receipt time before trace collection finishes, then resolves receipts as valid or invalid. A later valid receipt cannot win while an earlier receipt is still unresolved; it wins only if all earlier receipts resolve invalid or expired.
 
 Reward shape:
 
@@ -130,7 +131,7 @@ The public feed is hash-only. Raw CNF and submitted solutions must not appear in
 2. Confirm publisher env enables the task-family feed.
 3. Activate one formula from operator-controlled private storage.
 4. Confirm miner prompts are delivered through `SshHermesRunner`.
-5. Confirm the first verified solution locks the active challenge.
+5. Confirm the first-submitted valid receipt locks the active challenge.
 6. Confirm public feed rows are hash-only.
 7. Confirm validators pull signed rows and keep SAT task-family weight at the intended value.
 8. Confirm validator logs show coherent local weight setting.

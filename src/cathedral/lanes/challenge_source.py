@@ -4,8 +4,8 @@ A *challenge source* is the publisher's local store of currently-active
 private challenge material: the raw CNF (for boolean lanes), tier label,
 status flags, and any publisher-only audit metadata. It is the layer
 that the launch loop reads from when it needs to publish "the active
-challenge" and the layer that gets locked after a miner returns the
-first verified solution.
+challenge" and the layer that gets locked after the receipt state
+machine selects the first-submitted valid solution.
 
 This module deliberately does NOT contain real launch corpora. It only
 defines:
