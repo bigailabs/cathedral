@@ -63,6 +63,12 @@ from cathedral.lanes.challenge_source import (
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
 from cathedral.publisher import repository
 from cathedral.publisher.reads import router as reads_router
+from cathedral.publisher.sat_preflight import (
+    ACTIVE_CNF_PATH_ENV,
+    DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
+    MAX_CNF_BYTES_ENV,
+    read_operator_cnf_file,
+)
 from cathedral.publisher.submit import router as submit_router
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
@@ -84,8 +90,6 @@ class PublisherContext:
 
 
 _DEFAULT_SSH_PROBE_KEY_PATH = "/tmp/cathedral_probe_ed25519"  # noqa: S108
-_DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES = 64 * 1024 * 1024
-_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES"
 
 
 def _materialize_ssh_probe_key() -> None:
@@ -500,20 +504,20 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
     the path or CNF body, and the public schema-5 row still exposes only
     hash-backed fields.
     """
-    cnf_path = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", "").strip()
+    cnf_path = os.environ.get(ACTIVE_CNF_PATH_ENV, "").strip()
     if not cnf_path:
         return
 
     max_cnf_bytes = _env_int(
-        _SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV,
-        _DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
+        MAX_CNF_BYTES_ENV,
+        DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
     )
 
     try:
-        cnf_text = await asyncio.to_thread(_read_text_file, cnf_path, max_cnf_bytes)
+        cnf_text = await asyncio.to_thread(read_operator_cnf_file, cnf_path, max_cnf_bytes)
     except OSError:
         raise RuntimeError(
-            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH could not be read"
+            f"{ACTIVE_CNF_PATH_ENV} could not be read"
         ) from None
     except ValueError as exc:
         raise RuntimeError(str(exc)) from None
@@ -549,23 +553,6 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         num_clauses=audit.get("num_clauses"),
         cnf_sha256=audit.get("cnf_sha256"),
     )
-
-
-def _read_text_file(path: str, max_bytes: int) -> str:
-    expanded = Path(path).expanduser()
-    if expanded.stat().st_size > max_bytes:
-        raise ValueError(
-            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH exceeds "
-            f"{_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV}"
-        )
-    text = expanded.read_text(encoding="utf-8")
-    if len(text.encode("utf-8")) > max_bytes:
-        raise ValueError(
-            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH exceeds "
-            f"{_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES_ENV}"
-        )
-    return text
-
 
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()

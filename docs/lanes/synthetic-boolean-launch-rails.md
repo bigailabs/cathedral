@@ -154,6 +154,22 @@ first-launch formulas under that limit while Cathedral uses the
 publisher SQLite/Python verifier path. Multi-GB formulas require a
 file-backed/native verifier path before they are safe to seed.
 
+Run the publisher-side SAT preflight before booting a launch candidate:
+
+```bash
+cathedral-publisher sat-launch-preflight
+```
+
+The command reads the current environment, verifies the operator CNF is
+readable UTF-8 DIMACS under the configured launch limit, checks the tier
+and challenge id, and requires both eval-row and remote-weight signing
+keys by default. For a shadow run that intentionally does not produce
+signed remote weights, use:
+
+```bash
+cathedral-publisher sat-launch-preflight --no-require-weight-signing-key
+```
+
 Validator local testing:
 
 ```bash

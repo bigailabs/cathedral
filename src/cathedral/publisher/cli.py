@@ -288,6 +288,49 @@ def archive_cards(
     asyncio.run(_run())
 
 
+@app.command("sat-launch-preflight")
+def sat_launch_preflight(
+    require_eval_signing_key: bool = typer.Option(
+        True,
+        "--require-eval-signing-key/--no-require-eval-signing-key",
+        help="Require CATHEDRAL_EVAL_SIGNING_KEY to be present and well-formed.",
+    ),
+    require_weight_signing_key: bool = typer.Option(
+        True,
+        "--require-weight-signing-key/--no-require-weight-signing-key",
+        help="Require CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY for signed remote weights.",
+    ),
+) -> None:
+    """Validate SAT launch environment without writing to the publisher DB."""
+    configure()
+
+    from cathedral.publisher.sat_preflight import run_synthetic_boolean_launch_preflight
+
+    result = run_synthetic_boolean_launch_preflight(
+        require_eval_signing_key=require_eval_signing_key,
+        require_weight_signing_key=require_weight_signing_key,
+    )
+
+    detail_keys = (
+        "challenge_id",
+        "tier",
+        "num_vars",
+        "num_clauses",
+        "cnf_file_bytes",
+        "cnf_sha256",
+    )
+    for key in detail_keys:
+        if key in result.details:
+            typer.echo(f"{key}: {result.details[key]}")
+    for warning in result.warnings:
+        typer.echo(f"WARNING: {warning}", err=True)
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(1)
+    typer.echo("SAT launch preflight passed")
+
+
 @app.callback()
 def _callback() -> None:
     """Common config (no-op; lets typer build subcommand help cleanly)."""
