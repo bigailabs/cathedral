@@ -257,8 +257,15 @@ Before moving SAT above zero weight on mainnet, validators should pass:
 
 ```bash
 cathedral-validator sat-launch-preflight --config config/mainnet.toml
+cathedral-validator chain-launch-preflight --config config/mainnet.toml
 cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
 ```
+
+`chain-launch-preflight` reads the live Bittensor subnet without submitting
+`set_weights`. It reports the current block, metagraph block/size,
+registration status, validator hotkey-to-uid mapping, validator permit/stake
+when the SDK exposes them, selected subnet hyperparameters, and warnings for
+weight cadence, commit-reveal/immunity, or disabled weight setting.
 
 ## Leak Checks
 

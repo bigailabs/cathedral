@@ -157,6 +157,42 @@ def verify_remote_weight_vector(
     asyncio.run(_run())
 
 
+@app.command("chain-launch-preflight")
+def chain_launch_preflight(
+    config: str = typer.Option("config/mainnet.toml", "--config", "-c"),
+) -> None:
+    """Inspect live Bittensor validator launch state without set_weights."""
+    configure()
+    from cathedral.chain import BittensorChain
+    from cathedral.config import ValidatorSettings, resolve_validator_config_path
+    from cathedral.validator.chain_launch_preflight import (
+        run_validator_chain_launch_preflight,
+    )
+
+    config = resolve_validator_config_path(config)
+    settings = ValidatorSettings.from_toml(config)
+
+    async def _run() -> None:
+        chain = BittensorChain(
+            network=settings.network.name,
+            netuid=settings.network.netuid,
+            wallet_name=settings.network.wallet_name,
+            wallet_hotkey=settings.network.validator_hotkey,
+            wallet_path=settings.network.wallet_path,
+        )
+        result = await run_validator_chain_launch_preflight(settings, chain)
+        typer.echo(json.dumps(result.details, indent=2, sort_keys=True))
+        for warning in result.warnings:
+            typer.echo(f"WARNING: {warning}", err=True)
+        if result.errors:
+            for error in result.errors:
+                typer.echo(f"ERROR: {error}", err=True)
+            raise typer.Exit(1)
+        typer.echo("Validator chain launch preflight passed")
+
+    asyncio.run(_run())
+
+
 @app.command("pull")
 def pull(
     config: str = typer.Option("config/testnet.toml", "--config", "-c"),

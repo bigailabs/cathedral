@@ -82,6 +82,55 @@ async def test_bittensor_chain_set_weights_passes_spec_version() -> None:
     assert kwargs["weights"] == [0.5, 0.5]
 
 
+@pytest.mark.asyncio
+async def test_bittensor_chain_metagraph_carries_permit_and_stake() -> None:
+    chain = BittensorChain.__new__(BittensorChain)
+    chain.netuid = 39
+    chain._ensure_clients = MagicMock()
+    chain._wallet = MagicMock()
+    chain._subtensor = MagicMock()
+    chain._subtensor.metagraph.return_value = SimpleNamespace(
+        uids=[7],
+        hotkeys=["5hk"],
+        last_update=[120],
+        validator_permit=[True],
+        S=[123.5],
+        block=130,
+    )
+
+    metagraph = await chain.metagraph()
+
+    assert metagraph.block == 130
+    assert metagraph.miners == (
+        MinerNode(
+            uid=7,
+            hotkey="5hk",
+            last_update_block=120,
+            validator_permit=True,
+            stake=123.5,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_bittensor_chain_reads_wallet_hotkey_and_hyperparameters() -> None:
+    chain = BittensorChain.__new__(BittensorChain)
+    chain.netuid = 39
+    chain._ensure_clients = MagicMock()
+    chain._wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address="5validator"))
+    chain._subtensor = MagicMock()
+    chain._subtensor.get_subnet_hyperparameters.return_value = SimpleNamespace(
+        weights_rate_limit=100,
+        commit_reveal_weights_enabled=True,
+    )
+
+    assert await chain.validator_hotkey_ss58() == "5validator"
+    assert await chain.subnet_hyperparameters() == {
+        "commit_reveal_weights_enabled": True,
+        "weights_rate_limit": 100,
+    }
+
+
 def test_normalize_basic() -> None:
     out = normalize([(0, 1.0), (1, 1.0), (2, 2.0)])
     total = sum(w for _, w in out)
