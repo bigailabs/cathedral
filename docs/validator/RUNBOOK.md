@@ -135,6 +135,19 @@ cathedral-validator migrate --config config/mainnet.toml
 cathedral-validator serve --config config/mainnet.toml
 ```
 
+After the publisher is expected to produce signed vectors, verify the
+served vector before relying on it:
+
+```bash
+cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
+```
+
+This fetches `/v1/validator/weights/next`, verifies the Ed25519
+signature against `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX`, checks the
+pinned `key_id`, network, netuid, expiry, finite weights, and signed
+burn policy, then exits before any live metagraph mapping or
+`set_weights` call.
+
 Expected behavior:
 
 - Startup refuses to run if `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX` is missing or invalid.

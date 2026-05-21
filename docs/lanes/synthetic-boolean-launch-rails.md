@@ -191,6 +191,7 @@ Before moving SAT above zero weight on mainnet, validators should pass:
 
 ```bash
 cathedral-validator sat-launch-preflight --config config/mainnet.toml
+cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
 ```
 
 ## Leak Checks
