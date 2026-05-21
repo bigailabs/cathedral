@@ -32,6 +32,7 @@ from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
     SqliteFetchTokenStore,
 )
+from cathedral.publisher.sat_file_verifier import sha256_file
 
 if TYPE_CHECKING:
     pass
@@ -86,6 +87,15 @@ def _not_found() -> HTTPException:
         status_code=status.HTTP_404_NOT_FOUND,
         detail=_CHALLENGE_NOT_FOUND_DETAIL,
     )
+
+
+def _normalized_sha256(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip().lower()
+    if len(stripped) == 64 and all(ch in "0123456789abcdef" for ch in stripped):
+        return stripped
+    return None
 
 
 @router.get("/v1/challenges/{challenge_id}/cnf", include_in_schema=False)
@@ -148,6 +158,21 @@ async def get_challenge_cnf(
         path = Path(lookup.cnf_path)
         if not path.is_file():
             logger.warning("challenge_cnf_file_missing", challenge_id=challenge_id)
+            raise _not_found()
+        expected_sha256 = _normalized_sha256(lookup.cnf_sha256)
+        if expected_sha256 is None:
+            logger.warning("challenge_cnf_file_hash_missing", challenge_id=challenge_id)
+            raise _not_found()
+        try:
+            actual_sha256 = sha256_file(path)
+        except OSError:
+            logger.warning("challenge_cnf_file_unreadable", challenge_id=challenge_id)
+            raise _not_found()
+        # File-backed CNFs are referenced by path, but miners were
+        # announced a specific digest. Re-hash before serving so an
+        # overwritten path never serves bytes from a different formula.
+        if actual_sha256 != expected_sha256:
+            logger.warning("challenge_cnf_file_hash_mismatch", challenge_id=challenge_id)
             raise _not_found()
         return FileResponse(
             path,

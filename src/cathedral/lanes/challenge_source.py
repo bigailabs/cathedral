@@ -334,28 +334,33 @@ class SqliteChallengeSource:
     async def get_for_endpoint(self, challenge_id: str) -> EndpointLookup | None:
         """Single-row read for the public CNF endpoint.
 
-        Returns CNF storage material plus the two fields the route needs
-        to decide whether to serve: ``status`` (must be ``active`` or
-        ``locked``) and ``updated_at_iso`` (last status flip, used to
-        compute the post-lock grace window). Returns ``None`` on miss;
-        the caller responds 404 the same way for unknown ids and
-        disallowed statuses so the endpoint never becomes an existence
-        oracle.
+        Returns CNF storage material, the fields the route needs to
+        decide whether to serve, and the announced CNF digest used to
+        reject mutable file-backed rows whose bytes changed after
+        seeding. Returns ``None`` on miss; the caller responds 404 the
+        same way for unknown ids and disallowed statuses so the endpoint
+        never becomes an existence oracle.
         """
         cur = await self._conn.execute(
-            "SELECT cnf_text, cnf_path, status, updated_at_iso "
+            "SELECT cnf_text, cnf_path, status, updated_at_iso, audit_metadata "
             "FROM lane_challenges WHERE challenge_id = ? LIMIT 1",
             (challenge_id,),
         )
         row = await cur.fetchone()
         if row is None:
             return None
-        cnf_text, cnf_path, status, updated_at_iso = row
+        cnf_text, cnf_path, status, updated_at_iso, audit_json = row
+        try:
+            audit = json.loads(str(audit_json)) if audit_json else {}
+        except json.JSONDecodeError:
+            audit = {}
+        cnf_sha256 = audit.get("cnf_sha256") if isinstance(audit, dict) else None
         return EndpointLookup(
             cnf_text=str(cnf_text),
             cnf_path=str(cnf_path) if cnf_path else None,
             status=str(status),
             updated_at_iso=str(updated_at_iso),
+            cnf_sha256=str(cnf_sha256) if cnf_sha256 else None,
         )
 
     async def list_for_family(
@@ -594,17 +599,19 @@ class SqliteChallengeSource:
 class EndpointLookup:
     """Minimal projection of ``lane_challenges`` for the public CNF endpoint.
 
-    The endpoint only needs the storage pointer/body it serves and the
-    two fields that decide whether to serve at all. Returning a narrow
-    type (rather than a full :class:`ChallengeRecord`) keeps the
-    cardinal-sin surface small: no audit metadata, no family id, no tier
-    flow through this path.
+    The endpoint only needs the storage pointer/body it serves, the
+    fields that decide whether to serve, and the announced CNF digest
+    used to reject mutable file-backed rows whose bytes changed after
+    seeding. Returning a narrow type (rather than a full
+    :class:`ChallengeRecord`) keeps the cardinal-sin surface small: no
+    raw audit metadata, no family id, no tier flow through this path.
     """
 
     cnf_text: str
     cnf_path: str | None
     status: str
     updated_at_iso: str
+    cnf_sha256: str | None = None
 
 
 @dataclass(frozen=True)

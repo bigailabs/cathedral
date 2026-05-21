@@ -302,6 +302,14 @@ def _verify_file_backed_synthetic_boolean(
     cnf_path = hidden_payload["cnf_path"] if "cnf_path" in hidden_payload else None
     if not isinstance(cnf_path, str) or not cnf_path:
         return None
+    expected_sha256 = _expected_file_cnf_sha256(problem, hidden_payload)
+    if expected_sha256 is None:
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="cnf_hash_missing",
+            details={},
+        )
 
     answer = submission.answer
     if not isinstance(answer, dict):
@@ -329,7 +337,13 @@ def _verify_file_backed_synthetic_boolean(
 
     from cathedral.publisher.sat_file_verifier import verify_dimacs_solution_file
 
-    verification = verify_dimacs_solution_file(cnf_path, raw_solution)
+    # The public problem announced a digest; the file verifier checks the same
+    # bytes it uses for scoring so a mutable path cannot silently swap formulas.
+    verification = verify_dimacs_solution_file(
+        cnf_path,
+        raw_solution,
+        expected_sha256=expected_sha256,
+    )
     if not verification.parsed_ok:
         return VerifierResult(
             parsed_ok=False,
@@ -361,6 +375,29 @@ def _verify_file_backed_synthetic_boolean(
             "clause_count": verification.clause_count,
         },
     )
+
+
+def _expected_file_cnf_sha256(
+    problem: PublicProblem,
+    hidden_payload: dict[str, Any],
+) -> str | None:
+    public_input = problem.public_input if isinstance(problem.public_input, dict) else {}
+    public_sha = _normalized_sha256(public_input.get("cnf_sha256"))
+    if public_sha is not None:
+        return public_sha
+    audit = hidden_payload.get("audit_metadata")
+    if not isinstance(audit, dict):
+        return None
+    return _normalized_sha256(audit.get("cnf_sha256"))
+
+
+def _normalized_sha256(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip().lower()
+    if len(stripped) == 64 and all(ch in "0123456789abcdef" for ch in stripped):
+        return stripped
+    return None
 
 
 async def persist_task_family_result(

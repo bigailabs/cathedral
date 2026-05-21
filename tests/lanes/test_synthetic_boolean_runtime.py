@@ -16,6 +16,7 @@ from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA
 from cathedral.lanes.challenge_lock import InMemoryChallengeLock, SqliteChallengeLock
 from cathedral.lanes.challenge_receipts import RECEIPT_STATUS_INVALID
+from cathedral.lanes.challenge_receipts import RECEIPT_STATUS_VALID
 from cathedral.lanes.challenge_receipts import SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA
 from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_source import (
@@ -634,6 +635,137 @@ async def test_synthetic_boolean_first_submitted_valid_wins_when_later_finishes_
             ("active-boolean-001", CHALLENGE_STATUS_LOCKED),
             ("active-boolean-002", CHALLENGE_STATUS_ACTIVE),
         ]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_serializes_winner_finalization_on_shared_connection(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub_a = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+        sub_b = await _seed_submission(conn, submission_id="sub-b", miner_hotkey="5MinerB")
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-002",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 2 2\n1 0\n2 0\n",
+                status=CHALLENGE_STATUS_PENDING,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+
+        second_valid_receipt = asyncio.Event()
+        valid_receipts = 0
+
+        class _SignalingReceiptStore(SqliteChallengeReceiptStore):
+            async def update_status(self, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+                nonlocal valid_receipts
+                updated = await super().update_status(*args, **kwargs)
+                if kwargs.get("status") == RECEIPT_STATUS_VALID:
+                    valid_receipts += 1
+                    if valid_receipts == 2:
+                        second_valid_receipt.set()
+                return updated
+
+        original_persist = orchestrator_module.persist_task_family_result
+        winner_transaction_open = asyncio.Event()
+        release_winner_transaction = asyncio.Event()
+        blocked_once = False
+
+        async def gated_persist(*args: Any, **kwargs: Any) -> None:
+            nonlocal blocked_once
+            await original_persist(*args, **kwargs)
+            if kwargs.get("commit") is False and not blocked_once:
+                blocked_once = True
+                winner_transaction_open.set()
+                await release_winner_transaction.wait()
+
+        monkeypatch.setattr(orchestrator_module, "persist_task_family_result", gated_persist)
+
+        received_base = datetime.now(UTC)
+        runner = _SolvingRunner(
+            received_at=[
+                orchestrator_module._ms_iso(received_base),
+                orchestrator_module._ms_iso(received_base + timedelta(seconds=1)),
+            ],
+        )
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=_SignalingReceiptStore(conn),
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        log = structlog.get_logger("test")
+        snapshot = await orch.snapshot_task_family_batch_problems(log=log)
+        task_a = asyncio.create_task(
+            orch._maybe_run_task_family_lanes(
+                submission=sub_a,
+                runner=runner,
+                epoch=123,
+                round_index=0,
+                log=log,
+                problem_overrides=snapshot,
+            )
+        )
+        await asyncio.wait_for(winner_transaction_open.wait(), timeout=1.0)
+        task_b = asyncio.create_task(
+            orch._maybe_run_task_family_lanes(
+                submission=sub_b,
+                runner=runner,
+                epoch=123,
+                round_index=1,
+                log=log,
+                problem_overrides=snapshot,
+            )
+        )
+        await asyncio.wait_for(second_valid_receipt.wait(), timeout=1.0)
+        release_winner_transaction.set()
+        await asyncio.gather(task_a, task_b)
+
+        rows_a = await repository.list_eval_runs_for_submission(conn, "sub-a")
+        rows_b = await repository.list_eval_runs_for_submission(conn, "sub-b")
+        assert len(rows_a) == 1
+        assert len(rows_b) == 1
+        assert rows_a[0]["weighted_score"] == pytest.approx(1.0)
+        assert rows_b[0]["weighted_score"] == pytest.approx(0.0)
+        assert rows_b[0]["errors"] == ["challenge_already_locked"]
+
+        winner = await SqliteChallengeLock(conn).get_winner(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert winner is not None
+        assert winner.miner_hotkey == "5MinerA"
     finally:
         await conn.close()
 

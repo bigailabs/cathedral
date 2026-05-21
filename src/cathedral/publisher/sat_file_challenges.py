@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from cathedral.lanes.challenge_ops import challenge_id_for_cnf_sha256
@@ -12,22 +11,7 @@ from cathedral.lanes.challenge_source import (
     ChallengeSourceError,
 )
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
-from cathedral.publisher.sat_file_verifier import parse_dimacs_cnf_metadata_file
-
-_READ_CHUNK_BYTES = 1024 * 1024
-
-
-def sha256_file(path: str | Path) -> str:
-    """Return the SHA-256 digest of a file without materializing it."""
-    digest = hashlib.sha256()
-    expanded = Path(path).expanduser()
-    with expanded.open("rb") as handle:
-        while True:
-            chunk = handle.read(_READ_CHUNK_BYTES)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+from cathedral.publisher.sat_file_verifier import parse_dimacs_cnf_metadata_file, sha256_file
 
 
 def build_synthetic_boolean_file_challenge_record(
