@@ -250,7 +250,7 @@ def resolve_isolation_mode() -> IsolationMode:
         return "jailed"
     if sys.platform.startswith("linux"):
         unshare = shutil.which("unshare")
-        if unshare:
+        if unshare and _jail.unshare_userns_available():
             return "unshare_n_only"
     return "monkeypatch_only"
 

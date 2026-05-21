@@ -110,6 +110,26 @@ def unshare_supports_root() -> bool:
     return parsed >= _UNSHARE_MIN_VERSION
 
 
+def unshare_userns_available() -> bool:
+    """Return True iff unprivileged user namespaces can actually start."""
+    if not sys.platform.startswith("linux"):
+        return False
+    binary = shutil.which("unshare")
+    if not binary:
+        return False
+    try:
+        out = subprocess.run(  # noqa: S603 -- binary from shutil.which, fixed argv
+            [binary, "--user", "--map-root-user", "true"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return out.returncode == 0
+
+
 def jail_available() -> bool:
     """True iff the fs-jail can be assembled on this host.
 
@@ -120,6 +140,8 @@ def jail_available() -> bool:
     if not sys.platform.startswith("linux"):
         return False
     if not unshare_supports_root():
+        return False
+    if not unshare_userns_available():
         return False
     if not Path("/dev/null").exists() or not Path("/dev/urandom").exists():
         return False
@@ -524,4 +546,5 @@ __all__ = [
     "jail_available",
     "run_in_jail",
     "unshare_supports_root",
+    "unshare_userns_available",
 ]

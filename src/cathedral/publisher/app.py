@@ -339,6 +339,24 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             content={"detail": str(detail) if detail else "error"},
         )
 
+    @app.get("/", include_in_schema=False)
+    async def _root() -> dict[str, Any]:
+        return {
+            "service": "cathedral-publisher",
+            "description": "Publisher API for Cathedral SN39.",
+            "links": {
+                "health": "/health",
+                "skill": "/skill.md",
+                "api": "/api/cathedral",
+                "eval_spec": "/api/cathedral/v1/cards/eu-ai-act/eval-spec",
+                "recent_signed_evals": "/api/cathedral/v1/leaderboard/recent",
+                "sat_readiness": (
+                    "/api/cathedral/v1/synthetic-boolean/readiness-probe"
+                ),
+                "submit_agent": "/api/cathedral/v1/agents/submit",
+            },
+        }
+
     # CONTRACTS Section 2 locks the public surface at `/api/cathedral/v1/...`
     # (matches the cross-repo contract test mirror, the frontend's API client,
     # and the polariscomputer-side routes already deployed). Mount BOTH:
@@ -361,6 +379,16 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
     app.include_router(challenge_cnf_router, prefix="/api/cathedral")
     app.include_router(challenge_cnf_router, include_in_schema=False)
+
+    from cathedral.publisher.sat_readiness import router as sat_readiness_router
+
+    app.include_router(sat_readiness_router, prefix="/api/cathedral")
+    app.include_router(sat_readiness_router, include_in_schema=False)
+
+    # Issue #155: signed weight policy surface. Mounted on both prefixes
+    # for the same dual-routing reason as the submit/reads routers.
+    app.include_router(weight_policy_router, prefix="/api/cathedral")
+    app.include_router(weight_policy_router, include_in_schema=False)
 
     # Agent-facing onboarding - Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the

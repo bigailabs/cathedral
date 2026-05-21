@@ -33,6 +33,7 @@ from unittest import mock
 
 import pytest
 
+from cathedral.v4.oracle import jail as _jail
 from cathedral.v4.oracle.patch_runner import (
     PATCH_RUNNER_TIMEOUT_SECONDS,
     PatchRunResult,
@@ -112,7 +113,10 @@ def _build_probe_patch(relpath: str, original: str, probe: str) -> str:
     )
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="jail requires Linux unshare(1) >= 2.36")
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not _jail.jail_available(),
+    reason="jail requires usable Linux unshare(1) user namespaces",
+)
 def test_jail_blocks_etc_hosts_read() -> None:
     """Prove the Linux fs-jail blocks /etc/hosts reads from miner code.
 
@@ -282,7 +286,10 @@ def test_resolve_isolation_mode_macos_returns_monkeypatch() -> None:
     assert resolve_isolation_mode() == "monkeypatch_only"
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="jail requires Linux unshare(1) >= 2.36")
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not _jail.jail_available(),
+    reason="jail requires usable Linux unshare(1) user namespaces",
+)
 def test_jail_timeout_kills_sleeping_child_promptly() -> None:
     """The jailed path kills a sleeping workload before its sleep ends.
 

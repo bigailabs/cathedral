@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -461,10 +461,11 @@ async def test_synthetic_boolean_first_submitted_valid_wins_when_later_finishes_
                 audit_metadata={"source": "toy-runtime-test"},
             )
         )
+        received_base = datetime.now(UTC)
         runner = _DelayedSolvingRunner(
             received_at=[
-                "2026-05-20T12:00:00.000Z",
-                "2026-05-20T12:00:01.000Z",
+                orchestrator_module._ms_iso(received_base),
+                orchestrator_module._ms_iso(received_base + timedelta(seconds=1)),
             ],
             delays_by_submission={"sub-a": 0.05, "sub-b": 0.0},
         )
