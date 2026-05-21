@@ -175,6 +175,24 @@ Manual operator seeding supports the same storage choice:
 cathedral sat-seed-challenge --cnf-path /private/active.cnf --storage-mode file --activate
 ```
 
+After seeding or activation, confirm the active challenge metadata without
+printing raw CNF, local paths, or fetch tokens:
+
+```bash
+cathedral sat-active-challenge-status --db data/publisher.db
+```
+
+The same status check is available on the publisher CLI:
+
+```bash
+cathedral-publisher sat-active-challenge-status --db data/publisher.db
+```
+
+For file-backed staging, add `--verify-cnf-hash` to stream the active CNF
+and compare it with the SHA-256 recorded at seeding time. The command exits
+nonzero if there is no active challenge, the active CNF file is unreadable,
+or explicit hash verification fails.
+
 Run the publisher-side SAT preflight before booting a launch candidate:
 
 ```bash

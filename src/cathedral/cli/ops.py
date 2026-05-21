@@ -158,6 +158,34 @@ def sat_activate_challenge(
     typer.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
+@app.command(name="sat-active-challenge-status")
+def sat_active_challenge_status(
+    database_path: str = typer.Option(
+        "data/publisher.db",
+        "--database-path",
+        "--db",
+        help="Publisher SQLite database path.",
+    ),
+    verify_cnf_hash: bool = typer.Option(
+        False,
+        "--verify-cnf-hash/--no-verify-cnf-hash",
+        help="Stream the active file-backed CNF and compare it with audit metadata.",
+    ),
+) -> None:
+    """Print private-safe active synthetic_boolean_v1 challenge status."""
+    from cathedral.publisher.sat_status import active_sat_challenge_status_from_db
+
+    result = asyncio.run(
+        active_sat_challenge_status_from_db(
+            database_path,
+            verify_file_hash=verify_cnf_hash,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result.get("ok"):
+        raise typer.Exit(1)
+
+
 async def _get(url: str) -> dict[str, object]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(url)

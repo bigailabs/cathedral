@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import cast
 
@@ -342,6 +343,31 @@ def sat_launch_preflight(
             typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(1)
     typer.echo("SAT launch preflight passed")
+
+
+@app.command("sat-active-challenge-status")
+def sat_active_challenge_status(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    verify_cnf_hash: bool = typer.Option(
+        False,
+        "--verify-cnf-hash/--no-verify-cnf-hash",
+        help="Stream the active file-backed CNF and compare it with audit metadata.",
+    ),
+) -> None:
+    """Print private-safe active SAT challenge status from the publisher DB."""
+    configure()
+
+    from cathedral.publisher.sat_status import active_sat_challenge_status_from_db
+
+    result = asyncio.run(
+        active_sat_challenge_status_from_db(
+            database_path,
+            verify_file_hash=verify_cnf_hash,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result.get("ok"):
+        raise typer.Exit(1)
 
 
 @app.callback()
