@@ -10,16 +10,20 @@ from typing import Any
 
 from cathedral.lanes.challenge_ops import build_synthetic_boolean_challenge_record
 from cathedral.lanes.challenge_source import CHALLENGE_STATUS_ACTIVE, ChallengeSourceError
+from cathedral.publisher.sat_file_challenges import build_synthetic_boolean_file_challenge_record
 
 ACTIVE_CNF_PATH_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH"
 CHALLENGE_ID_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID"
 TIER_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER"
 LEGACY_TIER_ENV = "CATHEDRAL_TASK_FAMILY_TIER"
 MAX_CNF_BYTES_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES"
+STORAGE_MODE_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE"
 EVAL_SIGNING_KEY_ENV = "CATHEDRAL_EVAL_SIGNING_KEY"
 WEIGHT_POLICY_SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"
 
 DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES = 64 * 1024 * 1024
+STORAGE_MODE_SQLITE_TEXT = "sqlite_text"
+STORAGE_MODE_FILE = "file"
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,19 @@ def positive_int_env(env: Mapping[str, str], name: str, default: int) -> tuple[i
         return default, f"{name} is not an integer; using default {default}"
 
 
+def _storage_mode(env: Mapping[str, str]) -> tuple[str, str | None]:
+    raw = env.get(STORAGE_MODE_ENV, STORAGE_MODE_SQLITE_TEXT).strip().lower()
+    normalized = raw.replace("-", "_")
+    if normalized in {"", STORAGE_MODE_SQLITE_TEXT, "sqlite"}:
+        return STORAGE_MODE_SQLITE_TEXT, None
+    if normalized in {STORAGE_MODE_FILE, "file_backed", "filesystem"}:
+        return STORAGE_MODE_FILE, None
+    return STORAGE_MODE_SQLITE_TEXT, (
+        f"{STORAGE_MODE_ENV} must be '{STORAGE_MODE_SQLITE_TEXT}' or '{STORAGE_MODE_FILE}'; "
+        f"using {STORAGE_MODE_SQLITE_TEXT}"
+    )
+
+
 def _hex_seed_is_32_bytes(value: str) -> bool:
     try:
         return len(bytes.fromhex(value.strip())) == 32
@@ -73,12 +90,20 @@ def run_synthetic_boolean_launch_preflight(
     warnings: list[str] = []
     details: dict[str, Any] = {}
 
+    storage_mode, storage_warning = _storage_mode(env)
+    if storage_warning:
+        warnings.append(storage_warning)
+    details["storage_mode"] = storage_mode
+
     max_cnf_bytes, max_warning = positive_int_env(
         env, MAX_CNF_BYTES_ENV, DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES
     )
     if max_warning:
         warnings.append(max_warning)
     details["max_cnf_bytes"] = max_cnf_bytes
+    max_cnf_bytes_configured = bool(env.get(MAX_CNF_BYTES_ENV, "").strip())
+    enforce_max_cnf_bytes = storage_mode != STORAGE_MODE_FILE or max_cnf_bytes_configured
+    details["max_cnf_bytes_enforced"] = enforce_max_cnf_bytes
 
     cnf_path = env.get(ACTIVE_CNF_PATH_ENV, "").strip()
     if not cnf_path:
@@ -87,7 +112,6 @@ def run_synthetic_boolean_launch_preflight(
         try:
             expanded = Path(cnf_path).expanduser()
             details["cnf_file_bytes"] = expanded.stat().st_size
-            cnf_text = read_operator_cnf_file(cnf_path, max_cnf_bytes)
             tier_raw = env.get(TIER_ENV) or env.get(LEGACY_TIER_ENV, "0")
             try:
                 tier = max(0, int(tier_raw))
@@ -97,13 +121,24 @@ def run_synthetic_boolean_launch_preflight(
             details["tier"] = tier
 
             challenge_id = env.get(CHALLENGE_ID_ENV, "").strip() or None
-            record = build_synthetic_boolean_challenge_record(
-                cnf_text=cnf_text,
-                tier=tier,
-                challenge_id=challenge_id,
-                status=CHALLENGE_STATUS_ACTIVE,
-                source="operator_cnf_path",
-            )
+            if storage_mode == STORAGE_MODE_FILE:
+                record = build_synthetic_boolean_file_challenge_record(
+                    cnf_path=cnf_path,
+                    tier=tier,
+                    challenge_id=challenge_id,
+                    status=CHALLENGE_STATUS_ACTIVE,
+                    source="operator_cnf_path",
+                    max_bytes=max_cnf_bytes if enforce_max_cnf_bytes else None,
+                )
+            else:
+                cnf_text = read_operator_cnf_file(cnf_path, max_cnf_bytes)
+                record = build_synthetic_boolean_challenge_record(
+                    cnf_text=cnf_text,
+                    tier=tier,
+                    challenge_id=challenge_id,
+                    status=CHALLENGE_STATUS_ACTIVE,
+                    source="operator_cnf_path",
+                )
             details["challenge_id"] = record.challenge_id
             details["cnf_sha256"] = record.audit_metadata["cnf_sha256"]
             details["num_vars"] = record.audit_metadata["num_vars"]
@@ -146,6 +181,9 @@ __all__ = [
     "LEGACY_TIER_ENV",
     "MAX_CNF_BYTES_ENV",
     "SatLaunchPreflightResult",
+    "STORAGE_MODE_ENV",
+    "STORAGE_MODE_FILE",
+    "STORAGE_MODE_SQLITE_TEXT",
     "TIER_ENV",
     "WEIGHT_POLICY_SIGNING_KEY_ENV",
     "positive_int_env",

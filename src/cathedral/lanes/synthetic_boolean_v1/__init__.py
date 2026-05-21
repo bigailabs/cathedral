@@ -72,10 +72,23 @@ def problem_from_challenge_record(
         raise ValueError("public_base_url is required for the CNF URL transport")
     if not fetch_token:
         raise ValueError("fetch_token is required for the CNF URL transport")
-    parsed = parse_dimacs_cnf_metadata(record.cnf_text)
+    audit = dict(record.audit_metadata)
+    if record.cnf_text:
+        parsed = parse_dimacs_cnf_metadata(record.cnf_text)
+        cnf_sha256 = hashlib.sha256(record.cnf_text.encode("utf-8")).hexdigest()
+        num_vars = parsed.num_vars if parsed.ok else 0
+        num_clauses = parsed.num_clauses if parsed.ok else 0
+        rejection_reason = parsed.rejection_reason
+    else:
+        cnf_sha256 = str(audit["cnf_sha256"]) if "cnf_sha256" in audit else ""
+        num_vars = int(audit["num_vars"]) if "num_vars" in audit else 0
+        num_clauses = int(audit["num_clauses"]) if "num_clauses" in audit else 0
+        if cnf_sha256 and num_vars >= 0 and num_clauses >= 0:
+            rejection_reason = None
+        else:
+            rejection_reason = "cnf_missing"
     base = public_base_url.rstrip("/")
     cnf_url = f"{base}/v1/challenges/{record.challenge_id}/cnf?t={fetch_token}"
-    cnf_sha256 = hashlib.sha256(record.cnf_text.encode("utf-8")).hexdigest()
     public = PublicProblem(
         task_family=record.family_id,
         schema_version=SCHEMA_VERSION,
@@ -85,24 +98,28 @@ def problem_from_challenge_record(
             "format": "dimacs",
             "cnf_url": cnf_url,
             "cnf_sha256": cnf_sha256,
-            "num_vars": parsed.num_vars if parsed.ok else 0,
-            "num_clauses": parsed.num_clauses if parsed.ok else 0,
+            "num_vars": num_vars,
+            "num_clauses": num_clauses,
         },
         time_limit_seconds=time_limit_seconds,
     )
+    hidden_payload = {
+        "source": "challenge_source",
+        "challenge_id": record.challenge_id,
+        "status": record.status,
+        "audit_metadata": audit,
+        "cnf_rejection_reason": rejection_reason,
+    }
+    if record.cnf_path:
+        hidden_payload["cnf_path"] = record.cnf_path
+    else:
+        # CNF body lives in hidden so the verifier can reach it without
+        # the public projection carrying it on the wire.
+        hidden_payload["cnf"] = record.cnf_text
     hidden = HiddenMetadata(
         task_id=record.challenge_id,
         generator_version="challenge_source",
-        hidden_payload={
-            "source": "challenge_source",
-            "challenge_id": record.challenge_id,
-            "status": record.status,
-            "audit_metadata": dict(record.audit_metadata),
-            "cnf_rejection_reason": parsed.rejection_reason,
-            # CNF body lives in hidden so the verifier can reach it
-            # without the public projection carrying it on the wire.
-            "cnf": record.cnf_text,
-        },
+        hidden_payload=hidden_payload,
     )
     return public, hidden
 

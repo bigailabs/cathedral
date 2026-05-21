@@ -54,11 +54,9 @@ from cathedral.lanes.challenge_receipts import (
 from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
 from cathedral.lanes.challenge_source import (
-    SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
-)
-from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
     SqliteFetchTokenStore,
+    ensure_sqlite_challenge_source_schema,
 )
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
 from cathedral.publisher import repository
@@ -67,7 +65,13 @@ from cathedral.publisher.sat_preflight import (
     ACTIVE_CNF_PATH_ENV,
     DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
     MAX_CNF_BYTES_ENV,
+    STORAGE_MODE_ENV,
+    STORAGE_MODE_FILE,
+    STORAGE_MODE_SQLITE_TEXT,
     read_operator_cnf_file,
+)
+from cathedral.publisher.sat_file_challenges import (
+    build_synthetic_boolean_file_challenge_record,
 )
 from cathedral.publisher.submit import router as submit_router
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
@@ -161,7 +165,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         _materialize_ssh_probe_key()
         ctx: PublisherContext = await ctx_factory()
         app.state.ctx = ctx
-        await ctx.db.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await ensure_sqlite_challenge_source_schema(ctx.db)
         await ctx.db.executescript(CHALLENGE_LOCK_SCHEMA)
         await ctx.db.executescript(CHALLENGE_RECEIPT_SCHEMA)
         await ctx.db.commit()
@@ -540,15 +544,7 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         MAX_CNF_BYTES_ENV,
         DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
     )
-
-    try:
-        cnf_text = await asyncio.to_thread(read_operator_cnf_file, cnf_path, max_cnf_bytes)
-    except OSError:
-        raise RuntimeError(
-            f"{ACTIVE_CNF_PATH_ENV} could not be read"
-        ) from None
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from None
+    storage_mode = _synthetic_boolean_storage_mode()
 
     challenge_id = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID", "").strip()
     tier_raw = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER") or os.environ.get(
@@ -560,15 +556,42 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         raise RuntimeError("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER must be an integer") from None
 
     try:
-        active = await seed_synthetic_boolean_challenge(
-            source,
-            cnf_text=cnf_text,
-            tier=tier,
-            now_iso=_now_ms_iso(),
-            challenge_id=challenge_id or None,
-            activate=True,
-            input_source="operator_cnf_path",
-        )
+        if storage_mode == STORAGE_MODE_FILE:
+            record = await asyncio.to_thread(
+                build_synthetic_boolean_file_challenge_record,
+                cnf_path=cnf_path,
+                tier=tier,
+                challenge_id=challenge_id or None,
+                source="operator_cnf_path",
+                max_bytes=max_cnf_bytes
+                if os.environ.get(MAX_CNF_BYTES_ENV, "").strip()
+                else None,
+            )
+            await source.upsert(record, now_iso=_now_ms_iso())
+            active = await source.activate(
+                family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+                challenge_id=record.challenge_id,
+                now_iso=_now_ms_iso(),
+                retire_current=False,
+            )
+        else:
+            try:
+                cnf_text = await asyncio.to_thread(
+                    read_operator_cnf_file, cnf_path, max_cnf_bytes
+                )
+            except OSError:
+                raise RuntimeError(f"{ACTIVE_CNF_PATH_ENV} could not be read") from None
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from None
+            active = await seed_synthetic_boolean_challenge(
+                source,
+                cnf_text=cnf_text,
+                tier=tier,
+                now_iso=_now_ms_iso(),
+                challenge_id=challenge_id or None,
+                activate=True,
+                input_source="operator_cnf_path",
+            )
     except Exception as exc:
         raise RuntimeError(str(exc)) from None
 
@@ -577,10 +600,22 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         "synthetic_boolean_active_challenge_seeded",
         family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
         tier=tier,
+        storage=audit.get("storage", STORAGE_MODE_SQLITE_TEXT),
         num_vars=audit.get("num_vars"),
         num_clauses=audit.get("num_clauses"),
         cnf_sha256=audit.get("cnf_sha256"),
     )
+
+
+def _synthetic_boolean_storage_mode() -> str:
+    raw = os.environ.get(STORAGE_MODE_ENV, STORAGE_MODE_SQLITE_TEXT).strip().lower()
+    normalized = raw.replace("-", "_")
+    if normalized in {"", STORAGE_MODE_SQLITE_TEXT, "sqlite"}:
+        return STORAGE_MODE_SQLITE_TEXT
+    if normalized in {STORAGE_MODE_FILE, "file_backed", "filesystem"}:
+        return STORAGE_MODE_FILE
+    raise RuntimeError(f"{STORAGE_MODE_ENV} must be '{STORAGE_MODE_SQLITE_TEXT}' or 'file'")
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()

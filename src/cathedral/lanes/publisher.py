@@ -226,7 +226,9 @@ def score_and_sign_task_family_stdout(
             answer=answer,
         )
         try:
-            verifier = lane.verify(problem, hidden, submission)
+            verifier = _verify_file_backed_synthetic_boolean(problem, hidden, submission)
+            if verifier is None:
+                verifier = lane.verify(problem, hidden, submission)
         except Exception as exc:
             verifier = VerifierResult(
                 parsed_ok=False,
@@ -279,6 +281,85 @@ def score_and_sign_task_family_stdout(
         score=score,
         prompt=prompt,
         submission=submission,
+    )
+
+
+def _verify_file_backed_synthetic_boolean(
+    problem: PublicProblem,
+    hidden: Any,
+    submission: Submission,
+) -> VerifierResult | None:
+    """Publisher-side SAT verification for hidden file-backed CNFs.
+
+    The lane package remains pure and I/O-free. When the publisher's
+    challenge source stores only a local CNF path, this helper performs
+    the same answer validation and DIMACS result mapping the lane uses,
+    but streams the CNF from disk through publisher-owned code.
+    """
+    if problem.task_family != "synthetic_boolean_v1":
+        return None
+    hidden_payload = hidden.hidden_payload if isinstance(hidden.hidden_payload, dict) else {}
+    cnf_path = hidden_payload["cnf_path"] if "cnf_path" in hidden_payload else None
+    if not isinstance(cnf_path, str) or not cnf_path:
+        return None
+
+    answer = submission.answer
+    if not isinstance(answer, dict):
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="answer_not_object",
+            details={},
+        )
+    raw_solution = answer["dimacs_solution"] if "dimacs_solution" in answer else None
+    if not isinstance(raw_solution, str):
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="answer_missing_dimacs_solution",
+            details={},
+        )
+    if set(answer) != {"dimacs_solution"}:
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="answer_unexpected_keys",
+            details={"keys": sorted(str(k) for k in answer)},
+        )
+
+    from cathedral.publisher.sat_file_verifier import verify_dimacs_solution_file
+
+    verification = verify_dimacs_solution_file(cnf_path, raw_solution)
+    if not verification.parsed_ok:
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason=verification.rejection_reason or "solution_unparseable",
+            details={
+                "status": verification.status,
+                "clause_count": verification.clause_count,
+                "num_vars": verification.num_vars,
+                "assigned": verification.assigned,
+            },
+        )
+    if not verification.satisfied:
+        return VerifierResult(
+            parsed_ok=True,
+            raw_metric=0.0,
+            rejection_reason=verification.rejection_reason or "solution_unsatisfied",
+            details={
+                "clauses_satisfied": verification.clauses_satisfied,
+                "clause_count": verification.clause_count,
+            },
+        )
+    return VerifierResult(
+        parsed_ok=True,
+        raw_metric=1.0,
+        rejection_reason=None,
+        details={
+            "clauses_satisfied": verification.clauses_satisfied,
+            "clause_count": verification.clause_count,
+        },
     )
 
 

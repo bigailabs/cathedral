@@ -150,9 +150,29 @@ CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES=67108864
 ```
 
 `CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES` defaults to 64 MiB. Keep
-first-launch formulas under that limit while Cathedral uses the
-publisher SQLite/Python verifier path. Multi-GB formulas require a
-file-backed/native verifier path before they are safe to seed.
+first-launch formulas under that limit while Cathedral uses the default
+publisher SQLite CNF storage path.
+
+For large operator-mounted formulas, use file-backed storage:
+
+```bash
+CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE=file
+```
+
+In file mode, the publisher stores only a private local CNF path in its
+challenge row, serves the CNF through the same token-gated URL endpoint
+as a file response, and verifies submitted solutions through the
+file-backed DIMACS verifier. If `CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES`
+is explicitly set in file mode, preflight and startup still enforce it;
+otherwise file mode does not apply the default 64 MiB text-storage cap.
+Shadow-run file mode in the target publisher environment before seeding
+multi-GB formulas.
+
+Manual operator seeding supports the same storage choice:
+
+```bash
+cathedral sat-seed-challenge --cnf-path /private/active.cnf --storage-mode file --activate
+```
 
 Run the publisher-side SAT preflight before booting a launch candidate:
 
@@ -161,10 +181,11 @@ cathedral-publisher sat-launch-preflight
 ```
 
 The command reads the current environment, verifies the operator CNF is
-readable UTF-8 DIMACS under the configured launch limit, checks the tier
-and challenge id, and requires both eval-row and remote-weight signing
-keys by default. For a shadow run that intentionally does not produce
-signed remote weights, use:
+readable UTF-8 DIMACS, applies the configured launch limit for
+`sqlite_text` mode or explicitly capped `file` mode, checks the tier and
+challenge id, and requires both eval-row and remote-weight signing keys
+by default. For a shadow run that intentionally does not produce signed
+remote weights, use:
 
 ```bash
 cathedral-publisher sat-launch-preflight --no-require-weight-signing-key

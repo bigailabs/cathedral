@@ -22,9 +22,13 @@ from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_
 from cathedral.lanes.synthetic_boolean_v1.dimacs import parse_dimacs_cnf_metadata
 
 
+def challenge_id_for_cnf_sha256(cnf_sha256: str) -> str:
+    return f"sat-{cnf_sha256[:16]}"
+
+
 def challenge_id_for_cnf(cnf_text: str) -> str:
     digest = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
-    return f"sat-{digest[:16]}"
+    return challenge_id_for_cnf_sha256(digest)
 
 
 def build_synthetic_boolean_challenge_record(
@@ -101,5 +105,6 @@ async def seed_synthetic_boolean_challenge(
 __all__ = [
     "build_synthetic_boolean_challenge_record",
     "challenge_id_for_cnf",
+    "challenge_id_for_cnf_sha256",
     "seed_synthetic_boolean_challenge",
 ]

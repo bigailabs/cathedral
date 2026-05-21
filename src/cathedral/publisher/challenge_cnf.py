@@ -1,9 +1,10 @@
 """Public CNF endpoint for the synthetic boolean SAT lane.
 
 Cardinal sin: the satisfying assignment must never leave the publisher
-process. This route serves only ``lane_challenges.cnf_text`` and only
-when the publisher has explicitly announced the challenge by minting a
-``lane_challenge_fetch_tokens`` row.
+process. This route serves only the active challenge's CNF body, either
+from ``lane_challenges.cnf_text`` or from its publisher-local
+``cnf_path``, and only when the publisher has explicitly announced the
+challenge by minting a ``lane_challenge_fetch_tokens`` row.
 
 The endpoint deliberately has no enumerate / list surface and returns
 the same opaque 404 body for every miss path -- unknown id, missing
@@ -16,11 +17,12 @@ from __future__ import annotations
 
 import hmac
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from cathedral.lanes.challenge_source import (
     CHALLENGE_STATUS_ACTIVE,
@@ -91,7 +93,7 @@ async def get_challenge_cnf(
     challenge_id: str,
     request: Request,
     t: str = Query(default="", description="Announcement token"),
-) -> PlainTextResponse:
+) -> Response:
     """Serve the active (or locked-in-grace) CNF body for a challenge.
 
     Returns 200 ``text/plain`` with the DIMACS body when:
@@ -142,6 +144,17 @@ async def get_challenge_cnf(
     if not servable:
         raise _not_found()
 
+    if lookup.cnf_path:
+        path = Path(lookup.cnf_path)
+        if not path.is_file():
+            logger.warning("challenge_cnf_file_missing", challenge_id=challenge_id)
+            raise _not_found()
+        return FileResponse(
+            path,
+            media_type="text/plain; charset=utf-8",
+        )
+    if not lookup.cnf_text:
+        raise _not_found()
     return PlainTextResponse(
         lookup.cnf_text,
         media_type="text/plain; charset=utf-8",

@@ -228,6 +228,35 @@ async def test_env_seed_loads_operator_cnf_without_path_in_metadata(tmp_path, mo
         await conn.close()
 
 
+async def test_env_seed_can_store_operator_cnf_as_file_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from cathedral.publisher.app import _seed_synthetic_boolean_challenge_from_env
+
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 2 1\n1 -2 0\n", encoding="utf-8")
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", str(cnf_path))
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID", "active-file-001")
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE", "file")
+
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await _seed_synthetic_boolean_challenge_from_env(src)
+        active = await src.get_active(_FAMILY)
+        assert active is not None
+        assert active.challenge_id == "active-file-001"
+        assert active.cnf_text == ""
+        assert active.cnf_path == str(cnf_path.resolve())
+        assert active.audit_metadata["storage"] == "file"
+        assert active.audit_metadata["source"] == "operator_cnf_path"
+        assert "path" not in active.audit_metadata
+        assert str(cnf_path) not in str(active.audit_metadata)
+    finally:
+        await conn.close()
+
+
 async def test_env_seed_rejects_operator_cnf_above_launch_limit(tmp_path, monkeypatch) -> None:
     from cathedral.publisher.app import _seed_synthetic_boolean_challenge_from_env
 

@@ -63,10 +63,12 @@ class ChallengeSourceError(Exception):
 class ChallengeRecord:
     """One private challenge row.
 
-    ``cnf_text`` is publisher-private. Adapters must not echo it to a
-    public projection. Treat this dataclass the way you would treat a
-    Supabase row: it crosses the publisher boundary but never reaches a
-    miner-visible feed.
+    ``cnf_text`` and ``cnf_path`` are publisher-private. Adapters must
+    not echo either to a public projection. Text-backed rows carry the
+    DIMACS body in ``cnf_text``; file-backed rows carry a local path in
+    ``cnf_path`` and leave ``cnf_text`` empty. Treat this dataclass the
+    way you would treat a Supabase row: it crosses the publisher
+    boundary but never reaches a miner-visible feed.
     """
 
     challenge_id: str
@@ -75,6 +77,7 @@ class ChallengeRecord:
     cnf_text: str
     status: str
     audit_metadata: dict[str, Any] = field(default_factory=dict)
+    cnf_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in _ALLOWED_STATUSES:
@@ -167,6 +170,7 @@ class InMemoryChallengeSource:
                 cnf_text=record.cnf_text,
                 status=current.status,
                 audit_metadata=record.audit_metadata,
+                cnf_path=record.cnf_path,
             )
             return
         self._rows[record.challenge_id] = record
@@ -196,6 +200,7 @@ class InMemoryChallengeSource:
                 cnf_text=active.cnf_text,
                 status=CHALLENGE_STATUS_RETIRED,
                 audit_metadata=active.audit_metadata,
+                cnf_path=active.cnf_path,
             )
 
         activated = ChallengeRecord(
@@ -205,6 +210,7 @@ class InMemoryChallengeSource:
             cnf_text=target.cnf_text,
             status=CHALLENGE_STATUS_ACTIVE,
             audit_metadata=target.audit_metadata,
+            cnf_path=target.cnf_path,
         )
         self._rows[challenge_id] = activated
         return activated
@@ -226,6 +232,7 @@ class InMemoryChallengeSource:
                 cnf_text=current.cnf_text,
                 status=CHALLENGE_STATUS_LOCKED,
                 audit_metadata=current.audit_metadata,
+                cnf_path=current.cnf_path,
             )
 
         if await self.get_active(family_id) is not None:
@@ -252,6 +259,7 @@ CREATE TABLE IF NOT EXISTS lane_challenges (
     family_id       TEXT NOT NULL,
     tier            INTEGER NOT NULL,
     cnf_text        TEXT NOT NULL,
+    cnf_path        TEXT,
     status          TEXT NOT NULL CHECK (status IN ('pending','active','locked','retired')),
     audit_metadata  TEXT NOT NULL,
     created_at_iso  TEXT NOT NULL,
@@ -282,9 +290,18 @@ async def init_sqlite_challenge_source(database_path: str) -> aiosqlite.Connecti
     conn = await aiosqlite.connect(database_path)
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
-    await conn.executescript(SQLITE_SCHEMA)
-    await conn.commit()
+    await ensure_sqlite_challenge_source_schema(conn)
     return conn
+
+
+async def ensure_sqlite_challenge_source_schema(conn: aiosqlite.Connection) -> None:
+    """Apply the challenge-source schema and lightweight additive migrations."""
+    await conn.executescript(SQLITE_SCHEMA)
+    cur = await conn.execute("PRAGMA table_info(lane_challenges)")
+    columns = {str(row[1]) for row in await cur.fetchall()}
+    if "cnf_path" not in columns:
+        await conn.execute("ALTER TABLE lane_challenges ADD COLUMN cnf_path TEXT")
+    await conn.commit()
 
 
 class SqliteChallengeSource:
@@ -305,7 +322,7 @@ class SqliteChallengeSource:
 
     async def get_active(self, family_id: str) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
             "FROM lane_challenges WHERE family_id = ? AND status = ? LIMIT 1",
             (family_id, CHALLENGE_STATUS_ACTIVE),
         )
@@ -317,24 +334,26 @@ class SqliteChallengeSource:
     async def get_for_endpoint(self, challenge_id: str) -> EndpointLookup | None:
         """Single-row read for the public CNF endpoint.
 
-        Returns ``cnf_text`` plus the two fields the route needs to decide
-        whether to serve: ``status`` (must be ``active`` or ``locked``)
-        and ``updated_at_iso`` (last status flip, used to compute the
-        post-lock grace window). Returns ``None`` on miss; the caller
-        responds 404 the same way for unknown ids and disallowed statuses
-        so the endpoint never becomes an existence oracle.
+        Returns CNF storage material plus the two fields the route needs
+        to decide whether to serve: ``status`` (must be ``active`` or
+        ``locked``) and ``updated_at_iso`` (last status flip, used to
+        compute the post-lock grace window). Returns ``None`` on miss;
+        the caller responds 404 the same way for unknown ids and
+        disallowed statuses so the endpoint never becomes an existence
+        oracle.
         """
         cur = await self._conn.execute(
-            "SELECT cnf_text, status, updated_at_iso "
+            "SELECT cnf_text, cnf_path, status, updated_at_iso "
             "FROM lane_challenges WHERE challenge_id = ? LIMIT 1",
             (challenge_id,),
         )
         row = await cur.fetchone()
         if row is None:
             return None
-        cnf_text, status, updated_at_iso = row
+        cnf_text, cnf_path, status, updated_at_iso = row
         return EndpointLookup(
             cnf_text=str(cnf_text),
+            cnf_path=str(cnf_path) if cnf_path else None,
             status=str(status),
             updated_at_iso=str(updated_at_iso),
         )
@@ -344,13 +363,15 @@ class SqliteChallengeSource:
     ) -> list[ChallengeRecord]:
         if status is None:
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                "status, audit_metadata "
                 "FROM lane_challenges WHERE family_id = ? ORDER BY challenge_id",
                 (family_id,),
             )
         else:
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                "status, audit_metadata "
                 "FROM lane_challenges WHERE family_id = ? AND status = ? "
                 "ORDER BY challenge_id",
                 (family_id, status),
@@ -370,14 +391,15 @@ class SqliteChallengeSource:
             if overwrite_status:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
-                        challenge_id, family_id, tier, cnf_text, status,
+                        challenge_id, family_id, tier, cnf_text, cnf_path, status,
                         audit_metadata, created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
                         cnf_text=excluded.cnf_text,
+                        cnf_path=excluded.cnf_path,
                         status=excluded.status,
                         audit_metadata=excluded.audit_metadata,
                         updated_at_iso=excluded.updated_at_iso
@@ -385,14 +407,15 @@ class SqliteChallengeSource:
             else:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
-                        challenge_id, family_id, tier, cnf_text, status,
+                        challenge_id, family_id, tier, cnf_text, cnf_path, status,
                         audit_metadata, created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
                         cnf_text=excluded.cnf_text,
+                        cnf_path=excluded.cnf_path,
                         audit_metadata=excluded.audit_metadata,
                         updated_at_iso=excluded.updated_at_iso
                     """
@@ -403,6 +426,7 @@ class SqliteChallengeSource:
                     record.family_id,
                     record.tier,
                     record.cnf_text,
+                    record.cnf_path,
                     record.status,
                     json.dumps(record.audit_metadata, sort_keys=True),
                     ts,
@@ -498,7 +522,8 @@ class SqliteChallengeSource:
                 return None
 
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                "status, audit_metadata "
                 "FROM lane_challenges WHERE family_id = ? AND status = ? "
                 "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
                 (family_id, CHALLENGE_STATUS_PENDING),
@@ -527,6 +552,7 @@ class SqliteChallengeSource:
                 family_id=pending.family_id,
                 tier=pending.tier,
                 cnf_text=pending.cnf_text,
+                cnf_path=pending.cnf_path,
                 status=CHALLENGE_STATUS_ACTIVE,
                 audit_metadata=pending.audit_metadata,
             )
@@ -543,7 +569,7 @@ class SqliteChallengeSource:
         self, family_id: str, challenge_id: str
     ) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
             "FROM lane_challenges WHERE family_id = ? AND challenge_id = ? LIMIT 1",
             (family_id, challenge_id),
         )
@@ -554,7 +580,7 @@ class SqliteChallengeSource:
 
     async def _fetch_active_for_update(self, family_id: str) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
             "FROM lane_challenges WHERE family_id = ? AND status = ? LIMIT 1",
             (family_id, CHALLENGE_STATUS_ACTIVE),
         )
@@ -568,13 +594,15 @@ class SqliteChallengeSource:
 class EndpointLookup:
     """Minimal projection of ``lane_challenges`` for the public CNF endpoint.
 
-    The endpoint only needs the body it serves and the two fields that
-    decide whether to serve at all. Returning a narrow type (rather than
-    a full :class:`ChallengeRecord`) keeps the cardinal-sin surface small:
-    no audit metadata, no family id, no tier flow through this path.
+    The endpoint only needs the storage pointer/body it serves and the
+    two fields that decide whether to serve at all. Returning a narrow
+    type (rather than a full :class:`ChallengeRecord`) keeps the
+    cardinal-sin surface small: no audit metadata, no family id, no tier
+    flow through this path.
     """
 
     cnf_text: str
+    cnf_path: str | None
     status: str
     updated_at_iso: str
 
@@ -656,7 +684,7 @@ class SqliteFetchTokenStore:
 
 
 def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
-    challenge_id, family_id, tier, cnf_text, status, audit_json = row
+    challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_json = row
     audit: dict[str, Any]
     try:
         audit = json.loads(audit_json) if audit_json else {}
@@ -667,6 +695,7 @@ def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
         family_id=str(family_id),
         tier=int(tier),
         cnf_text=str(cnf_text),
+        cnf_path=str(cnf_path) if cnf_path else None,
         status=str(status),
         audit_metadata=audit,
     )
@@ -686,5 +715,6 @@ __all__ = [
     "InMemoryChallengeSource",
     "SqliteChallengeSource",
     "SqliteFetchTokenStore",
+    "ensure_sqlite_challenge_source_schema",
     "init_sqlite_challenge_source",
 ]
