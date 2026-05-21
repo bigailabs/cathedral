@@ -260,39 +260,3 @@ async def test_seed_does_not_reactivate_locked_challenge_on_restart(tmp_path) ->
         ]
     finally:
         await conn.close()
-
-
-async def test_env_seed_skips_locked_challenge_without_killing_startup(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    from cathedral.publisher.app import _seed_synthetic_boolean_challenge_from_env
-
-    cnf_path = tmp_path / "active.cnf"
-    cnf_path.write_text(_TOY_CNF, encoding="utf-8")
-    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", str(cnf_path))
-
-    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
-    try:
-        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
-        first = await seed_synthetic_boolean_challenge(
-            src,
-            cnf_text=_TOY_CNF,
-            tier=0,
-            now_iso="2026-05-19T00:00:00.000Z",
-            activate=True,
-        )
-        await src.mark_locked_and_promote_next(
-            family_id=_FAMILY,
-            challenge_id=first.challenge_id,
-            now_iso="2026-05-19T00:00:01.000Z",
-        )
-
-        await _seed_synthetic_boolean_challenge_from_env(src)
-
-        rows = await src.list_for_family(_FAMILY)
-        assert [(row.challenge_id, row.status) for row in rows] == [
-            (first.challenge_id, CHALLENGE_STATUS_LOCKED)
-        ]
-    finally:
-        await conn.close()

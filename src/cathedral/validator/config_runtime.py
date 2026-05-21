@@ -1,4 +1,4 @@
-"""Runtime context — bundles all dependencies the FastAPI lifespan needs.
+"""Runtime context - bundles all dependencies the FastAPI lifespan needs.
 
 Kept separate from `app.py` so tests can build a context with mocks without
 importing `BittensorChain` (heavy import).
@@ -29,4 +29,8 @@ class RuntimeContext:
     cathedral_public_key: Ed25519PublicKey | None = None
     publisher_api_token: str | None = None
     fetcher_close: Callable[[], Awaitable[None]] | None = None
+    # Issue #155: optional pinned public key for the remote signed weight
+    # source. When remote mode is enabled, startup refuses to continue
+    # unless this key is present. The default local-only path leaves it
+    # as None.
     remote_weight_public_key: Ed25519PublicKey | None = None

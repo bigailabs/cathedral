@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hmac
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
+import structlog
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
 
@@ -28,6 +30,11 @@ from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
     SqliteFetchTokenStore,
 )
+
+if TYPE_CHECKING:
+    pass
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -138,5 +145,4 @@ async def get_challenge_cnf(
     return PlainTextResponse(
         lookup.cnf_text,
         media_type="text/plain; charset=utf-8",
-        headers={"Cache-Control": "no-store"},
     )

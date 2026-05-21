@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import pytest
 
+import cathedral.lanes.synthetic_boolean_v1.dimacs as dimacs_mod
 from cathedral.lanes.synthetic_boolean_v1.dimacs import (
-    MAX_CNF_BYTES,
-    MAX_SOLUTION_BYTES,
     assignment_covers_all_vars,
     assignment_in_range,
     evaluate_assignment,
     parse_dimacs_cnf,
+    parse_dimacs_cnf_metadata,
     parse_dimacs_solution,
+    verify_dimacs_solution,
 )
 
 # --------------------------------------------------------------------------
@@ -66,6 +67,10 @@ def test_parse_cnf_clauses_can_span_lines() -> None:
         ("1 0\n", "cnf_clause_before_header"),
         ("p cnf 2 1\nfoo 0\n", "cnf_non_integer_literal"),
         ("p cnf 1 1\n5 0\n", "cnf_literal_out_of_range"),
+        ("p cnf 1 1\n+1 0\n", "cnf_non_integer_literal"),
+        ("p cnf 1 1\n-0\n", "cnf_non_integer_literal"),
+        ("p cnf 1 1\n0\n", "cnf_empty_clause"),
+        ("p cnf 1 1\n% end marker\n1 0\n", "cnf_non_integer_literal"),
         ("p cnf 1 1\n1\n", "cnf_unterminated_clause"),
         ("p cnf 2 2\n1 0\n", "cnf_clause_count_mismatch"),
         ("p cnf 1 1\np cnf 1 1\n1 0\n", "cnf_multiple_headers"),
@@ -77,11 +82,19 @@ def test_parse_cnf_rejects(text: str, reason: str) -> None:
     assert cnf.rejection_reason == reason
 
 
-def test_parse_cnf_oversized_blob() -> None:
-    huge = "p cnf 1 1\n" + ("1 0\n" * MAX_CNF_BYTES)
+def test_parse_cnf_oversized_blob(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dimacs_mod, "MAX_CNF_BYTES", 8)
+    huge = "p cnf 1 1\n1 0\n"
     cnf = parse_dimacs_cnf(huge)
     assert not cnf.ok
     assert cnf.rejection_reason == "cnf_oversized"
+
+
+def test_parse_cnf_metadata_does_not_collect_clauses() -> None:
+    meta = parse_dimacs_cnf_metadata("p cnf 3 2\n1 -2 0\n2 3 0\n")
+    assert meta.ok
+    assert meta.num_vars == 3
+    assert meta.num_clauses == 2
 
 
 # --------------------------------------------------------------------------
@@ -119,9 +132,15 @@ def test_parse_solution_comments_skipped() -> None:
         ("s SATISFIABLE\nv\n", "solution_missing_assignment"),
         ("s SATISFIABLE\nv 1 2\n", "solution_missing_terminator"),
         ("s SATISFIABLE\nv 1 -1 0\n", "solution_contradictory_assignment"),
+        ("s SATISFIABLE\nv 1 1 0\n", "solution_duplicate_assignment"),
         ("s SATISFIABLE\nv 1 foo 0\n", "solution_non_integer_literal"),
+        ("s SATISFIABLE\nv +1 0\n", "solution_non_integer_literal"),
+        ("s SATISFIABLE extra\nv 1 0\n", "solution_bad_status_line"),
+        ("s satisfiable\nv 1 0\n", "solution_unknown_status"),
         ("s SATISFIABLE\ns SATISFIABLE\nv 1 0\n", "solution_multiple_status_lines"),
         ("s SATISFIABLE\nv 0 1 0\n", "solution_literal_after_terminator"),
+        ("s SATISFIABLE\nv 1 0 0\n", "solution_literal_after_terminator"),
+        ("s SATISFIABLE\nv1 0\n", "solution_unknown_line"),
         ("nonsense line\n", "solution_unknown_line"),
     ],
 )
@@ -131,11 +150,40 @@ def test_parse_solution_rejects(text: str, reason: str) -> None:
     assert sol.rejection_reason == reason
 
 
-def test_parse_solution_oversized_blob() -> None:
-    huge = "s SATISFIABLE\nv " + ("1 " * MAX_SOLUTION_BYTES) + "0\n"
+def test_parse_solution_oversized_blob(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dimacs_mod, "MAX_SOLUTION_BYTES", 8)
+    huge = "s SATISFIABLE\nv 1 0\n"
     sol = parse_dimacs_solution(huge)
     assert not sol.ok
     assert sol.rejection_reason == "solution_oversized"
+
+
+def test_verify_dimacs_solution_streaming_path() -> None:
+    result = verify_dimacs_solution(
+        "p cnf 3 2\n1 -2 0\n2 3 0\n",
+        "s SATISFIABLE\nv 1 2 -3 0\n",
+    )
+    assert result.parsed_ok
+    assert result.satisfied
+    assert result.clauses_satisfied == 2
+    assert result.clause_count == 2
+
+
+def test_verify_dimacs_solution_matches_fred_bsat_strictness() -> None:
+    cnf = "p cnf 2 2\n1 0\n2 0\n"
+    for bad_solution in [
+        "s SATISFIABLE extra\nv 1 2 0\n",
+        "s SATISFIABLE\nv 1 1 2 0\n",
+        "s SATISFIABLE\nv +1 2 0\n",
+        "s SATISFIABLE\nv\nv 1 2 0\n",
+        "s satisfiable\nv 1 2 0\n",
+        "v 1 2 0\ns SATISFIABLE\n",
+        "s SATISFIABLE\nv1 2 0\n",
+        "s SATISFIABLE\nv 1 2 0 0\n",
+    ]:
+        result = verify_dimacs_solution(cnf, bad_solution)
+        assert not result.satisfied
+        assert result.rejection_reason
 
 
 # --------------------------------------------------------------------------

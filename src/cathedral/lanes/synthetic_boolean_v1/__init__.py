@@ -27,11 +27,8 @@ from cathedral.lanes.contract import (
     VerifierResult,
 )
 from cathedral.lanes.synthetic_boolean_v1.dimacs import (
-    assignment_covers_all_vars,
-    assignment_in_range,
-    evaluate_assignment,
-    parse_dimacs_cnf,
-    parse_dimacs_solution,
+    parse_dimacs_cnf_metadata,
+    verify_dimacs_solution,
 )
 from cathedral.lanes.synthetic_boolean_v1.toy_corpus import ToyInstance, toy_instance_for
 
@@ -75,7 +72,7 @@ def problem_from_challenge_record(
         raise ValueError("public_base_url is required for the CNF URL transport")
     if not fetch_token:
         raise ValueError("fetch_token is required for the CNF URL transport")
-    parsed = parse_dimacs_cnf(record.cnf_text)
+    parsed = parse_dimacs_cnf_metadata(record.cnf_text)
     base = public_base_url.rstrip("/")
     cnf_url = f"{base}/v1/challenges/{record.challenge_id}/cnf?t={fetch_token}"
     cnf_sha256 = hashlib.sha256(record.cnf_text.encode("utf-8")).hexdigest()
@@ -89,7 +86,7 @@ def problem_from_challenge_record(
             "cnf_url": cnf_url,
             "cnf_sha256": cnf_sha256,
             "num_vars": parsed.num_vars if parsed.ok else 0,
-            "num_clauses": len(parsed.clauses) if parsed.ok else 0,
+            "num_clauses": parsed.num_clauses if parsed.ok else 0,
         },
         time_limit_seconds=time_limit_seconds,
     )
@@ -187,15 +184,6 @@ class SyntheticBooleanV1:
                     rejection_reason="problem_missing_cnf",
                     details={},
                 )
-            cnf = parse_dimacs_cnf(cnf_text)
-            if not cnf.ok:
-                return VerifierResult(
-                    parsed_ok=False,
-                    raw_metric=0.0,
-                    rejection_reason=cnf.rejection_reason or "cnf_unparseable",
-                    details={},
-                )
-
             answer = submission.answer
             if not isinstance(answer, dict):
                 return VerifierResult(
@@ -220,46 +208,28 @@ class SyntheticBooleanV1:
                     details={"keys": sorted(str(k) for k in answer)},
                 )
 
-            solution = parse_dimacs_solution(raw_solution)
-            if not solution.ok:
+            verification = verify_dimacs_solution(cnf_text, raw_solution)
+            if not verification.parsed_ok:
                 return VerifierResult(
                     parsed_ok=False,
                     raw_metric=0.0,
-                    rejection_reason=solution.rejection_reason or "solution_unparseable",
-                    details={"status": solution.status},
-                )
-
-            if not assignment_in_range(cnf, solution.assignment):
-                return VerifierResult(
-                    parsed_ok=False,
-                    raw_metric=0.0,
-                    rejection_reason="solution_variable_out_of_range",
+                    rejection_reason=verification.rejection_reason or "solution_unparseable",
                     details={
-                        "clause_count": len(cnf.clauses),
-                        "num_vars": cnf.num_vars,
-                    },
-                )
-            if not assignment_covers_all_vars(cnf, solution.assignment):
-                return VerifierResult(
-                    parsed_ok=False,
-                    raw_metric=0.0,
-                    rejection_reason="solution_incomplete_assignment",
-                    details={
-                        "clause_count": len(cnf.clauses),
-                        "num_vars": cnf.num_vars,
-                        "assigned": len(solution.assignment),
+                        "status": verification.status,
+                        "clause_count": verification.clause_count,
+                        "num_vars": verification.num_vars,
+                        "assigned": verification.assigned,
                     },
                 )
 
-            satisfied, satisfied_count, clause_count = evaluate_assignment(cnf, solution.assignment)
-            if not satisfied:
+            if not verification.satisfied:
                 return VerifierResult(
                     parsed_ok=True,
                     raw_metric=0.0,
-                    rejection_reason="solution_unsatisfied",
+                    rejection_reason=verification.rejection_reason or "solution_unsatisfied",
                     details={
-                        "clauses_satisfied": satisfied_count,
-                        "clause_count": clause_count,
+                        "clauses_satisfied": verification.clauses_satisfied,
+                        "clause_count": verification.clause_count,
                     },
                 )
 
@@ -268,8 +238,8 @@ class SyntheticBooleanV1:
                 raw_metric=1.0,
                 rejection_reason=None,
                 details={
-                    "clauses_satisfied": satisfied_count,
-                    "clause_count": clause_count,
+                    "clauses_satisfied": verification.clauses_satisfied,
+                    "clause_count": verification.clause_count,
                 },
             )
         except Exception as exc:

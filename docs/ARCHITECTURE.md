@@ -108,6 +108,29 @@ Sqlite with WAL mode. The legacy worker is the single writer for `claims`, `evid
 | #3 regulatory cards useful and verifiable | `cathedral.cards` | `tests/test_preflight.py`, `tests/test_scorer.py` |
 | #1 validator ops safe and observable | `cathedral.validator.{auth,health,stall}`, `cathedral.cli`, `docs/validator/RUNBOOK.md` | `tests/test_validator_http.py`, `tests/test_weights.py` |
 
+## Trust model
+
+Cathedral is the **verifier-of-record** for private SAT challenges.
+
+What that means concretely:
+
+- The publisher holds the active formula corpus and the verifier code. The publisher runs `SyntheticBooleanV1.verify` against the miner's returned DIMACS solution (see `src/cathedral/lanes/synthetic_boolean_v1/__init__.py`).
+- The publisher attaches a `cathedral_signature` (Ed25519) over the canonical projection of each scored row.
+- Validators verify the signature with `CATHEDRAL_PUBLIC_KEY_HEX` (see `src/cathedral/validator/pull_loop.py`, `verify_eval_run_signature`). They do not re-run the SAT verifier in v1.
+- Validators also verify policy fields on signed weight vectors when the optional remote-weight path is enabled: network, netuid, key id, expiry, finite nonnegative weights, rollback protection (see `src/cathedral/validator/remote_weight_loop.py`).
+
+Why validators do not re-verify SAT solutions in v1:
+
+- The active formulas and the private SAT corpus are not exposed publicly. Letting every validator re-verify would require shipping the corpus and the verifier in the open, which defeats the lane's launch model.
+- The trade is explicit: validators trust Cathedral's signed scoring for SAT rows. They do not trust unsigned data, and the signature has a pinned key.
+
+How this could change later:
+
+- A future lane could publish formulas in the clear and let validators independently re-verify. That is a different lane design, not a change to the synthetic_boolean_v1 trust model.
+- Or the verifier could be redesigned around a public commitment scheme where the formula is revealed after the lock and validators retroactively check the winning solution. This is not implemented and is not on the immediate roadmap.
+
+The current trust model is honest about the trade. The docs and site copy must say "Cathedral signs and validators verify the signature", not "validators independently verify SAT solutions".
+
 ## What this repo deliberately omits
 
 - GPU verification, hardware fingerprinting

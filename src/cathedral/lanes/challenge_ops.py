@@ -19,7 +19,7 @@ from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
 )
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
-from cathedral.lanes.synthetic_boolean_v1.dimacs import parse_dimacs_cnf
+from cathedral.lanes.synthetic_boolean_v1.dimacs import parse_dimacs_cnf_metadata
 
 
 def challenge_id_for_cnf(cnf_text: str) -> str:
@@ -35,7 +35,7 @@ def build_synthetic_boolean_challenge_record(
     status: str = CHALLENGE_STATUS_PENDING,
     source: str = "operator_cnf",
 ) -> ChallengeRecord:
-    parsed = parse_dimacs_cnf(cnf_text)
+    parsed = parse_dimacs_cnf_metadata(cnf_text)
     if not parsed.ok:
         raise ChallengeSourceError(
             f"synthetic_boolean_v1 CNF is not valid DIMACS: {parsed.rejection_reason}"
@@ -51,7 +51,7 @@ def build_synthetic_boolean_challenge_record(
             "source": source,
             "cnf_sha256": digest,
             "num_vars": parsed.num_vars,
-            "num_clauses": len(parsed.clauses),
+            "num_clauses": parsed.num_clauses,
         },
     )
 

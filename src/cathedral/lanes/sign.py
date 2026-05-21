@@ -9,7 +9,6 @@ stable hashes until an explicit reveal/export path is added.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 from typing import Any
 
@@ -99,7 +98,10 @@ def build_signed_task_family_row(
             f"extra={sorted(extra)} missing={sorted(missing)}"
         )
 
-    sig_b64 = base64.b64encode(signer._sk.sign(canonical_json(signed_subset))).decode("ascii")
+    sign = getattr(signer, "sign", None)
+    if sign is None:
+        raise TypeError("task family signer must expose sign(payload)")
+    sig_b64 = str(sign(signed_subset))
     row = dict(signed_subset)
     row["cathedral_signature"] = sig_b64
     row["eval_output_schema_version"] = TASK_FAMILY_SCHEMA_VERSION

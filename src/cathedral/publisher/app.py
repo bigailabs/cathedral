@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import aiosqlite
 import structlog
@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cathedral.cards.registry import CardRegistry
+from cathedral.eval.orchestrator import run_eval_loop
 from cathedral.eval.polaris_runner import (
     BundleCardRunner,
     HttpPolarisRunner,
@@ -40,20 +41,18 @@ from cathedral.eval.polaris_runner import (
     PolarisRunner,
     StubPolarisRunner,
 )
+from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import (
     SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA,
 )
-from cathedral.lanes.challenge_lock import SqliteChallengeLock
-from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
-from cathedral.lanes.challenge_receipts import (
-    SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA,
+from cathedral.lanes.challenge_lock import (
+    SqliteChallengeLock,
 )
-from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
+from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
 from cathedral.lanes.challenge_source import (
     SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
 )
 from cathedral.lanes.challenge_source import (
-    ChallengeSourceError,
     SqliteChallengeSource,
     SqliteFetchTokenStore,
 )
@@ -62,7 +61,7 @@ from cathedral.publisher import repository
 from cathedral.publisher.reads import router as reads_router
 from cathedral.publisher.submit import router as submit_router
 from cathedral.publisher.weight_policy import (
-    FileBackedWeightPolicyStore,
+    WeightPolicyStore,
     load_producer_from_env,
     run_weight_policy_producer,
 )
@@ -73,9 +72,6 @@ from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
 
 logger = structlog.get_logger(__name__)
-
-if TYPE_CHECKING:
-    from cathedral.eval.scoring_pipeline import EvalSigner
 
 
 @dataclass
@@ -165,40 +161,23 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         app.state.ctx = ctx
         await ctx.db.executescript(CHALLENGE_SOURCE_SCHEMA)
         await ctx.db.executescript(CHALLENGE_LOCK_SCHEMA)
-        await ctx.db.executescript(CHALLENGE_RECEIPT_SCHEMA)
         await ctx.db.commit()
         task_family_challenge_source = SqliteChallengeSource(ctx.db)
         task_family_challenge_lock = SqliteChallengeLock(ctx.db)
         task_family_fetch_token_store = SqliteFetchTokenStore(ctx.db)
-        task_family_receipt_store = SqliteChallengeReceiptStore(ctx.db)
+        # Stash on app.state so the public CNF route can validate
+        # tokens and look up active/locked rows without re-opening
+        # the connection or re-wiring through dependency injection.
         app.state.task_family_challenge_source = task_family_challenge_source
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
-        app.state.task_family_receipt_store = task_family_receipt_store
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
-        vector_path = Path(
-            os.environ.get("CATHEDRAL_WEIGHT_POLICY_VECTOR_PATH", "data/current_vector.json")
-        )
-        weight_policy_store = FileBackedWeightPolicyStore(vector_path)
-        try:
-            await weight_policy_store.load()
-        except Exception as exc:
-            logger.warning("weight_policy_store_load_failed", error=str(exc))
+        # Issue #155: in-memory holder for the latest signed weight
+        # vector. Empty by default. The GET endpoint returns 503 until
+        # a cadence path (out of scope for this first pass) populates
+        # it. Tests can set it directly via app.state.weight_policy.
+        weight_policy_store = WeightPolicyStore()
         app.state.weight_policy = weight_policy_store
-
-        producer = load_producer_from_env()
-        if producer is not None:
-            producer_config, producer_key = producer
-            ctx.background_tasks.append(
-                asyncio.create_task(
-                    run_weight_policy_producer(
-                        ctx.db,
-                        weight_policy_store,
-                        producer_key,
-                        config=producer_config,
-                    )
-                )
-            )
         # Make ctx visible to the orchestrator's env-resolver. Production
         # `from_settings` previously skipped this; the test-only `build_app`
         # set it inside its own factory. Hoisting to the shared lifespan
@@ -232,6 +211,26 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             load_private_corpus()
 
         stop = asyncio.Event()
+        producer = load_producer_from_env()
+        if producer is None:
+            logger.warning(
+                "weight_policy_signing_key_missing",
+                env="CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY",
+            )
+        elif start_eval_loop:
+            producer_config, producer_private_key = producer
+            ctx.background_tasks.append(
+                asyncio.create_task(
+                    run_weight_policy_producer(
+                        ctx.db,
+                        weight_policy_store,
+                        producer_private_key,
+                        config=producer_config,
+                        stop=stop,
+                    )
+                )
+            )
+
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to
             # PolarisRuntimeRunner (Tier A), TEE-tier rows are pre-verified
@@ -240,7 +239,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             from cathedral.eval.orchestrator import (
                 _resolve_polaris_runner_for_mode,
                 _resolve_polaris_runner_from_env,
-                run_eval_loop,
             )
 
             def _runner_for(submission: dict[str, Any]) -> Any:
@@ -289,7 +287,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     task_family_challenge_source=task_family_challenge_source,
                     task_family_challenge_lock=task_family_challenge_lock,
                     task_family_fetch_token_store=task_family_fetch_token_store,
-                    task_family_receipt_store=task_family_receipt_store,
                     public_base_url=os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
                 )
             )
@@ -363,25 +360,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             content={"detail": str(detail) if detail else "error"},
         )
 
-    @app.get("/", include_in_schema=False)
-    async def _root() -> dict[str, Any]:
-        return {
-            "service": "cathedral-publisher",
-            "description": "Publisher API for Cathedral SN39.",
-            "links": {
-                "health": "/health",
-                "docs": "/docs",
-                "skill": "/skill.md",
-                "jwks": "/.well-known/cathedral-jwks.json",
-                "api": "/api/cathedral",
-                "cards": "/api/cathedral/v1/cards",
-                "eval_spec": "/api/cathedral/v1/cards/eu-ai-act/eval-spec",
-                "recent_signed_evals": "/api/cathedral/v1/leaderboard/recent",
-                "sat_readiness": "/api/cathedral/v1/synthetic-boolean/readiness-probe",
-                "submit_agent": "/api/cathedral/v1/agents/submit",
-            },
-        }
-
     # CONTRACTS Section 2 locks the public surface at `/api/cathedral/v1/...`
     # (matches the cross-repo contract test mirror, the frontend's API client,
     # and the polariscomputer-side routes already deployed). Mount BOTH:
@@ -392,22 +370,23 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     # entries pointing at the same function - no duplicated state.
     app.include_router(submit_router, prefix="/api/cathedral")
     app.include_router(reads_router, prefix="/api/cathedral")
-    app.include_router(weight_policy_router, prefix="/api/cathedral")
     app.include_router(submit_router, include_in_schema=False)
     app.include_router(reads_router, include_in_schema=False)
-    app.include_router(weight_policy_router, include_in_schema=False)
 
-    # Public CNF endpoint for the synthetic boolean lane. The route is
-    # token-gated and exposes only active or locked-in-grace CNF bodies.
+    # Public CNF endpoint for the synthetic boolean lane. Same dual-mount
+    # so callers using either the canonical /api/cathedral prefix or the
+    # back-compat /v1 root resolve to the same route. The route is gated
+    # by per-challenge fetch tokens minted at announce time; never log
+    # the ?t= query string.
     from cathedral.publisher.challenge_cnf import router as challenge_cnf_router
 
     app.include_router(challenge_cnf_router, prefix="/api/cathedral")
     app.include_router(challenge_cnf_router, include_in_schema=False)
 
-    from cathedral.publisher.sat_readiness import router as sat_readiness_router
-
-    app.include_router(sat_readiness_router, prefix="/api/cathedral")
-    app.include_router(sat_readiness_router, include_in_schema=False)
+    # Issue #155: signed weight policy surface. Mounted on both prefixes
+    # for the same dual-routing reason as the submit/reads routers.
+    app.include_router(weight_policy_router, prefix="/api/cathedral")
+    app.include_router(weight_policy_router, include_in_schema=False)
 
     # Agent-facing onboarding - Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the
@@ -581,15 +560,6 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
             activate=True,
             input_source="operator_cnf_path",
         )
-    except ChallengeSourceError as exc:
-        if "already locked" in str(exc):
-            logger.warning(
-                "synthetic_boolean_active_challenge_seed_skipped",
-                family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
-                reason="challenge_already_locked",
-            )
-            return
-        raise RuntimeError(str(exc)) from None
     except Exception as exc:
         raise RuntimeError(str(exc)) from None
 
@@ -672,8 +642,6 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
         signing_hex = os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY")
         if not signing_hex:
             raise RuntimeError("CATHEDRAL_EVAL_SIGNING_KEY env var required (32-byte hex)")
-        from cathedral.eval.scoring_pipeline import EvalSigner
-
         signer = EvalSigner.from_env_hex(signing_hex)
 
         polaris: PolarisRunner
@@ -821,8 +789,6 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
         if not signing_hex:
             signing_hex = secrets.token_bytes(32).hex()
             os.environ["CATHEDRAL_EVAL_SIGNING_KEY"] = signing_hex
-        from cathedral.eval.scoring_pipeline import EvalSigner
-
         signer = EvalSigner.from_env_hex(signing_hex)
 
         # Polaris runner - stub mode unless explicitly configured.

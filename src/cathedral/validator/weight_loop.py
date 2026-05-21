@@ -1,4 +1,4 @@
-"""Weight-set loop — joins scores to uids and pushes to chain on a timer."""
+"""Weight-set loop - joins scores to uids and pushes to chain on a timer."""
 
 from __future__ import annotations
 
@@ -70,13 +70,13 @@ async def run_weight_loop(
     stop: asyncio.Event | None = None,
     initial_backfill_complete: asyncio.Event | None = None,
     initial_backfill_timeout_secs: float = 120.0,
-    remote_weight_apply: Callable[[], Awaitable[bool]] | None = None,
+    remote_weight_apply: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
     # Track whether the initial backfill ever signalled completion.
     # `backfill_ready` becomes True the first time
     # `initial_backfill_complete` is observed set. If the timeout
-    # fallback path fires it stays False — every `weights_set` log
+    # fallback path fires it stays False - every `weights_set` log
     # line carries this flag so operators reading the log can tell
     # whether the published vector was computed from a known-good
     # 7-day window or a possibly-thin local DB.
@@ -90,7 +90,7 @@ async def run_weight_loop(
         # 7-day window. The event is set permanently after the first
         # complete pass, so subsequent iterations are unblocked.
         # Timeout caps the wait so a broken pull loop can't pin the
-        # weight loop forever — if the backfill hasn't completed in
+        # weight loop forever - if the backfill hasn't completed in
         # ``initial_backfill_timeout_secs``, fall through and publish
         # with whatever's in the local DB. Better to ship a thin
         # vector than no vector at all, but log loudly + set
@@ -112,7 +112,7 @@ async def run_weight_loop(
                 timeout_secs=initial_backfill_timeout_secs,
                 consequence=(
                     "First weights_set will run with whatever rows the "
-                    "local DB has — likely a strict subset of the "
+                    "local DB has - likely a strict subset of the "
                     "publisher's 7-day feed. Subsequent ticks recheck "
                     "the event and may upgrade to backfill_ready=True."
                 ),
@@ -131,19 +131,12 @@ async def run_weight_loop(
             logger.info("weight_loop_backfill_signal_received_late")
         try:
             if remote_weight_apply is not None:
-                if await remote_weight_apply():
-                    try:
-                        await asyncio.wait_for(stop.wait(), timeout=interval_secs)
-                    except TimeoutError:
-                        pass
-                    continue
-                logger.warning(
-                    "remote_weight_unavailable_falling_back_to_local",
-                    consequence=(
-                        "No signed remote vector has been accepted yet; using the "
-                        "local configured weight policy for this tick."
-                    ),
-                )
+                await remote_weight_apply()
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval_secs)
+                except TimeoutError:
+                    pass
+                continue
 
             metagraph = await chain.metagraph()
             registered = await chain.is_registered()

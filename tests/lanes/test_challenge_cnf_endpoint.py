@@ -183,7 +183,6 @@ async def test_active_with_correct_token_returns_cnf(wired_app: dict[str, Any]) 
     assert r.text == CNF_BODY
     assert hashlib.sha256(r.text.encode("utf-8")).hexdigest() == EXPECTED_SHA
     assert r.headers["content-type"].startswith("text/plain")
-    assert r.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.asyncio
