@@ -146,6 +146,13 @@ def _receipt_answer_hash(stdout: str) -> str:
     return canonical_hash(answer)
 
 
+def _task_family_receipt_attempt_id(stable_submission_id: str) -> str:
+    # The receipt table's historical column name is submission_id, but SAT
+    # receipts are per answer attempt. Reusing agent_submissions.id here would
+    # collapse repeated attempts against an unresolved challenge into one row.
+    return f"{stable_submission_id}:attempt:{secrets.token_urlsafe(16)}"
+
+
 def _task_family_signed_result_from_row(row: dict[str, Any]) -> TaskFamilySignedResult:
     verifier = VerifierResult(
         parsed_ok=float(row.get("weighted_score", 0.0)) > 0.0,
@@ -170,6 +177,20 @@ def _task_family_signed_result_from_row(row: dict[str, Any]) -> TaskFamilySigned
         prompt="",
         submission=submission,
     )
+
+
+def _task_family_receipt_submission_row(receipt: ChallengeReceipt) -> dict[str, str]:
+    # Receipt IDs are attempt scoped for SAT ordering. Eval rows still need the
+    # durable agent_submissions.id FK, which is preserved in the signed payload.
+    signed_row = receipt.signed_row or {}
+    return {
+        "id": str(
+            signed_row.get("agent_id")
+            or signed_row.get("submission_id")
+            or receipt.submission_id
+        ),
+        "miner_hotkey": str(signed_row.get("miner_hotkey") or receipt.miner_hotkey),
+    }
 
 
 @dataclass
@@ -716,6 +737,7 @@ class EvalOrchestrator:
             prompt = build_task_family_prompt(problem)
             receipt_store = self._task_family_receipt_store
             receipt: ChallengeReceipt | None = None
+            receipt_attempt_id = _task_family_receipt_attempt_id(str(submission["id"]))
 
             async def _record_receipt(stdout: str, stdout_received_at_iso: str) -> None:
                 nonlocal receipt
@@ -728,7 +750,7 @@ class EvalOrchestrator:
                 receipt = await receipt_store.record_receipt(
                     family_id=family_id,
                     challenge_id=problem.task_id,
-                    submission_id=str(submission["id"]),
+                    submission_id=receipt_attempt_id,
                     miner_hotkey=miner_hotkey,
                     received_at_iso=stdout_received_at_iso,
                     answer_hash=_receipt_answer_hash(stdout),
@@ -766,7 +788,7 @@ class EvalOrchestrator:
                     receipt = await receipt_store.record_receipt(
                         family_id=family_id,
                         challenge_id=problem.task_id,
-                        submission_id=str(submission["id"]),
+                        submission_id=receipt_attempt_id,
                         miner_hotkey=miner_hotkey,
                         received_at_iso=received_at,
                         answer_hash=_receipt_answer_hash(hermes_run.stdout),
@@ -1062,10 +1084,7 @@ class EvalOrchestrator:
             )
             return
 
-        winner_submission = {
-            "id": winner.submission_id,
-            "miner_hotkey": winner.miner_hotkey,
-        }
+        winner_submission = _task_family_receipt_submission_row(winner)
         winner_result = _task_family_signed_result_from_row(winner.signed_row)
         locked = None
         promoted = None
@@ -1148,10 +1167,7 @@ class EvalOrchestrator:
             )
             await persist_task_family_result(
                 self.db,
-                submission_row={
-                    "id": candidate.submission_id,
-                    "miner_hotkey": candidate.miner_hotkey,
-                },
+                submission_row=_task_family_receipt_submission_row(candidate),
                 problem=problem,
                 signed=_task_family_signed_result_from_row(loser_row),
                 epoch=int(candidate.epoch if candidate.epoch is not None else 0),

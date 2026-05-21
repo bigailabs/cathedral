@@ -15,6 +15,7 @@ from cathedral.eval.polaris_runner import StubPolarisRunner
 from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA
 from cathedral.lanes.challenge_lock import InMemoryChallengeLock, SqliteChallengeLock
+from cathedral.lanes.challenge_receipts import RECEIPT_STATUS_INVALID
 from cathedral.lanes.challenge_receipts import SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA
 from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_source import (
@@ -82,6 +83,30 @@ class _SolvingRunner(StubPolarisRunner):
         num_vars = int(public_input["num_vars"])
         literals = " ".join(str(i) for i in range(1, num_vars + 1))
         stdout = f'```FINAL_ANSWER\n{{"dimacs_solution": "s SATISFIABLE\\nv {literals} 0\\n"}}\n```'
+        receipt_callback = kwargs.get("receipt_callback")
+        received_at = (
+            self._received_at.pop(0)
+            if self._received_at
+            else f"2026-05-20T12:00:{self._counter:02d}.000Z"
+        )
+        self._counter += 1
+        if receipt_callback is not None:
+            await receipt_callback(stdout, received_at)
+        return _HermesResult(stdout=stdout, trace={})
+
+
+class _UnsatisfyingRunner(_SolvingRunner):
+    async def run_task_family_challenge(self, **kwargs: Any) -> _HermesResult:
+        problem = kwargs["problem"]
+        self.task_ids.append(str(problem.task_id))
+        public_input = problem.public_input
+        self.cnf_urls.append(str(public_input["cnf_url"]))
+        self.cnf_sha256s.append(str(public_input["cnf_sha256"]))
+        stdout = (
+            "```FINAL_ANSWER\n"
+            '{"dimacs_solution": "s SATISFIABLE\\nv -1 0\\n"}'
+            "\n```"
+        )
         receipt_callback = kwargs.get("receipt_callback")
         received_at = (
             self._received_at.pop(0)
@@ -326,6 +351,93 @@ async def test_synthetic_boolean_runtime_uses_one_active_formula_and_first_valid
         assert [(row.challenge_id, row.status) for row in rows] == [
             ("active-boolean-001", CHALLENGE_STATUS_LOCKED),
             ("active-boolean-002", CHALLENGE_STATUS_LOCKED),
+        ]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_repeated_unresolved_attempts_get_distinct_receipts(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub_a = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        runner = _UnsatisfyingRunner(
+            received_at=[
+                "2026-05-20T12:00:00.000Z",
+                "2026-05-20T12:00:01.000Z",
+            ]
+        )
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        log = structlog.get_logger("test")
+        await orch._maybe_run_task_family_lanes(
+            submission=sub_a,
+            runner=runner,
+            epoch=123,
+            round_index=0,
+            log=log,
+        )
+        await orch._maybe_run_task_family_lanes(
+            submission=sub_a,
+            runner=runner,
+            epoch=123,
+            round_index=1,
+            log=log,
+        )
+
+        receipts = await receipt_store.list_for_challenge(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert len(receipts) == 2
+        assert {receipt.status for receipt in receipts} == {RECEIPT_STATUS_INVALID}
+        assert len({receipt.submission_id for receipt in receipts}) == 2
+        assert all(receipt.submission_id != "sub-a" for receipt in receipts)
+        assert all(receipt.submission_id.startswith("sub-a:attempt:") for receipt in receipts)
+        assert all(receipt.signed_row is not None for receipt in receipts)
+        assert {receipt.signed_row["agent_id"] for receipt in receipts if receipt.signed_row} == {
+            "sub-a"
+        }
+
+        rows = await repository.list_eval_runs_for_submission(conn, "sub-a")
+        assert len(rows) == 2
+        assert all(row["weighted_score"] == pytest.approx(0.0) for row in rows)
+        assert [row["errors"] for row in rows] == [
+            ["solution_unsatisfied"],
+            ["solution_unsatisfied"],
         ]
     finally:
         await conn.close()

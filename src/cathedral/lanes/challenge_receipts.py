@@ -68,6 +68,13 @@ class ChallengeReceiptError(Exception):
 
 @dataclass(frozen=True)
 class ChallengeReceipt:
+    """Ordered challenge receipt.
+
+    ``submission_id`` is the legacy storage column name. For SAT runtime rows
+    it stores an attempt-scoped receipt id; after verification the stable
+    agent submission id is available in ``signed_row["agent_id"]``.
+    """
+
     family_id: str
     challenge_id: str
     submission_id: str
