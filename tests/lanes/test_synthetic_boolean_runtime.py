@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -139,6 +140,37 @@ class _DelayedSolvingRunner(_SolvingRunner):
         if receipt_callback is not None:
             await receipt_callback(stdout, received_at)
         delay = self._delays_by_submission.get(str(kwargs["submission"]["id"]), 0.0)
+        if delay:
+            await asyncio.sleep(delay)
+        return _HermesResult(stdout=stdout, trace={})
+
+
+class _ScriptedDelayedRunner(_SolvingRunner):
+    def __init__(
+        self,
+        *,
+        received_at: list[str],
+        delays_by_submission: dict[str, float],
+        solutions_by_submission: dict[str, str],
+    ) -> None:
+        super().__init__(received_at=received_at)
+        self._delays_by_submission = delays_by_submission
+        self._solutions_by_submission = solutions_by_submission
+
+    async def run_task_family_challenge(self, **kwargs: Any) -> _HermesResult:
+        problem = kwargs["problem"]
+        submission_id = str(kwargs["submission"]["id"])
+        self.task_ids.append(str(problem.task_id))
+        public_input = problem.public_input
+        self.cnf_urls.append(str(public_input["cnf_url"]))
+        self.cnf_sha256s.append(str(public_input["cnf_sha256"]))
+        solution = self._solutions_by_submission[submission_id]
+        stdout = f'```FINAL_ANSWER\n{{"dimacs_solution": {json.dumps(solution)}}}\n```'
+        receipt_callback = kwargs.get("receipt_callback")
+        received_at = self._received_at.pop(0)
+        if receipt_callback is not None:
+            await receipt_callback(stdout, received_at)
+        delay = self._delays_by_submission.get(submission_id, 0.0)
         if delay:
             await asyncio.sleep(delay)
         return _HermesResult(stdout=stdout, trace={})
@@ -629,6 +661,124 @@ async def test_synthetic_boolean_first_submitted_valid_wins_when_later_finishes_
         )
         assert winner is not None
         assert winner.miner_hotkey == "5MinerA"
+
+        rows = await source.list_for_family("synthetic_boolean_v1")
+        assert [(row.challenge_id, row.status) for row in rows] == [
+            ("active-boolean-001", CHALLENGE_STATUS_LOCKED),
+            ("active-boolean-002", CHALLENGE_STATUS_ACTIVE),
+        ]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_invalid_receipt_unblocks_waiting_valid_winner(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub_a = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+        sub_b = await _seed_submission(conn, submission_id="sub-b", miner_hotkey="5MinerB")
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-002",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 2 2\n1 0\n2 0\n",
+                status=CHALLENGE_STATUS_PENDING,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+        received_base = datetime.now(UTC)
+        runner = _ScriptedDelayedRunner(
+            received_at=[
+                orchestrator_module._ms_iso(received_base),
+                orchestrator_module._ms_iso(received_base + timedelta(seconds=1)),
+            ],
+            delays_by_submission={"sub-a": 0.05, "sub-b": 0.0},
+            solutions_by_submission={
+                "sub-a": "s SATISFIABLE\nv -1 0\n",
+                "sub-b": "s SATISFIABLE\nv 1 0\n",
+            },
+        )
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        log = structlog.get_logger("test")
+        snapshot = await orch.snapshot_task_family_batch_problems(log=log)
+        await asyncio.gather(
+            orch._maybe_run_task_family_lanes(
+                submission=sub_a,
+                runner=runner,
+                epoch=123,
+                round_index=0,
+                log=log,
+                problem_overrides=snapshot,
+            ),
+            orch._maybe_run_task_family_lanes(
+                submission=sub_b,
+                runner=runner,
+                epoch=123,
+                round_index=1,
+                log=log,
+                problem_overrides=snapshot,
+            ),
+        )
+
+        rows_a = await repository.list_eval_runs_for_submission(conn, "sub-a")
+        rows_b = await repository.list_eval_runs_for_submission(conn, "sub-b")
+        assert len(rows_a) == 1
+        assert len(rows_b) == 1
+        assert rows_a[0]["weighted_score"] == pytest.approx(0.0)
+        assert rows_a[0]["errors"] == ["solution_unsatisfied"]
+        assert rows_b[0]["weighted_score"] == pytest.approx(1.0)
+        assert rows_b[0]["errors"] is None
+
+        receipts = await receipt_store.list_for_challenge(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert [receipt.status for receipt in receipts] == [
+            RECEIPT_STATUS_INVALID,
+            RECEIPT_STATUS_VALID,
+        ]
+
+        winner = await SqliteChallengeLock(conn).get_winner(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert winner is not None
+        assert winner.miner_hotkey == "5MinerB"
 
         rows = await source.list_for_family("synthetic_boolean_v1")
         assert [(row.challenge_id, row.status) for row in rows] == [

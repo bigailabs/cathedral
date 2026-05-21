@@ -1019,43 +1019,35 @@ class EvalOrchestrator:
             verifier_details_hash=str(signed.row["verifier_details_hash"]),
         )
 
-        if not is_valid:
-            await persist_task_family_result(
-                self.db,
-                submission_row=submission,
+        async def _maybe_finalize_ready_winner(*, publish_current_loser: bool) -> None:
+            await self._expire_stale_sat_receipts(
+                receipt_store=receipt_store,
+                receipt=receipt,
                 problem=problem,
-                signed=signed,
-                epoch=epoch,
-                round_index=round_index,
-                duration_ms=int(hermes_run.duration_ms),
-                trace_json=trace_json,
-                feed_enabled=True,
+                now_iso=now_iso,
             )
-            return
 
-        await self._expire_stale_sat_receipts(
-            receipt_store=receipt_store,
-            receipt=receipt,
-            problem=problem,
-            now_iso=now_iso,
-        )
-        winner = await receipt_store.select_winner(
-            family_id=receipt.family_id,
-            challenge_id=receipt.challenge_id,
-        )
-        if winner is None:
-            log.info(
-                "task_family_receipt_waiting_for_earlier",
+            selected_winner = await receipt_store.select_winner(
                 family_id=receipt.family_id,
-                challenge_id_public=signed.row.get("task_id_public"),
-                submission_id=receipt.submission_id,
+                challenge_id=receipt.challenge_id,
             )
-            return
+            if selected_winner is None:
+                if publish_current_loser:
+                    log.info(
+                        "task_family_receipt_waiting_for_earlier",
+                        family_id=receipt.family_id,
+                        challenge_id_public=signed.row.get("task_id_public"),
+                        submission_id=receipt.submission_id,
+                    )
+                return
 
-        challenge_lock = self._task_family_challenge_lock
+            challenge_lock = self._task_family_challenge_lock
 
-        async def _publish_current_as_loser_if_unpublished() -> None:
-            if winner.submission_id != receipt.submission_id:
+            async def _publish_current_as_loser_if_unpublished(
+                winner: ChallengeReceipt,
+            ) -> None:
+                if not publish_current_loser or winner.submission_id == receipt.submission_id:
+                    return
                 if await self._eval_run_exists(str(signed.row["id"])):
                     return
                 loser = self._sat_loser_result(
@@ -1080,91 +1072,121 @@ class EvalOrchestrator:
                     feed_enabled=True,
                 )
 
-        if winner.signed_row is None or winner.eval_run_id is None:
-            log.warning(
-                "task_family_winner_missing_private_payload",
-                family_id=winner.family_id,
-                challenge_id=winner.challenge_id,
-                submission_id=winner.submission_id,
-            )
-            return
-
-        async with self._sat_finalization_lock:
-            # The lock read has to happen inside the process lock: any earlier
-            # read can become stale while another task is committing the same
-            # challenge winner on this shared SQLite connection.
-            existing_lock = (
-                await challenge_lock.get_winner(
-                    family_id=winner.family_id,
-                    challenge_id=winner.challenge_id,
+            async with self._sat_finalization_lock:
+                # Re-select inside the process lock. Invalid/expired receipts can
+                # unblock a valid receipt that previously waited behind them, and
+                # concurrent tasks can otherwise act on stale winner state.
+                winner = await receipt_store.select_winner(
+                    family_id=selected_winner.family_id,
+                    challenge_id=selected_winner.challenge_id,
                 )
-                if challenge_lock is not None
-                else None
-            )
-
-            if existing_lock is not None:
-                await _publish_current_as_loser_if_unpublished()
-                return
-
-            winner_submission = _task_family_receipt_submission_row(winner)
-            winner_result = _task_family_signed_result_from_row(winner.signed_row)
-            locked = None
-            promoted = None
-            await self.db.execute("BEGIN IMMEDIATE")
-            try:
-                await persist_task_family_result(
-                    self.db,
-                    submission_row=winner_submission,
-                    problem=problem,
-                    signed=winner_result,
-                    epoch=int(winner.epoch if winner.epoch is not None else epoch),
-                    round_index=int(
-                        winner.round_index if winner.round_index is not None else round_index
-                    ),
-                    duration_ms=int(winner.duration_ms if winner.duration_ms is not None else 0),
-                    trace_json=winner.trace_json,
-                    feed_enabled=True,
-                    commit=False,
-                )
-                if challenge_lock is not None:
-                    locked = await challenge_lock.try_lock(
+                if winner is None:
+                    return
+                if winner.signed_row is None or winner.eval_run_id is None:
+                    log.warning(
+                        "task_family_winner_missing_private_payload",
                         family_id=winner.family_id,
                         challenge_id=winner.challenge_id,
-                        miner_hotkey=winner.miner_hotkey,
-                        eval_run_id=winner.eval_run_id,
-                        weighted_score=float(winner.signed_row["weighted_score"]),
-                        won_at_iso=str(winner.signed_row["ran_at"]),
-                        commit=False,
+                        submission_id=winner.submission_id,
                     )
-                if locked is not None and self._task_family_challenge_source is not None:
-                    promoted = (
-                        await self._task_family_challenge_source.mark_locked_and_promote_next(
-                            family_id=winner.family_id,
-                            challenge_id=winner.challenge_id,
-                            now_iso=str(winner.signed_row["ran_at"]),
-                            manage_transaction=False,
-                        )
-                    )
-                await self.db.commit()
-            except Exception:
-                await self.db.rollback()
-                raise
+                    return
 
-            if locked is not None:
-                log.info(
-                    "task_family_challenge_locked",
-                    family_id=winner.family_id,
-                    challenge_id_public=winner.signed_row.get("task_id_public"),
-                    miner_hotkey=winner.miner_hotkey,
-                    promoted_challenge_id=(promoted.challenge_id if promoted else None),
+                # The lock read has to happen inside the process lock: any earlier
+                # read can become stale while another task is committing the same
+                # challenge winner on this shared SQLite connection.
+                existing_lock = (
+                    await challenge_lock.get_winner(
+                        family_id=winner.family_id,
+                        challenge_id=winner.challenge_id,
+                    )
+                    if challenge_lock is not None
+                    else None
                 )
 
-            await self._publish_resolved_sat_losers(
-                receipt_store=receipt_store,
-                winner=winner,
+                if existing_lock is not None:
+                    await _publish_current_as_loser_if_unpublished(winner)
+                    return
+
+                winner_submission = _task_family_receipt_submission_row(winner)
+                winner_result = _task_family_signed_result_from_row(winner.signed_row)
+                locked = None
+                promoted = None
+                await self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    await persist_task_family_result(
+                        self.db,
+                        submission_row=winner_submission,
+                        problem=problem,
+                        signed=winner_result,
+                        epoch=int(winner.epoch if winner.epoch is not None else epoch),
+                        round_index=int(
+                            winner.round_index if winner.round_index is not None else round_index
+                        ),
+                        duration_ms=int(
+                            winner.duration_ms if winner.duration_ms is not None else 0
+                        ),
+                        trace_json=winner.trace_json,
+                        feed_enabled=True,
+                        commit=False,
+                    )
+                    if challenge_lock is not None:
+                        locked = await challenge_lock.try_lock(
+                            family_id=winner.family_id,
+                            challenge_id=winner.challenge_id,
+                            miner_hotkey=winner.miner_hotkey,
+                            eval_run_id=winner.eval_run_id,
+                            weighted_score=float(winner.signed_row["weighted_score"]),
+                            won_at_iso=str(winner.signed_row["ran_at"]),
+                            commit=False,
+                        )
+                    if locked is not None and self._task_family_challenge_source is not None:
+                        promoted = (
+                            await self._task_family_challenge_source.mark_locked_and_promote_next(
+                                family_id=winner.family_id,
+                                challenge_id=winner.challenge_id,
+                                now_iso=str(winner.signed_row["ran_at"]),
+                                manage_transaction=False,
+                            )
+                        )
+                    await self.db.commit()
+                except Exception:
+                    await self.db.rollback()
+                    raise
+
+                if locked is not None:
+                    log.info(
+                        "task_family_challenge_locked",
+                        family_id=winner.family_id,
+                        challenge_id_public=winner.signed_row.get("task_id_public"),
+                        miner_hotkey=winner.miner_hotkey,
+                        promoted_challenge_id=(promoted.challenge_id if promoted else None),
+                    )
+
+                await self._publish_resolved_sat_losers(
+                    receipt_store=receipt_store,
+                    winner=winner,
+                    problem=problem,
+                    reason="challenge_already_locked",
+                )
+
+        if not is_valid:
+            await persist_task_family_result(
+                self.db,
+                submission_row=submission,
                 problem=problem,
-                reason="challenge_already_locked",
+                signed=signed,
+                epoch=epoch,
+                round_index=round_index,
+                duration_ms=int(hermes_run.duration_ms),
+                trace_json=trace_json,
+                feed_enabled=True,
             )
+            # An invalid/expired earlier receipt can unblock a later valid
+            # receipt that already resolved and is waiting in the receipt table.
+            await _maybe_finalize_ready_winner(publish_current_loser=False)
+            return
+
+        await _maybe_finalize_ready_winner(publish_current_loser=True)
 
     async def _publish_resolved_sat_losers(
         self,
