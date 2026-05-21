@@ -20,7 +20,6 @@ on Card JSON parse failure: record EvalRun with errors=[...], score=0
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import secrets
 import shutil
@@ -41,16 +40,6 @@ from cathedral.eval.scoring_pipeline import EvalSigner, score_and_sign
 from cathedral.eval.task_generator import generate_task
 from cathedral.lanes import registry as lane_registry
 from cathedral.lanes.challenge_lock import ChallengeLock, SqliteChallengeLock
-from cathedral.lanes.challenge_receipts import (
-    RECEIPT_STATUS_EXPIRED,
-    RECEIPT_STATUS_INVALID,
-    RECEIPT_STATUS_VALID,
-    RECEIPT_STATUS_VERIFYING,
-    ChallengeReceipt,
-    ChallengeReceiptError,
-    ChallengeReceiptStore,
-    SqliteChallengeReceiptStore,
-)
 from cathedral.lanes.challenge_source import (
     ChallengeRecord,
     ChallengeSource,
@@ -63,14 +52,12 @@ from cathedral.lanes.publisher import (
     build_task_family_prompt,
     enabled_task_family_ids,
     persist_task_family_result,
-    persist_task_family_result_row,
     score_and_sign_task_family_stdout,
     task_family_feed_enabled,
     task_family_prober_version_warning,
     task_family_runner_skip_reason,
     task_family_tier,
 )
-from cathedral.lanes.sign import resign_task_family_score
 from cathedral.lanes.synthetic_boolean_v1 import (
     FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID,
 )
@@ -114,7 +101,7 @@ def _retry_backoffs() -> tuple[float, ...]:
     """Production retry policy (CONTRACTS.md §6 'Timeouts and policies').
 
     Tests set `CATHEDRAL_FAST_RETRIES=1` (or any `CATHEDRAL_EVAL_MODE`
-    starting with `stub`) to keep ticks bounded - same 3-attempt policy
+    starting with `stub`) to keep ticks bounded — same 3-attempt policy
     but with zero sleep between attempts.
     """
     import os
@@ -164,16 +151,15 @@ class EvalOrchestrator:
         task_family_challenge_source: ChallengeSource | None = None,
         task_family_challenge_lock: ChallengeLock | None = None,
         task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
-        task_family_receipt_store: ChallengeReceiptStore | None = None,
         public_base_url: str | None = None,
     ) -> None:
         """Construct an orchestrator with either a single runner or a
         per-submission runner factory.
 
-        `polaris` (legacy) - one runner used for every submission. Kept
+        `polaris` (legacy) — one runner used for every submission. Kept
         for back-compat with existing callers and tests.
 
-        `runner_for` (preferred) - a callable `submission -> PolarisRunner`.
+        `runner_for` (preferred) — a callable `submission -> PolarisRunner`.
         Lets the orchestrator dispatch on the submission's
         `attestation_mode` so Tier A (polaris-hosted) goes to
         `PolarisRuntimeRunner`, BYO miners go to `BundleCardRunner`,
@@ -194,7 +180,6 @@ class EvalOrchestrator:
         self._task_family_challenge_source = task_family_challenge_source
         self._task_family_challenge_lock = task_family_challenge_lock
         self._task_family_fetch_token_store = task_family_fetch_token_store
-        self._task_family_receipt_store = task_family_receipt_store
         # Constructor wins; env is the fallback. An empty string is
         # treated as missing. See _announce_synthetic_boolean_problem.
         self._public_base_url = (
@@ -205,7 +190,7 @@ class EvalOrchestrator:
         # Per-submission cooldown for cadence-refresh rows that hit a
         # retryable or terminal failure. Cadence rows stay 'ranked'
         # through failures (so the leaderboard doesn't churn), and the
-        # cadence query uses MAX(eval_runs.ran_at) - which does NOT
+        # cadence query uses MAX(eval_runs.ran_at) — which does NOT
         # advance on a failure that never reached score_and_sign. Without
         # this cooldown, a permanently broken bundle would re-pick on
         # every loop tick, spam logs, and consume cadence slots. Process-
@@ -218,7 +203,7 @@ class EvalOrchestrator:
         """Back-compat: a few callers read `orch.polaris` directly. When
         a per-submission factory is configured this returns whatever the
         factory yields for an empty submission, which is fine for the
-        cases that use this - they're inspecting type, not running."""
+        cases that use this — they're inspecting type, not running."""
         if self._fixed_polaris is not None:
             return self._fixed_polaris
         assert self._runner_for is not None
@@ -239,7 +224,7 @@ class EvalOrchestrator:
         flag is set, upload it to Hippius + sign the manifest. Returns
         the PublishedArtifact for score_and_sign to consume, or None.
 
-        Failures here MUST NOT crash the eval - we log + return None so
+        Failures here MUST NOT crash the eval — we log + return None so
         the eval still scores under v1 wire shape. The whole point of
         the dual-publish window is that v2 publishing is best-effort
         during the transition; the canonical record is still the v1
@@ -250,7 +235,7 @@ class EvalOrchestrator:
         import os as _os
 
         if _os.environ.get("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD", "").lower() != "true":
-            # Flag's off - skip the Hippius round-trip entirely.
+            # Flag's off — skip the Hippius round-trip entirely.
             # Storage cost matters here: every eval would otherwise
             # upload an encrypted tar.gz on every cadence tick even
             # though we're not emitting v2 on the wire.
@@ -289,7 +274,7 @@ class EvalOrchestrator:
         # Capture the entry status so failure paths know whether this is
         # a first-time eval (queued) or a cadence refresh of a previously
         # ranked row. A cadence refresh that fails must leave the row as
-        # 'ranked' with its prior score intact - flipping to 'rejected'
+        # 'ranked' with its prior score intact — flipping to 'rejected'
         # would silently strip a working agent off the leaderboard.
         original_status = submission.get("status")
         is_cadence_refresh = original_status == "ranked"
@@ -347,7 +332,7 @@ class EvalOrchestrator:
             )
             return
 
-        # Extract to ephemeral dir, then immediately drop the path -
+        # Extract to ephemeral dir, then immediately drop the path —
         # Polaris will get the bundle bytes directly via the runner API
         # (we keep the extraction step here so adversarial-zip checks
         # still run). Wipe the dir afterwards regardless of outcome.
@@ -396,7 +381,7 @@ class EvalOrchestrator:
 
             if polaris_result is None:
                 # Persist a zero-score eval_run with errors so the public
-                # API surfaces the failure (CONTRACTS.md §6 step 3-4 - the
+                # API surfaces the failure (CONTRACTS.md §6 step 3-4 — the
                 # contract test asserts on either weighted_score=0 OR
                 # errors!=None). Status moves to 'rejected' to match the
                 # 'evaluating -> rejected' state machine arrow.
@@ -424,7 +409,7 @@ class EvalOrchestrator:
                 )
                 # First-eval rows that exhaust retries get rejected. A
                 # cadence refresh that exhausts retries leaves status as
-                # 'ranked' - score_and_sign above already folded the 0
+                # 'ranked' — score_and_sign above already folded the 0
                 # into the 30-day rolling avg, so the score itself
                 # signals degradation without stripping the row off the
                 # leaderboard.
@@ -466,7 +451,7 @@ class EvalOrchestrator:
                 registry=self.registry,
                 signer=self.signer,
                 polaris_attestation=attestation_dict,
-                # v2 additions - None for every runner except
+                # v2 additions — None for every runner except
                 # PolarisDeployRunner, which always populates them.
                 trace_json=polaris_result.trace,
                 polaris_manifest=polaris_result.manifest,
@@ -498,7 +483,7 @@ class EvalOrchestrator:
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
             # Drop the plaintext binding so GC can reclaim it on the next
-            # collector pass. Best-effort - Python doesn't guarantee
+            # collector pass. Best-effort — Python doesn't guarantee
             # zeroing, but losing the only reference is the closest we
             # get without ctypes-level memzero.
             plaintext = b""
@@ -675,56 +660,12 @@ class EvalOrchestrator:
                 continue
 
             prompt = build_task_family_prompt(problem)
-            receipt: ChallengeReceipt | None = None
-
-            async def _receipt_callback(
-                stdout: str,
-                stdout_received_at_iso: str,
-                *,
-                _family_id: str = family_id,
-                _problem: PublicProblem = problem,
-                _submission: dict[str, Any] = submission,
-                _miner_hotkey: str = miner_hotkey,
-            ) -> None:
-                nonlocal receipt
-                receipt = await self._record_task_family_receipt(
-                    family_id=_family_id,
-                    problem=_problem,
-                    submission=_submission,
-                    miner_hotkey=_miner_hotkey,
-                    stdout=stdout,
-                    received_at_iso=stdout_received_at_iso,
-                )
-
-            try:
-                hermes_run = await run_challenge(
-                    problem=problem,
-                    prompt=prompt,
-                    miner_hotkey=miner_hotkey,
-                    submission=submission,
-                    receipt_callback=_receipt_callback,
-                )
-            except Exception:
-                if receipt is not None:
-                    await self._expire_task_family_receipt(
-                        receipt=receipt,
-                        reason="runner_failed_after_receipt",
-                    )
-                raise
-            if receipt is None:
-                received_at = getattr(hermes_run, "stdout_received_at_iso", None)
-                receipt = await self._record_task_family_receipt(
-                    family_id=family_id,
-                    problem=problem,
-                    submission=submission,
-                    miner_hotkey=miner_hotkey,
-                    stdout=str(getattr(hermes_run, "stdout", "")),
-                    received_at_iso=(
-                        str(received_at)
-                        if isinstance(received_at, str) and received_at
-                        else _ms_iso(datetime.now(UTC))
-                    ),
-                )
+            hermes_run = await run_challenge(
+                problem=problem,
+                prompt=prompt,
+                miner_hotkey=miner_hotkey,
+                submission=submission,
+            )
             epoch_salt = f"epoch_{epoch}:{family_id}"
             signed = score_and_sign_task_family_stdout(
                 lane=lane,
@@ -757,25 +698,6 @@ class EvalOrchestrator:
                     out["manifest_url"] = published_artifact.manifest_url
                     out["manifest_hash"] = published_artifact.manifest_hash
                 return out
-
-            if (
-                family_id == SYNTHETIC_BOOLEAN_FAMILY_ID
-                and receipt is not None
-                and self._task_family_receipt_store is not None
-            ):
-                trace_json = await _build_trace_json()
-                await self._handle_synthetic_boolean_receipt_result(
-                    receipt=receipt,
-                    problem=problem,
-                    submission=submission,
-                    signed=signed,
-                    epoch=epoch,
-                    round_index=round_index,
-                    duration_ms=int(hermes_run.duration_ms),
-                    trace_json=trace_json,
-                    log=log,
-                )
-                continue
 
             if sat_lock_candidate:
                 assert challenge_lock is not None
@@ -873,314 +795,6 @@ class EvalOrchestrator:
                 family_id=family_id,
                 task_id_public=signed.row.get("task_id_public"),
                 weighted_score=signed.row.get("weighted_score"),
-            )
-
-    async def _record_task_family_receipt(
-        self,
-        *,
-        family_id: str,
-        problem: PublicProblem,
-        submission: dict[str, Any],
-        miner_hotkey: str,
-        stdout: str,
-        received_at_iso: str,
-    ) -> ChallengeReceipt | None:
-        if family_id != SYNTHETIC_BOOLEAN_FAMILY_ID or self._task_family_receipt_store is None:
-            return None
-        recorded_at_iso = _ms_iso(datetime.now(UTC))
-        await self._task_family_receipt_store.record_receipt(
-            family_id=family_id,
-            challenge_id=problem.task_id,
-            submission_id=str(submission["id"]),
-            miner_hotkey=miner_hotkey,
-            received_at_iso=received_at_iso,
-            answer_hash=hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
-            recorded_at_iso=recorded_at_iso,
-        )
-        return await self._task_family_receipt_store.update_status(
-            family_id=family_id,
-            challenge_id=problem.task_id,
-            submission_id=str(submission["id"]),
-            status=RECEIPT_STATUS_VERIFYING,
-            now_iso=recorded_at_iso,
-        )
-
-    async def _expire_task_family_receipt(
-        self,
-        *,
-        receipt: ChallengeReceipt,
-        reason: str,
-    ) -> None:
-        receipt_store = self._task_family_receipt_store
-        if receipt_store is None:
-            return
-        try:
-            await receipt_store.update_status(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-                submission_id=receipt.submission_id,
-                status=RECEIPT_STATUS_EXPIRED,
-                now_iso=_ms_iso(datetime.now(UTC)),
-                rejection_reason=reason,
-            )
-        except ChallengeReceiptError:
-            return
-
-    async def _handle_synthetic_boolean_receipt_result(
-        self,
-        *,
-        receipt: ChallengeReceipt,
-        problem: PublicProblem,
-        submission: dict[str, Any],
-        signed: Any,
-        epoch: int,
-        round_index: int,
-        duration_ms: int,
-        trace_json: dict[str, Any],
-        log: structlog.stdlib.BoundLogger,
-    ) -> None:
-        receipt_store = self._task_family_receipt_store
-        challenge_lock = self._task_family_challenge_lock
-        if receipt_store is None or challenge_lock is None:
-            return
-
-        is_valid = float(signed.score.weighted_score) >= 1.0
-        status = RECEIPT_STATUS_VALID if is_valid else RECEIPT_STATUS_INVALID
-        await self.db.execute("BEGIN IMMEDIATE")
-        try:
-            await receipt_store.update_status(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-                submission_id=receipt.submission_id,
-                status=status,
-                now_iso=str(signed.row["ran_at"]),
-                rejection_reason=(
-                    None if is_valid else str(signed.row.get("rejection_reason") or "")
-                ),
-                verifier_details_hash=str(signed.row["verifier_details_hash"]),
-                commit=False,
-            )
-            await receipt_store.attach_result(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-                submission_id=receipt.submission_id,
-                eval_run_id=str(signed.row["id"]),
-                signed_row=dict(signed.row),
-                trace_json=trace_json,
-                duration_ms=duration_ms,
-                epoch=epoch,
-                round_index=round_index,
-                now_iso=str(signed.row["ran_at"]),
-                commit=False,
-            )
-
-            if not is_valid:
-                await persist_task_family_result(
-                    self.db,
-                    submission_row=submission,
-                    problem=problem,
-                    signed=signed,
-                    epoch=epoch,
-                    round_index=round_index,
-                    duration_ms=duration_ms,
-                    trace_json=trace_json,
-                    feed_enabled=True,
-                    commit=False,
-                )
-
-            cutoff = datetime.now(UTC) - timedelta(seconds=problem.time_limit_seconds + 30)
-            await receipt_store.expire_unresolved_before(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-                cutoff_received_at_iso=_ms_iso(cutoff),
-                now_iso=str(signed.row["ran_at"]),
-                rejection_reason="receipt_timed_out",
-                commit=False,
-            )
-
-            selected = await receipt_store.select_winner(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-            )
-            locked = None
-            promoted = None
-            loser_recorded = False
-            if selected is not None and selected.signed_row is not None:
-                selected_submission = (
-                    submission
-                    if selected.submission_id == str(submission["id"])
-                    else await repository.get_agent_submission(self.db, selected.submission_id)
-                )
-                winner_record = None
-                if selected_submission is not None:
-                    locked = await challenge_lock.try_lock(
-                        family_id=selected.family_id,
-                        challenge_id=selected.challenge_id,
-                        miner_hotkey=selected.miner_hotkey,
-                        eval_run_id=str(selected.signed_row["id"]),
-                        weighted_score=float(selected.signed_row["weighted_score"]),
-                        won_at_iso=str(selected.signed_row["ran_at"]),
-                        commit=False,
-                    )
-                    winner_record = (
-                        locked
-                        if locked is not None
-                        else await challenge_lock.get_winner(
-                            family_id=selected.family_id,
-                            challenge_id=selected.challenge_id,
-                        )
-                    )
-                    if locked is not None:
-                        await persist_task_family_result_row(
-                            self.db,
-                            submission_row=selected_submission,
-                            task_family=problem.task_family,
-                            difficulty_tier=problem.difficulty_tier,
-                            time_limit_seconds=problem.time_limit_seconds,
-                            signed_row=selected.signed_row,
-                            epoch=int(selected.epoch if selected.epoch is not None else epoch),
-                            round_index=int(
-                                selected.round_index
-                                if selected.round_index is not None
-                                else round_index
-                            ),
-                            duration_ms=int(
-                                selected.duration_ms
-                                if selected.duration_ms is not None
-                                else duration_ms
-                            ),
-                            trace_json=selected.trace_json,
-                            feed_enabled=True,
-                            commit=False,
-                        )
-                        source = self._task_family_challenge_source
-                        if source is not None:
-                            promoted = (
-                                await source.mark_locked_and_promote_next(
-                                    family_id=selected.family_id,
-                                    challenge_id=selected.challenge_id,
-                                    now_iso=str(selected.signed_row["ran_at"]),
-                                    manage_transaction=False,
-                                )
-                            )
-                    if winner_record is not None:
-                        receipts = await receipt_store.list_for_challenge(
-                            family_id=receipt.family_id,
-                            challenge_id=receipt.challenge_id,
-                        )
-                        for candidate in receipts:
-                            if (
-                                candidate.status != RECEIPT_STATUS_VALID
-                                or candidate.signed_row is None
-                                or candidate.eval_run_id == winner_record.eval_run_id
-                            ):
-                                continue
-                            if locked is None and candidate.submission_id != receipt.submission_id:
-                                continue
-                            candidate_submission = (
-                                submission
-                                if candidate.submission_id == str(submission["id"])
-                                else await repository.get_agent_submission(
-                                    self.db, candidate.submission_id
-                                )
-                            )
-                            if candidate_submission is None:
-                                continue
-                            loser_row = resign_task_family_score(
-                                candidate.signed_row,
-                                signer=self.signer,
-                                weighted_score=0.0,
-                                score_parts={"binary_correct": 1.0, "lock_winner": 0.0},
-                                rejection_reason="challenge_already_locked",
-                            )
-                            await receipt_store.attach_result(
-                                family_id=candidate.family_id,
-                                challenge_id=candidate.challenge_id,
-                                submission_id=candidate.submission_id,
-                                eval_run_id=str(loser_row["id"]),
-                                signed_row=loser_row,
-                                trace_json=candidate.trace_json,
-                                duration_ms=int(
-                                    candidate.duration_ms
-                                    if candidate.duration_ms is not None
-                                    else duration_ms
-                                ),
-                                epoch=int(
-                                    candidate.epoch if candidate.epoch is not None else epoch
-                                ),
-                                round_index=int(
-                                    candidate.round_index
-                                    if candidate.round_index is not None
-                                    else round_index
-                                ),
-                                now_iso=str(loser_row["ran_at"]),
-                                commit=False,
-                            )
-                            await persist_task_family_result_row(
-                                self.db,
-                                submission_row=candidate_submission,
-                                task_family=problem.task_family,
-                                difficulty_tier=problem.difficulty_tier,
-                                time_limit_seconds=problem.time_limit_seconds,
-                                signed_row=loser_row,
-                                epoch=int(
-                                    candidate.epoch if candidate.epoch is not None else epoch
-                                ),
-                                round_index=int(
-                                    candidate.round_index
-                                    if candidate.round_index is not None
-                                    else round_index
-                                ),
-                                duration_ms=int(
-                                    candidate.duration_ms
-                                    if candidate.duration_ms is not None
-                                    else duration_ms
-                                ),
-                                trace_json=candidate.trace_json,
-                                feed_enabled=True,
-                                commit=False,
-                            )
-                            loser_recorded = True
-
-            await self.db.commit()
-        except Exception:
-            await self.db.rollback()
-            raise
-
-        if not is_valid:
-            log.info(
-                "task_family_receipt_rejected",
-                family_id=receipt.family_id,
-                challenge_id_public=signed.row.get("task_id_public"),
-                miner_hotkey=receipt.miner_hotkey,
-            )
-        elif loser_recorded:
-            log.info(
-                "task_family_receipt_loser_recorded",
-                family_id=receipt.family_id,
-                challenge_id_public=signed.row.get("task_id_public"),
-                miner_hotkey=receipt.miner_hotkey,
-            )
-        elif locked is None:
-            log.info(
-                "task_family_receipt_waiting",
-                family_id=receipt.family_id,
-                challenge_id_public=signed.row.get("task_id_public"),
-                miner_hotkey=receipt.miner_hotkey,
-            )
-        else:
-            log.info(
-                "task_family_challenge_winner_recorded",
-                family_id=receipt.family_id,
-                challenge_id_public=signed.row.get("task_id_public"),
-                miner_hotkey=locked.miner_hotkey,
-            )
-            log.info(
-                "task_family_challenge_locked",
-                family_id=receipt.family_id,
-                challenge_id_public=signed.row.get("task_id_public"),
-                miner_hotkey=locked.miner_hotkey,
-                promoted_challenge_id=(promoted.challenge_id if promoted else None),
             )
 
     async def _announce_synthetic_boolean_problem(
@@ -1327,7 +941,7 @@ class EvalOrchestrator:
         self._failure_counts[submission["id"]] += 1
         if self._failure_counts[submission["id"]] >= 3:
             # Cadence refresh exhausted: keep the row 'ranked' with its
-            # prior score - the cadence loop will pick it up again next
+            # prior score — the cadence loop will pick it up again next
             # window. First-eval exhausted: terminal rejection.
             if is_cadence_refresh:
                 self._arm_cadence_cooldown(submission["id"])
@@ -1346,7 +960,7 @@ class EvalOrchestrator:
         else:
             if is_cadence_refresh:
                 # Cadence rows are not in 'evaluating' (we never flipped
-                # them) - nothing to restore. Arm a cooldown so a row
+                # them) — nothing to restore. Arm a cooldown so a row
                 # whose underlying bundle is permanently broken doesn't
                 # re-pick on every tick (the cadence query uses
                 # MAX(eval_runs.ran_at), which a failed retryable does
@@ -1371,7 +985,7 @@ class EvalOrchestrator:
 
     def _arm_cadence_cooldown(self, submission_id: str) -> None:
         """Mark a cadence row as in-cooldown so the loop's batch picker
-        skips it for `_CADENCE_FAILURE_COOLDOWN`. Idempotent - repeated
+        skips it for `_CADENCE_FAILURE_COOLDOWN`. Idempotent — repeated
         failures just push the deadline forward."""
         self._cadence_cooldown_until[submission_id] = datetime.now(UTC) + _CADENCE_FAILURE_COOLDOWN
 
@@ -1399,7 +1013,7 @@ class EvalOrchestrator:
         """Terminal failure (e.g. decryption, structure, missing card_def).
 
         First-eval rows go to 'rejected' as before. Cadence refresh rows
-        stay 'ranked' - a previously verified bundle failing decryption
+        stay 'ranked' — a previously verified bundle failing decryption
         once should not strip the agent off the leaderboard. The cadence
         loop will pick it up again on the next tick, and if the failure
         is permanent the operator will see the repeated log lines.
@@ -1445,7 +1059,6 @@ async def run_eval_loop(
     task_family_challenge_source: ChallengeSource | None = None,
     task_family_challenge_lock: ChallengeLock | None = None,
     task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
-    task_family_receipt_store: ChallengeReceiptStore | None = None,
     public_base_url: str | None = None,
 ) -> None:
     """Long-running scheduler: picks queued submissions and evals them.
@@ -1470,13 +1083,12 @@ async def run_eval_loop(
         task_family_challenge_source=task_family_challenge_source,
         task_family_challenge_lock=task_family_challenge_lock,
         task_family_fetch_token_store=task_family_fetch_token_store,
-        task_family_receipt_store=task_family_receipt_store,
         public_base_url=public_base_url,
     )
     sem = asyncio.Semaphore(max_concurrent)
 
     while not stop.is_set():
-        # v1.1.0 PR 5 - cadence scheduler. Two queue sources:
+        # v1.1.0 PR 5 — cadence scheduler. Two queue sources:
         #   1. status='queued' rows (first eval after submit)
         #   2. status='ranked' rows whose card cadence window expired
         # Merged into one batch per tick, capped at max_concurrent.
@@ -1558,7 +1170,7 @@ async def run_eval_loop(
                     # the existing 3-attempt retry policy so the row
                     # either re-queues or eventually rejects rather than
                     # sitting in 'evaluating' forever. Cadence rows
-                    # stayed 'ranked' the whole time - nothing to do.
+                    # stayed 'ranked' the whole time — nothing to do.
                     if s.get("status") == "queued":
                         await orchestrator._on_retryable_failure(
                             s, logger.bind(submission_id=s["id"]), f"evaluate_one crash: {e}"
@@ -1607,7 +1219,7 @@ async def _evaluating_submissions(conn: Any, limit: int = 10) -> list[dict[str, 
 def _resolve_polaris_runner_for_mode(mode: str) -> PolarisRunner:
     """Build a runner for an explicit attestation mode.
 
-    Mirrors `_resolve_polaris_runner_from_env` but skips the env lookup -
+    Mirrors `_resolve_polaris_runner_from_env` but skips the env lookup —
     the per-submission dispatch already knows which tier this row is.
     """
     import os as _os
@@ -1634,12 +1246,12 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
       stub-fail-polaris    -> FailingStubPolarisRunner
       stub-bad-card        -> MalformedStubPolarisRunner
       bundle               -> BundleCardRunner (BYO-compute path)
-      polaris              -> PolarisRuntimeRunner (legacy Tier A -
+      polaris              -> PolarisRuntimeRunner (legacy Tier A —
                               cathedral-runtime shim; kept as backup
                               during v2 migration per POLARIS_NATIVE_V2.md)
-      polaris-deploy       -> PolarisDeployRunner (v2 paid - real Hermes
+      polaris-deploy       -> PolarisDeployRunner (v2 paid — real Hermes
                               via Polaris's native deploy pipeline)
-      ssh-probe            -> SshProbeRunner (v2 free - Cathedral SSHs
+      ssh-probe            -> SshProbeRunner (v2 free — Cathedral SSHs
                               into the miner's box, no Polaris attestation,
                               no verified-runtime multiplier)
       http-polaris (legacy)-> HttpPolarisRunner
@@ -1674,7 +1286,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
     if mode == "bundle":
         return BundleCardRunner()
     if mode == "ssh-probe":
-        # Tier B free tier - Cathedral SSHs into the miner's box.
+        # Tier B free tier — Cathedral SSHs into the miner's box.
         #
         # v1 (legacy, default): SshProbeRunner. Assumes the miner runs
         # an HTTP server exposing /healthz + /chat. Built on the wrong
@@ -1685,7 +1297,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         # `hermes -z`). Snapshot-then-eval pattern per docs/HERMES.md
         # § L.1. Returns a TraceBundle with the full Hermes forensic
         # trail (state.db slice, sessions JSON, request dumps,
-        # memories, skills, logs) - the data moat.
+        # memories, skills, logs) — the data moat.
         #
         # Default is v1 while we smoke-test v2 on the rented Polaris
         # box. Flip via env var when ready to cut over.
@@ -1725,7 +1337,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
                 )
             )
 
-        # v1 (default - legacy HTTP-shaped path)
+        # v1 (default — legacy HTTP-shaped path)
         from cathedral.eval.ssh_probe_runner import (
             SshProbeRunner,
             SshProbeRunnerConfig,
@@ -1740,7 +1352,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
             )
         )
     if mode == "polaris-deploy":
-        # v2 - Polaris-native Hermes deploy. Skips the cathedral-runtime
+        # v2 — Polaris-native Hermes deploy. Skips the cathedral-runtime
         # image entirely; uses the standard marketplace-eval pipeline
         # against `ghcr.io/bigailabs/polaris-hermes`. Requires the
         # publisher app for the Hippius client (presigned URLs).
@@ -1786,7 +1398,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
             )
         )
     if mode in {"polaris", "polaris-runtime"}:
-        # Tier A - Polaris-hosted miners. Polaris fetches the bundle via
+        # Tier A — Polaris-hosted miners. Polaris fetches the bundle via
         # presigned URL, runs Cathedral's runtime image, signs an
         # attestation over the result.
         from cathedral.publisher.app import latest_ctx
@@ -1847,7 +1459,7 @@ async def _run_once_async() -> int:
     # a miner opted into Tier A (polaris) or BYO (bundle). The env-level
     # CATHEDRAL_EVAL_MODE remains the override for stub/legacy paths and
     # the fallback whenever attestation_mode is unset or its required
-    # env vars aren't configured - that way tests and dev environments
+    # env vars aren't configured — that way tests and dev environments
     # that pin a single mode globally keep working without seeding extra
     # config per submission.
     import os as _os
@@ -1868,7 +1480,7 @@ async def _run_once_async() -> int:
             )
             return r
         if mode == "polaris-deploy" and has_polaris_key:
-            # v2 - opted into the Polaris-native Hermes flow.
+            # v2 — opted into the Polaris-native Hermes flow.
             r = _resolve_polaris_runner_for_mode("polaris-deploy")
             logger.info(
                 "runner_dispatch",
@@ -1902,7 +1514,7 @@ async def _run_once_async() -> int:
             )
             return r
         if mode == "ssh-probe":
-            # v2 free tier - Cathedral SSHs into the miner's box. No
+            # v2 free tier — Cathedral SSHs into the miner's box. No
             # Polaris attestation chain (manifest will be None on the
             # PolarisRunResult), so the verified-runtime 1.10x multiplier
             # is not applied at scoring.
@@ -1937,7 +1549,6 @@ async def _run_once_async() -> int:
         task_family_challenge_source=SqliteChallengeSource(ctx.db),
         task_family_challenge_lock=SqliteChallengeLock(ctx.db),
         task_family_fetch_token_store=SqliteFetchTokenStore(ctx.db),
-        task_family_receipt_store=SqliteChallengeReceiptStore(ctx.db),
         public_base_url=_os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
     )
 
@@ -1973,7 +1584,7 @@ def run_once() -> int:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Inside an async context already - schedule and wait.
+            # Inside an async context already — schedule and wait.
             return asyncio.run_coroutine_threadsafe(_run_once_async(), loop).result(timeout=60)
     except RuntimeError:
         pass

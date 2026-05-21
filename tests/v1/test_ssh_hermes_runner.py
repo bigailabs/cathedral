@@ -998,3 +998,65 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
 # because importing cathedral.eval.orchestrator triggers the publisher's
 # import chain which conflicts with the direct-module-load pattern this
 # file uses for the runner-under-test. Don't add dispatch tests here.
+
+
+# --------------------------------------------------------------------------
+# CNF URL token redaction: cardinal sin protection for log surfaces
+# --------------------------------------------------------------------------
+#
+# The SAT lane's CNF URL carries an unguessable token in ``?t=<...>``.
+# That token must never appear in any log line or exception message the
+# runner emits. ``_redact_query_tokens`` is the single chokepoint used
+# by ``_run_remote``'s two error paths (timeout + non-zero exit).
+
+_redact_query_tokens = _module._redact_query_tokens
+
+
+def test_redact_query_tokens_replaces_token_value() -> None:
+    raw = "hermes chat -Q -q 'fetch https://api.cathedral.test/cnf?t=SECRET123 now'"
+    redacted = _redact_query_tokens(raw)
+    assert "SECRET123" not in redacted
+    assert "?t=REDACTED" in redacted
+
+
+def test_redact_query_tokens_handles_no_token() -> None:
+    # A cmd with no token is returned untouched. The helper is cheap
+    # enough to call unconditionally on every error path.
+    raw = "hermes --version"
+    assert _redact_query_tokens(raw) == raw
+
+
+def test_redact_query_tokens_handles_truncation_before_marker() -> None:
+    # If ``cmd[:120]`` cut before the ``?t=`` marker ever appeared, the
+    # input is returned unchanged (the regex needs the literal marker).
+    raw = "hermes chat -Q -q 'Capability: synthetic_boolean_v1 fetch URL below'"
+    assert _redact_query_tokens(raw) == raw
+
+
+def test_redact_query_tokens_redacts_partial_token_after_marker() -> None:
+    # If the truncation lands in the middle of the token value, the
+    # partial value is still redacted -- the regex eats up to the next
+    # whitespace / quote / ampersand / double-quote boundary.
+    raw = "fetch https://api.cathedral.test/cnf?t=PARTIAL_TOKEN_VALUE_TRUNC"
+    redacted = _redact_query_tokens(raw)
+    assert "PARTIAL_TOKEN_VALUE_TRUNC" not in redacted
+    assert "?t=REDACTED" in redacted
+
+
+def test_redact_query_tokens_redacts_multiple_occurrences() -> None:
+    raw = "first ?t=AAAAAAAA second ?t=BBBBBBBB"
+    redacted = _redact_query_tokens(raw)
+    assert "AAAAAAAA" not in redacted
+    assert "BBBBBBBB" not in redacted
+    assert redacted.count("?t=REDACTED") == 2
+
+
+def test_redact_query_tokens_stops_at_ampersand_and_quote() -> None:
+    # The redaction must not eat past query separators or shell quoting
+    # boundaries, otherwise unrelated content (other query params, the
+    # closing shell quote) would also disappear from logs.
+    raw = "url='https://x/cnf?t=ABC123&other=ok'"
+    redacted = _redact_query_tokens(raw)
+    assert "ABC123" not in redacted
+    assert "&other=ok" in redacted
+    assert redacted.endswith("'")

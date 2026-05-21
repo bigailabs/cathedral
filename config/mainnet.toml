@@ -50,8 +50,18 @@ public_key_env = "CATHEDRAL_PUBLIC_KEY_HEX"
 pull_interval_secs = 30.0
 api_token_env = "CATHEDRAL_PUBLISHER_TOKEN"
 
+[remote_weight_source]
+# Disabled by default. Validators keep local score blending unless an operator
+# explicitly opts into relaying Cathedral's signed weight vector.
+enabled = false
+url = "https://api.cathedral.computer"
+key_id = "cathedral-weight-policy"
+public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
+poll_interval_secs = 60.0
+request_timeout_secs = 10.0
+
 [storage]
-database_path = "data/validator-mainnet.db"
+database_path = "/var/lib/cathedral/validator-mainnet.db"
 
 [worker]
 poll_interval_secs = 5.0

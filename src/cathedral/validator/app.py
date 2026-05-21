@@ -41,39 +41,32 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
         # Prevents a freshly-upgraded validator from publishing a vector
         # computed off a half-hydrated 7-day window. Set once, never reset.
         initial_backfill_complete = asyncio.Event()
-        remote_fetch_task: asyncio.Task[None] | None = None
-        if ctx.settings.weight_source.mode == "remote":
-            if ctx.remote_weight_public_key is None:
-                logger.error(
-                    "remote_weight_source_enabled_but_key_missing",
-                    env=ctx.settings.weight_source.cathedral_policy_public_key_env,
-                )
-                raise RuntimeError(
-                    "weight_source.mode=remote requires a pinned Cathedral policy key"
-                )
-            if (
-                ctx.settings.weight_source.refuse_after_stale_minutes
-                < ctx.settings.weight_source.fallback_after_stale_minutes
-            ):
-                raise RuntimeError(
-                    "weight_source.refuse_after_stale_minutes must be greater than or "
-                    "equal to fallback_after_stale_minutes"
-                )
-            remote_key = ctx.remote_weight_public_key
+        if ctx.settings.remote_weight_source.enabled and ctx.remote_weight_public_key is None:
+            logger.error(
+                "remote_weight_source_enabled_but_key_missing",
+                env=ctx.settings.remote_weight_source.public_key_env,
+            )
+            raise RuntimeError(
+                "remote_weight_source.enabled requires "
+                f"{ctx.settings.remote_weight_source.public_key_env}; refusing local fallback"
+            )
+
+        if ctx.settings.remote_weight_source.enabled:
             remote_fetch_task = asyncio.create_task(
                 remote_weight_loop.run_remote_weight_loop(
                     conn,
                     ctx.health,
-                    publisher_weights_url=ctx.settings.weight_source.publisher_weights_url,
-                    public_key=remote_key,
-                    expected_key_id=ctx.settings.weight_source.cathedral_policy_key_id,
+                    publisher_url=ctx.settings.remote_weight_source.url,
+                    public_key=ctx.remote_weight_public_key,
+                    expected_key_id=ctx.settings.remote_weight_source.key_id,
                     network=ctx.settings.network.name,
                     netuid=ctx.settings.network.netuid,
-                    poll_interval_secs=ctx.settings.weight_source.poll_interval_secs,
-                    request_timeout_secs=ctx.settings.weight_source.request_timeout_secs,
+                    poll_interval_secs=ctx.settings.remote_weight_source.poll_interval_secs,
+                    request_timeout_secs=ctx.settings.remote_weight_source.request_timeout_secs,
                     stop=stop,
                 )
             )
+            initial_backfill_complete.set()
             weight_task = asyncio.create_task(
                 weight_loop.run_weight_loop(
                     conn,
@@ -87,21 +80,16 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                         conn,
                         ctx.chain,
                         ctx.health,
-                        public_key=remote_key,
-                        expected_key_id=ctx.settings.weight_source.cathedral_policy_key_id,
+                        public_key=ctx.remote_weight_public_key,
+                        expected_key_id=ctx.settings.remote_weight_source.key_id,
                         network=ctx.settings.network.name,
                         netuid=ctx.settings.network.netuid,
                         disabled=ctx.settings.weights.disabled,
-                        fallback_after_stale_minutes=(
-                            ctx.settings.weight_source.fallback_after_stale_minutes
-                        ),
-                        refuse_after_stale_minutes=(
-                            ctx.settings.weight_source.refuse_after_stale_minutes
-                        ),
                     ),
                 )
             )
         else:
+            remote_fetch_task = None
             weight_task = asyncio.create_task(
                 weight_loop.run_weight_loop(
                     conn,
@@ -117,6 +105,7 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                     initial_backfill_complete=initial_backfill_complete,
                 )
             )
+
         tasks = [
             asyncio.create_task(
                 worker.run_worker(
@@ -161,7 +150,7 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                 "pull_loop_disabled",
                 reason="cathedral_public_key not configured",
             )
-            # No pull loop wired — unblock weight_loop immediately so it
+            # No pull loop wired - unblock weight_loop immediately so it
             # doesn't hang on the backfill signal that will never fire.
             initial_backfill_complete.set()
         try:
@@ -194,7 +183,7 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
     async def get_card(card_id: str) -> dict:
         """Return the highest-scoring verified version of `card_id`.
 
-        Public read — cards are public information. Used by
+        Public read - cards are public information. Used by
         cathedral.computer to display the canonical view of each card.
         404 if no miner has produced a verified version yet.
         """
@@ -215,15 +204,14 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
 
 
 def from_settings(settings_path: str) -> FastAPI:
-    """Production builder — used by `cathedral-validator serve`."""
+    """Production builder - used by `cathedral-validator serve`."""
     from cathedral.config import (  # local import for CLI speed
         ValidatorSettings,
-        apply_weight_source_env_overrides,
         resolve_validator_config_path,
     )
 
     settings_path = resolve_validator_config_path(settings_path)
-    settings = apply_weight_source_env_overrides(ValidatorSettings.from_toml(settings_path))
+    settings = ValidatorSettings.from_toml(settings_path)
     bearer = os.environ.get(settings.http.bearer_token_env)
     if not bearer:
         raise RuntimeError(f"missing bearer token: env {settings.http.bearer_token_env} not set")
@@ -247,7 +235,7 @@ def from_settings(settings_path: str) -> FastAPI:
         logger.warning(
             "cathedral_public_key_missing",
             env=settings.publisher.public_key_env,
-            hint="pull_loop will be disabled — set the env var to enable",
+            hint="pull_loop will be disabled - set the env var to enable",
         )
 
     publisher_api_token: str | None = None
@@ -255,21 +243,25 @@ def from_settings(settings_path: str) -> FastAPI:
         publisher_api_token = os.environ.get(settings.publisher.api_token_env)
 
     remote_weight_pubkey: Ed25519PublicKey | None = None
-    if settings.weight_source.mode == "remote":
-        remote_key_hex = (
-            settings.weight_source.cathedral_policy_public_key_hex
-            or os.environ.get(settings.weight_source.cathedral_policy_public_key_env, "")
-        ).strip()
-        if not remote_key_hex:
-            raise RuntimeError(
-                "weight_source.mode=remote requires "
-                f"{settings.weight_source.cathedral_policy_public_key_env} or "
-                "weight_source.cathedral_policy_public_key_hex"
+    if settings.remote_weight_source.enabled:
+        rw_hex = os.environ.get(settings.remote_weight_source.public_key_env, "").strip()
+        if rw_hex:
+            try:
+                remote_weight_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(rw_hex))
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"{settings.remote_weight_source.public_key_env} must be "
+                    "a 32-byte Ed25519 public-key hex"
+                ) from exc
+        else:
+            logger.error(
+                "remote_weight_public_key_missing",
+                env=settings.remote_weight_source.public_key_env,
             )
-        try:
-            remote_weight_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(remote_key_hex))
-        except ValueError as exc:
-            raise RuntimeError("remote weight policy public key must be 32-byte hex") from exc
+            raise RuntimeError(
+                "remote_weight_source.enabled requires "
+                f"{settings.remote_weight_source.public_key_env}; refusing local fallback"
+            )
 
     ctx = RuntimeContext(
         settings=settings,

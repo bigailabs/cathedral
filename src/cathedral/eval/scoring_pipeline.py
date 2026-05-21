@@ -38,7 +38,8 @@ from cathedral.eval.scoring import (
     FIRST_MOVER_WINDOW_DAYS,
     first_mover_multiplier,
 )
-from cathedral.publisher import repository
+from cathedral.eval.v2_payload import _SIGNED_KEYS_BY_VERSION  # noqa: F401
+from cathedral.eval.v2_payload import card_excerpt as _card_excerpt
 from cathedral.types import Card
 from cathedral.v1_types import canonical_json
 
@@ -54,12 +55,6 @@ _FIRST_MOVER_PENALTY_MULTIPLIER = FIRST_MOVER_PENALTY_MULTIPLIER
 # kept in source so re-entry is a single env flip. DO NOT REMOVE — dead
 # code by design until Tier A returns as a paid tier.
 _TIER_A_MULTIPLIER = 1.10
-
-
-# Re-export from v2_payload (no-publisher-cycle module) so existing
-# imports work; the keyset is canonical there. Cross-branch contract
-# with validator-compat's _SIGNED_KEYS_BY_VERSION (validator/pull_loop.py).
-from cathedral.eval.v2_payload import _SIGNED_KEYS_BY_VERSION  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -102,13 +97,6 @@ class EvalSigner:
     def sign(self, eval_run_dict: dict[str, Any]) -> str:
         payload = canonical_json(eval_run_dict)
         return base64.b64encode(self._sk.sign(payload)).decode("ascii")
-
-
-# Back-compat alias — _card_excerpt was inline here in PR 4 v1; moved
-# to v2_payload.card_excerpt in v2 so cross-branch tests can import
-# without the publisher cycle. Keep the alias for any existing internal
-# callers; new code should import from cathedral.eval.v2_payload.
-from cathedral.eval.v2_payload import card_excerpt as _card_excerpt  # noqa: F401
 
 
 def card_hash(card: Card | dict[str, Any]) -> str:
@@ -390,6 +378,8 @@ async def score_and_sign(
     # Single transaction for eval_runs INSERT + agent_submissions score/rank
     # UPDATE (cathedralai/cathedral#69). A crash between the two former
     # commits left a signed eval_run with a stale submission row.
+    from cathedral.publisher import repository
+
     await repository.insert_eval_run(
         conn,
         id=eval_run_id,
@@ -492,6 +482,8 @@ async def _first_mover_multiplier(
     fingerprint = submission["metadata_fingerprint"]
     card_id = submission["card_id"]
     submission_id = submission["id"]
+
+    from cathedral.publisher import repository
 
     first = await repository.first_mover_for_fingerprint(conn, card_id, fingerprint)
     is_first = first is None or str(first["id"]) == str(submission_id)

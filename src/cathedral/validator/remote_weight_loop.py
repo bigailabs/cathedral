@@ -1,9 +1,25 @@
-"""Remote signed-weight vector polling and apply helpers."""
+"""Remote signed-weight loop (issue #155).
+
+Validators that opt in run a remote fetch loop plus the normal
+``run_weight_loop`` cadence. The fetch loop verifies and caches signed
+vectors. The weight loop decides when a cached vector may reach
+``chain.set_weights``.
+
+What the loop does each tick:
+
+1. Fetch ``GET /v1/validator/weights/next`` from the configured
+   publisher URL.
+2. Verify Ed25519 signature against the pinned ``key_id`` + public key.
+3. Run structural invariants (network, netuid, expires_at, finite +
+   nonnegative weights, signed burn policy).
+4. Reject rollbacks against the durable ``last_accepted_policy_version``.
+5. Persist the accepted vector so the normal weight loop can apply it
+   on its own chain cadence.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
 
 import aiosqlite
@@ -12,12 +28,12 @@ import structlog
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
-from cathedral.chain import Chain, normalize
+from cathedral.chain import Chain
 from cathedral.chain.client import WeightStatus
-from cathedral.policy.schemas import (
+from cathedral.chain.weights import apply_burn, normalize
+from cathedral.policy.signing import (
     SignedWeightVector,
     VectorVerificationError,
-    parse_iso_utc,
     verify_vector,
 )
 from cathedral.validator import remote_state
@@ -25,47 +41,45 @@ from cathedral.validator.health import Health
 
 logger = structlog.get_logger(__name__)
 
+
 WEIGHTS_NEXT_PATH = "/v1/validator/weights/next"
 
 
 class RemoteWeightFetchError(Exception):
-    """The publisher did not return a usable signed vector."""
+    """Could not fetch a usable vector from the publisher this tick."""
 
 
 async def fetch_signed_vector(
     client: httpx.AsyncClient,
     *,
-    publisher_weights_url: str,
+    publisher_url: str,
 ) -> SignedWeightVector | None:
+    """Fetch and parse the next signed weight vector from the publisher.
+
+    Returns ``None`` for HTTP 503 (publisher has no vector yet - this is
+    a normal "starting up" state, not an error). Raises
+    ``RemoteWeightFetchError`` for any other non-2xx, network error, or
+    JSON-decode / schema failure.
+    """
+    url = publisher_url.rstrip("/") + WEIGHTS_NEXT_PATH
     try:
-        resp = await client.get(publisher_weights_url)
-    except httpx.HTTPError as exc:
-        raise RemoteWeightFetchError(f"network error fetching remote vector: {exc}") from exc
+        resp = await client.get(url)
+    except httpx.HTTPError as e:
+        raise RemoteWeightFetchError(f"network error fetching {url}: {e}") from e
     if resp.status_code == 503:
         return None
     if resp.status_code != 200:
-        raise RemoteWeightFetchError(f"publisher returned {resp.status_code}: {resp.text[:200]!r}")
+        raise RemoteWeightFetchError(
+            f"publisher returned {resp.status_code} for {url}: {resp.text[:200]!r}"
+        )
     try:
-        body = _loads_no_duplicate_keys(resp.text)
+        body = resp.json()
+    except ValueError as e:
+        raise RemoteWeightFetchError(f"publisher response is not JSON: {e}") from e
+    try:
         return SignedWeightVector.model_validate(body)
-    except (ValueError, ValidationError) as exc:
-        raise RemoteWeightFetchError(f"publisher vector schema invalid: {exc}") from exc
-
-
-def map_weights_to_uids(
-    vector: SignedWeightVector,
-    *,
-    uid_by_hotkey: dict[str, int],
-) -> tuple[list[tuple[int, float]], list[str]]:
-    raw: list[tuple[int, float]] = []
-    dropped: list[str] = []
-    for hotkey, weight in vector.weights_by_hotkey.items():
-        uid = uid_by_hotkey.get(hotkey)
-        if uid is None:
-            dropped.append(hotkey)
-            continue
-        raw.append((uid, weight))
-    return raw, dropped
+    except ValidationError as e:
+        raise RemoteWeightFetchError(f"publisher response failed schema validation: {e}") from e
 
 
 def map_and_renormalize(
@@ -73,15 +87,44 @@ def map_and_renormalize(
     *,
     uid_by_hotkey: dict[str, int],
 ) -> tuple[list[tuple[int, float]], list[str]]:
+    """Map signed (hotkey, weight) entries onto live uids and renormalize.
+
+    Hotkeys missing from the metagraph are dropped - the publisher does
+    not have a perfect view of which hotkeys are currently registered,
+    so the validator filters locally. The dropped hotkeys are returned
+    as the second tuple member for log observability.
+
+    Returns ``(weight_pairs, dropped_hotkeys)``. ``weight_pairs`` is the
+    output of ``cathedral.chain.weights.normalize`` against the mapped
+    entries; if every entry was dropped or weights summed to zero the
+    list is empty and the caller MUST NOT call set_weights.
+    """
     raw, dropped = map_weights_to_uids(vector, uid_by_hotkey=uid_by_hotkey)
     return normalize(raw), dropped
+
+
+def map_weights_to_uids(
+    vector: SignedWeightVector,
+    *,
+    uid_by_hotkey: dict[str, int],
+) -> tuple[list[tuple[int, float]], list[str]]:
+    """Map signed (hotkey, weight) entries onto live uids without normalizing."""
+    raw: list[tuple[int, float]] = []
+    dropped: list[str] = []
+    for entry in vector.weights:
+        uid = uid_by_hotkey.get(entry.miner_hotkey)
+        if uid is None:
+            dropped.append(entry.miner_hotkey)
+            continue
+        raw.append((uid, entry.weight))
+    return raw, dropped
 
 
 async def run_remote_weight_loop(
     conn: aiosqlite.Connection,
     health: Health,
     *,
-    publisher_weights_url: str,
+    publisher_url: str,
     public_key: Ed25519PublicKey,
     expected_key_id: str,
     network: str,
@@ -91,19 +134,22 @@ async def run_remote_weight_loop(
     stop: asyncio.Event | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> None:
+    """Fetch, verify, and cache remote vectors without setting weights."""
     stop = stop or asyncio.Event()
     await remote_state.ensure_schema(conn)
+
     close_client = False
     if http_client is None:
         http_client = httpx.AsyncClient(timeout=request_timeout_secs)
         close_client = True
+
     try:
         while not stop.is_set():
-            await poll_once(
+            await _run_one_poll(
                 conn,
                 health,
                 http_client=http_client,
-                publisher_weights_url=publisher_weights_url,
+                publisher_url=publisher_url,
                 public_key=public_key,
                 expected_key_id=expected_key_id,
                 network=network,
@@ -118,32 +164,38 @@ async def run_remote_weight_loop(
             await http_client.aclose()
 
 
-async def poll_once(
+async def _run_one_poll(
     conn: aiosqlite.Connection,
     health: Health,
     *,
     http_client: httpx.AsyncClient,
-    publisher_weights_url: str,
+    publisher_url: str,
     public_key: Ed25519PublicKey,
     expected_key_id: str,
     network: str,
     netuid: int,
 ) -> None:
+    """Fetch one remote vector and cache it if signature and policy pass."""
     try:
-        vector = await fetch_signed_vector(http_client, publisher_weights_url=publisher_weights_url)
-    except RemoteWeightFetchError as exc:
-        logger.warning("remote_weight_fetch_error", error=str(exc))
+        vector = await fetch_signed_vector(http_client, publisher_url=publisher_url)
+    except RemoteWeightFetchError as e:
+        logger.warning("remote_weight_fetch_error", error=str(e))
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
         return
 
     state = await remote_state.load_state(conn)
+
     if vector is None:
-        if state.cached_vector is None:
-            logger.warning("remote_weight_no_vector_yet")
+        # Publisher has no vector yet. Refuse to set_weights and surface
+        # the state via health so an operator notices. last-known-good
+        # semantics: if we previously accepted any vector we keep that
+        # state untouched; we just do not relay anything new this tick.
+        if state.last_accepted_vector_id is None:
+            logger.info("remote_weight_no_vector_yet", publisher=publisher_url)
             await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
         else:
             logger.info(
-                "remote_weight_publisher_quiet",
+                "remote_weight_publisher_quiet_keeping_last_known_good",
                 last_accepted_vector_id=state.last_accepted_vector_id,
                 last_accepted_policy_version=state.last_accepted_policy_version,
             )
@@ -151,11 +203,23 @@ async def poll_once(
 
     try:
         verify_vector(vector, public_key=public_key, expected_key_id=expected_key_id)
-        vector.invariant_check(network=network, netuid=netuid, require_unexpired=True)
-    except (VectorVerificationError, ValueError) as exc:
+    except VectorVerificationError as e:
         logger.warning(
-            "remote_weight_vector_rejected",
-            error=str(exc),
+            "remote_weight_signature_invalid",
+            error=str(e),
+            vector_id=vector.vector_id,
+            key_id=vector.key_id,
+        )
+        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
+        return
+
+    now_iso = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    try:
+        vector.invariant_check(network=network, netuid=netuid, now_iso=now_iso)
+    except ValueError as e:
+        logger.warning(
+            "remote_weight_invariant_rejected",
+            error=str(e),
             vector_id=vector.vector_id,
             policy_version=vector.policy_version,
         )
@@ -169,9 +233,9 @@ async def poll_once(
     ):
         logger.warning(
             "remote_weight_replay_or_rollback_rejected",
-            vector_id=vector.vector_id,
-            policy_version=vector.policy_version,
+            vector_policy_version=vector.policy_version,
             last_accepted_policy_version=state.last_accepted_policy_version,
+            vector_id=vector.vector_id,
             last_accepted_vector_id=state.last_accepted_vector_id,
         )
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
@@ -183,14 +247,14 @@ async def poll_once(
         vector_id=vector.vector_id,
         vector_payload=vector.to_payload(),
         sidecar={
-            "issued_at": vector.issued_at,
+            "generated_at": vector.generated_at,
             "expires_at": vector.expires_at,
             "key_id": vector.key_id,
+            "policy_reason": vector.policy_reason,
+            "burn_snapshot": vector.burn_snapshot.model_dump(mode="json"),
             "policy_hash": vector.policy_hash,
-            "metagraph_block": vector.metagraph_block,
-            "burn_hotkey_prefix": vector.burn_hotkey[:8],
-            "burn_uid_snapshot": vector.burn_uid_snapshot,
-            "weight_hotkeys": len(vector.weights_by_hotkey),
+            "policy_metadata": vector.policy_metadata,
+            "weight_entries": len(vector.weights),
         },
     )
     logger.info(
@@ -199,112 +263,6 @@ async def poll_once(
         policy_version=vector.policy_version,
         expires_at=vector.expires_at,
     )
-
-
-async def apply_cached_remote_vector_once(
-    conn: aiosqlite.Connection,
-    chain: Chain,
-    health: Health,
-    *,
-    public_key: Ed25519PublicKey,
-    expected_key_id: str,
-    network: str,
-    netuid: int,
-    disabled: bool,
-    fallback_after_stale_minutes: float,
-    refuse_after_stale_minutes: float,
-    now: datetime | None = None,
-) -> bool:
-    state = await remote_state.load_state(conn)
-    if state.cached_vector is None:
-        logger.warning("remote_weight_no_cached_vector")
-        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return False
-
-    now = (now or datetime.now(UTC)).astimezone(UTC)
-    try:
-        vector = SignedWeightVector.model_validate(state.cached_vector)
-        verify_vector(vector, public_key=public_key, expected_key_id=expected_key_id)
-        vector.invariant_check(
-            network=network,
-            netuid=netuid,
-            now=now,
-            require_unexpired=False,
-        )
-    except (ValidationError, VectorVerificationError, ValueError) as exc:
-        logger.warning("remote_weight_cached_vector_rejected", error=str(exc))
-        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return True
-
-    stale = _stale_state(
-        vector,
-        now=now,
-        fallback_after_stale_minutes=fallback_after_stale_minutes,
-        refuse_after_stale_minutes=refuse_after_stale_minutes,
-    )
-    if stale == "refuse":
-        logger.warning(
-            "remote_weight_cached_vector_refused_stale",
-            vector_id=vector.vector_id,
-            expires_at=vector.expires_at,
-        )
-        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return True
-    if stale == "fallback":
-        logger.warning(
-            "remote_weight_using_stale_fallback",
-            vector_id=vector.vector_id,
-            expires_at=vector.expires_at,
-        )
-
-    metagraph = await chain.metagraph()
-    registered = await chain.is_registered()
-    await health.update(current_block=metagraph.block, registered=registered)
-    await health.heartbeat("last_metagraph_at")
-
-    normalized, dropped = map_and_renormalize(vector, uid_by_hotkey=metagraph.hotkey_to_uid())
-    burn_hotkey_mapped = vector.burn_hotkey not in dropped
-    logger.info(
-        "remote_weight_mapped",
-        vector_id=vector.vector_id,
-        policy_version=vector.policy_version,
-        signed_hotkeys=len(vector.weights_by_hotkey),
-        mapped_uids=len(normalized),
-        dropped_hotkeys=len(dropped),
-        dropped_sample=[hotkey[:8] for hotkey in dropped[:5]],
-        burn_hotkey_mapped=burn_hotkey_mapped,
-    )
-    if not burn_hotkey_mapped:
-        logger.warning(
-            "remote_weight_burn_hotkey_unmapped",
-            vector_id=vector.vector_id,
-            burn_hotkey_prefix=vector.burn_hotkey[:8],
-        )
-        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return True
-    if not normalized:
-        logger.warning("remote_weight_no_mapped_entries", vector_id=vector.vector_id)
-        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
-        return True
-
-    status = WeightStatus.DISABLED if disabled else await chain.set_weights(normalized)
-    await health.update(weight_status=status)
-    await health.heartbeat("last_weight_set_at")
-    if status in {WeightStatus.HEALTHY, WeightStatus.DISABLED}:
-        await remote_state.record_applied(
-            conn,
-            policy_version=vector.policy_version,
-            vector_id=vector.vector_id,
-        )
-    logger.info(
-        "remote_weight_relayed",
-        vector_id=vector.vector_id,
-        policy_version=vector.policy_version,
-        status=status.value,
-        count=len(normalized),
-        uids=[uid for uid, _ in normalized][:20],
-    )
-    return True
 
 
 async def _run_one_tick(
@@ -320,12 +278,13 @@ async def _run_one_tick(
     netuid: int,
     disabled: bool,
 ) -> None:
+    """Compatibility test helper. It only polls and caches."""
     del chain, disabled
-    await poll_once(
+    await _run_one_poll(
         conn,
         health,
         http_client=http_client,
-        publisher_weights_url=publisher_url.rstrip("/") + WEIGHTS_NEXT_PATH,
+        publisher_url=publisher_url,
         public_key=public_key,
         expected_key_id=expected_key_id,
         network=network,
@@ -333,34 +292,115 @@ async def _run_one_tick(
     )
 
 
-def _stale_state(
-    vector: SignedWeightVector,
+async def apply_cached_remote_vector_once(
+    conn: aiosqlite.Connection,
+    chain: Chain,
+    health: Health,
     *,
-    now: datetime,
-    fallback_after_stale_minutes: float,
-    refuse_after_stale_minutes: float,
-) -> str:
-    expires = parse_iso_utc(vector.expires_at)
-    if now <= expires:
-        return "fresh"
-    stale_minutes = (now - expires).total_seconds() / 60.0
-    if stale_minutes >= refuse_after_stale_minutes:
-        return "refuse"
-    if stale_minutes >= fallback_after_stale_minutes:
-        return "fallback"
-    return "fresh"
+    public_key: Ed25519PublicKey,
+    expected_key_id: str,
+    network: str,
+    netuid: int,
+    disabled: bool,
+) -> None:
+    """Apply the cached vector through the normal weight-loop cadence."""
+    state = await remote_state.load_state(conn)
+    if state.cached_vector is None:
+        logger.warning("remote_weight_no_cached_vector")
+        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
+        return
 
+    try:
+        vector = SignedWeightVector.model_validate(state.cached_vector)
+        verify_vector(vector, public_key=public_key, expected_key_id=expected_key_id)
+        now_iso = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        vector.invariant_check(network=network, netuid=netuid, now_iso=now_iso)
+    except (ValidationError, VectorVerificationError, ValueError) as e:
+        logger.warning("remote_weight_cached_vector_rejected", error=str(e))
+        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
+        return
 
-def _loads_no_duplicate_keys(body: str) -> object:
-    def hook(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        out: dict[str, object] = {}
-        for key, value in pairs:
-            if key in out:
-                raise ValueError(f"duplicate JSON key {key!r}")
-            out[key] = value
-        return out
+    if remote_state.already_applied(
+        state,
+        candidate_policy_version=vector.policy_version,
+        candidate_vector_id=vector.vector_id,
+    ):
+        logger.info(
+            "remote_weight_repeat_skip",
+            vector_id=vector.vector_id,
+            policy_version=vector.policy_version,
+        )
+        return
 
-    return json.loads(body, object_pairs_hook=hook)
+    metagraph = await chain.metagraph()
+    registered = await chain.is_registered()
+    await health.update(current_block=metagraph.block, registered=registered)
+    await health.heartbeat("last_metagraph_at")
+
+    uid_by_hotkey = metagraph.hotkey_to_uid()
+    mapped, dropped = map_weights_to_uids(vector, uid_by_hotkey=uid_by_hotkey)
+    burn_uid = vector.burn_snapshot.burn_uid
+    forced_burn_percentage = vector.burn_snapshot.forced_burn_percentage
+    if burn_uid is not None:
+        normalized = normalize(
+            apply_burn(
+                mapped,
+                burn_uid=burn_uid,
+                forced_burn_percentage=forced_burn_percentage,
+            )
+        )
+    else:
+        normalized = normalize(mapped)
+
+    logger.info(
+        "remote_weight_mapped",
+        vector_id=vector.vector_id,
+        policy_version=vector.policy_version,
+        signed_entries=len(vector.weights),
+        mapped_entries=len(normalized),
+        burn_uid=burn_uid,
+        forced_burn_percentage=forced_burn_percentage,
+        dropped_hotkeys=len(dropped),
+        dropped_sample=[hk[:8] for hk in dropped[:5]],
+    )
+
+    if not normalized:
+        # Every hotkey was dropped (or summed to zero). Mark accepted
+        # (already done above) but skip the chain call - sending no
+        # weights would silently no-op.
+        logger.warning(
+            "remote_weight_no_mapped_entries",
+            vector_id=vector.vector_id,
+            dropped_hotkeys=len(dropped),
+        )
+        await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
+        return
+
+    if disabled:
+        status = WeightStatus.DISABLED
+    else:
+        status = await chain.set_weights(normalized)
+    await health.update(weight_status=status)
+    await health.heartbeat("last_weight_set_at")
+
+    if status is WeightStatus.HEALTHY or status is WeightStatus.DISABLED:
+        # Treat DISABLED as "we successfully completed the dry-run for
+        # this vector" - record applied so a follow-up tick with the
+        # same vector_id is correctly recognised as a repeat.
+        await remote_state.record_applied(
+            conn,
+            policy_version=vector.policy_version,
+            vector_id=vector.vector_id,
+        )
+
+    logger.info(
+        "remote_weight_relayed",
+        vector_id=vector.vector_id,
+        policy_version=vector.policy_version,
+        status=status.value,
+        count=len(normalized),
+        uids=[uid for uid, _ in normalized][:20],
+    )
 
 
 __all__ = [
@@ -370,6 +410,5 @@ __all__ = [
     "fetch_signed_vector",
     "map_and_renormalize",
     "map_weights_to_uids",
-    "poll_once",
     "run_remote_weight_loop",
 ]

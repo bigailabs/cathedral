@@ -260,15 +260,6 @@ def score_and_sign_task_family_stdout(
                 details={"error": str(exc)[:512]},
             )
 
-    if os.environ.get("CATHEDRAL_ZERO_ALL_SCORES", "").lower() == "true":
-        score_parts = dict(score.score_parts)
-        score_parts["lock_winner"] = 0.0
-        score = ScoreResult(
-            weighted_score=0.0,
-            rejection_reason=score.rejection_reason,
-            score_parts=score_parts,
-        )
-
     row = build_signed_task_family_row(
         eval_run_id=eval_run_id or str(uuid4()),
         submission_id=str(submission_row["id"]),
@@ -304,48 +295,6 @@ async def persist_task_family_result(
     feed_enabled: bool | None = None,
     commit: bool = True,
 ) -> None:
-    if feed_enabled is None:
-        feed_enabled = task_family_feed_enabled()
-    if not feed_enabled:
-        return
-
-    row = signed.row
-    await persist_task_family_result_row(
-        conn,
-        submission_row=submission_row,
-        task_family=problem.task_family,
-        difficulty_tier=problem.difficulty_tier,
-        time_limit_seconds=problem.time_limit_seconds,
-        signed_row=row,
-        epoch=epoch,
-        round_index=round_index,
-        duration_ms=duration_ms,
-        trace_json=trace_json,
-        commit=commit,
-    )
-
-
-async def persist_task_family_result_row(
-    conn: aiosqlite.Connection,
-    *,
-    submission_row: dict[str, Any],
-    task_family: str,
-    difficulty_tier: int,
-    time_limit_seconds: int,
-    signed_row: dict[str, Any],
-    epoch: int,
-    round_index: int,
-    duration_ms: int,
-    trace_json: dict[str, Any] | None = None,
-    feed_enabled: bool | None = None,
-    commit: bool = True,
-) -> None:
-    """Persist an already-signed Task Family row.
-
-    Receipt ordering can delay finalization until earlier receipts resolve.
-    In that path the publisher stores a signed hash-only row in the private
-    receipt table, then persists it once the selector confirms eligibility.
-    """
     from cathedral.publisher import repository
 
     if feed_enabled is None:
@@ -353,22 +302,22 @@ async def persist_task_family_result_row(
     if not feed_enabled:
         return
 
-    row = signed_row
+    row = signed.row
     output_card_json = {
-        "task_type": task_family,
+        "task_type": problem.task_family,
         "task_id_public": row["task_id_public"],
-        "difficulty_tier": difficulty_tier,
+        "difficulty_tier": problem.difficulty_tier,
         "weighted_score": row["weighted_score"],
         "rejection_reason": row.get("rejection_reason"),
         "worker_owner_hotkey": submission_row["miner_hotkey"],
     }
     output_card_hash = blake3.blake3(canonical_json(output_card_json)).hexdigest()
     task_json = {
-        "task_type": task_family,
+        "task_type": problem.task_family,
         "task_id_public": row["task_id_public"],
         "epoch_salt": row["epoch_salt"],
-        "difficulty_tier": difficulty_tier,
-        "time_limit_seconds": time_limit_seconds,
+        "difficulty_tier": problem.difficulty_tier,
+        "time_limit_seconds": problem.time_limit_seconds,
         "answer_hash": row["answer_hash"],
         "verifier_details_hash": row["verifier_details_hash"],
     }
@@ -381,7 +330,7 @@ async def persist_task_family_result_row(
         epoch=epoch,
         round_index=round_index,
         polaris_agent_id=f"ssh-hermes:{str(submission_row['miner_hotkey'])[:12]}",
-        polaris_run_id=f"{task_family}:{row['id']}",
+        polaris_run_id=f"{problem.task_family}:{row['id']}",
         task_json=task_json,
         output_card_json=output_card_json,
         output_card_hash=output_card_hash,

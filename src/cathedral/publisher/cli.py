@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import cast
 
 import structlog
 import typer
@@ -31,7 +32,7 @@ def serve(
     from cathedral.publisher import from_settings
 
     application = from_settings(database_path)
-    uvicorn.run(application, host=host, port=port, log_level=log_level)
+    uvicorn.run(application, host=host, port=port, log_level=log_level, access_log=False)
 
 
 @app.command()
@@ -53,9 +54,7 @@ def migrate(
 def merkle_close(
     epoch: int = typer.Option(..., "--epoch", "-e", help="ISO calendar epoch (year * 100 + week)"),
     database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
-    on_chain: bool = typer.Option(
-        False, "--on-chain", help="Submit anchor to chain"
-    ),
+    on_chain: bool = typer.Option(False, "--on-chain", help="Submit anchor to chain"),
     network: str = typer.Option("finney", "--network"),
     wallet_name: str = typer.Option("default", "--wallet-name"),
     wallet_hotkey: str = typer.Option("default", "--wallet-hotkey"),
@@ -118,8 +117,7 @@ def seed_cards(
                     jurisdiction=juris,
                     topic=topic,
                     description=(
-                        f"## {name}\n\n"
-                        "Placeholder definition. Owned by cathedral-eval-spec."
+                        f"## {name}\n\nPlaceholder definition. Owned by cathedral-eval-spec."
                     ),
                     eval_spec_md="Placeholder eval spec — owned by cathedral-eval-spec.",
                     source_pool=[],
@@ -175,15 +173,24 @@ def load_eval_spec(
     configure()
 
     import sys
+
     if sys.version_info >= (3, 11):
         import tomllib
     else:
         import tomli as tomllib  # type: ignore[import-not-found]
+    import urllib.parse
     import urllib.request
 
     from cathedral.publisher import repository
 
     card_ids = [c.strip() for c in cards.split(",") if c.strip()]
+
+    def _fetch_url_bytes(url: str) -> bytes:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(f"unsupported URL scheme: {parsed.scheme}")
+        with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
+            return cast(bytes, resp.read())
 
     async def _run() -> None:
         conn = await connect(database_path)
@@ -192,8 +199,7 @@ def load_eval_spec(
                 url = f"{repo_url.rstrip('/')}/{card_id}/card_definition.toml"
                 typer.echo(f"fetching {url}")
                 try:
-                    with urllib.request.urlopen(url, timeout=30) as resp:
-                        body = resp.read()
+                    body = await asyncio.to_thread(_fetch_url_bytes, url)
                 except Exception as e:
                     typer.echo(f"  FAILED: {e}", err=True)
                     continue
@@ -230,8 +236,10 @@ def load_eval_spec(
                     refresh_cadence_hours=int(cadence),
                     status=card.get("status", "active"),
                 )
-                typer.echo(f"  loaded {card_id}: {len(source_pool)} sources, "
-                           f"{len(task_templates)} task templates")
+                typer.echo(
+                    f"  loaded {card_id}: {len(source_pool)} sources, "
+                    f"{len(task_templates)} task templates"
+                )
         finally:
             await conn.close()
 

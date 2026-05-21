@@ -1,61 +1,52 @@
 # Synthetic Boolean Launch Rails
 
-These rails define the public SAT launch boundary for `synthetic_boolean_v1`.
+These rails define the SAT launch sequence and public/private boundary for `synthetic_boolean_v1`.
 
 ## Status
 
-The public repo includes the SAT lane, toy fixtures, authorized CNF URL
-transport, and durable first-submitted receipt ordering. Mainnet SAT remains
-disabled: validator SAT weight defaults to `0.0`, no production CNFs ship in
-this repo, and operators must not enable a nonzero mainnet SAT weight from
-this branch.
-
-The rules are public. Actual challenge CNFs are private until announcement.
-When a challenge is announced, eligible miners receive a `cnf_url` exactly as
-it should be fetched and a `cnf_sha256` integrity hash. The public feed still
-remains hash-only.
+The codebase includes the SAT lane and remote signed-weight path. Mainnet SAT remains disabled until deploy, publisher enablement, and validator opt-in to remote signed weight vectors.
 
 ## Launch Model
 
 The first launch model is one active formula.
 
-1. Operator activates one SAT formula from private storage.
-2. All eligible miners race the same active formula.
-3. Cathedral sends challenge metadata through the SSH/Hermes path.
-4. Miners fetch the CNF URL exactly as given and verify `cnf_sha256`.
-5. Miners return a JSON object with `dimacs_solution`.
-6. Cathedral records a publisher receipt timestamp when Hermes stdout returns.
-7. Cathedral verifies the assignment deterministically.
-8. The earliest valid receipt wins the SAT lane score.
-9. Later valid receipts for that challenge score `0.0`.
-10. Earlier invalid or expired receipts do not block a later valid receipt.
-11. The publisher advances to the next pending challenge.
+1. Operator activates one SAT formula.
+2. All eligible miners race the same formula.
+3. Cathedral runs each miner through the SSH/Hermes path.
+4. Miners return a JSON object with `dimacs_solution`.
+5. Cathedral verifies the assignment deterministically.
+6. The first answer Cathedral verifies and locks wins the SAT lane score; the publisher then advances the active challenge.
+7. Later submissions for that locked challenge score `0.0`.
+8. Operator advances to the next formula.
 
-The winner ordering rule is first submitted by publisher receipt time, after
-verification proves the answer valid. A later receipt that verifies faster must
-wait while any earlier receipt is still `unverified` or `verifying`. The
-selector can finalize only when the earliest unresolved receipts are invalid or
-expired, or when the earliest unresolved receipt becomes valid and wins.
+The winner ordering rule is **first verified and locked**, not first submitted. The lock is acquired only after `SyntheticBooleanV1.verify` returns a valid satisfying assignment, so submissions that arrive earlier but verify later than another miner's parallel run can lose the race. See `src/cathedral/eval/orchestrator.py` for the call site. Open tracking issue for whether to keep this rule or move to a true first-submitted (publisher-receipt-time + miner-signed answer) model.
 
-This is not per-miner hidden challenges. It is not a public formula feed. It is
-not a pool where every correct late answer earns weight.
+Reward shape:
+
+- The winner earns the SAT lane score (binary `1.0`).
+- Chain impact depends on the validator-side SAT lane weight and the configured burn policy. On mainnet today: `task_family_weights = { synthetic_boolean_v1 = 0.0 }` and `forced_burn_percentage = 95.0`. Until that weight is intentionally moved off zero on a controlled testnet pass, "winning SAT" does not move chain weight on mainnet.
+- This is not a winner-takes-all TAO payout. The SAT lane is the first Task Family lane plugged into the publisher-scored pipeline, not a replacement for the existing agent pipeline.
+
+This is not per-miner hidden challenges. It is not a public formula feed. It is not a pool where every correct late answer earns weight.
+
+## Miner Migration
+
+Migration is additive. Existing miners keep the current agent pipeline running while they prepare SAT.
+
+1. Keep the existing hotkey and registered agent path live.
+2. Stand up a SAT wrapper on a reachable Linux host.
+3. Install Hermes for the SSH user Cathedral will invoke.
+4. Run local toy DIMACS checks before exposing the host.
+5. Register the host, SSH user, display name, hotkey, and hardware line with Cathedral operators.
+6. Enter shadow SAT rounds while `synthetic_boolean_v1` remains weight `0.0`.
+7. Enter scored SAT rounds only after the feed, verifier, signed-weight path, and validator opt-in are stable.
+
+The public miner contract is the answer shape, the hotkey identity, and the host reachability check. Solver source, solver strategy, logs, private benchmark data, and infrastructure details are not public repo material.
 
 ## Miner Contract
 
-Cathedral sends challenge metadata through Hermes. Under the URL transport,
-`public_input` contains:
+Cathedral sends a DIMACS CNF challenge through Hermes. The miner may use any private solver or wrapper on their own infrastructure.
 
-```json
-{
-  "format": "dimacs",
-  "cnf_url": "<authorized HTTPS URL>",
-  "cnf_sha256": "<sha256>",
-  "num_vars": 3,
-  "num_clauses": 2
-}
-```
-
-The miner may use any private solver or wrapper on their own infrastructure.
 The final answer must be one fenced `FINAL_ANSWER` JSON block:
 
 ````text
@@ -73,15 +64,6 @@ Rules:
 - `s SATISFIABLE` is required for a positive score.
 - `v` lines must assign every variable and end with `0`.
 - Explanations, logs, source code, extra keys, and assignment dictionaries are not accepted.
-- Miners must not log the authorized CNF URL.
-
-## CNF URL Transport
-
-Miners fetch `public_input.cnf_url` exactly as given. The transport returns
-`200 text/plain` only for an authorized, currently available challenge. Every
-miss path returns the same `404 {"detail": "challenge_not_found"}` body.
-Unknown IDs, missing authorization, unavailable rows, and expired rows are
-intentionally indistinguishable.
 
 ## Scoring
 
@@ -90,8 +72,7 @@ SAT scoring is binary:
 - `1.0`: well-formed satisfying assignment for the active formula.
 - `0.0`: malformed, incomplete, contradictory, out-of-range, unsatisfied, non-SAT, missing, late, or verifier-error result.
 
-The verifier evaluates clauses directly. It does not rely on miner claims about
-correctness.
+The verifier evaluates clauses directly. It does not rely on miner claims about correctness.
 
 ## Public Feed Boundary
 
@@ -129,68 +110,86 @@ dimacs
 assignment
 solution
 dimacs_solution
-cnf_url
-cnf_sha256
 bundle_url
 manifest_url
 score_record_url
 ```
 
-Raw CNF, authorized fetch URLs, submitted solutions, hidden metadata, private
-construction details, private corpus names, and private filenames must not
-appear in public API responses, website state, static JSON, logs intended for
-publication, or repo docs.
+The public feed is hash-only. Raw CNF and submitted solutions must not appear in public API responses, website state, static JSON, logs intended for publication, or repo docs.
+
+## Validator Boundary
+
+Before the remote-weight release:
+
+- Validators use the existing local scoring and weight loop.
+- SAT task-family weight stays `0.0` unless an operator is doing controlled local testing.
+
+After the remote-weight release:
+
+- Validators must explicitly enable `[remote_weight_source]`.
+- Validators must pin `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX`.
+- Validators fetch `GET /v1/validator/weights/next`.
+- Validators verify the signed vector before applying it.
+- If remote mode is disabled, local weighting remains the path.
+
+## Operator Sequence
+
+1. Confirm SAT code is merged and deployed.
+2. Confirm publisher env enables the task-family feed.
+3. Activate one formula from operator-controlled private storage.
+4. Confirm miner prompts are delivered through `SshHermesRunner`.
+5. Confirm the first verified solution locks the active challenge.
+6. Confirm public feed rows are hash-only.
+7. Produce a signed remote weight vector.
+8. Have validators opt in with the pinned weight-policy public key.
+9. Confirm validator logs show accepted remote vectors and coherent weight setting.
+10. Advance to the next formula only after the current challenge is locked or retired.
 
 ## Environment Gates
 
-Publisher smoke path:
+Publisher:
 
 ```bash
 CATHEDRAL_EVAL_MODE=ssh-probe
 CATHEDRAL_PROBER_VERSION=v2
 CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true
 CATHEDRAL_TASK_FAMILY_IDS=synthetic_boolean_v1
-CATHEDRAL_PUBLIC_BASE_URL=https://api.cathedral.computer
-CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH=/path/to/private-input
 ```
 
-Validator:
-
-```bash
-CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT=0.0
-```
-
-Alternative validator weight override for local tests only:
+Validator local testing:
 
 ```bash
 CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
+CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT=0.0
 ```
 
-## Operator Sequence
+Validator remote-weight opt-in after release:
 
-1. Confirm SAT code is merged and deployed.
-2. Confirm publisher env enables the task-family feed on a controlled surface.
-3. Activate one formula from operator-controlled private storage.
-4. Confirm miner prompts contain `cnf_url` and `cnf_sha256`, not inline CNF.
-5. Confirm authorized fetch succeeds for eligible miners.
-6. Confirm the earliest valid receipt locks the active challenge, even if a
-   later receipt verifies first.
-7. Confirm later correct submissions for the same challenge score `0.0`.
-8. Confirm public feed rows are hash-only.
-9. Keep validator SAT weight at `0.0` until a separate release intentionally changes it.
+```toml
+[remote_weight_source]
+enabled = true
+url = "https://api.cathedral.computer"
+key_id = "cathedral-weight-policy"
+public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
+```
 
 ## Leak Checks
 
-Run before pushing SAT changes:
+The public repo must not contain real `.cnf`, `.dimacs`, or `.sol` files.
+
+Run before pushing docs or launch changes:
 
 ```bash
 find . -name '*.cnf' -o -name '*.dimacs' -o -name '*.sol'
-rg -n "cnf_url|cnf_sha256|dimacs_solution|public_input|hidden_metadata|bundle_url|manifest_url|score_record_url" README.md docs src tests
+rg -n "dimacs_solution|public_input|hidden_metadata|bundle_url|manifest_url|score_record_url" README.md docs src/cathedral/publisher/skill_md.py
 ```
 
 Expected result:
 
 - No real formula or solution files.
 - `dimacs_solution` appears only in miner contract docs, verifier code, fixtures, or tests.
-- `cnf_url` and `cnf_sha256` appear only in transport docs, prompt code, endpoint code, or tests.
 - Public-feed docs list forbidden fields as forbidden, not as emitted fields.
+
+## Website And Static Surfaces
+
+Do not claim live SAT metrics from static text. Live claims require deployed `state.json` or publisher state. Demo views must be labeled as demo.

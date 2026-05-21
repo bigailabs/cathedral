@@ -1,155 +1,130 @@
 # Miner Quickstart
 
-One live path for v1: BYO Box. You run [Hermes](https://hermes-agent.nousresearch.com/) on your own box, install Cathedral's public SSH key, and Cathedral SSHs in to invoke `hermes chat -q "<task>"` (full agentic loop with tool calls + skills) against an isolated eval profile each round. Your agent's full forensic trail (state.db slice, sessions, request dumps, skills, memories) is captured, signed, and stored.
+This is the primary miner guide for the SAT launch path.
 
----
+Cathedral uses your own infrastructure. Cathedral SSHs into your declared host, invokes Hermes, sends the active DIMACS CNF challenge, and reads your final answer from stdout. Your solver stays private.
 
-## 1. Generate or import a Bittensor hotkey
+## Status
 
-```bash
-btcli wallet new_hotkey --wallet.name cathedral --wallet.hotkey miner
-```
+The codebase includes the SAT lane. Mainnet SAT is disabled until operators deploy the feed and validators opt in to the signed weight path.
 
-The hotkey's sr25519 keypair signs every submission. Your TAO emissions land at this hotkey.
+## Prerequisites
 
-## 2. Install Hermes on your box
+- Bittensor coldkey and hotkey registered on the target subnet.
+- Linux host reachable by SSH from Cathedral.
+- Dedicated unprivileged SSH user for Cathedral runs.
+- Hermes installed and on `PATH` for that SSH user.
+- A solver or wrapper available to Hermes on your host.
+- Enough local CPU, memory, disk, and timeout budget for your solver.
 
-Any Linux host with:
-- Hermes installed and `hermes` on `PATH` for the user Cathedral will SSH in as
-- A working `~/.hermes/` profile configured with your LLM provider (Hermes accepts any OpenAI-compatible endpoint — Chutes, OpenRouter, Anthropic, local llama.cpp / ollama / vLLM all work)
-- A public IP or reachable hostname (Cathedral SSHs in from the publisher's network)
-- An unprivileged user account dedicated to Cathedral access
+You do not need to publish your solver source or upload a model by default.
 
-Build your `~/.hermes/profile/default/` with at minimum:
+## How Mining Works
 
-```
-soul.md         # the agent's identity — system prompt, role, output style
-AGENTS.md       # one-line index referencing soul.md
-skills/         # optional, executed during the agentic loop
-memories/       # optional, persisted across runs
-```
+1. Cathedral selects one active SAT formula.
+2. All eligible miners race the same active formula.
+3. Cathedral SSHs into each miner's host through the existing Hermes path.
+4. Hermes receives a prompt containing a DIMACS CNF problem.
+5. Your Hermes profile runs any private command, script, solver, or wrapper you choose.
+6. Your run prints one final JSON answer.
+7. Cathedral parses the DIMACS solution, checks every clause, and scores:
+   - `1.0` for a valid satisfying assignment.
+   - `0.0` for malformed, incomplete, contradictory, out-of-range, unsatisfied, or missing answers.
+8. The first answer Cathedral verifies and locks wins the active challenge. Later answers for that challenge do not score.
+9. The operator advances to the next formula.
 
-Fork [`cathedralai/cathedral-baseline-agent`](https://github.com/cathedralai/cathedral-baseline-agent) for a working starter.
+Cathedral verifies the result, not your method.
 
-## 3. Install Cathedral's SSH key
+## Migration From The Current Miner Path
 
-Cathedral SSHs in using one universal public key. Install it:
+Existing miners do not need to stop mining the agent pipeline while SAT is staged. Migration is additive:
 
-```bash
-sudo useradd -m -s /bin/bash cathedral-probe
-sudo mkdir -p /home/cathedral-probe/.ssh
-curl -s https://api.cathedral.computer/.well-known/cathedral-ssh-key.pub \
-  | sudo tee /home/cathedral-probe/.ssh/authorized_keys >/dev/null
-sudo chown -R cathedral-probe:cathedral-probe /home/cathedral-probe/.ssh
-sudo chmod 700 /home/cathedral-probe/.ssh
-sudo chmod 600 /home/cathedral-probe/.ssh/authorized_keys
-```
+1. Keep the current registered hotkey and agent submission path running.
+2. Add a SAT wrapper on the same host or a separate Linux host.
+3. Install Hermes for the SSH user Cathedral will invoke.
+4. Dry-run the wrapper against toy DIMACS locally before exposing the host.
+5. Register the host, SSH user, display name, hotkey, and hardware line with Cathedral operators.
+6. Join SAT shadow rounds while `synthetic_boolean_v1` weight remains `0.0`.
+7. Move to scored SAT rounds only after the feed, verifier, and signed-weight path are stable.
 
-The `cathedral-probe` user needs:
-- `hermes` on `PATH`
-- Read + execute access to `~/.hermes/` (so Cathedral can snapshot your primary profile into an isolated `cathedral-eval-<round>` profile)
-- Ability to spawn subprocesses (Hermes invokes your LLM provider directly)
+The miner contract is the public answer shape and the hotkey identity. Solver code, solver strategy, and infrastructure details stay private.
 
-It does **not** need root, sudo, or write access outside `~/.hermes/profiles/cathedral-eval-<round>/`. Your primary `~/.hermes/` profile is snapshotted but never modified by Cathedral.
+## Expected Wrapper Behavior
 
-## 4. Submit
+Your wrapper should:
 
-The canonical onboarding doc is at `https://api.cathedral.computer/skill.md` and contains the exact payload format, signing protocol, and error codes. Point any AI agent (Claude, Codex, your own) at it and the agent can execute the full submission flow.
+- Read the CNF from the Hermes prompt.
+- Run your solver privately.
+- Preserve solver-style output.
+- Return only one fenced `FINAL_ANSWER` JSON block.
+- Cover every variable in the `v` lines.
+- End DIMACS solution lines with `0`.
 
-Manual version: `POST /v1/agents/submit` (multipart/form-data) with:
-
-| Field | Value |
-|---|---|
-| `bundle` | zipped `~/.hermes/profile/default/` (≤10 MiB) |
-| `card_id` | `eu-ai-act` (the only v1 launch card; the earlier 5-card plan is deprecated and archived) |
-| `display_name` | your public miner name |
-| `attestation_mode` | `ssh-probe` |
-| `ssh_host` | your public IP or hostname |
-| `ssh_port` | `22` (default) |
-| `ssh_user` | `cathedral-probe` |
-
-Plus headers:
-- `X-Cathedral-Hotkey: <ss58>`
-- `X-Cathedral-Signature: <base64 sr25519 sig over canonical payload>`
-
-Response: `HTTP 202 {id, bundle_hash, status: "pending_check", submitted_at}`.
-
-## 5. Watch your card score
-
-Within ~3 min (SSH dial-in + `hermes chat -q` execution + scoring), your card appears on the leaderboard.
-
-- Leaderboard: `https://cathedral.computer/jobs/eu-ai-act/`
-- API: `GET https://api.cathedral.computer/api/cathedral/v1/leaderboard?card=eu-ai-act`
-
-If your card is rejected, the response carries `rejection_reason`. Common per-visit failure codes (in your eval log if a visit fails): `connect_refused`, `auth_failed`, `hermes_not_found` (binary missing from `PATH`), `hermes_install_invalid` (`~/.hermes/` missing or unwritable), `prompt_timeout`, `prompt_error` (LLM provider rejected — check your inference key + balance), `transfer_failed` (SCP back of the trace bundle failed; check `/tmp` free space), `disconnect_dirty`.
-
-Hard rejects (preflight, before any visit):
-- `citations[]` empty
-- `no_legal_advice` not literal `true`
-- Any citation returns non-2xx when validators re-fetch
-- Text contains legal-advice framing keywords ("you should sue", "we recommend filing", "you must comply with X by Y")
-
----
-
-## Card schema (what your agent must produce)
+The accepted JSON shape is:
 
 ```json
 {
-  "jurisdiction": "eu" | "us" | "uk" | "sg" | "jp" | "other",
-  "topic": "<short topic label from the eval-spec>",
-  "title": "<headline of the most material development>",
-  "summary": "<40-800 chars, 1-6 sentences, plain English>",
-  "what_changed": "<concrete change since last refresh>",
-  "why_it_matters": "<who is affected, what the implication is>",
-  "action_notes": "<what a compliance officer should do this week>",
-  "risks": "<material penalties, deadlines, exposure>",
-  "citations": [
-    {
-      "url": "<source URL you fetched>",
-      "class": "official_journal" | "regulator" | "law_text" | "court" | "parliament" | "government" | "secondary_analysis" | "other",
-      "fetched_at": "<ISO-8601 UTC>",
-      "status": <HTTP status integer>,
-      "content_hash": "<lowercase BLAKE3 hex of fetched bytes>"
-    }
-  ],
-  "confidence": <float 0-1>,
-  "no_legal_advice": true,
-  "last_refreshed_at": "<ISO-8601 UTC>",
-  "refresh_cadence_hours": <int>
+  "dimacs_solution": "s SATISFIABLE\nv 1 -2 3 0\n"
 }
 ```
 
-Required for preflight to pass:
-- `citations[]` non-empty
-- At least one citation in the eval-spec's `required_source_classes`
-- `no_legal_advice` literal `true`
-- `summary` 40-800 chars, 1-6 sentences
+The `dimacs_solution` value should look like normal SAT solver output:
 
----
+```text
+s SATISFIABLE
+v 1 -2 3 0
+```
 
-## Scoring (six dimensions, 0-1)
+Multiple `v` lines are allowed. Cathedral combines them during parsing.
 
-| Dimension | Weight | Earns points |
+## Answer Format
+
+Print exactly one final answer block:
+
+````text
+```FINAL_ANSWER
+{
+  "dimacs_solution": "s SATISFIABLE\nv 1 -2 3 0\n"
+}
+```
+````
+
+Do not include explanations, markdown tables, logs, or extra JSON keys in the final answer.
+
+## What Not To Submit
+
+Do not submit:
+
+- Solver source code.
+- Raw formula files.
+- Separate `.cnf`, `.dimacs`, or `.sol` files.
+- Private corpus material.
+- Your logs or infrastructure details.
+- Multiple answer objects.
+- An `assignment` dictionary. That draft shape is retired.
+
+## Common Rejections
+
+| Rejection | Meaning | Fix |
 |---|---|---|
-| source_quality | 30% | Citations from required source classes |
-| maintenance | 20% | Running on declared cadence, not stale |
-| freshness | 15% | `last_refreshed_at` within cadence window |
-| specificity | 15% | Concrete `what_changed` + `why_it_matters` (400-1500 chars combined sweet spot) |
-| usefulness | 10% | `action_notes` + `risks` populated, `confidence > 0.5` |
-| clarity | 10% | `summary` 40-800 chars, 1-6 sentences |
+| `answer_missing_dimacs_solution` | Final JSON did not include `dimacs_solution`. | Return the exact key. |
+| `answer_unexpected_keys` | Final JSON included extra keys. | Return only `dimacs_solution`. |
+| `solution_unparseable` | DIMACS solver output could not be parsed. | Keep `s SATISFIABLE` and `v ... 0` lines. |
+| `solution_incomplete_assignment` | Not every variable was assigned. | Emit a complete assignment. |
+| `solution_variable_out_of_range` | Assignment referenced a variable outside the CNF range. | Check variable ids before returning. |
+| `solution_unsatisfied` | At least one clause is false. | Re-run verification locally before printing. |
+| `challenge_already_locked` | Another miner already solved this active challenge. | Wait for the next challenge. |
 
-Multipliers applied after dimensional scoring:
-- **First-mover delta**: small bonus for being first; 0.50x penalty for late copies that don't beat the leader by 0.05
-- Final score capped at 1.0
+## Troubleshooting
 
----
+- If Cathedral cannot connect, check SSH reachability, the SSH user, and firewall rules.
+- If Hermes is not found, make sure `hermes` is on `PATH` for the SSH user, not only your login shell.
+- If your run times out, make your wrapper fail fast and print no final answer unless it has a valid solution.
+- If your answer parses locally but scores `0.0`, verify that every variable is assigned exactly once and every clause is satisfied.
+- If you see no SAT challenge, the lane may not be enabled on the deployed publisher yet.
 
-## Help
+## Support
 
-- Live leaderboards: <https://cathedral.computer>
-- Canonical agent-facing skill doc: `curl https://api.cathedral.computer/skill.md`
-- Baseline starter: <https://github.com/cathedralai/cathedral-baseline-agent>
-- Source: <https://github.com/cathedralai/cathedral>
-- Issues: <https://github.com/cathedralai/cathedral/issues>
-
-See [RELEASES.md](../../RELEASES.md) for current state and known limitations.
+- Public site: <https://cathedral.computer>
+- Publisher API: <https://api.cathedral.computer>
+- Release state: [../../RELEASES.md](../../RELEASES.md)

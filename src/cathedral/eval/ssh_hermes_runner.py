@@ -15,8 +15,8 @@ Per-eval lifecycle (``docs/HERMES.md`` § L.1):
 
 1. SSH in as ``ssh_user@ssh_host:ssh_port`` using the platform-wide
    prober key (``/.well-known/cathedral-ssh-key.pub``).
-2. ``hermes --version`` - verify Hermes is installed.
-3. ``hermes profile create cathedral-eval-<round> --clone-all`` - full
+2. ``hermes --version`` — verify Hermes is installed.
+3. ``hermes profile create cathedral-eval-<round> --clone-all`` — full
    copy of the miner's primary profile via Hermes's own copytree.
    Replaces the dossier's "backup + restore from zip" sketch: per
    ``hermes_cli/profiles.py:540-617`` ``--clone-all`` is the
@@ -27,9 +27,9 @@ Per-eval lifecycle (``docs/HERMES.md`` § L.1):
    execution, multiple model turns, memory reads) and writes the
    full forensic trail (session JSON, request dumps, SQLite rows) to
    the eval profile (``docs/HERMES.md`` § A.1). v1.1.7 switched from
-   ``hermes -z`` (one-shot, no agentic loop) - see PR for context.
+   ``hermes -z`` (one-shot, no agentic loop) — see PR for context.
 5. Snapshot the eval profile's ``state.db`` via SQLite's backup() API
-   over SSH (matches ``hermes_cli/backup.py:_safe_copy_db`` - consistent
+   over SSH (matches ``hermes_cli/backup.py:_safe_copy_db`` — consistent
    WAL snapshot without explicit ``PRAGMA wal_checkpoint(TRUNCATE)``).
 6. SCP back: ``state.db`` snapshot, ``sessions/session_<id>.json``,
    every ``sessions/request_dump_<id>_*.json``, ``memories/``,
@@ -40,13 +40,13 @@ Per-eval lifecycle (``docs/HERMES.md`` § L.1):
 8. Proof-of-loop checks: count tool_calls / api_call / request_dump
    counts, verify the assembled system_prompt includes SOUL.md +
    AGENTS.md + MEMORY.md.
-9. ``hermes profile delete cathedral-eval-<round>`` - tear down.
+9. ``hermes profile delete cathedral-eval-<round>`` — tear down.
    Primary profile untouched throughout.
 
 The runner returns a ``PolarisRunResult`` whose ``output_card_json``
 is the parsed Card from ``hermes chat -q`` stdout. **The trace bundle is
 written to local disk** (``self.config.bundle_output_dir``) and the
-runner does NOT upload it - PR 3 (Hippius adapter) handles upload.
+runner does NOT upload it — PR 3 (Hippius adapter) handles upload.
 The bundle path is returned via the ``trace`` field for the
 orchestrator to forward.
 
@@ -67,7 +67,6 @@ import tarfile
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -96,11 +95,25 @@ from cathedral.v3.prompts import (
 logger = structlog.get_logger(__name__)
 
 
+# Redact `?t=<token>` query values before any cmd / prompt string lands
+# in a log line or error message. The synthetic_boolean_v1 CNF URL is
+# the only token-bearing query string Cathedral currently mints, but
+# the pattern is shape-only: any `?t=` value is redacted regardless of
+# where it came from. Cardinal sin per the CNF URL transport: the
+# token must never appear in logs or in exception messages that may
+# get forwarded to operators or third-party log sinks.
 _QUERY_TOKEN_RE = re.compile(r"(\?t=)[^\s'&\"]+")
 
 
 def _redact_query_tokens(s: str) -> str:
-    """Replace any ``?t=<value>`` substring with ``?t=REDACTED``."""
+    """Replace any ``?t=<value>`` substring with ``?t=REDACTED``.
+
+    Safe to call on partial truncations (`cmd[:120]`) because the
+    regex only fires when the literal ``?t=`` marker is present. If
+    the truncation cut before the token, the input is returned
+    unchanged. If the token straddles the truncation boundary, the
+    partial token value is still redacted.
+    """
     return _QUERY_TOKEN_RE.sub(r"\1REDACTED", s)
 
 
@@ -181,7 +194,7 @@ class SshHermesRunnerConfig:
     hermes_home: str = "~/.hermes"
     # Pinned model + provider for the eval invocation. Set via env on
     # the orchestrator side so all evals against a given card use the
-    # same model - neutralizes one source of cross-miner variance.
+    # same model — neutralizes one source of cross-miner variance.
     pinned_model: str | None = None
     pinned_provider: str | None = None
 
@@ -274,10 +287,9 @@ class HermesVisitTrace:
     bundle_path: str | None = None
     bundle_blake3: str | None = None
     proof_of_loop: dict[str, Any] | None = None
-    task_family_stdout_received_at_iso: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        out = {
+        return {
             "visit_started_at": self.visit_started_at,
             "visit_ended_at": self.visit_ended_at,
             "hermes_version": self.hermes_version,
@@ -289,9 +301,6 @@ class HermesVisitTrace:
             "proof_of_loop": self.proof_of_loop or {},
             "tier": "ssh-hermes",
         }
-        if self.task_family_stdout_received_at_iso is not None:
-            out["task_family_stdout_received_at_iso"] = self.task_family_stdout_received_at_iso
-        return out
 
 
 @dataclass
@@ -313,7 +322,6 @@ class TaskFamilyHermesRun:
     duration_ms: int = 0
     trace: dict[str, Any] = field(default_factory=dict)
     trace_bundle: TraceBundle | None = None
-    stdout_received_at_iso: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -353,7 +361,7 @@ class SshHermesRunner:
     async def run(
         self,
         *,
-        bundle_bytes: bytes,  # unused - miner runs Hermes themselves
+        bundle_bytes: bytes,  # unused — miner runs Hermes themselves
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
@@ -667,7 +675,6 @@ class SshHermesRunner:
         prompt: str,
         miner_hotkey: str,
         submission: dict[str, Any],
-        receipt_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> TaskFamilyHermesRun:
         """Run one generic Task Family prompt over SSH Hermes.
 
@@ -720,10 +727,6 @@ class SshHermesRunner:
                 eval_round=eval_round,
                 resolved_home=resolved_home,
             )
-            stdout_received_at_iso = _now_utc_iso()
-            trace.task_family_stdout_received_at_iso = stdout_received_at_iso
-            if receipt_callback is not None:
-                await receipt_callback(stdout, stdout_received_at_iso)
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
             synthetic_card: dict[str, Any] = {
@@ -750,7 +753,6 @@ class SshHermesRunner:
                 duration_ms=int((time.monotonic() - t_start) * 1000),
                 trace=trace.to_dict(),
                 trace_bundle=bundle,
-                stdout_received_at_iso=stdout_received_at_iso,
             )
         except SshHermesError:
             trace.visit_ended_at = datetime.now(UTC).isoformat()
@@ -835,7 +837,7 @@ class SshHermesRunner:
         conn: Any,
         cmd: str,
         *,
-        timeout: float | None = None,  # noqa: ASYNC109 - `timeout` is the API we want
+        timeout: float | None = None,  # noqa: ASYNC109 — `timeout` is the API we want
         failure_code: str = "hermes_invocation_failed",
         check: bool = True,
     ) -> tuple[str, str, int]:
@@ -928,8 +930,8 @@ class SshHermesRunner:
 
     async def _verify_hermes_install(self, conn: Any, resolved_home: str) -> None:
         """Check that ``~/.hermes/`` (or configured ``hermes_home``) exists
-        and is readable. We can't write here - we use ``hermes profile
-        create`` for that - but a missing/broken install fails fast.
+        and is readable. We can't write here — we use ``hermes profile
+        create`` for that — but a missing/broken install fails fast.
 
         ``resolved_home`` is the absolute path on the miner box (see
         ``_resolve_hermes_home``). We then ``shlex.quote`` it to keep
@@ -947,7 +949,7 @@ class SshHermesRunner:
     async def _clone_profile(self, conn: Any, eval_profile: str) -> None:
         """Use `hermes profile create --clone-all` to fork the active
         profile into an isolated eval profile. Source confirmed at
-        ``hermes_cli/profiles.py:540-617`` - ``--clone-all`` is the
+        ``hermes_cli/profiles.py:540-617`` — ``--clone-all`` is the
         canonical full copytree path.
         """
         cmd = f"hermes profile create {shlex.quote(eval_profile)} --clone-all"
@@ -960,7 +962,7 @@ class SshHermesRunner:
 
     async def _delete_profile(self, conn: Any, eval_profile: str) -> None:
         # ``hermes profile delete <name>`` exists per
-        # ``hermes_cli/profiles.py:718``. Best-effort - don't raise.
+        # ``hermes_cli/profiles.py:718``. Best-effort — don't raise.
         cmd = f"hermes profile delete {shlex.quote(eval_profile)} --yes"
         try:
             await self._run_remote(conn, cmd, timeout=30.0, check=False)
@@ -989,7 +991,7 @@ class SshHermesRunner:
         loop: tool calls, skill execution, multiple model turns,
         memory reads). Cathedral's value prop is verifying the agent
         actually did work (fetching source URLs, calling tools,
-        reasoning across turns) - ``-z`` stripped exactly that out.
+        reasoning across turns) — ``-z`` stripped exactly that out.
 
         ``hermes chat -q`` writes plain text to stdout, with no JSON
         envelope, so we still instruct the agent in the prompt to
@@ -1005,7 +1007,7 @@ class SshHermesRunner:
             "from your soul.md. No prose, no file writes, no narration. The "
             "first character of your response MUST be '{' and the last MUST be "
             "'}'. Do not write files, do not list directories, do not say "
-            "'I've compiled' or 'see the full report' - just emit the JSON.\n\n"
+            "'I've compiled' or 'see the full report' — just emit the JSON.\n\n"
             "Task:\n"
             f"{prompt}"
         )
@@ -1065,7 +1067,7 @@ class SshHermesRunner:
         # Mirrors hermes_cli/profiles.py: profiles live at
         # $HERMES_HOME/profiles/<name>/. Default HERMES_HOME is ~/.hermes.
         # ``resolved_home`` is the absolute path returned by
-        # ``_resolve_hermes_home`` - see that method for why we must not
+        # ``_resolve_hermes_home`` — see that method for why we must not
         # use ``self.config.hermes_home`` directly here.
         return f"{resolved_home.rstrip('/')}/profiles/{eval_profile}"
 
@@ -1141,7 +1143,7 @@ class SshHermesRunner:
                         ),
                         timeout=10.0,
                     )
-                    import asyncssh  # noqa: F401 - already imported
+                    import asyncssh  # noqa: F401 — already imported
 
                     async with conn.start_sftp_client() as sftp:
                         try:
@@ -1160,7 +1162,7 @@ class SshHermesRunner:
                         error=str(e),
                     )
 
-            # Sessions and request dumps - variable count. List the dir,
+            # Sessions and request dumps — variable count. List the dir,
             # pull each. session_*.json is the per-session log; the
             # request_dump_*.json files are per-API-call traces.
             try:
@@ -1189,7 +1191,7 @@ class SshHermesRunner:
             except Exception as e:
                 logger.warning("ssh_hermes_sessions_dir_pull_failed", error=str(e))
 
-            # Skills tree - preserve the agent's accumulated learning.
+            # Skills tree — preserve the agent's accumulated learning.
             # Recursive copy via tar over SSH (rsync would be nicer but
             # we don't want a hard dependency on rsync being installed).
             skills_remote = f"{profile_path}/skills"
@@ -1226,7 +1228,7 @@ class SshHermesRunner:
                         timeout=10.0,
                         check=False,
                     )
-                except Exception:  # noqa: S110 - best-effort cleanup
+                except Exception:  # noqa: S110 — best-effort cleanup
                     pass
 
             # Clean up the remote state.db snapshot
@@ -1237,7 +1239,7 @@ class SshHermesRunner:
                     timeout=10.0,
                     check=False,
                 )
-            except Exception:  # noqa: S110 - best-effort cleanup
+            except Exception:  # noqa: S110 — best-effort cleanup
                 pass
 
             # Also preserve the raw `hermes chat -q` stdout for audit
@@ -1308,7 +1310,7 @@ class SshHermesRunner:
                 import shutil
 
                 shutil.rmtree(local_root, ignore_errors=True)
-            except Exception:  # noqa: S110 - best-effort cleanup
+            except Exception:  # noqa: S110 — best-effort cleanup
                 pass
 
 
@@ -1345,10 +1347,6 @@ def _content_type_for(rel_path: str) -> str:
     if rel_path.endswith(".tar.gz") or rel_path.endswith(".tgz"):
         return "application/gzip"
     return "application/octet-stream"
-
-
-def _now_utc_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _extract_card_json(stdout: str) -> dict[str, Any] | None:
@@ -1392,7 +1390,7 @@ def _extract_card_json(stdout: str) -> dict[str, Any] | None:
             return obj
     except json.JSONDecodeError:
         pass
-    # Balanced object scan - collect every balanced {...} then return
+    # Balanced object scan — collect every balanced {...} then return
     # the LAST one that parses as a dict. The "last" rule matches how
     # an agent writes: preliminary thinking before the final answer
     # should be discarded.
@@ -1495,5 +1493,4 @@ __all__ = [
     "SshHermesRunnerConfig",
     "TaskFamilyHermesRun",
     "TraceBundle",
-    "_redact_query_tokens",
 ]

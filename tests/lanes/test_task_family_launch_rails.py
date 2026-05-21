@@ -6,22 +6,14 @@ import sys
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.eval.scoring_pipeline import EvalSigner
-from cathedral.lanes.contract import (
-    GenerateCtx,
-    PublicProblem,
-    ScoreResult,
-    Submission,
-    VerifierResult,
-)
+from cathedral.lanes.contract import PublicProblem, ScoreResult, Submission, VerifierResult
 from cathedral.lanes.publisher import (
     AnswerExtractionError,
-    TaskFamilySignedResult,
     build_task_family_prompt,
     extract_answer,
-    score_and_sign_task_family_stdout,
     task_family_prober_version_warning,
     task_family_runner_skip_reason,
 )
@@ -31,7 +23,6 @@ from cathedral.lanes.sign import (
     build_signed_task_family_row,
     public_task_id,
 )
-from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
 from cathedral.validator import pull_loop
 from cathedral.validator.db import connect
 from cathedral.validator.pull_loop import latest_pulled_score_per_hotkey, upsert_pulled_eval
@@ -93,34 +84,6 @@ def _signed_row() -> tuple[dict[str, object], Ed25519PrivateKey]:
     return row, sk
 
 
-def _score_synthetic_boolean_stdout() -> tuple[TaskFamilySignedResult, Ed25519PublicKey]:
-    sk = Ed25519PrivateKey.generate()
-    lane = SyntheticBooleanV1()
-    problem, hidden = lane.generate(
-        GenerateCtx(
-            seed=123,
-            tier=0,
-            issued_at_iso="2026-05-20T00:00:00.000Z",
-        )
-    )
-    signed = score_and_sign_task_family_stdout(
-        lane=lane,
-        problem=problem,
-        hidden=hidden,
-        submission_row={
-            "id": "submission-sat-killswitch",
-            "miner_hotkey": "5Miner",
-            "display_name": "Boolean Miner",
-        },
-        stdout='```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}\n```',
-        ran_at_iso="2026-05-20T00:01:00.000Z",
-        signer=EvalSigner(sk),
-        eval_run_id="run-sat-killswitch",
-        epoch_salt="epoch_123:synthetic_boolean_v1",
-    )
-    return signed, sk.public_key()
-
-
 def test_task_family_signed_row_verifies_without_raw_problem_or_answer() -> None:
     row, sk = _signed_row()
 
@@ -152,44 +115,6 @@ def test_task_family_signed_row_rejects_tampered_score() -> None:
 
     with pytest.raises(pull_loop.PullVerificationError):
         pull_loop.verify_eval_output_signature(row, sk.public_key())
-
-
-def test_task_family_zero_all_scores_unset_scores_positive(monkeypatch) -> None:
-    monkeypatch.delenv("CATHEDRAL_ZERO_ALL_SCORES", raising=False)
-
-    signed, public_key = _score_synthetic_boolean_stdout()
-
-    assert signed.row["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION
-    assert signed.row["task_type"] == "synthetic_boolean_v1"
-    assert signed.row["weighted_score"] == 1.0
-    assert signed.score.weighted_score == 1.0
-    assert "lock_winner" not in signed.row["score_parts"]
-    pull_loop.verify_eval_output_signature(signed.row, public_key)
-
-
-def test_task_family_zero_all_scores_true_forces_schema5_zero(monkeypatch) -> None:
-    monkeypatch.setenv("CATHEDRAL_ZERO_ALL_SCORES", "true")
-
-    signed, public_key = _score_synthetic_boolean_stdout()
-
-    assert signed.row["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION
-    assert signed.row["weighted_score"] == 0.0
-    assert signed.score.weighted_score == 0.0
-    assert signed.row["score_parts"]["binary_correct"] == 1.0
-    assert signed.row["score_parts"]["lock_winner"] == 0.0
-    pull_loop.verify_eval_output_signature(signed.row, public_key)
-
-
-def test_task_family_zero_all_scores_false_scores_positive(monkeypatch) -> None:
-    monkeypatch.setenv("CATHEDRAL_ZERO_ALL_SCORES", "false")
-
-    signed, public_key = _score_synthetic_boolean_stdout()
-
-    assert signed.row["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION
-    assert signed.row["weighted_score"] == 1.0
-    assert signed.score.weighted_score == 1.0
-    assert "lock_winner" not in signed.row["score_parts"]
-    pull_loop.verify_eval_output_signature(signed.row, public_key)
 
 
 def test_task_family_answer_extraction_prefers_final_answer_block() -> None:
@@ -303,9 +228,7 @@ def test_ssh_hermes_task_family_runner_interface_is_launch_smoked() -> None:
         "prompt",
         "miner_hotkey",
         "submission",
-        "receipt_callback",
     ]
-    assert signature.parameters["receipt_callback"].default is None
 
 
 def test_ssh_hermes_redacts_cnf_fetch_tokens_from_errors() -> None:
