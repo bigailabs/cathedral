@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -179,6 +180,44 @@ def sat_active_challenge_status(
         active_sat_challenge_status_from_db(
             database_path,
             verify_file_hash=verify_cnf_hash,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result.get("ok"):
+        raise typer.Exit(1)
+
+
+@app.command(name="sat-active-cnf-probe")
+def sat_active_cnf_probe(
+    database_path: str = typer.Option(
+        "data/publisher.db",
+        "--database-path",
+        "--db",
+        help="Publisher SQLite database path.",
+    ),
+    public_base_url: str = typer.Option(
+        "",
+        "--public-base-url",
+        help="Public publisher base URL. Defaults to CATHEDRAL_PUBLIC_BASE_URL.",
+    ),
+    timeout_secs: float = typer.Option(300.0, "--timeout-secs", min=0.1),
+    min_bytes_per_second: float = typer.Option(
+        0.0,
+        "--min-bytes-per-second",
+        min=0.0,
+    ),
+    announced_time_limit_secs: int = typer.Option(60, "--announced-time-limit-secs", min=1),
+) -> None:
+    """Fetch the active SAT CNF through the public URL and verify its hash."""
+    from cathedral.publisher.sat_cnf_probe import probe_active_sat_cnf_url_from_db
+
+    result = asyncio.run(
+        probe_active_sat_cnf_url_from_db(
+            database_path,
+            public_base_url=public_base_url or os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", ""),
+            timeout_secs=timeout_secs,
+            min_bytes_per_second=min_bytes_per_second,
+            announced_time_limit_secs=announced_time_limit_secs,
         )
     )
     typer.echo(json.dumps(result, indent=2, sort_keys=True))

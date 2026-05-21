@@ -193,6 +193,26 @@ and compare it with the SHA-256 recorded at seeding time. The command exits
 nonzero if there is no active challenge, the active CNF file is unreadable,
 or explicit hash verification fails.
 
+Before sending a large formula to miners, probe the real public CNF
+download path through the target proxy:
+
+```bash
+cathedral-publisher sat-active-cnf-probe \
+  --db data/publisher.db \
+  --public-base-url https://api.cathedral.computer \
+  --timeout-secs 300 \
+  --min-bytes-per-second 1048576
+```
+
+`sat-active-cnf-probe` mints or reuses an authorized fetch token, downloads
+the active CNF from `/v1/challenges/{challenge_id}/cnf` through the public
+base URL, streams the response into a SHA-256 digest, and exits nonzero on
+HTTP failure, hash mismatch, empty response, or throughput below the
+configured floor. Its JSON output includes byte count, elapsed time,
+throughput, and hash match status, but never prints the CNF body, fetch token,
+full URL, or local file path. The same command is available through the
+operator CLI as `cathedral sat-active-cnf-probe`.
+
 Run the publisher-side SAT preflight before booting a launch candidate:
 
 ```bash
