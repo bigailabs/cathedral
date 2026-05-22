@@ -49,6 +49,13 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 _WEIGHT_POLICY_SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"
+_WEIGHT_POLICY_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS publisher_weight_policy_state (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    last_policy_version INTEGER NOT NULL,
+    updated_at_iso      TEXT NOT NULL
+);
+"""
 
 
 @dataclass(frozen=True)
@@ -244,6 +251,7 @@ async def latest_policy_scores_by_hotkey(
     configured signed-policy weights. This mirrors the validator local
     scoring rule: unknown or unweighted Task Family rows contribute zero.
     """
+    limit = max(0, int(limit))
     lane_weights = _resolve_task_family_weights(task_family_weights)
     cur = await conn.execute(
         """
@@ -316,7 +324,52 @@ async def latest_policy_scores_by_hotkey(
         elif weighted_total > 0.0:
             scores[hotkey] = weighted_total
 
-    return scores
+    # Task-family rows can introduce task-only hotkeys after the base ranked
+    # query has applied LIMIT. Apply the configured cap after blending so the
+    # signed vector never exceeds operator policy or schema bounds.
+    return _limit_scores(scores, limit)
+
+
+def _limit_scores(scores: Mapping[str, float], limit: int) -> dict[str, float]:
+    if limit <= 0:
+        return {}
+    ranked = sorted(scores.items(), key=lambda item: (-float(item[1]), item[0]))
+    return dict(ranked[:limit])
+
+
+async def _next_policy_version(conn: Any, *, issued_at: datetime) -> int:
+    """Return a durable, monotonic policy_version for validator rollback fences."""
+    wall_clock_version = int(issued_at.timestamp() * 1000)
+    await conn.executescript(_WEIGHT_POLICY_STATE_SCHEMA)
+    await conn.commit()
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        cur = await conn.execute(
+            "SELECT last_policy_version FROM publisher_weight_policy_state WHERE id = 1"
+        )
+        row = await cur.fetchone()
+        last_version = int(row[0]) if row is not None else None
+        next_version = (
+            wall_clock_version
+            if last_version is None
+            else max(wall_clock_version, last_version + 1)
+        )
+        await conn.execute(
+            """
+            INSERT INTO publisher_weight_policy_state (
+                id, last_policy_version, updated_at_iso
+            ) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                last_policy_version = excluded.last_policy_version,
+                updated_at_iso = excluded.updated_at_iso
+            """,
+            (next_version, _ms_iso(issued_at)),
+        )
+        await conn.commit()
+        return next_version
+    except Exception:
+        await conn.rollback()
+        raise
 
 
 async def produce_weight_policy_once(
@@ -326,6 +379,7 @@ async def produce_weight_policy_once(
     *,
     config: WeightPolicyProducerConfig,
     issued_at: datetime | None = None,
+    state_conn: Any | None = None,
 ) -> SignedWeightVector:
     """Build, sign, and publish one vector into ``store``."""
     issued = issued_at or datetime.now(UTC)
@@ -346,7 +400,10 @@ async def produce_weight_policy_once(
         "scores": scores,
     }
     digest = compute_policy_hash(policy_input)
-    policy_version = int(issued.timestamp() * 1000)
+    # Production uses the publisher DB for this durable counter. Read-only
+    # preflight callers can pass a scratch state connection so dry-runs do not
+    # mutate the production database they are inspecting.
+    policy_version = await _next_policy_version(state_conn or conn, issued_at=issued)
     vector_id = f"{config.network}-{config.netuid}-{policy_version}-{digest[:12]}"
     vector = build_and_sign(
         scores,
@@ -441,12 +498,17 @@ async def run_weight_policy_producer(
     *,
     config: WeightPolicyProducerConfig,
     stop: asyncio.Event | None = None,
+    db_write_lock: asyncio.Lock | None = None,
 ) -> None:
     """Continuously produce signed vectors on the safe chain cadence."""
     stop = stop or asyncio.Event()
     while not stop.is_set():
         try:
-            await produce_weight_policy_once(conn, store, private_key, config=config)
+            if db_write_lock is None:
+                await produce_weight_policy_once(conn, store, private_key, config=config)
+            else:
+                async with db_write_lock:
+                    await produce_weight_policy_once(conn, store, private_key, config=config)
         except Exception as exc:
             logger.warning("weight_policy_producer_error", error=str(exc))
         try:

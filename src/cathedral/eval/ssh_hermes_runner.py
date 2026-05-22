@@ -719,6 +719,7 @@ class SshHermesRunner:
         )
         profile_created = False
         profile_deleted = False
+        receipt_committed = False
         try:
             hermes_version = await self._hermes_version(conn)
             trace.hermes_version = hermes_version
@@ -743,23 +744,64 @@ class SshHermesRunner:
             stdout_received_at_iso = _now_utc_iso()
             if receipt_callback is not None:
                 await receipt_callback(stdout, stdout_received_at_iso)
+                receipt_committed = True
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
             synthetic_card: dict[str, Any] = {
                 "task_type": problem.task_family,
                 "task_id": problem.task_id,
             }
-            bundle = await self._collect_and_assemble(
-                conn,
-                eval_profile=eval_profile,
-                eval_id=run_id,
-                submission_id=str(submission["id"]),
-                eval_round=eval_round,
-                hermes_version=hermes_version,
-                card_json=synthetic_card,
-                hermes_stdout=stdout,
-                resolved_home=resolved_home,
-            )
+            try:
+                bundle = await self._collect_and_assemble(
+                    conn,
+                    eval_profile=eval_profile,
+                    eval_id=run_id,
+                    submission_id=str(submission["id"]),
+                    eval_round=eval_round,
+                    hermes_version=hermes_version,
+                    card_json=synthetic_card,
+                    hermes_stdout=stdout,
+                    resolved_home=resolved_home,
+                )
+            except Exception as exc:
+                if not receipt_committed:
+                    raise
+                # SAT ordering is based on stdout receipt time. Once the
+                # receipt callback commits a verifying row, post-stdout trace
+                # collection must not make a valid first answer disappear.
+                # Return a degraded trace so the orchestrator can still score
+                # and finalize the captured stdout.
+                trace.visit_ended_at = datetime.now(UTC).isoformat()
+                failure_code = (
+                    exc.code if isinstance(exc, SshHermesError) else "trace_collection_failed"
+                )
+                logger.warning(
+                    "ssh_hermes_task_family_trace_collection_failed_after_receipt",
+                    eval_profile=eval_profile,
+                    failure_code=failure_code,
+                    error=str(exc)[:300],
+                )
+                if profile_created and not profile_deleted:
+                    try:
+                        await self._delete_profile(conn, eval_profile)
+                        profile_deleted = True
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "ssh_hermes_cleanup_failed",
+                            eval_profile=eval_profile,
+                            error=str(cleanup_exc),
+                        )
+                trace_dict = trace.to_dict()
+                trace_dict["task_family_stdout_received_at_iso"] = stdout_received_at_iso
+                trace_dict["trace_collection_failed_after_receipt"] = True
+                trace_dict["trace_collection_failure_code"] = failure_code
+                return TaskFamilyHermesRun(
+                    stdout=stdout,
+                    stdout_received_at_iso=stdout_received_at_iso,
+                    duration_ms=int((time.monotonic() - t_start) * 1000),
+                    trace=trace_dict,
+                    trace_bundle=None,
+                )
 
             trace.visit_ended_at = datetime.now(UTC).isoformat()
             await self._delete_profile(conn, eval_profile)

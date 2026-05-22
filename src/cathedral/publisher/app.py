@@ -206,6 +206,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                         private_key,
                         config=config,
                         stop=stop,
+                        db_write_lock=ctx.db_write_lock,
                     )
                 )
             )

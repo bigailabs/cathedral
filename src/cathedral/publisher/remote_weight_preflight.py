@@ -86,6 +86,7 @@ async def run_publisher_remote_weight_preflight(
 
     store = WeightPolicyStore()
     conn = await _connect_readonly(db_path)
+    state_conn = await aiosqlite.connect(":memory:")
     try:
         vector = await produce_weight_policy_once(
             conn,
@@ -93,6 +94,7 @@ async def run_publisher_remote_weight_preflight(
             private_key,
             config=config,
             issued_at=issued_at,
+            state_conn=state_conn,
         )
     except Exception as exc:
         errors.append(f"could not build signed remote weight vector: {exc}")
@@ -102,6 +104,7 @@ async def run_publisher_remote_weight_preflight(
             details=details,
         )
     finally:
+        await state_conn.close()
         await conn.close()
 
     try:
