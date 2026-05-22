@@ -200,20 +200,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         weight_policy_store = WeightPolicyStore()
         app.state.weight_policy = weight_policy_store
         producer_config = load_producer_from_env()
-        if producer_config is not None:
-            config, private_key = producer_config
-            ctx.background_tasks.append(
-                asyncio.create_task(
-                    run_weight_policy_producer(
-                        ctx.db,
-                        weight_policy_store,
-                        private_key,
-                        config=config,
-                        stop=stop,
-                        db_write_lock=ctx.db_write_lock,
-                    )
-                )
-            )
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
         # Make ctx visible to the orchestrator's env-resolver. Production
@@ -247,6 +233,25 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             from cathedral.v3.corpus.private_loader import load_private_corpus
 
             load_private_corpus()
+
+        if producer_config is not None:
+            config, private_key = producer_config
+            # Do not schedule this shared-connection writer until startup DB
+            # mutations are done. create_task() can run at the next await; if it
+            # starts before SAT seeding or repair commits, it can interleave
+            # transactions on ctx.db and corrupt the boot transaction boundary.
+            ctx.background_tasks.append(
+                asyncio.create_task(
+                    run_weight_policy_producer(
+                        ctx.db,
+                        weight_policy_store,
+                        private_key,
+                        config=config,
+                        stop=stop,
+                        db_write_lock=ctx.db_write_lock,
+                    )
+                )
+            )
 
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to

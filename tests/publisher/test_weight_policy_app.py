@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi.testclient import TestClient
 
+import cathedral.publisher.app as publisher_app
 from cathedral.publisher.app import build_app
 
 
@@ -70,3 +72,48 @@ def test_weight_policy_route_serves_produced_vector_when_configured(
         assert payload["policy_metadata"]["score_source"] == (
             "agent_submissions.current_score+configured_task_family_rows"
         )
+
+
+def test_weight_policy_producer_starts_after_sat_seed(tmp_path, monkeypatch) -> None:
+    """Regression: startup DB writers must finish before producer task starts."""
+
+    _clear_weight_policy_env(monkeypatch)
+    events: list[str] = []
+
+    async def fake_seed(_source) -> None:
+        events.append("seed_start")
+        await asyncio.sleep(0)
+        events.append("seed_end")
+
+    async def fake_producer(*_args, **kwargs) -> None:
+        events.append("producer_start")
+        await kwargs["stop"].wait()
+
+    monkeypatch.setattr(
+        publisher_app,
+        "_seed_synthetic_boolean_challenge_from_env",
+        fake_seed,
+    )
+    monkeypatch.setattr(
+        publisher_app,
+        "load_producer_from_env",
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(
+        publisher_app,
+        "run_weight_policy_producer",
+        fake_producer,
+    )
+    monkeypatch.setenv(
+        "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH",
+        str(tmp_path / "active.cnf"),
+    )
+
+    app = build_app(str(tmp_path / "publisher.db"))
+    with TestClient(app):
+        for _ in range(50):
+            if "producer_start" in events:
+                break
+            time.sleep(0.02)
+
+        assert events == ["seed_start", "seed_end", "producer_start"]
