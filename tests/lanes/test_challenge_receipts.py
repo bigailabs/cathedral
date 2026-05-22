@@ -277,6 +277,57 @@ async def test_expire_unresolved_before_does_not_expire_verifying_receipt(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_expire_unresolved_before_expires_stale_verifying_receipt(tmp_path) -> None:
+    conn, store = await _store(tmp_path)
+    try:
+        await _receipt(
+            store,
+            submission_id="sub-a",
+            received_at_iso="2026-05-20T00:00:01.000Z",
+        )
+        await _receipt(
+            store,
+            submission_id="sub-b",
+            received_at_iso="2026-05-20T00:00:02.000Z",
+        )
+        await store.update_status(
+            family_id="synthetic_boolean_v1",
+            challenge_id="sat-001",
+            submission_id="sub-a",
+            status=RECEIPT_STATUS_VERIFYING,
+            now_iso="2026-05-20T00:00:01.500Z",
+        )
+        await _mark_valid(store, "sub-b")
+
+        expired = await store.expire_unresolved_before(
+            family_id="synthetic_boolean_v1",
+            challenge_id="sat-001",
+            cutoff_received_at_iso="2026-05-19T23:59:59.000Z",
+            now_iso="2026-05-20T00:15:00.000Z",
+            rejection_reason="receipt_timed_out",
+            verifying_cutoff_updated_at_iso="2026-05-20T00:10:00.000Z",
+        )
+
+        assert expired == 1
+        earlier = await store.get(
+            family_id="synthetic_boolean_v1",
+            challenge_id="sat-001",
+            submission_id="sub-a",
+        )
+        assert earlier is not None
+        assert earlier.status == RECEIPT_STATUS_EXPIRED
+        assert earlier.rejection_reason == "receipt_timed_out"
+        winner = await store.select_winner(
+            family_id="synthetic_boolean_v1",
+            challenge_id="sat-001",
+        )
+        assert winner is not None
+        assert winner.submission_id == "sub-b"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_verifying_receipt_blocks_later_valid_until_resolved(tmp_path) -> None:
     conn, store = await _store(tmp_path)
     try:

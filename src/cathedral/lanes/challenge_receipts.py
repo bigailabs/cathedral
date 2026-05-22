@@ -16,9 +16,9 @@ Receipt statuses:
 Winner selection is conservative. For one ``(family_id, challenge_id)``,
 the earliest ``valid`` receipt can win only when every earlier receipt is
 resolved ``invalid`` or ``expired``. Any earlier ``unverified`` or
-``verifying`` receipt blocks later valid receipts. Expiry only applies
-to old ``unverified`` receipts; a ``verifying`` receipt is owned by an
-in-flight finalizer and must resolve itself to ``valid`` or ``invalid``.
+``verifying`` receipt blocks later valid receipts. Expiry applies to old
+``unverified`` receipts by receipt time and to abandoned ``verifying``
+receipts only when their verifier heartbeat (``updated_at_iso``) is stale.
 
 Leak boundary: this store is publisher-private and hash-only. It stores
 ``answer_hash`` plus optional receipt-auth metadata, not raw stdout,
@@ -175,9 +175,16 @@ class ChallengeReceiptStore(Protocol):
         cutoff_received_at_iso: str,
         now_iso: str,
         rejection_reason: str,
+        verifying_cutoff_updated_at_iso: str | None = None,
         commit: bool = True,
     ) -> int:
-        """Expire stale unverified receipts older than the receipt-time cutoff."""
+        """Expire stale unresolved receipts.
+
+        ``unverified`` rows expire by receipt time. ``verifying`` rows expire
+        only when the caller provides a stale heartbeat cutoff, which recovers
+        receipts abandoned by a crashed verifier without stealing ownership
+        from a running one.
+        """
         ...
 
     async def get(
@@ -309,15 +316,23 @@ class InMemoryChallengeReceiptStore:
         cutoff_received_at_iso: str,
         now_iso: str,
         rejection_reason: str,
+        verifying_cutoff_updated_at_iso: str | None = None,
         commit: bool = True,
     ) -> int:
         expired = 0
         for key, current in list(self._rows.items()):
             if key[0] != family_id or key[1] != challenge_id:
                 continue
-            if current.status != RECEIPT_STATUS_UNVERIFIED:
-                continue
-            if current.received_at_iso >= cutoff_received_at_iso:
+            expire_unverified = (
+                current.status == RECEIPT_STATUS_UNVERIFIED
+                and current.received_at_iso < cutoff_received_at_iso
+            )
+            expire_verifying = (
+                current.status == RECEIPT_STATUS_VERIFYING
+                and verifying_cutoff_updated_at_iso is not None
+                and current.updated_at_iso < verifying_cutoff_updated_at_iso
+            )
+            if not (expire_unverified or expire_verifying):
                 continue
             self._rows[key] = _advance_receipt(
                 current,
@@ -613,13 +628,15 @@ class SqliteChallengeReceiptStore:
         cutoff_received_at_iso: str,
         now_iso: str,
         rejection_reason: str,
+        verifying_cutoff_updated_at_iso: str | None = None,
         commit: bool = True,
     ) -> int:
         cur = await self._conn.execute(
             "UPDATE lane_challenge_receipts SET status = ?, rejection_reason = ?, "
             "updated_at_iso = ?, resolved_at_iso = ? "
             "WHERE family_id = ? AND challenge_id = ? "
-            "AND status = ? AND received_at_iso < ?",
+            "AND ((status = ? AND received_at_iso < ?) "
+            "OR (? IS NOT NULL AND status = ? AND updated_at_iso < ?))",
             (
                 RECEIPT_STATUS_EXPIRED,
                 rejection_reason,
@@ -629,6 +646,9 @@ class SqliteChallengeReceiptStore:
                 challenge_id,
                 RECEIPT_STATUS_UNVERIFIED,
                 cutoff_received_at_iso,
+                verifying_cutoff_updated_at_iso,
+                RECEIPT_STATUS_VERIFYING,
+                verifying_cutoff_updated_at_iso,
             ),
         )
         if commit:
