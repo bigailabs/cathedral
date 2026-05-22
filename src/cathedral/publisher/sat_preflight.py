@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from cathedral.eval.ssh_hermes_runner import DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES
 from cathedral.lanes.challenge_ops import build_synthetic_boolean_challenge_record
 from cathedral.lanes.challenge_source import CHALLENGE_STATUS_ACTIVE, ChallengeSourceError
 from cathedral.lanes.synthetic_boolean_v1 import validate_cnf_url_challenge_id
@@ -24,6 +25,7 @@ EVAL_SIGNING_KEY_ENV = "CATHEDRAL_EVAL_SIGNING_KEY"
 WEIGHT_POLICY_SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"
 TASK_FAMILY_FEED_ENABLED_ENV = "CATHEDRAL_TASK_FAMILY_FEED_ENABLED"
 TASK_FAMILY_IDS_ENV = "CATHEDRAL_TASK_FAMILY_IDS"
+TASK_FAMILY_STDOUT_MAX_BYTES_ENV = "CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES"
 EVAL_MODE_ENV = "CATHEDRAL_EVAL_MODE"
 PROBER_VERSION_ENV = "CATHEDRAL_PROBER_VERSION"
 PUBLIC_BASE_URL_ENV = "CATHEDRAL_PUBLIC_BASE_URL"
@@ -87,7 +89,64 @@ def _hex_seed_is_32_bytes(value: str) -> bool:
 
 
 def _env_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    # Keep this literal parser aligned with task_family_feed_enabled().
+    # Accepting "1"/"yes"/"on" here would make preflight green while the
+    # publisher still skips every Task Family evaluation at runtime.
+    return value.strip().lower() == "true"
+
+
+def _sum_decimal_digits_through(n: int) -> int:
+    total = 0
+    start = 1
+    digits = 1
+    while start <= n:
+        end = min(n, (start * 10) - 1)
+        total += (end - start + 1) * digits
+        start *= 10
+        digits += 1
+    return total
+
+
+def _min_sat_answer_stdout_bytes(num_vars: int) -> int:
+    """Minimum stdout bytes for a complete fenced JSON DIMACS assignment.
+
+    Hermes stdout is capped before receipt recording. This estimates the
+    smallest accepted FINAL_ANSWER block for the worst valid assignment shape:
+    every variable is assigned negatively, which is one byte larger per
+    literal than the positive case. It intentionally ignores miner prose; the
+    launch invariant is only that a terse correct answer can fit.
+    """
+    variable_count = max(0, int(num_vars))
+    negative_literal_bytes = _sum_decimal_digits_through(variable_count) + (
+        2 * variable_count
+    )
+    escaped_dimacs_bytes = (
+        len("s SATISFIABLE\\nv ")
+        + negative_literal_bytes
+        + len("0\\n")
+    )
+    return (
+        len('```FINAL_ANSWER\n{"dimacs_solution":"')
+        + escaped_dimacs_bytes
+        + len('"}\n```')
+    )
+
+
+def _validate_stdout_cap(
+    *,
+    num_vars: int,
+    stdout_max_bytes: int,
+    errors: list[str],
+    details: dict[str, Any],
+) -> None:
+    min_stdout_bytes = _min_sat_answer_stdout_bytes(num_vars)
+    details["min_sat_answer_stdout_bytes"] = min_stdout_bytes
+    if stdout_max_bytes < min_stdout_bytes:
+        errors.append(
+            f"{TASK_FAMILY_STDOUT_MAX_BYTES_ENV}={stdout_max_bytes} is too small "
+            f"for a complete DIMACS assignment with {num_vars} variables; "
+            f"set it to at least {min_stdout_bytes}"
+        )
 
 
 def _task_family_ids(env: Mapping[str, str]) -> list[str]:
@@ -197,6 +256,15 @@ def run_synthetic_boolean_launch_preflight(
     enforce_max_cnf_bytes = storage_mode != STORAGE_MODE_FILE or max_cnf_bytes_configured
     details["max_cnf_bytes_enforced"] = enforce_max_cnf_bytes
 
+    stdout_max_bytes, stdout_warning = positive_int_env(
+        env,
+        TASK_FAMILY_STDOUT_MAX_BYTES_ENV,
+        DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
+    )
+    if stdout_warning:
+        warnings.append(stdout_warning)
+    details["task_family_stdout_max_bytes"] = stdout_max_bytes
+
     cnf_path = env.get(ACTIVE_CNF_PATH_ENV, "").strip()
     if not cnf_path:
         errors.append(f"{ACTIVE_CNF_PATH_ENV} is required")
@@ -239,6 +307,12 @@ def run_synthetic_boolean_launch_preflight(
             details["cnf_sha256"] = record.audit_metadata["cnf_sha256"]
             details["num_vars"] = record.audit_metadata["num_vars"]
             details["num_clauses"] = record.audit_metadata["num_clauses"]
+            _validate_stdout_cap(
+                num_vars=int(record.audit_metadata["num_vars"]),
+                stdout_max_bytes=stdout_max_bytes,
+                errors=errors,
+                details=details,
+            )
         except UnicodeDecodeError:
             errors.append(f"{ACTIVE_CNF_PATH_ENV} must be UTF-8 text")
         except OSError:
@@ -286,6 +360,7 @@ __all__ = [
     "STORAGE_MODE_SQLITE_TEXT",
     "TASK_FAMILY_FEED_ENABLED_ENV",
     "TASK_FAMILY_IDS_ENV",
+    "TASK_FAMILY_STDOUT_MAX_BYTES_ENV",
     "TIER_ENV",
     "WEIGHT_POLICY_SIGNING_KEY_ENV",
     "SatLaunchPreflightResult",

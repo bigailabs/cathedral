@@ -318,6 +318,118 @@ async def test_active_file_backed_snapshot_cache_runs_off_event_loop_once(
 
 
 @pytest.mark.asyncio
+async def test_active_file_backed_snapshot_cache_uses_configured_root(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cache_root = tmp_path / "operator-cache"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    monkeypatch.setenv(challenge_cnf_module.CNF_SNAPSHOT_DIR_ENV, str(cache_root))
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    cache = wired_app["app"].state.cnf_snapshot_cache
+    assert cache._root == cache_root
+    assert list(cache_root.glob("*.cnf"))
+
+
+@pytest.mark.asyncio
+async def test_file_backed_snapshot_cache_prunes_locked_past_grace(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=1,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 200
+
+    cache = wired_app["app"].state.cnf_snapshot_cache
+    snapshot_paths = [entry.path for entry in cache._by_digest.values()]
+    assert snapshot_paths
+    assert all(path.exists() for path in snapshot_paths)
+
+    locked_at = datetime.now(UTC) - timedelta(seconds=120)
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_LOCKED,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(locked_at),
+        overwrite_status=True,
+    )
+
+    r_past_grace = client.get(
+        f"/v1/challenges/{CHALLENGE_ID}/cnf",
+        params={"t": FAKE_TOKEN},
+    )
+
+    assert r_past_grace.status_code == 404
+    assert r_past_grace.json() == NOT_FOUND_BODY
+    assert cache._by_digest == {}
+    assert all(not path.exists() for path in snapshot_paths)
+
+
+@pytest.mark.asyncio
 async def test_active_file_backed_streams_verified_open_file_after_path_replace(
     wired_app: dict[str, Any],
     tmp_path: Any,

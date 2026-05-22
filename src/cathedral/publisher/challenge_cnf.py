@@ -22,6 +22,7 @@ import os
 import stat
 import tempfile
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
@@ -47,6 +48,7 @@ router = APIRouter()
 _CHALLENGE_NOT_FOUND_DETAIL = "challenge_not_found"
 _POST_LOCK_GRACE_SECS = 30
 _FILE_CHUNK_BYTES = 1024 * 1024
+CNF_SNAPSHOT_DIR_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CNF_SNAPSHOT_DIR"
 
 
 class _CnfFileHashMismatchError(Exception):
@@ -57,36 +59,76 @@ class _CnfFileOversizedError(Exception):
     pass
 
 
+@dataclass
+class _CnfSnapshotEntry:
+    path: Path
+    challenge_ids: set[str]
+
+
 class _CnfSnapshotCache:
     """Process-local content-addressed cache for file-backed CNF snapshots.
 
     The first authorized fetch for a digest pays the copy/hash cost. Later
     fetches stream the same private immutable snapshot, avoiding
     O(file_size * request_count) temp-space and disk-I/O pressure from shared
-    miner fetch tokens.
+    miner fetch tokens. Entries are pruned against challenge status so
+    promoted file-backed formulas do not accumulate in default temp storage
+    until publisher process exit.
     """
 
-    def __init__(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory(prefix="cathedral-cnf-snapshots-")
-        self._root = Path(self._tmp.name)
+    def __init__(self, root: Path | None = None) -> None:
+        configured_root = root or _configured_snapshot_root()
+        if configured_root is None:
+            self._tmp = tempfile.TemporaryDirectory(prefix="cathedral-cnf-snapshots-")
+            self._root = Path(self._tmp.name)
+        else:
+            self._tmp = None
+            self._root = configured_root
         self._lock = asyncio.Lock()
-        self._by_digest: dict[str, Path] = {}
+        self._by_digest: dict[str, _CnfSnapshotEntry] = {}
+
+    async def prune(
+        self,
+        *,
+        source: SqliteChallengeSource,
+        tokens: SqliteFetchTokenStore,
+        now: datetime,
+    ) -> None:
+        """Drop snapshots whose challenge is no longer fetchable."""
+        async with self._lock:
+            for digest, entry in list(self._by_digest.items()):
+                keep_challenge_ids: set[str] = set()
+                for challenge_id in entry.challenge_ids:
+                    token_row = await tokens.get(challenge_id)
+                    lookup = await source.get_for_endpoint(challenge_id)
+                    if token_row is None or lookup is None:
+                        continue
+                    if lookup.status == CHALLENGE_STATUS_ACTIVE:
+                        keep_challenge_ids.add(challenge_id)
+                    elif lookup.status == CHALLENGE_STATUS_LOCKED and _within_post_lock_grace(
+                        lookup,
+                        token_row,
+                        now,
+                    ):
+                        keep_challenge_ids.add(challenge_id)
+                if keep_challenge_ids and entry.path.is_file():
+                    entry.challenge_ids = keep_challenge_ids
+                    continue
+                self._discard_locked(digest)
 
     async def get(
         self,
         source_path: Path,
         *,
+        challenge_id: str,
         expected_sha256: str,
         max_bytes: int | None,
     ) -> Path:
-        cached = self._by_digest.get(expected_sha256)
-        if cached is not None and cached.is_file():
-            return cached
-
         async with self._lock:
             cached = self._by_digest.get(expected_sha256)
-            if cached is not None and cached.is_file():
-                return cached
+            if cached is not None and cached.path.is_file():
+                cached.challenge_ids.add(challenge_id)
+                return cached.path
             snapshot = await asyncio.to_thread(
                 _materialize_verified_cnf_snapshot,
                 source_path,
@@ -94,8 +136,30 @@ class _CnfSnapshotCache:
                 cache_root=self._root,
                 max_bytes=max_bytes,
             )
-            self._by_digest[expected_sha256] = snapshot
+            self._by_digest[expected_sha256] = _CnfSnapshotEntry(
+                path=snapshot,
+                challenge_ids={challenge_id},
+            )
             return snapshot
+
+    def _discard_locked(self, digest: str) -> None:
+        entry = self._by_digest.pop(digest, None)
+        if entry is None:
+            return
+        try:
+            entry.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _configured_snapshot_root() -> Path | None:
+    raw = os.environ.get(CNF_SNAPSHOT_DIR_ENV, "").strip()
+    if not raw:
+        return None
+    # Large launch CNFs should use an operator-mounted cache directory rather
+    # than the host's default temp area. The status-based prune above still
+    # bounds lifetime when a custom root is configured.
+    return Path(raw).expanduser()
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -167,8 +231,9 @@ def _materialize_verified_cnf_snapshot(
     """
     cache_root.mkdir(parents=True, exist_ok=True)
     target = cache_root / f"{expected_sha256}.cnf"
-    if target.is_file():
-        return target
+    # Reuse is controlled by the process-local cache map. A configurable cache
+    # root may survive restarts, so a pre-existing digest-named file is not
+    # trusted until this fetch has copied and verified the current source.
     if max_bytes is not None:
         if path.stat().st_size > max_bytes:
             raise _CnfFileOversizedError
@@ -288,6 +353,14 @@ async def get_challenge_cnf(
         raise _not_found()
 
     now = datetime.now(UTC)
+    cache: _CnfSnapshotCache | None = getattr(request.app.state, "cnf_snapshot_cache", None)
+    if cache is not None:
+        # The cache is keyed by digest but validity is keyed by challenge
+        # lifecycle. Pruning before the servability check lets the first
+        # post-grace request for a promoted challenge clean up its old snapshot
+        # while preserving active and locked-in-grace fetches.
+        await cache.prune(source=source, tokens=tokens, now=now)
+
     if lookup.status == CHALLENGE_STATUS_ACTIVE:
         servable = True
     elif lookup.status == CHALLENGE_STATUS_LOCKED:
@@ -309,6 +382,7 @@ async def get_challenge_cnf(
             # directly instead of copying the full launch CNF again.
             snapshot_path = await _cnf_snapshot_cache(request).get(
                 path,
+                challenge_id=challenge_id,
                 expected_sha256=expected_sha256,
                 max_bytes=_effective_cnf_max_bytes(lookup),
             )
