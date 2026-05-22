@@ -240,6 +240,33 @@ def test_verify_dimacs_solution_matches_reference_strictness() -> None:
         assert result.rejection_reason
 
 
+def test_verify_dimacs_solution_rejects_assignment_above_bitset_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dimacs_mod, "MAX_ASSIGNMENT_VARIABLES", 3)
+    cnf = "p cnf 4 1\n1 0\n"
+
+    result = verify_dimacs_solution(cnf, "s SATISFIABLE\nv 1 2 3 4 0\n")
+
+    assert not result.parsed_ok
+    assert result.rejection_reason == "solution_too_many_vars"
+
+
+def test_verify_dimacs_solution_rejects_non_sat_status_before_bitset_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExplodingAssignmentBits:
+        def __init__(self, variable_count: int) -> None:
+            raise AssertionError(f"unexpected bitset allocation for {variable_count}")
+
+    monkeypatch.setattr(dimacs_mod, "_AssignmentBits", _ExplodingAssignmentBits)
+
+    result = verify_dimacs_solution("p cnf 1 1\n1 0\n", "s UNKNOWN\n")
+
+    assert not result.parsed_ok
+    assert result.rejection_reason == "solution_status_unknown"
+
+
 # --------------------------------------------------------------------------
 # Evaluation helpers
 # --------------------------------------------------------------------------

@@ -181,18 +181,18 @@ async def test_bug_isolation_persist_is_write_and_read_gated(tmp_path) -> None:
         rows = await repository.list_eval_runs_recent(conn, since=since, include_v3=True)
         assert len(rows) == 1
         wire = _eval_run_to_output(rows[0], submission)
-        verify_eval_output_signature(wire, sk.public_key())
         assert wire["eval_output_schema_version"] == 3
         assert wire["task_type"] == "bug_isolation_v1"
         assert wire["miner_hotkey"] == "5BugIsolationMinerHotkey"
         assert wire["weighted_score"] == pytest.approx(1.0)
-        assert wire["challenge_id"] == "ch_pilot_alpha"
+        assert "challenge_id" not in wire
+        assert "challenge_id" not in wire["claim"]
         assert wire["challenge_id_public"] == signed.row["challenge_id_public"]
         # epoch_salt is part of the v3 signed subset; the readback
-        # path must surface it on the wire or a future regression in
-        # _eval_run_to_output could drop it silently while signed
-        # rows already on disk would then fail verification.
+        # path still surfaces it even though the raw challenge_id is
+        # stripped from public reads.
         assert wire["epoch_salt"] == "epoch_301"
+        verify_eval_output_signature(signed.row, sk.public_key())
     finally:
         await conn.close()
 
@@ -238,8 +238,8 @@ async def test_orchestrator_runs_bug_isolation_lane_when_feed_is_enabled(
         rows = await repository.list_eval_runs_recent(conn, since=since, include_v3=True)
         assert len(rows) == 1
         wire = _eval_run_to_output(rows[0], submission)
-        verify_eval_output_signature(wire, sk.public_key())
         assert wire["task_type"] == "bug_isolation_v1"
         assert wire["weighted_score"] == pytest.approx(1.0)
+        assert "challenge_id" not in wire
     finally:
         await conn.close()

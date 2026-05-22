@@ -16,8 +16,15 @@ ceiling.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import sys
+import time
+from pathlib import Path
+
 import pytest
 
+import cathedral.v4.oracle.patch_runner as patch_runner
 from cathedral.v4.oracle.patch_runner import (
     REPRO_BUDGET_SECONDS,
     OracleError,
@@ -188,6 +195,64 @@ print('SHOULD_NEVER_PRINT')
     assert result.passed is False
     assert "SHOULD_NEVER_PRINT" not in result.stdout
     assert result.duration_seconds < 0.5
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fallback process groups are POSIX-only")
+def test_fallback_timeout_kills_background_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(patch_runner, "resolve_isolation_mode", lambda: "monkeypatch_only")
+    child_pid_file = tmp_path / "child.pid"
+    hidden_test = f"""import pathlib, subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, "-I", "-c", "import time; time.sleep(5)"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid))
+time.sleep(5)
+"""
+
+    child_pid: int | None = None
+    try:
+        result = run_patch_against_hidden_test(
+            original_repo_state={"m.py": PRICE_FILE},
+            patch_str=PRICE_FIX,
+            hidden_test_code=hidden_test,
+            timeout_seconds=0.25,
+        )
+        assert result.timed_out is True
+        assert child_pid_file.exists()
+        child_pid = int(child_pid_file.read_text())
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not _pid_is_running(child_pid):
+                break
+            time.sleep(0.05)
+
+        assert not _pid_is_running(child_pid), "fallback oracle left child process alive"
+    finally:
+        if child_pid is not None and _pid_is_running(child_pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, 9)
+
+
+def _pid_is_running(pid: int) -> bool:
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        with contextlib.suppress(OSError, IndexError):
+            state = proc_stat.read_text().split()[2]
+            if state == "Z":
+                return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def test_empty_hidden_test_raises() -> None:

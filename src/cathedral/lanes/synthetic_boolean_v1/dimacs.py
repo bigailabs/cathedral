@@ -37,6 +37,10 @@ MAX_SOLUTION_BYTES = 2 * 1024 * 1024 * 1024
 MAX_VARIABLES = 1_000_000_000
 MAX_CLAUSES = 1_000_000_000
 MAX_LITERALS_PER_CLAUSE = 10_000_000
+# Assignment verification uses two bitsets. Keep this lower than the parser's
+# launch-file header bound so a seeded-but-impractical CNF cannot allocate
+# hundreds of MiB per bad answer before being rejected.
+MAX_ASSIGNMENT_VARIABLES = 50_000_000
 
 _UINT64_MAX = (1 << 64) - 1
 _ASCII_SPACE = " \t\f\v"
@@ -462,7 +466,7 @@ def _parse_solution_bits(
 
     status: str | None = None
     seen_terminator = False
-    bits = _AssignmentBits(variable_count)
+    bits: _AssignmentBits | None = None
 
     for raw_line in text.splitlines():
         line = _skip_or_strip_line(raw_line)
@@ -480,6 +484,11 @@ def _parse_solution_bits(
             if candidate not in _ALLOWED_STATUSES:
                 return "solution_unknown_status", candidate, None
             status = candidate
+            if status != "SATISFIABLE":
+                return f"solution_status_{status.lower()}", status, None
+            if variable_count > MAX_ASSIGNMENT_VARIABLES:
+                return "solution_too_many_vars", status, None
+            bits = _AssignmentBits(variable_count)
             continue
 
         if seen_terminator:
@@ -491,6 +500,7 @@ def _parse_solution_bits(
         if len(parts) == 1:
             return "solution_missing_assignment", status, None
 
+        assert bits is not None
         for index, tok in enumerate(parts[1:], start=1):
             parsed = _signed_int_token(tok)
             if parsed is None:
@@ -509,10 +519,9 @@ def _parse_solution_bits(
 
     if status is None:
         return "solution_missing_status", "", None
-    if status != "SATISFIABLE":
-        return f"solution_status_{status.lower()}", status, None
     if variable_count > 0 and not seen_terminator:
         return "solution_missing_terminator", status, None
+    assert bits is not None
     if not bits.complete():
         return "solution_incomplete_assignment", status, bits
     return None, status, bits
@@ -654,6 +663,7 @@ def assignment_in_range(cnf: Cnf, assignment: dict[int, bool]) -> bool:
 
 
 __all__ = [
+    "MAX_ASSIGNMENT_VARIABLES",
     "MAX_CLAUSES",
     "MAX_CNF_BYTES",
     "MAX_LITERALS_PER_CLAUSE",
