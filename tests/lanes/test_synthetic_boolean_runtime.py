@@ -2129,6 +2129,63 @@ async def test_synthetic_boolean_reconcile_locked_challenge_publishes_losers_aft
 
 
 @pytest.mark.asyncio
+async def test_synthetic_boolean_reconcile_marks_legacy_receiptless_lock_done(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="legacy-locked-no-receipts",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_LOCKED,
+                audit_metadata={"source": "legacy-upgrade-test"},
+            )
+        )
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=StubPolarisRunner(),
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        async def fail_if_announced(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("receipt-less locked challenge should not be re-announced")
+
+        monkeypatch.setattr(orch, "_announce_synthetic_boolean_problem", fail_if_announced)
+
+        finalized = await orch.reconcile_sat_receipts(log=structlog.get_logger("test"))
+
+        assert finalized == 0
+        cur = await conn.execute(
+            "SELECT losers_published_at_iso FROM lane_challenges WHERE challenge_id = ?",
+            ("legacy-locked-no-receipts",),
+        )
+        assert (await cur.fetchone())[0] is not None
+        assert await source.list_locked_needing_loser_reconciliation(
+            "synthetic_boolean_v1"
+        ) == []
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_synthetic_boolean_receipt_result_and_terminal_status_are_atomic(
     tmp_path, monkeypatch
 ) -> None:

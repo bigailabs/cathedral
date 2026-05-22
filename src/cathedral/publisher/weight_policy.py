@@ -380,6 +380,7 @@ async def produce_weight_policy_once(
     config: WeightPolicyProducerConfig,
     issued_at: datetime | None = None,
     state_conn: Any | None = None,
+    state_write_lock: asyncio.Lock | None = None,
 ) -> SignedWeightVector:
     """Build, sign, and publish one vector into ``store``."""
     issued = issued_at or datetime.now(UTC)
@@ -403,7 +404,16 @@ async def produce_weight_policy_once(
     # Production uses the publisher DB for this durable counter. Read-only
     # preflight callers can pass a scratch state connection so dry-runs do not
     # mutate the production database they are inspecting.
-    policy_version = await _next_policy_version(state_conn or conn, issued_at=issued)
+    state_target = state_conn or conn
+    if state_write_lock is None:
+        policy_version = await _next_policy_version(state_target, issued_at=issued)
+    else:
+        async with state_write_lock:
+            # Keep only the durable counter transaction under the shared
+            # publisher write gate. The score scans above are read-only and can
+            # be slow on large eval history; holding this lock there would
+            # stall submissions and SAT finalization unnecessarily.
+            policy_version = await _next_policy_version(state_target, issued_at=issued)
     vector_id = f"{config.network}-{config.netuid}-{policy_version}-{digest[:12]}"
     vector = build_and_sign(
         scores,
@@ -504,11 +514,13 @@ async def run_weight_policy_producer(
     stop = stop or asyncio.Event()
     while not stop.is_set():
         try:
-            if db_write_lock is None:
-                await produce_weight_policy_once(conn, store, private_key, config=config)
-            else:
-                async with db_write_lock:
-                    await produce_weight_policy_once(conn, store, private_key, config=config)
+            await produce_weight_policy_once(
+                conn,
+                store,
+                private_key,
+                config=config,
+                state_write_lock=db_write_lock,
+            )
         except Exception as exc:
             logger.warning("weight_policy_producer_error", error=str(exc))
         try:

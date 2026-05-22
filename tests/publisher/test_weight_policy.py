@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from cathedral.publisher import weight_policy as weight_policy_module
 from cathedral.publisher import repository
 from cathedral.publisher.weight_policy import (
     WeightPolicyProducerConfig,
     WeightPolicyStore,
     latest_policy_scores_by_hotkey,
     produce_weight_policy_once,
+    run_weight_policy_producer,
 )
 from cathedral.validator.db import connect
 
@@ -108,6 +111,40 @@ async def test_weight_policy_limit_applies_after_task_family_blending(tmp_path) 
         assert scores == {"hk-task-only": 1.0}
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_weight_policy_producer_locks_only_state_write(monkeypatch) -> None:
+    store = WeightPolicyStore()
+    lock = asyncio.Lock()
+    stop = asyncio.Event()
+    events: list[str] = []
+
+    async def fake_scores(*_args, **_kwargs) -> dict[str, float]:
+        events.append("read_unlocked")
+        assert not lock.locked()
+        return {"hk-a": 0.9}
+
+    async def fake_next_version(_conn, *, issued_at: datetime) -> int:
+        events.append("state_write_locked")
+        assert lock.locked()
+        stop.set()
+        return int(issued_at.timestamp() * 1000)
+
+    monkeypatch.setattr(weight_policy_module, "latest_policy_scores_by_hotkey", fake_scores)
+    monkeypatch.setattr(weight_policy_module, "_next_policy_version", fake_next_version)
+
+    await run_weight_policy_producer(
+        object(),
+        store,
+        _private_key(),
+        config=WeightPolicyProducerConfig(interval_secs=3600, valid_for_secs=3600),
+        stop=stop,
+        db_write_lock=lock,
+    )
+
+    assert events == ["read_unlocked", "state_write_locked"]
+    assert await store.get() is not None
 
 
 async def _seed_ranked_submission(

@@ -1475,7 +1475,8 @@ class EvalOrchestrator:
             if self._task_family_challenge_source is not None:
                 await self._mark_locked_sat_losers_published(
                     challenge_source=self._task_family_challenge_source,
-                    winner=winner_to_publish_losers,
+                    family_id=winner_to_publish_losers.family_id,
+                    challenge_id=winner_to_publish_losers.challenge_id,
                 )
             return True
         return False
@@ -1484,7 +1485,8 @@ class EvalOrchestrator:
         self,
         *,
         challenge_source: ChallengeSource,
-        winner: ChallengeReceipt,
+        family_id: str,
+        challenge_id: str,
     ) -> None:
         async with self._db_write_lock:
             # This marker bounds scheduler reconciliation: once all currently
@@ -1492,8 +1494,8 @@ class EvalOrchestrator:
             # or observed as already persisted, future ticks can skip the old
             # formula without re-announcing it and re-walking receipts.
             await challenge_source.mark_locked_loser_reconciliation_complete(
-                family_id=winner.family_id,
-                challenge_id=winner.challenge_id,
+                family_id=family_id,
+                challenge_id=challenge_id,
                 now_iso=_ms_iso(datetime.now(UTC)),
             )
 
@@ -1607,6 +1609,21 @@ class EvalOrchestrator:
             ):
                 finalized += 1
         for record in locked_records:
+            winner = await receipt_store.select_winner(
+                family_id=record.family_id,
+                challenge_id=record.challenge_id,
+            )
+            if winner is None or winner.signed_row is None:
+                # Older publishers could lock SAT challenges before receipt
+                # rows existed. There is no signed payload to publish, so mark
+                # the legacy lock reconciled; otherwise the bounded dirty query
+                # would pick the same historical row on every scheduler tick.
+                await self._mark_locked_sat_losers_published(
+                    challenge_source=challenge_source,
+                    family_id=record.family_id,
+                    challenge_id=record.challenge_id,
+                )
+                continue
             announced = await self._announce_synthetic_boolean_problem(
                 record,
                 log=log,
@@ -1615,12 +1632,6 @@ class EvalOrchestrator:
             if announced is None:
                 continue
             problem, _hidden = announced
-            winner = await receipt_store.select_winner(
-                family_id=record.family_id,
-                challenge_id=record.challenge_id,
-            )
-            if winner is None or winner.signed_row is None:
-                continue
             # Winner/lock/source commits before loser publication. If the
             # publisher exits in that gap, reconciliation revisits only locked
             # challenges without the durable loser-published marker; successful
@@ -1634,7 +1645,8 @@ class EvalOrchestrator:
             )
             await self._mark_locked_sat_losers_published(
                 challenge_source=challenge_source,
-                winner=winner,
+                family_id=winner.family_id,
+                challenge_id=winner.challenge_id,
             )
         return finalized
 
