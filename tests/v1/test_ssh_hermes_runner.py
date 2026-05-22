@@ -1000,6 +1000,47 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
     assert "dimacs_solution" not in result.trace
 
 
+@pytest.mark.asyncio
+async def test_task_family_uses_announced_problem_time_limit(runner_config, submission) -> None:
+    problem = _module.PublicProblem(
+        task_family="synthetic_boolean_v1",
+        schema_version=5,
+        task_id="sat_public_timeout_probe",
+        difficulty_tier=0,
+        public_input={"num_vars": 1, "cnf_sha256": "a" * 64},
+        time_limit_seconds=7,
+    )
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+    runner = SshHermesRunner(runner_config)
+    runner._connect_with_retries = AsyncMock(return_value=conn)
+    runner._hermes_version = AsyncMock(return_value="hermes 0.13.0")
+    runner._resolve_hermes_home = AsyncMock(return_value="/home/cathedral-probe/.hermes")
+    runner._verify_hermes_install = AsyncMock(return_value=None)
+    runner._clone_profile = AsyncMock(return_value=None)
+    runner._delete_profile = AsyncMock(return_value=None)
+    runner._collect_and_assemble = AsyncMock(return_value=MagicMock())
+    runner._invoke_hermes_text = AsyncMock(
+        return_value='```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+    )
+
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        await runner.run_task_family_challenge(
+            problem=problem,
+            prompt="Solve the SAT challenge.",
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+        )
+
+    runner._invoke_hermes_text.assert_awaited_once()
+    assert runner._invoke_hermes_text.await_args.kwargs["timeout_secs"] == 7.0
+
+
 # --------------------------------------------------------------------------
 # Prober version dispatch — CATHEDRAL_PROBER_VERSION env flag
 # --------------------------------------------------------------------------

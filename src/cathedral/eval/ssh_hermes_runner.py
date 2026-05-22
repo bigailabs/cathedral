@@ -735,6 +735,10 @@ class SshHermesRunner:
                 prompt=prompt,
                 eval_round=eval_round,
                 resolved_home=resolved_home,
+                # SAT receipts are ordered by first valid answer, so the
+                # Hermes call must use the challenge's advertised wall-clock
+                # budget instead of the runner-wide default.
+                timeout_secs=float(problem.time_limit_seconds),
             )
             stdout_received_at_iso = _now_utc_iso()
             if receipt_callback is not None:
@@ -1052,6 +1056,7 @@ class SshHermesRunner:
         prompt: str,
         eval_round: str,
         resolved_home: str,
+        timeout_secs: float | None = None,
     ) -> str:
         """Run ``hermes chat -q`` and return raw stdout."""
         hermes_home = self._profile_path(eval_profile, resolved_home)
@@ -1065,7 +1070,7 @@ class SshHermesRunner:
         stdout, stderr, exit_status = await self._run_remote(
             conn,
             cmd,
-            timeout=self.config.eval_timeout_secs,
+            timeout=timeout_secs if timeout_secs is not None else self.config.eval_timeout_secs,
             check=False,
         )
         if exit_status != 0:

@@ -23,16 +23,24 @@ from cathedral.lanes.challenge_source import (
 
 _FAMILY = "synthetic_boolean_v1"
 _TOY_CNF = "p cnf 1 1\n1 0\n"
+_OTHER_TOY_CNF = "p cnf 1 1\n-1 0\n"
 
 
-def _record(challenge_id: str, status: str = CHALLENGE_STATUS_ACTIVE) -> ChallengeRecord:
+def _record(
+    challenge_id: str,
+    status: str = CHALLENGE_STATUS_ACTIVE,
+    *,
+    cnf_text: str = _TOY_CNF,
+    tier: int = 1,
+    audit_metadata: dict[str, object] | None = None,
+) -> ChallengeRecord:
     return ChallengeRecord(
         challenge_id=challenge_id,
         family_id=_FAMILY,
-        tier=1,
-        cnf_text=_TOY_CNF,
+        tier=tier,
+        cnf_text=cnf_text,
         status=status,
-        audit_metadata={"note": "toy"},
+        audit_metadata=dict(audit_metadata or {"note": "toy"}),
     )
 
 
@@ -132,6 +140,76 @@ async def test_sqlite_upsert_preserves_existing_status_by_default(tmp_path) -> N
         rows = await src.list_for_family(_FAMILY)
         assert len(rows) == 1
         assert rows[0].status == CHALLENGE_STATUS_LOCKED
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_rejects_active_challenge_material_mutation(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("c1", CHALLENGE_STATUS_ACTIVE))
+
+        with pytest.raises(ChallengeSourceError, match="immutable"):
+            await src.upsert(
+                _record(
+                    "c1",
+                    CHALLENGE_STATUS_PENDING,
+                    cnf_text=_OTHER_TOY_CNF,
+                    audit_metadata={"note": "different-cnf"},
+                )
+            )
+
+        rows = await src.list_for_family(_FAMILY)
+        assert len(rows) == 1
+        assert rows[0].status == CHALLENGE_STATUS_ACTIVE
+        assert rows[0].cnf_text == _TOY_CNF
+        assert rows[0].audit_metadata == {"note": "toy"}
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_rejects_locked_challenge_material_mutation_even_with_status_overwrite(
+    tmp_path,
+) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("c1", CHALLENGE_STATUS_LOCKED))
+
+        with pytest.raises(ChallengeSourceError, match="immutable"):
+            await src.upsert(
+                _record("c1", CHALLENGE_STATUS_ACTIVE, cnf_text=_OTHER_TOY_CNF),
+                overwrite_status=True,
+            )
+
+        rows = await src.list_for_family(_FAMILY)
+        assert len(rows) == 1
+        assert rows[0].status == CHALLENGE_STATUS_LOCKED
+        assert rows[0].cnf_text == _TOY_CNF
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_allows_pending_challenge_material_update(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("c1", CHALLENGE_STATUS_PENDING))
+        await src.upsert(
+            _record(
+                "c1",
+                CHALLENGE_STATUS_PENDING,
+                cnf_text=_OTHER_TOY_CNF,
+                audit_metadata={"note": "updated-before-announce"},
+            )
+        )
+
+        rows = await src.list_for_family(_FAMILY)
+        assert len(rows) == 1
+        assert rows[0].status == CHALLENGE_STATUS_PENDING
+        assert rows[0].cnf_text == _OTHER_TOY_CNF
+        assert rows[0].audit_metadata == {"note": "updated-before-announce"}
     finally:
         await conn.close()
 

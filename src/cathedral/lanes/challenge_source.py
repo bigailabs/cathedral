@@ -162,6 +162,14 @@ class InMemoryChallengeSource:
 
     async def upsert(self, record: ChallengeRecord, *, overwrite_status: bool = False) -> None:
         current = self._rows.get(record.challenge_id)
+        if (
+            current is not None
+            and current.status != CHALLENGE_STATUS_PENDING
+            and not _challenge_material_matches(current, record)
+        ):
+            raise ChallengeSourceError(
+                "challenge material is immutable once the challenge is active"
+            )
         if current is not None and not overwrite_status:
             self._rows[record.challenge_id] = ChallengeRecord(
                 challenge_id=record.challenge_id,
@@ -393,6 +401,26 @@ class SqliteChallengeSource:
     ) -> None:
         ts = now_iso or self._default_now_iso or "1970-01-01T00:00:00.000Z"
         try:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            current_cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "audit_metadata FROM lane_challenges WHERE challenge_id = ? LIMIT 1",
+                (record.challenge_id,),
+            )
+            current_row = await current_cur.fetchone()
+            if current_row is not None:
+                current = _row_to_record(current_row)
+                if (
+                    current.status != CHALLENGE_STATUS_PENDING
+                    and not _challenge_material_matches(current, record)
+                ):
+                    # Once a challenge has been announced, fetch tokens,
+                    # receipts, and lock rows all refer to this exact private
+                    # material. Reusing a custom challenge id for another CNF
+                    # must fail instead of mutating the solved/active target.
+                    raise ChallengeSourceError(
+                        "challenge material is immutable once the challenge is active"
+                    )
             if overwrite_status:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
@@ -439,9 +467,15 @@ class SqliteChallengeSource:
                 ),
             )
             await self._conn.commit()
+        except ChallengeSourceError:
+            await self._conn.rollback()
+            raise
         except aiosqlite.IntegrityError as exc:
             await self._conn.rollback()
             raise ChallengeSourceError("challenge source constraint violation") from exc
+        except Exception:
+            await self._conn.rollback()
+            raise
 
     async def activate(
         self,
@@ -705,6 +739,24 @@ def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
         cnf_path=str(cnf_path) if cnf_path else None,
         status=str(status),
         audit_metadata=audit,
+    )
+
+
+def _challenge_material_matches(existing: ChallengeRecord, incoming: ChallengeRecord) -> bool:
+    """True when an upsert is an idempotent rewrite of private material.
+
+    Status is deliberately ignored: callers may still activate/retire through
+    the state machine. CNF bytes/path, family, tier, and audit metadata are the
+    immutable material that public announcements, fetch tokens, and receipts
+    bind to after a row leaves ``pending``.
+    """
+    return (
+        existing.challenge_id == incoming.challenge_id
+        and existing.family_id == incoming.family_id
+        and existing.tier == incoming.tier
+        and existing.cnf_text == incoming.cnf_text
+        and existing.cnf_path == incoming.cnf_path
+        and existing.audit_metadata == incoming.audit_metadata
     )
 
 
