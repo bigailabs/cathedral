@@ -4,7 +4,7 @@ These rails define the SAT launch sequence and public/private boundary for `synt
 
 ## Status
 
-The codebase includes the SAT lane and remote signed-weight path. Mainnet SAT remains disabled until deploy, publisher enablement, and validator opt-in to remote signed weight vectors.
+The codebase includes the SAT lane. Mainnet SAT remains disabled until deploy, publisher enablement, and an explicit validator-local task-family weight change.
 
 ## Launch Model
 
@@ -39,7 +39,7 @@ Migration is additive. Existing miners keep the current agent pipeline running w
 4. Run local toy DIMACS checks before exposing the host.
 5. Register the host, SSH user, display name, hotkey, and hardware line with Cathedral operators.
 6. Enter shadow SAT rounds while `synthetic_boolean_v1` remains weight `0.0`.
-7. Enter scored SAT rounds only after the feed, verifier, signed-weight path, and validator opt-in are stable.
+7. Enter scored SAT rounds only after the feed, verifier, and validator-local weight path are stable.
 
 The public miner contract is the answer shape, the hotkey identity, and the host reachability check. Solver source, solver strategy, logs, private benchmark data, and infrastructure details are not public repo material.
 
@@ -119,18 +119,10 @@ The public feed is hash-only. Raw CNF and submitted solutions must not appear in
 
 ## Validator Boundary
 
-Before the remote-weight release:
-
 - Validators use the existing local scoring and weight loop.
-- SAT task-family weight stays `0.0` unless an operator is doing controlled local testing.
-
-After the remote-weight release:
-
-- Validators must explicitly enable `[remote_weight_source]`.
-- Validators must pin `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX`.
-- Validators fetch `GET /v1/validator/weights/next`.
-- Validators verify the signed vector before applying it.
-- If remote mode is disabled, local weighting remains the path.
+- SAT task-family weight stays `0.0` unless an operator is doing controlled local testing or a release intentionally changes it.
+- Validators pull signed eval rows and verify `cathedral_signature` with `CATHEDRAL_PUBLIC_KEY_HEX`.
+- Validators do not receive raw CNF, submitted solutions, or private corpus material.
 
 ## Operator Sequence
 
@@ -140,10 +132,9 @@ After the remote-weight release:
 4. Confirm miner prompts are delivered through `SshHermesRunner`.
 5. Confirm the first verified solution locks the active challenge.
 6. Confirm public feed rows are hash-only.
-7. Produce a signed remote weight vector.
-8. Have validators opt in with the pinned weight-policy public key.
-9. Confirm validator logs show accepted remote vectors and coherent weight setting.
-10. Advance to the next formula only after the current challenge is locked or retired.
+7. Confirm validators pull signed rows and keep SAT task-family weight at the intended value.
+8. Confirm validator logs show coherent local weight setting.
+9. Advance to the next formula only after the current challenge is locked or retired.
 
 ## Environment Gates
 
@@ -161,16 +152,6 @@ Validator local testing:
 ```bash
 CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
 CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT=0.0
-```
-
-Validator remote-weight opt-in after release:
-
-```toml
-[remote_weight_source]
-enabled = true
-url = "https://api.cathedral.computer"
-key_id = "cathedral-weight-policy"
-public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
 ```
 
 ## Leak Checks

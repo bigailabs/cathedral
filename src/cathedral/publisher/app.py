@@ -60,14 +60,6 @@ from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_
 from cathedral.publisher import repository
 from cathedral.publisher.reads import router as reads_router
 from cathedral.publisher.submit import router as submit_router
-from cathedral.publisher.weight_policy import (
-    WeightPolicyStore,
-    load_producer_from_env,
-    run_weight_policy_producer,
-)
-from cathedral.publisher.weight_policy import (
-    router as weight_policy_router,
-)
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
 
@@ -172,12 +164,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
-        # Issue #155: in-memory holder for the latest signed weight
-        # vector. Empty by default. The GET endpoint returns 503 until
-        # a cadence path (out of scope for this first pass) populates
-        # it. Tests can set it directly via app.state.weight_policy.
-        weight_policy_store = WeightPolicyStore()
-        app.state.weight_policy = weight_policy_store
         # Make ctx visible to the orchestrator's env-resolver. Production
         # `from_settings` previously skipped this; the test-only `build_app`
         # set it inside its own factory. Hoisting to the shared lifespan
@@ -211,26 +197,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             load_private_corpus()
 
         stop = asyncio.Event()
-        producer = load_producer_from_env()
-        if producer is None:
-            logger.warning(
-                "weight_policy_signing_key_missing",
-                env="CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY",
-            )
-        elif start_eval_loop:
-            producer_config, producer_private_key = producer
-            ctx.background_tasks.append(
-                asyncio.create_task(
-                    run_weight_policy_producer(
-                        ctx.db,
-                        weight_policy_store,
-                        producer_private_key,
-                        config=producer_config,
-                        stop=stop,
-                    )
-                )
-            )
-
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to
             # PolarisRuntimeRunner (Tier A), TEE-tier rows are pre-verified
@@ -382,11 +348,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
     app.include_router(challenge_cnf_router, prefix="/api/cathedral")
     app.include_router(challenge_cnf_router, include_in_schema=False)
-
-    # Issue #155: signed weight policy surface. Mounted on both prefixes
-    # for the same dual-routing reason as the submit/reads routers.
-    app.include_router(weight_policy_router, prefix="/api/cathedral")
-    app.include_router(weight_policy_router, include_in_schema=False)
 
     # Agent-facing onboarding - Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the

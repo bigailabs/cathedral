@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from cathedral.config import ValidatorSettings, resolve_validator_config_path
 
 POLARIS_KEY = "11" * 32
@@ -54,8 +57,6 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     assert settings.weights.interval_secs == 1500
     assert settings.weights.burn_uid == 204
     assert settings.weights.forced_burn_percentage == 95.0
-    assert settings.remote_weight_source.enabled is False
-    assert settings.remote_weight_source.public_key_env == "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
 
     env_text = (etc / "validator.env").read_text()
     assert f"CATHEDRAL_CONFIG_PATH={etc / 'mainnet.toml'}" in env_text
@@ -156,6 +157,66 @@ def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> No
     settings = ValidatorSettings.from_toml(resolved)
     assert settings.weights.forced_burn_percentage == 95.0
     assert "forced_burn_percentage = 95.0" in custom.read_text()
+
+
+def test_retired_weight_config_sections_are_ignored(tmp_path: Path) -> None:
+    config = tmp_path / "mainnet.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[weights]",
+                "interval_secs = 1500",
+                "forced_burn_percentage = 95.0",
+                "",
+                "[weight_source]",
+                'mode = "remote"',
+                "",
+                "[remote_weight_source]",
+                "enabled = true",
+            ]
+        )
+        + "\n"
+    )
+
+    settings = ValidatorSettings.from_toml(config)
+
+    assert settings.network.name == "finney"
+    assert settings.network.validator_hotkey == "operator-hotkey"
+    assert settings.weights.interval_secs == 1500
+
+
+def test_unknown_top_level_config_sections_still_fail(tmp_path: Path) -> None:
+    config = tmp_path / "mainnet.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[weightz]",
+                "interval_secs = 1500",
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ValidatorSettings.from_toml(config)
 
 
 def test_explicit_testnet_network_is_respected(tmp_path: Path) -> None:

@@ -33,32 +33,11 @@ v3_bug_isolation_weight = 0.0
 # Off until synthetic_boolean_v1 is intentionally enabled.
 task_family_weights = { synthetic_boolean_v1 = 0.0 }
 
-[weight_source]
-mode = "remote"
-publisher_weights_url = "https://api.cathedral.computer/v1/validator/weights/next"
-poll_interval_secs = 60.0
-request_timeout_secs = 10.0
-fallback_after_stale_minutes = 10.0
-refuse_after_stale_minutes = 30.0
-cathedral_policy_public_key_hex = "8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd"
-cathedral_policy_public_key_env = "CATHEDRAL_POLICY_PUBLIC_KEY_HEX"
-cathedral_policy_key_id = "cathedral-weight-policy"
-
 [publisher]
 url = "https://api.cathedral.computer"
 public_key_env = "CATHEDRAL_PUBLIC_KEY_HEX"
 pull_interval_secs = 30.0
 api_token_env = "CATHEDRAL_PUBLISHER_TOKEN"
-
-[remote_weight_source]
-# Disabled by default. Validators keep local score blending unless an operator
-# explicitly opts into relaying Cathedral's signed weight vector.
-enabled = false
-url = "https://api.cathedral.computer"
-key_id = "cathedral-weight-policy"
-public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
-poll_interval_secs = 60.0
-request_timeout_secs = 10.0
 
 [storage]
 database_path = "/var/lib/cathedral/validator-mainnet.db"

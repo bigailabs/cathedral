@@ -117,7 +117,6 @@ What that means concretely:
 - The publisher holds the active formula corpus and the verifier code. The publisher runs `SyntheticBooleanV1.verify` against the miner's returned DIMACS solution (see `src/cathedral/lanes/synthetic_boolean_v1/__init__.py`).
 - The publisher attaches a `cathedral_signature` (Ed25519) over the canonical projection of each scored row.
 - Validators verify the signature with `CATHEDRAL_PUBLIC_KEY_HEX` (see `src/cathedral/validator/pull_loop.py`, `verify_eval_run_signature`). They do not re-run the SAT verifier in v1.
-- Validators also verify policy fields on signed weight vectors when the optional remote-weight path is enabled: network, netuid, key id, expiry, finite nonnegative weights, rollback protection (see `src/cathedral/validator/remote_weight_loop.py`).
 
 Why validators do not re-verify SAT solutions in v1:
 

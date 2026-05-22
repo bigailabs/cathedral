@@ -4,13 +4,9 @@ This is the operator runbook for Cathedral validators during the SAT launch tran
 
 ## Status
 
-The codebase includes the SAT lane and remote signed-weight path. Mainnet SAT remains disabled until the publisher is deployed with the SAT feed and validators opt in to remote signed weight vectors.
-
-Until remote weights are enabled, validators keep using the existing local scoring and weight path.
+The codebase includes the SAT lane. Mainnet SAT remains disabled until the publisher is deployed with the SAT feed and operators move validator-local task-family weight above `0.0`.
 
 ## What The Validator Does
-
-Default path:
 
 1. Poll `GET /v1/leaderboard/recent`.
 2. Verify each signed eval row with `CATHEDRAL_PUBLIC_KEY_HEX`.
@@ -18,17 +14,6 @@ Default path:
 4. Blend local score rows into a weight vector.
 5. Apply burn policy.
 6. Call `subtensor.set_weights`.
-
-Remote-weight path after the SAT release:
-
-1. Poll `GET /v1/validator/weights/next`.
-2. Verify the signed weight vector with the pinned weight-policy public key.
-3. Reject wrong network, wrong netuid, wrong key id, expired vectors, invalid weights, and policy rollbacks.
-4. Map hotkeys to local metagraph uids.
-5. Apply the signed burn snapshot.
-6. Call `subtensor.set_weights` on the validator's normal cadence.
-
-Remote weights are explicit opt-in. If the key is missing while remote mode is enabled, startup fails instead of silently falling back.
 
 ## Prerequisites
 
@@ -100,42 +85,6 @@ sudo -u cathedral pm2 logs cathedral-validator --lines 200
 sudo -u cathedral pm2 restart cathedral-validator
 ```
 
-## Enable Remote Weights After The SAT Release
-
-Do this only after the remote-weight release is deployed and the operator has published the weight-policy public key.
-
-The shipped `config/mainnet.toml` and `config/testnet.toml` templates already include a disabled block. Change only `enabled` unless the release notes say otherwise:
-
-```toml
-[remote_weight_source]
-enabled = true
-url = "https://api.cathedral.computer"
-key_id = "cathedral-weight-policy"
-public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
-poll_interval_secs = 60.0
-request_timeout_secs = 10.0
-```
-
-Set the pinned key:
-
-```bash
-export CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX=<cathedral-weight-policy-public-key>
-```
-
-Then restart:
-
-```bash
-cathedral-validator migrate --config config/mainnet.toml
-cathedral-validator serve --config config/mainnet.toml
-```
-
-Expected behavior:
-
-- Startup refuses to run if `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX` is missing or invalid.
-- `503` from `/v1/validator/weights/next` means the publisher is up but has no vector yet.
-- The validator keeps last accepted remote state and does not apply a rollback.
-- If remote mode is disabled, the validator uses local scoring and weight computation.
-
 ## Health
 
 ```bash
@@ -167,9 +116,6 @@ Useful log lines:
 - `pull_loop_tick fetched=N persisted=M`: signed eval rows are being pulled.
 - `weights_pre_burn`: local vector before burn.
 - `weights_set`: chain weight call completed or was blocked.
-- `remote_weight_no_vector_yet`: remote mode is enabled but the publisher has no vector.
-- `remote_weight_signature_invalid`: remote vector failed signature or policy checks.
-- `remote_weight_source_enabled_but_key_missing`: remote mode was enabled without the pinned key.
 - `pull_loop_disabled`: `CATHEDRAL_PUBLIC_KEY_HEX` is not set, so signed eval rows are not pulled.
 
 ## Troubleshooting
@@ -178,12 +124,10 @@ Useful log lines:
 |---|---|
 | `pull_loop_disabled` | Set `CATHEDRAL_PUBLIC_KEY_HEX` and restart. |
 | `pull_eval_signature_invalid` | Re-pin the Cathedral eval-signing public key from the trusted operator source. |
-| Remote startup fails | Set `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX` or disable `[remote_weight_source]`. |
-| Remote fetch returns 503 | Wait for the publisher to produce a vector. Do not switch keys. |
 | `blocked_by_stake` | Add stake or wait for permit. |
 | `blocked_by_transaction_error` | Check subtensor endpoint, rate limit, and logs. |
 | `stalled: true` | Restart the validator and inspect logs before it stalled. |
-| SAT rows accepted but no SAT weight | Confirm remote mode is enabled after release, or local task-family weight is intentionally nonzero for testing. |
+| SAT rows accepted but no SAT weight | Confirm local task-family weight is intentionally nonzero for testing or release. |
 
 ## Public Feed Checks
 
@@ -209,4 +153,3 @@ An incoming validator operator needs:
 - Local `CATHEDRAL_BEARER`.
 - Pinned Cathedral eval-signing public key.
 - Pinned Polaris runtime-attestation public key while the legacy worker remains enabled.
-- Pinned weight-policy public key only if remote weights are enabled.

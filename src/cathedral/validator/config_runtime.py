@@ -29,8 +29,3 @@ class RuntimeContext:
     cathedral_public_key: Ed25519PublicKey | None = None
     publisher_api_token: str | None = None
     fetcher_close: Callable[[], Awaitable[None]] | None = None
-    # Issue #155: optional pinned public key for the remote signed weight
-    # source. When remote mode is enabled, startup refuses to continue
-    # unless this key is present. The default local-only path leaves it
-    # as None.
-    remote_weight_public_key: Ed25519PublicKey | None = None

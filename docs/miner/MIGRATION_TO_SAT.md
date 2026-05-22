@@ -8,8 +8,8 @@ SAT migration is additive. Keep the current agent pipeline running while SAT is 
 
 - The live production path remains the agent pipeline.
 - The SAT lane runs through Cathedral's SSH/Hermes execution path.
-- Mainnet SAT weight is `0.0` until operators enable the lane and validators opt in.
-- Validators verify Cathedral signatures and signed weight vectors. They do not receive raw formulas.
+- Mainnet SAT weight is `0.0` until operators enable the lane and intentionally change validator-local SAT weighting.
+- Validators verify Cathedral signatures over eval rows. They do not receive raw formulas.
 
 ## What Changes For Miners
 
@@ -38,7 +38,7 @@ SAT path:
 6. Test the wrapper locally with toy DIMACS input.
 7. Register display name, hotkey, host, SSH user, and hardware line with Cathedral operators.
 8. Join shadow rounds while SAT weight remains `0.0`.
-9. Move into scored rounds after the feed, verifier, and signed-weight path are stable.
+9. Move into scored rounds after the feed, verifier, and validator-local weight path are stable.
 
 ## Wrapper Contract
 
