@@ -280,6 +280,58 @@ async def test_active_file_backed_streams_verified_open_file_after_path_replace(
 
 
 @pytest.mark.asyncio
+async def test_active_file_backed_streams_verified_snapshot_after_in_place_write(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    mutated_body = "p cnf 1 1\n-1 0\n"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    original_iter = challenge_cnf_module._iter_open_file
+
+    def mutate_source_before_stream(handle: Any):
+        cnf_path.write_text(mutated_body, encoding="utf-8")
+        yield from original_iter(handle)
+
+    monkeypatch.setattr(
+        challenge_cnf_module,
+        "_iter_open_file",
+        mutate_source_before_stream,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert cnf_path.read_text(encoding="utf-8") == mutated_body
+
+
+@pytest.mark.asyncio
 async def test_active_file_backed_rejects_changed_cnf_digest(
     wired_app: dict[str, Any],
     tmp_path: Any,

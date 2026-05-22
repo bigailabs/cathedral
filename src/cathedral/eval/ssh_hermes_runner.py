@@ -118,7 +118,10 @@ def _redact_query_tokens(s: str) -> str:
 
 
 def _now_utc_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    # SAT receipt ordering uses SQLite text comparison, so callback
+    # timestamps must use the same fixed-width millisecond-Z form as the
+    # fallback and reconciler paths.
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 # --------------------------------------------------------------------------

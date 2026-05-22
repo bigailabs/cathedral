@@ -52,6 +52,17 @@ _compute_proof_of_loop = _module._compute_proof_of_loop
 
 from cathedral.v1_types import EvalTask  # noqa: E402
 
+
+def test_now_utc_iso_uses_receipt_ordering_timestamp_format() -> None:
+    timestamp = _module._now_utc_iso()
+    assert timestamp.endswith("Z")
+    assert "+00:00" not in timestamp
+    date_part, time_part = timestamp.removesuffix("Z").split("T")
+    assert len(date_part) == len("2026-05-20")
+    assert len(time_part.split(".")[1]) == 3
+    _module.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
+
 # --------------------------------------------------------------------------
 # Fixtures
 # --------------------------------------------------------------------------

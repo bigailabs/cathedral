@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import os
 import stat
+import tempfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -103,29 +104,34 @@ def _normalized_sha256(value: str | None) -> str | None:
     return None
 
 
-def _open_verified_cnf_file(path: Path, *, expected_sha256: str) -> BinaryIO:
-    """Open, hash, and rewind the same file descriptor we will stream.
+def _open_verified_cnf_snapshot(path: Path, *, expected_sha256: str) -> BinaryIO:
+    """Copy, hash, and rewind an immutable snapshot for streaming.
 
     ``FileResponse`` opens the path later, after route code returns. For
-    operator-managed file-backed CNFs that leaves a check/use gap: the path or
-    symlink can be replaced after the digest check but before streaming. Keeping
-    one descriptor through hash and response iteration binds served bytes to the
-    digest we just validated.
+    operator-managed file-backed CNFs that leaves a check/use gap. Even an
+    already-open descriptor can see in-place writes after the digest check.
+    Stream a private temp-file snapshot so miners receive exactly the bytes
+    whose digest was validated.
     """
-    handle = path.open("rb")
+    source = path.open("rb")
     try:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise OSError("challenge CNF path is not a regular file")
-        digest = hashlib.sha256()
-        while chunk := handle.read(_FILE_CHUNK_BYTES):
-            digest.update(chunk)
-        if digest.hexdigest() != expected_sha256:
-            raise _CnfFileHashMismatchError
-        handle.seek(0)
-        return handle
-    except Exception:
-        handle.close()
-        raise
+        snapshot = tempfile.TemporaryFile("w+b")
+        try:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise OSError("challenge CNF path is not a regular file")
+            digest = hashlib.sha256()
+            while chunk := source.read(_FILE_CHUNK_BYTES):
+                digest.update(chunk)
+                snapshot.write(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise _CnfFileHashMismatchError
+            snapshot.seek(0)
+            return snapshot
+        except Exception:
+            snapshot.close()
+            raise
+    finally:
+        source.close()
 
 
 def _iter_open_file(handle: BinaryIO) -> Iterator[bytes]:
@@ -199,7 +205,7 @@ async def get_challenge_cnf(
             logger.warning("challenge_cnf_file_hash_missing", challenge_id=challenge_id)
             raise _not_found()
         try:
-            handle = _open_verified_cnf_file(path, expected_sha256=expected_sha256)
+            handle = _open_verified_cnf_snapshot(path, expected_sha256=expected_sha256)
         except FileNotFoundError:
             logger.warning("challenge_cnf_file_missing", challenge_id=challenge_id)
             raise _not_found() from None
