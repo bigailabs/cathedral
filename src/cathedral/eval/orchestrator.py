@@ -51,6 +51,7 @@ from cathedral.lanes.challenge_receipts import (
 )
 from cathedral.lanes.challenge_source import (
     CHALLENGE_STATUS_ACTIVE,
+    CHALLENGE_STATUS_LOCKED,
     ChallengeRecord,
     ChallengeSource,
     SqliteChallengeSource,
@@ -1313,6 +1314,11 @@ class EvalOrchestrator:
             winner_result = _task_family_signed_result_from_row(winner.signed_row)
             locked = None
             promoted = None
+            # Use the transaction-time lock timestamp for challenge-source
+            # updated_at_iso. The CNF endpoint's locked grace window is
+            # anchored there, and winner.signed_row["ran_at"] may be minutes
+            # older if the valid receipt waited behind earlier receipts.
+            lock_commit_iso = _ms_iso(datetime.now(UTC))
             await self.db.execute("BEGIN IMMEDIATE")
             try:
                 await persist_task_family_result(
@@ -1334,7 +1340,7 @@ class EvalOrchestrator:
                         miner_hotkey=winner.miner_hotkey,
                         eval_run_id=winner.eval_run_id,
                         weighted_score=float(winner.signed_row["weighted_score"]),
-                        won_at_iso=str(winner.signed_row["ran_at"]),
+                        won_at_iso=lock_commit_iso,
                         commit=False,
                     )
                 if locked is not None and self._task_family_challenge_source is not None:
@@ -1342,7 +1348,7 @@ class EvalOrchestrator:
                         await self._task_family_challenge_source.mark_locked_and_promote_next(
                             family_id=winner.family_id,
                             challenge_id=winner.challenge_id,
-                            now_iso=str(winner.signed_row["ran_at"]),
+                            now_iso=lock_commit_iso,
                             manage_transaction=False,
                         )
                     )
@@ -1381,7 +1387,8 @@ class EvalOrchestrator:
         winner: ChallengeReceipt,
         problem: PublicProblem,
         reason: str,
-    ) -> None:
+    ) -> int:
+        published = 0
         for candidate in await receipt_store.list_for_challenge(
             family_id=winner.family_id,
             challenge_id=winner.challenge_id,
@@ -1422,6 +1429,8 @@ class EvalOrchestrator:
                     trace_json=candidate.trace_json,
                     feed_enabled=True,
                 )
+                published += 1
+        return published
 
     async def reconcile_sat_receipts(
         self,
@@ -1443,15 +1452,19 @@ class EvalOrchestrator:
 
         finalized = 0
         try:
-            records = await challenge_source.list_for_family(
+            active_records = await challenge_source.list_for_family(
                 SYNTHETIC_BOOLEAN_FAMILY_ID,
                 status=CHALLENGE_STATUS_ACTIVE,
+            )
+            locked_records = await challenge_source.list_for_family(
+                SYNTHETIC_BOOLEAN_FAMILY_ID,
+                status=CHALLENGE_STATUS_LOCKED,
             )
         except Exception as exc:
             log.warning("task_family_receipt_reconcile_failed", error=str(exc)[:256])
             return 0
 
-        for record in records:
+        for record in active_records:
             announced = await self._announce_synthetic_boolean_problem(
                 record,
                 log=log,
@@ -1476,6 +1489,30 @@ class EvalOrchestrator:
                 log=log,
             ):
                 finalized += 1
+        for record in locked_records:
+            announced = await self._announce_synthetic_boolean_problem(
+                record,
+                log=log,
+                family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+            )
+            if announced is None:
+                continue
+            problem, _hidden = announced
+            winner = await receipt_store.select_winner(
+                family_id=record.family_id,
+                challenge_id=record.challenge_id,
+            )
+            if winner is None or winner.signed_row is None:
+                continue
+            # Winner/lock/source commits before loser publication. If the
+            # publisher exits in that gap, reconciliation must revisit locked
+            # challenges and idempotently publish already-validated losers.
+            finalized += await self._publish_resolved_sat_losers(
+                receipt_store=receipt_store,
+                winner=winner,
+                problem=problem,
+                reason="challenge_already_locked",
+            )
         return finalized
 
     async def _expire_stale_sat_receipts(

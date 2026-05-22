@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from cathedral.lanes.synthetic_boolean_v1.dimacs import MAX_ASSIGNMENT_VARIABLES
 from cathedral.publisher.sat_preflight import run_synthetic_boolean_launch_preflight
 
 
@@ -88,6 +89,46 @@ def test_sat_launch_preflight_rejects_cnf_above_launch_limit(tmp_path) -> None:
         "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH exceeds "
         "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES"
     ) in result.errors
+
+
+def test_sat_launch_preflight_rejects_cnf_above_verifier_variable_bound(tmp_path) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(f"p cnf {MAX_ASSIGNMENT_VARIABLES + 1} 0\n", encoding="utf-8")
+
+    result = run_synthetic_boolean_launch_preflight(_launch_env(cnf_path))
+
+    assert not result.ok
+    assert (
+        "synthetic_boolean_v1 CNF is not valid DIMACS: cnf_too_many_vars"
+        in result.errors
+    )
+
+
+def test_sat_launch_preflight_rejects_unsafe_challenge_id(tmp_path) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+
+    env = _launch_env(cnf_path)
+    env["CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID"] = "sat/bad"
+    result = run_synthetic_boolean_launch_preflight(env)
+
+    assert not result.ok
+    assert any("challenge_id must be a non-empty RFC3986" in error for error in result.errors)
+
+
+def test_sat_launch_preflight_rejects_invalid_storage_mode(tmp_path) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+
+    env = _launch_env(cnf_path)
+    env["CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE"] = "sqllite"
+    result = run_synthetic_boolean_launch_preflight(env)
+
+    assert not result.ok
+    assert (
+        "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE must be 'sqlite_text' or 'file'"
+        in result.errors
+    )
 
 
 def test_sat_launch_preflight_rejects_missing_runtime_gates(tmp_path) -> None:

@@ -34,13 +34,16 @@ from dataclasses import dataclass, field
 # preventing accidental unbounded strings from entering the Python verifier.
 MAX_CNF_BYTES = 2 * 1024 * 1024 * 1024
 MAX_SOLUTION_BYTES = 2 * 1024 * 1024 * 1024
-MAX_VARIABLES = 1_000_000_000
 MAX_CLAUSES = 1_000_000_000
 MAX_LITERALS_PER_CLAUSE = 10_000_000
 # Assignment verification uses two bitsets. Keep this lower than the parser's
 # launch-file header bound so a seeded-but-impractical CNF cannot allocate
 # hundreds of MiB per bad answer before being rejected.
 MAX_ASSIGNMENT_VARIABLES = 50_000_000
+# Launch records must obey the verifier's assignment budget. Allowing a larger
+# CNF header here would announce challenges that every valid answer later
+# rejects as ``solution_too_many_vars``.
+MAX_VARIABLES = MAX_ASSIGNMENT_VARIABLES
 
 _UINT64_MAX = (1 << 64) - 1
 _ASCII_SPACE = " \t\f\v"

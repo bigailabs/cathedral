@@ -101,6 +101,15 @@ def test_parse_cnf_metadata_does_not_collect_clauses() -> None:
     assert meta.num_clauses == 2
 
 
+def test_parse_cnf_metadata_rejects_cnf_above_assignment_budget() -> None:
+    meta = parse_dimacs_cnf_metadata(
+        f"p cnf {dimacs_mod.MAX_ASSIGNMENT_VARIABLES + 1} 0\n"
+    )
+
+    assert not meta.ok
+    assert meta.rejection_reason == "cnf_too_many_vars"
+
+
 def test_parse_cnf_metadata_file_streams_without_collecting_clauses(tmp_path) -> None:
     cnf_path = tmp_path / "stream.cnf"
     cnf_path.write_text("c comment\np cnf 3 2\n1 -2 0\n2 3 0\n", encoding="utf-8")

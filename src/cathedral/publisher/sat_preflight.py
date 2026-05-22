@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from cathedral.lanes.challenge_ops import build_synthetic_boolean_challenge_record
 from cathedral.lanes.challenge_source import CHALLENGE_STATUS_ACTIVE, ChallengeSourceError
+from cathedral.lanes.synthetic_boolean_v1 import validate_cnf_url_challenge_id
 from cathedral.publisher.sat_file_challenges import build_synthetic_boolean_file_challenge_record
 
 ACTIVE_CNF_PATH_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH"
@@ -72,8 +73,7 @@ def _storage_mode(env: Mapping[str, str]) -> tuple[str, str | None]:
     if normalized in {STORAGE_MODE_FILE, "file_backed", "filesystem"}:
         return STORAGE_MODE_FILE, None
     return STORAGE_MODE_SQLITE_TEXT, (
-        f"{STORAGE_MODE_ENV} must be '{STORAGE_MODE_SQLITE_TEXT}' or '{STORAGE_MODE_FILE}'; "
-        f"using {STORAGE_MODE_SQLITE_TEXT}"
+        f"{STORAGE_MODE_ENV} must be '{STORAGE_MODE_SQLITE_TEXT}' or '{STORAGE_MODE_FILE}'"
     )
 
 
@@ -155,7 +155,9 @@ def run_synthetic_boolean_launch_preflight(
 
     storage_mode, storage_warning = _storage_mode(env)
     if storage_warning:
-        warnings.append(storage_warning)
+        # Publisher startup rejects invalid storage modes; preflight must fail
+        # the same typo instead of silently checking a different mode.
+        errors.append(storage_warning)
     details["storage_mode"] = storage_mode
 
     max_cnf_bytes, max_warning = positive_int_env(
@@ -184,6 +186,10 @@ def run_synthetic_boolean_launch_preflight(
             details["tier"] = tier
 
             challenge_id = env.get(CHALLENGE_ID_ENV, "").strip() or None
+            if challenge_id is not None:
+                # Keep launch checks aligned with cnf_url announcement: the id
+                # is a route path segment, so reserved URL characters are fatal.
+                validate_cnf_url_challenge_id(challenge_id)
             if storage_mode == STORAGE_MODE_FILE:
                 record = build_synthetic_boolean_file_challenge_record(
                     cnf_path=cnf_path,

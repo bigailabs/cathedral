@@ -47,7 +47,7 @@ def _task_id_for(instance: ToyInstance, seed: int, tier: int) -> str:
     return digest[:32]
 
 
-def _validate_cnf_url_challenge_id(challenge_id: str) -> None:
+def validate_cnf_url_challenge_id(challenge_id: str) -> None:
     if not challenge_id or any(ch not in _URL_SAFE_CHALLENGE_ID_CHARS for ch in challenge_id):
         raise ValueError(
             "challenge_id must be a non-empty RFC3986 unreserved path segment "
@@ -88,7 +88,7 @@ def problem_from_challenge_record(
     # characters instead of trying to encode them: many ASGI/server stacks
     # decode %2F before route matching, which would still make miner fetches
     # 404 even though the announced URL looked escaped.
-    _validate_cnf_url_challenge_id(record.challenge_id)
+    validate_cnf_url_challenge_id(record.challenge_id)
     audit = dict(record.audit_metadata)
     if record.cnf_text:
         parsed = parse_dimacs_cnf_metadata(record.cnf_text)
@@ -318,4 +318,5 @@ __all__ = [
     "SCHEMA_VERSION",
     "SyntheticBooleanV1",
     "problem_from_challenge_record",
+    "validate_cnf_url_challenge_id",
 ]

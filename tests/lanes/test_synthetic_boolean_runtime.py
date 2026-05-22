@@ -253,6 +253,63 @@ async def _seed_submission(conn, *, submission_id: str, miner_hotkey: str) -> di
     return seeded
 
 
+async def _store_valid_sat_receipt(
+    receipt_store: SqliteChallengeReceiptStore,
+    *,
+    family_id: str,
+    challenge_id: str,
+    receipt_id: str,
+    miner_hotkey: str,
+    received_at_iso: str,
+    signed: Any,
+    epoch: int,
+    round_index: int,
+) -> Any:
+    receipt = await receipt_store.record_receipt(
+        family_id=family_id,
+        challenge_id=challenge_id,
+        submission_id=receipt_id,
+        miner_hotkey=miner_hotkey,
+        received_at_iso=received_at_iso,
+        answer_hash=f"answer:{receipt_id}",
+        recorded_at_iso=received_at_iso,
+    )
+    await receipt_store.update_status(
+        family_id=receipt.family_id,
+        challenge_id=receipt.challenge_id,
+        submission_id=receipt.submission_id,
+        status=RECEIPT_STATUS_VERIFYING,
+        now_iso=receipt.received_at_iso,
+    )
+    await receipt_store.attach_result(
+        family_id=receipt.family_id,
+        challenge_id=receipt.challenge_id,
+        submission_id=receipt.submission_id,
+        eval_run_id=str(signed.row["id"]),
+        signed_row=signed.row,
+        trace_json={},
+        duration_ms=1,
+        epoch=epoch,
+        round_index=round_index,
+        now_iso=str(signed.row["ran_at"]),
+    )
+    await receipt_store.update_status(
+        family_id=receipt.family_id,
+        challenge_id=receipt.challenge_id,
+        submission_id=receipt.submission_id,
+        status=RECEIPT_STATUS_VALID,
+        now_iso=str(signed.row["ran_at"]),
+        verifier_details_hash=str(signed.row["verifier_details_hash"]),
+    )
+    stored = await receipt_store.get(
+        family_id=receipt.family_id,
+        challenge_id=receipt.challenge_id,
+        submission_id=receipt.submission_id,
+    )
+    assert stored is not None
+    return stored
+
+
 @pytest.mark.asyncio
 async def test_run_once_wires_cnf_url_token_store(
     monkeypatch: pytest.MonkeyPatch,
@@ -1688,6 +1745,239 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
         await asyncio.wait_for(persist_finished.wait(), timeout=1.0)
         await publish_task
 
+        rows_b = await repository.list_eval_runs_for_submission(conn, "sub-b")
+        assert len(rows_b) == 1
+        assert rows_b[0]["weighted_score"] == pytest.approx(0.0)
+        assert rows_b[0]["errors"] == ["challenge_already_locked"]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_lock_timestamp_uses_commit_time_for_cnf_grace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+
+        signer = EvalSigner(Ed25519PrivateKey.generate())
+        lane = SyntheticBooleanV1()
+        problem, hidden = lane.generate(
+            GenerateCtx(
+                seed=1,
+                tier=0,
+                issued_at_iso="2026-05-20T00:00:00.000Z",
+            )
+        )
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id=problem.task_id,
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "lock-time-test"},
+            ),
+            now_iso="2026-05-20T00:00:00.000Z",
+        )
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=StubPolarisRunner(),
+            signer=signer,
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_receipt_store=receipt_store,
+        )
+        stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}\n```'
+        old_score_time = "2026-05-20T00:00:02.000Z"
+        signed = score_and_sign_task_family_stdout(
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission_row=sub,
+            stdout=stdout,
+            ran_at_iso=old_score_time,
+            signer=signer,
+            eval_run_id="winner-run",
+            epoch_salt="epoch_123:synthetic_boolean_v1",
+        )
+        await _store_valid_sat_receipt(
+            receipt_store,
+            family_id="synthetic_boolean_v1",
+            challenge_id=problem.task_id,
+            receipt_id="sub-a:attempt:winner",
+            miner_hotkey="5MinerA",
+            received_at_iso="2026-05-20T00:00:01.000Z",
+            signed=signed,
+            epoch=123,
+            round_index=0,
+        )
+
+        before_finalize = datetime.now(UTC) - timedelta(seconds=1)
+        finalized = await orch._finalize_ready_sat_winner(
+            receipt_store=receipt_store,
+            family_id="synthetic_boolean_v1",
+            challenge_id=problem.task_id,
+            problem=problem,
+            log=structlog.get_logger("test"),
+        )
+
+        assert finalized is True
+        cur = await conn.execute(
+            "SELECT status, updated_at_iso FROM lane_challenges WHERE challenge_id = ?",
+            (problem.task_id,),
+        )
+        status, updated_at_iso = await cur.fetchone()
+        assert status == CHALLENGE_STATUS_LOCKED
+        assert updated_at_iso != old_score_time
+        updated_at = datetime.fromisoformat(str(updated_at_iso).replace("Z", "+00:00"))
+        assert updated_at >= before_finalize
+        winner = await SqliteChallengeLock(conn).get_winner(
+            family_id="synthetic_boolean_v1",
+            challenge_id=problem.task_id,
+        )
+        assert winner is not None
+        assert winner.won_at_iso == updated_at_iso
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_reconcile_locked_challenge_publishes_losers_after_crash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub_a = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+        sub_b = await _seed_submission(conn, submission_id="sub-b", miner_hotkey="5MinerB")
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+
+        signer = EvalSigner(Ed25519PrivateKey.generate())
+        lane = SyntheticBooleanV1()
+        problem, hidden = lane.generate(
+            GenerateCtx(
+                seed=1,
+                tier=0,
+                issued_at_iso="2026-05-20T00:00:00.000Z",
+            )
+        )
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id=problem.task_id,
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "loser-recovery-test"},
+            )
+        )
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=StubPolarisRunner(),
+            signer=signer,
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+        stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}\n```'
+        winner_signed = score_and_sign_task_family_stdout(
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission_row=sub_a,
+            stdout=stdout,
+            ran_at_iso="2026-05-20T00:00:02.000Z",
+            signer=signer,
+            eval_run_id="winner-run",
+            epoch_salt="epoch_123:synthetic_boolean_v1",
+        )
+        loser_signed = score_and_sign_task_family_stdout(
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission_row=sub_b,
+            stdout=stdout,
+            ran_at_iso="2026-05-20T00:00:03.000Z",
+            signer=signer,
+            eval_run_id="loser-run",
+            epoch_salt="epoch_123:synthetic_boolean_v1",
+        )
+        await _store_valid_sat_receipt(
+            receipt_store,
+            family_id="synthetic_boolean_v1",
+            challenge_id=problem.task_id,
+            receipt_id="sub-a:attempt:winner",
+            miner_hotkey="5MinerA",
+            received_at_iso="2026-05-20T00:00:01.000Z",
+            signed=winner_signed,
+            epoch=123,
+            round_index=0,
+        )
+        await _store_valid_sat_receipt(
+            receipt_store,
+            family_id="synthetic_boolean_v1",
+            challenge_id=problem.task_id,
+            receipt_id="sub-b:attempt:loser",
+            miner_hotkey="5MinerB",
+            received_at_iso="2026-05-20T00:00:02.000Z",
+            signed=loser_signed,
+            epoch=123,
+            round_index=1,
+        )
+
+        original_publish = orch._publish_resolved_sat_losers
+
+        async def failing_publish(**_kwargs: Any) -> int:
+            raise RuntimeError("loser publish failed")
+
+        monkeypatch.setattr(orch, "_publish_resolved_sat_losers", failing_publish)
+        with pytest.raises(RuntimeError, match="loser publish failed"):
+            await orch._finalize_ready_sat_winner(
+                receipt_store=receipt_store,
+                family_id="synthetic_boolean_v1",
+                challenge_id=problem.task_id,
+                problem=problem,
+                log=structlog.get_logger("test"),
+            )
+
+        cur = await conn.execute(
+            "SELECT status FROM lane_challenges WHERE challenge_id = ?",
+            (problem.task_id,),
+        )
+        assert (await cur.fetchone())[0] == CHALLENGE_STATUS_LOCKED
+        assert len(await repository.list_eval_runs_for_submission(conn, "sub-a")) == 1
+        assert await repository.list_eval_runs_for_submission(conn, "sub-b") == []
+
+        monkeypatch.setattr(orch, "_publish_resolved_sat_losers", original_publish)
+        finalized = await orch.reconcile_sat_receipts(log=structlog.get_logger("test"))
+
+        assert finalized == 1
         rows_b = await repository.list_eval_runs_for_submission(conn, "sub-b")
         assert len(rows_b) == 1
         assert rows_b[0]["weighted_score"] == pytest.approx(0.0)
