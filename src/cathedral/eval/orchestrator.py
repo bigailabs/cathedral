@@ -1432,20 +1432,10 @@ class EvalOrchestrator:
             # anchored there, and winner.signed_row["ran_at"] may be minutes
             # older if the valid receipt waited behind earlier receipts.
             lock_commit_iso = _ms_iso(datetime.now(UTC))
+            lock_lost_after_recheck = False
             await self.db.execute("BEGIN IMMEDIATE")
             try:
-                await persist_task_family_result(
-                    self.db,
-                    submission_row=winner_submission,
-                    problem=problem,
-                    signed=winner_result,
-                    epoch=int(winner.epoch if winner.epoch is not None else 0),
-                    round_index=int(winner.round_index if winner.round_index is not None else 0),
-                    duration_ms=int(winner.duration_ms if winner.duration_ms is not None else 0),
-                    trace_json=winner.trace_json,
-                    feed_enabled=True,
-                    commit=False,
-                )
+                result_to_persist = winner_result
                 if challenge_lock is not None:
                     locked = await challenge_lock.try_lock(
                         family_id=winner.family_id,
@@ -1456,6 +1446,29 @@ class EvalOrchestrator:
                         won_at_iso=lock_commit_iso,
                         commit=False,
                     )
+                    if locked is None:
+                        # The earlier get_winner() is only a stale-read guard.
+                        # A separate publisher process can still win the
+                        # INSERT OR IGNORE race before this transaction reaches
+                        # try_lock(). Never publish this receipt as full score
+                        # unless this process actually owns the durable lock.
+                        result_to_persist = self._sat_loser_result(
+                            original=winner_result,
+                            reason="challenge_already_locked",
+                        )
+                        lock_lost_after_recheck = True
+                await persist_task_family_result(
+                    self.db,
+                    submission_row=winner_submission,
+                    problem=problem,
+                    signed=result_to_persist,
+                    epoch=int(winner.epoch if winner.epoch is not None else 0),
+                    round_index=int(winner.round_index if winner.round_index is not None else 0),
+                    duration_ms=int(winner.duration_ms if winner.duration_ms is not None else 0),
+                    trace_json=winner.trace_json,
+                    feed_enabled=True,
+                    commit=False,
+                )
                 if locked is not None and self._task_family_challenge_source is not None:
                     promoted = (
                         await self._task_family_challenge_source.mark_locked_and_promote_next(
@@ -1464,13 +1477,23 @@ class EvalOrchestrator:
                             now_iso=lock_commit_iso,
                             manage_transaction=False,
                         )
-                    )
+                        )
                 await self.db.commit()
-                winner_to_publish_losers = winner
-                promoted_for_log = promoted
+                if not lock_lost_after_recheck:
+                    winner_to_publish_losers = winner
+                    promoted_for_log = promoted
             except Exception:
                 await self.db.rollback()
                 raise
+
+            if lock_lost_after_recheck:
+                log.info(
+                    "task_family_challenge_already_locked",
+                    family_id=winner.family_id,
+                    challenge_id_public=winner.signed_row.get("task_id_public"),
+                    miner_hotkey=winner.miner_hotkey,
+                )
+                return False
 
             if locked is not None:
                 log.info(

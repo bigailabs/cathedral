@@ -79,6 +79,18 @@ class _FailingTerminalStatusReceiptStore(SqliteChallengeReceiptStore):
         return await super().update_status(*args, **kwargs)
 
 
+class _RaceLostChallengeLock:
+    def __init__(self) -> None:
+        self.try_lock_calls = 0
+
+    async def get_winner(self, *, family_id: str, challenge_id: str) -> None:
+        return None
+
+    async def try_lock(self, **_kwargs: Any) -> None:
+        self.try_lock_calls += 1
+        return None
+
+
 class _SolvingRunner(StubPolarisRunner):
     """Test stub that pretends to be a miner.
 
@@ -2271,6 +2283,91 @@ async def test_synthetic_boolean_receipt_result_and_terminal_status_are_atomic(
         assert stored.eval_run_id is None
         assert stored.signed_row is None
         assert stored.trace_json is None
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_receipt_lock_race_publishes_selected_winner_as_loser(
+    tmp_path,
+) -> None:
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+
+        signer = EvalSigner(Ed25519PrivateKey.generate())
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        lock = _RaceLostChallengeLock()
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=StubPolarisRunner(),
+            signer=signer,
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_lock=lock,  # type: ignore[arg-type]
+            task_family_receipt_store=receipt_store,
+        )
+        lane = SyntheticBooleanV1()
+        problem, hidden = lane.generate(
+            GenerateCtx(
+                seed=1,
+                tier=0,
+                issued_at_iso="2026-05-20T00:00:00.000Z",
+            )
+        )
+        stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}\n```'
+        signed = score_and_sign_task_family_stdout(
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission_row=sub,
+            stdout=stdout,
+            ran_at_iso="2026-05-20T00:00:02.000Z",
+            signer=signer,
+            eval_run_id="race-lost-run",
+            epoch_salt="epoch_123:synthetic_boolean_v1",
+        )
+        assert signed.row["weighted_score"] == pytest.approx(1.0)
+        receipt = await receipt_store.record_receipt(
+            family_id="synthetic_boolean_v1",
+            challenge_id=problem.task_id,
+            submission_id="sub-a:attempt:valid",
+            miner_hotkey="5MinerA",
+            received_at_iso="2026-05-20T00:00:01.000Z",
+            answer_hash="valid-answer",
+            recorded_at_iso="2026-05-20T00:00:01.000Z",
+        )
+        await receipt_store.update_status(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+            submission_id=receipt.submission_id,
+            status=RECEIPT_STATUS_VERIFYING,
+            now_iso=receipt.received_at_iso,
+        )
+
+        await orch._finalize_sat_receipt_ordered_result(
+            receipt_store=receipt_store,
+            receipt=receipt,
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission=sub,
+            hermes_run=_HermesResult(stdout=stdout, trace={}),
+            signed=signed,
+            epoch=123,
+            round_index=0,
+            epoch_salt="epoch_123:synthetic_boolean_v1",
+            log=structlog.get_logger("test"),
+        )
+
+        assert lock.try_lock_calls == 1
+        rows = await repository.list_eval_runs_for_submission(conn, "sub-a")
+        assert len(rows) == 1
+        assert rows[0]["id"] == "race-lost-run"
+        assert rows[0]["weighted_score"] == pytest.approx(0.0)
+        assert rows[0]["errors"] == ["challenge_already_locked"]
     finally:
         await conn.close()
 
