@@ -118,6 +118,7 @@ _CADENCE_FAILURE_COOLDOWN = timedelta(hours=1)
 # Verifiers refresh receipt.updated_at_iso when they take ownership. A stale
 # heartbeat means the process died or task was cancelled after status=verifying.
 _SAT_VERIFYING_STALE_TIMEOUT = timedelta(minutes=10)
+_SAT_RECEIPT_HEARTBEAT_INTERVAL = timedelta(minutes=1)
 
 
 def _retry_backoffs() -> tuple[float, ...]:
@@ -755,6 +756,27 @@ class EvalOrchestrator:
             receipt_store = self._task_family_receipt_store
             receipt: ChallengeReceipt | None = None
             receipt_attempt_id = _task_family_receipt_attempt_id(str(submission["id"]))
+            receipt_heartbeat_stop: asyncio.Event | None = None
+            receipt_heartbeat_task: asyncio.Task[Any] | None = None
+
+            def _start_receipt_heartbeat(receipt_to_heartbeat: ChallengeReceipt) -> None:
+                nonlocal receipt_heartbeat_stop, receipt_heartbeat_task
+                if receipt_heartbeat_task is not None:
+                    return
+                receipt_heartbeat_stop = asyncio.Event()
+                receipt_heartbeat_task = asyncio.create_task(
+                    self._run_sat_receipt_heartbeat(
+                        receipt_store=receipt_store,
+                        receipt=receipt_to_heartbeat,
+                        stop=receipt_heartbeat_stop,
+                    )
+                )
+
+            async def _stop_receipt_heartbeat() -> None:
+                if receipt_heartbeat_stop is not None:
+                    receipt_heartbeat_stop.set()
+                if receipt_heartbeat_task is not None:
+                    await asyncio.gather(receipt_heartbeat_task, return_exceptions=True)
 
             async def _record_receipt(
                 stdout: str,
@@ -794,6 +816,7 @@ class EvalOrchestrator:
                         status=RECEIPT_STATUS_VERIFYING,
                         now_iso=_ms_iso(datetime.now(UTC)),
                     )
+                    _start_receipt_heartbeat(receipt)
 
             run_kwargs: dict[str, Any] = {
                 "problem": problem,
@@ -803,9 +826,13 @@ class EvalOrchestrator:
             }
             if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
                 run_kwargs["receipt_callback"] = _record_receipt
-            hermes_run = await run_challenge(
-                **run_kwargs,
-            )
+            try:
+                hermes_run = await run_challenge(
+                    **run_kwargs,
+                )
+            except Exception:
+                await _stop_receipt_heartbeat()
+                raise
             epoch_salt = f"epoch_{epoch}:{family_id}"
             if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
                 if receipt is None:
@@ -833,6 +860,7 @@ class EvalOrchestrator:
                             status=RECEIPT_STATUS_VERIFYING,
                             now_iso=_ms_iso(datetime.now(UTC)),
                         )
+                        _start_receipt_heartbeat(receipt)
                 # Deterministic SAT scoring may stream a large file-backed CNF.
                 # Take receipt ownership before scoring so scheduler
                 # reconciliation cannot expire this in-progress verifier as an
@@ -841,6 +869,40 @@ class EvalOrchestrator:
                     receipt_store=receipt_store,
                     receipt=receipt,
                 )
+                try:
+                    signed = await self._score_and_sign_task_family_stdout(
+                        lane=lane,
+                        problem=problem,
+                        hidden=hidden,
+                        submission_row=submission,
+                        stdout=hermes_run.stdout,
+                        ran_at_iso=_ms_iso(datetime.now(UTC)),
+                        epoch_salt=epoch_salt,
+                    )
+                    assert receipt is not None
+                    await self._finalize_sat_receipt_ordered_result(
+                        receipt_store=receipt_store,
+                        receipt=receipt,
+                        lane=lane,
+                        problem=problem,
+                        hidden=hidden,
+                        submission=submission,
+                        hermes_run=hermes_run,
+                        signed=signed,
+                        epoch=epoch,
+                        round_index=round_index,
+                        epoch_salt=epoch_salt,
+                        log=log,
+                    )
+                finally:
+                    await _stop_receipt_heartbeat()
+                log.info(
+                    "task_family_eval_complete",
+                    family_id=family_id,
+                    task_id_public=signed.row.get("task_id_public"),
+                    weighted_score=signed.row.get("weighted_score"),
+                )
+                continue
             signed = await self._score_and_sign_task_family_stdout(
                 lane=lane,
                 problem=problem,
@@ -850,29 +912,6 @@ class EvalOrchestrator:
                 ran_at_iso=_ms_iso(datetime.now(UTC)),
                 epoch_salt=epoch_salt,
             )
-            if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
-                assert receipt is not None
-                await self._finalize_sat_receipt_ordered_result(
-                    receipt_store=receipt_store,
-                    receipt=receipt,
-                    lane=lane,
-                    problem=problem,
-                    hidden=hidden,
-                    submission=submission,
-                    hermes_run=hermes_run,
-                    signed=signed,
-                    epoch=epoch,
-                    round_index=round_index,
-                    epoch_salt=epoch_salt,
-                    log=log,
-                )
-                log.info(
-                    "task_family_eval_complete",
-                    family_id=family_id,
-                    task_id_public=signed.row.get("task_id_public"),
-                    weighted_score=signed.row.get("weighted_score"),
-                )
-                continue
             challenge_lock = self._task_family_challenge_lock
             sat_lock_candidate = (
                 family_id == SYNTHETIC_BOOLEAN_FAMILY_ID
@@ -1014,6 +1053,60 @@ class EvalOrchestrator:
                 status=RECEIPT_STATUS_VERIFYING,
                 now_iso=verifying_started_iso,
             )
+
+    async def _run_sat_receipt_heartbeat(
+        self,
+        *,
+        receipt_store: ChallengeReceiptStore,
+        receipt: ChallengeReceipt,
+        stop: asyncio.Event,
+    ) -> None:
+        """Refresh a live SAT verifier's ownership until scoring finalizes.
+
+        Receipt reconciliation expires stale ``verifying`` rows to recover
+        from crashed publishers. Long file-backed verification and trace
+        collection are legitimate live work, so the owner must keep
+        ``updated_at_iso`` fresh for the whole scoring/finalization window.
+        """
+        interval = max(
+            0.01,
+            min(
+                _SAT_RECEIPT_HEARTBEAT_INTERVAL.total_seconds(),
+                _SAT_VERIFYING_STALE_TIMEOUT.total_seconds() / 3,
+            ),
+        )
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+
+            try:
+                async with self._db_write_lock:
+                    current = await receipt_store.get(
+                        family_id=receipt.family_id,
+                        challenge_id=receipt.challenge_id,
+                        submission_id=receipt.submission_id,
+                    )
+                    if current is None or current.status != RECEIPT_STATUS_VERIFYING:
+                        return
+                    await receipt_store.update_status(
+                        family_id=receipt.family_id,
+                        challenge_id=receipt.challenge_id,
+                        submission_id=receipt.submission_id,
+                        status=RECEIPT_STATUS_VERIFYING,
+                        now_iso=_ms_iso(datetime.now(UTC)),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "task_family_receipt_heartbeat_failed",
+                    family_id=receipt.family_id,
+                    challenge_id=receipt.challenge_id,
+                    submission_id=receipt.submission_id,
+                    error=str(exc),
+                )
+                return
 
     async def _score_and_sign_task_family_stdout(
         self,

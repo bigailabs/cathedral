@@ -53,6 +53,40 @@ class _CnfFileHashMismatchError(Exception):
     pass
 
 
+class _CnfSnapshotCache:
+    """Process-local content-addressed cache for file-backed CNF snapshots.
+
+    The first authorized fetch for a digest pays the copy/hash cost. Later
+    fetches stream the same private immutable snapshot, avoiding
+    O(file_size * request_count) temp-space and disk-I/O pressure from shared
+    miner fetch tokens.
+    """
+
+    def __init__(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="cathedral-cnf-snapshots-")
+        self._root = Path(self._tmp.name)
+        self._lock = asyncio.Lock()
+        self._by_digest: dict[str, Path] = {}
+
+    async def get(self, source_path: Path, *, expected_sha256: str) -> Path:
+        cached = self._by_digest.get(expected_sha256)
+        if cached is not None and cached.is_file():
+            return cached
+
+        async with self._lock:
+            cached = self._by_digest.get(expected_sha256)
+            if cached is not None and cached.is_file():
+                return cached
+            snapshot = await asyncio.to_thread(
+                _materialize_verified_cnf_snapshot,
+                source_path,
+                expected_sha256=expected_sha256,
+                cache_root=self._root,
+            )
+            self._by_digest[expected_sha256] = snapshot
+            return snapshot
+
+
 def _parse_iso(value: str) -> datetime | None:
     """Best-effort ISO-8601 parse. Returns ``None`` on malformed input.
 
@@ -105,34 +139,64 @@ def _normalized_sha256(value: str | None) -> str | None:
     return None
 
 
-def _open_verified_cnf_snapshot(path: Path, *, expected_sha256: str) -> BinaryIO:
-    """Copy, hash, and rewind an immutable snapshot for streaming.
+def _materialize_verified_cnf_snapshot(
+    path: Path,
+    *,
+    expected_sha256: str,
+    cache_root: Path,
+) -> Path:
+    """Create or return one immutable snapshot for an announced CNF digest.
 
     ``FileResponse`` opens the path later, after route code returns. For
     operator-managed file-backed CNFs that leaves a check/use gap. Even an
-    already-open descriptor can see in-place writes after the digest check.
-    Stream a private temp-file snapshot so miners receive exactly the bytes
-    whose digest was validated.
+    already-open descriptor can see in-place writes after the digest check, so
+    the first fetch copies bytes into a private content-addressed snapshot and
+    later fetches reuse it.
     """
-    source = path.open("rb")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    target = cache_root / f"{expected_sha256}.cnf"
+    if target.is_file():
+        return target
+
+    tmp_path: str | None = None
     try:
-        snapshot = tempfile.TemporaryFile("w+b")
-        try:
+        with path.open("rb") as source:
             if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                 raise OSError("challenge CNF path is not a regular file")
             digest = hashlib.sha256()
-            while chunk := source.read(_FILE_CHUNK_BYTES):
-                digest.update(chunk)
-                snapshot.write(chunk)
-            if digest.hexdigest() != expected_sha256:
-                raise _CnfFileHashMismatchError
-            snapshot.seek(0)
-            return snapshot
-        except Exception:
-            snapshot.close()
-            raise
+            with tempfile.NamedTemporaryFile(
+                "w+b",
+                dir=cache_root,
+                prefix=f".{expected_sha256[:12]}.",
+                suffix=".tmp",
+                delete=False,
+            ) as snapshot:
+                tmp_path = snapshot.name
+                while chunk := source.read(_FILE_CHUNK_BYTES):
+                    digest.update(chunk)
+                    snapshot.write(chunk)
+                snapshot.flush()
+                os.fsync(snapshot.fileno())
+        if digest.hexdigest() != expected_sha256:
+            raise _CnfFileHashMismatchError
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        os.replace(tmp_path, target)
+        tmp_path = None
+        return target
     finally:
-        source.close()
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+
+
+def _cnf_snapshot_cache(request: Request) -> _CnfSnapshotCache:
+    cache: _CnfSnapshotCache | None = getattr(request.app.state, "cnf_snapshot_cache", None)
+    if cache is None:
+        cache = _CnfSnapshotCache()
+        request.app.state.cnf_snapshot_cache = cache
+    return cache
 
 
 def _iter_open_file(handle: BinaryIO) -> Iterator[bytes]:
@@ -206,11 +270,10 @@ async def get_challenge_cnf(
             logger.warning("challenge_cnf_file_hash_missing", challenge_id=challenge_id)
             raise _not_found()
         try:
-            # Snapshotting can hash/copy launch-scale CNFs. Keep that blocking
-            # disk work off the FastAPI event loop so health checks and other
-            # publisher routes continue to run while the file is prepared.
-            handle = await asyncio.to_thread(
-                _open_verified_cnf_snapshot,
+            # The cache materializes one verified immutable snapshot per digest
+            # off the event loop; later authorized fetches stream that snapshot
+            # directly instead of copying the full launch CNF again.
+            snapshot_path = await _cnf_snapshot_cache(request).get(
                 path,
                 expected_sha256=expected_sha256,
             )
@@ -224,7 +287,7 @@ async def get_challenge_cnf(
             logger.warning("challenge_cnf_file_unreadable", challenge_id=challenge_id)
             raise _not_found() from None
         return StreamingResponse(
-            _iter_open_file(handle),
+            _iter_open_file(snapshot_path.open("rb")),
             media_type="text/plain; charset=utf-8",
         )
     if not lookup.cnf_text:

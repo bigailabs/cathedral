@@ -267,7 +267,7 @@ async def test_active_file_backed_with_correct_token_returns_cnf(
 
 
 @pytest.mark.asyncio
-async def test_active_file_backed_snapshot_runs_off_event_loop(
+async def test_active_file_backed_snapshot_cache_runs_off_event_loop_once(
     wired_app: dict[str, Any],
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -308,10 +308,13 @@ async def test_active_file_backed_snapshot_runs_off_event_loop(
 
     client = TestClient(wired_app["app"])
     r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    r_again = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
 
     assert r.status_code == 200
     assert r.text == CNF_BODY
-    assert offloaded == [challenge_cnf_module._open_verified_cnf_snapshot]
+    assert r_again.status_code == 200
+    assert r_again.text == CNF_BODY
+    assert offloaded == [challenge_cnf_module._materialize_verified_cnf_snapshot]
 
 
 @pytest.mark.asyncio
