@@ -29,3 +29,7 @@ class RuntimeContext:
     cathedral_public_key: Ed25519PublicKey | None = None
     publisher_api_token: str | None = None
     fetcher_close: Callable[[], Awaitable[None]] | None = None
+    # Remote signed weights are strictly opt-in. Keeping the pinned key on the
+    # runtime context lets tests and startup fail before any local fallback can
+    # publish weights when remote mode is enabled but not verifiable.
+    remote_weight_public_key: Ed25519PublicKey | None = None
