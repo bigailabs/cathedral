@@ -262,6 +262,16 @@ def score_and_sign_task_family_stdout(
                 details={"error": str(exc)[:512]},
             )
 
+    if os.environ.get("CATHEDRAL_ZERO_ALL_SCORES", "").lower() == "true":
+        # Emergency publisher kill switch: schema-5 Task Family/SAT rows feed
+        # the same validator and remote-weight paths as legacy rows, so they
+        # must also collapse to zero when operators need fleet-wide burn mode.
+        score = ScoreResult(
+            weighted_score=0.0,
+            rejection_reason=score.rejection_reason or "CATHEDRAL_ZERO_ALL_SCORES=true",
+            score_parts={key: 0.0 for key in score.score_parts},
+        )
+
     row = build_signed_task_family_row(
         eval_run_id=eval_run_id or str(uuid4()),
         submission_id=str(submission_row["id"]),
