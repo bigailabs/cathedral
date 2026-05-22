@@ -16,6 +16,7 @@ def _launch_env(cnf_path) -> dict[str, str]:
         "CATHEDRAL_EVAL_MODE": "ssh-probe",
         "CATHEDRAL_PROBER_VERSION": "v2",
         "CATHEDRAL_PUBLIC_BASE_URL": "https://api.cathedral.test",
+        "CATHEDRAL_PROBE_SSH_PRIVATE_KEY": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n",
         "CATHEDRAL_EVAL_SIGNING_KEY": _seed_hex(),
         "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY": _seed_hex(),
     }
@@ -148,6 +149,38 @@ def test_sat_launch_preflight_rejects_missing_runtime_gates(tmp_path) -> None:
     assert "CATHEDRAL_EVAL_MODE=ssh-probe is required" in result.errors
     assert "CATHEDRAL_PROBER_VERSION=v2 is required" in result.errors
     assert "CATHEDRAL_PUBLIC_BASE_URL is required for SAT cnf_url prompts" in result.errors
+
+
+def test_sat_launch_preflight_rejects_missing_ssh_probe_key(tmp_path) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+
+    env = _launch_env(cnf_path)
+    env.pop("CATHEDRAL_PROBE_SSH_PRIVATE_KEY")
+    env["CATHEDRAL_SSH_KEY_PATH"] = str(tmp_path / "missing_ed25519")
+    result = run_synthetic_boolean_launch_preflight(env)
+
+    assert not result.ok
+    assert (
+        "CATHEDRAL_PROBE_SSH_PRIVATE_KEY or an existing CATHEDRAL_SSH_KEY_PATH "
+        "file is required for ssh-probe v2"
+    ) in result.errors
+    assert result.details["ssh_key_path_exists"] is False
+
+
+def test_sat_launch_preflight_accepts_existing_ssh_probe_key_file(tmp_path) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+    key_path = tmp_path / "cathedral_probe_ed25519"
+    key_path.write_text("existing-key\n", encoding="utf-8")
+
+    env = _launch_env(cnf_path)
+    env.pop("CATHEDRAL_PROBE_SSH_PRIVATE_KEY")
+    env["CATHEDRAL_SSH_KEY_PATH"] = str(key_path)
+    result = run_synthetic_boolean_launch_preflight(env)
+
+    assert result.ok
+    assert result.details["ssh_key_path_exists"] is True
 
 
 def test_sat_launch_preflight_allows_runtime_gate_override(tmp_path) -> None:

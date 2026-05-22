@@ -13,11 +13,13 @@ in ``evaluating`` forever.
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
 import pytest
 
+import cathedral.publisher.app as publisher_app
 from cathedral.publisher.app import _materialize_ssh_probe_key
 
 # A valid-looking OpenSSH private key block. Content doesn't have to be a
@@ -69,6 +71,21 @@ def test_env_set_and_file_absent_writes_file_with_0600(
 
     mode = stat.S_IMODE(target.stat().st_mode)
     assert mode == 0o600, f"perms must be 0600 for OpenSSH, got {oct(mode)}"
+
+
+def test_env_set_without_path_exports_materialized_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The later ssh-probe runner reads CATHEDRAL_SSH_KEY_PATH."""
+    target = tmp_path / "default_probe_key"
+    monkeypatch.setattr(publisher_app, "_DEFAULT_SSH_PROBE_KEY_PATH", str(target))
+    monkeypatch.setenv("CATHEDRAL_PROBE_SSH_PRIVATE_KEY", _FAKE_PEM)
+
+    _materialize_ssh_probe_key()
+
+    assert target.is_file()
+    assert target.read_text() == _FAKE_PEM
+    assert os.environ["CATHEDRAL_SSH_KEY_PATH"] == str(target)
 
 
 def test_env_set_and_file_matches_is_noop(

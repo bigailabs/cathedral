@@ -12,13 +12,16 @@ verification at runtime.
 
 from __future__ import annotations
 
+import base64
+import json
 from datetime import UTC, datetime
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from nacl.signing import SigningKey, VerifyKey
 
 from cathedral.v4 import ValidationPayload, VerifyError, verify_v4_row
-from cathedral.v4.sign import build_signed_v4_row
+from cathedral.v4.sign import _V4_SIGNED_KEYS, build_signed_v4_row
 
 
 class _MockEvalSigner:
@@ -75,6 +78,39 @@ def test_sign_then_verify_round_trip(
     verified, score = verify_v4_row(row, publisher_pubkey=pubkey)
     assert verified is True
     assert score == pytest.approx(0.87)
+
+
+def test_verify_accepts_production_cryptography_ed25519_key() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    row = {
+        "id": "run_crypto",
+        "miner_hotkey": "5DfHt...miner_x",
+        "task_type": "v4_patch",
+        "task_id": "v4t_sign_001",
+        "difficulty_tier": "bronze",
+        "language": "python",
+        "injected_fault_type": "sign_error_off_by_operator",
+        "weighted_score": 0.42,
+        "outcome": "SUCCESS",
+        "total_turns": 3,
+        "deterministic_hash": "def" * 10,
+        "ran_at": datetime.now(UTC).isoformat(),
+        "eval_output_schema_version": 4,
+    }
+    signed_subset = {key: row[key] for key in _V4_SIGNED_KEYS}
+    payload_bytes = json.dumps(
+        signed_subset,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    row["cathedral_signature"] = base64.b64encode(
+        private_key.sign(payload_bytes)
+    ).decode("ascii")
+
+    verified, score = verify_v4_row(row, publisher_pubkey=private_key.public_key())
+
+    assert verified is True
+    assert score == pytest.approx(0.42)
 
 
 def test_tampered_score_fails_verification(

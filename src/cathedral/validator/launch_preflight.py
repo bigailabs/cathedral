@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ from typing import Any
 from cathedral.config import ValidatorSettings
 
 SAT_FAMILY_ID = "synthetic_boolean_v1"
+TASK_FAMILY_WEIGHTS_JSON_ENV = "CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON"
+SYNTHETIC_BOOLEAN_WEIGHT_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT"
 PLACEHOLDER_HOTKEY = "REPLACE_ME"
 PLACEHOLDER_POLARIS_KEY = "REPLACE_WITH_POLARIS_ED25519_PUBLIC_KEY_HEX"
 
@@ -32,6 +35,36 @@ def _hex_is_32_bytes(value: str) -> bool:
         return False
 
 
+def _resolved_task_family_weights(
+    configured: Mapping[str, float] | None,
+    env: Mapping[str, str],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror runtime env overrides before evaluating launch weight gates."""
+
+    out: dict[str, Any] = dict(configured or {})
+    raw_json = env.get(TASK_FAMILY_WEIGHTS_JSON_ENV, "").strip()
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            warnings.append(f"{TASK_FAMILY_WEIGHTS_JSON_ENV} is not valid JSON; ignored")
+        else:
+            if isinstance(parsed, dict):
+                out.update(parsed)
+            else:
+                warnings.append(f"{TASK_FAMILY_WEIGHTS_JSON_ENV} must be a JSON object; ignored")
+
+    raw_sat = env.get(SYNTHETIC_BOOLEAN_WEIGHT_ENV)
+    if raw_sat is not None:
+        try:
+            out[SAT_FAMILY_ID] = float(raw_sat)
+        except ValueError:
+            warnings.append(f"{SYNTHETIC_BOOLEAN_WEIGHT_ENV} is not a float; ignored")
+
+    return out
+
+
 def run_validator_sat_launch_preflight(
     settings: ValidatorSettings,
     env: Mapping[str, str] | None = None,
@@ -45,13 +78,23 @@ def run_validator_sat_launch_preflight(
     errors: list[str] = []
     warnings: list[str] = []
 
-    sat_weight = float(settings.weights.task_family_weights.get(SAT_FAMILY_ID, 0.0))
+    task_family_weights = _resolved_task_family_weights(
+        settings.weights.task_family_weights,
+        env,
+        warnings,
+    )
+    try:
+        sat_weight = float(task_family_weights.get(SAT_FAMILY_ID, 0.0))
+    except (TypeError, ValueError):
+        sat_weight = 0.0
+        errors.append(f"weights.task_family_weights.{SAT_FAMILY_ID} must be a float")
     details: dict[str, Any] = {
         "network": settings.network.name,
         "netuid": settings.network.netuid,
         "validator_hotkey": settings.network.validator_hotkey,
         "remote_weight_source_enabled": settings.remote_weight_source.enabled,
         "local_sat_weight": sat_weight,
+        "task_family_weights": task_family_weights,
         "weights_disabled": settings.weights.disabled,
         "weights_interval_secs": settings.weights.interval_secs,
         "forced_burn_percentage": settings.weights.forced_burn_percentage,
@@ -111,6 +154,8 @@ def run_validator_sat_launch_preflight(
 
 __all__ = [
     "SAT_FAMILY_ID",
+    "SYNTHETIC_BOOLEAN_WEIGHT_ENV",
+    "TASK_FAMILY_WEIGHTS_JSON_ENV",
     "ValidatorLaunchPreflightResult",
     "run_validator_sat_launch_preflight",
 ]

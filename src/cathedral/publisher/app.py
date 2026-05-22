@@ -129,6 +129,10 @@ def _materialize_ssh_probe_key() -> None:
     """
     target_str = os.environ.get("CATHEDRAL_SSH_KEY_PATH", _DEFAULT_SSH_PROBE_KEY_PATH)
     target = Path(target_str).expanduser()
+    # Runner construction reads CATHEDRAL_SSH_KEY_PATH later. When the operator
+    # only supplies the private-key env var, publish the materialized default so
+    # preflight, startup, and SshHermesRunner all agree on the same file.
+    os.environ.setdefault("CATHEDRAL_SSH_KEY_PATH", str(target))
 
     raw = os.environ.get("CATHEDRAL_PROBE_SSH_PRIVATE_KEY")
     if not raw:

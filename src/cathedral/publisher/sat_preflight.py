@@ -27,6 +27,8 @@ TASK_FAMILY_IDS_ENV = "CATHEDRAL_TASK_FAMILY_IDS"
 EVAL_MODE_ENV = "CATHEDRAL_EVAL_MODE"
 PROBER_VERSION_ENV = "CATHEDRAL_PROBER_VERSION"
 PUBLIC_BASE_URL_ENV = "CATHEDRAL_PUBLIC_BASE_URL"
+SSH_PRIVATE_KEY_ENV = "CATHEDRAL_PROBE_SSH_PRIVATE_KEY"
+SSH_KEY_PATH_ENV = "CATHEDRAL_SSH_KEY_PATH"
 
 DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES = 64 * 1024 * 1024
 STORAGE_MODE_SQLITE_TEXT = "sqlite_text"
@@ -102,6 +104,27 @@ def _public_base_url_error(value: str) -> str | None:
     return None
 
 
+def _ssh_probe_key_error(env: Mapping[str, str], details: dict[str, Any]) -> str | None:
+    key_env_present = bool(env.get(SSH_PRIVATE_KEY_ENV, "").strip())
+    key_path = env.get(SSH_KEY_PATH_ENV, "").strip()
+    details["ssh_private_key_env_present"] = key_env_present
+    details["ssh_key_path"] = key_path
+
+    if key_env_present:
+        # Startup materializes this env var before the ssh-probe runner is
+        # constructed; accepting it here keeps preflight aligned with boot.
+        return None
+    if key_path and Path(key_path).expanduser().is_file():
+        details["ssh_key_path_exists"] = True
+        return None
+
+    details["ssh_key_path_exists"] = False
+    return (
+        f"{SSH_PRIVATE_KEY_ENV} or an existing {SSH_KEY_PATH_ENV} file is required "
+        "for ssh-probe v2"
+    )
+
+
 def _check_runtime_env(
     env: Mapping[str, str],
     errors: list[str],
@@ -128,6 +151,10 @@ def _check_runtime_env(
         errors.append(f"{EVAL_MODE_ENV}=ssh-probe is required")
     if prober_version != "v2":
         errors.append(f"{PROBER_VERSION_ENV}=v2 is required")
+    if eval_mode == "ssh-probe" and prober_version == "v2":
+        key_error = _ssh_probe_key_error(env, details)
+        if key_error:
+            errors.append(key_error)
 
     public_url_error = _public_base_url_error(public_base_url)
     if public_url_error:
@@ -252,6 +279,8 @@ __all__ = [
     "MAX_CNF_BYTES_ENV",
     "PROBER_VERSION_ENV",
     "PUBLIC_BASE_URL_ENV",
+    "SSH_KEY_PATH_ENV",
+    "SSH_PRIVATE_KEY_ENV",
     "STORAGE_MODE_ENV",
     "STORAGE_MODE_FILE",
     "STORAGE_MODE_SQLITE_TEXT",

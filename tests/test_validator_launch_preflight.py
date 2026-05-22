@@ -90,6 +90,43 @@ def test_validator_sat_launch_preflight_rejects_nonzero_local_sat_weight() -> No
     ) in result.errors
 
 
+def test_validator_sat_launch_preflight_honors_sat_weight_env_override() -> None:
+    result = run_validator_sat_launch_preflight(
+        _settings(local_sat_weight=0.0),
+        env={
+            "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
+            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
+            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT": "0.15",
+        },
+    )
+
+    assert not result.ok
+    assert result.details["local_sat_weight"] == 0.15
+    assert (
+        "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
+        "for remote-weight launch"
+    ) in result.errors
+
+
+def test_validator_sat_launch_preflight_honors_task_family_weights_json_env() -> None:
+    result = run_validator_sat_launch_preflight(
+        _settings(local_sat_weight=0.0),
+        env={
+            "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
+            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
+            "CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON": '{"synthetic_boolean_v1": 0.2}',
+        },
+    )
+
+    assert not result.ok
+    assert result.details["local_sat_weight"] == 0.2
+    assert result.details["task_family_weights"]["synthetic_boolean_v1"] == 0.2
+    assert (
+        "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
+        "for remote-weight launch"
+    ) in result.errors
+
+
 def test_validator_sat_launch_preflight_can_shadow_without_remote_opt_in() -> None:
     result = run_validator_sat_launch_preflight(
         _settings(remote_enabled=False),
