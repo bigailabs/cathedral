@@ -52,6 +52,7 @@ from cathedral.lanes.challenge_source import (
 )
 from cathedral.lanes.publisher import score_and_sign_task_family_stdout
 from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
+from cathedral.publisher import challenge_cnf as challenge_cnf_module
 from cathedral.publisher.challenge_cnf import router as challenge_cnf_router
 from cathedral.storage.hippius import StubHippiusClient
 from cathedral.validator.db import connect
@@ -221,6 +222,61 @@ async def test_active_file_backed_with_correct_token_returns_cnf(
     assert r.status_code == 200
     assert r.text == CNF_BODY
     assert hashlib.sha256(r.content).hexdigest() == EXPECTED_SHA
+
+
+@pytest.mark.asyncio
+async def test_active_file_backed_streams_verified_open_file_after_path_replace(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    replacement_path = tmp_path / "replacement.cnf"
+    mutated_body = "p cnf 1 1\n-1 0\n"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    replacement_path.write_text(mutated_body, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    original_iter = challenge_cnf_module._iter_open_file
+
+    def replace_path_before_stream(handle: Any):
+        cnf_path.unlink()
+        replacement_path.rename(cnf_path)
+        yield from original_iter(handle)
+
+    monkeypatch.setattr(
+        challenge_cnf_module,
+        "_iter_open_file",
+        replace_path_before_stream,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert cnf_path.read_text(encoding="utf-8") == mutated_body
 
 
 @pytest.mark.asyncio

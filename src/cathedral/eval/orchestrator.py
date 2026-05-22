@@ -793,21 +793,11 @@ class EvalOrchestrator:
                 **run_kwargs,
             )
             epoch_salt = f"epoch_{epoch}:{family_id}"
-            signed = score_and_sign_task_family_stdout(
-                lane=lane,
-                problem=problem,
-                hidden=hidden,
-                submission_row=submission,
-                stdout=hermes_run.stdout,
-                ran_at_iso=_ms_iso(datetime.now(UTC)),
-                signer=self.signer,
-                epoch_salt=epoch_salt,
-            )
             if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
                 if receipt is None:
                     received_at = (
                         getattr(hermes_run, "stdout_received_at_iso", None)
-                        or str(signed.row["ran_at"])
+                        or _ms_iso(datetime.now(UTC))
                     )
                     async with self._db_write_lock:
                         receipt = await receipt_store.record_receipt(
@@ -819,6 +809,26 @@ class EvalOrchestrator:
                             answer_hash=_receipt_answer_hash(hermes_run.stdout),
                             recorded_at_iso=_ms_iso(datetime.now(UTC)),
                         )
+                # Deterministic SAT scoring may stream a large file-backed CNF.
+                # Take receipt ownership before scoring so scheduler
+                # reconciliation cannot expire this in-progress verifier as an
+                # abandoned unverified receipt.
+                await self._mark_sat_receipt_verifying(
+                    receipt_store=receipt_store,
+                    receipt=receipt,
+                )
+            signed = score_and_sign_task_family_stdout(
+                lane=lane,
+                problem=problem,
+                hidden=hidden,
+                submission_row=submission,
+                stdout=hermes_run.stdout,
+                ran_at_iso=_ms_iso(datetime.now(UTC)),
+                signer=self.signer,
+                epoch_salt=epoch_salt,
+            )
+            if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
+                assert receipt is not None
                 await self._finalize_sat_receipt_ordered_result(
                     receipt_store=receipt_store,
                     receipt=receipt,
@@ -964,6 +974,25 @@ class EvalOrchestrator:
                 weighted_score=signed.row.get("weighted_score"),
             )
 
+    async def _mark_sat_receipt_verifying(
+        self,
+        *,
+        receipt_store: ChallengeReceiptStore,
+        receipt: ChallengeReceipt,
+    ) -> None:
+        # updated_at_iso is the verifier heartbeat used by crash recovery.
+        # It must reflect when this process owns the receipt, not when stdout
+        # first arrived, or slow live verifiers can look stale.
+        verifying_started_iso = _ms_iso(datetime.now(UTC))
+        async with self._db_write_lock:
+            await receipt_store.update_status(
+                family_id=receipt.family_id,
+                challenge_id=receipt.challenge_id,
+                submission_id=receipt.submission_id,
+                status=RECEIPT_STATUS_VERIFYING,
+                now_iso=verifying_started_iso,
+            )
+
     async def _eval_run_exists(self, eval_run_id: str) -> bool:
         cur = await self.db.execute(
             "SELECT 1 FROM eval_runs WHERE id = ? LIMIT 1",
@@ -1012,18 +1041,6 @@ class EvalOrchestrator:
             return out
 
         now_iso = str(signed.row["ran_at"])
-        # updated_at_iso is the verifier heartbeat used by crash recovery.
-        # It must reflect when this process owns the receipt, not when stdout
-        # first arrived, or slow live verifiers can look stale.
-        verifying_started_iso = _ms_iso(datetime.now(UTC))
-        async with self._db_write_lock:
-            await receipt_store.update_status(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-                submission_id=receipt.submission_id,
-                status=RECEIPT_STATUS_VERIFYING,
-                now_iso=verifying_started_iso,
-            )
         trace_json = await _build_trace_json()
         async with self._db_write_lock:
             await receipt_store.attach_result(

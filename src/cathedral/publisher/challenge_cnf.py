@@ -15,14 +15,18 @@ material.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import os
+import stat
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import BinaryIO
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from cathedral.lanes.challenge_source import (
     CHALLENGE_STATUS_ACTIVE,
@@ -32,10 +36,6 @@ from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
     SqliteFetchTokenStore,
 )
-from cathedral.publisher.sat_file_verifier import sha256_file
-
-if TYPE_CHECKING:
-    pass
 
 logger = structlog.get_logger(__name__)
 
@@ -44,6 +44,11 @@ router = APIRouter()
 
 _CHALLENGE_NOT_FOUND_DETAIL = "challenge_not_found"
 _POST_LOCK_GRACE_SECS = 30
+_FILE_CHUNK_BYTES = 1024 * 1024
+
+
+class _CnfFileHashMismatchError(Exception):
+    pass
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -96,6 +101,39 @@ def _normalized_sha256(value: str | None) -> str | None:
     if len(stripped) == 64 and all(ch in "0123456789abcdef" for ch in stripped):
         return stripped
     return None
+
+
+def _open_verified_cnf_file(path: Path, *, expected_sha256: str) -> BinaryIO:
+    """Open, hash, and rewind the same file descriptor we will stream.
+
+    ``FileResponse`` opens the path later, after route code returns. For
+    operator-managed file-backed CNFs that leaves a check/use gap: the path or
+    symlink can be replaced after the digest check but before streaming. Keeping
+    one descriptor through hash and response iteration binds served bytes to the
+    digest we just validated.
+    """
+    handle = path.open("rb")
+    try:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError("challenge CNF path is not a regular file")
+        digest = hashlib.sha256()
+        while chunk := handle.read(_FILE_CHUNK_BYTES):
+            digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise _CnfFileHashMismatchError
+        handle.seek(0)
+        return handle
+    except Exception:
+        handle.close()
+        raise
+
+
+def _iter_open_file(handle: BinaryIO) -> Iterator[bytes]:
+    try:
+        while chunk := handle.read(_FILE_CHUNK_BYTES):
+            yield chunk
+    finally:
+        handle.close()
 
 
 @router.get("/v1/challenges/{challenge_id}/cnf", include_in_schema=False)
@@ -156,26 +194,23 @@ async def get_challenge_cnf(
 
     if lookup.cnf_path:
         path = Path(lookup.cnf_path)
-        if not path.is_file():
-            logger.warning("challenge_cnf_file_missing", challenge_id=challenge_id)
-            raise _not_found()
         expected_sha256 = _normalized_sha256(lookup.cnf_sha256)
         if expected_sha256 is None:
             logger.warning("challenge_cnf_file_hash_missing", challenge_id=challenge_id)
             raise _not_found()
         try:
-            actual_sha256 = sha256_file(path)
+            handle = _open_verified_cnf_file(path, expected_sha256=expected_sha256)
+        except FileNotFoundError:
+            logger.warning("challenge_cnf_file_missing", challenge_id=challenge_id)
+            raise _not_found() from None
+        except _CnfFileHashMismatchError:
+            logger.warning("challenge_cnf_file_hash_mismatch", challenge_id=challenge_id)
+            raise _not_found() from None
         except OSError:
             logger.warning("challenge_cnf_file_unreadable", challenge_id=challenge_id)
-            raise _not_found()
-        # File-backed CNFs are referenced by path, but miners were
-        # announced a specific digest. Re-hash before serving so an
-        # overwritten path never serves bytes from a different formula.
-        if actual_sha256 != expected_sha256:
-            logger.warning("challenge_cnf_file_hash_mismatch", challenge_id=challenge_id)
-            raise _not_found()
-        return FileResponse(
-            path,
+            raise _not_found() from None
+        return StreamingResponse(
+            _iter_open_file(handle),
             media_type="text/plain; charset=utf-8",
         )
     if not lookup.cnf_text:

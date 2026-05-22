@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,6 +22,7 @@ from cathedral.lanes.challenge_lock import InMemoryChallengeLock, SqliteChalleng
 from cathedral.lanes.challenge_receipts import (
     RECEIPT_STATUS_EXPIRED,
     RECEIPT_STATUS_INVALID,
+    RECEIPT_STATUS_UNVERIFIED,
     RECEIPT_STATUS_VALID,
     RECEIPT_STATUS_VERIFYING,
     SqliteChallengeReceiptStore,
@@ -1114,6 +1116,108 @@ async def test_synthetic_boolean_reconcile_expires_stale_verifier_and_finalizes_
             ("active-boolean-001", CHALLENGE_STATUS_LOCKED),
             ("active-boolean-002", CHALLENGE_STATUS_ACTIVE),
         ]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_marks_receipt_verifying_before_scoring(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    db_path = tmp_path / "publisher.db"
+    conn = await connect(str(db_path))
+    try:
+        sub = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+
+        original_score = orchestrator_module.score_and_sign_task_family_stdout
+        statuses_during_score: list[str] = []
+
+        def score_after_simulated_expiry(*args: Any, **kwargs: Any):
+            problem = kwargs["problem"]
+            now_iso = orchestrator_module._ms_iso(datetime.now(UTC))
+            with sqlite3.connect(db_path) as raw:
+                raw.execute(
+                    "UPDATE lane_challenge_receipts "
+                    "SET status = ?, rejection_reason = ?, updated_at_iso = ?, "
+                    "resolved_at_iso = ? "
+                    "WHERE challenge_id = ? AND status = ?",
+                    (
+                        RECEIPT_STATUS_EXPIRED,
+                        "receipt_timed_out",
+                        now_iso,
+                        now_iso,
+                        problem.task_id,
+                        RECEIPT_STATUS_UNVERIFIED,
+                    ),
+                )
+                raw.commit()
+                row = raw.execute(
+                    "SELECT status FROM lane_challenge_receipts WHERE challenge_id = ?",
+                    (problem.task_id,),
+                ).fetchone()
+            statuses_during_score.append(str(row[0]) if row is not None else "missing")
+            return original_score(*args, **kwargs)
+
+        monkeypatch.setattr(
+            orchestrator_module,
+            "score_and_sign_task_family_stdout",
+            score_after_simulated_expiry,
+        )
+
+        received_base = datetime.now(UTC) - timedelta(minutes=5)
+        runner = _SolvingRunner(
+            received_at=[orchestrator_module._ms_iso(received_base)],
+        )
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        log = structlog.get_logger("test")
+        snapshot = await orch.snapshot_task_family_batch_problems(log=log)
+        await orch._maybe_run_task_family_lanes(
+            submission=sub,
+            runner=runner,
+            epoch=123,
+            round_index=0,
+            log=log,
+            problem_overrides=snapshot,
+        )
+
+        assert statuses_during_score == [RECEIPT_STATUS_VERIFYING]
+        receipts = await receipt_store.list_for_challenge(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert [receipt.status for receipt in receipts] == [RECEIPT_STATUS_VALID]
     finally:
         await conn.close()
 
