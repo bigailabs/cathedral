@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MAINNET_FORCED_BURN_PERCENTAGE = 95.0
+_RETIRED_VALIDATOR_CONFIG_SECTIONS = frozenset({"weight_source", "remote_weight_source"})
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -95,7 +96,8 @@ class ValidatorSettings(BaseSettings):
     @classmethod
     def from_toml(cls, path: str | Path) -> ValidatorSettings:
         data = _load_toml(Path(path))
-        data = {key: value for key, value in data.items() if key in cls.model_fields}
+        for section in _RETIRED_VALIDATOR_CONFIG_SECTIONS:
+            data.pop(section, None)
         return cls.model_validate(data)
 
 
