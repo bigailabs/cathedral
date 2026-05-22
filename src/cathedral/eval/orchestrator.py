@@ -1177,6 +1177,8 @@ class EvalOrchestrator:
                 feed_enabled=True,
             )
 
+        winner_to_publish_losers: ChallengeReceipt | None = None
+        promoted_for_log = None
         async with self._db_write_lock:
             # Re-select inside the process lock. Invalid/expired receipts can
             # unblock a valid receipt that previously waited behind them, and
@@ -1250,6 +1252,8 @@ class EvalOrchestrator:
                         )
                     )
                 await self.db.commit()
+                winner_to_publish_losers = winner
+                promoted_for_log = promoted
             except Exception:
                 await self.db.rollback()
                 raise
@@ -1260,16 +1264,20 @@ class EvalOrchestrator:
                     family_id=winner.family_id,
                     challenge_id_public=winner.signed_row.get("task_id_public"),
                     miner_hotkey=winner.miner_hotkey,
-                    promoted_challenge_id=(promoted.challenge_id if promoted else None),
+                    promoted_challenge_id=(
+                        promoted_for_log.challenge_id if promoted_for_log else None
+                    ),
                 )
 
+        if winner_to_publish_losers is not None:
             await self._publish_resolved_sat_losers(
                 receipt_store=receipt_store,
-                winner=winner,
+                winner=winner_to_publish_losers,
                 problem=problem,
                 reason="challenge_already_locked",
             )
             return True
+        return False
 
     async def _publish_resolved_sat_losers(
         self,
@@ -1287,11 +1295,6 @@ class EvalOrchestrator:
                 continue
             if candidate.status != RECEIPT_STATUS_VALID or candidate.signed_row is None:
                 continue
-            candidate_eval_run_id = candidate.eval_run_id or candidate.signed_row.get("id")
-            if candidate_eval_run_id is not None and await self._eval_run_exists(
-                str(candidate_eval_run_id)
-            ):
-                continue
             loser_row = resign_task_family_score(
                 candidate.signed_row,
                 signer=self.signer,
@@ -1299,17 +1302,31 @@ class EvalOrchestrator:
                 score_parts={"binary_correct": 0.0, "receipt_winner": 0.0},
                 rejection_reason=reason,
             )
-            await persist_task_family_result(
-                self.db,
-                submission_row=_task_family_receipt_submission_row(candidate),
-                problem=problem,
-                signed=_task_family_signed_result_from_row(loser_row),
-                epoch=int(candidate.epoch if candidate.epoch is not None else 0),
-                round_index=int(candidate.round_index if candidate.round_index is not None else 0),
-                duration_ms=int(candidate.duration_ms if candidate.duration_ms is not None else 0),
-                trace_json=candidate.trace_json,
-                feed_enabled=True,
-            )
+            async with self._db_write_lock:
+                # Loser publication commits on the same aiosqlite connection
+                # used by SAT winner transactions. Keep the duplicate check
+                # and insert behind the shared write gate so this commit cannot
+                # close another task's BEGIN IMMEDIATE window early.
+                candidate_eval_run_id = candidate.eval_run_id or candidate.signed_row.get("id")
+                if candidate_eval_run_id is not None and await self._eval_run_exists(
+                    str(candidate_eval_run_id)
+                ):
+                    continue
+                await persist_task_family_result(
+                    self.db,
+                    submission_row=_task_family_receipt_submission_row(candidate),
+                    problem=problem,
+                    signed=_task_family_signed_result_from_row(loser_row),
+                    epoch=int(candidate.epoch if candidate.epoch is not None else 0),
+                    round_index=int(
+                        candidate.round_index if candidate.round_index is not None else 0
+                    ),
+                    duration_ms=int(
+                        candidate.duration_ms if candidate.duration_ms is not None else 0
+                    ),
+                    trace_json=candidate.trace_json,
+                    feed_enabled=True,
+                )
 
     async def reconcile_sat_receipts(
         self,
