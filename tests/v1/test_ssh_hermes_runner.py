@@ -1,4 +1,4 @@
-# ruff: noqa: ASYNC240
+# ruff: noqa: ASYNC109, ASYNC240
 """Unit tests for SshHermesRunner (cathedralai/cathedral#75, PR 2).
 
 Mocks asyncssh at the module level. Covers:
@@ -1085,6 +1085,56 @@ async def test_task_family_scores_stdout_when_trace_collection_fails_after_recei
     assert result.trace_bundle is None
     assert result.trace["trace_collection_failed_after_receipt"] is True
     assert result.trace["trace_collection_failure_code"] == "transfer_failed"
+    assert result.trace["task_family_stdout_received_at_iso"] == result.stdout_received_at_iso
+
+
+@pytest.mark.asyncio
+async def test_task_family_returns_stdout_when_cleanup_fails_after_receipt(
+    runner_config, submission
+) -> None:
+    problem = _module.PublicProblem(
+        task_family="synthetic_boolean_v1",
+        schema_version=5,
+        task_id="sat_public_cleanup_failure",
+        difficulty_tier=0,
+        public_input={"num_vars": 1, "cnf_sha256": "a" * 64},
+        time_limit_seconds=30,
+    )
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+    receipt_calls: list[tuple[str, str]] = []
+
+    runner = SshHermesRunner(runner_config)
+    runner._connect_with_retries = AsyncMock(return_value=conn)
+    runner._hermes_version = AsyncMock(return_value="hermes 0.13.0")
+    runner._resolve_hermes_home = AsyncMock(return_value="/home/cathedral-probe/.hermes")
+    runner._verify_hermes_install = AsyncMock(return_value=None)
+    runner._clone_profile = AsyncMock(return_value=None)
+    runner._delete_profile = AsyncMock(side_effect=RuntimeError("profile delete denied"))
+    runner._invoke_hermes_text = AsyncMock(return_value=stdout)
+    runner._collect_and_assemble = AsyncMock(return_value=MagicMock())
+
+    async def receipt_callback(receipted_stdout: str, received_at_iso: str) -> None:
+        receipt_calls.append((receipted_stdout, received_at_iso))
+
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        result = await runner.run_task_family_challenge(
+            problem=problem,
+            prompt="Solve the SAT challenge.",
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+            receipt_callback=receipt_callback,
+        )
+
+    assert receipt_calls == [(stdout, result.stdout_received_at_iso)]
+    assert result.stdout == stdout
+    assert result.trace_bundle is not None
+    assert result.trace["profile_cleanup_failed_after_receipt"] is True
     assert result.trace["task_family_stdout_received_at_iso"] == result.stdout_received_at_iso
 
 

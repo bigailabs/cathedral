@@ -215,6 +215,12 @@ class _RoundCounter:
         return idx
 
 
+@dataclass
+class _ReceiptHeartbeatState:
+    stop: asyncio.Event | None = None
+    task: asyncio.Task[Any] | None = None
+
+
 class EvalOrchestrator:
     """Orchestrates the eval lifecycle for a single submission."""
 
@@ -756,27 +762,33 @@ class EvalOrchestrator:
             receipt_store = self._task_family_receipt_store
             receipt: ChallengeReceipt | None = None
             receipt_attempt_id = _task_family_receipt_attempt_id(str(submission["id"]))
-            receipt_heartbeat_stop: asyncio.Event | None = None
-            receipt_heartbeat_task: asyncio.Task[Any] | None = None
+            receipt_heartbeat = _ReceiptHeartbeatState()
 
-            def _start_receipt_heartbeat(receipt_to_heartbeat: ChallengeReceipt) -> None:
-                nonlocal receipt_heartbeat_stop, receipt_heartbeat_task
-                if receipt_heartbeat_task is not None:
+            def _start_receipt_heartbeat(
+                receipt_to_heartbeat: ChallengeReceipt,
+                *,
+                callback_receipt_store: ChallengeReceiptStore,
+                heartbeat: _ReceiptHeartbeatState = receipt_heartbeat,
+            ) -> None:
+                if heartbeat.task is not None:
                     return
-                receipt_heartbeat_stop = asyncio.Event()
-                receipt_heartbeat_task = asyncio.create_task(
+                heartbeat.stop = asyncio.Event()
+                heartbeat.task = asyncio.create_task(
                     self._run_sat_receipt_heartbeat(
-                        receipt_store=receipt_store,
+                        receipt_store=callback_receipt_store,
                         receipt=receipt_to_heartbeat,
-                        stop=receipt_heartbeat_stop,
+                        stop=heartbeat.stop,
                     )
                 )
 
-            async def _stop_receipt_heartbeat() -> None:
-                if receipt_heartbeat_stop is not None:
-                    receipt_heartbeat_stop.set()
-                if receipt_heartbeat_task is not None:
-                    await asyncio.gather(receipt_heartbeat_task, return_exceptions=True)
+            async def _stop_receipt_heartbeat(
+                *,
+                heartbeat: _ReceiptHeartbeatState = receipt_heartbeat,
+            ) -> None:
+                if heartbeat.stop is not None:
+                    heartbeat.stop.set()
+                if heartbeat.task is not None:
+                    await asyncio.gather(heartbeat.task, return_exceptions=True)
 
             async def _record_receipt(
                 stdout: str,
@@ -816,7 +828,10 @@ class EvalOrchestrator:
                         status=RECEIPT_STATUS_VERIFYING,
                         now_iso=_ms_iso(datetime.now(UTC)),
                     )
-                    _start_receipt_heartbeat(receipt)
+                    _start_receipt_heartbeat(
+                        receipt,
+                        callback_receipt_store=callback_receipt_store,
+                    )
 
             run_kwargs: dict[str, Any] = {
                 "problem": problem,
@@ -860,7 +875,10 @@ class EvalOrchestrator:
                             status=RECEIPT_STATUS_VERIFYING,
                             now_iso=_ms_iso(datetime.now(UTC)),
                         )
-                        _start_receipt_heartbeat(receipt)
+                        _start_receipt_heartbeat(
+                            receipt,
+                            callback_receipt_store=receipt_store,
+                        )
                 # Deterministic SAT scoring may stream a large file-backed CNF.
                 # Take receipt ownership before scoring so scheduler
                 # reconciliation cannot expire this in-progress verifier as an
@@ -2160,6 +2178,20 @@ def _resolve_polaris_runner_for_mode(mode: str) -> PolarisRunner:
             _os.environ["CATHEDRAL_EVAL_MODE"] = _saved
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        # Keep runtime dispatch aligned with SAT launch preflight: a typo in
+        # the stdout cap should warn and use the default, not brick ssh-probe
+        # v2 runner construction after preflight already reported fallback.
+        logger.warning("invalid_int_env", env=name, value=raw, default=default)
+        return default
+
+
 def _resolve_polaris_runner_from_env() -> PolarisRunner:
     """Re-build a Polaris runner from the current env so monkeypatched
     `CATHEDRAL_EVAL_MODE` mid-test takes effect on the next tick.
@@ -2260,14 +2292,9 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
                     ),
                     pinned_model=os.environ.get("CATHEDRAL_HERMES_PINNED_MODEL"),
                     pinned_provider=os.environ.get("CATHEDRAL_HERMES_PINNED_PROVIDER"),
-                    task_family_stdout_limit_bytes=max(
-                        1,
-                        int(
-                            os.environ.get(
-                                "CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES",
-                                str(DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES),
-                            )
-                        ),
+                    task_family_stdout_limit_bytes=_positive_int_env(
+                        "CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES",
+                        DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
                     ),
                 )
             )

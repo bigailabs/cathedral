@@ -117,6 +117,33 @@ def test_resolve_polaris_runner_other_modes_still_work(
     assert isinstance(_resolve_polaris_runner_from_env(), HttpPolarisRunner)
 
 
+def test_ssh_probe_v2_invalid_stdout_cap_env_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Runtime parser must match SAT preflight's warn-and-default behavior."""
+    from cathedral.eval.orchestrator import _resolve_polaris_runner_for_mode
+    from cathedral.eval.ssh_hermes_runner import (
+        DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
+        SshHermesRunner,
+    )
+
+    monkeypatch.setenv("CATHEDRAL_PROBER_VERSION", "v2")
+    ssh_key_path = tmp_path / "cathedral_probe_ed25519"
+    ssh_key_path.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n")
+    monkeypatch.setenv("CATHEDRAL_SSH_KEY_PATH", str(ssh_key_path))
+    monkeypatch.setenv("CATHEDRAL_BUNDLE_OUTPUT_DIR", str(tmp_path / "bundles"))
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES", "8MB")
+
+    runner = _resolve_polaris_runner_for_mode("ssh-probe")
+
+    assert isinstance(runner, SshHermesRunner)
+    assert (
+        runner.config.task_family_stdout_limit_bytes
+        == DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES
+    )
+
+
 # --------------------------------------------------------------------------
 # Tests 2+3 — score_and_sign persists attestation + flips polaris_verified
 # --------------------------------------------------------------------------

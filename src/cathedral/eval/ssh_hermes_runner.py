@@ -818,10 +818,27 @@ class SshHermesRunner:
                 )
 
             trace.visit_ended_at = datetime.now(UTC).isoformat()
-            await self._delete_profile(conn, eval_profile)
-            profile_deleted = True
+            cleanup_failed_after_receipt = False
+            try:
+                await self._delete_profile(conn, eval_profile)
+                profile_deleted = True
+            except Exception as cleanup_exc:
+                if not receipt_committed:
+                    raise
+                # SAT receipts are already committed before trace/profile
+                # teardown. Cleanup must stay best-effort here so a valid
+                # first answer is not lost because the miner box rejected
+                # profile deletion after stdout was captured.
+                cleanup_failed_after_receipt = True
+                logger.warning(
+                    "ssh_hermes_cleanup_failed_after_task_family_receipt",
+                    eval_profile=eval_profile,
+                    error=str(cleanup_exc),
+                )
             trace_dict = trace.to_dict()
             trace_dict["task_family_stdout_received_at_iso"] = stdout_received_at_iso
+            if cleanup_failed_after_receipt:
+                trace_dict["profile_cleanup_failed_after_receipt"] = True
             return TaskFamilyHermesRun(
                 stdout=stdout,
                 stdout_received_at_iso=stdout_received_at_iso,
