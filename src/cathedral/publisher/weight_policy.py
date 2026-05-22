@@ -385,12 +385,29 @@ async def produce_weight_policy_once(
     """Build, sign, and publish one vector into ``store``."""
     issued = issued_at or datetime.now(UTC)
     task_family_weights = _resolve_task_family_weights(config.task_family_weights)
-    scores = await latest_policy_scores_by_hotkey(
-        conn,
-        limit=config.limit,
-        task_family_weights=task_family_weights,
-        task_family_since_days=config.task_family_since_days,
-    )
+    state_target = state_conn or conn
+    if state_write_lock is None:
+        scores = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=config.limit,
+            task_family_weights=task_family_weights,
+            task_family_since_days=config.task_family_since_days,
+        )
+        policy_version = await _next_policy_version(state_target, issued_at=issued)
+    else:
+        async with state_write_lock:
+            # Production shares one aiosqlite connection between eval writes,
+            # SAT finalization, and this producer. Reads on that same connection
+            # can see another task's uncommitted transaction, so the signed
+            # snapshot and durable policy counter both sit behind the publisher
+            # write gate.
+            scores = await latest_policy_scores_by_hotkey(
+                conn,
+                limit=config.limit,
+                task_family_weights=task_family_weights,
+                task_family_since_days=config.task_family_since_days,
+            )
+            policy_version = await _next_policy_version(state_target, issued_at=issued)
     policy_input = {
         "network": config.network,
         "netuid": config.netuid,
@@ -401,19 +418,6 @@ async def produce_weight_policy_once(
         "scores": scores,
     }
     digest = compute_policy_hash(policy_input)
-    # Production uses the publisher DB for this durable counter. Read-only
-    # preflight callers can pass a scratch state connection so dry-runs do not
-    # mutate the production database they are inspecting.
-    state_target = state_conn or conn
-    if state_write_lock is None:
-        policy_version = await _next_policy_version(state_target, issued_at=issued)
-    else:
-        async with state_write_lock:
-            # Keep only the durable counter transaction under the shared
-            # publisher write gate. The score scans above are read-only and can
-            # be slow on large eval history; holding this lock there would
-            # stall submissions and SAT finalization unnecessarily.
-            policy_version = await _next_policy_version(state_target, issued_at=issued)
     vector_id = f"{config.network}-{config.netuid}-{policy_version}-{digest[:12]}"
     vector = build_and_sign(
         scores,

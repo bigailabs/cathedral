@@ -56,6 +56,20 @@ def test_unset_env_and_no_file_logs_warning_and_does_not_crash(
     )
 
 
+def test_unset_env_and_no_path_preserves_runner_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No raw key means startup must not override the runner's ~/.ssh fallback."""
+    target = tmp_path / "would_be_materialized"
+    monkeypatch.setattr(publisher_app, "_DEFAULT_SSH_PROBE_KEY_PATH", str(target))
+
+    _materialize_ssh_probe_key()
+
+    assert "CATHEDRAL_SSH_KEY_PATH" not in os.environ
+    assert not target.exists()
+
+
 def test_env_set_and_file_absent_writes_file_with_0600(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

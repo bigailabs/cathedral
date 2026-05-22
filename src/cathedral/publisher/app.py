@@ -77,8 +77,10 @@ from cathedral.publisher.submit import router as submit_router
 from cathedral.publisher.weight_policy import (
     WeightPolicyStore,
     load_producer_from_env,
-    router as weight_policy_router,
     run_weight_policy_producer,
+)
+from cathedral.publisher.weight_policy import (
+    router as weight_policy_router,
 )
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
@@ -117,9 +119,12 @@ def _materialize_ssh_probe_key() -> None:
     helper every ssh-probe submission hangs in ``evaluating`` forever.
 
     Behaviour:
-    - ``CATHEDRAL_PROBE_SSH_PRIVATE_KEY`` unset and no file at
-      ``CATHEDRAL_SSH_KEY_PATH``: log a warning and return. Other
-      attestation modes still work; only ssh-probe is degraded.
+    - ``CATHEDRAL_PROBE_SSH_PRIVATE_KEY`` unset and
+      ``CATHEDRAL_SSH_KEY_PATH`` unset: return without changing env so the
+      runners keep their own ``~/.ssh/cathedral_probe_ed25519`` fallback.
+    - ``CATHEDRAL_PROBE_SSH_PRIVATE_KEY`` unset and
+      ``CATHEDRAL_SSH_KEY_PATH`` set but missing: log a warning and return.
+      Other attestation modes still work; only ssh-probe is degraded.
     - Env var set: write to ``CATHEDRAL_SSH_KEY_PATH`` (default
       ``/tmp/cathedral_probe_ed25519``) with ``0600`` perms.
     - File already exists with identical content: short-circuit, no
@@ -127,18 +132,25 @@ def _materialize_ssh_probe_key() -> None:
     - File exists with different content: overwrite (operator rotated
       the key - respect the new value).
     """
-    target_str = os.environ.get("CATHEDRAL_SSH_KEY_PATH", _DEFAULT_SSH_PROBE_KEY_PATH)
-    target = Path(target_str).expanduser()
+    raw = os.environ.get("CATHEDRAL_PROBE_SSH_PRIVATE_KEY")
+    target_str = os.environ.get("CATHEDRAL_SSH_KEY_PATH")
+    if not raw:
+        if not target_str:
+            # Preserve the runners' own ~/.ssh/cathedral_probe_ed25519 fallback
+            # when startup is not materializing a key from env. Publishing our
+            # container temp path here would override already-provisioned
+            # deployments that rely on the runner default.
+            return
+        target = Path(target_str).expanduser()
+        if not target.is_file():
+            logger.warning("ssh_probe_key_missing", path=str(target))
+        return
+
+    target = Path(target_str or _DEFAULT_SSH_PROBE_KEY_PATH).expanduser()
     # Runner construction reads CATHEDRAL_SSH_KEY_PATH later. When the operator
     # only supplies the private-key env var, publish the materialized default so
     # preflight, startup, and SshHermesRunner all agree on the same file.
     os.environ.setdefault("CATHEDRAL_SSH_KEY_PATH", str(target))
-
-    raw = os.environ.get("CATHEDRAL_PROBE_SSH_PRIVATE_KEY")
-    if not raw:
-        if not target.is_file():
-            logger.warning("ssh_probe_key_missing", path=str(target))
-        return
 
     # Some env-var transports strip trailing newlines; OpenSSH refuses
     # keys without one.

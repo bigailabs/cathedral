@@ -6,8 +6,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cathedral.publisher import weight_policy as weight_policy_module
 from cathedral.publisher import repository
+from cathedral.publisher import weight_policy as weight_policy_module
 from cathedral.publisher.weight_policy import (
     WeightPolicyProducerConfig,
     WeightPolicyStore,
@@ -114,15 +114,15 @@ async def test_weight_policy_limit_applies_after_task_family_blending(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_weight_policy_producer_locks_only_state_write(monkeypatch) -> None:
+async def test_weight_policy_producer_locks_snapshot_and_state_write(monkeypatch) -> None:
     store = WeightPolicyStore()
     lock = asyncio.Lock()
     stop = asyncio.Event()
     events: list[str] = []
 
     async def fake_scores(*_args, **_kwargs) -> dict[str, float]:
-        events.append("read_unlocked")
-        assert not lock.locked()
+        events.append("read_locked")
+        assert lock.locked()
         return {"hk-a": 0.9}
 
     async def fake_next_version(_conn, *, issued_at: datetime) -> int:
@@ -143,8 +143,48 @@ async def test_weight_policy_producer_locks_only_state_write(monkeypatch) -> Non
         db_write_lock=lock,
     )
 
-    assert events == ["read_unlocked", "state_write_locked"]
+    assert events == ["read_locked", "state_write_locked"]
     assert await store.get() is not None
+
+
+@pytest.mark.asyncio
+async def test_weight_policy_snapshot_waits_for_shared_writer_rollback(tmp_path) -> None:
+    conn = await connect(str(tmp_path / "publisher.db"))
+    lock = asyncio.Lock()
+    store = WeightPolicyStore()
+    try:
+        await _seed_ranked_submission(conn, "agent-a", "hk-a", current_score=0.72)
+
+        await lock.acquire()
+        await conn.execute("BEGIN IMMEDIATE")
+        await conn.execute(
+            "UPDATE agent_submissions SET current_score = ? WHERE id = ?",
+            (0.99, "agent-a"),
+        )
+
+        task = asyncio.create_task(
+            produce_weight_policy_once(
+                conn,
+                store,
+                _private_key(),
+                config=WeightPolicyProducerConfig(valid_for_secs=3600),
+                issued_at=datetime(2026, 5, 21, 12, 0, tzinfo=UTC),
+                state_write_lock=lock,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        await conn.rollback()
+        lock.release()
+        vector = await task
+
+        weights = {entry.miner_hotkey: entry.weight for entry in vector.weights}
+        assert weights == {"hk-a": 0.72}
+    finally:
+        if lock.locked():
+            lock.release()
+        await conn.close()
 
 
 async def _seed_ranked_submission(
