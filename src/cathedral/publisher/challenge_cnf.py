@@ -15,6 +15,7 @@ material.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -205,7 +206,14 @@ async def get_challenge_cnf(
             logger.warning("challenge_cnf_file_hash_missing", challenge_id=challenge_id)
             raise _not_found()
         try:
-            handle = _open_verified_cnf_snapshot(path, expected_sha256=expected_sha256)
+            # Snapshotting can hash/copy launch-scale CNFs. Keep that blocking
+            # disk work off the FastAPI event loop so health checks and other
+            # publisher routes continue to run while the file is prepared.
+            handle = await asyncio.to_thread(
+                _open_verified_cnf_snapshot,
+                path,
+                expected_sha256=expected_sha256,
+            )
         except FileNotFoundError:
             logger.warning("challenge_cnf_file_missing", challenge_id=challenge_id)
             raise _not_found() from None

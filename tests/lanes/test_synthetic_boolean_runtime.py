@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1216,6 +1218,94 @@ async def test_synthetic_boolean_marks_receipt_verifying_before_scoring(
         receipts = await receipt_store.list_for_challenge(
             family_id="synthetic_boolean_v1",
             challenge_id="active-boolean-001",
+        )
+        assert [receipt.status for receipt in receipts] == [RECEIPT_STATUS_VALID]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_file_backed_scoring_runs_off_event_loop(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        cnf_text = "p cnf 2 2\n1 0\n2 0\n"
+        cnf_path = tmp_path / "active.cnf"
+        cnf_path.write_text(cnf_text, encoding="utf-8")
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-file-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="",
+                cnf_path=str(cnf_path),
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={
+                    "source": "toy-runtime-test",
+                    "storage": "file",
+                    "cnf_sha256": hashlib.sha256(cnf_text.encode("utf-8")).hexdigest(),
+                    "num_vars": 2,
+                    "num_clauses": 2,
+                },
+            )
+        )
+
+        event_loop_thread_id = threading.get_ident()
+        score_thread_ids: list[int] = []
+        original_score = orchestrator_module.score_and_sign_task_family_stdout
+
+        def recording_score(*args: Any, **kwargs: Any):
+            score_thread_ids.append(threading.get_ident())
+            return original_score(*args, **kwargs)
+
+        monkeypatch.setattr(
+            orchestrator_module,
+            "score_and_sign_task_family_stdout",
+            recording_score,
+        )
+
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        runner = _SolvingRunner()
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        log = structlog.get_logger("test")
+        snapshot = await orch.snapshot_task_family_batch_problems(log=log)
+        await orch._maybe_run_task_family_lanes(
+            submission=sub,
+            runner=runner,
+            epoch=123,
+            round_index=0,
+            log=log,
+            problem_overrides=snapshot,
+        )
+
+        assert score_thread_ids
+        assert all(thread_id != event_loop_thread_id for thread_id in score_thread_ids)
+        receipts = await receipt_store.list_for_challenge(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-file-boolean-001",
         )
         assert [receipt.status for receipt in receipts] == [RECEIPT_STATUS_VALID]
     finally:

@@ -225,6 +225,54 @@ async def test_active_file_backed_with_correct_token_returns_cnf(
 
 
 @pytest.mark.asyncio
+async def test_active_file_backed_snapshot_runs_off_event_loop(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    original_to_thread = challenge_cnf_module.asyncio.to_thread
+    offloaded: list[Any] = []
+
+    async def spy_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        offloaded.append(func)
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(challenge_cnf_module.asyncio, "to_thread", spy_to_thread)
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert offloaded == [challenge_cnf_module._open_verified_cnf_snapshot]
+
+
+@pytest.mark.asyncio
 async def test_active_file_backed_streams_verified_open_file_after_path_replace(
     wired_app: dict[str, Any],
     tmp_path: Any,

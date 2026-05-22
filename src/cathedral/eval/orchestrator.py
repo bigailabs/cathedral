@@ -817,14 +817,13 @@ class EvalOrchestrator:
                     receipt_store=receipt_store,
                     receipt=receipt,
                 )
-            signed = score_and_sign_task_family_stdout(
+            signed = await self._score_and_sign_task_family_stdout(
                 lane=lane,
                 problem=problem,
                 hidden=hidden,
                 submission_row=submission,
                 stdout=hermes_run.stdout,
                 ran_at_iso=_ms_iso(datetime.now(UTC)),
-                signer=self.signer,
                 epoch_salt=epoch_salt,
             )
             if family_id == SYNTHETIC_BOOLEAN_FAMILY_ID and receipt_store is not None:
@@ -888,14 +887,13 @@ class EvalOrchestrator:
                             commit=False,
                         )
                         if locked is None:
-                            signed = score_and_sign_task_family_stdout(
+                            signed = await self._score_and_sign_task_family_stdout(
                                 lane=lane,
                                 problem=problem,
                                 hidden=hidden,
                                 submission_row=submission,
                                 stdout=hermes_run.stdout,
                                 ran_at_iso=str(signed.row["ran_at"]),
-                                signer=self.signer,
                                 eval_run_id=str(signed.row["id"]),
                                 epoch_salt=epoch_salt,
                                 score_override=ScoreResult(
@@ -992,6 +990,37 @@ class EvalOrchestrator:
                 status=RECEIPT_STATUS_VERIFYING,
                 now_iso=verifying_started_iso,
             )
+
+    async def _score_and_sign_task_family_stdout(
+        self,
+        *,
+        lane: Any,
+        problem: PublicProblem,
+        hidden: HiddenMetadata,
+        submission_row: dict[str, Any],
+        stdout: str,
+        ran_at_iso: str,
+        epoch_salt: str,
+        eval_run_id: str | None = None,
+        score_override: ScoreResult | None = None,
+    ) -> TaskFamilySignedResult:
+        # File-backed SAT verification streams, hashes, and evaluates the CNF.
+        # Run the scorer in a worker thread from async eval paths so large
+        # launch CNFs do not stall receipt reconciliation, CNF serving, or
+        # unrelated evaluations on the publisher event loop.
+        return await asyncio.to_thread(
+            score_and_sign_task_family_stdout,
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission_row=submission_row,
+            stdout=stdout,
+            ran_at_iso=ran_at_iso,
+            signer=self.signer,
+            eval_run_id=eval_run_id,
+            epoch_salt=epoch_salt,
+            score_override=score_override,
+        )
 
     async def _eval_run_exists(self, eval_run_id: str) -> bool:
         cur = await self.db.execute(
@@ -1173,13 +1202,7 @@ class EvalOrchestrator:
             if await self._eval_run_exists(str(current_signed.row["id"])):
                 return
             loser = self._sat_loser_result(
-                lane=current_lane,
-                problem=problem,
-                hidden=current_hidden,
-                submission=current_submission,
-                stdout=current_hermes_run.stdout,
                 original=current_signed,
-                epoch_salt=current_epoch_salt,
                 reason="challenge_already_locked",
             )
             await persist_task_family_result(
@@ -1445,31 +1468,20 @@ class EvalOrchestrator:
     def _sat_loser_result(
         self,
         *,
-        lane: Any,
-        problem: PublicProblem,
-        hidden: HiddenMetadata,
-        submission: dict[str, Any],
-        stdout: str,
         original: TaskFamilySignedResult,
-        epoch_salt: str,
         reason: str,
     ) -> TaskFamilySignedResult:
-        return score_and_sign_task_family_stdout(
-            lane=lane,
-            problem=problem,
-            hidden=hidden,
-            submission_row=submission,
-            stdout=stdout,
-            ran_at_iso=str(original.row["ran_at"]),
+        # The answer was already verified to produce ``original``. Re-sign
+        # that hash-only row as a loser instead of re-running file-backed SAT
+        # verification on the event loop.
+        loser_row = resign_task_family_score(
+            original.row,
             signer=self.signer,
-            eval_run_id=str(original.row["id"]),
-            epoch_salt=epoch_salt,
-            score_override=ScoreResult(
-                weighted_score=0.0,
-                rejection_reason=reason,
-                score_parts={"binary_correct": 0.0, "receipt_winner": 0.0},
-            ),
+            weighted_score=0.0,
+            score_parts={"binary_correct": 0.0, "receipt_winner": 0.0},
+            rejection_reason=reason,
         )
+        return _task_family_signed_result_from_row(loser_row)
 
     async def _announce_synthetic_boolean_problem(
         self,
