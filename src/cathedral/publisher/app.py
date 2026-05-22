@@ -74,6 +74,12 @@ from cathedral.publisher.sat_preflight import (
     read_operator_cnf_file,
 )
 from cathedral.publisher.submit import router as submit_router
+from cathedral.publisher.weight_policy import (
+    WeightPolicyStore,
+    load_producer_from_env,
+    router as weight_policy_router,
+    run_weight_policy_producer,
+)
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
 
@@ -169,6 +175,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         _materialize_ssh_probe_key()
         ctx: PublisherContext = await ctx_factory()
         app.state.ctx = ctx
+        stop = asyncio.Event()
         await ensure_sqlite_challenge_source_schema(ctx.db)
         await ctx.db.executescript(CHALLENGE_LOCK_SCHEMA)
         await ctx.db.executescript(CHALLENGE_RECEIPT_SCHEMA)
@@ -182,6 +189,26 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         # the connection or re-wiring through dependency injection.
         app.state.task_family_challenge_source = task_family_challenge_source
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
+        # Keep the signed-weight route and its backing store wired together.
+        # The endpoint is mounted even without a signing key so validators get
+        # a deterministic 503 "not configured yet" instead of app construction
+        # failures; configured publishers start the producer below.
+        weight_policy_store = WeightPolicyStore()
+        app.state.weight_policy = weight_policy_store
+        producer_config = load_producer_from_env()
+        if producer_config is not None:
+            config, private_key = producer_config
+            ctx.background_tasks.append(
+                asyncio.create_task(
+                    run_weight_policy_producer(
+                        ctx.db,
+                        weight_policy_store,
+                        private_key,
+                        config=config,
+                        stop=stop,
+                    )
+                )
+            )
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
         # Make ctx visible to the orchestrator's env-resolver. Production
@@ -216,7 +243,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
             load_private_corpus()
 
-        stop = asyncio.Event()
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to
             # PolarisRuntimeRunner (Tier A), TEE-tier rows are pre-verified
