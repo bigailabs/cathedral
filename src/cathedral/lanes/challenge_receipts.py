@@ -16,7 +16,9 @@ Receipt statuses:
 Winner selection is conservative. For one ``(family_id, challenge_id)``,
 the earliest ``valid`` receipt can win only when every earlier receipt is
 resolved ``invalid`` or ``expired``. Any earlier ``unverified`` or
-``verifying`` receipt blocks later valid receipts.
+``verifying`` receipt blocks later valid receipts. Expiry only applies
+to old ``unverified`` receipts; a ``verifying`` receipt is owned by an
+in-flight finalizer and must resolve itself to ``valid`` or ``invalid``.
 
 Leak boundary: this store is publisher-private and hash-only. It stores
 ``answer_hash`` plus optional receipt-auth metadata, not raw stdout,
@@ -175,7 +177,7 @@ class ChallengeReceiptStore(Protocol):
         rejection_reason: str,
         commit: bool = True,
     ) -> int:
-        """Expire unresolved receipts older than the receipt-time cutoff."""
+        """Expire stale unverified receipts older than the receipt-time cutoff."""
         ...
 
     async def get(
@@ -313,7 +315,7 @@ class InMemoryChallengeReceiptStore:
         for key, current in list(self._rows.items()):
             if key[0] != family_id or key[1] != challenge_id:
                 continue
-            if current.status in _TERMINAL_STATUSES:
+            if current.status != RECEIPT_STATUS_UNVERIFIED:
                 continue
             if current.received_at_iso >= cutoff_received_at_iso:
                 continue
@@ -617,7 +619,7 @@ class SqliteChallengeReceiptStore:
             "UPDATE lane_challenge_receipts SET status = ?, rejection_reason = ?, "
             "updated_at_iso = ?, resolved_at_iso = ? "
             "WHERE family_id = ? AND challenge_id = ? "
-            "AND status IN (?, ?) AND received_at_iso < ?",
+            "AND status = ? AND received_at_iso < ?",
             (
                 RECEIPT_STATUS_EXPIRED,
                 rejection_reason,
@@ -626,7 +628,6 @@ class SqliteChallengeReceiptStore:
                 family_id,
                 challenge_id,
                 RECEIPT_STATUS_UNVERIFIED,
-                RECEIPT_STATUS_VERIFYING,
                 cutoff_received_at_iso,
             ),
         )

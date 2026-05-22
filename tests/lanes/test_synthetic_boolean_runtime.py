@@ -16,8 +16,10 @@ from cathedral.eval.polaris_runner import StubPolarisRunner
 from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA
 from cathedral.lanes.challenge_lock import InMemoryChallengeLock, SqliteChallengeLock
+from cathedral.lanes.challenge_receipts import RECEIPT_STATUS_EXPIRED
 from cathedral.lanes.challenge_receipts import RECEIPT_STATUS_INVALID
 from cathedral.lanes.challenge_receipts import RECEIPT_STATUS_VALID
+from cathedral.lanes.challenge_receipts import RECEIPT_STATUS_VERIFYING
 from cathedral.lanes.challenge_receipts import SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA
 from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_source import (
@@ -31,6 +33,8 @@ from cathedral.lanes.challenge_source import (
 from cathedral.lanes.challenge_source import (
     SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
 )
+from cathedral.lanes.publisher import score_and_sign_task_family_stdout
+from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
 from cathedral.publisher import repository
 from cathedral.publisher.app import PublisherContext
 from cathedral.publisher.reads import _eval_run_to_output
@@ -780,6 +784,158 @@ async def test_synthetic_boolean_invalid_receipt_unblocks_waiting_valid_winner(
         assert winner is not None
         assert winner.miner_hotkey == "5MinerB"
 
+        rows = await source.list_for_family("synthetic_boolean_v1")
+        assert [(row.challenge_id, row.status) for row in rows] == [
+            ("active-boolean-001", CHALLENGE_STATUS_LOCKED),
+            ("active-boolean-002", CHALLENGE_STATUS_ACTIVE),
+        ]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_reconcile_expires_stale_blocker_and_finalizes_valid(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub_b = await _seed_submission(conn, submission_id="sub-b", miner_hotkey="5MinerB")
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        record = ChallengeRecord(
+            challenge_id="active-boolean-001",
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="p cnf 1 1\n1 0\n",
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={"source": "toy-runtime-test"},
+        )
+        await source.upsert(record)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-002",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 2 2\n1 0\n2 0\n",
+                status=CHALLENGE_STATUS_PENDING,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+
+        signer = EvalSigner(Ed25519PrivateKey.generate())
+        tokens = SqliteFetchTokenStore(conn)
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=StubPolarisRunner(),
+            signer=signer,
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=tokens,
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+        announced = await orch._announce_synthetic_boolean_problem(
+            record,
+            log=structlog.get_logger("test"),
+            family_id="synthetic_boolean_v1",
+        )
+        assert announced is not None
+        problem, hidden = announced
+        now = datetime.now(UTC)
+
+        await receipt_store.record_receipt(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+            submission_id="sub-a:attempt:stale",
+            miner_hotkey="5MinerA",
+            received_at_iso=orchestrator_module._ms_iso(now - timedelta(seconds=120)),
+            answer_hash="stale-answer",
+            recorded_at_iso=orchestrator_module._ms_iso(now - timedelta(seconds=120)),
+        )
+        valid_receipt = await receipt_store.record_receipt(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+            submission_id="sub-b:attempt:valid",
+            miner_hotkey="5MinerB",
+            received_at_iso=orchestrator_module._ms_iso(now - timedelta(seconds=30)),
+            answer_hash="valid-answer",
+            recorded_at_iso=orchestrator_module._ms_iso(now - timedelta(seconds=30)),
+        )
+        signed = score_and_sign_task_family_stdout(
+            lane=SyntheticBooleanV1(),
+            problem=problem,
+            hidden=hidden,
+            submission_row=sub_b,
+            stdout='```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}\n```',
+            ran_at_iso=orchestrator_module._ms_iso(now - timedelta(seconds=20)),
+            signer=signer,
+            eval_run_id="run-waiting-valid",
+            epoch_salt="epoch_123:synthetic_boolean_v1",
+        )
+        await receipt_store.update_status(
+            family_id=valid_receipt.family_id,
+            challenge_id=valid_receipt.challenge_id,
+            submission_id=valid_receipt.submission_id,
+            status=RECEIPT_STATUS_VERIFYING,
+            now_iso=valid_receipt.received_at_iso,
+        )
+        await receipt_store.attach_result(
+            family_id=valid_receipt.family_id,
+            challenge_id=valid_receipt.challenge_id,
+            submission_id=valid_receipt.submission_id,
+            eval_run_id=str(signed.row["id"]),
+            signed_row=signed.row,
+            trace_json={},
+            duration_ms=1,
+            epoch=123,
+            round_index=1,
+            now_iso=str(signed.row["ran_at"]),
+        )
+        await receipt_store.update_status(
+            family_id=valid_receipt.family_id,
+            challenge_id=valid_receipt.challenge_id,
+            submission_id=valid_receipt.submission_id,
+            status=RECEIPT_STATUS_VALID,
+            now_iso=str(signed.row["ran_at"]),
+            verifier_details_hash=str(signed.row["verifier_details_hash"]),
+        )
+        assert await receipt_store.select_winner(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        ) is None
+
+        finalized = await orch.reconcile_sat_receipts(log=structlog.get_logger("test"))
+
+        assert finalized == 1
+        receipts = await receipt_store.list_for_challenge(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert [receipt.status for receipt in receipts] == [
+            RECEIPT_STATUS_EXPIRED,
+            RECEIPT_STATUS_VALID,
+        ]
+        rows_b = await repository.list_eval_runs_for_submission(conn, "sub-b")
+        assert len(rows_b) == 1
+        assert rows_b[0]["weighted_score"] == pytest.approx(1.0)
+        assert rows_b[0]["errors"] is None
+
+        winner = await SqliteChallengeLock(conn).get_winner(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert winner is not None
+        assert winner.miner_hotkey == "5MinerB"
         rows = await source.list_for_family("synthetic_boolean_v1")
         assert [(row.challenge_id, row.status) for row in rows] == [
             ("active-boolean-001", CHALLENGE_STATUS_LOCKED),
