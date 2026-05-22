@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from cathedral.lanes.synthetic_boolean_v1.dimacs import (
@@ -24,6 +25,8 @@ _TOY = toy_instance_for(1)
 _TOY_CNF = _TOY.cnf_text
 _TOY_SHA256 = hashlib.sha256(_TOY_CNF.encode("utf-8")).hexdigest()
 _PROBE_PATH = "/api/cathedral/v1/synthetic-boolean/readiness-probe"
+_MAX_VERIFY_BODY_BYTES = 16 * 1024
+_MAX_VERIFY_SOLUTION_BYTES = 8 * 1024
 
 
 @router.get("/v1/synthetic-boolean/readiness-probe")
@@ -61,13 +64,16 @@ async def get_synthetic_boolean_readiness_cnf() -> PlainTextResponse:
 
 
 @router.post("/v1/synthetic-boolean/readiness-probe/verify")
-async def verify_synthetic_boolean_readiness_probe(body: dict[str, Any]) -> dict[str, Any]:
+async def verify_synthetic_boolean_readiness_probe(request: Request) -> dict[str, Any]:
     """Verify a toy probe answer, but always return a zero weighted score."""
+    body = await _read_verify_body(request)
     raw_solution = body["dimacs_solution"] if "dimacs_solution" in body else None
     if not isinstance(raw_solution, str):
         return _probe_result(False, "answer_missing_dimacs_solution")
     if set(body) != {"dimacs_solution"}:
         return _probe_result(False, "answer_unexpected_keys")
+    if len(raw_solution.encode("utf-8")) > _MAX_VERIFY_SOLUTION_BYTES:
+        raise HTTPException(status_code=413, detail="dimacs_solution too large")
 
     cnf = parse_dimacs_cnf(_TOY_CNF)
     if not cnf.ok:
@@ -90,6 +96,38 @@ async def verify_synthetic_boolean_readiness_probe(body: dict[str, Any]) -> dict
         "weighted_score": 0.0,
         "emissions_eligible": False,
     }
+
+
+async def _read_verify_body(request: Request) -> dict[str, Any]:
+    """Read the public toy verifier body with a small pre-parse cap.
+
+    The readiness verifier is unauthenticated and mounted publicly. Avoid a
+    typed ``body: dict`` parameter here: FastAPI would JSON-parse the whole
+    payload before this route can enforce the toy-probe limit.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_VERIFY_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="readiness verify body too large")
+        except ValueError:
+            pass
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX_VERIFY_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="readiness verify body too large")
+        chunks.append(chunk)
+
+    try:
+        parsed = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"_invalid_json": True}
+    if not isinstance(parsed, dict):
+        return {"_invalid_json": True}
+    return parsed
 
 
 def _probe_result(valid: bool, rejection_reason: str) -> dict[str, Any]:

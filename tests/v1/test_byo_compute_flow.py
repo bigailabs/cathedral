@@ -184,6 +184,36 @@ def test_synthetic_boolean_readiness_probe_is_zero_weight(
     assert verify.json()["emissions_eligible"] is False
 
 
+def test_synthetic_boolean_readiness_verify_rejects_large_solution(
+    publisher_client: object,
+) -> None:
+    if publisher_client is None:
+        pytest.skip("publisher app not buildable")
+
+    verify = publisher_client.post(  # type: ignore[attr-defined]
+        "/api/cathedral/v1/synthetic-boolean/readiness-probe/verify",
+        json={"dimacs_solution": "s SATISFIABLE\nv " + ("1 " * 4097) + "0\n"},
+    )
+
+    assert verify.status_code == 413
+    assert verify.json()["detail"] == "dimacs_solution too large"
+
+
+def test_synthetic_boolean_readiness_verify_rejects_large_body(
+    publisher_client: object,
+) -> None:
+    if publisher_client is None:
+        pytest.skip("publisher app not buildable")
+
+    verify = publisher_client.post(  # type: ignore[attr-defined]
+        "/api/cathedral/v1/synthetic-boolean/readiness-probe/verify",
+        json={"dimacs_solution": "s SATISFIABLE\nv " + ("1 " * 9000) + "0\n"},
+    )
+
+    assert verify.status_code == 413
+    assert verify.json()["detail"] == "readiness verify body too large"
+
+
 def test_verified_multiplier_capped_at_one() -> None:
     """A 0.95 score x 1.10 = 1.045, must clip to 1.0 not exceed."""
     # Direct test of the cap formula in scoring_pipeline.

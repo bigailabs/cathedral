@@ -339,22 +339,20 @@ async def test_run_once_wires_cnf_url_token_store(
     try:
         monkeypatch.setenv("CATHEDRAL_PUBLIC_BASE_URL", _TEST_PUBLIC_BASE_URL)
         monkeypatch.setattr(orchestrator_module, "EvalOrchestrator", _CapturingOrchestrator)
-        monkeypatch.setattr(
-            publisher_app,
-            "_LATEST_CTX",
-            PublisherContext(
-                db=conn,
-                hippius=StubHippiusClient(),
-                polaris=StubPolarisRunner(),
-                signer=EvalSigner(Ed25519PrivateKey.generate()),
-                registry=_Registry(),  # type: ignore[arg-type]
-            ),
+        ctx = PublisherContext(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=StubPolarisRunner(),
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
         )
+        monkeypatch.setattr(publisher_app, "_LATEST_CTX", ctx)
 
         advanced = await orchestrator_module._run_once_async()
         assert advanced == 0
         assert isinstance(captured["task_family_fetch_token_store"], SqliteFetchTokenStore)
         assert isinstance(captured["task_family_receipt_store"], SqliteChallengeReceiptStore)
+        assert captured["db_write_lock"] is ctx.db_write_lock
         assert captured["public_base_url"] == _TEST_PUBLIC_BASE_URL
     finally:
         await conn.close()
@@ -1616,6 +1614,7 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
 
         signer = EvalSigner(Ed25519PrivateKey.generate())
         receipt_store = SqliteChallengeReceiptStore(conn)
+        shared_write_lock = asyncio.Lock()
         orch = EvalOrchestrator(
             db=conn,
             hippius=StubHippiusClient(),
@@ -1623,6 +1622,7 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
             signer=signer,
             registry=_Registry(),  # type: ignore[arg-type]
             task_family_receipt_store=receipt_store,
+            db_write_lock=shared_write_lock,
         )
         lane = SyntheticBooleanV1()
         problem, hidden = lane.generate(
@@ -1727,7 +1727,7 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
 
         monkeypatch.setattr(orchestrator_module, "persist_task_family_result", signaling_persist)
 
-        await orch._db_write_lock.acquire()
+        await shared_write_lock.acquire()
         try:
             publish_task = asyncio.create_task(
                 orch._publish_resolved_sat_losers(
@@ -1740,7 +1740,7 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
             await asyncio.sleep(0.05)
             assert not persist_started.is_set()
         finally:
-            orch._db_write_lock.release()
+            shared_write_lock.release()
 
         await asyncio.wait_for(persist_finished.wait(), timeout=1.0)
         await publish_task

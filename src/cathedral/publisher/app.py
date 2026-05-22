@@ -48,11 +48,11 @@ from cathedral.lanes.challenge_lock import (
 from cathedral.lanes.challenge_lock import (
     SqliteChallengeLock,
 )
+from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
 from cathedral.lanes.challenge_receipts import (
     SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA,
 )
 from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
-from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
 from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
     SqliteFetchTokenStore,
@@ -61,6 +61,9 @@ from cathedral.lanes.challenge_source import (
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
 from cathedral.publisher import repository
 from cathedral.publisher.reads import router as reads_router
+from cathedral.publisher.sat_file_challenges import (
+    build_synthetic_boolean_file_challenge_record,
+)
 from cathedral.publisher.sat_preflight import (
     ACTIVE_CNF_PATH_ENV,
     DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
@@ -69,9 +72,6 @@ from cathedral.publisher.sat_preflight import (
     STORAGE_MODE_FILE,
     STORAGE_MODE_SQLITE_TEXT,
     read_operator_cnf_file,
-)
-from cathedral.publisher.sat_file_challenges import (
-    build_synthetic_boolean_file_challenge_record,
 )
 from cathedral.publisher.submit import router as submit_router
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
@@ -90,6 +90,10 @@ class PublisherContext:
     signer: EvalSigner
     registry: CardRegistry
     submissions_paused: bool = False
+    # One aiosqlite connection is shared by HTTP routes and the evaluator.
+    # SAT finalization opens explicit transactions on that connection, so
+    # every connection writer must acquire this gate before a commit.
+    db_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
 
@@ -270,6 +274,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     task_family_challenge_lock=task_family_challenge_lock,
                     task_family_fetch_token_store=task_family_fetch_token_store,
                     task_family_receipt_store=task_family_receipt_store,
+                    db_write_lock=ctx.db_write_lock,
                     public_base_url=os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
                 )
             )

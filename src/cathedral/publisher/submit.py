@@ -417,28 +417,29 @@ async def submit_agent(
     # row with status=rejected and return 202 with rejection_reason. Skip
     # bundle upload + first-mover anchor.
     if rejection_reason is not None:
-        await repository.insert_agent_submission(
-            ctx.db,
-            id=submission_id,
-            miner_hotkey=auth.hotkey_ss58,
-            card_id=card_id,
-            bundle_blob_key="",
-            bundle_hash=bundle_hash,
-            bundle_size_bytes=len(raw),
-            encryption_key_id="",
-            bundle_signature=auth.signature_b64,
-            display_name=display_name,
-            bio=bio,
-            logo_url=None,
-            soul_md_preview=None,
-            metadata_fingerprint=sim_metadata_fingerprint,
-            similarity_check_passed=False,
-            rejection_reason=rejection_reason,
-            status="rejected",
-            submitted_at=submitted_at,
-            submitted_at_iso=submitted_at_iso,
-            first_mover_at=None,
-        )
+        async with ctx.db_write_lock:
+            await repository.insert_agent_submission(
+                ctx.db,
+                id=submission_id,
+                miner_hotkey=auth.hotkey_ss58,
+                card_id=card_id,
+                bundle_blob_key="",
+                bundle_hash=bundle_hash,
+                bundle_size_bytes=len(raw),
+                encryption_key_id="",
+                bundle_signature=auth.signature_b64,
+                display_name=display_name,
+                bio=bio,
+                logo_url=None,
+                soul_md_preview=None,
+                metadata_fingerprint=sim_metadata_fingerprint,
+                similarity_check_passed=False,
+                rejection_reason=rejection_reason,
+                status="rejected",
+                submitted_at=submitted_at,
+                submitted_at_iso=submitted_at_iso,
+                first_mover_at=None,
+            )
         logger.info(
             "submission_rejected_similarity",
             submission_id=submission_id,
@@ -523,39 +524,43 @@ async def submit_agent(
     submission_status = "discovery" if attestation_mode == "unverified" else "queued"
     discovery_only = attestation_mode == "unverified"
     try:
-        await repository.insert_agent_submission(
-            ctx.db,
-            id=submission_id,
-            miner_hotkey=auth.hotkey_ss58,
-            card_id=card_id,
-            bundle_blob_key=blob_key,
-            bundle_hash=bundle_hash,
-            bundle_size_bytes=len(raw),
-            encryption_key_id=encrypted.encryption_key_id,
-            bundle_signature=auth.signature_b64,
-            display_name=display_name,
-            bio=bio,
-            logo_url=logo_url,
-            soul_md_preview=None,  # populated post-decrypt during eval
-            metadata_fingerprint=sim_metadata_fingerprint,
-            similarity_check_passed=True,
-            rejection_reason=None,
-            status=submission_status,
-            submitted_at=submitted_at,
-            submitted_at_iso=submitted_at_iso,
-            first_mover_at=first_mover_dt,
-            attestation_mode=attestation_mode,
-            attestation_type=(attestation_type if attestation_mode == "tee" else None),
-            attestation_blob=(attestation_blob_bytes if attestation_mode == "tee" else None),
-            attestation_verified_at=(
-                attestation_result.verified_at if attestation_result is not None else None
-            ),
-            discovery_only=discovery_only,
-            ssh_host=ssh_host,
-            ssh_port=ssh_port,
-            ssh_user=ssh_user,
-            hermes_port=hermes_port,
-        )
+        async with ctx.db_write_lock:
+            # Share the PublisherContext write gate with SAT finalization:
+            # insert_agent_submission() commits on ctx.db, and a concurrent
+            # commit would otherwise close a finalizer BEGIN IMMEDIATE early.
+            await repository.insert_agent_submission(
+                ctx.db,
+                id=submission_id,
+                miner_hotkey=auth.hotkey_ss58,
+                card_id=card_id,
+                bundle_blob_key=blob_key,
+                bundle_hash=bundle_hash,
+                bundle_size_bytes=len(raw),
+                encryption_key_id=encrypted.encryption_key_id,
+                bundle_signature=auth.signature_b64,
+                display_name=display_name,
+                bio=bio,
+                logo_url=logo_url,
+                soul_md_preview=None,  # populated post-decrypt during eval
+                metadata_fingerprint=sim_metadata_fingerprint,
+                similarity_check_passed=True,
+                rejection_reason=None,
+                status=submission_status,
+                submitted_at=submitted_at,
+                submitted_at_iso=submitted_at_iso,
+                first_mover_at=first_mover_dt,
+                attestation_mode=attestation_mode,
+                attestation_type=(attestation_type if attestation_mode == "tee" else None),
+                attestation_blob=(attestation_blob_bytes if attestation_mode == "tee" else None),
+                attestation_verified_at=(
+                    attestation_result.verified_at if attestation_result is not None else None
+                ),
+                discovery_only=discovery_only,
+                ssh_host=ssh_host,
+                ssh_port=ssh_port,
+                ssh_user=ssh_user,
+                hermes_port=hermes_port,
+            )
     except aiosqlite.IntegrityError as e:
         # idx_agent_unique violation = same hotkey + same card + same bundle.
         # Best-effort cleanup of the freshly uploaded blob.

@@ -230,6 +230,7 @@ class EvalOrchestrator:
         task_family_challenge_lock: ChallengeLock | None = None,
         task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
         task_family_receipt_store: ChallengeReceiptStore | None = None,
+        db_write_lock: asyncio.Lock | None = None,
         public_base_url: str | None = None,
     ) -> None:
         """Construct an orchestrator with either a single runner or a
@@ -261,10 +262,11 @@ class EvalOrchestrator:
         self._task_family_fetch_token_store = task_family_fetch_token_store
         self._task_family_receipt_store = task_family_receipt_store
         # SAT winner finalization opens explicit BEGIN/COMMIT windows on this
-        # shared aiosqlite connection. Every orchestrator-side DB writer must
-        # use the same lock, or an unrelated commit can close that transaction
-        # before the winner row, lock row, and challenge promotion move as one.
-        self._db_write_lock = asyncio.Lock()
+        # shared aiosqlite connection. This lock is injected from
+        # PublisherContext in production so route handlers and orchestrator
+        # writers share one transaction gate; otherwise an unrelated route
+        # commit can close the finalizer transaction early.
+        self._db_write_lock = db_write_lock or asyncio.Lock()
         # Constructor wins; env is the fallback. An empty string is
         # treated as missing. See _announce_synthetic_boolean_problem.
         self._public_base_url = (
@@ -1842,6 +1844,7 @@ async def run_eval_loop(
     task_family_challenge_lock: ChallengeLock | None = None,
     task_family_fetch_token_store: SqliteFetchTokenStore | None = None,
     task_family_receipt_store: ChallengeReceiptStore | None = None,
+    db_write_lock: asyncio.Lock | None = None,
     public_base_url: str | None = None,
 ) -> None:
     """Long-running scheduler: picks queued submissions and evals them.
@@ -1867,6 +1870,7 @@ async def run_eval_loop(
         task_family_challenge_lock=task_family_challenge_lock,
         task_family_fetch_token_store=task_family_fetch_token_store,
         task_family_receipt_store=task_family_receipt_store,
+        db_write_lock=db_write_lock,
         public_base_url=public_base_url,
     )
     sem = asyncio.Semaphore(max_concurrent)
@@ -2245,10 +2249,12 @@ async def _run_once_async() -> int:
     from cathedral.lanes.challenge_receipts import SQLITE_SCHEMA as _CHALLENGE_RECEIPT_SCHEMA
     from cathedral.lanes.challenge_source import SQLITE_SCHEMA as _CHALLENGE_SOURCE_SCHEMA
 
-    await ctx.db.executescript(_CHALLENGE_SOURCE_SCHEMA)
-    await ctx.db.executescript(_CHALLENGE_LOCK_SCHEMA)
-    await ctx.db.executescript(_CHALLENGE_RECEIPT_SCHEMA)
-    await ctx.db.commit()
+    db_write_lock = getattr(ctx, "db_write_lock", asyncio.Lock())
+    async with db_write_lock:
+        await ctx.db.executescript(_CHALLENGE_SOURCE_SCHEMA)
+        await ctx.db.executescript(_CHALLENGE_LOCK_SCHEMA)
+        await ctx.db.executescript(_CHALLENGE_RECEIPT_SCHEMA)
+        await ctx.db.commit()
 
     # Per-submission runner dispatch. The submission's `attestation_mode`
     # column (added by the submit-attestation-modes PR) tells us whether
@@ -2346,6 +2352,7 @@ async def _run_once_async() -> int:
         task_family_challenge_lock=SqliteChallengeLock(ctx.db),
         task_family_fetch_token_store=SqliteFetchTokenStore(ctx.db),
         task_family_receipt_store=SqliteChallengeReceiptStore(ctx.db),
+        db_write_lock=db_write_lock,
         public_base_url=_os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
     )
 
@@ -2374,7 +2381,8 @@ async def _run_once_async() -> int:
     # Phase 1: promote queued -> evaluating (work happens next tick).
     queued = await repository.queued_submissions(ctx.db, limit=10)
     for s in queued:
-        await repository.update_submission_status(ctx.db, s["id"], status="evaluating")
+        async with db_write_lock:
+            await repository.update_submission_status(ctx.db, s["id"], status="evaluating")
         advanced += 1
 
     return advanced
