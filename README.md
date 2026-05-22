@@ -25,7 +25,7 @@
 
 The live production path is the agent pipeline. Miners submit bundles through `POST /v1/agents/submit`; the publisher evaluates them and signs rows that validators pull. The legacy `/v1/claim` worker still exists for older Polaris-evidence submissions. SAT weight on `config/mainnet.toml` is `0.0`.
 
-The codebase includes the SAT lane and the remote signed-weight path, but mainnet SAT is disabled by default. Enabling it requires deploying the publisher with the SAT feed on and validators explicitly opting in to remote signed weight vectors with a pinned weight-policy public key.
+The codebase includes the SAT lane, but mainnet SAT is disabled by default. Enabling it requires deploying the publisher with the SAT feed on and moving validator-local task-family weight above `0.0` in a controlled release.
 
 Before SAT weight moves above `0.0`, the target release branch must carry the first-submitted receipt ordering state machine and the global zero-score kill switch. Do not enable SAT from a branch whose docs and code disagree on winner ordering.
 
@@ -50,7 +50,7 @@ Miners keep solver source, wrappers, logs, and infrastructure private. Cathedral
 
 [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md)
 
-The validator pulls signed eval rows, verifies Ed25519 signatures, stores rows, maps hotkeys to uids, computes weights, and calls `set_weights`. The remote signed-weight path is opt-in and shipped behind a pinned public key.
+The validator pulls signed eval rows, verifies Ed25519 signatures, stores rows, maps hotkeys to uids, computes weights locally, and calls `set_weights`.
 
 ### For operators
 
@@ -74,7 +74,7 @@ This installs `cathedral`, `cathedral-validator`, and `cathedral-miner`.
 
 ```bash
 PYTHONPATH=src pytest tests/lanes/test_contract.py -k synthetic_boolean_v1 -q
-PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_remote_weight_loop.py tests/test_publisher_weight_policy.py -q
+PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_weight_loop.py -q
 ```
 
 ## Run

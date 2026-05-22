@@ -6,7 +6,7 @@ Cathedral uses your own infrastructure. Cathedral SSHs into your declared host, 
 
 ## Status
 
-The codebase includes the SAT lane. Mainnet SAT is disabled until operators deploy the feed and validators opt in to the signed weight path.
+The codebase includes the SAT lane. Mainnet SAT is disabled until operators deploy the feed and intentionally change validator-local SAT weighting.
 
 ## Prerequisites
 
@@ -45,7 +45,7 @@ Existing miners do not need to stop mining the agent pipeline while SAT is stage
 4. Dry-run the wrapper against toy DIMACS locally before exposing the host.
 5. Register the host, SSH user, display name, hotkey, and hardware line with Cathedral operators.
 6. Join SAT shadow rounds while `synthetic_boolean_v1` weight remains `0.0`.
-7. Move to scored SAT rounds only after the feed, verifier, and signed-weight path are stable.
+7. Move to scored SAT rounds only after the feed, verifier, and validator-local weight path are stable.
 
 The miner contract is the public answer shape and the hotkey identity. Solver code, solver strategy, and infrastructure details stay private.
 

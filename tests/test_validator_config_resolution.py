@@ -54,8 +54,6 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     assert settings.weights.interval_secs == 1500
     assert settings.weights.burn_uid == 204
     assert settings.weights.forced_burn_percentage == 95.0
-    assert settings.remote_weight_source.enabled is False
-    assert settings.remote_weight_source.public_key_env == "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
 
     env_text = (etc / "validator.env").read_text()
     assert f"CATHEDRAL_CONFIG_PATH={etc / 'mainnet.toml'}" in env_text

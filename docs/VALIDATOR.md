@@ -4,7 +4,7 @@ This file explains the validator mechanism. Day-2 commands live in [validator/RU
 
 ## Status
 
-The codebase includes the SAT lane and remote signed-weight path. Mainnet SAT remains disabled by config until the publisher is deployed with the SAT feed and validators opt in to remote signed weight vectors.
+The codebase includes the SAT lane. Mainnet SAT remains disabled by config until the publisher is deployed with the SAT feed and operators move validator-local task-family weight above `0.0`.
 
 ## Current Default Path
 
@@ -37,40 +37,20 @@ It must not expose raw CNF, submitted DIMACS solution, hidden metadata, private 
 
 Validators verify schema-aware signed rows through the same pull-loop dispatcher used for other eval rows. Local task-family blending remains weight `0.0` unless an operator intentionally changes config for testing.
 
-## Remote Signed Weights
-
-The remote-weight path is optional and explicit.
-
-When `[remote_weight_source].enabled = true`, the validator:
-
-1. Fetches `GET /v1/validator/weights/next`.
-2. Parses the signed weight vector.
-3. Verifies Ed25519 signature with `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX`.
-4. Checks `key_id`, network, netuid, expiry, finite nonnegative weights, and rollback protection.
-5. Maps miner hotkeys to local metagraph uids.
-6. Applies the signed burn snapshot.
-7. Calls `set_weights` on the normal cadence.
-
-If remote mode is enabled without the pinned public key, startup fails. This prevents accidental fallback to a different weighting policy.
-
-If remote mode is disabled, the validator uses the local scoring path.
-
 ## Required Operator Inputs
 
 - Registered validator hotkey.
 - `CATHEDRAL_BEARER` for the local `/v1/claim` endpoint.
 - `CATHEDRAL_PUBLIC_KEY_HEX` for signed eval-row verification.
 - `polaris.public_key_hex` in TOML while the legacy worker still boots.
-- `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX` only when remote weights are enabled.
 
 Validators do not need GPUs, solver infrastructure, raw SAT formulas, submitted solutions, or publisher storage credentials.
 
 ## Known Limits
 
 - The publisher remains the source of signed eval rows.
-- SAT mainnet is gated until deploy and validator opt-in.
+- SAT mainnet is gated until deploy and explicit validator-local weight config.
 - Static website text is not evidence of live SAT metrics.
-- If `/v1/validator/weights/next` returns `503`, the publisher has no vector yet. That is not proof of a bad key.
 - Losing the validator hotkey or local wallet files is outside Cathedral recovery.
 
 ## Verification Checklist
@@ -81,5 +61,5 @@ For a SAT launch candidate:
 2. Confirm public rows are hash-only.
 3. Confirm the first verified solution locks the active challenge (the lock fires after the publisher-side verifier runs, not on submission timestamp).
 4. Confirm late solutions do not earn weight for the locked challenge.
-5. Confirm validators either stay on local weighting or explicitly opt in to remote signed weights.
+5. Confirm validator-local SAT task-family weight is still `0.0` unless the release intentionally changes it.
 6. Confirm no live website metric is shown unless backed by deployed `state.json` or marked demo.

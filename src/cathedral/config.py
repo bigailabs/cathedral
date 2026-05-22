@@ -58,25 +58,6 @@ class WeightsConfig(BaseModel):
     task_family_weights: dict[str, float] = Field(default_factory=dict)
 
 
-class RemoteWeightSourceConfig(BaseModel):
-    """Optional opt-in remote signed-weight source (issue #155).
-
-    Default ``enabled=False`` preserves local-only behaviour. When
-    enabled the validator runs the remote weight loop instead of the
-    local one, fetching from ``url`` and verifying signatures against
-    the pinned ``key_id``. Poll cadence (``poll_interval_secs``) is
-    decoupled from the chain set_weights cadence; the loop only relays
-    to chain when a new accepted vector arrives.
-    """
-
-    enabled: bool = False
-    url: str = "https://api.cathedral.computer"
-    key_id: str = "cathedral-weight-policy"
-    public_key_env: str = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
-    poll_interval_secs: float = 60.0
-    request_timeout_secs: float = 10.0
-
-
 class PublisherConfig(BaseModel):
     """Where the validator pulls signed eval-runs from."""
 
@@ -110,7 +91,6 @@ class ValidatorSettings(BaseSettings):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
     stall: StallConfig = Field(default_factory=StallConfig)
-    remote_weight_source: RemoteWeightSourceConfig = Field(default_factory=RemoteWeightSourceConfig)
 
     @classmethod
     def from_toml(cls, path: str | Path) -> ValidatorSettings:
