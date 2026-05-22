@@ -136,6 +136,37 @@ def _mk_sftp() -> Any:
     return sftp
 
 
+class _FakeStreamingStdout:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def read(self, _n: int = -1) -> bytes:
+        if self._chunks:
+            return self._chunks.pop(0)
+        return b""
+
+
+class _FakeStreamingProcess:
+    def __init__(self, chunks: list[bytes], *, exit_status: int = 0) -> None:
+        self.stdout = _FakeStreamingStdout(chunks)
+        self.exit_status = exit_status
+        self.terminated = False
+        self.killed = False
+        self.closed = False
+
+    async def wait(self, *, check: bool = False, timeout: float | None = None) -> Any:
+        return _mk_run_result(exit_status=self.exit_status)
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait_closed(self) -> None:
+        self.closed = True
+
+
 # --------------------------------------------------------------------------
 # Config + constructor
 # --------------------------------------------------------------------------
@@ -948,16 +979,19 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
     conn.close = MagicMock()
     conn.wait_closed = AsyncMock(return_value=None)
 
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+
     def _route(cmd, **kwargs):
         if "hermes --version" in cmd:
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes chat -Q" in cmd:
-            events.append("hermes_stdout")
-            stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
-            return _mk_run_result(stdout=stdout)
         return _mk_run_result()
+
+    async def _create_process(cmd, **kwargs):
+        assert "hermes chat -Q" in cmd
+        events.append("hermes_stdout")
+        return _FakeStreamingProcess([stdout.encode("utf-8")])
 
     async def fake_collect(*args, **kwargs):
         events.append("collect")
@@ -969,6 +1003,7 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
         return receipt_at
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    conn.create_process = AsyncMock(side_effect=_create_process)
     fake_asyncssh = MagicMock()
     fake_asyncssh.connect = AsyncMock(return_value=conn)
     fake_asyncssh.Error = Exception
@@ -1092,6 +1127,37 @@ async def test_task_family_uses_announced_problem_time_limit(runner_config, subm
 
     runner._invoke_hermes_text.assert_awaited_once()
     assert runner._invoke_hermes_text.await_args.kwargs["timeout_secs"] == 7.0
+    assert runner._invoke_hermes_text.await_args.kwargs["max_stdout_bytes"] == (
+        runner_config.task_family_stdout_limit_bytes
+    )
+
+
+@pytest.mark.asyncio
+async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
+    runner_config,
+) -> None:
+    runner = SshHermesRunner(runner_config)
+    process = _FakeStreamingProcess([b"a" * 8, b"b" * 8])
+    conn = MagicMock()
+    conn.create_process = AsyncMock(return_value=process)
+    conn.run = AsyncMock(side_effect=AssertionError("conn.run buffers stdout"))
+
+    with pytest.raises(SshHermesError) as exc:
+        await runner._invoke_hermes_text(
+            conn,
+            eval_profile="cathedral-eval-sat",
+            prompt="Solve the SAT challenge.",
+            eval_round="synthetic_boolean_v1-test",
+            resolved_home="/home/cathedral-probe/.hermes",
+            timeout_secs=30,
+            max_stdout_bytes=10,
+        )
+
+    assert exc.value.code == "hermes_stdout_oversized"
+    assert process.terminated is True
+    assert process.closed is True
+    conn.run.assert_not_called()
+    conn.create_process.assert_awaited_once()
 
 
 # --------------------------------------------------------------------------

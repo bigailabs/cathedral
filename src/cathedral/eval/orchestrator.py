@@ -2194,6 +2194,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
 
         if prober_version == "v2":
             from cathedral.eval.ssh_hermes_runner import (
+                DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
                 SshHermesRunner,
                 SshHermesRunnerConfig,
             )
@@ -2219,6 +2220,15 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
                     ),
                     pinned_model=os.environ.get("CATHEDRAL_HERMES_PINNED_MODEL"),
                     pinned_provider=os.environ.get("CATHEDRAL_HERMES_PINNED_PROVIDER"),
+                    task_family_stdout_limit_bytes=max(
+                        1,
+                        int(
+                            os.environ.get(
+                                "CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES",
+                                str(DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES),
+                            )
+                        ),
+                    ),
                 )
             )
 

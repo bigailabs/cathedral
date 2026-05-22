@@ -67,6 +67,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -143,6 +144,7 @@ SSH_HERMES_FAILURE_CODES: tuple[str, ...] = (
     "hermes_install_invalid",
     "hermes_invocation_failed",
     "hermes_output_malformed",
+    "hermes_stdout_oversized",
     "profile_clone_failed",
     "prompt_timeout",
     "transfer_failed",
@@ -150,6 +152,10 @@ SSH_HERMES_FAILURE_CODES: tuple[str, ...] = (
     "disconnect_dirty",
     "config_invalid",
 )
+
+
+DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES = 8 * 1024 * 1024
+_SSH_STDOUT_READ_CHUNK_BYTES = 64 * 1024
 
 
 class SshHermesError(PolarisRunnerError):
@@ -204,6 +210,9 @@ class SshHermesRunnerConfig:
     # same model — neutralizes one source of cross-miner variance.
     pinned_model: str | None = None
     pinned_provider: str | None = None
+    # SAT miners control Hermes stdout. Keep task-family answers bounded
+    # before receipt hashing and DIMACS parsing run in the publisher process.
+    task_family_stdout_limit_bytes: int = DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES
 
 
 # --------------------------------------------------------------------------
@@ -740,6 +749,11 @@ class SshHermesRunner:
                 # Hermes call must use the challenge's advertised wall-clock
                 # budget instead of the runner-wide default.
                 timeout_secs=float(problem.time_limit_seconds),
+                # This path handles miner-controlled SAT answers. The SSH
+                # process is streamed with this cap, so oversized output is
+                # killed before receipt processing or DIMACS parsing can
+                # allocate on the full blob.
+                max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
             )
             stdout_received_at_iso = _now_utc_iso()
             if receipt_callback is not None:
@@ -937,6 +951,103 @@ class SshHermesRunner:
             )
         return stdout, stderr, exit_status
 
+    async def _run_remote_limited_stdout(
+        self,
+        conn: Any,
+        cmd: str,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 — `timeout` is the API we want
+        max_stdout_bytes: int,
+    ) -> tuple[str, str, int]:
+        """Run a remote command while streaming and bounding stdout bytes."""
+
+        import asyncssh
+
+        if max_stdout_bytes < 1:
+            raise SshHermesError(
+                "config_invalid",
+                f"max_stdout_bytes must be positive: {max_stdout_bytes}",
+            )
+
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+
+        def remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            return remaining
+
+        process: Any | None = None
+        try:
+            process = await asyncio.wait_for(
+                conn.create_process(
+                    cmd,
+                    stdin=asyncssh.DEVNULL,
+                    # Stderr is miner-controlled too; fold it into the same
+                    # bounded stream so logs cannot bypass the SAT stdout cap.
+                    stderr=asyncssh.STDOUT,
+                    encoding=None,
+                ),
+                timeout=remaining_timeout(),
+            )
+
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await asyncio.wait_for(
+                    process.stdout.read(_SSH_STDOUT_READ_CHUNK_BYTES),
+                    timeout=remaining_timeout(),
+                )
+                if not chunk:
+                    break
+                raw = (
+                    chunk.encode("utf-8", errors="replace")
+                    if isinstance(chunk, str)
+                    else bytes(chunk)
+                )
+                total += len(raw)
+                if total > max_stdout_bytes:
+                    await self._stop_remote_process(process)
+                    raise SshHermesError(
+                        "hermes_stdout_oversized",
+                        (
+                            f"stdout exceeded {max_stdout_bytes} bytes for "
+                            f"cmd={_redact_query_tokens(cmd[:120])!r}"
+                        ),
+                    )
+                chunks.append(raw)
+
+            result = await asyncio.wait_for(
+                process.wait(check=False),
+                timeout=remaining_timeout(),
+            )
+        except TimeoutError as e:
+            if process is not None:
+                await self._stop_remote_process(process)
+            raise SshHermesError(
+                "prompt_timeout",
+                f"command timed out after {timeout}s: {_redact_query_tokens(cmd[:120])}",
+            ) from e
+
+        stdout = b"".join(chunks).decode("utf-8", errors="replace")
+        exit_status = int(getattr(result, "exit_status", 0) or 0)
+        stderr = stdout if exit_status != 0 else ""
+        return stdout, stderr, exit_status
+
+    async def _stop_remote_process(self, process: Any) -> None:
+        with suppress(Exception):
+            process.terminate()
+        with suppress(Exception):
+            await asyncio.wait_for(process.wait_closed(), timeout=2.0)
+            return
+        with suppress(Exception):
+            process.kill()
+        with suppress(Exception):
+            await asyncio.wait_for(process.wait_closed(), timeout=2.0)
+
     # ----------------------------------------------------------------------
     # Hermes-specific steps
     # ----------------------------------------------------------------------
@@ -1099,6 +1210,7 @@ class SshHermesRunner:
         eval_round: str,
         resolved_home: str,
         timeout_secs: float | None = None,
+        max_stdout_bytes: int | None = None,
     ) -> str:
         """Run ``hermes chat -q`` and return raw stdout."""
         hermes_home = self._profile_path(eval_profile, resolved_home)
@@ -1109,18 +1221,28 @@ class SshHermesRunner:
             envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
         cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(prompt)}"
-        stdout, stderr, exit_status = await self._run_remote(
-            conn,
-            cmd,
-            timeout=timeout_secs if timeout_secs is not None else self.config.eval_timeout_secs,
-            check=False,
-        )
+        timeout = timeout_secs if timeout_secs is not None else self.config.eval_timeout_secs
+        if max_stdout_bytes is None:
+            stdout, stderr, exit_status = await self._run_remote(
+                conn,
+                cmd,
+                timeout=timeout,
+                check=False,
+            )
+        else:
+            stdout, stderr, exit_status = await self._run_remote_limited_stdout(
+                conn,
+                cmd,
+                timeout=timeout,
+                max_stdout_bytes=max_stdout_bytes,
+            )
         if exit_status != 0:
             raise SshHermesError(
                 "hermes_invocation_failed",
                 (
                     f"hermes chat -q exited {exit_status} for "
-                    f"eval_round={eval_round}: {_redact_query_tokens(stderr[:300])}"
+                    f"eval_round={eval_round}: "
+                    f"{_redact_query_tokens((stderr or stdout)[:300])}"
                 ),
             )
         return stdout
