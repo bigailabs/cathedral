@@ -51,7 +51,7 @@ from cathedral.lanes.challenge_source import (
     SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
 )
 from cathedral.lanes.publisher import score_and_sign_task_family_stdout
-from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
+from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1, problem_from_challenge_record
 from cathedral.publisher import challenge_cnf as challenge_cnf_module
 from cathedral.publisher.challenge_cnf import router as challenge_cnf_router
 from cathedral.storage.hippius import StubHippiusClient
@@ -69,6 +69,48 @@ def _ms_iso(dt: datetime) -> str:
         dt = dt.replace(tzinfo=UTC)
     s = dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
     return s + "Z"
+
+
+@pytest.mark.parametrize("challenge_id", ["sat/bad", "sat?bad", "sat#bad", "sat bad"])
+def test_problem_from_challenge_record_rejects_unsafe_cnf_url_challenge_ids(
+    challenge_id: str,
+) -> None:
+    record = ChallengeRecord(
+        challenge_id=challenge_id,
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text=CNF_BODY,
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={"source": "unit"},
+    )
+
+    with pytest.raises(ValueError, match="challenge_id must be"):
+        problem_from_challenge_record(
+            record,
+            public_base_url="https://api.cathedral.test/",
+            fetch_token="token",
+        )
+
+
+def test_problem_from_challenge_record_encodes_cnf_url_fetch_token() -> None:
+    record = ChallengeRecord(
+        challenge_id="sat-safe_001~x",
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text=CNF_BODY,
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={"source": "unit"},
+    )
+
+    problem, _hidden = problem_from_challenge_record(
+        record,
+        public_base_url="https://api.cathedral.test/",
+        fetch_token="tok?x#y",
+    )
+
+    assert problem.public_input["cnf_url"] == (
+        "https://api.cathedral.test/v1/challenges/sat-safe_001~x/cnf?t=tok%3Fx%23y"
+    )
 
 
 @pytest_asyncio.fixture

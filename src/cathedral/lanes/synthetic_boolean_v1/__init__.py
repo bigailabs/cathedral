@@ -16,6 +16,7 @@ PublicProblem`` map suitable for tests and the contract gate.
 from __future__ import annotations
 
 import hashlib
+from urllib.parse import quote
 
 from cathedral.lanes.challenge_source import ChallengeRecord
 from cathedral.lanes.contract import (
@@ -36,11 +37,22 @@ FAMILY_ID = "synthetic_boolean_v1"
 SCHEMA_VERSION = 1
 
 DEFAULT_TIME_LIMIT_SECONDS = 60
+_URL_SAFE_CHALLENGE_ID_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-"
+)
 
 
 def _task_id_for(instance: ToyInstance, seed: int, tier: int) -> str:
     digest = hashlib.sha256(f"{FAMILY_ID}:{instance.name}:{seed}:{tier}".encode()).hexdigest()
     return digest[:32]
+
+
+def _validate_cnf_url_challenge_id(challenge_id: str) -> None:
+    if not challenge_id or any(ch not in _URL_SAFE_CHALLENGE_ID_CHARS for ch in challenge_id):
+        raise ValueError(
+            "challenge_id must be a non-empty RFC3986 unreserved path segment "
+            "for SAT cnf_url transport"
+        )
 
 
 def problem_from_challenge_record(
@@ -72,6 +84,11 @@ def problem_from_challenge_record(
         raise ValueError("public_base_url is required for the CNF URL transport")
     if not fetch_token:
         raise ValueError("fetch_token is required for the CNF URL transport")
+    # The challenge id is a route path segment. Reject reserved URL
+    # characters instead of trying to encode them: many ASGI/server stacks
+    # decode %2F before route matching, which would still make miner fetches
+    # 404 even though the announced URL looked escaped.
+    _validate_cnf_url_challenge_id(record.challenge_id)
     audit = dict(record.audit_metadata)
     if record.cnf_text:
         parsed = parse_dimacs_cnf_metadata(record.cnf_text)
@@ -88,7 +105,7 @@ def problem_from_challenge_record(
         else:
             rejection_reason = "cnf_missing"
     base = public_base_url.rstrip("/")
-    cnf_url = f"{base}/v1/challenges/{record.challenge_id}/cnf?t={fetch_token}"
+    cnf_url = f"{base}/v1/challenges/{record.challenge_id}/cnf?t={quote(fetch_token, safe='')}"
     public = PublicProblem(
         task_family=record.family_id,
         schema_version=SCHEMA_VERSION,

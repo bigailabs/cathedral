@@ -641,20 +641,18 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
     if schema_version == 3:
         task_json = run.get("task_json") or {}
         output = run.get("output_card_json") or {}
-        claim = output.get("claim")
-        if isinstance(claim, dict):
-            # Public v3 feeds expose the hashed challenge id only. The raw
-            # challenge_id remains in the signed DB row for validator-private
-            # verification, but unauthenticated miner/site reads must not let
-            # miners correlate a live prompt with a solved public row by id.
-            claim = dict(claim)
-            claim.pop("challenge_id", None)
+        # This helper backs /v1/leaderboard/recent, the validator pull feed.
+        # Schema-3 signatures cover the raw top-level challenge_id and the
+        # raw claim, so this projection must keep the signed payload
+        # byte-for-byte verifiable. A miner/site redacted v3 feed needs a
+        # separate endpoint and signature shape.
         return {
             "id": run["id"],
             "agent_id": sub["id"],
             "agent_display_name": sub["display_name"],
             "miner_hotkey": sub["miner_hotkey"],
             "task_type": "bug_isolation_v1",
+            "challenge_id": task_json.get("challenge_id"),
             "challenge_id_public": task_json.get("challenge_id_public")
             or output.get("challenge_id_public"),
             # epoch_salt is part of the signed subset; surface it
@@ -662,7 +660,7 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             "epoch_salt": task_json.get("epoch_salt"),
             "weighted_score": run["weighted_score"],
             "score_parts": run["score_parts"],
-            "claim": claim,
+            "claim": output.get("claim"),
             "ran_at": run["ran_at"],
             "eval_output_schema_version": 3,
             "cathedral_signature": run["cathedral_signature"],
