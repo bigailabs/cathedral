@@ -95,6 +95,7 @@ class ValidatorSettings(BaseSettings):
     @classmethod
     def from_toml(cls, path: str | Path) -> ValidatorSettings:
         data = _load_toml(Path(path))
+        data = {key: value for key, value in data.items() if key in cls.model_fields}
         return cls.model_validate(data)
 
 

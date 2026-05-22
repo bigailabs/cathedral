@@ -156,6 +156,38 @@ def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> No
     assert "forced_burn_percentage = 95.0" in custom.read_text()
 
 
+def test_retired_top_level_config_sections_are_ignored(tmp_path: Path) -> None:
+    config = tmp_path / "mainnet.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[weights]",
+                "interval_secs = 1500",
+                "forced_burn_percentage = 95.0",
+                "",
+                "[retired_validator_section]",
+                "enabled = true",
+            ]
+        )
+        + "\n"
+    )
+
+    settings = ValidatorSettings.from_toml(config)
+
+    assert settings.network.name == "finney"
+    assert settings.network.validator_hotkey == "operator-hotkey"
+    assert settings.weights.interval_secs == 1500
+
+
 def test_explicit_testnet_network_is_respected(tmp_path: Path) -> None:
     etc = tmp_path / "etc" / "cathedral"
     etc.mkdir(parents=True)

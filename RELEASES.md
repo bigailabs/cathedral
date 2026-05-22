@@ -10,23 +10,22 @@ need to know about.
 
 ---
 
-## v1.1.25 - Managed remote weights and SAT readiness probe
+## v1.1.25 - Managed validator config and SAT readiness probe
 
 **Date:** 2026-05-20
 
-**Headline:** Signed release that lets managed SN39 validators pull Cathedral-signed weight policy by default while keeping SAT emissions disabled.
+**Headline:** Signed release that keeps SN39 validators on local eval-row weighting while adding the public SAT readiness probe.
 
 ### Added
 
-- **Managed remote signed weights by default.** `config/mainnet.toml` now points SN39 validators at the Cathedral signed-weight endpoint with a pinned policy public key.
-- **Managed config migration.** Existing SN39 mainnet configs are migrated from local weight computation to the remote signed-weight source on startup while preserving wallet, hotkey, wallet path, database path, and operator env.
-- **Remote-unavailable local fallback.** Before the first signed remote vector is accepted, validators fall back to the local configured burn policy for that tick. After a remote vector exists, stale or invalid vectors fail closed.
+- **Managed mainnet config alignment.** Existing SN39 managed hosts render the current mainnet config on startup while preserving wallet, hotkey, wallet path, database path, and operator env.
+- **Local validator weighting remains default.** Validators pull signed eval rows, compute local weights, apply the configured burn policy, and call `set_weights` from the validator process.
 - **SAT readiness probe.** The publisher exposes a public toy `synthetic_boolean_v1` readiness probe with the same `cnf_url`, `cnf_sha256`, and `dimacs_solution` protocol shape. The probe is not emissions-eligible and always returns `weighted_score: 0.0`.
 
 ### Operator note
 
 - This release still does not enable scored SAT emissions. `synthetic_boolean_v1` remains `0.0` by default.
-- Validators only need to update to the signed tag. No manual weight-source env edit is required for managed SN39 hosts.
+- Validators only need to update to the signed tag. Managed SN39 hosts keep their local scoring configuration.
 
 ---
 
@@ -64,7 +63,7 @@ need to know about.
 
 - **Public SAT CNF transport.** Miners receive a public CNF URL plus hash metadata rather than an inline CNF body in the prompt. Fetch tokens gate the public endpoint so challenge bodies are not fetchable before announcement.
 - **First-submitted SAT receipt ordering (#166).** The publisher records SAT stdout receipt before trace collection, verification updates receipt state, and durable winner selection picks the earliest valid receipt only after earlier receipts resolve.
-- **Remote signed weights.** Validators can opt into a signed remote weight vector path while preserving the local fallback path.
+- **Validator scoring experiment.** A validator-side weighting experiment shipped in this train and has since been retired. Current validators use local eval-row scoring.
 
 ### Changed
 
