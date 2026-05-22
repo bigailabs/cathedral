@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 from cathedral.v4 import ValidationPayload
@@ -108,6 +109,37 @@ def test_build_miner_bundle_removes_files_deleted_by_bug_patch(
     )
 
     workspace_path = Path(handle.workspace_path)
+    assert "app/main.py" not in bundle.workspace_files
+    assert not (workspace_path / "app" / "main.py").exists()
+
+
+def test_build_miner_bundle_preserves_binary_files_outside_text_map(
+    vault_path: Path,
+    tmp_path: Path,
+) -> None:
+    tmp_vault = tmp_path / "vault"
+    tmp_vault.mkdir()
+    shutil.copytree(
+        vault_path / "python_fastapi_base",
+        tmp_vault / "python_fastapi_base",
+    )
+    binary_bytes = b"\xff\x00cathedral-binary-asset"
+    (tmp_vault / "python_fastapi_base" / "app" / "asset.bin").write_bytes(binary_bytes)
+
+    engine = CathedralEngine(vault_path=str(tmp_vault))
+    bug_patch = (
+        "--- a/app/main.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+    )
+
+    bundle, handle = engine.build_bundle_and_handle(
+        "python_fastapi_base", bug_patch=bug_patch, seed=1002
+    )
+
+    workspace_path = Path(handle.workspace_path)
+    assert "app/asset.bin" not in bundle.workspace_files
+    assert (workspace_path / "app" / "asset.bin").read_bytes() == binary_bytes
     assert "app/main.py" not in bundle.workspace_files
     assert not (workspace_path / "app" / "main.py").exists()
 

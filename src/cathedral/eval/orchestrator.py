@@ -780,6 +780,17 @@ class EvalOrchestrator:
                         answer_hash=_receipt_answer_hash(stdout),
                         recorded_at_iso=_ms_iso(datetime.now(UTC)),
                     )
+                    # SshHermesRunner calls this as soon as stdout arrives,
+                    # before slower trace collection. Claim verifier ownership
+                    # here so another scheduler tick cannot expire this
+                    # first-submitted answer as an abandoned unverified receipt.
+                    receipt = await callback_receipt_store.update_status(
+                        family_id=receipt.family_id,
+                        challenge_id=receipt.challenge_id,
+                        submission_id=receipt.submission_id,
+                        status=RECEIPT_STATUS_VERIFYING,
+                        now_iso=_ms_iso(datetime.now(UTC)),
+                    )
 
             run_kwargs: dict[str, Any] = {
                 "problem": problem,
@@ -808,6 +819,16 @@ class EvalOrchestrator:
                             received_at_iso=received_at,
                             answer_hash=_receipt_answer_hash(hermes_run.stdout),
                             recorded_at_iso=_ms_iso(datetime.now(UTC)),
+                        )
+                        # Fallback runners may not support the stdout callback;
+                        # still claim ownership in the same write gate as the
+                        # receipt insert so reconciliation cannot steal it.
+                        receipt = await receipt_store.update_status(
+                            family_id=receipt.family_id,
+                            challenge_id=receipt.challenge_id,
+                            submission_id=receipt.submission_id,
+                            status=RECEIPT_STATUS_VERIFYING,
+                            now_iso=_ms_iso(datetime.now(UTC)),
                         )
                 # Deterministic SAT scoring may stream a large file-backed CNF.
                 # Take receipt ownership before scoring so scheduler

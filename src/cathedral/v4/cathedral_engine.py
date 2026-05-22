@@ -314,8 +314,13 @@ class CathedralEngine:
 
         # Flush the exact broken state to disk so a separate transport
         # (tar, rsync, signed-url upload) cannot package files deleted by
-        # the server-side bug patch.
-        _flush_workspace_files(scrambled.workspace_path, broken)
+        # the server-side bug patch. Binary assets are copied by the
+        # scrambler but intentionally excluded from the text workspace map.
+        _flush_workspace_files(
+            scrambled.workspace_path,
+            broken,
+            preserve_files=scrambled.binary_files,
+        )
 
         resolved_task_id = task_id or f"v4t_{seed:016x}"
         bundle = MinerBundle(

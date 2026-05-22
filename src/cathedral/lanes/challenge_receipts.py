@@ -740,6 +740,32 @@ def _advance_receipt(
     if status not in RECEIPT_STATUSES:
         raise ChallengeReceiptError(f"unknown receipt status: {status!r}")
     if receipt.status == status:
+        if status == RECEIPT_STATUS_VERIFYING:
+            # Re-entering "verifying" is the verifier heartbeat. The SAT
+            # orchestrator claims a receipt when stdout arrives, then refreshes
+            # ownership after trace collection before potentially slow scoring.
+            return ChallengeReceipt(
+                family_id=receipt.family_id,
+                challenge_id=receipt.challenge_id,
+                submission_id=receipt.submission_id,
+                miner_hotkey=receipt.miner_hotkey,
+                received_at_iso=receipt.received_at_iso,
+                answer_hash=receipt.answer_hash,
+                status=receipt.status,
+                created_at_iso=receipt.created_at_iso,
+                updated_at_iso=now_iso,
+                nonce=receipt.nonce,
+                miner_signature=receipt.miner_signature,
+                rejection_reason=receipt.rejection_reason,
+                verifier_details_hash=verifier_details_hash or receipt.verifier_details_hash,
+                resolved_at_iso=receipt.resolved_at_iso,
+                eval_run_id=receipt.eval_run_id,
+                signed_row=receipt.signed_row,
+                trace_json=receipt.trace_json,
+                duration_ms=receipt.duration_ms,
+                epoch=receipt.epoch,
+                round_index=receipt.round_index,
+            )
         return receipt
     if receipt.status in _TERMINAL_STATUSES:
         raise ChallengeReceiptError(

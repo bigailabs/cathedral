@@ -1232,6 +1232,105 @@ async def test_synthetic_boolean_marks_receipt_verifying_before_scoring(
 
 
 @pytest.mark.asyncio
+async def test_synthetic_boolean_marks_receipt_verifying_before_post_run_collection(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "toy-runtime-test"},
+            )
+        )
+
+        receipt_store = SqliteChallengeReceiptStore(conn)
+        statuses_after_expiry_tick: list[str] = []
+        orch: EvalOrchestrator
+
+        class _PostStdoutCollectionRunner(_SolvingRunner):
+            async def run_task_family_challenge(self, **kwargs: Any) -> _HermesResult:
+                problem = kwargs["problem"]
+                self.task_ids.append(str(problem.task_id))
+                public_input = problem.public_input
+                self.cnf_urls.append(str(public_input["cnf_url"]))
+                self.cnf_sha256s.append(str(public_input["cnf_sha256"]))
+                stdout = (
+                    "```FINAL_ANSWER\n"
+                    '{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}'
+                    "\n```"
+                )
+                receipt_callback = kwargs.get("receipt_callback")
+                assert receipt_callback is not None
+                await receipt_callback(
+                    stdout,
+                    orchestrator_module._ms_iso(datetime.now(UTC) - timedelta(minutes=5)),
+                )
+
+                await orch._expire_stale_sat_receipts_for_challenge(
+                    receipt_store=receipt_store,
+                    family_id="synthetic_boolean_v1",
+                    challenge_id=str(problem.task_id),
+                    problem=problem,
+                    now_iso=orchestrator_module._ms_iso(datetime.now(UTC)),
+                )
+                receipts = await receipt_store.list_for_challenge(
+                    family_id="synthetic_boolean_v1",
+                    challenge_id=str(problem.task_id),
+                )
+                statuses_after_expiry_tick.extend(receipt.status for receipt in receipts)
+                return _HermesResult(stdout=stdout, trace={})
+
+        runner = _PostStdoutCollectionRunner()
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=receipt_store,
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        log = structlog.get_logger("test")
+        snapshot = await orch.snapshot_task_family_batch_problems(log=log)
+        await orch._maybe_run_task_family_lanes(
+            submission=sub,
+            runner=runner,
+            epoch=123,
+            round_index=0,
+            log=log,
+            problem_overrides=snapshot,
+        )
+
+        assert statuses_after_expiry_tick == [RECEIPT_STATUS_VERIFYING]
+        receipts = await receipt_store.list_for_challenge(
+            family_id="synthetic_boolean_v1",
+            challenge_id="active-boolean-001",
+        )
+        assert [receipt.status for receipt in receipts] == [RECEIPT_STATUS_VALID]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_synthetic_boolean_file_backed_scoring_runs_off_event_loop(
     tmp_path, monkeypatch
 ) -> None:
