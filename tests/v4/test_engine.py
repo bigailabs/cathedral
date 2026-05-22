@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from cathedral.v4 import ValidationPayload
 from cathedral.v4.cathedral_engine import (
@@ -90,6 +91,25 @@ def test_build_miner_bundle_applies_bug_server_side(
     assert "--- a/app/calculator.py\\n+++ b/app/calculator.py\\n@@" not in bundle_json
     # Use of `apply_tax_scrambled` keeps the linter happy.
     _ = apply_tax_scrambled
+
+
+def test_build_miner_bundle_removes_files_deleted_by_bug_patch(
+    engine: CathedralEngine,
+) -> None:
+    seed = 1001
+    bug_patch = (
+        "--- a/app/main.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+    )
+
+    bundle, handle = engine.build_bundle_and_handle(
+        "python_fastapi_base", bug_patch=bug_patch, seed=seed
+    )
+
+    workspace_path = Path(handle.workspace_path)
+    assert "app/main.py" not in bundle.workspace_files
+    assert not (workspace_path / "app" / "main.py").exists()
 
 
 def test_full_round_trip_with_real_winning_patch(

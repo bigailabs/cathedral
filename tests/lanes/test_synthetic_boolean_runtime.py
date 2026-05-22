@@ -72,6 +72,13 @@ class _HermesResult:
     trace_bundle: object | None = None
 
 
+class _FailingTerminalStatusReceiptStore(SqliteChallengeReceiptStore):
+    async def update_status(self, *args: Any, **kwargs: Any):
+        if kwargs.get("status") in {RECEIPT_STATUS_VALID, RECEIPT_STATUS_INVALID}:
+            raise RuntimeError("terminal status failed")
+        return await super().update_status(*args, **kwargs)
+
+
 class _SolvingRunner(StubPolarisRunner):
     """Test stub that pretends to be a miner.
 
@@ -1586,6 +1593,96 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
         assert len(rows_b) == 1
         assert rows_b[0]["weighted_score"] == pytest.approx(0.0)
         assert rows_b[0]["errors"] == ["challenge_already_locked"]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_boolean_receipt_result_and_terminal_status_are_atomic(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub = await _seed_submission(conn, submission_id="sub-a", miner_hotkey="5MinerA")
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+
+        signer = EvalSigner(Ed25519PrivateKey.generate())
+        receipt_store = _FailingTerminalStatusReceiptStore(conn)
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=StubPolarisRunner(),
+            signer=signer,
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_receipt_store=receipt_store,
+        )
+        lane = SyntheticBooleanV1()
+        problem, hidden = lane.generate(
+            GenerateCtx(
+                seed=1,
+                tier=0,
+                issued_at_iso="2026-05-20T00:00:00.000Z",
+            )
+        )
+        stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}\n```'
+        signed = score_and_sign_task_family_stdout(
+            lane=lane,
+            problem=problem,
+            hidden=hidden,
+            submission_row=sub,
+            stdout=stdout,
+            ran_at_iso="2026-05-20T00:00:02.000Z",
+            signer=signer,
+            eval_run_id="valid-run",
+            epoch_salt="epoch_123:synthetic_boolean_v1",
+        )
+        receipt = await receipt_store.record_receipt(
+            family_id="synthetic_boolean_v1",
+            challenge_id=problem.task_id,
+            submission_id="sub-a:attempt:valid",
+            miner_hotkey="5MinerA",
+            received_at_iso="2026-05-20T00:00:01.000Z",
+            answer_hash="valid-answer",
+            recorded_at_iso="2026-05-20T00:00:01.000Z",
+        )
+        await receipt_store.update_status(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+            submission_id=receipt.submission_id,
+            status=RECEIPT_STATUS_VERIFYING,
+            now_iso=receipt.received_at_iso,
+        )
+
+        with pytest.raises(RuntimeError, match="terminal status failed"):
+            await orch._finalize_sat_receipt_ordered_result(
+                receipt_store=receipt_store,
+                receipt=receipt,
+                lane=lane,
+                problem=problem,
+                hidden=hidden,
+                submission=sub,
+                hermes_run=_HermesResult(stdout=stdout, trace={}),
+                signed=signed,
+                epoch=123,
+                round_index=0,
+                epoch_salt="epoch_123:synthetic_boolean_v1",
+                log=structlog.get_logger("test"),
+            )
+
+        stored = await SqliteChallengeReceiptStore(conn).get(
+            family_id=receipt.family_id,
+            challenge_id=receipt.challenge_id,
+            submission_id=receipt.submission_id,
+        )
+        assert stored is not None
+        assert stored.status == RECEIPT_STATUS_VERIFYING
+        assert stored.eval_run_id is None
+        assert stored.signed_row is None
+        assert stored.trace_json is None
     finally:
         await conn.close()
 

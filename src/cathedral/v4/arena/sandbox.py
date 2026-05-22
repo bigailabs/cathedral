@@ -370,11 +370,41 @@ class MinerArena:
         return dict(self._files)
 
     def _flush_to_disk(self) -> None:
-        root = self._repo.workspace_path
-        for relpath, content in self._files.items():
-            dest = root / relpath
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+        _flush_workspace_files(self._repo.workspace_path, self._files)
+
+
+def _flush_workspace_files(root: Path, files: dict[str, str]) -> None:
+    """Synchronize ``root`` exactly to the current text-file map."""
+
+    root.mkdir(parents=True, exist_ok=True)
+    normalized_files = {_normalize_relpath(relpath): content for relpath, content in files.items()}
+
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        relpath = path.relative_to(root).as_posix()
+        if relpath not in normalized_files:
+            # The disk tree is a transport surface, not a cache. Whole-file
+            # delete hunks must remove stale bytes before tar/rsync/signed-url
+            # packaging reads the workspace.
+            path.unlink()
+
+    _prune_empty_workspace_dirs(root)
+    for relpath, content in normalized_files.items():
+        dest = root / relpath
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content)
+    _prune_empty_workspace_dirs(root)
+
+
+def _prune_empty_workspace_dirs(root: Path) -> None:
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if not path.is_dir():
+            continue
+        try:
+            path.rmdir()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------

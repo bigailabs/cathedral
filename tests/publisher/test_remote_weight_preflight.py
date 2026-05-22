@@ -30,6 +30,10 @@ def _env() -> dict[str, str]:
     }
 
 
+def _fresh_issued_at() -> datetime:
+    return datetime.now(UTC).replace(microsecond=0)
+
+
 def test_remote_weight_preflight_builds_private_safe_signed_vector(tmp_path) -> None:
     db_path = tmp_path / "publisher.db"
     asyncio.run(_seed_ranked_score(db_path))
@@ -38,7 +42,7 @@ def test_remote_weight_preflight_builds_private_safe_signed_vector(tmp_path) -> 
         run_publisher_remote_weight_preflight(
             str(db_path),
             env=_env(),
-            issued_at=datetime(2026, 5, 21, 12, 0, tzinfo=UTC),
+            issued_at=_fresh_issued_at(),
         )
     )
     payload = json.dumps(result.details, sort_keys=True)
@@ -77,7 +81,7 @@ def test_remote_weight_preflight_warns_on_empty_vector(tmp_path) -> None:
         run_publisher_remote_weight_preflight(
             str(db_path),
             env=_env(),
-            issued_at=datetime(2026, 5, 21, 12, 0, tzinfo=UTC),
+            issued_at=_fresh_issued_at(),
         )
     )
 

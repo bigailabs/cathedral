@@ -1071,31 +1071,65 @@ class EvalOrchestrator:
 
         now_iso = str(signed.row["ran_at"])
         trace_json = await _build_trace_json()
-        async with self._db_write_lock:
-            await receipt_store.attach_result(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-                submission_id=receipt.submission_id,
-                eval_run_id=str(signed.row["id"]),
-                signed_row=signed.row,
-                trace_json=trace_json,
-                duration_ms=int(hermes_run.duration_ms),
-                epoch=epoch,
-                round_index=round_index,
-                now_iso=now_iso,
-            )
-
         is_valid = float(signed.score.weighted_score) >= 1.0
+        terminal_status = RECEIPT_STATUS_VALID if is_valid else RECEIPT_STATUS_INVALID
         async with self._db_write_lock:
-            await receipt_store.update_status(
-                family_id=receipt.family_id,
-                challenge_id=receipt.challenge_id,
-                submission_id=receipt.submission_id,
-                status=RECEIPT_STATUS_VALID if is_valid else RECEIPT_STATUS_INVALID,
-                now_iso=now_iso,
-                rejection_reason=None if is_valid else signed.row.get("rejection_reason"),
-                verifier_details_hash=str(signed.row["verifier_details_hash"]),
-            )
+            # The signed result payload and terminal status are one durability
+            # boundary. A crash with signed_row persisted but status still
+            # "verifying" lets receipt reconciliation expire a first valid
+            # solution and incorrectly promote a later receipt.
+            if isinstance(receipt_store, SqliteChallengeReceiptStore):
+                await self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    await receipt_store.attach_result(
+                        family_id=receipt.family_id,
+                        challenge_id=receipt.challenge_id,
+                        submission_id=receipt.submission_id,
+                        eval_run_id=str(signed.row["id"]),
+                        signed_row=signed.row,
+                        trace_json=trace_json,
+                        duration_ms=int(hermes_run.duration_ms),
+                        epoch=epoch,
+                        round_index=round_index,
+                        now_iso=now_iso,
+                        commit=False,
+                    )
+                    await receipt_store.update_status(
+                        family_id=receipt.family_id,
+                        challenge_id=receipt.challenge_id,
+                        submission_id=receipt.submission_id,
+                        status=terminal_status,
+                        now_iso=now_iso,
+                        rejection_reason=None if is_valid else signed.row.get("rejection_reason"),
+                        verifier_details_hash=str(signed.row["verifier_details_hash"]),
+                        commit=False,
+                    )
+                    await self.db.commit()
+                except Exception:
+                    await self.db.rollback()
+                    raise
+            else:
+                await receipt_store.attach_result(
+                    family_id=receipt.family_id,
+                    challenge_id=receipt.challenge_id,
+                    submission_id=receipt.submission_id,
+                    eval_run_id=str(signed.row["id"]),
+                    signed_row=signed.row,
+                    trace_json=trace_json,
+                    duration_ms=int(hermes_run.duration_ms),
+                    epoch=epoch,
+                    round_index=round_index,
+                    now_iso=now_iso,
+                )
+                await receipt_store.update_status(
+                    family_id=receipt.family_id,
+                    challenge_id=receipt.challenge_id,
+                    submission_id=receipt.submission_id,
+                    status=terminal_status,
+                    now_iso=now_iso,
+                    rejection_reason=None if is_valid else signed.row.get("rejection_reason"),
+                    verifier_details_hash=str(signed.row["verifier_details_hash"]),
+                )
 
         async def _maybe_finalize_ready_winner(*, publish_current_loser: bool) -> None:
             await self._expire_stale_sat_receipts(
