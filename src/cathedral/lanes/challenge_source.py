@@ -78,6 +78,7 @@ class ChallengeRecord:
     status: str
     audit_metadata: dict[str, Any] = field(default_factory=dict)
     cnf_path: str | None = None
+    losers_published_at_iso: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in _ALLOWED_STATUSES:
@@ -126,6 +127,22 @@ class ChallengeSource(Protocol):
         manage_transaction: bool = True,
     ) -> ChallengeRecord | None:
         """Lock the solved challenge and activate the next pending row."""
+        ...
+
+    async def list_locked_needing_loser_reconciliation(
+        self, family_id: str, *, limit: int = 32
+    ) -> list[ChallengeRecord]:
+        """Return locked challenges whose loser rows have not been marked done."""
+        ...
+
+    async def mark_locked_loser_reconciliation_complete(
+        self,
+        *,
+        family_id: str,
+        challenge_id: str,
+        now_iso: str,
+    ) -> None:
+        """Durably mark locked-challenge loser publication complete."""
         ...
 
 
@@ -179,6 +196,7 @@ class InMemoryChallengeSource:
                 status=current.status,
                 audit_metadata=record.audit_metadata,
                 cnf_path=record.cnf_path,
+                losers_published_at_iso=current.losers_published_at_iso,
             )
             return
         self._rows[record.challenge_id] = record
@@ -209,6 +227,7 @@ class InMemoryChallengeSource:
                 status=CHALLENGE_STATUS_RETIRED,
                 audit_metadata=active.audit_metadata,
                 cnf_path=active.cnf_path,
+                losers_published_at_iso=active.losers_published_at_iso,
             )
 
         activated = ChallengeRecord(
@@ -219,6 +238,7 @@ class InMemoryChallengeSource:
             status=CHALLENGE_STATUS_ACTIVE,
             audit_metadata=target.audit_metadata,
             cnf_path=target.cnf_path,
+            losers_published_at_iso=target.losers_published_at_iso,
         )
         self._rows[challenge_id] = activated
         return activated
@@ -241,6 +261,7 @@ class InMemoryChallengeSource:
                 status=CHALLENGE_STATUS_LOCKED,
                 audit_metadata=current.audit_metadata,
                 cnf_path=current.cnf_path,
+                losers_published_at_iso=None,
             )
 
         if await self.get_active(family_id) is not None:
@@ -253,6 +274,41 @@ class InMemoryChallengeSource:
             family_id=family_id,
             challenge_id=pending[0].challenge_id,
             now_iso=now_iso,
+        )
+
+    async def list_locked_needing_loser_reconciliation(
+        self, family_id: str, *, limit: int = 32
+    ) -> list[ChallengeRecord]:
+        rows = [
+            rec
+            for rec in self._rows.values()
+            if rec.family_id == family_id
+            and rec.status == CHALLENGE_STATUS_LOCKED
+            and not rec.losers_published_at_iso
+        ]
+        return sorted(rows, key=lambda r: r.challenge_id, reverse=True)[: max(1, int(limit))]
+
+    async def mark_locked_loser_reconciliation_complete(
+        self,
+        *,
+        family_id: str,
+        challenge_id: str,
+        now_iso: str,
+    ) -> None:
+        current = self._rows.get(challenge_id)
+        if current is None or current.family_id != family_id:
+            raise ChallengeSourceError("challenge not found")
+        if current.status != CHALLENGE_STATUS_LOCKED:
+            raise ChallengeSourceError("challenge is not locked")
+        self._rows[challenge_id] = ChallengeRecord(
+            challenge_id=current.challenge_id,
+            family_id=current.family_id,
+            tier=current.tier,
+            cnf_text=current.cnf_text,
+            status=current.status,
+            audit_metadata=current.audit_metadata,
+            cnf_path=current.cnf_path,
+            losers_published_at_iso=now_iso,
         )
 
 
@@ -270,6 +326,7 @@ CREATE TABLE IF NOT EXISTS lane_challenges (
     cnf_path        TEXT,
     status          TEXT NOT NULL CHECK (status IN ('pending','active','locked','retired')),
     audit_metadata  TEXT NOT NULL,
+    losers_published_at_iso TEXT,
     created_at_iso  TEXT NOT NULL,
     updated_at_iso  TEXT NOT NULL
 );
@@ -309,6 +366,12 @@ async def ensure_sqlite_challenge_source_schema(conn: aiosqlite.Connection) -> N
     columns = {str(row[1]) for row in await cur.fetchall()}
     if "cnf_path" not in columns:
         await conn.execute("ALTER TABLE lane_challenges ADD COLUMN cnf_path TEXT")
+    if "losers_published_at_iso" not in columns:
+        await conn.execute("ALTER TABLE lane_challenges ADD COLUMN losers_published_at_iso TEXT")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lane_challenges_locked_losers "
+        "ON lane_challenges(family_id, status, losers_published_at_iso, updated_at_iso)"
+    )
     await conn.commit()
 
 
@@ -392,6 +455,43 @@ class SqliteChallengeSource:
         rows = await cur.fetchall()
         return [_row_to_record(r) for r in rows]
 
+    async def list_locked_needing_loser_reconciliation(
+        self, family_id: str, *, limit: int = 32
+    ) -> list[ChallengeRecord]:
+        limit = max(1, int(limit))
+        cur = await self._conn.execute(
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+            "audit_metadata, losers_published_at_iso "
+            "FROM lane_challenges "
+            "WHERE family_id = ? AND status = ? AND losers_published_at_iso IS NULL "
+            "ORDER BY updated_at_iso DESC, challenge_id DESC LIMIT ?",
+            (family_id, CHALLENGE_STATUS_LOCKED, limit),
+        )
+        rows = await cur.fetchall()
+        return [_row_to_record(r) for r in rows]
+
+    async def mark_locked_loser_reconciliation_complete(
+        self,
+        *,
+        family_id: str,
+        challenge_id: str,
+        now_iso: str,
+    ) -> None:
+        cur = await self._conn.execute(
+            "UPDATE lane_challenges "
+            "SET losers_published_at_iso = ? "
+            "WHERE family_id = ? AND challenge_id = ? AND status = ?",
+            (
+                now_iso,
+                family_id,
+                challenge_id,
+                CHALLENGE_STATUS_LOCKED,
+            ),
+        )
+        await self._conn.commit()
+        if int(cur.rowcount or 0) != 1:
+            raise ChallengeSourceError("locked challenge not found")
+
     async def upsert(
         self,
         record: ChallengeRecord,
@@ -425,9 +525,9 @@ class SqliteChallengeSource:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
                         challenge_id, family_id, tier, cnf_text, cnf_path, status,
-                        audit_metadata, created_at_iso, updated_at_iso
+                        audit_metadata, losers_published_at_iso, created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
@@ -435,15 +535,16 @@ class SqliteChallengeSource:
                         cnf_path=excluded.cnf_path,
                         status=excluded.status,
                         audit_metadata=excluded.audit_metadata,
+                        losers_published_at_iso=excluded.losers_published_at_iso,
                         updated_at_iso=excluded.updated_at_iso
                     """
             else:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
                         challenge_id, family_id, tier, cnf_text, cnf_path, status,
-                        audit_metadata, created_at_iso, updated_at_iso
+                        audit_metadata, losers_published_at_iso, created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
@@ -462,6 +563,7 @@ class SqliteChallengeSource:
                     record.cnf_path,
                     record.status,
                     json.dumps(record.audit_metadata, sort_keys=True),
+                    record.losers_published_at_iso,
                     ts,
                     ts,
                 ),
@@ -543,7 +645,8 @@ class SqliteChallengeSource:
             if manage_transaction:
                 await self._conn.execute("BEGIN IMMEDIATE")
             await self._conn.execute(
-                "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
+                "UPDATE lane_challenges SET status = ?, losers_published_at_iso = NULL, "
+                "updated_at_iso = ? "
                 "WHERE family_id = ? AND challenge_id = ? AND status = ?",
                 (
                     CHALLENGE_STATUS_LOCKED,
@@ -575,7 +678,8 @@ class SqliteChallengeSource:
 
             pending = _row_to_record(row)
             await self._conn.execute(
-                "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
+                "UPDATE lane_challenges SET status = ?, losers_published_at_iso = NULL, "
+                "updated_at_iso = ? "
                 "WHERE family_id = ? AND challenge_id = ?",
                 (
                     CHALLENGE_STATUS_ACTIVE,
@@ -725,7 +829,7 @@ class SqliteFetchTokenStore:
 
 
 def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
-    challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_json = row
+    challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_json, *rest = row
     audit: dict[str, Any]
     try:
         audit = json.loads(audit_json) if audit_json else {}
@@ -739,6 +843,7 @@ def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
         cnf_path=str(cnf_path) if cnf_path else None,
         status=str(status),
         audit_metadata=audit,
+        losers_published_at_iso=str(rest[0]) if rest and rest[0] else None,
     )
 
 

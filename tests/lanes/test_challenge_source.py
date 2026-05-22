@@ -144,6 +144,37 @@ async def test_sqlite_upsert_preserves_existing_status_by_default(tmp_path) -> N
         await conn.close()
 
 
+async def test_sqlite_locked_loser_reconciliation_marker_filters_dirty_rows(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("locked-old", CHALLENGE_STATUS_LOCKED))
+        await src.upsert(
+            _record("locked-done", CHALLENGE_STATUS_LOCKED),
+            now_iso="2026-05-19T00:00:01.000Z",
+        )
+        await src.upsert(
+            _record("locked-new", CHALLENGE_STATUS_LOCKED),
+            now_iso="2026-05-19T00:00:02.000Z",
+        )
+        await src.mark_locked_loser_reconciliation_complete(
+            family_id=_FAMILY,
+            challenge_id="locked-done",
+            now_iso="2026-05-19T00:00:03.000Z",
+        )
+
+        dirty = await src.list_locked_needing_loser_reconciliation(_FAMILY, limit=1)
+
+        assert [row.challenge_id for row in dirty] == ["locked-new"]
+        assert dirty[0].losers_published_at_iso is None
+
+        all_dirty = await src.list_locked_needing_loser_reconciliation(_FAMILY)
+        assert [row.challenge_id for row in all_dirty] == ["locked-new", "locked-old"]
+        assert "locked-done" not in {row.challenge_id for row in all_dirty}
+    finally:
+        await conn.close()
+
+
 async def test_sqlite_rejects_active_challenge_material_mutation(tmp_path) -> None:
     conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
     try:

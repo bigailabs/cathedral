@@ -51,7 +51,6 @@ from cathedral.lanes.challenge_receipts import (
 )
 from cathedral.lanes.challenge_source import (
     CHALLENGE_STATUS_ACTIVE,
-    CHALLENGE_STATUS_LOCKED,
     ChallengeRecord,
     ChallengeSource,
     SqliteChallengeSource,
@@ -119,6 +118,7 @@ _CADENCE_FAILURE_COOLDOWN = timedelta(hours=1)
 # heartbeat means the process died or task was cancelled after status=verifying.
 _SAT_VERIFYING_STALE_TIMEOUT = timedelta(minutes=10)
 _SAT_RECEIPT_HEARTBEAT_INTERVAL = timedelta(minutes=1)
+_SAT_LOCKED_RECONCILE_LIMIT = 32
 
 
 def _retry_backoffs() -> tuple[float, ...]:
@@ -1472,8 +1472,30 @@ class EvalOrchestrator:
                 problem=problem,
                 reason="challenge_already_locked",
             )
+            if self._task_family_challenge_source is not None:
+                await self._mark_locked_sat_losers_published(
+                    challenge_source=self._task_family_challenge_source,
+                    winner=winner_to_publish_losers,
+                )
             return True
         return False
+
+    async def _mark_locked_sat_losers_published(
+        self,
+        *,
+        challenge_source: ChallengeSource,
+        winner: ChallengeReceipt,
+    ) -> None:
+        async with self._db_write_lock:
+            # This marker bounds scheduler reconciliation: once all currently
+            # valid loser receipts for a locked challenge have been published
+            # or observed as already persisted, future ticks can skip the old
+            # formula without re-announcing it and re-walking receipts.
+            await challenge_source.mark_locked_loser_reconciliation_complete(
+                family_id=winner.family_id,
+                challenge_id=winner.challenge_id,
+                now_iso=_ms_iso(datetime.now(UTC)),
+            )
 
     async def _publish_resolved_sat_losers(
         self,
@@ -1551,9 +1573,9 @@ class EvalOrchestrator:
                 SYNTHETIC_BOOLEAN_FAMILY_ID,
                 status=CHALLENGE_STATUS_ACTIVE,
             )
-            locked_records = await challenge_source.list_for_family(
+            locked_records = await challenge_source.list_locked_needing_loser_reconciliation(
                 SYNTHETIC_BOOLEAN_FAMILY_ID,
-                status=CHALLENGE_STATUS_LOCKED,
+                limit=_SAT_LOCKED_RECONCILE_LIMIT,
             )
         except Exception as exc:
             log.warning("task_family_receipt_reconcile_failed", error=str(exc)[:256])
@@ -1600,13 +1622,19 @@ class EvalOrchestrator:
             if winner is None or winner.signed_row is None:
                 continue
             # Winner/lock/source commits before loser publication. If the
-            # publisher exits in that gap, reconciliation must revisit locked
-            # challenges and idempotently publish already-validated losers.
+            # publisher exits in that gap, reconciliation revisits only locked
+            # challenges without the durable loser-published marker; successful
+            # publication sets the marker so historical solved formulas do not
+            # get re-announced and receipt-walked on every scheduler tick.
             finalized += await self._publish_resolved_sat_losers(
                 receipt_store=receipt_store,
                 winner=winner,
                 problem=problem,
                 reason="challenge_already_locked",
+            )
+            await self._mark_locked_sat_losers_published(
+                challenge_source=challenge_source,
+                winner=winner,
             )
         return finalized
 

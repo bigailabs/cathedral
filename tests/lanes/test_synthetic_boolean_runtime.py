@@ -2108,6 +2108,22 @@ async def test_synthetic_boolean_reconcile_locked_challenge_publishes_losers_aft
         assert len(rows_b) == 1
         assert rows_b[0]["weighted_score"] == pytest.approx(0.0)
         assert rows_b[0]["errors"] == ["challenge_already_locked"]
+
+        cur = await conn.execute(
+            "SELECT losers_published_at_iso FROM lane_challenges WHERE challenge_id = ?",
+            (problem.task_id,),
+        )
+        assert (await cur.fetchone())[0] is not None
+
+        async def fail_if_locked_reannounce(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("completed locked challenge was reconciled again")
+
+        monkeypatch.setattr(
+            orch,
+            "_announce_synthetic_boolean_problem",
+            fail_if_locked_reannounce,
+        )
+        assert await orch.reconcile_sat_receipts(log=structlog.get_logger("test")) == 0
     finally:
         await conn.close()
 
