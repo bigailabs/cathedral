@@ -232,6 +232,22 @@ def test_verify_dimacs_solution_file_rejects_unsatisfied_assignment(tmp_path) ->
     assert result.rejection_reason == "solution_unsatisfied"
 
 
+def test_verify_dimacs_solution_file_rejects_oversized_file_before_hashing(tmp_path) -> None:
+    original_cnf = "p cnf 1 1\n1 0\n"
+    cnf_path = tmp_path / "stream.cnf"
+    cnf_path.write_text("c replacement grew\np cnf 1 1\n-1 0\n", encoding="utf-8")
+
+    result = verify_dimacs_solution_file(
+        cnf_path,
+        "s SATISFIABLE\nv -1 0\n",
+        max_bytes=len(original_cnf.encode("utf-8")),
+        expected_sha256="0" * 64,
+    )
+
+    assert not result.parsed_ok
+    assert result.rejection_reason == "cnf_oversized"
+
+
 def test_verify_dimacs_solution_matches_reference_strictness() -> None:
     cnf = "p cnf 2 2\n1 0\n2 0\n"
     for bad_solution in [

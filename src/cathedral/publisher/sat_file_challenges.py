@@ -11,7 +11,11 @@ from cathedral.lanes.challenge_source import (
     ChallengeSourceError,
 )
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
-from cathedral.publisher.sat_file_verifier import parse_dimacs_cnf_metadata_file, sha256_file
+from cathedral.publisher.sat_file_verifier import (
+    parse_dimacs_cnf_metadata_file,
+    sha256_file,
+    sha256_file_with_size,
+)
 
 
 def build_synthetic_boolean_file_challenge_record(
@@ -31,9 +35,23 @@ def build_synthetic_boolean_file_challenge_record(
             f"synthetic_boolean_v1 CNF is not valid DIMACS: {parsed.rejection_reason}"
         )
     try:
-        digest = sha256_file(expanded)
+        digest, cnf_bytes = sha256_file_with_size(expanded, max_bytes=max_bytes)
     except OSError as exc:
         raise ChallengeSourceError("synthetic_boolean_v1 CNF could not be read") from exc
+    except ValueError as exc:
+        raise ChallengeSourceError(
+            f"synthetic_boolean_v1 CNF is not valid DIMACS: {exc}"
+        ) from exc
+    audit_metadata = {
+        "source": source,
+        "storage": "file",
+        "cnf_sha256": digest,
+        "cnf_bytes": cnf_bytes,
+        "num_vars": parsed.num_vars,
+        "num_clauses": parsed.num_clauses,
+    }
+    if max_bytes is not None:
+        audit_metadata["max_cnf_bytes"] = int(max_bytes)
     return ChallengeRecord(
         challenge_id=challenge_id or challenge_id_for_cnf_sha256(digest),
         family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
@@ -41,13 +59,7 @@ def build_synthetic_boolean_file_challenge_record(
         cnf_text="",
         cnf_path=str(expanded),
         status=status,
-        audit_metadata={
-            "source": source,
-            "storage": "file",
-            "cnf_sha256": digest,
-            "num_vars": parsed.num_vars,
-            "num_clauses": parsed.num_clauses,
-        },
+        audit_metadata=audit_metadata,
     )
 
 

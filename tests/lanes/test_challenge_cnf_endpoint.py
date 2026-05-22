@@ -462,6 +462,24 @@ async def test_active_file_backed_rejects_changed_cnf_digest(
     assert r.json() == NOT_FOUND_BODY
 
 
+def test_file_backed_snapshot_rejects_oversized_replacement_before_copy(
+    tmp_path: Any,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cache_root = tmp_path / "snapshots"
+    cnf_path.write_text(CNF_BODY + "c oversized replacement\n", encoding="utf-8")
+
+    with pytest.raises(challenge_cnf_module._CnfFileOversizedError):
+        challenge_cnf_module._materialize_verified_cnf_snapshot(
+            cnf_path,
+            expected_sha256=EXPECTED_SHA,
+            cache_root=cache_root,
+            max_bytes=len(CNF_BODY.encode("utf-8")),
+        )
+
+    assert not list(cache_root.iterdir())
+
+
 @pytest.mark.asyncio
 async def test_locked_within_grace_returns_cnf(wired_app: dict[str, Any]) -> None:
     # Lock happened 30 seconds ago, time limit is 60s, grace is +30s -> 90s
@@ -763,6 +781,73 @@ async def test_file_backed_verifier_rejects_changed_cnf_digest(
 
     assert signed.row["weighted_score"] == 0.0
     assert signed.row["rejection_reason"] == "cnf_hash_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_file_backed_verifier_rejects_replacement_above_seeded_size(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    original_cnf = "p cnf 1 1\n1 0\n"
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(original_cnf, encoding="utf-8")
+    record = ChallengeRecord(
+        challenge_id="sat-file-oversized-001",
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text="",
+        cnf_path=str(cnf_path),
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={
+            "source": "local-e2e",
+            "storage": "file",
+            "cnf_sha256": hashlib.sha256(original_cnf.encode("utf-8")).hexdigest(),
+            "cnf_bytes": len(original_cnf.encode("utf-8")),
+            "num_vars": 1,
+            "num_clauses": 1,
+        },
+    )
+    await wired_app["source"].upsert(record)
+    orchestrator = EvalOrchestrator(
+        db=wired_app["conn"],
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        registry=object(),
+        task_family_challenge_source=wired_app["source"],
+        task_family_challenge_lock=None,
+        task_family_fetch_token_store=wired_app["tokens"],
+        public_base_url="http://testserver",
+    )
+
+    announced = await orchestrator._announce_synthetic_boolean_problem(
+        record,
+        log=structlog.get_logger("test"),
+        family_id="synthetic_boolean_v1",
+    )
+    assert announced is not None
+    problem, hidden = announced
+    cnf_path.write_text("c replacement grew\np cnf 1 1\n-1 0\n", encoding="utf-8")
+
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv -1 0\\n"}\n```'
+    signed = score_and_sign_task_family_stdout(
+        lane=SyntheticBooleanV1(),
+        problem=problem,
+        hidden=hidden,
+        submission_row={
+            "id": "sub-file-oversized",
+            "miner_hotkey": "5MinerLocal",
+            "display_name": "Local Miner",
+        },
+        stdout=stdout,
+        ran_at_iso="2026-05-19T18:00:00.000Z",
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        eval_run_id="run-file-oversized",
+        epoch_salt="epoch_local:synthetic_boolean_v1",
+    )
+
+    assert signed.row["weighted_score"] == 0.0
+    assert signed.row["rejection_reason"] == "cnf_oversized"
 
 
 @pytest.mark.asyncio

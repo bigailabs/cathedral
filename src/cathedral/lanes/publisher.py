@@ -352,6 +352,7 @@ def _verify_file_backed_synthetic_boolean(
     verification = verify_dimacs_solution_file(
         cnf_path,
         raw_solution,
+        max_bytes=_file_cnf_max_bytes(hidden_payload),
         expected_sha256=expected_sha256,
     )
     if not verification.parsed_ok:
@@ -401,6 +402,27 @@ def _expected_file_cnf_sha256(
     return _normalized_sha256(audit.get("cnf_sha256"))
 
 
+def _file_cnf_max_bytes(hidden_payload: dict[str, Any]) -> int | None:
+    audit = hidden_payload.get("audit_metadata")
+    if not isinstance(audit, dict):
+        return None
+    candidates = [
+        value
+        for value in (
+            _positive_int(audit.get("cnf_bytes")),
+            _positive_int(audit.get("max_cnf_bytes")),
+        )
+        if value is not None
+    ]
+    if not candidates:
+        return None
+    # Verification must be bound to the seeded file size as well as any
+    # operator launch cap. Otherwise a tampered path can force the async eval
+    # worker to stream/hash a much larger replacement before it notices the
+    # announced SHA-256 no longer matches.
+    return min(candidates)
+
+
 def _normalized_sha256(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -408,6 +430,14 @@ def _normalized_sha256(value: Any) -> str | None:
     if len(stripped) == 64 and all(ch in "0123456789abcdef" for ch in stripped):
         return stripped
     return None
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 async def persist_task_family_result(

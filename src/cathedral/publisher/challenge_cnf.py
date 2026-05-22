@@ -53,6 +53,10 @@ class _CnfFileHashMismatchError(Exception):
     pass
 
 
+class _CnfFileOversizedError(Exception):
+    pass
+
+
 class _CnfSnapshotCache:
     """Process-local content-addressed cache for file-backed CNF snapshots.
 
@@ -68,7 +72,13 @@ class _CnfSnapshotCache:
         self._lock = asyncio.Lock()
         self._by_digest: dict[str, Path] = {}
 
-    async def get(self, source_path: Path, *, expected_sha256: str) -> Path:
+    async def get(
+        self,
+        source_path: Path,
+        *,
+        expected_sha256: str,
+        max_bytes: int | None,
+    ) -> Path:
         cached = self._by_digest.get(expected_sha256)
         if cached is not None and cached.is_file():
             return cached
@@ -82,6 +92,7 @@ class _CnfSnapshotCache:
                 source_path,
                 expected_sha256=expected_sha256,
                 cache_root=self._root,
+                max_bytes=max_bytes,
             )
             self._by_digest[expected_sha256] = snapshot
             return snapshot
@@ -144,6 +155,7 @@ def _materialize_verified_cnf_snapshot(
     *,
     expected_sha256: str,
     cache_root: Path,
+    max_bytes: int | None = None,
 ) -> Path:
     """Create or return one immutable snapshot for an announced CNF digest.
 
@@ -157,13 +169,20 @@ def _materialize_verified_cnf_snapshot(
     target = cache_root / f"{expected_sha256}.cnf"
     if target.is_file():
         return target
+    if max_bytes is not None:
+        if path.stat().st_size > max_bytes:
+            raise _CnfFileOversizedError
 
     tmp_path: str | None = None
     try:
         with path.open("rb") as source:
-            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            source_stat = os.fstat(source.fileno())
+            if not stat.S_ISREG(source_stat.st_mode):
                 raise OSError("challenge CNF path is not a regular file")
+            if max_bytes is not None and source_stat.st_size > max_bytes:
+                raise _CnfFileOversizedError
             digest = hashlib.sha256()
+            bytes_seen = 0
             with tempfile.NamedTemporaryFile(
                 "w+b",
                 dir=cache_root,
@@ -173,6 +192,9 @@ def _materialize_verified_cnf_snapshot(
             ) as snapshot:
                 tmp_path = snapshot.name
                 while chunk := source.read(_FILE_CHUNK_BYTES):
+                    bytes_seen += len(chunk)
+                    if max_bytes is not None and bytes_seen > max_bytes:
+                        raise _CnfFileOversizedError
                     digest.update(chunk)
                     snapshot.write(chunk)
                 snapshot.flush()
@@ -197,6 +219,18 @@ def _cnf_snapshot_cache(request: Request) -> _CnfSnapshotCache:
         cache = _CnfSnapshotCache()
         request.app.state.cnf_snapshot_cache = cache
     return cache
+
+
+def _effective_cnf_max_bytes(lookup: EndpointLookup) -> int | None:
+    candidates = [
+        value for value in (lookup.cnf_bytes, lookup.max_cnf_bytes) if value is not None
+    ]
+    if not candidates:
+        return None
+    # File-backed rows record the seeded file size. Use the tighter of that
+    # immutable size and any configured launch cap so a later oversized path
+    # replacement fails on stat instead of after a full copy/hash pass.
+    return min(candidates)
 
 
 def _iter_open_file(handle: BinaryIO) -> Iterator[bytes]:
@@ -276,12 +310,16 @@ async def get_challenge_cnf(
             snapshot_path = await _cnf_snapshot_cache(request).get(
                 path,
                 expected_sha256=expected_sha256,
+                max_bytes=_effective_cnf_max_bytes(lookup),
             )
         except FileNotFoundError:
             logger.warning("challenge_cnf_file_missing", challenge_id=challenge_id)
             raise _not_found() from None
         except _CnfFileHashMismatchError:
             logger.warning("challenge_cnf_file_hash_mismatch", challenge_id=challenge_id)
+            raise _not_found() from None
+        except _CnfFileOversizedError:
+            logger.warning("challenge_cnf_file_oversized", challenge_id=challenge_id)
             raise _not_found() from None
         except OSError:
             logger.warning("challenge_cnf_file_unreadable", challenge_id=challenge_id)

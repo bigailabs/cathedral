@@ -360,8 +360,12 @@ async def test_env_seed_can_store_operator_cnf_as_file_reference(
         assert active.cnf_path == str(cnf_path.resolve())
         assert active.audit_metadata["storage"] == "file"
         assert active.audit_metadata["source"] == "operator_cnf_path"
+        assert active.audit_metadata["cnf_bytes"] == cnf_path.stat().st_size
         assert "path" not in active.audit_metadata
         assert str(cnf_path) not in str(active.audit_metadata)
+        lookup = await src.get_for_endpoint("active-file-001")
+        assert lookup is not None
+        assert lookup.cnf_bytes == cnf_path.stat().st_size
     finally:
         await conn.close()
 

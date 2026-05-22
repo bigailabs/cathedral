@@ -425,13 +425,22 @@ class SqliteChallengeSource:
             audit = json.loads(str(audit_json)) if audit_json else {}
         except json.JSONDecodeError:
             audit = {}
-        cnf_sha256 = audit.get("cnf_sha256") if isinstance(audit, dict) else None
+        if isinstance(audit, dict):
+            cnf_sha256 = audit.get("cnf_sha256")
+            cnf_bytes = _positive_audit_int(audit.get("cnf_bytes"))
+            max_cnf_bytes = _positive_audit_int(audit.get("max_cnf_bytes"))
+        else:
+            cnf_sha256 = None
+            cnf_bytes = None
+            max_cnf_bytes = None
         return EndpointLookup(
             cnf_text=str(cnf_text),
             cnf_path=str(cnf_path) if cnf_path else None,
             status=str(status),
             updated_at_iso=str(updated_at_iso),
             cnf_sha256=str(cnf_sha256) if cnf_sha256 else None,
+            cnf_bytes=cnf_bytes,
+            max_cnf_bytes=max_cnf_bytes,
         )
 
     async def list_for_family(
@@ -738,7 +747,7 @@ class EndpointLookup:
     """Minimal projection of ``lane_challenges`` for the public CNF endpoint.
 
     The endpoint only needs the storage pointer/body it serves, the
-    fields that decide whether to serve, and the announced CNF digest
+    fields that decide whether to serve, and the announced CNF digest/size
     used to reject mutable file-backed rows whose bytes changed after
     seeding. Returning a narrow type (rather than a full
     :class:`ChallengeRecord`) keeps the cardinal-sin surface small: no
@@ -750,6 +759,8 @@ class EndpointLookup:
     status: str
     updated_at_iso: str
     cnf_sha256: str | None = None
+    cnf_bytes: int | None = None
+    max_cnf_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -863,6 +874,14 @@ def _challenge_material_matches(existing: ChallengeRecord, incoming: ChallengeRe
         and existing.cnf_path == incoming.cnf_path
         and existing.audit_metadata == incoming.audit_metadata
     )
+
+
+def _positive_audit_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 __all__ = [
