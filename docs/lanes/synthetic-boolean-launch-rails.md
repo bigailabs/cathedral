@@ -224,13 +224,7 @@ gates (`CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true`, `CATHEDRAL_EVAL_MODE=ssh-probe
 `CATHEDRAL_PROBER_VERSION=v2`, and `CATHEDRAL_PUBLIC_BASE_URL`), verifies
 the operator CNF is readable UTF-8 DIMACS, applies the configured launch
 limit for `sqlite_text` mode or explicitly capped `file` mode, checks
-the tier and challenge id, and requires both eval-row and remote-weight
-signing keys by default. For a shadow run that intentionally does not
-produce signed remote weights, use:
-
-```bash
-cathedral-publisher sat-launch-preflight --no-require-weight-signing-key
-```
+the tier and challenge id, and requires the eval-row signing key by default.
 
 For local one-off parser checks that intentionally do not wire the
 runtime feed, use `--no-require-runtime-env`; do not use that override
@@ -243,31 +237,16 @@ CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
 CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT=0.0
 ```
 
-Validator remote-weight opt-in after release:
-
-```toml
-[remote_weight_source]
-enabled = true
-url = "https://api.cathedral.computer"
-key_id = "cathedral-weight-policy"
-public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
-```
-
 Before moving SAT above zero weight on mainnet, validators should pass:
 
 ```bash
-cathedral-publisher remote-weight-vector-preflight --db data/publisher.db
 cathedral-validator sat-launch-preflight --config config/mainnet.toml
 cathedral-validator chain-launch-preflight --config config/mainnet.toml
-cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
 ```
 
-`remote-weight-vector-preflight` opens the publisher DB read-only, builds one
-signed remote-weight vector from the current ranked scores and configured Task
-Family weights, self-verifies the signature/invariants against the configured
-weight-policy key id, and reports private-safe metadata such as vector id,
-policy version, expiry, entry count, burn policy, and policy hash. It does not
-print miner hotkeys or the full vector payload.
+`sat-launch-preflight` verifies the local validator config and env before any
+Bittensor call. For shadow runs it keeps `synthetic_boolean_v1` at `0.0`; for
+intentional local SAT-weight tests use `--allow-local-sat-weight`.
 
 `chain-launch-preflight` reads the live Bittensor subnet without submitting
 `set_weights`. It reports the current block, metagraph block/size,

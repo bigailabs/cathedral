@@ -69,7 +69,6 @@ def run_validator_sat_launch_preflight(
     settings: ValidatorSettings,
     env: Mapping[str, str] | None = None,
     *,
-    require_remote_weight_source: bool = True,
     require_zero_local_sat_weight: bool = True,
 ) -> ValidatorLaunchPreflightResult:
     """Validate validator config/env for SAT launch without touching chain state."""
@@ -92,7 +91,6 @@ def run_validator_sat_launch_preflight(
         "network": settings.network.name,
         "netuid": settings.network.netuid,
         "validator_hotkey": settings.network.validator_hotkey,
-        "remote_weight_source_enabled": settings.remote_weight_source.enabled,
         "local_sat_weight": sat_weight,
         "task_family_weights": task_family_weights,
         "weights_disabled": settings.weights.disabled,
@@ -120,26 +118,12 @@ def run_validator_sat_launch_preflight(
 
     if require_zero_local_sat_weight and sat_weight != 0.0:
         errors.append(
-            f"weights.task_family_weights.{SAT_FAMILY_ID} must stay 0.0 for remote-weight launch"
+            f"weights.task_family_weights.{SAT_FAMILY_ID} must stay 0.0 for shadow launch"
         )
 
-    remote = settings.remote_weight_source
-    if require_remote_weight_source and not remote.enabled:
-        errors.append("remote_weight_source.enabled must be true before mainnet SAT weight")
-
-    if remote.enabled:
-        if not remote.url.strip():
-            errors.append("remote_weight_source.url is required when remote weights are enabled")
-        if not remote.key_id.strip():
-            errors.append("remote_weight_source.key_id is required when remote weights are enabled")
-        remote_key = env.get(remote.public_key_env, "").strip()
-        if not remote_key:
-            errors.append(f"{remote.public_key_env} is required when remote weights are enabled")
-        elif not _hex_is_32_bytes(remote_key):
-            errors.append(f"{remote.public_key_env} must be a 32-byte hex public key")
-    elif sat_weight > 0.0:
+    if sat_weight > 0.0:
         warnings.append(
-            f"{SAT_FAMILY_ID} has local nonzero weight while remote weights are disabled"
+            f"{SAT_FAMILY_ID} has local nonzero weight and will affect local set_weights"
         )
 
     if settings.weights.disabled:

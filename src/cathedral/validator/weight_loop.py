@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 
 import aiosqlite
 import structlog
@@ -70,7 +69,6 @@ async def run_weight_loop(
     stop: asyncio.Event | None = None,
     initial_backfill_complete: asyncio.Event | None = None,
     initial_backfill_timeout_secs: float = 120.0,
-    remote_weight_apply: Callable[[], Awaitable[object]] | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
     # Track whether the initial backfill ever signalled completion.
@@ -130,17 +128,6 @@ async def run_weight_loop(
             backfill_ready = True
             logger.info("weight_loop_backfill_signal_received_late")
         try:
-            if remote_weight_apply is not None:
-                # Remote mode must not fall back to locally computed weights while
-                # waiting for a signed publisher vector; the callback owns all
-                # apply/no-op decisions for this cadence tick.
-                await remote_weight_apply()
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=interval_secs)
-                except TimeoutError:
-                    pass
-                continue
-
             metagraph = await chain.metagraph()
             registered = await chain.is_registered()
             await health.update(

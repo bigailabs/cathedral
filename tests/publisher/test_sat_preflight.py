@@ -25,7 +25,6 @@ def _launch_env(cnf_path) -> dict[str, str]:
         "CATHEDRAL_PUBLIC_BASE_URL": "https://api.cathedral.test",
         "CATHEDRAL_PROBE_SSH_PRIVATE_KEY": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n",
         "CATHEDRAL_EVAL_SIGNING_KEY": _seed_hex(),
-        "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY": _seed_hex(),
     }
 
 
@@ -75,21 +74,16 @@ def test_sat_launch_preflight_accepts_file_backed_operator_cnf(tmp_path) -> None
     assert result.details["num_clauses"] == 1
 
 
-def test_sat_launch_preflight_rejects_missing_signing_keys(tmp_path) -> None:
+def test_sat_launch_preflight_rejects_missing_eval_signing_key(tmp_path) -> None:
     cnf_path = tmp_path / "active.cnf"
     cnf_path.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
 
     env = _launch_env(cnf_path)
     env.pop("CATHEDRAL_EVAL_SIGNING_KEY")
-    env.pop("CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY")
     result = run_synthetic_boolean_launch_preflight(env)
 
     assert not result.ok
     assert "CATHEDRAL_EVAL_SIGNING_KEY is required" in result.errors
-    assert (
-        "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY is required for signed remote weights"
-        in result.errors
-    )
 
 
 def test_sat_launch_preflight_rejects_cnf_above_launch_limit(tmp_path) -> None:
@@ -155,7 +149,6 @@ def test_sat_launch_preflight_rejects_missing_runtime_gates(tmp_path) -> None:
         {
             "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH": str(cnf_path),
             "CATHEDRAL_EVAL_SIGNING_KEY": _seed_hex(),
-            "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY": _seed_hex(),
         }
     )
 
@@ -245,7 +238,6 @@ def test_sat_launch_preflight_allows_runtime_gate_override(tmp_path) -> None:
         {
             "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH": str(cnf_path),
             "CATHEDRAL_EVAL_SIGNING_KEY": _seed_hex(),
-            "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY": _seed_hex(),
         },
         require_runtime_env=False,
     )

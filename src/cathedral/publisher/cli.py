@@ -296,11 +296,6 @@ def sat_launch_preflight(
         "--require-eval-signing-key/--no-require-eval-signing-key",
         help="Require CATHEDRAL_EVAL_SIGNING_KEY to be present and well-formed.",
     ),
-    require_weight_signing_key: bool = typer.Option(
-        True,
-        "--require-weight-signing-key/--no-require-weight-signing-key",
-        help="Require CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY for signed remote weights.",
-    ),
     require_runtime_env: bool = typer.Option(
         True,
         "--require-runtime-env/--no-require-runtime-env",
@@ -314,7 +309,6 @@ def sat_launch_preflight(
 
     result = run_synthetic_boolean_launch_preflight(
         require_eval_signing_key=require_eval_signing_key,
-        require_weight_signing_key=require_weight_signing_key,
         require_runtime_env=require_runtime_env,
     )
 
@@ -343,28 +337,6 @@ def sat_launch_preflight(
             typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(1)
     typer.echo("SAT launch preflight passed")
-
-
-@app.command("remote-weight-vector-preflight")
-def remote_weight_vector_preflight(
-    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
-) -> None:
-    """Build and self-verify one signed remote weight vector from the DB."""
-    configure()
-
-    from cathedral.publisher.remote_weight_preflight import (
-        run_publisher_remote_weight_preflight,
-    )
-
-    result = asyncio.run(run_publisher_remote_weight_preflight(database_path))
-    typer.echo(json.dumps(result.details, indent=2, sort_keys=True))
-    for warning in result.warnings:
-        typer.echo(f"WARNING: {warning}", err=True)
-    if result.errors:
-        for error in result.errors:
-            typer.echo(f"ERROR: {error}", err=True)
-        raise typer.Exit(1)
-    typer.echo("Publisher remote weight vector preflight passed")
 
 
 @app.command("sat-active-challenge-status")

@@ -22,7 +22,6 @@ LEGACY_TIER_ENV = "CATHEDRAL_TASK_FAMILY_TIER"
 MAX_CNF_BYTES_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES"
 STORAGE_MODE_ENV = "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE"
 EVAL_SIGNING_KEY_ENV = "CATHEDRAL_EVAL_SIGNING_KEY"
-WEIGHT_POLICY_SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"
 TASK_FAMILY_FEED_ENABLED_ENV = "CATHEDRAL_TASK_FAMILY_FEED_ENABLED"
 TASK_FAMILY_IDS_ENV = "CATHEDRAL_TASK_FAMILY_IDS"
 TASK_FAMILY_STDOUT_MAX_BYTES_ENV = "CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES"
@@ -226,7 +225,6 @@ def run_synthetic_boolean_launch_preflight(
     env: Mapping[str, str] | None = None,
     *,
     require_eval_signing_key: bool = True,
-    require_weight_signing_key: bool = True,
     require_runtime_env: bool = True,
 ) -> SatLaunchPreflightResult:
     """Validate the operator-controlled SAT launch inputs without mutating state."""
@@ -328,14 +326,6 @@ def run_synthetic_boolean_launch_preflight(
     elif eval_key and not _hex_seed_is_32_bytes(eval_key):
         errors.append(f"{EVAL_SIGNING_KEY_ENV} must be a 32-byte Ed25519 seed hex")
 
-    weight_key = env.get(WEIGHT_POLICY_SIGNING_KEY_ENV, "").strip()
-    if require_weight_signing_key and not weight_key:
-        errors.append(
-            f"{WEIGHT_POLICY_SIGNING_KEY_ENV} is required for signed remote weights"
-        )
-    elif weight_key and not _hex_seed_is_32_bytes(weight_key):
-        errors.append(f"{WEIGHT_POLICY_SIGNING_KEY_ENV} must be a 32-byte Ed25519 seed hex")
-
     return SatLaunchPreflightResult(
         errors=tuple(errors),
         warnings=tuple(warnings),
@@ -362,7 +352,6 @@ __all__ = [
     "TASK_FAMILY_IDS_ENV",
     "TASK_FAMILY_STDOUT_MAX_BYTES_ENV",
     "TIER_ENV",
-    "WEIGHT_POLICY_SIGNING_KEY_ENV",
     "SatLaunchPreflightResult",
     "positive_int_env",
     "read_operator_cnf_file",

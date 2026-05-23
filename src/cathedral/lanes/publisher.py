@@ -264,7 +264,7 @@ def score_and_sign_task_family_stdout(
 
     if os.environ.get("CATHEDRAL_ZERO_ALL_SCORES", "").lower() == "true":
         # Emergency publisher kill switch: schema-5 Task Family/SAT rows feed
-        # the same validator and remote-weight paths as legacy rows, so they
+        # the same validator local scoring path as legacy rows, so they
         # must also collapse to zero when operators need fleet-wide burn mode.
         score = ScoreResult(
             weighted_score=0.0,

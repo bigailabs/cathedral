@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 
-import httpx
 import typer
 import uvicorn
 
@@ -60,11 +59,6 @@ def migrate(
 @app.command("sat-launch-preflight")
 def sat_launch_preflight(
     config: str = typer.Option("config/mainnet.toml", "--config", "-c"),
-    require_remote_weight_source: bool = typer.Option(
-        True,
-        "--require-remote-weight-source/--allow-local-weight-source",
-        help="Require signed remote-weight opt-in before mainnet SAT weight.",
-    ),
     require_zero_local_sat_weight: bool = typer.Option(
         True,
         "--require-zero-local-sat-weight/--allow-local-sat-weight",
@@ -80,7 +74,6 @@ def sat_launch_preflight(
     settings = ValidatorSettings.from_toml(config)
     result = run_validator_sat_launch_preflight(
         settings,
-        require_remote_weight_source=require_remote_weight_source,
         require_zero_local_sat_weight=require_zero_local_sat_weight,
     )
 
@@ -88,7 +81,6 @@ def sat_launch_preflight(
         "network",
         "netuid",
         "validator_hotkey",
-        "remote_weight_source_enabled",
         "local_sat_weight",
         "weights_disabled",
         "weights_interval_secs",
@@ -103,58 +95,6 @@ def sat_launch_preflight(
             typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(1)
     typer.echo("Validator SAT launch preflight passed")
-
-
-@app.command("verify-remote-weight-vector")
-def verify_remote_weight_vector(
-    config: str = typer.Option("config/mainnet.toml", "--config", "-c"),
-    publisher_url: str | None = typer.Option(
-        None,
-        "--publisher-url",
-        help="Publisher base URL. Defaults to [remote_weight_source].url.",
-    ),
-) -> None:
-    """Fetch and verify the publisher's signed weight vector without set_weights."""
-    configure()
-    from cathedral.config import ValidatorSettings, resolve_validator_config_path
-    from cathedral.validator.remote_weight_verify import (
-        RemoteWeightVectorFetchError,
-        fetch_remote_weight_vector_for_verification,
-        load_remote_weight_public_key,
-        verify_remote_weight_vector_for_settings,
-    )
-
-    config = resolve_validator_config_path(config)
-    settings = ValidatorSettings.from_toml(config)
-    public_key, key_error = load_remote_weight_public_key(settings)
-    if key_error is not None:
-        typer.echo(f"ERROR: {key_error}", err=True)
-        raise typer.Exit(1)
-    assert public_key is not None
-
-    async def _run() -> None:
-        timeout = settings.remote_weight_source.request_timeout_secs
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                vector = await fetch_remote_weight_vector_for_verification(
-                    client,
-                    publisher_url=publisher_url or settings.remote_weight_source.url,
-                )
-            except RemoteWeightVectorFetchError as exc:
-                typer.echo(f"ERROR: {exc}", err=True)
-                raise typer.Exit(1) from exc
-        if vector is None:
-            typer.echo("ERROR: publisher has no signed weight vector yet", err=True)
-            raise typer.Exit(1)
-        result = verify_remote_weight_vector_for_settings(vector, settings, public_key)
-        typer.echo(json.dumps(result.details, indent=2, sort_keys=True))
-        if result.errors:
-            for error in result.errors:
-                typer.echo(f"ERROR: {error}", err=True)
-            raise typer.Exit(1)
-        typer.echo("Remote weight vector verification passed")
-
-    asyncio.run(_run())
 
 
 @app.command("chain-launch-preflight")

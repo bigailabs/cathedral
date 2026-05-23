@@ -35,12 +35,6 @@ def _settings(*, interval_secs: int = 1500, weights_disabled: bool = False) -> V
                 "url": "https://api.cathedral.computer",
                 "public_key_env": "CATHEDRAL_PUBLIC_KEY_HEX",
             },
-            "remote_weight_source": {
-                "enabled": True,
-                "url": "https://api.cathedral.computer",
-                "key_id": "cathedral-weight-policy",
-                "public_key_env": "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX",
-            },
         }
     )
 
@@ -207,11 +201,6 @@ task_family_weights = { synthetic_boolean_v1 = 0.0 }
 url = "https://api.cathedral.computer"
 public_key_env = "CATHEDRAL_PUBLIC_KEY_HEX"
 
-[remote_weight_source]
-enabled = true
-url = "https://api.cathedral.computer"
-key_id = "cathedral-weight-policy"
-public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
 """,
         encoding="utf-8",
     )

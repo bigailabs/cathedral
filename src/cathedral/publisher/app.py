@@ -74,14 +74,6 @@ from cathedral.publisher.sat_preflight import (
     read_operator_cnf_file,
 )
 from cathedral.publisher.submit import router as submit_router
-from cathedral.publisher.weight_policy import (
-    WeightPolicyStore,
-    load_producer_from_env,
-    run_weight_policy_producer,
-)
-from cathedral.publisher.weight_policy import (
-    router as weight_policy_router,
-)
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
 
@@ -205,13 +197,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         # the connection or re-wiring through dependency injection.
         app.state.task_family_challenge_source = task_family_challenge_source
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
-        # Keep the signed-weight route and its backing store wired together.
-        # The endpoint is mounted even without a signing key so validators get
-        # a deterministic 503 "not configured yet" instead of app construction
-        # failures; configured publishers start the producer below.
-        weight_policy_store = WeightPolicyStore()
-        app.state.weight_policy = weight_policy_store
-        producer_config = load_producer_from_env()
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
         # Make ctx visible to the orchestrator's env-resolver. Production
@@ -245,25 +230,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             from cathedral.v3.corpus.private_loader import load_private_corpus
 
             load_private_corpus()
-
-        if producer_config is not None:
-            config, private_key = producer_config
-            # Do not schedule this shared-connection writer until startup DB
-            # mutations are done. create_task() can run at the next await; if it
-            # starts before SAT seeding or repair commits, it can interleave
-            # transactions on ctx.db and corrupt the boot transaction boundary.
-            ctx.background_tasks.append(
-                asyncio.create_task(
-                    run_weight_policy_producer(
-                        ctx.db,
-                        weight_policy_store,
-                        private_key,
-                        config=config,
-                        stop=stop,
-                        db_write_lock=ctx.db_write_lock,
-                    )
-                )
-            )
 
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to
@@ -441,11 +407,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
     app.include_router(sat_readiness_router, prefix="/api/cathedral")
     app.include_router(sat_readiness_router, include_in_schema=False)
-
-    # Issue #155: signed weight policy surface. Mounted on both prefixes
-    # for the same dual-routing reason as the submit/reads routers.
-    app.include_router(weight_policy_router, prefix="/api/cathedral")
-    app.include_router(weight_policy_router, include_in_schema=False)
 
     # Agent-facing onboarding - Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the

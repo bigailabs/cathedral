@@ -10,7 +10,6 @@ def _key() -> str:
 
 def _settings(
     *,
-    remote_enabled: bool = True,
     local_sat_weight: float = 0.0,
     hotkey: str = "operator-hotkey",
 ) -> ValidatorSettings:
@@ -37,56 +36,42 @@ def _settings(
                 "url": "https://api.cathedral.computer",
                 "public_key_env": "CATHEDRAL_PUBLIC_KEY_HEX",
             },
-            "remote_weight_source": {
-                "enabled": remote_enabled,
-                "url": "https://api.cathedral.computer",
-                "key_id": "cathedral-weight-policy",
-                "public_key_env": "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX",
-            },
         }
     )
 
 
-def test_validator_sat_launch_preflight_accepts_remote_weight_config() -> None:
+def test_validator_sat_launch_preflight_accepts_local_shadow_config() -> None:
     result = run_validator_sat_launch_preflight(
         _settings(),
-        env={
-            "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
-            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
-        },
+        env={"CATHEDRAL_PUBLIC_KEY_HEX": _key()},
     )
 
     assert result.ok
     assert result.errors == ()
-    assert result.details["remote_weight_source_enabled"] is True
     assert result.details["local_sat_weight"] == 0.0
 
 
 def test_validator_sat_launch_preflight_rejects_placeholders_and_missing_keys() -> None:
     result = run_validator_sat_launch_preflight(
-        _settings(remote_enabled=False, hotkey="REPLACE_ME"),
+        _settings(hotkey="REPLACE_ME"),
         env={},
     )
 
     assert not result.ok
     assert "network.validator_hotkey is still REPLACE_ME" in result.errors
     assert "CATHEDRAL_PUBLIC_KEY_HEX is required for signed eval pulls" in result.errors
-    assert "remote_weight_source.enabled must be true before mainnet SAT weight" in result.errors
 
 
 def test_validator_sat_launch_preflight_rejects_nonzero_local_sat_weight() -> None:
     result = run_validator_sat_launch_preflight(
         _settings(local_sat_weight=0.05),
-        env={
-            "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
-            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
-        },
+        env={"CATHEDRAL_PUBLIC_KEY_HEX": _key()},
     )
 
     assert not result.ok
     assert (
         "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
-        "for remote-weight launch"
+        "for shadow launch"
     ) in result.errors
 
 
@@ -95,7 +80,6 @@ def test_validator_sat_launch_preflight_honors_sat_weight_env_override() -> None
         _settings(local_sat_weight=0.0),
         env={
             "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
-            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
             "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT": "0.15",
         },
     )
@@ -104,7 +88,7 @@ def test_validator_sat_launch_preflight_honors_sat_weight_env_override() -> None
     assert result.details["local_sat_weight"] == 0.15
     assert (
         "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
-        "for remote-weight launch"
+        "for shadow launch"
     ) in result.errors
 
 
@@ -113,7 +97,6 @@ def test_validator_sat_launch_preflight_honors_task_family_weights_json_env() ->
         _settings(local_sat_weight=0.0),
         env={
             "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
-            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
             "CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON": '{"synthetic_boolean_v1": 0.2}',
         },
     )
@@ -123,16 +106,20 @@ def test_validator_sat_launch_preflight_honors_task_family_weights_json_env() ->
     assert result.details["task_family_weights"]["synthetic_boolean_v1"] == 0.2
     assert (
         "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
-        "for remote-weight launch"
+        "for shadow launch"
     ) in result.errors
 
 
-def test_validator_sat_launch_preflight_can_shadow_without_remote_opt_in() -> None:
+def test_validator_sat_launch_preflight_can_allow_local_sat_weight() -> None:
     result = run_validator_sat_launch_preflight(
-        _settings(remote_enabled=False),
+        _settings(local_sat_weight=0.2),
         env={"CATHEDRAL_PUBLIC_KEY_HEX": _key()},
-        require_remote_weight_source=False,
+        require_zero_local_sat_weight=False,
     )
 
     assert result.ok
     assert result.errors == ()
+    assert (
+        "synthetic_boolean_v1 has local nonzero weight and will affect local set_weights"
+        in result.warnings
+    )
