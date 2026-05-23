@@ -64,7 +64,8 @@ Winning is selected by publisher receipt time, not first verified time.
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 
-## Getting Started
+<details>
+<summary><strong>Getting Started</strong></summary>
 
 ### Installation
 
@@ -111,3 +112,5 @@ cathedral-validator migrate --config config/mainnet.toml
 cathedral chain-check --config config/mainnet.toml
 cathedral-validator serve --config config/mainnet.toml
 ```
+
+</details>
