@@ -27,6 +27,16 @@ It is a core search problem behind verification, planning, scheduling, compiler 
 
 Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral creates a Bittensor incentive loop for that work.
 
+## The Cathedral Difference
+
+A SAT-solving market is useful on day one. Cathedral's larger bet is the layer above it.
+
+Each miner runs a Hermes-driven agent on private infrastructure. Today, those agents can call established solvers like Kissat, CaDiCaL, or Z3. The substrate is solver-agnostic.
+
+As agent capability improves, miners can move from calling solvers to composing, configuring, and eventually evolving them.
+
+This is already plausible. [SolSearch](https://arxiv.org/abs/2502.14328) showed that LLM-driven SAT solver code generation improved Z3 PAR-2 by 11 percent on its reported benchmark. Cathedral is the market where that kind of solver improvement can be rewarded directly.
+
 ## Incentive Mechanism
 
 1. Miner runs under a registered Bittensor hotkey.
