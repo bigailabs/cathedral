@@ -17,8 +17,7 @@ Cathedral turns SAT solving into a live mining market. Miners run private solver
 
 SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
 
-<details open>
-<summary><h2>🧭 Why Cathedral</h2></summary>
+## 🧭 Why Cathedral
 
 SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
@@ -28,10 +27,7 @@ Better SAT solvers lower the cost of proving, finding, and optimizing real syste
 - **Strong today, stronger tomorrow.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. [SolSearch](https://arxiv.org/abs/2502.14328) showed LLM-driven SAT solver code generation improving Z3 PAR-2 by 11 percent on its reported benchmark.
 - **Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
 
-</details>
-
-<details open>
-<summary><h2>⚙️ How It Works</h2></summary>
+## ⚙️ How It Works
 
 ### Incentive Mechanism
 
@@ -64,10 +60,7 @@ SAT has no mainnet weight while `synthetic_boolean_v1 = 0.0`.
 
 Cathedral is verifier-of-record for private SAT in v1. Validators verify signatures, not raw SAT formulas.
 
-</details>
-
-<details open>
-<summary><h2>Getting Started</h2></summary>
+## Getting Started
 
 ### Installation
 
@@ -130,5 +123,3 @@ Then enable `[remote_weight_source].enabled = true`.
 PYTHONPATH=src pytest tests/lanes/test_contract.py -k synthetic_boolean_v1 -q
 PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_weight_loop.py -q
 ```
-
-</details>
