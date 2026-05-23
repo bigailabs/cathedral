@@ -575,19 +575,16 @@ def _run_subprocess(
         preexec_fn=preexec,
         start_new_session=sys.platform != "win32",
     )
-    try:
-        stdout_b, stderr_b = proc.communicate(input=hidden_code_payload, timeout=timeout_seconds)
-        timed_out = False
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_fallback_process_tree(proc)
-        try:
-            stdout_b, stderr_b = proc.communicate(timeout=0.1)
-        except subprocess.TimeoutExpired:
-            stdout_b, stderr_b = (b"", b"")
-        timed_out = True
-        returncode = None
-    else:
+    # Fallback isolation still executes miner-controlled code. Use the same
+    # bounded pipe reader as the jailed path so stdout/stderr cannot accumulate
+    # unbounded in the publisher process before timeout.
+    stdout_b, stderr_b, returncode, timed_out = _jail._communicate_bounded(
+        proc,
+        stdin_bytes=hidden_code_payload,
+        timeout_seconds=timeout_seconds,
+        max_stream_bytes=_jail._MAX_CAPTURED_STREAM_BYTES,
+    )
+    if not timed_out:
         # A malicious patch can spawn a background child, detach its stdio,
         # and let the parent exit successfully. The fallback runner owns the
         # whole session, so clean up descendants even on non-timeout exits.

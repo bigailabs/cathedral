@@ -522,6 +522,12 @@ def run_in_jail(
 
 
 def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
+    if sys.platform == "win32":  # pragma: no cover -- jail is Linux-only
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return
     # Kill the entire process group (negative pid). start_new_session
     # made `proc.pid` the pgrp leader, so this reaches every host process the
     # jail spawned -- not just the unshare(1) wrapper.

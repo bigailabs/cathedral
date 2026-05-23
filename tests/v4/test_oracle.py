@@ -429,6 +429,29 @@ print('SHOULD_NEVER_PRINT')
     assert result.duration_seconds < 0.5
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fallback bounded pipes are POSIX-only")
+def test_fallback_output_capture_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(patch_runner, "resolve_isolation_mode", lambda: "monkeypatch_only")
+    noisy_test = """import sys, time
+sys.stdout.write("A" * (512 * 1024))
+sys.stdout.flush()
+time.sleep(5)
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=PRICE_FIX,
+        hidden_test_code=noisy_test,
+        timeout_seconds=2.0,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is False
+    assert result.timed_out is False
+    assert len(result.stdout.encode("utf-8")) <= patch_runner._jail._MAX_CAPTURED_STREAM_BYTES
+    assert "output exceeded capture limit" in result.stderr
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="fallback process groups are POSIX-only")
 def test_fallback_timeout_kills_background_child(
     monkeypatch: pytest.MonkeyPatch,
