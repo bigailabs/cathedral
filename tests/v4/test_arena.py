@@ -99,6 +99,22 @@ def test_write_patch_bad_context_returns_false(tmp_path: Path, vault_path: Path)
     assert "this line is not in the file" not in text
 
 
+def test_write_patch_unsafe_path_returns_false(tmp_path: Path, vault_path: Path) -> None:
+    scrambler = IsomorphicScrambler(vault_path)
+    repo = scrambler.scramble("python_fastapi_base", seed=40, workspace_root=tmp_path)
+    arena = MinerArena(repo)
+
+    ok = arena.write_patch(
+        "--- a/../../x\n"
+        "+++ b/../../x\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    assert ok is False
+
+
 def test_run_local_compile_returns_dict(tmp_path: Path, vault_path: Path) -> None:
     scrambler = IsomorphicScrambler(vault_path)
     repo = scrambler.scramble("python_fastapi_base", seed=5, workspace_root=tmp_path)

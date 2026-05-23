@@ -41,7 +41,8 @@ Security posture (publisher-side worker; defence in depth):
   * **Strict command allowlist.** The runner only spawns
     ``sys.executable`` with ``-I -c <bootstrap>``. No shell, no
     user-supplied argv. The hidden test source is never written into
-    ``/work``; the child receives a private marshalled code object.
+    ``/work`` or argv; the child receives a private marshalled code
+    object over stdin and closes that fd before executing miner code.
   * **No host filesystem writes outside the scratch dir.** ``cwd``
     is pinned to a fresh ``tempfile.TemporaryDirectory`` rooted in
     ``/dev/shm`` (tmpfs) when available, otherwise the platform
@@ -83,7 +84,7 @@ from typing import Literal
 
 import structlog
 
-from cathedral.v4.arena.sandbox import _apply_unified_diff, _DiffError
+from cathedral.v4.arena.sandbox import ArenaError, _apply_unified_diff, _DiffError
 from cathedral.v4.oracle import jail as _jail
 
 logger = structlog.get_logger(__name__)
@@ -112,7 +113,6 @@ PATCH_RUNNER_BUDGET_SECONDS: float = BOOKKEEPING_BUDGET_SECONDS
 
 # Memory ceiling for the spawned hidden-test child (bytes).
 _RLIMIT_AS_BYTES: int = 512 * 1024 * 1024
-_HIDDEN_CODE_BASENAME = "__v4_hidden_test.marshal"
 _HIDDEN_CODE_FILENAME = "<v4_hidden_test>"
 
 # Jail-side rlimits applied inside the jail bootstrap (before exec of
@@ -332,9 +332,8 @@ def run_patch_against_hidden_test(
     hidden_test_relpath: str = "test_hidden_v4.py",
     timeout_seconds: float = PATCH_RUNNER_TIMEOUT_SECONDS,
 ) -> PatchRunResult:
-    """Apply ``patch_str`` to ``original_repo_state``, append the hidden
-    test, run it under the configured isolation posture, return the
-    result.
+    """Apply ``patch_str`` to ``original_repo_state``, run the hidden
+    test under the configured isolation posture, return the result.
 
     Args:
       original_repo_state: ``{relpath: file_content}`` mirror of the
@@ -343,8 +342,9 @@ def run_patch_against_hidden_test(
       patch_str: the miner's unified-diff submission.
       hidden_test_code: the publisher's hidden verification test, as
         a Python source string. It is compiled outside the patched
-        workspace before execution so miner code cannot read
-        ``test_hidden_v4.py`` from ``/work``.
+        workspace and streamed over stdin so miner code cannot read
+        ``test_hidden_v4.py`` from ``/work`` or discover a payload path
+        from ``/proc/self/cmdline``.
       hidden_test_relpath: deprecated compatibility argument. Hidden
         tests are no longer written into the scratch workspace.
       timeout_seconds: wall-clock subprocess timeout. Defaults to
@@ -370,7 +370,9 @@ def run_patch_against_hidden_test(
     try:
         patched = _apply_unified_diff(original_repo_state, patch_str)
         patch_applied = True
-    except _DiffError as e:
+    except (_DiffError, ArenaError) as e:
+        # Unsafe diff paths are validation failures, not oracle crashes.
+        # _normalize_relpath raises ArenaError for absolute/traversal paths.
         logger.info("oracle.patch_apply_failed", reason=str(e))
         return PatchRunResult(
             passed=False,
@@ -386,59 +388,71 @@ def run_patch_against_hidden_test(
     # 2) materialize to tmpfs
     scratch_root = _select_scratch_root()
 
+    hidden_code_payload = _compile_hidden_code_payload(hidden_test_code)
+
     with tempfile.TemporaryDirectory(prefix="v4oracle_", dir=str(scratch_root)) as td:
         td_path = Path(td)
-        hidden_root = Path(tempfile.mkdtemp(prefix="v4oracle_hidden_", dir=str(scratch_root)))
-        try:
-            for relpath, content in patched.items():
-                dest = td_path / relpath
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(content)
-            hidden_code_path = _materialize_hidden_code(
-                hidden_test_code=hidden_test_code,
-                hidden_root=hidden_root,
-            )
+        for relpath, content in patched.items():
+            dest = td_path / relpath
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
 
-            if isolation_mode == "jailed":
-                return _run_jailed(
-                    workspace_dir=td_path,
-                    hidden_code_path=hidden_code_path,
-                    timeout_seconds=timeout_seconds,
-                    patch_applied=patch_applied,
-                )
-
-            return _run_subprocess(
+        if isolation_mode == "jailed":
+            return _run_jailed(
                 workspace_dir=td_path,
-                hidden_code_path=hidden_code_path,
+                hidden_code_payload=hidden_code_payload,
                 timeout_seconds=timeout_seconds,
                 patch_applied=patch_applied,
-                isolation_mode=isolation_mode,
             )
-        finally:
-            shutil.rmtree(hidden_root, ignore_errors=True)
+
+        return _run_subprocess(
+            workspace_dir=td_path,
+            hidden_code_payload=hidden_code_payload,
+            timeout_seconds=timeout_seconds,
+            patch_applied=patch_applied,
+            isolation_mode=isolation_mode,
+        )
 
 
-def _materialize_hidden_code(*, hidden_test_code: str, hidden_root: Path) -> Path:
-    """Compile hidden test source outside the patched workspace.
+def _compile_hidden_code_payload(hidden_test_code: str) -> bytes:
+    """Compile hidden source in the publisher process and return bytecode.
 
-    The child only receives a marshalled code object, not a readable
-    ``test_hidden_v4.py`` in ``/work``. That prevents miner patches from
-    opening the hidden source during module import and specializing to the
-    exact assertions.
+    The payload is streamed once to the child over stdin. It is never
+    materialized as a file, mounted in the jail, or embedded in argv, because
+    miner-controlled imports can read ``/work`` and ``/proc/self/cmdline``.
     """
-    hidden_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(hidden_root, 0o700)
-    hidden_code_path = hidden_root / _HIDDEN_CODE_BASENAME
     code = compile(hidden_test_code, _HIDDEN_CODE_FILENAME, "exec")
-    hidden_code_path.write_bytes(marshal.dumps(code))
-    os.chmod(hidden_code_path, 0o600)
-    return hidden_code_path
+    return marshal.dumps(code)
+
+
+def _hidden_stdin_bootstrap() -> str:
+    return (
+        "\nimport marshal as _m, os as _os, sys as _sys\n"
+        "_payload = _sys.stdin.buffer.read()\n"
+        "_code = _m.loads(_payload)\n"
+        "del _payload\n"
+        "# The hidden bytecode arrives through stdin. Close it and replace fd 0\n"
+        "# with /dev/null before miner-controlled imports run so /proc/self/fd/0\n"
+        "# cannot be used as a second chance to read the payload.\n"
+        "try:\n"
+        "    _sys.stdin.close()\n"
+        "except Exception:\n"
+        "    pass\n"
+        "try:\n"
+        "    _fd = _os.open('/dev/null', _os.O_RDONLY)\n"
+        "    if _fd != 0:\n"
+        "        _os.dup2(_fd, 0)\n"
+        "        _os.close(_fd)\n"
+        "except Exception:\n"
+        "    pass\n"
+        f"exec(_code, {{'__name__': '__main__', '__file__': {_HIDDEN_CODE_FILENAME!r}}})\n"
+    )
 
 
 def _run_subprocess(
     *,
     workspace_dir: Path,
-    hidden_code_path: Path,
+    hidden_code_payload: bytes,
     timeout_seconds: float,
     patch_applied: bool,
     isolation_mode: IsolationMode,
@@ -453,9 +467,7 @@ def _run_subprocess(
 
     program = (
         _HERMETIC_BOOTSTRAP
-        + "\nimport marshal as _m, pathlib as _p\n"
-        + f"_code = _m.loads(_p.Path({str(hidden_code_path)!r}).read_bytes())\n"
-        + f"exec(_code, {{'__name__': '__main__', '__file__': {_HIDDEN_CODE_FILENAME!r}}})\n"
+        + _hidden_stdin_bootstrap()
     )
     argv: list[str] = [
         *isolation_prefix,
@@ -478,6 +490,7 @@ def _run_subprocess(
     proc = subprocess.Popen(  # noqa: S603 -- argv list, no shell, allowlist
         argv,
         cwd=workspace_dir,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -486,7 +499,7 @@ def _run_subprocess(
         start_new_session=sys.platform != "win32",
     )
     try:
-        stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
+        stdout_b, stderr_b = proc.communicate(input=hidden_code_payload, timeout=timeout_seconds)
         timed_out = False
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
@@ -537,17 +550,16 @@ def _kill_fallback_process_tree(proc: subprocess.Popen[bytes]) -> None:
 def _run_jailed(
     *,
     workspace_dir: Path,
-    hidden_code_path: Path,
+    hidden_code_payload: bytes,
     timeout_seconds: float,
     patch_applied: bool,
 ) -> PatchRunResult:
     """Linux fs-jail path. See cathedral.v4.oracle.jail for the helper."""
     program = (
         _HERMETIC_BOOTSTRAP
-        + "\nimport marshal as _m, os as _os, pathlib as _p\n"
+        + "\nimport os as _os\n"
         + "_os.chdir('/work')\n"
-        + f"_code = _m.loads(_p.Path('/oracle/{hidden_code_path.name}').read_bytes())\n"
-        + f"exec(_code, {{'__name__': '__main__', '__file__': {_HIDDEN_CODE_FILENAME!r}}})\n"
+        + _hidden_stdin_bootstrap()
     )
 
     # Use sys.base_prefix (not sys.prefix) so we bind the underlying
@@ -562,8 +574,8 @@ def _run_jailed(
             jail_root=jail_root,
             workspace_dir=workspace_dir,
             python_prefix=python_prefix,
-            hidden_dir=hidden_code_path.parent,
             program=program,
+            stdin_bytes=hidden_code_payload,
             timeout_seconds=timeout_seconds,
             rlimit_cpu_secs=JAIL_RLIMIT_CPU_SECS,
             rlimit_as_bytes=JAIL_RLIMIT_AS_BYTES,

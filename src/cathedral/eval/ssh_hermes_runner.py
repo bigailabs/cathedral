@@ -104,6 +104,7 @@ logger = structlog.get_logger(__name__)
 # token must never appear in logs or in exception messages that may
 # get forwarded to operators or third-party log sinks.
 _QUERY_TOKEN_RE = re.compile(r"(\?t=)[^\s'&\"]+")
+_QUERY_TOKEN_BYTES_RE = re.compile(rb"(\?t=)([^\s'&\"]+)")
 
 
 def _redact_query_tokens(s: str) -> str:
@@ -116,6 +117,47 @@ def _redact_query_tokens(s: str) -> str:
     partial token value is still redacted.
     """
     return _QUERY_TOKEN_RE.sub(r"\1REDACTED", s)
+
+
+def _redact_query_token_bytes(blob: bytes) -> bytes:
+    """Redact token values without changing byte length.
+
+    Trace artifacts include SQLite snapshots and JSON logs. Keeping replacement
+    lengths stable lets us scrub token bytes in binary SQLite pages without
+    shifting offsets or corrupting the file structure before bundling.
+    """
+
+    def replacement(match: re.Match[bytes]) -> bytes:
+        token = match.group(2)
+        marker = b"REDACTED"
+        if len(token) <= len(marker):
+            redacted = b"X" * len(token)
+        else:
+            redacted = marker + (b"X" * (len(token) - len(marker)))
+        return match.group(1) + redacted
+
+    return _QUERY_TOKEN_BYTES_RE.sub(replacement, blob)
+
+
+def _redact_query_tokens_in_artifact_tree(root: Path) -> None:
+    """Scrub CNF fetch tokens from local files before trace publication."""
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        # Do not rewrite compressed archives in place: changing compressed
+        # bytes would invalidate checksums. SAT prompt/request tokens are stored
+        # in state.db, sessions/request dumps, logs, and stdout, all of which
+        # are uncompressed files in this bundle tree.
+        if path.suffix in {".gz", ".tgz", ".zip"}:
+            continue
+        try:
+            original = path.read_bytes()
+        except OSError:
+            continue
+        redacted = _redact_query_token_bytes(original)
+        if redacted == original:
+            continue
+        path.write_bytes(redacted)
 
 
 def _now_utc_iso() -> str:
@@ -1452,6 +1494,12 @@ class SshHermesRunner:
                     dest = local_root / rel_path
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_text(content, encoding="utf-8")
+
+            # The SAT prompt must carry an authorized cnf_url to the miner, but
+            # trace bundles are public artifacts. Scrub token-shaped ?t= values
+            # from every collected uncompressed artifact before proof, manifest,
+            # hashes, and tarball creation.
+            _redact_query_tokens_in_artifact_tree(local_root)
 
             # Compute proof-of-loop from what we collected
             proof = _compute_proof_of_loop(local_root)

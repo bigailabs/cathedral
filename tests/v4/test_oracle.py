@@ -88,6 +88,25 @@ def test_bad_patch_returns_failed() -> None:
     assert result.duration_seconds < REPRO_BUDGET_SECONDS
 
 
+def test_unsafe_diff_path_returns_patch_failure() -> None:
+    unsafe_diff = (
+        "--- a/../../x\n"
+        "+++ b/../../x\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=unsafe_diff,
+        hidden_test_code=HIDDEN_TEST,
+    )
+
+    assert result.patch_applied is False
+    assert result.passed is False
+    assert "path traversal not allowed" in result.stderr
+
+
 def test_wrong_logic_patch_runs_but_fails() -> None:
     wrong_fix = (
         "--- a/m.py\n"
@@ -113,11 +132,24 @@ def test_hidden_source_is_not_materialized_in_workspace() -> None:
     probe_file = """import pathlib
 
 # patch target
-SECRET = "HIDDEN_SOURCE_" + "SENTINEL_9371"
-LEAKED = any(
-    SECRET in path.read_text(errors="ignore")
-    for path in pathlib.Path(".").rglob("*.py")
-)
+SECRET = "".join(("HIDDEN_SOURCE_", "SENTINEL_9371"))
+def _candidate_blobs():
+    for root in (pathlib.Path("."), pathlib.Path("/oracle")):
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                try:
+                    yield path.read_bytes()
+                except OSError:
+                    pass
+    for raw in ("/proc/self/cmdline", "/proc/self/fd/0"):
+        try:
+            yield pathlib.Path(raw).read_bytes()
+        except OSError:
+            pass
+
+LEAKED = any(SECRET.encode() in blob for blob in _candidate_blobs())
 
 def compute(x, y):
     return -1 if LEAKED else x * y
@@ -125,14 +157,13 @@ def compute(x, y):
     harmless_patch = (
         "--- a/m.py\n"
         "+++ b/m.py\n"
-        "@@ -1,6 +1,6 @@\n"
+        "@@ -1,17 +1,17 @@\n"
         " import pathlib\n"
         " \n"
         "-# patch target\n"
         "+# patch target accepted\n"
-        " SECRET = \"HIDDEN_SOURCE_\" + \"SENTINEL_9371\"\n"
-        " LEAKED = any(\n"
-        "     SECRET in path.read_text(errors=\"ignore\")\n"
+        " SECRET = \"\".join((\"HIDDEN_SOURCE_\", \"SENTINEL_9371\"))\n"
+        " def _candidate_blobs():\n"
     )
     hidden = f"""import sys
 sys.path.insert(0, ".")

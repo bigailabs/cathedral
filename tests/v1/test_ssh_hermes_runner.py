@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util as _ilu
 import json
 import sys
+import tarfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1231,6 +1232,7 @@ async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
 # by ``_run_remote``'s two error paths (timeout + non-zero exit).
 
 _redact_query_tokens = _module._redact_query_tokens
+_redact_query_tokens_in_artifact_tree = _module._redact_query_tokens_in_artifact_tree
 
 
 def test_redact_query_tokens_replaces_token_value() -> None:
@@ -1281,3 +1283,91 @@ def test_redact_query_tokens_stops_at_ampersand_and_quote() -> None:
     assert "ABC123" not in redacted
     assert "&other=ok" in redacted
     assert redacted.endswith("'")
+
+
+def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
+    tmp_path: Path,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "session_s1.json").write_text(
+        json.dumps({"prompt": f"https://api.test/cnf?t={token}&x=1"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "agent.log").write_text(
+        f"fetch https://api.test/cnf?t={token}\n",
+        encoding="utf-8",
+    )
+    sqlite_blob = b"SQLite format 3\x00" + f"https://api.test/cnf?t={token} ".encode()
+    state_db = tmp_path / "state.db"
+    state_db.write_bytes(sqlite_blob)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    for path in (sessions / "session_s1.json", tmp_path / "logs" / "agent.log", state_db):
+        blob = path.read_bytes()
+        assert token.encode() not in blob
+        assert b"?t=REDACTED" in blob
+    assert state_db.stat().st_size == len(sqlite_blob)
+
+
+async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
+    runner_config: SshHermesRunnerConfig,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    conn = MagicMock()
+    conn.run = AsyncMock(return_value=_mk_run_result())
+
+    async def fake_sftp_get(remote: str, local: str) -> None:
+        path = Path(local)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if remote.endswith(".db"):
+            path.write_bytes(b"SQLite format 3\x00" + f"?t={token} ".encode())
+        elif "session_" in remote:
+            path.write_text(json.dumps({"system_prompt": f"https://x/cnf?t={token}"}))
+        elif "request_dump_" in remote:
+            path.write_text(json.dumps({"url": f"https://x/cnf?t={token}&ok=1"}))
+        elif remote.endswith(".log"):
+            path.write_text(f"log url https://x/cnf?t={token}\n")
+        elif remote.endswith(".tar.gz"):
+            path.write_bytes(b"")
+        else:
+            path.write_text("stub\n")
+
+    async def fake_listdir(remote: str) -> list[str]:
+        if remote.endswith("/sessions"):
+            return ["session_s1.json", "request_dump_s1_001.json"]
+        return []
+
+    sftp = _mk_sftp()
+    sftp.get = AsyncMock(side_effect=fake_sftp_get)
+    sftp.listdir = AsyncMock(side_effect=fake_listdir)
+    conn.start_sftp_client = MagicMock(return_value=sftp)
+
+    runner = SshHermesRunner(runner_config)
+    bundle = await runner._collect_and_assemble(
+        conn,
+        eval_profile="cathedral-eval-sat",
+        eval_id="eval-sat-redact",
+        submission_id="sub-sat-redact",
+        eval_round="synthetic_boolean_v1-redact",
+        hermes_version="hermes 0.13.0",
+        card_json={"task_type": "synthetic_boolean_v1"},
+        hermes_stdout=f"stdout saw https://x/cnf?t={token}",
+        resolved_home="/home/cathedral-probe/.hermes",
+    )
+
+    found_redaction = False
+    with tarfile.open(bundle.bundle_tar_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            fileobj = tar.extractfile(member)
+            assert fileobj is not None
+            blob = fileobj.read()
+            assert token.encode() not in blob, member.name
+            found_redaction = found_redaction or b"?t=REDACTED" in blob
+
+    assert found_redaction

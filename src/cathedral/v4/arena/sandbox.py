@@ -314,7 +314,9 @@ class MinerArena:
         """
         try:
             new_files = _apply_unified_diff(self._files, diff_string)
-        except _DiffError as e:
+        except (_DiffError, ArenaError) as e:
+            # Path validation failures (absolute/traversal headers) are patch
+            # rejections from the miner's perspective, same as a bad hunk.
             logger.info("arena.patch_failed", reason=str(e))
             return False
         self._files = new_files

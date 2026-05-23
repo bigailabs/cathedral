@@ -6,7 +6,6 @@ test inside it via ``unshare(1)`` with fresh user / mount / network
 only a small, audited slice of the host filesystem:
 
   * ``/work``      -- the workspace dir bind-mounted read-write
-  * ``/oracle``    -- optional read-only hidden-test bytecode payload
   * ``/python``    -- the pinned interpreter prefix bind-mounted read-only
   * ELF loader/libs -- only the pinned interpreter's ``ldd`` dependency files
   * ``/dev/null``  -- bind-mounted from host
@@ -259,7 +258,6 @@ def assemble_jail(
             proc/   (mountpoint for fresh procfs)
             tmp/    (mountpoint for fresh tmpfs)
             work/   (mountpoint for the workspace bind)
-            oracle/ (optional mountpoint for hidden-test bytecode)
             python/ (mountpoint for the read-only python prefix bind)
             <runtime deps> (empty files for bind-mounted ELF loader/libs)
 
@@ -278,7 +276,7 @@ def assemble_jail(
         raise JailError(f"python_prefix does not exist: {python_prefix}")
 
     jail_root = Path(tempfile.mkdtemp(prefix="v4jail_"))
-    for sub in ("dev", "proc", "tmp", "work", "oracle", "python"):
+    for sub in ("dev", "proc", "tmp", "work", "python"):
         (jail_root / sub).mkdir()
     # Touch the bind-mount targets for /dev/null + /dev/urandom so
     # `mount --bind <file> <file>` has a destination inode.
@@ -292,7 +290,6 @@ def _build_setup_script(
     jail_root: Path,
     workspace_dir: Path,
     python_prefix: Path,
-    hidden_dir: Path | None,
     interpreter_relpath: str,
     bootstrap_in_work: str,
     rlimit_cpu_secs: int,
@@ -317,12 +314,6 @@ def _build_setup_script(
     )
     if runtime_mounts:
         runtime_mounts += "\n"
-    hidden_mount = ""
-    if hidden_dir is not None:
-        hidden_mount = (
-            f"mount --bind {hidden_dir} {jail_root}/oracle\n"
-            f"mount -o remount,bind,ro {jail_root}/oracle\n"
-        )
     ld_dirs = ["/python/lib", "/python/lib64"]
     for path in runtime_paths:
         parent = os.path.normpath(str(path.parent))
@@ -362,7 +353,6 @@ mount --bind {jail_root} {jail_root}
 mount --bind {python_prefix} {jail_root}/python
 mount -o remount,bind,ro {jail_root}/python
 {runtime_mounts}mount --bind {workspace_dir} {jail_root}/work
-{hidden_mount}\
 mount --bind /dev/null {jail_root}/dev/null
 mount -o remount,bind,ro {jail_root}/dev/null
 mount --bind /dev/urandom {jail_root}/dev/urandom
@@ -426,8 +416,8 @@ def run_in_jail(
     workspace_dir: Path,
     python_prefix: Path,
     program: str,
+    stdin_bytes: bytes,
     timeout_seconds: float,
-    hidden_dir: Path | None = None,
     interpreter_relpath: str = "bin/python3",
     rlimit_cpu_secs: int = 4,
     rlimit_as_bytes: int = 512 * 1024 * 1024,
@@ -438,6 +428,8 @@ def run_in_jail(
     We materialize it into ``workspace_dir/__v4_jail_bootstrap.py``
     so the in-namespace bash setup script can ``exec`` it by file
     path rather than ``-c``, sidestepping shell escaping concerns.
+    ``stdin_bytes`` carries the hidden-test bytecode; the bootstrap
+    consumes and closes it before miner-controlled imports execute.
     Returns a ``JailResult`` with stdout / stderr / returncode.
     """
     import time
@@ -455,7 +447,6 @@ def run_in_jail(
         jail_root=jail_root,
         workspace_dir=workspace_dir,
         python_prefix=python_prefix,
-        hidden_dir=hidden_dir,
         interpreter_relpath=interpreter_relpath,
         bootstrap_in_work=_BOOTSTRAP_BASENAME,
         rlimit_cpu_secs=rlimit_cpu_secs,
@@ -501,6 +492,7 @@ def run_in_jail(
     # outer wrapper exits early.
     proc = subprocess.Popen(  # noqa: S603 -- argv list, no shell, fixed binary
         argv,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -508,7 +500,7 @@ def run_in_jail(
         start_new_session=True,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        stdout, stderr = proc.communicate(input=stdin_bytes, timeout=timeout_seconds)
         timed_out = False
         returncode: int | None = proc.returncode
     except subprocess.TimeoutExpired:
