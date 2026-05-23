@@ -11,15 +11,6 @@
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
 
-## Status
-
-- Network: SN39.
-- Current release: `v1.1.27`.
-- Live lane: agent evaluation.
-- Next lane: `synthetic_boolean_v1` SAT.
-- SAT mainnet weight: `0.0`.
-- Remote signed weights: available, validator opt-in.
-
 ## What It Does
 
 Cathedral turns SAT solving into a live mining market.
