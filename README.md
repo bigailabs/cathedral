@@ -46,54 +46,15 @@ Winning is selected by publisher receipt time, not first verified time.
 
 ### Proofs and Protections
 
-<details>
-<summary><strong>Registered-hotkey scoped</strong></summary>
-
-Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped.
-
-</details>
-
-<details>
-<summary><strong>Publisher-authentic</strong></summary>
-
-Eval rows are Ed25519-signed by Cathedral and verified by validators.
-
-</details>
-
-<details>
-<summary><strong>Remote-policy-authentic</strong></summary>
-
-When enabled, validators require a pinned key and verify the vector signature, key id, network, netuid, expiry, and burn snapshot.
-
-</details>
-
-<details>
-<summary><strong>Hash-only public feed</strong></summary>
-
-Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers.
-
-</details>
-
-<details>
-<summary><strong>Publisher-checkable</strong></summary>
-
-Cathedral parses DIMACS and checks clauses before signing a score row.
-
-</details>
-
-<details>
-<summary><strong>Receipt-ordered</strong></summary>
-
-Winning SAT receipt is selected by publisher-observed receipt time after Hermes stdout returns.
-
-</details>
-
-<details>
-<summary><strong>Burn-configured</strong></summary>
-
-Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID.
-
-</details>
+| Claim | Mechanism |
+|---|---|
+| **Registered-hotkey scoped** | <details><summary>View</summary>Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped.</details> |
+| **Publisher-authentic** | <details><summary>View</summary>Eval rows are Ed25519-signed by Cathedral and verified by validators.</details> |
+| **Remote-policy-authentic** | <details><summary>View</summary>When enabled, validators require a pinned key and verify the vector signature, key id, network, netuid, expiry, and burn snapshot.</details> |
+| **Hash-only public feed** | <details><summary>View</summary>Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers.</details> |
+| **Publisher-checkable** | <details><summary>View</summary>Cathedral parses DIMACS and checks clauses before signing a score row.</details> |
+| **Receipt-ordered** | <details><summary>View</summary>Winning SAT receipt is selected by publisher-observed receipt time after Hermes stdout returns.</details> |
+| **Burn-configured** | <details><summary>View</summary>Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID.</details> |
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 
