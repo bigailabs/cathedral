@@ -10,6 +10,26 @@ need to know about.
 
 ---
 
+## v1.1.27 - Remote weight validator opt-in config
+
+**Date:** 2026-05-22
+
+**Headline:** Signed validator-ops release for Serge's remote signed-weight path. Validators still opt in explicitly, but the shipped config and provisioner now carry the public key pin needed for that path.
+
+### Changed
+
+- **Remote weight config ships in templates.** `config/mainnet.toml` and `config/testnet.toml` now include disabled `[remote_weight_source]` blocks so operators change only `enabled = true` when opting in.
+- **Weight-policy public key defaults in provisioning.** `scripts/provision_validator.sh` writes the current Cathedral weight-policy public key into `/etc/cathedral/validator.env` unless the operator overrides `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX`.
+- **Operator docs include the concrete public pin.** The validator runbook and handoff docs now name `8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd`.
+
+### Operator note
+
+- This release does not turn remote weights on by itself. Validators must still set `[remote_weight_source].enabled = true`.
+- The live publisher serves signed remote vectors under key id `cathedral-weight-policy`.
+- The signed vector currently keeps `synthetic_boolean_v1 = 0.0`; this is not a scored SAT launch.
+
+---
+
 ## v1.1.25 - Managed validator config and SAT readiness probe
 
 **Date:** 2026-05-20
