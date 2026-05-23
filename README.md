@@ -64,8 +64,11 @@ Winning is selected by publisher receipt time, not first verified time.
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 
-<details>
-<summary><strong>Getting Started</strong></summary>
+---
+
+## 🚀 Getting Started
+
+Use the quick starts below to work inside the subnet.
 
 ### Installation
 
@@ -77,9 +80,7 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-### Miner Quick Start
-
-Read [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md).
+### [Miner Quick Start](docs/miner/QUICKSTART.md)
 
 You need:
 
@@ -98,9 +99,7 @@ Return exactly:
 ```
 ````
 
-### Validator Quick Start
-
-Read [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md).
+### [Validator Quick Start](docs/validator/RUNBOOK.md)
 
 Default mode pulls signed rows:
 
@@ -112,5 +111,3 @@ cathedral-validator migrate --config config/mainnet.toml
 cathedral chain-check --config config/mainnet.toml
 cathedral-validator serve --config config/mainnet.toml
 ```
-
-</details>
