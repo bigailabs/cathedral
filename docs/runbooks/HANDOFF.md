@@ -29,6 +29,8 @@ A clean handoff is a property of the system, not a one-time event. If the valida
    curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json | jq
    # pin CATHEDRAL_PUBLIC_KEY_HEX (env)         from kid=cathedral-eval-signing
    # pin polaris.public_key_hex (TOML)          from kid=polaris-runtime-attestation
+   # CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX defaults in the provisioner:
+   # 8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd
    export CATHEDRAL_BEARER=$(openssl rand -hex 32)
    cathedral-validator migrate --config config/<network>.toml
    ```

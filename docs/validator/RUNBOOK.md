@@ -104,8 +104,12 @@ request_timeout_secs = 10.0
 Set the pinned key:
 
 ```bash
-export CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX=<cathedral-weight-policy-public-key>
+export CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX=8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd
 ```
+
+The validator provisioner writes this current Cathedral public pin into
+`/etc/cathedral/validator.env` by default. Override it only when release notes
+announce a weight-policy key rotation.
 
 Before enabling SAT weight on mainnet, run:
 
