@@ -2,14 +2,14 @@
   <img src="docs/assets/cathedral-mark.svg" alt="Cathedral mark" width="112">
 </p>
 
-<h1 align="center">Cathedral</h1>
-
 <p align="center">Competitive SAT solving as a Bittensor incentive market.</p>
 
 <p align="center">
   <a href="https://cathedral.computer">Site</a> |
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
+
+<h1 align="center">Cathedral</h1>
 
 ## [Why Cathedral](#why-cathedral)
 
