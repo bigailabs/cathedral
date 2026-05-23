@@ -48,13 +48,13 @@ Winning is selected by publisher receipt time, not first verified time.
 
 | Claim | Mechanism |
 |---|---|
-| **Registered-hotkey scoped** | Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped. |
-| **Publisher-authentic** | Eval rows are Ed25519-signed by Cathedral and verified by validators. |
-| **Remote-policy-authentic** | When enabled, validators require a pinned key and verify the vector signature, key id, network, netuid, expiry, and burn snapshot. |
-| **Hash-only public feed** | Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers. |
-| **Publisher-checkable** | Cathedral parses DIMACS and checks clauses before signing a score row. |
-| **Receipt-ordered** | Winning SAT receipt is selected by publisher-observed receipt time after Hermes stdout returns. |
-| **Burn-configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID. |
+| **Hotkey scoped** | Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped. |
+| **Publisher signed** | Eval rows are Ed25519-signed by Cathedral and verified by validators. |
+| **Remote policy** | When enabled, validators require a pinned key and verify the vector signature, key id, network, netuid, expiry, and burn snapshot. |
+| **Hash-only feed** | Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers. |
+| **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
+| **Receipt ordered** | Winning SAT receipt is selected by publisher-observed receipt time after Hermes stdout returns. |
+| **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID. |
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 
