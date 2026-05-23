@@ -58,7 +58,9 @@ the rented Polaris box.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import io
 import json
 import os
 import re
@@ -144,11 +146,13 @@ def _redact_query_tokens_in_artifact_tree(root: Path) -> None:
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        # Do not rewrite compressed archives in place: changing compressed
-        # bytes would invalidate checksums. SAT prompt/request tokens are stored
-        # in state.db, sessions/request dumps, logs, and stdout, all of which
-        # are uncompressed files in this bundle tree.
-        if path.suffix in {".gz", ".tgz", ".zip"}:
+        if _is_tar_gz_artifact(path):
+            _redact_query_tokens_in_tar_gz(path)
+            continue
+        # Do not byte-edit unknown compressed archives in place: changing
+        # compressed bytes would invalidate container checksums. Known Hermes
+        # tarballs are handled above by unpacking and repacking each member.
+        if path.suffix in {".gz", ".zip"}:
             continue
         try:
             original = path.read_bytes()
@@ -158,6 +162,56 @@ def _redact_query_tokens_in_artifact_tree(root: Path) -> None:
         if redacted == original:
             continue
         path.write_bytes(redacted)
+
+
+def _is_tar_gz_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".tar.gz") or name.endswith(".tgz")
+
+
+def _redact_query_tokens_in_tar_gz(path: Path) -> None:
+    """Repack a tar.gz artifact after redacting token-bearing file members.
+
+    Hermes skills are collected as ``skills.tar.gz``. They can contain prompt
+    copies or logs, so skipping compressed archives would reintroduce CNF token
+    leaks into the final public trace bundle.
+    """
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+        with tarfile.open(path, "r:gz") as source, tarfile.open(tmp_path, "w:gz") as target:
+            for member in source.getmembers():
+                out_member = copy.copy(member)
+                if not member.isfile():
+                    target.addfile(out_member)
+                    continue
+                extracted = source.extractfile(member)
+                if extracted is None:
+                    out_member.size = 0
+                    target.addfile(out_member, io.BytesIO(b""))
+                    continue
+                redacted = _redact_query_token_bytes(extracted.read())
+                out_member.size = len(redacted)
+                target.addfile(out_member, io.BytesIO(redacted))
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except (tarfile.TarError, OSError) as exc:
+        logger.warning(
+            "ssh_hermes_trace_archive_redaction_failed",
+            path=str(path),
+            error=str(exc),
+        )
+    finally:
+        if tmp_path is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_path)
 
 
 def _now_utc_iso() -> str:

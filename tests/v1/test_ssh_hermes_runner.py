@@ -14,6 +14,7 @@ Mocks asyncssh at the module level. Covers:
 from __future__ import annotations
 
 import importlib.util as _ilu
+import io
 import json
 import sys
 import tarfile
@@ -1303,6 +1304,12 @@ def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
     sqlite_blob = b"SQLite format 3\x00" + f"https://api.test/cnf?t={token} ".encode()
     state_db = tmp_path / "state.db"
     state_db.write_bytes(sqlite_blob)
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        payload = f"skill prompt https://api.test/cnf?t={token}\n".encode()
+        info = tarfile.TarInfo("skills/prompt.txt")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
 
     _redact_query_tokens_in_artifact_tree(tmp_path)
 
@@ -1311,6 +1318,12 @@ def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
         assert token.encode() not in blob
         assert b"?t=REDACTED" in blob
     assert state_db.stat().st_size == len(sqlite_blob)
+    with tarfile.open(skills_tar, "r:gz") as tar:
+        member = tar.extractfile("skills/prompt.txt")
+        assert member is not None
+        skills_payload = member.read()
+    assert token.encode() not in skills_payload
+    assert b"?t=REDACTED" in skills_payload
 
 
 async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
@@ -1332,7 +1345,11 @@ async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
         elif remote.endswith(".log"):
             path.write_text(f"log url https://x/cnf?t={token}\n")
         elif remote.endswith(".tar.gz"):
-            path.write_bytes(b"")
+            with tarfile.open(path, "w:gz") as tar:
+                payload = f"skill memory https://x/cnf?t={token}\n".encode()
+                info = tarfile.TarInfo("skills/memory.txt")
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
         else:
             path.write_text("stub\n")
 
@@ -1360,6 +1377,7 @@ async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
     )
 
     found_redaction = False
+    found_inner_redaction = False
     with tarfile.open(bundle.bundle_tar_path, "r:gz") as tar:
         for member in tar.getmembers():
             if not member.isfile():
@@ -1369,5 +1387,14 @@ async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
             blob = fileobj.read()
             assert token.encode() not in blob, member.name
             found_redaction = found_redaction or b"?t=REDACTED" in blob
+            if member.name.endswith("skills.tar.gz"):
+                with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as skills_tar:
+                    inner = skills_tar.extractfile("skills/memory.txt")
+                    assert inner is not None
+                    inner_blob = inner.read()
+                assert token.encode() not in inner_blob
+                assert b"?t=REDACTED" in inner_blob
+                found_inner_redaction = True
 
     assert found_redaction
+    assert found_inner_redaction
