@@ -60,7 +60,9 @@ class TaskFamilySignedResult:
 
 def task_family_feed_enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
-    return values.get("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "").lower() == "true"
+    # Keep this normalization aligned with SAT launch preflight so a
+    # whitespace-padded operator env cannot pass preflight but disable runtime.
+    return values.get("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "").strip().lower() == "true"
 
 
 def enabled_task_family_ids(env: Mapping[str, str] | None = None) -> list[str]:
@@ -99,7 +101,8 @@ def task_family_prober_version_warning(
     values = os.environ if env is None else env
     if not task_family_feed_enabled(values):
         return None
-    if values.get("CATHEDRAL_PROBER_VERSION", "v1").lower() == "v2":
+    # Match orchestrator dispatch, which also trims before selecting v2.
+    if values.get("CATHEDRAL_PROBER_VERSION", "v1").strip().lower() == "v2":
         return None
     return {
         "reason": "prober_version_not_v2",

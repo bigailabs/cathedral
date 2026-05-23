@@ -288,8 +288,8 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                 #      cathedral-runtime LLM shim path, kept as backup
                 #   5. attestation_mode='tee' - bundled card, pre-verified
                 #   6. anything else falls back to CATHEDRAL_EVAL_MODE
-                mode = (submission.get("attestation_mode") or "").lower()
-                env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+                mode = (submission.get("attestation_mode") or "").strip().lower()
+                env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").strip().lower()
                 has_key = bool(os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"))
                 if env_mode.startswith("stub"):
                     return _resolve_polaris_runner_from_env()
@@ -737,7 +737,7 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
         signer = EvalSigner.from_env_hex(signing_hex)
 
         polaris: PolarisRunner
-        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").strip().lower()
         if eval_mode == "stub":
             polaris = StubPolarisRunner()
         elif eval_mode == "bundle":
@@ -884,7 +884,7 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
         signer = EvalSigner.from_env_hex(signing_hex)
 
         # Polaris runner - stub mode unless explicitly configured.
-        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").lower()
+        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").strip().lower()
         polaris: PolarisRunner
         if eval_mode.startswith("stub"):
             polaris = _build_stub_polaris(eval_mode)

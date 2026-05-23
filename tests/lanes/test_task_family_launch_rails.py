@@ -253,6 +253,15 @@ def test_task_family_prober_version_warning_is_explicit() -> None:
         )
         is None
     )
+    assert (
+        task_family_prober_version_warning(
+            {
+                "CATHEDRAL_TASK_FAMILY_FEED_ENABLED": " true ",
+                "CATHEDRAL_PROBER_VERSION": "v2 ",
+            }
+        )
+        is None
+    )
 
 
 def test_ssh_hermes_task_family_runner_interface_is_launch_smoked() -> None:

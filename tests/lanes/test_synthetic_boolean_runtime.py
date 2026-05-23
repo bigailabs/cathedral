@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import blake3
 import pytest
 import structlog
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -89,6 +90,24 @@ class _RaceLostChallengeLock:
     async def try_lock(self, **_kwargs: Any) -> None:
         self.try_lock_calls += 1
         return None
+
+
+def test_receipt_answer_hash_never_parses_miner_stdout(monkeypatch) -> None:
+    stdout = "malformed" + ("}" * 100_000)
+
+    def fail_if_parse_attempted(_stdout: str) -> dict[str, Any]:
+        raise AssertionError("receipt hashing must not parse stdout")
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "extract_answer",
+        fail_if_parse_attempted,
+        raising=False,
+    )
+
+    assert orchestrator_module._receipt_answer_hash(stdout) == blake3.blake3(
+        stdout.encode("utf-8")
+    ).hexdigest()
 
 
 class _SolvingRunner(StubPolarisRunner):
