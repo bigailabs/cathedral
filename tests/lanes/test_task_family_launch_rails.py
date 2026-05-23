@@ -9,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.eval.scoring_pipeline import EvalSigner
+from cathedral.lanes import publisher as publisher_module
 from cathedral.lanes.contract import (
     HiddenMetadata,
     PublicProblem,
@@ -176,6 +177,27 @@ def test_task_family_answer_extraction_rejects_multiple_final_answer_blocks() ->
     with pytest.raises(AnswerExtractionError) as exc:
         extract_answer(stdout)
     assert exc.value.reason == "multiple_final_answer_blocks"
+
+
+def test_task_family_answer_extraction_fallback_is_linear(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_loads = publisher_module.json.loads
+    loads_calls = 0
+
+    def counting_loads(blob: str):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(blob)
+
+    monkeypatch.setattr(publisher_module.json, "loads", counting_loads)
+
+    stdout = (
+        "miner log without a fence\n"
+        + ("}" * 100_000)
+        + '\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}'
+    )
+
+    assert extract_answer(stdout) == {"dimacs_solution": "s SATISFIABLE\nv 1 0\n"}
+    assert loads_calls == 1
 
 
 def test_task_family_prompt_keeps_challenge_generic() -> None:

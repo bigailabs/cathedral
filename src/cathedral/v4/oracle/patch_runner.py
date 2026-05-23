@@ -4,9 +4,10 @@ This module runs ONLY on the publisher's worker host, never on a
 validator. It takes the original workspace state (the in-memory
 ``{relpath: content}`` map produced by the engine after the
 synthetic bug patch has been applied), applies the miner-submitted
-unified diff to it, appends the hidden verification test, writes
-the resulting workspace to a tmpfs scratch dir, and runs the test
-in a child Python process with a hard wall-clock timeout.
+unified diff to it, writes only the patched workspace to a tmpfs
+scratch dir, compiles the hidden verification test outside that
+workspace, and runs the test in a child Python process with a hard
+wall-clock timeout.
 
 Security posture (publisher-side worker; defence in depth):
 
@@ -39,8 +40,8 @@ Security posture (publisher-side worker; defence in depth):
     chosen CPU budget. Address space is capped at 512MiB.
   * **Strict command allowlist.** The runner only spawns
     ``sys.executable`` with ``-I -c <bootstrap>``. No shell, no
-    user-supplied argv. The hidden test code is materialized to a
-    file inside the scratch dir and discovered with ``runpy``.
+    user-supplied argv. The hidden test source is never written into
+    ``/work``; the child receives a private marshalled code object.
   * **No host filesystem writes outside the scratch dir.** ``cwd``
     is pinned to a fresh ``tempfile.TemporaryDirectory`` rooted in
     ``/dev/shm`` (tmpfs) when available, otherwise the platform
@@ -67,6 +68,7 @@ covered by both arena and oracle test suites.
 
 from __future__ import annotations
 
+import marshal
 import os
 import resource
 import shutil
@@ -110,6 +112,8 @@ PATCH_RUNNER_BUDGET_SECONDS: float = BOOKKEEPING_BUDGET_SECONDS
 
 # Memory ceiling for the spawned hidden-test child (bytes).
 _RLIMIT_AS_BYTES: int = 512 * 1024 * 1024
+_HIDDEN_CODE_BASENAME = "__v4_hidden_test.marshal"
+_HIDDEN_CODE_FILENAME = "<v4_hidden_test>"
 
 # Jail-side rlimits applied inside the jail bootstrap (before exec of
 # the hidden-test interpreter). Same numeric ceilings as the non-jailed
@@ -338,9 +342,11 @@ def run_patch_against_hidden_test(
         time. The engine holds this; the miner never sees it.
       patch_str: the miner's unified-diff submission.
       hidden_test_code: the publisher's hidden verification test, as
-        a Python source string. Run via ``runpy.run_path``.
-      hidden_test_relpath: where to write the hidden test inside the
-        scratch dir. Defaults to ``test_hidden_v4.py``.
+        a Python source string. It is compiled outside the patched
+        workspace before execution so miner code cannot read
+        ``test_hidden_v4.py`` from ``/work``.
+      hidden_test_relpath: deprecated compatibility argument. Hidden
+        tests are no longer written into the scratch workspace.
       timeout_seconds: wall-clock subprocess timeout. Defaults to
         ``REPRO_BUDGET_SECONDS`` (3s). Callers that want the tighter
         bookkeeping budget should pass ``BOOKKEEPING_BUDGET_SECONDS``.
@@ -382,35 +388,57 @@ def run_patch_against_hidden_test(
 
     with tempfile.TemporaryDirectory(prefix="v4oracle_", dir=str(scratch_root)) as td:
         td_path = Path(td)
-        for relpath, content in patched.items():
-            dest = td_path / relpath
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
-        hidden_dest = td_path / hidden_test_relpath
-        hidden_dest.parent.mkdir(parents=True, exist_ok=True)
-        hidden_dest.write_text(hidden_test_code)
-
-        if isolation_mode == "jailed":
-            return _run_jailed(
-                workspace_dir=td_path,
-                hidden_test_relpath=hidden_test_relpath,
-                timeout_seconds=timeout_seconds,
-                patch_applied=patch_applied,
+        hidden_root = Path(tempfile.mkdtemp(prefix="v4oracle_hidden_", dir=str(scratch_root)))
+        try:
+            for relpath, content in patched.items():
+                dest = td_path / relpath
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content)
+            hidden_code_path = _materialize_hidden_code(
+                hidden_test_code=hidden_test_code,
+                hidden_root=hidden_root,
             )
 
-        return _run_subprocess(
-            workspace_dir=td_path,
-            hidden_dest=hidden_dest,
-            timeout_seconds=timeout_seconds,
-            patch_applied=patch_applied,
-            isolation_mode=isolation_mode,
-        )
+            if isolation_mode == "jailed":
+                return _run_jailed(
+                    workspace_dir=td_path,
+                    hidden_code_path=hidden_code_path,
+                    timeout_seconds=timeout_seconds,
+                    patch_applied=patch_applied,
+                )
+
+            return _run_subprocess(
+                workspace_dir=td_path,
+                hidden_code_path=hidden_code_path,
+                timeout_seconds=timeout_seconds,
+                patch_applied=patch_applied,
+                isolation_mode=isolation_mode,
+            )
+        finally:
+            shutil.rmtree(hidden_root, ignore_errors=True)
+
+
+def _materialize_hidden_code(*, hidden_test_code: str, hidden_root: Path) -> Path:
+    """Compile hidden test source outside the patched workspace.
+
+    The child only receives a marshalled code object, not a readable
+    ``test_hidden_v4.py`` in ``/work``. That prevents miner patches from
+    opening the hidden source during module import and specializing to the
+    exact assertions.
+    """
+    hidden_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(hidden_root, 0o700)
+    hidden_code_path = hidden_root / _HIDDEN_CODE_BASENAME
+    code = compile(hidden_test_code, _HIDDEN_CODE_FILENAME, "exec")
+    hidden_code_path.write_bytes(marshal.dumps(code))
+    os.chmod(hidden_code_path, 0o600)
+    return hidden_code_path
 
 
 def _run_subprocess(
     *,
     workspace_dir: Path,
-    hidden_dest: Path,
+    hidden_code_path: Path,
     timeout_seconds: float,
     patch_applied: bool,
     isolation_mode: IsolationMode,
@@ -425,8 +453,9 @@ def _run_subprocess(
 
     program = (
         _HERMETIC_BOOTSTRAP
-        + "\nimport runpy as _rp\n"
-        + f"_rp.run_path({str(hidden_dest)!r}, run_name='__main__')\n"
+        + "\nimport marshal as _m, pathlib as _p\n"
+        + f"_code = _m.loads(_p.Path({str(hidden_code_path)!r}).read_bytes())\n"
+        + f"exec(_code, {{'__name__': '__main__', '__file__': {_HIDDEN_CODE_FILENAME!r}}})\n"
     )
     argv: list[str] = [
         *isolation_prefix,
@@ -508,16 +537,17 @@ def _kill_fallback_process_tree(proc: subprocess.Popen[bytes]) -> None:
 def _run_jailed(
     *,
     workspace_dir: Path,
-    hidden_test_relpath: str,
+    hidden_code_path: Path,
     timeout_seconds: float,
     patch_applied: bool,
 ) -> PatchRunResult:
     """Linux fs-jail path. See cathedral.v4.oracle.jail for the helper."""
     program = (
         _HERMETIC_BOOTSTRAP
-        + "\nimport runpy as _rp, os as _os\n"
+        + "\nimport marshal as _m, os as _os, pathlib as _p\n"
         + "_os.chdir('/work')\n"
-        + f"_rp.run_path('/work/{hidden_test_relpath}', run_name='__main__')\n"
+        + f"_code = _m.loads(_p.Path('/oracle/{hidden_code_path.name}').read_bytes())\n"
+        + f"exec(_code, {{'__name__': '__main__', '__file__': {_HIDDEN_CODE_FILENAME!r}}})\n"
     )
 
     # Use sys.base_prefix (not sys.prefix) so we bind the underlying
@@ -532,6 +562,7 @@ def _run_jailed(
             jail_root=jail_root,
             workspace_dir=workspace_dir,
             python_prefix=python_prefix,
+            hidden_dir=hidden_code_path.parent,
             program=program,
             timeout_seconds=timeout_seconds,
             rlimit_cpu_secs=JAIL_RLIMIT_CPU_SECS,

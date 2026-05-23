@@ -91,12 +91,24 @@ logger = structlog.get_logger(__name__)
 # Siphon rule constants. Centralized here so tests + audit log share them.
 ONE_SHOT_TURN_THRESHOLD: int = 1
 SIPHON_FLAG_ONE_SHOT: str = "one_shot_no_trace"
+SUPPORTED_ORACLE_LANGUAGES: frozenset[str] = frozenset({"python"})
 
 
 class EngineError(Exception):
     """Raised on operator/wiring errors that the engine cannot recover
     from (missing vault, missing corpus path, malformed task row).
     """
+
+
+def _assert_supported_oracle_language(language: str, *, base_repo: str | None = None) -> None:
+    normalized = language.strip().lower()
+    if normalized in SUPPORTED_ORACLE_LANGUAGES:
+        return
+    repo_hint = f" for {base_repo!r}" if base_repo else ""
+    raise EngineError(
+        f"unsupported v4 oracle language{repo_hint}: {language!r}; "
+        "only Python hidden tests are wired to the publisher oracle"
+    )
 
 
 class PublisherHandle(BaseModel):
@@ -305,6 +317,11 @@ class CathedralEngine:
             seed=seed,
             workspace_root=self._workspace_root,
         )
+        # The publisher oracle currently executes Python hidden tests only.
+        # Non-Python vaults may still be used for local scrambler/toolchain
+        # experiments, but production task issuance must wait for a matching
+        # verifier instead of feeding TS source to the Python patch runner.
+        _assert_supported_oracle_language(scrambled.language, base_repo=base_repo)
         try:
             broken = _apply_unified_diff(dict(scrambled.files), bug_patch)
         except _DiffError as e:
@@ -414,6 +431,8 @@ class CathedralEngine:
         patch_str: str,
         hidden_test_code: str,
         timeout_seconds: float = REPRO_BUDGET_SECONDS,
+        *,
+        language: str = "python",
     ) -> tuple[bool, float]:
         """Run the miner's patch against the hidden test on the
         publisher-side oracle.
@@ -426,6 +445,7 @@ class CathedralEngine:
         lightweight bookkeeping verification a caller can pass the
         tighter ``BOOKKEEPING_BUDGET_SECONDS`` ceiling.
         """
+        _assert_supported_oracle_language(language)
         start = time.monotonic()
         result: PatchRunResult = run_patch_against_hidden_test(
             original_repo_state=original_repo_state,

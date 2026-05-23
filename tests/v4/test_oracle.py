@@ -108,6 +108,48 @@ def test_wrong_logic_patch_runs_but_fails() -> None:
     assert result.duration_seconds < REPRO_BUDGET_SECONDS
 
 
+def test_hidden_source_is_not_materialized_in_workspace() -> None:
+    secret = "HIDDEN_SOURCE_SENTINEL_9371"
+    probe_file = """import pathlib
+
+# patch target
+SECRET = "HIDDEN_SOURCE_" + "SENTINEL_9371"
+LEAKED = any(
+    SECRET in path.read_text(errors="ignore")
+    for path in pathlib.Path(".").rglob("*.py")
+)
+
+def compute(x, y):
+    return -1 if LEAKED else x * y
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,6 +1,6 @@\n"
+        " import pathlib\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " SECRET = \"HIDDEN_SOURCE_\" + \"SENTINEL_9371\"\n"
+        " LEAKED = any(\n"
+        "     SECRET in path.read_text(errors=\"ignore\")\n"
+    )
+    hidden = f"""import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, {secret!r}
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
 def test_network_is_blocked_inside_runner() -> None:
     """Hidden test attempts urllib.urlopen; the bootstrap must block."""
     network_test = """import sys

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from cathedral.v4.arena import IsomorphicScrambler
+from cathedral.v4.cathedral_engine import CathedralEngine, EngineError
 
 
 def test_ts_vault_manifest_well_formed(vault_path: Path) -> None:
@@ -37,6 +38,25 @@ def test_ts_vault_scrambles_cleanly(vault_path: Path, tmp_path: Path) -> None:
     # the renamed identifier somewhere.
     src = (repo.workspace_path / "src" / "user_format.ts").read_text()
     assert "formatGreeting" not in src or repo.rename_map.get("formatGreeting") in src
+
+
+def test_ts_vault_is_gated_until_matching_oracle_exists(vault_path: Path) -> None:
+    engine = CathedralEngine(vault_path=str(vault_path))
+
+    with pytest.raises(EngineError, match="unsupported v4 oracle language"):
+        engine.build_bundle_and_handle(
+            "ts_prisma_base",
+            bug_patch="--- a/src/user_format.ts\n+++ b/src/user_format.ts\n",
+            seed=11,
+        )
+
+    with pytest.raises(EngineError, match="unsupported v4 oracle language"):
+        engine.verify_miner_submission(
+            original_repo_state={"src/user_format.ts": "export {};\n"},
+            patch_str="--- a/src/user_format.ts\n+++ b/src/user_format.ts\n",
+            hidden_test_code="console.log('ts hidden test');\n",
+            language="typescript",
+        )
 
 
 @pytest.mark.skipif(

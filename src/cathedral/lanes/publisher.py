@@ -528,29 +528,53 @@ def _decode_json(blob: str, *, source: str) -> dict[str, Any]:
 
 
 def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
-    closes: list[int] = []
+    # Keep the no-fence fallback linear: miners control stdout, so rescanning
+    # backward from every closing brace lets malformed output burn verifier CPU.
+    # We only try completed top-level brace ranges once; FINAL_ANSWER/json fences
+    # remain the preferred transport for precise extraction.
+    last: dict[str, Any] | None = None
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+
     for i, ch in enumerate(stdout):
-        if ch == "}":
-            closes.append(i)
-    while closes:
-        end = closes.pop()
-        depth = 0
-        for j in range(end, -1, -1):
-            c = stdout[j]
-            if c == "}":
-                depth += 1
-            elif c == "{":
-                depth -= 1
-                if depth == 0:
-                    candidate = stdout[j : end + 1]
-                    try:
-                        parsed = json.loads(candidate)
-                    except json.JSONDecodeError:
-                        break
+        if depth == 0:
+            if ch == "{":
+                start = i
+                depth = 1
+                in_string = False
+                escaped = False
+            continue
+
+        if escaped:
+            escaped = False
+            continue
+        if in_string and ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidate = stdout[start : i + 1]
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+                else:
                     if isinstance(parsed, dict):
-                        return parsed
-                    break
-    return None
+                        last = parsed
+                start = None
+
+    return last
 
 
 def _parse_ms_iso(value: str) -> datetime:

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -357,7 +358,10 @@ async def test_active_file_backed_snapshot_cache_uses_configured_root(
     assert r.text == CNF_BODY
     cache = wired_app["app"].state.cnf_snapshot_cache
     assert cache._root == cache_root
-    assert list(cache_root.glob("*.cnf"))
+    snapshots = list(cache_root.glob("*.cnf"))
+    assert snapshots
+    assert stat.S_IMODE(cache_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(snapshots[0].stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio

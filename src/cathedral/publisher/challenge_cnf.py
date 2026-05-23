@@ -229,7 +229,11 @@ def _materialize_verified_cnf_snapshot(
     the first fetch copies bytes into a private content-addressed snapshot and
     later fetches reuse it.
     """
-    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Cached CNFs are still private challenge material. Operators may place the
+    # cache on a shared volume, so force owner-only directory permissions rather
+    # than inheriting a permissive umask or pre-existing directory mode.
+    os.chmod(cache_root, stat.S_IRWXU)
     target = cache_root / f"{expected_sha256}.cnf"
     # Reuse is controlled by the process-local cache map. A configurable cache
     # root may survive restarts, so a pre-existing digest-named file is not
@@ -266,7 +270,7 @@ def _materialize_verified_cnf_snapshot(
                 os.fsync(snapshot.fileno())
         if digest.hexdigest() != expected_sha256:
             raise _CnfFileHashMismatchError
-        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
         os.replace(tmp_path, target)
         tmp_path = None
         return target
