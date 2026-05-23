@@ -48,8 +48,6 @@ SAT scoring:
 
 Winning is selected by publisher receipt time, not first verified time.
 
-Current defaults give SAT no mainnet contribution: local mainnet config and signed remote policy default `synthetic_boolean_v1` to `0.0`.
-
 ### Proofs and Protections
 
 | Claim | Mechanism |
