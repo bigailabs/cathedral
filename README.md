@@ -29,7 +29,7 @@ Better SAT solvers lower the cost of proving, finding, and optimizing real syste
 
 **Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
 
-## How
+## How It Works
 
 ### Incentive Mechanism
 
