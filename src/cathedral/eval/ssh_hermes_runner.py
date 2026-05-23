@@ -192,7 +192,7 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
             tmp_path = tmp.name
         with tarfile.open(path, "r:gz") as source, tarfile.open(tmp_path, "w:gz") as target:
             for member in source.getmembers():
-                out_member = copy.copy(member)
+                out_member = _redact_query_tokens_in_tar_member(member)
                 if not member.isfile():
                     target.addfile(out_member)
                     continue
@@ -216,6 +216,26 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
         if tmp_path is not None:
             with suppress(FileNotFoundError):
                 os.unlink(tmp_path)
+
+
+def _redact_query_tokens_in_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Return a copied ``TarInfo`` with token-bearing metadata scrubbed.
+
+    File content redaction is not enough for SAT traces: tar member names,
+    symlink targets, owners, and pax headers can also carry copied prompts or
+    CNF URLs. Metadata does not have binary offset constraints, so fixed-length
+    replacement is unnecessary here.
+    """
+    out = copy.copy(member)
+    out.name = _redact_query_tokens(out.name)
+    out.linkname = _redact_query_tokens(out.linkname)
+    out.uname = _redact_query_tokens(out.uname)
+    out.gname = _redact_query_tokens(out.gname)
+    out.pax_headers = {
+        _redact_query_tokens(str(key)): _redact_query_tokens(str(value))
+        for key, value in member.pax_headers.items()
+    }
+    return out
 
 
 def _now_utc_iso() -> str:

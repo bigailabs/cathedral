@@ -8,7 +8,9 @@ on:
     paths:
       - .github/workflows/task-family-security-guard.yml
       - pyproject.toml
+      - src/cathedral/eval/scoring_pipeline.py
       - src/cathedral/lanes/**
+      - src/cathedral/publisher/reads.py
       - tests/lanes/**
   push:
     branches:
@@ -18,7 +20,9 @@ on:
     paths:
       - .github/workflows/task-family-security-guard.yml
       - pyproject.toml
+      - src/cathedral/eval/scoring_pipeline.py
       - src/cathedral/lanes/**
+      - src/cathedral/publisher/reads.py
       - tests/lanes/**
 
 jobs:
@@ -43,8 +47,10 @@ jobs:
       - name: Lint public task-family guard surface
         run: |
           python -m ruff check \
+            src/cathedral/eval/scoring_pipeline.py \
             src/cathedral/lanes/contract.py \
             src/cathedral/lanes/registry.py \
+            src/cathedral/publisher/reads.py \
             tests/lanes/test_contract.py \
             tests/lanes/test_task_family_launch_rails.py \
             tests/lanes/test_public_repo_leak_guard.py

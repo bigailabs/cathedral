@@ -1320,8 +1320,17 @@ def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
     with tarfile.open(skills_tar, "w:gz") as tar:
         payload = f"skill prompt https://api.test/cnf?t={token}\n".encode()
         info = tarfile.TarInfo("skills/prompt.txt")
+        info.pax_headers = {"comment": f"https://api.test/cnf?t={token}"}
         info.size = len(payload)
         tar.addfile(info, io.BytesIO(payload))
+        name_payload = b"token in member name only\n"
+        name_info = tarfile.TarInfo(f"skills/name?t={token}")
+        name_info.size = len(name_payload)
+        tar.addfile(name_info, io.BytesIO(name_payload))
+        link_info = tarfile.TarInfo("skills/link")
+        link_info.type = tarfile.SYMTYPE
+        link_info.linkname = f"https://api.test/cnf?t={token}"
+        tar.addfile(link_info)
 
     _redact_query_tokens_in_artifact_tree(tmp_path)
 
@@ -1334,8 +1343,15 @@ def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
         member = tar.extractfile("skills/prompt.txt")
         assert member is not None
         skills_payload = member.read()
+        members = tar.getmembers()
     assert token.encode() not in skills_payload
     assert b"?t=REDACTED" in skills_payload
+    serialized_metadata = "\n".join(
+        f"{member.name} {member.linkname} {member.uname} {member.gname} {member.pax_headers}"
+        for member in members
+    )
+    assert token not in serialized_metadata
+    assert "?t=REDACTED" in serialized_metadata
 
 
 async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(

@@ -192,6 +192,85 @@ assert compute(3, 4) == 12, {secret!r}
     assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
+def test_hidden_frame_inspection_is_blocked_for_miner_code() -> None:
+    probe_file = """import inspect
+import sys
+
+# patch target
+FRAME_ACCESS_BLOCKED = False
+HIDDEN_FRAME_SEEN = False
+
+def _hidden_frame_seen(frame):
+    while frame is not None:
+        if frame.f_code.co_filename == "<v4_hidden_test>":
+            return True
+        frame = frame.f_back
+    return False
+
+try:
+    HIDDEN_FRAME_SEEN = _hidden_frame_seen(sys._getframe())
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = "frame inspection is blocked" in str(exc)
+
+try:
+    inspect.stack(context=0)
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and "frame inspection is blocked" in str(exc)
+else:
+    # inspect.stack() succeeding during hidden-test import means miner code can
+    # reach the caller chain and inspect the private hidden-test frame.
+    HIDDEN_FRAME_SEEN = True
+
+def compute(x, y):
+    return x * y if FRAME_ACCESS_BLOCKED and not HIDDEN_FRAME_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,6 +1,6 @@\n"
+        " import inspect\n"
+        " import sys\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " FRAME_ACCESS_BLOCKED = False\n"
+        " HIDDEN_FRAME_SEEN = False\n"
+    )
+    hidden = """import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, "hidden frame leaked to miner code"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_resolve_jail_python_runtime_uses_current_minor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "python-runtime"
+    exe_name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    exe = runtime / "bin" / exe_name
+    exe.parent.mkdir(parents=True)
+    exe.write_text("# executable placeholder\n", encoding="utf-8")
+
+    monkeypatch.setattr(patch_runner.sys, "base_prefix", str(runtime))
+    monkeypatch.setattr(patch_runner.sys, "executable", str(exe))
+
+    prefix, relpath = patch_runner._resolve_jail_python_runtime()
+
+    assert prefix == runtime.resolve()
+    assert relpath == f"bin/{exe_name}"
+
+
 def test_network_is_blocked_inside_runner() -> None:
     """Hidden test attempts urllib.urlopen; the bootstrap must block."""
     network_test = """import sys

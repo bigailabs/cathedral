@@ -226,6 +226,29 @@ class _BlockedModule:
 for _name in ("requests", "httpx", "aiohttp"):
     _sys.modules.setdefault(_name, _BlockedModule())
 
+# 4) frame-introspection guard. Hidden tests run in the same interpreter as
+#    miner-controlled modules they import. Without this, miner code can walk
+#    caller frames and inspect the <v4_hidden_test> code object/consts while
+#    the hidden test is importing or calling it. Block the standard frame APIs
+#    before hidden bytecode executes.
+_FRAME_BLOCKED_MSG = "v4 oracle: frame inspection is blocked inside the hermetic runner"
+
+
+def _v4_frame_blocked(*_a, **_kw):
+    raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
+try:
+    import inspect as _inspect
+except Exception:
+    _inspect = None  # type: ignore[assignment]
+
+_sys._getframe = _v4_frame_blocked  # type: ignore[attr-defined,assignment]
+if _inspect is not None:
+    _inspect.currentframe = _v4_frame_blocked  # type: ignore[assignment]
+    _inspect.stack = _v4_frame_blocked  # type: ignore[assignment]
+    _inspect.trace = _v4_frame_blocked  # type: ignore[assignment]
+
 # -- end bootstrap --
 """
 
@@ -582,13 +605,12 @@ def _run_jailed(
         + _hidden_stdin_bootstrap()
     )
 
-    # Use sys.base_prefix (not sys.prefix) so we bind the underlying
-    # python install rather than a venv that just contains symlinks
-    # back into it. For non-venv interpreters base_prefix == prefix so
-    # this is a no-op; for venv interpreters it points at the real
-    # install whose bin/python3 is a usable ELF binary inside the jail.
-    python_prefix = Path(sys.base_prefix)
-    jail_root = _jail.assemble_jail(workspace_dir=workspace_dir, python_prefix=python_prefix)
+    python_prefix, interpreter_relpath = _resolve_jail_python_runtime()
+    jail_root = _jail.assemble_jail(
+        workspace_dir=workspace_dir,
+        python_prefix=python_prefix,
+        interpreter_relpath=interpreter_relpath,
+    )
     try:
         result = _jail.run_in_jail(
             jail_root=jail_root,
@@ -597,6 +619,7 @@ def _run_jailed(
             program=program,
             stdin_bytes=hidden_code_payload,
             timeout_seconds=timeout_seconds,
+            interpreter_relpath=interpreter_relpath,
             rlimit_cpu_secs=JAIL_RLIMIT_CPU_SECS,
             rlimit_as_bytes=JAIL_RLIMIT_AS_BYTES,
         )
@@ -616,6 +639,38 @@ def _run_jailed(
         patch_applied=patch_applied,
         isolation_mode="jailed",
     )
+
+
+def _resolve_jail_python_runtime() -> tuple[Path, str]:
+    """Return the runtime prefix and interpreter path used inside the jail.
+
+    Hidden tests are marshalled by the publisher interpreter, and marshal
+    bytecode is only compatible with the same Python minor version. Bind the
+    exact resolved interpreter when it lives under ``sys.base_prefix``; this
+    keeps venv deployments from accidentally running generic ``python3`` that
+    points at another minor inside the jail.
+    """
+    base_prefix = Path(sys.base_prefix).resolve()
+    executable = Path(sys.executable).resolve()
+
+    try:
+        rel = executable.relative_to(base_prefix)
+    except ValueError:
+        rel = None
+    if rel is not None and (base_prefix / rel).exists():
+        return base_prefix, rel.as_posix()
+
+    versioned = base_prefix / "bin" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    if versioned.exists():
+        return base_prefix, versioned.relative_to(base_prefix).as_posix()
+
+    by_name = base_prefix / "bin" / executable.name
+    if by_name.exists():
+        return base_prefix, by_name.relative_to(base_prefix).as_posix()
+
+    # Last-resort compatibility with older installs. This preserves the
+    # previous jail path but only after all same-minor candidates failed.
+    return base_prefix, "bin/python3"
 
 
 __all__ = [
