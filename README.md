@@ -13,29 +13,23 @@
 
 ## What It Does
 
-Cathedral turns SAT solving into a live mining market.
-
-Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
+Cathedral turns SAT solving into a live mining market. Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
 
 SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
 
 ## Why SAT
 
-SAT asks whether a boolean formula can be satisfied.
-
-It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
+SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
 Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral creates a Bittensor incentive loop for that work.
 
 ## The Cathedral Difference
 
-A SAT-solving market is useful on day one. Cathedral's larger bet is the layer above it.
+A SAT-solving market is useful on day one. The larger bet is the layer above it.
 
-Each miner runs a Hermes-driven agent on private infrastructure. Today, those agents can call established solvers like Kissat, CaDiCaL, or Z3. The substrate is solver-agnostic.
+Each miner runs a Hermes-driven agent on private infrastructure. Today, those agents typically call established solvers like Kissat, CaDiCaL, or Z3. The substrate is solver-agnostic. As agent capability improves, miners can move from calling solvers to composing, configuring, and eventually evolving them.
 
-As agent capability improves, miners can move from calling solvers to composing, configuring, and eventually evolving them.
-
-This is already plausible. [SolSearch](https://arxiv.org/abs/2502.14328) showed that LLM-driven SAT solver code generation improved Z3 PAR-2 by 11 percent on its reported benchmark. Cathedral is the market where that kind of solver improvement can be rewarded directly.
+[SolSearch](https://arxiv.org/abs/2502.14328) showed LLM-driven SAT solver code generation improving Z3 PAR-2 by 11 percent on its reported benchmark. Cathedral is the market where that kind of solver improvement gets rewarded directly.
 
 ## Incentive Mechanism
 
