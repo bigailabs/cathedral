@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import os
 import re
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -55,6 +57,9 @@ logger = structlog.get_logger(__name__)
 # the ctypes fallback (not implemented here -- the production
 # startup check refuses to start if the jail cannot be assembled).
 _UNSHARE_MIN_VERSION: tuple[int, int] = (2, 36)
+_MAX_CAPTURED_STREAM_BYTES = 256 * 1024
+_PIPE_READ_BYTES = 16 * 1024
+_OUTPUT_OVERSIZED_MARKER = b"\n[v4 oracle output exceeded capture limit]\n"
 
 
 class JailError(Exception):
@@ -499,25 +504,12 @@ def run_in_jail(
         shell=False,
         start_new_session=True,
     )
-    try:
-        stdout, stderr = proc.communicate(input=stdin_bytes, timeout=timeout_seconds)
-        timed_out = False
-        returncode: int | None = proc.returncode
-    except subprocess.TimeoutExpired:
-        # Kill the entire process group (negative pid). start_new_session
-        # made `proc.pid` the pgrp leader, so this reaches every host
-        # process the jail spawned -- not just the unshare(1) wrapper.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            # Race: the wrapper may have already exited cleanly.
-            proc.kill()
-        try:
-            stdout, stderr = proc.communicate(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = (b"", b"")
-        timed_out = True
-        returncode = None
+    stdout, stderr, returncode, timed_out = _communicate_bounded(
+        proc,
+        stdin_bytes=stdin_bytes,
+        timeout_seconds=timeout_seconds,
+        max_stream_bytes=_MAX_CAPTURED_STREAM_BYTES,
+    )
 
     duration = time.monotonic() - started
     return JailResult(
@@ -527,6 +519,93 @@ def run_in_jail(
         timed_out=timed_out,
         duration_seconds=duration,
     )
+
+
+def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
+    # Kill the entire process group (negative pid). start_new_session
+    # made `proc.pid` the pgrp leader, so this reaches every host process the
+    # jail spawned -- not just the unshare(1) wrapper.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # Race: the wrapper may have already exited cleanly.
+        proc.kill()
+
+
+def _communicate_bounded(
+    proc: subprocess.Popen[bytes],
+    *,
+    stdin_bytes: bytes,
+    timeout_seconds: float,
+    max_stream_bytes: int,
+) -> tuple[bytes, bytes, int | None, bool]:
+    """Communicate without letting miner stdout/stderr grow unbounded.
+
+    ``subprocess.communicate()`` buffers the whole pipe in the publisher
+    process. Miner-controlled oracle code can print until timeout, so read the
+    pipes incrementally, cap each captured stream, and kill the process group as
+    soon as either stream exceeds the limit.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout_seconds
+    stdout = bytearray()
+    stderr = bytearray()
+    oversized = False
+
+    if proc.stdin is not None:
+        try:
+            proc.stdin.write(stdin_bytes)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    selector = selectors.DefaultSelector()
+    try:
+        if proc.stdout is not None:
+            selector.register(proc.stdout, selectors.EVENT_READ, stdout)
+        if proc.stderr is not None:
+            selector.register(proc.stderr, selectors.EVENT_READ, stderr)
+
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_process_group(proc)
+                with suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=0.5)
+                return bytes(stdout), bytes(stderr), None, True
+
+            events = selector.select(timeout=min(remaining, 0.05))
+            if not events and proc.poll() is not None:
+                continue
+            for key, _mask in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), _PIPE_READ_BYTES)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    with suppress(Exception):
+                        selector.unregister(key.fileobj)
+                    continue
+
+                sink: bytearray = key.data
+                available = max_stream_bytes - len(sink)
+                if available > 0:
+                    sink.extend(chunk[:available])
+                if len(chunk) > available:
+                    oversized = True
+                    _kill_process_group(proc)
+
+        try:
+            returncode: int | None = proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            returncode = None
+        if oversized:
+            stderr.extend(_OUTPUT_OVERSIZED_MARKER)
+        return bytes(stdout), bytes(stderr), returncode, False
+    finally:
+        selector.close()
 
 
 def cleanup_jail(jail_root: Path) -> None:

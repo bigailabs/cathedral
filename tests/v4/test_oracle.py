@@ -254,6 +254,24 @@ try:
 except RuntimeError as exc:
     FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
 
+try:
+    import ctypes
+    ctypes.pythonapi.PyEval_GetFrame.restype = ctypes.py_object
+    HIDDEN_FRAME_SEEN = HIDDEN_FRAME_SEEN or _hidden_frame_seen(
+        ctypes.pythonapi.PyEval_GetFrame()
+    )
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    HIDDEN_FRAME_SEEN = True
+
+try:
+    import _ctypes  # noqa: PLC2701
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    HIDDEN_FRAME_SEEN = True
+
 def compute(x, y):
     return x * y if FRAME_ACCESS_BLOCKED and not HIDDEN_FRAME_SEEN else -1
 """

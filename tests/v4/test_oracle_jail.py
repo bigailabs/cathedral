@@ -28,6 +28,8 @@ from __future__ import annotations
 import difflib
 import os
 import platform
+import subprocess
+import sys
 import textwrap
 from unittest import mock
 
@@ -373,3 +375,31 @@ def test_jail_timeout_kills_sleeping_child_promptly() -> None:
         # No children at all -- also a clean state.
         pid, status = 0, 0
     assert pid == 0, f"orphan child detected after jail kill: pid={pid} status={status}"
+
+
+def test_jail_bounded_communicate_kills_oversized_stdout() -> None:
+    """The jail wrapper must cap captured output before buffering it all."""
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys, time; sys.stdout.write('A' * 200000); sys.stdout.flush(); time.sleep(5)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    stdout, stderr, returncode, timed_out = _jail._communicate_bounded(
+        proc,
+        stdin_bytes=b"",
+        timeout_seconds=2.0,
+        max_stream_bytes=1024,
+    )
+
+    assert timed_out is False
+    assert returncode is not None
+    assert len(stdout) == 1024
+    assert b"output exceeded capture limit" in stderr

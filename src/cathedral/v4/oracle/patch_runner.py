@@ -229,8 +229,9 @@ for _name in ("requests", "httpx", "aiohttp"):
 # 4) frame-introspection guard. Hidden tests run in the same interpreter as
 #    miner-controlled modules they import. Without this, miner code can walk
 #    caller frames and inspect the <v4_hidden_test> code object/consts while
-#    the hidden test is importing or calling it. Trace/profile callbacks also
-#    receive live frames, so block those APIs before hidden bytecode executes.
+#    the hidden test is importing or calling it. Trace/profile callbacks and
+#    ctypes.pythonapi can also produce live frames, so block those APIs before
+#    hidden bytecode executes.
 _FRAME_BLOCKED_MSG = "v4 oracle: frame inspection is blocked inside the hermetic runner"
 
 
@@ -261,6 +262,26 @@ if _inspect is not None:
 if _threading is not None:
     _threading.settrace = _v4_frame_blocked  # type: ignore[assignment]
     _threading.setprofile = _v4_frame_blocked  # type: ignore[assignment]
+
+
+class _FrameBlockedModule:
+    def __getattr__(self, _name):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
+class _FrameBlockedImport:
+    def find_spec(self, fullname, _path=None, _target=None):
+        if fullname in {"ctypes", "_ctypes"} or fullname.startswith("ctypes."):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return None
+
+
+# Native ctypes access can call CPython C-API helpers such as PyEval_GetFrame,
+# bypassing the Python-level frame guards above. Hidden tests should not depend
+# on native process introspection, so block ctypes before miner imports run.
+for _name in ("ctypes", "_ctypes"):
+    _sys.modules[_name] = _FrameBlockedModule()
+_sys.meta_path.insert(0, _FrameBlockedImport())
 
 # -- end bootstrap --
 """
