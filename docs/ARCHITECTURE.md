@@ -27,7 +27,7 @@ Public:
 
 - miner hotkey
 - task type
-- task id hash
+- `task_id_public`
 - answer hash
 - verifier details hash
 - score

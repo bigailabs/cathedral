@@ -35,7 +35,7 @@ SAT rows use `eval_output_schema_version = 5`.
 Allowed public fields:
 
 - miner hotkey
-- task id hash
+- `task_id_public`
 - answer hash
 - verifier details hash
 - score
