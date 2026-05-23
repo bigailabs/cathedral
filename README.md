@@ -11,12 +11,6 @@
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
 
-## [What Is Cathedral](#what-is-cathedral)
-
-Cathedral turns SAT solving into a live mining market. Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
-
-SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
-
 ## [Why Cathedral](#why-cathedral)
 
 SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
