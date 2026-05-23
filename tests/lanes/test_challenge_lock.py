@@ -1,8 +1,9 @@
-"""Tests for the publisher-side single-active-challenge lock.
+"""Tests for the publisher-side single-active-challenge final lock.
 
-Covers the first-valid-wins semantics for both the in-memory fake and
-the SQLite-backed implementation. The lock is the boundary that
-guarantees one and only one miner wins a given active challenge.
+Covers the compare-and-set semantics for both the in-memory fake and
+the SQLite-backed implementation. Receipt ordering chooses the winner;
+the lock guarantees one and only one selected receipt can finalize a
+given active challenge.
 """
 
 from __future__ import annotations
@@ -90,7 +91,7 @@ async def test_in_memory_independent_challenges_lock_independently() -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_sqlite_first_valid_wins(tmp_path) -> None:
+async def test_sqlite_first_selected_winner_locks(tmp_path) -> None:
     conn = await init_sqlite_challenge_lock(str(tmp_path / "locks.db"))
     try:
         lock = SqliteChallengeLock(conn)
@@ -115,9 +116,9 @@ async def test_sqlite_first_valid_wins(tmp_path) -> None:
         )
         assert second is None
 
-        # Winner stays the first one even if a later try carries a
-        # higher (or equal) weighted_score: first-valid-wins, not
-        # best-of-all.
+        # Winner stays the first selected receipt even if a later try
+        # carries a higher (or equal) weighted_score: the final lock is
+        # not best-of-all.
         third = await lock.try_lock(
             family_id=_FAMILY,
             challenge_id=_CHALLENGE,

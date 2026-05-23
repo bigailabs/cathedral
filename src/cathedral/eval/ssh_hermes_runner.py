@@ -67,6 +67,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,6 +118,13 @@ def _redact_query_tokens(s: str) -> str:
     return _QUERY_TOKEN_RE.sub(r"\1REDACTED", s)
 
 
+def _now_utc_iso() -> str:
+    # SAT receipt ordering uses SQLite text comparison, so callback
+    # timestamps must use the same fixed-width millisecond-Z form as the
+    # fallback and reconciler paths.
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 # --------------------------------------------------------------------------
 # Failure codes
 # --------------------------------------------------------------------------
@@ -136,6 +144,7 @@ SSH_HERMES_FAILURE_CODES: tuple[str, ...] = (
     "hermes_install_invalid",
     "hermes_invocation_failed",
     "hermes_output_malformed",
+    "hermes_stdout_oversized",
     "profile_clone_failed",
     "prompt_timeout",
     "transfer_failed",
@@ -143,6 +152,10 @@ SSH_HERMES_FAILURE_CODES: tuple[str, ...] = (
     "disconnect_dirty",
     "config_invalid",
 )
+
+
+DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES = 8 * 1024 * 1024
+_SSH_STDOUT_READ_CHUNK_BYTES = 64 * 1024
 
 
 class SshHermesError(PolarisRunnerError):
@@ -197,6 +210,9 @@ class SshHermesRunnerConfig:
     # same model — neutralizes one source of cross-miner variance.
     pinned_model: str | None = None
     pinned_provider: str | None = None
+    # SAT miners control Hermes stdout. Keep task-family answers bounded
+    # before receipt hashing and DIMACS parsing run in the publisher process.
+    task_family_stdout_limit_bytes: int = DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +335,7 @@ class TaskFamilyHermesRun:
     """Raw Hermes result for one Task Family challenge."""
 
     stdout: str
+    stdout_received_at_iso: str | None = None
     duration_ms: int = 0
     trace: dict[str, Any] = field(default_factory=dict)
     trace_bundle: TraceBundle | None = None
@@ -675,6 +692,7 @@ class SshHermesRunner:
         prompt: str,
         miner_hotkey: str,
         submission: dict[str, Any],
+        receipt_callback: Any | None = None,
     ) -> TaskFamilyHermesRun:
         """Run one generic Task Family prompt over SSH Hermes.
 
@@ -710,6 +728,7 @@ class SshHermesRunner:
         )
         profile_created = False
         profile_deleted = False
+        receipt_committed = False
         try:
             hermes_version = await self._hermes_version(conn)
             trace.hermes_version = hermes_version
@@ -726,32 +745,105 @@ class SshHermesRunner:
                 prompt=prompt,
                 eval_round=eval_round,
                 resolved_home=resolved_home,
+                # SAT receipts are ordered by first valid answer, so the
+                # Hermes call must use the challenge's advertised wall-clock
+                # budget instead of the runner-wide default.
+                timeout_secs=float(problem.time_limit_seconds),
+                # This path handles miner-controlled SAT answers. The SSH
+                # process is streamed with this cap, so oversized output is
+                # killed before receipt processing or DIMACS parsing can
+                # allocate on the full blob.
+                max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
             )
+            stdout_received_at_iso = _now_utc_iso()
+            if receipt_callback is not None:
+                await receipt_callback(stdout, stdout_received_at_iso)
+                receipt_committed = True
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
             synthetic_card: dict[str, Any] = {
                 "task_type": problem.task_family,
                 "task_id": problem.task_id,
             }
-            bundle = await self._collect_and_assemble(
-                conn,
-                eval_profile=eval_profile,
-                eval_id=run_id,
-                submission_id=str(submission["id"]),
-                eval_round=eval_round,
-                hermes_version=hermes_version,
-                card_json=synthetic_card,
-                hermes_stdout=stdout,
-                resolved_home=resolved_home,
-            )
+            try:
+                bundle = await self._collect_and_assemble(
+                    conn,
+                    eval_profile=eval_profile,
+                    eval_id=run_id,
+                    submission_id=str(submission["id"]),
+                    eval_round=eval_round,
+                    hermes_version=hermes_version,
+                    card_json=synthetic_card,
+                    hermes_stdout=stdout,
+                    resolved_home=resolved_home,
+                )
+            except Exception as exc:
+                if not receipt_committed:
+                    raise
+                # SAT ordering is based on stdout receipt time. Once the
+                # receipt callback commits a verifying row, post-stdout trace
+                # collection must not make a valid first answer disappear.
+                # Return a degraded trace so the orchestrator can still score
+                # and finalize the captured stdout.
+                trace.visit_ended_at = datetime.now(UTC).isoformat()
+                failure_code = (
+                    exc.code if isinstance(exc, SshHermesError) else "trace_collection_failed"
+                )
+                logger.warning(
+                    "ssh_hermes_task_family_trace_collection_failed_after_receipt",
+                    eval_profile=eval_profile,
+                    failure_code=failure_code,
+                    error=str(exc)[:300],
+                )
+                if profile_created and not profile_deleted:
+                    try:
+                        await self._delete_profile(conn, eval_profile)
+                        profile_deleted = True
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "ssh_hermes_cleanup_failed",
+                            eval_profile=eval_profile,
+                            error=str(cleanup_exc),
+                        )
+                trace_dict = trace.to_dict()
+                trace_dict["task_family_stdout_received_at_iso"] = stdout_received_at_iso
+                trace_dict["trace_collection_failed_after_receipt"] = True
+                trace_dict["trace_collection_failure_code"] = failure_code
+                return TaskFamilyHermesRun(
+                    stdout=stdout,
+                    stdout_received_at_iso=stdout_received_at_iso,
+                    duration_ms=int((time.monotonic() - t_start) * 1000),
+                    trace=trace_dict,
+                    trace_bundle=None,
+                )
 
             trace.visit_ended_at = datetime.now(UTC).isoformat()
-            await self._delete_profile(conn, eval_profile)
-            profile_deleted = True
+            cleanup_failed_after_receipt = False
+            try:
+                await self._delete_profile(conn, eval_profile)
+                profile_deleted = True
+            except Exception as cleanup_exc:
+                if not receipt_committed:
+                    raise
+                # SAT receipts are already committed before trace/profile
+                # teardown. Cleanup must stay best-effort here so a valid
+                # first answer is not lost because the miner box rejected
+                # profile deletion after stdout was captured.
+                cleanup_failed_after_receipt = True
+                logger.warning(
+                    "ssh_hermes_cleanup_failed_after_task_family_receipt",
+                    eval_profile=eval_profile,
+                    error=str(cleanup_exc),
+                )
+            trace_dict = trace.to_dict()
+            trace_dict["task_family_stdout_received_at_iso"] = stdout_received_at_iso
+            if cleanup_failed_after_receipt:
+                trace_dict["profile_cleanup_failed_after_receipt"] = True
             return TaskFamilyHermesRun(
                 stdout=stdout,
+                stdout_received_at_iso=stdout_received_at_iso,
                 duration_ms=int((time.monotonic() - t_start) * 1000),
-                trace=trace.to_dict(),
+                trace=trace_dict,
                 trace_bundle=bundle,
             )
         except SshHermesError:
@@ -875,6 +967,103 @@ class SshHermesRunner:
                 f"stderr={_redact_query_tokens(stderr[:300])}",
             )
         return stdout, stderr, exit_status
+
+    async def _run_remote_limited_stdout(
+        self,
+        conn: Any,
+        cmd: str,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 — `timeout` is the API we want
+        max_stdout_bytes: int,
+    ) -> tuple[str, str, int]:
+        """Run a remote command while streaming and bounding stdout bytes."""
+
+        import asyncssh
+
+        if max_stdout_bytes < 1:
+            raise SshHermesError(
+                "config_invalid",
+                f"max_stdout_bytes must be positive: {max_stdout_bytes}",
+            )
+
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+
+        def remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            return remaining
+
+        process: Any | None = None
+        try:
+            process = await asyncio.wait_for(
+                conn.create_process(
+                    cmd,
+                    stdin=asyncssh.DEVNULL,
+                    # Stderr is miner-controlled too; fold it into the same
+                    # bounded stream so logs cannot bypass the SAT stdout cap.
+                    stderr=asyncssh.STDOUT,
+                    encoding=None,
+                ),
+                timeout=remaining_timeout(),
+            )
+
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await asyncio.wait_for(
+                    process.stdout.read(_SSH_STDOUT_READ_CHUNK_BYTES),
+                    timeout=remaining_timeout(),
+                )
+                if not chunk:
+                    break
+                raw = (
+                    chunk.encode("utf-8", errors="replace")
+                    if isinstance(chunk, str)
+                    else bytes(chunk)
+                )
+                total += len(raw)
+                if total > max_stdout_bytes:
+                    await self._stop_remote_process(process)
+                    raise SshHermesError(
+                        "hermes_stdout_oversized",
+                        (
+                            f"stdout exceeded {max_stdout_bytes} bytes for "
+                            f"cmd={_redact_query_tokens(cmd[:120])!r}"
+                        ),
+                    )
+                chunks.append(raw)
+
+            result = await asyncio.wait_for(
+                process.wait(check=False),
+                timeout=remaining_timeout(),
+            )
+        except TimeoutError as e:
+            if process is not None:
+                await self._stop_remote_process(process)
+            raise SshHermesError(
+                "prompt_timeout",
+                f"command timed out after {timeout}s: {_redact_query_tokens(cmd[:120])}",
+            ) from e
+
+        stdout = b"".join(chunks).decode("utf-8", errors="replace")
+        exit_status = int(getattr(result, "exit_status", 0) or 0)
+        stderr = stdout if exit_status != 0 else ""
+        return stdout, stderr, exit_status
+
+    async def _stop_remote_process(self, process: Any) -> None:
+        with suppress(Exception):
+            process.terminate()
+        with suppress(Exception):
+            await asyncio.wait_for(process.wait_closed(), timeout=2.0)
+            return
+        with suppress(Exception):
+            process.kill()
+        with suppress(Exception):
+            await asyncio.wait_for(process.wait_closed(), timeout=2.0)
 
     # ----------------------------------------------------------------------
     # Hermes-specific steps
@@ -1037,6 +1226,8 @@ class SshHermesRunner:
         prompt: str,
         eval_round: str,
         resolved_home: str,
+        timeout_secs: float | None = None,
+        max_stdout_bytes: int | None = None,
     ) -> str:
         """Run ``hermes chat -q`` and return raw stdout."""
         hermes_home = self._profile_path(eval_profile, resolved_home)
@@ -1047,18 +1238,28 @@ class SshHermesRunner:
             envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
         cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(prompt)}"
-        stdout, stderr, exit_status = await self._run_remote(
-            conn,
-            cmd,
-            timeout=self.config.eval_timeout_secs,
-            check=False,
-        )
+        timeout = timeout_secs if timeout_secs is not None else self.config.eval_timeout_secs
+        if max_stdout_bytes is None:
+            stdout, stderr, exit_status = await self._run_remote(
+                conn,
+                cmd,
+                timeout=timeout,
+                check=False,
+            )
+        else:
+            stdout, stderr, exit_status = await self._run_remote_limited_stdout(
+                conn,
+                cmd,
+                timeout=timeout,
+                max_stdout_bytes=max_stdout_bytes,
+            )
         if exit_status != 0:
             raise SshHermesError(
                 "hermes_invocation_failed",
                 (
                     f"hermes chat -q exited {exit_status} for "
-                    f"eval_round={eval_round}: {_redact_query_tokens(stderr[:300])}"
+                    f"eval_round={eval_round}: "
+                    f"{_redact_query_tokens((stderr or stdout)[:300])}"
                 ),
             )
         return stdout

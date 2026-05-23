@@ -49,17 +49,39 @@ from cathedral.lanes.challenge_lock import (
     SqliteChallengeLock,
 )
 from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
-from cathedral.lanes.challenge_source import (
-    SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
+from cathedral.lanes.challenge_receipts import (
+    SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA,
 )
+from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
     SqliteFetchTokenStore,
+    ensure_sqlite_challenge_source_schema,
 )
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
 from cathedral.publisher import repository
 from cathedral.publisher.reads import router as reads_router
+from cathedral.publisher.sat_file_challenges import (
+    build_synthetic_boolean_file_challenge_record,
+)
+from cathedral.publisher.sat_preflight import (
+    ACTIVE_CNF_PATH_ENV,
+    DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
+    MAX_CNF_BYTES_ENV,
+    STORAGE_MODE_ENV,
+    STORAGE_MODE_FILE,
+    STORAGE_MODE_SQLITE_TEXT,
+    read_operator_cnf_file,
+)
 from cathedral.publisher.submit import router as submit_router
+from cathedral.publisher.weight_policy import (
+    WeightPolicyStore,
+    load_producer_from_env,
+    run_weight_policy_producer,
+)
+from cathedral.publisher.weight_policy import (
+    router as weight_policy_router,
+)
 from cathedral.storage import HippiusClient, HippiusConfig, StubHippiusClient
 from cathedral.validator.db import connect
 
@@ -76,6 +98,10 @@ class PublisherContext:
     signer: EvalSigner
     registry: CardRegistry
     submissions_paused: bool = False
+    # One aiosqlite connection is shared by HTTP routes and the evaluator.
+    # SAT finalization opens explicit transactions on that connection, so
+    # every connection writer must acquire this gate before a commit.
+    db_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
 
@@ -93,9 +119,12 @@ def _materialize_ssh_probe_key() -> None:
     helper every ssh-probe submission hangs in ``evaluating`` forever.
 
     Behaviour:
-    - ``CATHEDRAL_PROBE_SSH_PRIVATE_KEY`` unset and no file at
-      ``CATHEDRAL_SSH_KEY_PATH``: log a warning and return. Other
-      attestation modes still work; only ssh-probe is degraded.
+    - ``CATHEDRAL_PROBE_SSH_PRIVATE_KEY`` unset and
+      ``CATHEDRAL_SSH_KEY_PATH`` unset: return without changing env so the
+      runners keep their own ``~/.ssh/cathedral_probe_ed25519`` fallback.
+    - ``CATHEDRAL_PROBE_SSH_PRIVATE_KEY`` unset and
+      ``CATHEDRAL_SSH_KEY_PATH`` set but missing: log a warning and return.
+      Other attestation modes still work; only ssh-probe is degraded.
     - Env var set: write to ``CATHEDRAL_SSH_KEY_PATH`` (default
       ``/tmp/cathedral_probe_ed25519``) with ``0600`` perms.
     - File already exists with identical content: short-circuit, no
@@ -103,14 +132,25 @@ def _materialize_ssh_probe_key() -> None:
     - File exists with different content: overwrite (operator rotated
       the key - respect the new value).
     """
-    target_str = os.environ.get("CATHEDRAL_SSH_KEY_PATH", _DEFAULT_SSH_PROBE_KEY_PATH)
-    target = Path(target_str).expanduser()
-
     raw = os.environ.get("CATHEDRAL_PROBE_SSH_PRIVATE_KEY")
+    target_str = os.environ.get("CATHEDRAL_SSH_KEY_PATH")
     if not raw:
+        if not target_str:
+            # Preserve the runners' own ~/.ssh/cathedral_probe_ed25519 fallback
+            # when startup is not materializing a key from env. Publishing our
+            # container temp path here would override already-provisioned
+            # deployments that rely on the runner default.
+            return
+        target = Path(target_str).expanduser()
         if not target.is_file():
             logger.warning("ssh_probe_key_missing", path=str(target))
         return
+
+    target = Path(target_str or _DEFAULT_SSH_PROBE_KEY_PATH).expanduser()
+    # Runner construction reads CATHEDRAL_SSH_KEY_PATH later. When the operator
+    # only supplies the private-key env var, publish the materialized default so
+    # preflight, startup, and SshHermesRunner all agree on the same file.
+    os.environ.setdefault("CATHEDRAL_SSH_KEY_PATH", str(target))
 
     # Some env-var transports strip trailing newlines; OpenSSH refuses
     # keys without one.
@@ -151,17 +191,27 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         _materialize_ssh_probe_key()
         ctx: PublisherContext = await ctx_factory()
         app.state.ctx = ctx
-        await ctx.db.executescript(CHALLENGE_SOURCE_SCHEMA)
+        stop = asyncio.Event()
+        await ensure_sqlite_challenge_source_schema(ctx.db)
         await ctx.db.executescript(CHALLENGE_LOCK_SCHEMA)
+        await ctx.db.executescript(CHALLENGE_RECEIPT_SCHEMA)
         await ctx.db.commit()
         task_family_challenge_source = SqliteChallengeSource(ctx.db)
         task_family_challenge_lock = SqliteChallengeLock(ctx.db)
         task_family_fetch_token_store = SqliteFetchTokenStore(ctx.db)
+        task_family_receipt_store = SqliteChallengeReceiptStore(ctx.db)
         # Stash on app.state so the public CNF route can validate
         # tokens and look up active/locked rows without re-opening
         # the connection or re-wiring through dependency injection.
         app.state.task_family_challenge_source = task_family_challenge_source
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
+        # Keep the signed-weight route and its backing store wired together.
+        # The endpoint is mounted even without a signing key so validators get
+        # a deterministic 503 "not configured yet" instead of app construction
+        # failures; configured publishers start the producer below.
+        weight_policy_store = WeightPolicyStore()
+        app.state.weight_policy = weight_policy_store
+        producer_config = load_producer_from_env()
         await _seed_synthetic_boolean_challenge_from_env(task_family_challenge_source)
 
         # Make ctx visible to the orchestrator's env-resolver. Production
@@ -196,7 +246,25 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
             load_private_corpus()
 
-        stop = asyncio.Event()
+        if producer_config is not None:
+            config, private_key = producer_config
+            # Do not schedule this shared-connection writer until startup DB
+            # mutations are done. create_task() can run at the next await; if it
+            # starts before SAT seeding or repair commits, it can interleave
+            # transactions on ctx.db and corrupt the boot transaction boundary.
+            ctx.background_tasks.append(
+                asyncio.create_task(
+                    run_weight_policy_producer(
+                        ctx.db,
+                        weight_policy_store,
+                        private_key,
+                        config=config,
+                        stop=stop,
+                        db_write_lock=ctx.db_write_lock,
+                    )
+                )
+            )
+
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to
             # PolarisRuntimeRunner (Tier A), TEE-tier rows are pre-verified
@@ -253,6 +321,8 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     task_family_challenge_source=task_family_challenge_source,
                     task_family_challenge_lock=task_family_challenge_lock,
                     task_family_fetch_token_store=task_family_fetch_token_store,
+                    task_family_receipt_store=task_family_receipt_store,
+                    db_write_lock=ctx.db_write_lock,
                     public_base_url=os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip() or None,
                 )
             )
@@ -326,6 +396,24 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             content={"detail": str(detail) if detail else "error"},
         )
 
+    @app.get("/", include_in_schema=False)
+    async def _root() -> dict[str, Any]:
+        return {
+            "service": "cathedral-publisher",
+            "description": "Publisher API for Cathedral SN39.",
+            "links": {
+                "health": "/health",
+                "skill": "/skill.md",
+                "api": "/api/cathedral",
+                "eval_spec": "/api/cathedral/v1/cards/eu-ai-act/eval-spec",
+                "recent_signed_evals": "/api/cathedral/v1/leaderboard/recent",
+                "sat_readiness": (
+                    "/api/cathedral/v1/synthetic-boolean/readiness-probe"
+                ),
+                "submit_agent": "/api/cathedral/v1/agents/submit",
+            },
+        }
+
     # CONTRACTS Section 2 locks the public surface at `/api/cathedral/v1/...`
     # (matches the cross-repo contract test mirror, the frontend's API client,
     # and the polariscomputer-side routes already deployed). Mount BOTH:
@@ -348,6 +436,16 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
 
     app.include_router(challenge_cnf_router, prefix="/api/cathedral")
     app.include_router(challenge_cnf_router, include_in_schema=False)
+
+    from cathedral.publisher.sat_readiness import router as sat_readiness_router
+
+    app.include_router(sat_readiness_router, prefix="/api/cathedral")
+    app.include_router(sat_readiness_router, include_in_schema=False)
+
+    # Issue #155: signed weight policy surface. Mounted on both prefixes
+    # for the same dual-routing reason as the submit/reads routers.
+    app.include_router(weight_policy_router, prefix="/api/cathedral")
+    app.include_router(weight_policy_router, include_in_schema=False)
 
     # Agent-facing onboarding - Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the
@@ -491,16 +589,15 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
     the path or CNF body, and the public schema-5 row still exposes only
     hash-backed fields.
     """
-    cnf_path = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", "").strip()
+    cnf_path = os.environ.get(ACTIVE_CNF_PATH_ENV, "").strip()
     if not cnf_path:
         return
 
-    try:
-        cnf_text = await asyncio.to_thread(_read_text_file, cnf_path)
-    except OSError:
-        raise RuntimeError(
-            "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH could not be read"
-        ) from None
+    max_cnf_bytes = _env_int(
+        MAX_CNF_BYTES_ENV,
+        DEFAULT_SYNTHETIC_BOOLEAN_MAX_CNF_BYTES,
+    )
+    storage_mode = _synthetic_boolean_storage_mode()
 
     challenge_id = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID", "").strip()
     tier_raw = os.environ.get("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER") or os.environ.get(
@@ -512,15 +609,42 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         raise RuntimeError("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_TIER must be an integer") from None
 
     try:
-        active = await seed_synthetic_boolean_challenge(
-            source,
-            cnf_text=cnf_text,
-            tier=tier,
-            now_iso=_now_ms_iso(),
-            challenge_id=challenge_id or None,
-            activate=True,
-            input_source="operator_cnf_path",
-        )
+        if storage_mode == STORAGE_MODE_FILE:
+            record = await asyncio.to_thread(
+                build_synthetic_boolean_file_challenge_record,
+                cnf_path=cnf_path,
+                tier=tier,
+                challenge_id=challenge_id or None,
+                source="operator_cnf_path",
+                max_bytes=max_cnf_bytes
+                if os.environ.get(MAX_CNF_BYTES_ENV, "").strip()
+                else None,
+            )
+            await source.upsert(record, now_iso=_now_ms_iso())
+            active = await source.activate(
+                family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+                challenge_id=record.challenge_id,
+                now_iso=_now_ms_iso(),
+                retire_current=False,
+            )
+        else:
+            try:
+                cnf_text = await asyncio.to_thread(
+                    read_operator_cnf_file, cnf_path, max_cnf_bytes
+                )
+            except OSError:
+                raise RuntimeError(f"{ACTIVE_CNF_PATH_ENV} could not be read") from None
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from None
+            active = await seed_synthetic_boolean_challenge(
+                source,
+                cnf_text=cnf_text,
+                tier=tier,
+                now_iso=_now_ms_iso(),
+                challenge_id=challenge_id or None,
+                activate=True,
+                input_source="operator_cnf_path",
+            )
     except Exception as exc:
         raise RuntimeError(str(exc)) from None
 
@@ -529,14 +653,21 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         "synthetic_boolean_active_challenge_seeded",
         family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
         tier=tier,
+        storage=audit.get("storage", STORAGE_MODE_SQLITE_TEXT),
         num_vars=audit.get("num_vars"),
         num_clauses=audit.get("num_clauses"),
         cnf_sha256=audit.get("cnf_sha256"),
     )
 
 
-def _read_text_file(path: str) -> str:
-    return Path(path).expanduser().read_text(encoding="utf-8")
+def _synthetic_boolean_storage_mode() -> str:
+    raw = os.environ.get(STORAGE_MODE_ENV, STORAGE_MODE_SQLITE_TEXT).strip().lower()
+    normalized = raw.replace("-", "_")
+    if normalized in {"", STORAGE_MODE_SQLITE_TEXT, "sqlite"}:
+        return STORAGE_MODE_SQLITE_TEXT
+    if normalized in {STORAGE_MODE_FILE, "file_backed", "filesystem"}:
+        return STORAGE_MODE_FILE
+    raise RuntimeError(f"{STORAGE_MODE_ENV} must be '{STORAGE_MODE_SQLITE_TEXT}' or 'file'")
 
 
 def _env_int(name: str, default: int) -> int:

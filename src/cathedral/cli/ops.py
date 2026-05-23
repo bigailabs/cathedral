@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -109,18 +110,28 @@ def sat_seed_challenge(
         "--retire-current",
         help="When activating, retire a different active challenge first.",
     ),
+    storage_mode: str = typer.Option(
+        "sqlite_text",
+        "--storage-mode",
+        help="CNF storage mode: sqlite_text or file.",
+    ),
 ) -> None:
     """Seed a private synthetic_boolean_v1 CNF into the publisher DB."""
-    cnf_text = _read_cnf_runtime_input(cnf_path)
+    normalized_storage_mode = _normalize_sat_storage_mode(storage_mode)
+    if normalized_storage_mode == "file" and cnf_path == "-":
+        raise typer.BadParameter("--storage-mode=file requires --cnf-path to be a file")
+    cnf_text = None if normalized_storage_mode == "file" else _read_cnf_runtime_input(cnf_path)
     result = asyncio.run(
         _seed_sat_challenge_async(
             database_path=database_path,
             cnf_text=cnf_text,
+            cnf_path=None if cnf_path == "-" else cnf_path,
             challenge_id=challenge_id,
             tier=tier,
             activate=activate,
             retire_current=retire_current,
             input_source="operator_cnf_stdin" if cnf_path == "-" else "operator_cnf_path",
+            storage_mode=normalized_storage_mode,
         )
     )
     typer.echo(json.dumps(result, indent=2, sort_keys=True))
@@ -148,6 +159,72 @@ def sat_activate_challenge(
     typer.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
+@app.command(name="sat-active-challenge-status")
+def sat_active_challenge_status(
+    database_path: str = typer.Option(
+        "data/publisher.db",
+        "--database-path",
+        "--db",
+        help="Publisher SQLite database path.",
+    ),
+    verify_cnf_hash: bool = typer.Option(
+        False,
+        "--verify-cnf-hash/--no-verify-cnf-hash",
+        help="Stream the active file-backed CNF and compare it with audit metadata.",
+    ),
+) -> None:
+    """Print private-safe active synthetic_boolean_v1 challenge status."""
+    from cathedral.publisher.sat_status import active_sat_challenge_status_from_db
+
+    result = asyncio.run(
+        active_sat_challenge_status_from_db(
+            database_path,
+            verify_file_hash=verify_cnf_hash,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result.get("ok"):
+        raise typer.Exit(1)
+
+
+@app.command(name="sat-active-cnf-probe")
+def sat_active_cnf_probe(
+    database_path: str = typer.Option(
+        "data/publisher.db",
+        "--database-path",
+        "--db",
+        help="Publisher SQLite database path.",
+    ),
+    public_base_url: str = typer.Option(
+        "",
+        "--public-base-url",
+        help="Public publisher base URL. Defaults to CATHEDRAL_PUBLIC_BASE_URL.",
+    ),
+    timeout_secs: float = typer.Option(300.0, "--timeout-secs", min=0.1),
+    min_bytes_per_second: float = typer.Option(
+        0.0,
+        "--min-bytes-per-second",
+        min=0.0,
+    ),
+    announced_time_limit_secs: int = typer.Option(60, "--announced-time-limit-secs", min=1),
+) -> None:
+    """Fetch the active SAT CNF through the public URL and verify its hash."""
+    from cathedral.publisher.sat_cnf_probe import probe_active_sat_cnf_url_from_db
+
+    result = asyncio.run(
+        probe_active_sat_cnf_url_from_db(
+            database_path,
+            public_base_url=public_base_url or os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", ""),
+            timeout_secs=timeout_secs,
+            min_bytes_per_second=min_bytes_per_second,
+            announced_time_limit_secs=announced_time_limit_secs,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result.get("ok"):
+        raise typer.Exit(1)
+
+
 async def _get(url: str) -> dict[str, object]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(url)
@@ -162,15 +239,26 @@ def _read_cnf_runtime_input(cnf_path: str) -> str:
     return Path(cnf_path).expanduser().read_text(encoding="utf-8")
 
 
+def _normalize_sat_storage_mode(storage_mode: str) -> str:
+    normalized = storage_mode.strip().lower().replace("-", "_")
+    if normalized in {"", "sqlite", "sqlite_text"}:
+        return "sqlite_text"
+    if normalized in {"file", "file_backed", "filesystem"}:
+        return "file"
+    raise typer.BadParameter("--storage-mode must be sqlite_text or file")
+
+
 async def _seed_sat_challenge_async(
     *,
     database_path: str,
-    cnf_text: str,
+    cnf_text: str | None,
+    cnf_path: str | None,
     challenge_id: str | None,
     tier: int,
     activate: bool,
     retire_current: bool,
     input_source: str,
+    storage_mode: str = "sqlite_text",
 ) -> dict[str, object]:
     from cathedral.lanes.challenge_lock import SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA
     from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
@@ -188,16 +276,40 @@ async def _seed_sat_challenge_async(
         await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
         await conn.commit()
         source = SqliteChallengeSource(conn)
-        record = await seed_synthetic_boolean_challenge(
-            source,
-            cnf_text=cnf_text,
-            tier=tier,
-            now_iso=_now_ms_iso(),
-            challenge_id=challenge_id,
-            activate=activate,
-            retire_current=retire_current,
-            input_source=input_source,
-        )
+        if storage_mode == "file":
+            if not cnf_path:
+                raise typer.BadParameter("--storage-mode=file requires --cnf-path")
+            from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID
+            from cathedral.publisher.sat_file_challenges import (
+                build_synthetic_boolean_file_challenge_record,
+            )
+
+            record = build_synthetic_boolean_file_challenge_record(
+                cnf_path=cnf_path,
+                tier=tier,
+                challenge_id=challenge_id,
+                source=input_source,
+            )
+            await source.upsert(record, now_iso=_now_ms_iso())
+            if activate:
+                record = await source.activate(
+                    family_id=FAMILY_ID,
+                    challenge_id=record.challenge_id,
+                    now_iso=_now_ms_iso(),
+                    retire_current=retire_current,
+                )
+        else:
+            assert cnf_text is not None
+            record = await seed_synthetic_boolean_challenge(
+                source,
+                cnf_text=cnf_text,
+                tier=tier,
+                now_iso=_now_ms_iso(),
+                challenge_id=challenge_id,
+                activate=activate,
+                retire_current=retire_current,
+                input_source=input_source,
+            )
         return _challenge_result(record)
     finally:
         await conn.close()
@@ -236,6 +348,7 @@ def _challenge_result(record: object) -> dict[str, object]:
         "family_id": record.family_id,
         "tier": record.tier,
         "status": record.status,
+        "storage": audit.get("storage", "sqlite_text"),
         "cnf_sha256": audit.get("cnf_sha256"),
         "num_vars": audit.get("num_vars"),
         "num_clauses": audit.get("num_clauses"),

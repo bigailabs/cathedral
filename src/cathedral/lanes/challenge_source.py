@@ -4,8 +4,8 @@ A *challenge source* is the publisher's local store of currently-active
 private challenge material: the raw CNF (for boolean lanes), tier label,
 status flags, and any publisher-only audit metadata. It is the layer
 that the launch loop reads from when it needs to publish "the active
-challenge" and the layer that gets locked after a miner returns the
-first verified solution.
+challenge" and the layer that gets locked after the receipt state
+machine selects the first-submitted valid solution.
 
 This module deliberately does NOT contain real launch corpora. It only
 defines:
@@ -63,10 +63,12 @@ class ChallengeSourceError(Exception):
 class ChallengeRecord:
     """One private challenge row.
 
-    ``cnf_text`` is publisher-private. Adapters must not echo it to a
-    public projection. Treat this dataclass the way you would treat a
-    Supabase row: it crosses the publisher boundary but never reaches a
-    miner-visible feed.
+    ``cnf_text`` and ``cnf_path`` are publisher-private. Adapters must
+    not echo either to a public projection. Text-backed rows carry the
+    DIMACS body in ``cnf_text``; file-backed rows carry a local path in
+    ``cnf_path`` and leave ``cnf_text`` empty. Treat this dataclass the
+    way you would treat a Supabase row: it crosses the publisher
+    boundary but never reaches a miner-visible feed.
     """
 
     challenge_id: str
@@ -75,6 +77,8 @@ class ChallengeRecord:
     cnf_text: str
     status: str
     audit_metadata: dict[str, Any] = field(default_factory=dict)
+    cnf_path: str | None = None
+    losers_published_at_iso: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in _ALLOWED_STATUSES:
@@ -125,6 +129,22 @@ class ChallengeSource(Protocol):
         """Lock the solved challenge and activate the next pending row."""
         ...
 
+    async def list_locked_needing_loser_reconciliation(
+        self, family_id: str, *, limit: int = 32
+    ) -> list[ChallengeRecord]:
+        """Return locked challenges whose loser rows have not been marked done."""
+        ...
+
+    async def mark_locked_loser_reconciliation_complete(
+        self,
+        *,
+        family_id: str,
+        challenge_id: str,
+        now_iso: str,
+    ) -> None:
+        """Durably mark locked-challenge loser publication complete."""
+        ...
+
 
 # --------------------------------------------------------------------------
 # In-memory fake (tests + dry-runs)
@@ -159,6 +179,14 @@ class InMemoryChallengeSource:
 
     async def upsert(self, record: ChallengeRecord, *, overwrite_status: bool = False) -> None:
         current = self._rows.get(record.challenge_id)
+        if (
+            current is not None
+            and current.status != CHALLENGE_STATUS_PENDING
+            and not _challenge_material_matches(current, record)
+        ):
+            raise ChallengeSourceError(
+                "challenge material is immutable once the challenge is active"
+            )
         if current is not None and not overwrite_status:
             self._rows[record.challenge_id] = ChallengeRecord(
                 challenge_id=record.challenge_id,
@@ -167,6 +195,8 @@ class InMemoryChallengeSource:
                 cnf_text=record.cnf_text,
                 status=current.status,
                 audit_metadata=record.audit_metadata,
+                cnf_path=record.cnf_path,
+                losers_published_at_iso=current.losers_published_at_iso,
             )
             return
         self._rows[record.challenge_id] = record
@@ -196,6 +226,8 @@ class InMemoryChallengeSource:
                 cnf_text=active.cnf_text,
                 status=CHALLENGE_STATUS_RETIRED,
                 audit_metadata=active.audit_metadata,
+                cnf_path=active.cnf_path,
+                losers_published_at_iso=active.losers_published_at_iso,
             )
 
         activated = ChallengeRecord(
@@ -205,6 +237,8 @@ class InMemoryChallengeSource:
             cnf_text=target.cnf_text,
             status=CHALLENGE_STATUS_ACTIVE,
             audit_metadata=target.audit_metadata,
+            cnf_path=target.cnf_path,
+            losers_published_at_iso=target.losers_published_at_iso,
         )
         self._rows[challenge_id] = activated
         return activated
@@ -226,6 +260,8 @@ class InMemoryChallengeSource:
                 cnf_text=current.cnf_text,
                 status=CHALLENGE_STATUS_LOCKED,
                 audit_metadata=current.audit_metadata,
+                cnf_path=current.cnf_path,
+                losers_published_at_iso=None,
             )
 
         if await self.get_active(family_id) is not None:
@@ -240,6 +276,41 @@ class InMemoryChallengeSource:
             now_iso=now_iso,
         )
 
+    async def list_locked_needing_loser_reconciliation(
+        self, family_id: str, *, limit: int = 32
+    ) -> list[ChallengeRecord]:
+        rows = [
+            rec
+            for rec in self._rows.values()
+            if rec.family_id == family_id
+            and rec.status == CHALLENGE_STATUS_LOCKED
+            and not rec.losers_published_at_iso
+        ]
+        return sorted(rows, key=lambda r: r.challenge_id, reverse=True)[: max(1, int(limit))]
+
+    async def mark_locked_loser_reconciliation_complete(
+        self,
+        *,
+        family_id: str,
+        challenge_id: str,
+        now_iso: str,
+    ) -> None:
+        current = self._rows.get(challenge_id)
+        if current is None or current.family_id != family_id:
+            raise ChallengeSourceError("challenge not found")
+        if current.status != CHALLENGE_STATUS_LOCKED:
+            raise ChallengeSourceError("challenge is not locked")
+        self._rows[challenge_id] = ChallengeRecord(
+            challenge_id=current.challenge_id,
+            family_id=current.family_id,
+            tier=current.tier,
+            cnf_text=current.cnf_text,
+            status=current.status,
+            audit_metadata=current.audit_metadata,
+            cnf_path=current.cnf_path,
+            losers_published_at_iso=now_iso,
+        )
+
 
 # --------------------------------------------------------------------------
 # SQLite-backed source (first-launch default)
@@ -252,8 +323,10 @@ CREATE TABLE IF NOT EXISTS lane_challenges (
     family_id       TEXT NOT NULL,
     tier            INTEGER NOT NULL,
     cnf_text        TEXT NOT NULL,
+    cnf_path        TEXT,
     status          TEXT NOT NULL CHECK (status IN ('pending','active','locked','retired')),
     audit_metadata  TEXT NOT NULL,
+    losers_published_at_iso TEXT,
     created_at_iso  TEXT NOT NULL,
     updated_at_iso  TEXT NOT NULL
 );
@@ -282,9 +355,24 @@ async def init_sqlite_challenge_source(database_path: str) -> aiosqlite.Connecti
     conn = await aiosqlite.connect(database_path)
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
-    await conn.executescript(SQLITE_SCHEMA)
-    await conn.commit()
+    await ensure_sqlite_challenge_source_schema(conn)
     return conn
+
+
+async def ensure_sqlite_challenge_source_schema(conn: aiosqlite.Connection) -> None:
+    """Apply the challenge-source schema and lightweight additive migrations."""
+    await conn.executescript(SQLITE_SCHEMA)
+    cur = await conn.execute("PRAGMA table_info(lane_challenges)")
+    columns = {str(row[1]) for row in await cur.fetchall()}
+    if "cnf_path" not in columns:
+        await conn.execute("ALTER TABLE lane_challenges ADD COLUMN cnf_path TEXT")
+    if "losers_published_at_iso" not in columns:
+        await conn.execute("ALTER TABLE lane_challenges ADD COLUMN losers_published_at_iso TEXT")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lane_challenges_locked_losers "
+        "ON lane_challenges(family_id, status, losers_published_at_iso, updated_at_iso)"
+    )
+    await conn.commit()
 
 
 class SqliteChallengeSource:
@@ -305,7 +393,7 @@ class SqliteChallengeSource:
 
     async def get_active(self, family_id: str) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
             "FROM lane_challenges WHERE family_id = ? AND status = ? LIMIT 1",
             (family_id, CHALLENGE_STATUS_ACTIVE),
         )
@@ -317,26 +405,42 @@ class SqliteChallengeSource:
     async def get_for_endpoint(self, challenge_id: str) -> EndpointLookup | None:
         """Single-row read for the public CNF endpoint.
 
-        Returns ``cnf_text`` plus the two fields the route needs to decide
-        whether to serve: ``status`` (must be ``active`` or ``locked``)
-        and ``updated_at_iso`` (last status flip, used to compute the
-        post-lock grace window). Returns ``None`` on miss; the caller
-        responds 404 the same way for unknown ids and disallowed statuses
-        so the endpoint never becomes an existence oracle.
+        Returns CNF storage material, the fields the route needs to
+        decide whether to serve, and the announced CNF digest used to
+        reject mutable file-backed rows whose bytes changed after
+        seeding. Returns ``None`` on miss; the caller responds 404 the
+        same way for unknown ids and disallowed statuses so the endpoint
+        never becomes an existence oracle.
         """
         cur = await self._conn.execute(
-            "SELECT cnf_text, status, updated_at_iso "
+            "SELECT cnf_text, cnf_path, status, updated_at_iso, audit_metadata "
             "FROM lane_challenges WHERE challenge_id = ? LIMIT 1",
             (challenge_id,),
         )
         row = await cur.fetchone()
         if row is None:
             return None
-        cnf_text, status, updated_at_iso = row
+        cnf_text, cnf_path, status, updated_at_iso, audit_json = row
+        try:
+            audit = json.loads(str(audit_json)) if audit_json else {}
+        except json.JSONDecodeError:
+            audit = {}
+        if isinstance(audit, dict):
+            cnf_sha256 = audit.get("cnf_sha256")
+            cnf_bytes = _positive_audit_int(audit.get("cnf_bytes"))
+            max_cnf_bytes = _positive_audit_int(audit.get("max_cnf_bytes"))
+        else:
+            cnf_sha256 = None
+            cnf_bytes = None
+            max_cnf_bytes = None
         return EndpointLookup(
             cnf_text=str(cnf_text),
+            cnf_path=str(cnf_path) if cnf_path else None,
             status=str(status),
             updated_at_iso=str(updated_at_iso),
+            cnf_sha256=str(cnf_sha256) if cnf_sha256 else None,
+            cnf_bytes=cnf_bytes,
+            max_cnf_bytes=max_cnf_bytes,
         )
 
     async def list_for_family(
@@ -344,19 +448,58 @@ class SqliteChallengeSource:
     ) -> list[ChallengeRecord]:
         if status is None:
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                "status, audit_metadata "
                 "FROM lane_challenges WHERE family_id = ? ORDER BY challenge_id",
                 (family_id,),
             )
         else:
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                "status, audit_metadata "
                 "FROM lane_challenges WHERE family_id = ? AND status = ? "
                 "ORDER BY challenge_id",
                 (family_id, status),
             )
         rows = await cur.fetchall()
         return [_row_to_record(r) for r in rows]
+
+    async def list_locked_needing_loser_reconciliation(
+        self, family_id: str, *, limit: int = 32
+    ) -> list[ChallengeRecord]:
+        limit = max(1, int(limit))
+        cur = await self._conn.execute(
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+            "audit_metadata, losers_published_at_iso "
+            "FROM lane_challenges "
+            "WHERE family_id = ? AND status = ? AND losers_published_at_iso IS NULL "
+            "ORDER BY updated_at_iso DESC, challenge_id DESC LIMIT ?",
+            (family_id, CHALLENGE_STATUS_LOCKED, limit),
+        )
+        rows = await cur.fetchall()
+        return [_row_to_record(r) for r in rows]
+
+    async def mark_locked_loser_reconciliation_complete(
+        self,
+        *,
+        family_id: str,
+        challenge_id: str,
+        now_iso: str,
+    ) -> None:
+        cur = await self._conn.execute(
+            "UPDATE lane_challenges "
+            "SET losers_published_at_iso = ? "
+            "WHERE family_id = ? AND challenge_id = ? AND status = ?",
+            (
+                now_iso,
+                family_id,
+                challenge_id,
+                CHALLENGE_STATUS_LOCKED,
+            ),
+        )
+        await self._conn.commit()
+        if int(cur.rowcount or 0) != 1:
+            raise ChallengeSourceError("locked challenge not found")
 
     async def upsert(
         self,
@@ -367,32 +510,55 @@ class SqliteChallengeSource:
     ) -> None:
         ts = now_iso or self._default_now_iso or "1970-01-01T00:00:00.000Z"
         try:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            current_cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "audit_metadata FROM lane_challenges WHERE challenge_id = ? LIMIT 1",
+                (record.challenge_id,),
+            )
+            current_row = await current_cur.fetchone()
+            if current_row is not None:
+                current = _row_to_record(current_row)
+                if (
+                    current.status != CHALLENGE_STATUS_PENDING
+                    and not _challenge_material_matches(current, record)
+                ):
+                    # Once a challenge has been announced, fetch tokens,
+                    # receipts, and lock rows all refer to this exact private
+                    # material. Reusing a custom challenge id for another CNF
+                    # must fail instead of mutating the solved/active target.
+                    raise ChallengeSourceError(
+                        "challenge material is immutable once the challenge is active"
+                    )
             if overwrite_status:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
-                        challenge_id, family_id, tier, cnf_text, status,
-                        audit_metadata, created_at_iso, updated_at_iso
+                        challenge_id, family_id, tier, cnf_text, cnf_path, status,
+                        audit_metadata, losers_published_at_iso, created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
                         cnf_text=excluded.cnf_text,
+                        cnf_path=excluded.cnf_path,
                         status=excluded.status,
                         audit_metadata=excluded.audit_metadata,
+                        losers_published_at_iso=excluded.losers_published_at_iso,
                         updated_at_iso=excluded.updated_at_iso
                     """
             else:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
-                        challenge_id, family_id, tier, cnf_text, status,
-                        audit_metadata, created_at_iso, updated_at_iso
+                        challenge_id, family_id, tier, cnf_text, cnf_path, status,
+                        audit_metadata, losers_published_at_iso, created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
                         cnf_text=excluded.cnf_text,
+                        cnf_path=excluded.cnf_path,
                         audit_metadata=excluded.audit_metadata,
                         updated_at_iso=excluded.updated_at_iso
                     """
@@ -403,16 +569,24 @@ class SqliteChallengeSource:
                     record.family_id,
                     record.tier,
                     record.cnf_text,
+                    record.cnf_path,
                     record.status,
                     json.dumps(record.audit_metadata, sort_keys=True),
+                    record.losers_published_at_iso,
                     ts,
                     ts,
                 ),
             )
             await self._conn.commit()
+        except ChallengeSourceError:
+            await self._conn.rollback()
+            raise
         except aiosqlite.IntegrityError as exc:
             await self._conn.rollback()
             raise ChallengeSourceError("challenge source constraint violation") from exc
+        except Exception:
+            await self._conn.rollback()
+            raise
 
     async def activate(
         self,
@@ -480,7 +654,8 @@ class SqliteChallengeSource:
             if manage_transaction:
                 await self._conn.execute("BEGIN IMMEDIATE")
             await self._conn.execute(
-                "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
+                "UPDATE lane_challenges SET status = ?, losers_published_at_iso = NULL, "
+                "updated_at_iso = ? "
                 "WHERE family_id = ? AND challenge_id = ? AND status = ?",
                 (
                     CHALLENGE_STATUS_LOCKED,
@@ -498,7 +673,8 @@ class SqliteChallengeSource:
                 return None
 
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                "status, audit_metadata "
                 "FROM lane_challenges WHERE family_id = ? AND status = ? "
                 "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
                 (family_id, CHALLENGE_STATUS_PENDING),
@@ -511,7 +687,8 @@ class SqliteChallengeSource:
 
             pending = _row_to_record(row)
             await self._conn.execute(
-                "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
+                "UPDATE lane_challenges SET status = ?, losers_published_at_iso = NULL, "
+                "updated_at_iso = ? "
                 "WHERE family_id = ? AND challenge_id = ?",
                 (
                     CHALLENGE_STATUS_ACTIVE,
@@ -527,6 +704,7 @@ class SqliteChallengeSource:
                 family_id=pending.family_id,
                 tier=pending.tier,
                 cnf_text=pending.cnf_text,
+                cnf_path=pending.cnf_path,
                 status=CHALLENGE_STATUS_ACTIVE,
                 audit_metadata=pending.audit_metadata,
             )
@@ -543,7 +721,7 @@ class SqliteChallengeSource:
         self, family_id: str, challenge_id: str
     ) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
             "FROM lane_challenges WHERE family_id = ? AND challenge_id = ? LIMIT 1",
             (family_id, challenge_id),
         )
@@ -554,7 +732,7 @@ class SqliteChallengeSource:
 
     async def _fetch_active_for_update(self, family_id: str) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
             "FROM lane_challenges WHERE family_id = ? AND status = ? LIMIT 1",
             (family_id, CHALLENGE_STATUS_ACTIVE),
         )
@@ -568,15 +746,21 @@ class SqliteChallengeSource:
 class EndpointLookup:
     """Minimal projection of ``lane_challenges`` for the public CNF endpoint.
 
-    The endpoint only needs the body it serves and the two fields that
-    decide whether to serve at all. Returning a narrow type (rather than
-    a full :class:`ChallengeRecord`) keeps the cardinal-sin surface small:
-    no audit metadata, no family id, no tier flow through this path.
+    The endpoint only needs the storage pointer/body it serves, the
+    fields that decide whether to serve, and the announced CNF digest/size
+    used to reject mutable file-backed rows whose bytes changed after
+    seeding. Returning a narrow type (rather than a full
+    :class:`ChallengeRecord`) keeps the cardinal-sin surface small: no
+    raw audit metadata, no family id, no tier flow through this path.
     """
 
     cnf_text: str
+    cnf_path: str | None
     status: str
     updated_at_iso: str
+    cnf_sha256: str | None = None
+    cnf_bytes: int | None = None
+    max_cnf_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -656,7 +840,7 @@ class SqliteFetchTokenStore:
 
 
 def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
-    challenge_id, family_id, tier, cnf_text, status, audit_json = row
+    challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_json, *rest = row
     audit: dict[str, Any]
     try:
         audit = json.loads(audit_json) if audit_json else {}
@@ -667,9 +851,37 @@ def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
         family_id=str(family_id),
         tier=int(tier),
         cnf_text=str(cnf_text),
+        cnf_path=str(cnf_path) if cnf_path else None,
         status=str(status),
         audit_metadata=audit,
+        losers_published_at_iso=str(rest[0]) if rest and rest[0] else None,
     )
+
+
+def _challenge_material_matches(existing: ChallengeRecord, incoming: ChallengeRecord) -> bool:
+    """True when an upsert is an idempotent rewrite of private material.
+
+    Status is deliberately ignored: callers may still activate/retire through
+    the state machine. CNF bytes/path, family, tier, and audit metadata are the
+    immutable material that public announcements, fetch tokens, and receipts
+    bind to after a row leaves ``pending``.
+    """
+    return (
+        existing.challenge_id == incoming.challenge_id
+        and existing.family_id == incoming.family_id
+        and existing.tier == incoming.tier
+        and existing.cnf_text == incoming.cnf_text
+        and existing.cnf_path == incoming.cnf_path
+        and existing.audit_metadata == incoming.audit_metadata
+    )
+
+
+def _positive_audit_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 __all__ = [
@@ -686,5 +898,6 @@ __all__ = [
     "InMemoryChallengeSource",
     "SqliteChallengeSource",
     "SqliteFetchTokenStore",
+    "ensure_sqlite_challenge_source_schema",
     "init_sqlite_challenge_source",
 ]

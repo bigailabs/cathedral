@@ -226,7 +226,9 @@ def score_and_sign_task_family_stdout(
             answer=answer,
         )
         try:
-            verifier = lane.verify(problem, hidden, submission)
+            verifier = _verify_file_backed_synthetic_boolean(problem, hidden, submission)
+            if verifier is None:
+                verifier = lane.verify(problem, hidden, submission)
         except Exception as exc:
             verifier = VerifierResult(
                 parsed_ok=False,
@@ -260,6 +262,16 @@ def score_and_sign_task_family_stdout(
                 details={"error": str(exc)[:512]},
             )
 
+    if os.environ.get("CATHEDRAL_ZERO_ALL_SCORES", "").lower() == "true":
+        # Emergency publisher kill switch: schema-5 Task Family/SAT rows feed
+        # the same validator and remote-weight paths as legacy rows, so they
+        # must also collapse to zero when operators need fleet-wide burn mode.
+        score = ScoreResult(
+            weighted_score=0.0,
+            rejection_reason=score.rejection_reason or "CATHEDRAL_ZERO_ALL_SCORES=true",
+            score_parts={key: 0.0 for key in score.score_parts},
+        )
+
     row = build_signed_task_family_row(
         eval_run_id=eval_run_id or str(uuid4()),
         submission_id=str(submission_row["id"]),
@@ -280,6 +292,152 @@ def score_and_sign_task_family_stdout(
         prompt=prompt,
         submission=submission,
     )
+
+
+def _verify_file_backed_synthetic_boolean(
+    problem: PublicProblem,
+    hidden: Any,
+    submission: Submission,
+) -> VerifierResult | None:
+    """Publisher-side SAT verification for hidden file-backed CNFs.
+
+    The lane package remains pure and I/O-free. When the publisher's
+    challenge source stores only a local CNF path, this helper performs
+    the same answer validation and DIMACS result mapping the lane uses,
+    but streams the CNF from disk through publisher-owned code.
+    """
+    if problem.task_family != "synthetic_boolean_v1":
+        return None
+    hidden_payload = hidden.hidden_payload if isinstance(hidden.hidden_payload, dict) else {}
+    cnf_path = hidden_payload["cnf_path"] if "cnf_path" in hidden_payload else None
+    if not isinstance(cnf_path, str) or not cnf_path:
+        return None
+    expected_sha256 = _expected_file_cnf_sha256(problem, hidden_payload)
+    if expected_sha256 is None:
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="cnf_hash_missing",
+            details={},
+        )
+
+    answer = submission.answer
+    if not isinstance(answer, dict):
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="answer_not_object",
+            details={},
+        )
+    raw_solution = answer["dimacs_solution"] if "dimacs_solution" in answer else None
+    if not isinstance(raw_solution, str):
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="answer_missing_dimacs_solution",
+            details={},
+        )
+    if set(answer) != {"dimacs_solution"}:
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason="answer_unexpected_keys",
+            details={"keys": sorted(str(k) for k in answer)},
+        )
+
+    from cathedral.publisher.sat_file_verifier import verify_dimacs_solution_file
+
+    # The public problem announced a digest; the file verifier checks the same
+    # bytes it uses for scoring so a mutable path cannot silently swap formulas.
+    verification = verify_dimacs_solution_file(
+        cnf_path,
+        raw_solution,
+        max_bytes=_file_cnf_max_bytes(hidden_payload),
+        expected_sha256=expected_sha256,
+    )
+    if not verification.parsed_ok:
+        return VerifierResult(
+            parsed_ok=False,
+            raw_metric=0.0,
+            rejection_reason=verification.rejection_reason or "solution_unparseable",
+            details={
+                "status": verification.status,
+                "clause_count": verification.clause_count,
+                "num_vars": verification.num_vars,
+                "assigned": verification.assigned,
+            },
+        )
+    if not verification.satisfied:
+        return VerifierResult(
+            parsed_ok=True,
+            raw_metric=0.0,
+            rejection_reason=verification.rejection_reason or "solution_unsatisfied",
+            details={
+                "clauses_satisfied": verification.clauses_satisfied,
+                "clause_count": verification.clause_count,
+            },
+        )
+    return VerifierResult(
+        parsed_ok=True,
+        raw_metric=1.0,
+        rejection_reason=None,
+        details={
+            "clauses_satisfied": verification.clauses_satisfied,
+            "clause_count": verification.clause_count,
+        },
+    )
+
+
+def _expected_file_cnf_sha256(
+    problem: PublicProblem,
+    hidden_payload: dict[str, Any],
+) -> str | None:
+    public_input = problem.public_input if isinstance(problem.public_input, dict) else {}
+    public_sha = _normalized_sha256(public_input.get("cnf_sha256"))
+    if public_sha is not None:
+        return public_sha
+    audit = hidden_payload.get("audit_metadata")
+    if not isinstance(audit, dict):
+        return None
+    return _normalized_sha256(audit.get("cnf_sha256"))
+
+
+def _file_cnf_max_bytes(hidden_payload: dict[str, Any]) -> int | None:
+    audit = hidden_payload.get("audit_metadata")
+    if not isinstance(audit, dict):
+        return None
+    candidates = [
+        value
+        for value in (
+            _positive_int(audit.get("cnf_bytes")),
+            _positive_int(audit.get("max_cnf_bytes")),
+        )
+        if value is not None
+    ]
+    if not candidates:
+        return None
+    # Verification must be bound to the seeded file size as well as any
+    # operator launch cap. Otherwise a tampered path can force the async eval
+    # worker to stream/hash a much larger replacement before it notices the
+    # announced SHA-256 no longer matches.
+    return min(candidates)
+
+
+def _normalized_sha256(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip().lower()
+    if len(stripped) == 64 and all(ch in "0123456789abcdef" for ch in stripped):
+        return stripped
+    return None
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 async def persist_task_family_result(

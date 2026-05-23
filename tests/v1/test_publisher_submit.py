@@ -63,6 +63,35 @@ def test_submit_happy_path_returns_202_with_id_and_bundle_hash(
     )
 
 
+def test_submit_insert_uses_shared_db_write_lock(
+    publisher_client,
+    alice_keypair,
+    monkeypatch,
+):
+    """SAT finalization and public submits share one SQLite commit gate."""
+    from cathedral.publisher import repository
+
+    original_insert = repository.insert_agent_submission
+    lock_states: list[bool] = []
+
+    async def wrapped_insert(*args, **kwargs):
+        lock_states.append(publisher_client.app.state.ctx.db_write_lock.locked())
+        return await original_insert(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "insert_agent_submission", wrapped_insert)
+
+    resp = submit_multipart(
+        publisher_client,
+        keypair=alice_keypair,
+        card_id="eu-ai-act",
+        bundle=make_valid_bundle(soul_md="# shared write lock probe\n"),
+        display_name="Shared Lock Probe",
+    )
+
+    assert resp.status_code == 202
+    assert lock_states == [True]
+
+
 def test_submit_id_is_lowercase_hyphenated_uuid(publisher_client, alice_keypair):
     """CONTRACTS.md §9 lock #7: UUIDs are lowercase hyphenated 8-4-4-4-12."""
     import uuid

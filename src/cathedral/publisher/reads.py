@@ -641,6 +641,11 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
     if schema_version == 3:
         task_json = run.get("task_json") or {}
         output = run.get("output_card_json") or {}
+        # This helper backs /v1/leaderboard/recent, the validator pull feed.
+        # Schema-3 signatures cover the raw top-level challenge_id and the
+        # raw claim, so this projection must keep the signed payload
+        # byte-for-byte verifiable. A miner/site redacted v3 feed needs a
+        # separate endpoint and signature shape.
         return {
             "id": run["id"],
             "agent_id": sub["id"],

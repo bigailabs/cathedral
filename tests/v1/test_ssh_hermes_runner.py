@@ -1,4 +1,4 @@
-# ruff: noqa: ASYNC240
+# ruff: noqa: ASYNC109, ASYNC240
 """Unit tests for SshHermesRunner (cathedralai/cathedral#75, PR 2).
 
 Mocks asyncssh at the module level. Covers:
@@ -51,6 +51,17 @@ _extract_card_json = _module._extract_card_json
 _compute_proof_of_loop = _module._compute_proof_of_loop
 
 from cathedral.v1_types import EvalTask  # noqa: E402
+
+
+def test_now_utc_iso_uses_receipt_ordering_timestamp_format() -> None:
+    timestamp = _module._now_utc_iso()
+    assert timestamp.endswith("Z")
+    assert "+00:00" not in timestamp
+    date_part, time_part = timestamp.removesuffix("Z").split("T")
+    assert len(date_part) == len("2026-05-20")
+    assert len(time_part.split(".")[1]) == 3
+    _module.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
 
 # --------------------------------------------------------------------------
 # Fixtures
@@ -123,6 +134,37 @@ def _mk_sftp() -> Any:
     sftp.__aenter__ = AsyncMock(return_value=sftp)
     sftp.__aexit__ = AsyncMock(return_value=None)
     return sftp
+
+
+class _FakeStreamingStdout:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def read(self, _n: int = -1) -> bytes:
+        if self._chunks:
+            return self._chunks.pop(0)
+        return b""
+
+
+class _FakeStreamingProcess:
+    def __init__(self, chunks: list[bytes], *, exit_status: int = 0) -> None:
+        self.stdout = _FakeStreamingStdout(chunks)
+        self.exit_status = exit_status
+        self.terminated = False
+        self.killed = False
+        self.closed = False
+
+    async def wait(self, *, check: bool = False, timeout: float | None = None) -> Any:
+        return _mk_run_result(exit_status=self.exit_status)
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait_closed(self) -> None:
+        self.closed = True
 
 
 # --------------------------------------------------------------------------
@@ -937,16 +979,19 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
     conn.close = MagicMock()
     conn.wait_closed = AsyncMock(return_value=None)
 
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+
     def _route(cmd, **kwargs):
         if "hermes --version" in cmd:
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes chat -Q" in cmd:
-            events.append("hermes_stdout")
-            stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
-            return _mk_run_result(stdout=stdout)
         return _mk_run_result()
+
+    async def _create_process(cmd, **kwargs):
+        assert "hermes chat -Q" in cmd
+        events.append("hermes_stdout")
+        return _FakeStreamingProcess([stdout.encode("utf-8")])
 
     async def fake_collect(*args, **kwargs):
         events.append("collect")
@@ -958,6 +1003,7 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
         return receipt_at
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    conn.create_process = AsyncMock(side_effect=_create_process)
     fake_asyncssh = MagicMock()
     fake_asyncssh.connect = AsyncMock(return_value=conn)
     fake_asyncssh.Error = Exception
@@ -987,6 +1033,181 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
     assert result.trace["task_family_stdout_received_at_iso"] == receipt_at
     assert "cnf_url" not in result.trace
     assert "dimacs_solution" not in result.trace
+
+
+@pytest.mark.asyncio
+async def test_task_family_scores_stdout_when_trace_collection_fails_after_receipt(
+    runner_config, submission
+) -> None:
+    problem = _module.PublicProblem(
+        task_family="synthetic_boolean_v1",
+        schema_version=5,
+        task_id="sat_public_trace_failure",
+        difficulty_tier=0,
+        public_input={"num_vars": 1, "cnf_sha256": "a" * 64},
+        time_limit_seconds=30,
+    )
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+    receipt_calls: list[tuple[str, str]] = []
+
+    runner = SshHermesRunner(runner_config)
+    runner._connect_with_retries = AsyncMock(return_value=conn)
+    runner._hermes_version = AsyncMock(return_value="hermes 0.13.0")
+    runner._resolve_hermes_home = AsyncMock(return_value="/home/cathedral-probe/.hermes")
+    runner._verify_hermes_install = AsyncMock(return_value=None)
+    runner._clone_profile = AsyncMock(return_value=None)
+    runner._delete_profile = AsyncMock(return_value=None)
+    runner._invoke_hermes_text = AsyncMock(return_value=stdout)
+    runner._collect_and_assemble = AsyncMock(
+        side_effect=SshHermesError("transfer_failed", "state.db missing")
+    )
+
+    async def receipt_callback(receipted_stdout: str, received_at_iso: str) -> None:
+        receipt_calls.append((receipted_stdout, received_at_iso))
+
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        result = await runner.run_task_family_challenge(
+            problem=problem,
+            prompt="Solve the SAT challenge.",
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+            receipt_callback=receipt_callback,
+        )
+
+    assert receipt_calls == [(stdout, result.stdout_received_at_iso)]
+    assert result.stdout == stdout
+    assert result.trace_bundle is None
+    assert result.trace["trace_collection_failed_after_receipt"] is True
+    assert result.trace["trace_collection_failure_code"] == "transfer_failed"
+    assert result.trace["task_family_stdout_received_at_iso"] == result.stdout_received_at_iso
+
+
+@pytest.mark.asyncio
+async def test_task_family_returns_stdout_when_cleanup_fails_after_receipt(
+    runner_config, submission
+) -> None:
+    problem = _module.PublicProblem(
+        task_family="synthetic_boolean_v1",
+        schema_version=5,
+        task_id="sat_public_cleanup_failure",
+        difficulty_tier=0,
+        public_input={"num_vars": 1, "cnf_sha256": "a" * 64},
+        time_limit_seconds=30,
+    )
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+    receipt_calls: list[tuple[str, str]] = []
+
+    runner = SshHermesRunner(runner_config)
+    runner._connect_with_retries = AsyncMock(return_value=conn)
+    runner._hermes_version = AsyncMock(return_value="hermes 0.13.0")
+    runner._resolve_hermes_home = AsyncMock(return_value="/home/cathedral-probe/.hermes")
+    runner._verify_hermes_install = AsyncMock(return_value=None)
+    runner._clone_profile = AsyncMock(return_value=None)
+    runner._delete_profile = AsyncMock(side_effect=RuntimeError("profile delete denied"))
+    runner._invoke_hermes_text = AsyncMock(return_value=stdout)
+    runner._collect_and_assemble = AsyncMock(return_value=MagicMock())
+
+    async def receipt_callback(receipted_stdout: str, received_at_iso: str) -> None:
+        receipt_calls.append((receipted_stdout, received_at_iso))
+
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        result = await runner.run_task_family_challenge(
+            problem=problem,
+            prompt="Solve the SAT challenge.",
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+            receipt_callback=receipt_callback,
+        )
+
+    assert receipt_calls == [(stdout, result.stdout_received_at_iso)]
+    assert result.stdout == stdout
+    assert result.trace_bundle is not None
+    assert result.trace["profile_cleanup_failed_after_receipt"] is True
+    assert result.trace["task_family_stdout_received_at_iso"] == result.stdout_received_at_iso
+
+
+@pytest.mark.asyncio
+async def test_task_family_uses_announced_problem_time_limit(runner_config, submission) -> None:
+    problem = _module.PublicProblem(
+        task_family="synthetic_boolean_v1",
+        schema_version=5,
+        task_id="sat_public_timeout_probe",
+        difficulty_tier=0,
+        public_input={"num_vars": 1, "cnf_sha256": "a" * 64},
+        time_limit_seconds=7,
+    )
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+    runner = SshHermesRunner(runner_config)
+    runner._connect_with_retries = AsyncMock(return_value=conn)
+    runner._hermes_version = AsyncMock(return_value="hermes 0.13.0")
+    runner._resolve_hermes_home = AsyncMock(return_value="/home/cathedral-probe/.hermes")
+    runner._verify_hermes_install = AsyncMock(return_value=None)
+    runner._clone_profile = AsyncMock(return_value=None)
+    runner._delete_profile = AsyncMock(return_value=None)
+    runner._collect_and_assemble = AsyncMock(return_value=MagicMock())
+    runner._invoke_hermes_text = AsyncMock(
+        return_value='```FINAL_ANSWER\n{"dimacs_solution":"s SATISFIABLE\\nv 1 0\\n"}\n```'
+    )
+
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        await runner.run_task_family_challenge(
+            problem=problem,
+            prompt="Solve the SAT challenge.",
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+        )
+
+    runner._invoke_hermes_text.assert_awaited_once()
+    assert runner._invoke_hermes_text.await_args.kwargs["timeout_secs"] == 7.0
+    assert runner._invoke_hermes_text.await_args.kwargs["max_stdout_bytes"] == (
+        runner_config.task_family_stdout_limit_bytes
+    )
+
+
+@pytest.mark.asyncio
+async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
+    runner_config,
+) -> None:
+    runner = SshHermesRunner(runner_config)
+    process = _FakeStreamingProcess([b"a" * 8, b"b" * 8])
+    conn = MagicMock()
+    conn.create_process = AsyncMock(return_value=process)
+    conn.run = AsyncMock(side_effect=AssertionError("conn.run buffers stdout"))
+
+    with pytest.raises(SshHermesError) as exc:
+        await runner._invoke_hermes_text(
+            conn,
+            eval_profile="cathedral-eval-sat",
+            prompt="Solve the SAT challenge.",
+            eval_round="synthetic_boolean_v1-test",
+            resolved_home="/home/cathedral-probe/.hermes",
+            timeout_secs=30,
+            max_stdout_bytes=10,
+        )
+
+    assert exc.value.code == "hermes_stdout_oversized"
+    assert process.terminated is True
+    assert process.closed is True
+    conn.run.assert_not_called()
+    conn.create_process.assert_awaited_once()
 
 
 # --------------------------------------------------------------------------

@@ -23,16 +23,24 @@ from cathedral.lanes.challenge_source import (
 
 _FAMILY = "synthetic_boolean_v1"
 _TOY_CNF = "p cnf 1 1\n1 0\n"
+_OTHER_TOY_CNF = "p cnf 1 1\n-1 0\n"
 
 
-def _record(challenge_id: str, status: str = CHALLENGE_STATUS_ACTIVE) -> ChallengeRecord:
+def _record(
+    challenge_id: str,
+    status: str = CHALLENGE_STATUS_ACTIVE,
+    *,
+    cnf_text: str = _TOY_CNF,
+    tier: int = 1,
+    audit_metadata: dict[str, object] | None = None,
+) -> ChallengeRecord:
     return ChallengeRecord(
         challenge_id=challenge_id,
         family_id=_FAMILY,
-        tier=1,
-        cnf_text=_TOY_CNF,
+        tier=tier,
+        cnf_text=cnf_text,
         status=status,
-        audit_metadata={"note": "toy"},
+        audit_metadata=dict(audit_metadata or {"note": "toy"}),
     )
 
 
@@ -136,6 +144,107 @@ async def test_sqlite_upsert_preserves_existing_status_by_default(tmp_path) -> N
         await conn.close()
 
 
+async def test_sqlite_locked_loser_reconciliation_marker_filters_dirty_rows(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("locked-old", CHALLENGE_STATUS_LOCKED))
+        await src.upsert(
+            _record("locked-done", CHALLENGE_STATUS_LOCKED),
+            now_iso="2026-05-19T00:00:01.000Z",
+        )
+        await src.upsert(
+            _record("locked-new", CHALLENGE_STATUS_LOCKED),
+            now_iso="2026-05-19T00:00:02.000Z",
+        )
+        await src.mark_locked_loser_reconciliation_complete(
+            family_id=_FAMILY,
+            challenge_id="locked-done",
+            now_iso="2026-05-19T00:00:03.000Z",
+        )
+
+        dirty = await src.list_locked_needing_loser_reconciliation(_FAMILY, limit=1)
+
+        assert [row.challenge_id for row in dirty] == ["locked-new"]
+        assert dirty[0].losers_published_at_iso is None
+
+        all_dirty = await src.list_locked_needing_loser_reconciliation(_FAMILY)
+        assert [row.challenge_id for row in all_dirty] == ["locked-new", "locked-old"]
+        assert "locked-done" not in {row.challenge_id for row in all_dirty}
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_rejects_active_challenge_material_mutation(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("c1", CHALLENGE_STATUS_ACTIVE))
+
+        with pytest.raises(ChallengeSourceError, match="immutable"):
+            await src.upsert(
+                _record(
+                    "c1",
+                    CHALLENGE_STATUS_PENDING,
+                    cnf_text=_OTHER_TOY_CNF,
+                    audit_metadata={"note": "different-cnf"},
+                )
+            )
+
+        rows = await src.list_for_family(_FAMILY)
+        assert len(rows) == 1
+        assert rows[0].status == CHALLENGE_STATUS_ACTIVE
+        assert rows[0].cnf_text == _TOY_CNF
+        assert rows[0].audit_metadata == {"note": "toy"}
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_rejects_locked_challenge_material_mutation_even_with_status_overwrite(
+    tmp_path,
+) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("c1", CHALLENGE_STATUS_LOCKED))
+
+        with pytest.raises(ChallengeSourceError, match="immutable"):
+            await src.upsert(
+                _record("c1", CHALLENGE_STATUS_ACTIVE, cnf_text=_OTHER_TOY_CNF),
+                overwrite_status=True,
+            )
+
+        rows = await src.list_for_family(_FAMILY)
+        assert len(rows) == 1
+        assert rows[0].status == CHALLENGE_STATUS_LOCKED
+        assert rows[0].cnf_text == _TOY_CNF
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_allows_pending_challenge_material_update(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("c1", CHALLENGE_STATUS_PENDING))
+        await src.upsert(
+            _record(
+                "c1",
+                CHALLENGE_STATUS_PENDING,
+                cnf_text=_OTHER_TOY_CNF,
+                audit_metadata={"note": "updated-before-announce"},
+            )
+        )
+
+        rows = await src.list_for_family(_FAMILY)
+        assert len(rows) == 1
+        assert rows[0].status == CHALLENGE_STATUS_PENDING
+        assert rows[0].cnf_text == _OTHER_TOY_CNF
+        assert rows[0].audit_metadata == {"note": "updated-before-announce"}
+    finally:
+        await conn.close()
+
+
 async def test_sqlite_upsert_can_overwrite_status_explicitly(tmp_path) -> None:
     conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
     try:
@@ -224,6 +333,57 @@ async def test_env_seed_loads_operator_cnf_without_path_in_metadata(tmp_path, mo
         assert active.audit_metadata["source"] == "operator_cnf_path"
         assert "path" not in active.audit_metadata
         assert str(cnf_path) not in str(active.audit_metadata)
+    finally:
+        await conn.close()
+
+
+async def test_env_seed_can_store_operator_cnf_as_file_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from cathedral.publisher.app import _seed_synthetic_boolean_challenge_from_env
+
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 2 1\n1 -2 0\n", encoding="utf-8")
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", str(cnf_path))
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_CHALLENGE_ID", "active-file-001")
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE", "file")
+
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await _seed_synthetic_boolean_challenge_from_env(src)
+        active = await src.get_active(_FAMILY)
+        assert active is not None
+        assert active.challenge_id == "active-file-001"
+        assert active.cnf_text == ""
+        assert active.cnf_path == str(cnf_path.resolve())
+        assert active.audit_metadata["storage"] == "file"
+        assert active.audit_metadata["source"] == "operator_cnf_path"
+        assert active.audit_metadata["cnf_bytes"] == cnf_path.stat().st_size
+        assert "path" not in active.audit_metadata
+        assert str(cnf_path) not in str(active.audit_metadata)
+        lookup = await src.get_for_endpoint("active-file-001")
+        assert lookup is not None
+        assert lookup.cnf_bytes == cnf_path.stat().st_size
+    finally:
+        await conn.close()
+
+
+async def test_env_seed_rejects_operator_cnf_above_launch_limit(tmp_path, monkeypatch) -> None:
+    from cathedral.publisher.app import _seed_synthetic_boolean_challenge_from_env
+
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 2 1\n1 -2 0\n", encoding="utf-8")
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", str(cnf_path))
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES", "8")
+
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        with pytest.raises(RuntimeError, match="MAX_CNF_BYTES"):
+            await _seed_synthetic_boolean_challenge_from_env(src)
+        assert await src.get_active(_FAMILY) is None
     finally:
         await conn.close()
 

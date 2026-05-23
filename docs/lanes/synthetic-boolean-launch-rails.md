@@ -14,12 +14,13 @@ The first launch model is one active formula.
 2. All eligible miners race the same formula.
 3. Cathedral runs each miner through the SSH/Hermes path.
 4. Miners return a JSON object with `dimacs_solution`.
-5. Cathedral verifies the assignment deterministically.
-6. The first answer Cathedral verifies and locks wins the SAT lane score; the publisher then advances the active challenge.
-7. Later submissions for that locked challenge score `0.0`.
-8. Operator advances to the next formula.
+5. Cathedral records a hash-only receipt as soon as Hermes stdout returns.
+6. Cathedral verifies the assignment deterministically.
+7. The first-submitted valid receipt wins the SAT lane score; the publisher then advances the active challenge.
+8. Later valid receipts for that locked challenge score `0.0`.
+9. Operator advances to the next formula.
 
-The winner ordering rule is **first verified and locked**, not first submitted. The lock is acquired only after `SyntheticBooleanV1.verify` returns a valid satisfying assignment, so submissions that arrive earlier but verify later than another miner's parallel run can lose the race. See `src/cathedral/eval/orchestrator.py` for the call site. Open tracking issue for whether to keep this rule or move to a true first-submitted (publisher-receipt-time + miner-signed answer) model.
+The winner ordering rule is **first submitted among valid receipts**, not first verified. The publisher records receipt time before trace collection finishes, then resolves receipts as valid or invalid. A later valid receipt cannot win while an earlier receipt is still unresolved; it wins only if all earlier receipts resolve invalid or expired.
 
 Reward shape:
 
@@ -130,7 +131,7 @@ The public feed is hash-only. Raw CNF and submitted solutions must not appear in
 2. Confirm publisher env enables the task-family feed.
 3. Activate one formula from operator-controlled private storage.
 4. Confirm miner prompts are delivered through `SshHermesRunner`.
-5. Confirm the first verified solution locks the active challenge.
+5. Confirm the first-submitted valid receipt locks the active challenge.
 6. Confirm public feed rows are hash-only.
 7. Confirm validators pull signed rows and keep SAT task-family weight at the intended value.
 8. Confirm validator logs show coherent local weight setting.
@@ -145,7 +146,95 @@ CATHEDRAL_EVAL_MODE=ssh-probe
 CATHEDRAL_PROBER_VERSION=v2
 CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true
 CATHEDRAL_TASK_FAMILY_IDS=synthetic_boolean_v1
+CATHEDRAL_PUBLIC_BASE_URL=https://api.cathedral.computer
+CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES=67108864
 ```
+
+`CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES` defaults to 64 MiB. Keep
+first-launch formulas under that limit while Cathedral uses the default
+publisher SQLite CNF storage path.
+
+For large operator-mounted formulas, use file-backed storage:
+
+```bash
+CATHEDRAL_SYNTHETIC_BOOLEAN_V1_STORAGE_MODE=file
+```
+
+In file mode, the publisher stores only a private local CNF path in its
+challenge row, serves the CNF through the same token-gated URL endpoint
+as a file response, and verifies submitted solutions through the
+file-backed DIMACS verifier. If `CATHEDRAL_SYNTHETIC_BOOLEAN_V1_MAX_CNF_BYTES`
+is explicitly set in file mode, preflight and startup still enforce it;
+otherwise file mode does not apply the default 64 MiB text-storage cap.
+Shadow-run file mode in the target publisher environment before seeding
+multi-GB formulas.
+
+Manual operator seeding supports the same storage choice:
+
+```bash
+cathedral sat-seed-challenge --cnf-path /private/active.cnf --storage-mode file --activate
+```
+
+After seeding or activation, confirm the active challenge metadata without
+printing raw CNF, local paths, or fetch tokens:
+
+```bash
+cathedral sat-active-challenge-status --db data/publisher.db
+```
+
+The same status check is available on the publisher CLI:
+
+```bash
+cathedral-publisher sat-active-challenge-status --db data/publisher.db
+```
+
+For file-backed staging, add `--verify-cnf-hash` to stream the active CNF
+and compare it with the SHA-256 recorded at seeding time. The command exits
+nonzero if there is no active challenge, the active CNF file is unreadable,
+or explicit hash verification fails.
+
+Before sending a large formula to miners, probe the real public CNF
+download path through the target proxy:
+
+```bash
+cathedral-publisher sat-active-cnf-probe \
+  --db data/publisher.db \
+  --public-base-url https://api.cathedral.computer \
+  --timeout-secs 300 \
+  --min-bytes-per-second 1048576
+```
+
+`sat-active-cnf-probe` mints or reuses an authorized fetch token, downloads
+the active CNF from `/v1/challenges/{challenge_id}/cnf` through the public
+base URL, streams the response into a SHA-256 digest, and exits nonzero on
+HTTP failure, hash mismatch, empty response, or throughput below the
+configured floor. Its JSON output includes byte count, elapsed time,
+throughput, and hash match status, but never prints the CNF body, fetch token,
+full URL, or local file path. The same command is available through the
+operator CLI as `cathedral sat-active-cnf-probe`.
+
+Run the publisher-side SAT preflight before booting a launch candidate:
+
+```bash
+cathedral-publisher sat-launch-preflight
+```
+
+The command reads the current environment, requires the SAT feed/runtime
+gates (`CATHEDRAL_TASK_FAMILY_FEED_ENABLED=true`, `CATHEDRAL_EVAL_MODE=ssh-probe`,
+`CATHEDRAL_PROBER_VERSION=v2`, and `CATHEDRAL_PUBLIC_BASE_URL`), verifies
+the operator CNF is readable UTF-8 DIMACS, applies the configured launch
+limit for `sqlite_text` mode or explicitly capped `file` mode, checks
+the tier and challenge id, and requires both eval-row and remote-weight
+signing keys by default. For a shadow run that intentionally does not
+produce signed remote weights, use:
+
+```bash
+cathedral-publisher sat-launch-preflight --no-require-weight-signing-key
+```
+
+For local one-off parser checks that intentionally do not wire the
+runtime feed, use `--no-require-runtime-env`; do not use that override
+for target publisher launch checks.
 
 Validator local testing:
 
@@ -153,6 +242,38 @@ Validator local testing:
 CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
 CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT=0.0
 ```
+
+Validator remote-weight opt-in after release:
+
+```toml
+[remote_weight_source]
+enabled = true
+url = "https://api.cathedral.computer"
+key_id = "cathedral-weight-policy"
+public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
+```
+
+Before moving SAT above zero weight on mainnet, validators should pass:
+
+```bash
+cathedral-publisher remote-weight-vector-preflight --db data/publisher.db
+cathedral-validator sat-launch-preflight --config config/mainnet.toml
+cathedral-validator chain-launch-preflight --config config/mainnet.toml
+cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
+```
+
+`remote-weight-vector-preflight` opens the publisher DB read-only, builds one
+signed remote-weight vector from the current ranked scores and configured Task
+Family weights, self-verifies the signature/invariants against the configured
+weight-policy key id, and reports private-safe metadata such as vector id,
+policy version, expiry, entry count, burn policy, and policy hash. It does not
+print miner hotkeys or the full vector payload.
+
+`chain-launch-preflight` reads the live Bittensor subnet without submitting
+`set_weights`. It reports the current block, metagraph block/size,
+registration status, validator hotkey-to-uid mapping, validator permit/stake
+when the SDK exposes them, selected subnet hyperparameters, and warnings for
+weight cadence, commit-reveal/immunity, or disabled weight setting.
 
 ## Leak Checks
 

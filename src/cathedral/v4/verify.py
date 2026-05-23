@@ -21,6 +21,8 @@ import base64
 import json
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 # The set of keys the validator re-canonicalizes for signature check.
 # MUST stay byte-equal to ``cathedral.v4.sign._V4_SIGNED_KEYS``; a
 # test pins this.
@@ -53,6 +55,24 @@ def _canonical_json(obj: dict[str, Any]) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _verify_detached_ed25519(
+    publisher_pubkey: Any,
+    *,
+    payload_bytes: bytes,
+    signature: bytes,
+) -> None:
+    if isinstance(publisher_pubkey, Ed25519PublicKey):
+        # Production validator auth uses cryptography keys. Its API takes
+        # (signature, data), the reverse of PyNaCl's detached verify order.
+        publisher_pubkey.verify(signature, payload_bytes)
+        return
+
+    # Unit tests and older mock integrations use PyNaCl VerifyKey, whose
+    # detached-signature API is verify(data, signature). Keep this fallback
+    # explicit so a future key-type swap cannot silently flip the arguments.
+    publisher_pubkey.verify(payload_bytes, signature)
+
+
 def verify_v4_row(
     row: dict[str, Any],
     publisher_pubkey: Any,
@@ -63,10 +83,10 @@ def verify_v4_row(
       row: the wire dict pulled from the publisher feed. Must
         contain every key in ``_V4_SIGNED_KEYS_VALIDATOR_MIRROR``
         plus ``cathedral_signature`` and ``eval_output_schema_version``.
-      publisher_pubkey: a ``nacl.signing.VerifyKey`` (or anything
-        with a compatible ``.verify(bytes, signature_bytes) -> bytes``
-        method). Typed as ``Any`` so this module stays decoupled
-        from the validator's auth wiring.
+      publisher_pubkey: a production ``cryptography``
+        ``Ed25519PublicKey`` or a legacy/test ``nacl.signing.VerifyKey``.
+        Typed as ``Any`` so this module stays decoupled from the
+        validator's auth wiring.
 
     Returns ``(verified, weighted_score)``. ``verified=False`` on
     any structural or signature failure; verified=True and a small
@@ -98,7 +118,11 @@ def verify_v4_row(
         raise VerifyError(f"signature is not valid base64: {e}") from e
 
     try:
-        publisher_pubkey.verify(payload_bytes, signature)
+        _verify_detached_ed25519(
+            publisher_pubkey,
+            payload_bytes=payload_bytes,
+            signature=signature,
+        )
     except Exception as e:  # nacl raises BadSignatureError
         raise VerifyError(f"signature verification failed: {e}") from e
 

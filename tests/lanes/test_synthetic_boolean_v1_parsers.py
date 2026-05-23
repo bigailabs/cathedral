@@ -19,6 +19,10 @@ from cathedral.lanes.synthetic_boolean_v1.dimacs import (
     parse_dimacs_solution,
     verify_dimacs_solution,
 )
+from cathedral.publisher.sat_file_verifier import (
+    parse_dimacs_cnf_metadata_file,
+    verify_dimacs_solution_file,
+)
 
 # --------------------------------------------------------------------------
 # CNF parser
@@ -97,6 +101,36 @@ def test_parse_cnf_metadata_does_not_collect_clauses() -> None:
     assert meta.num_clauses == 2
 
 
+def test_parse_cnf_metadata_rejects_cnf_above_assignment_budget() -> None:
+    meta = parse_dimacs_cnf_metadata(
+        f"p cnf {dimacs_mod.MAX_ASSIGNMENT_VARIABLES + 1} 0\n"
+    )
+
+    assert not meta.ok
+    assert meta.rejection_reason == "cnf_too_many_vars"
+
+
+def test_parse_cnf_metadata_file_streams_without_collecting_clauses(tmp_path) -> None:
+    cnf_path = tmp_path / "stream.cnf"
+    cnf_path.write_text("c comment\np cnf 3 2\n1 -2 0\n2 3 0\n", encoding="utf-8")
+
+    meta = parse_dimacs_cnf_metadata_file(cnf_path)
+
+    assert meta.ok
+    assert meta.num_vars == 3
+    assert meta.num_clauses == 2
+
+
+def test_parse_cnf_metadata_file_honors_explicit_size_limit(tmp_path) -> None:
+    cnf_path = tmp_path / "stream.cnf"
+    cnf_path.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+
+    meta = parse_dimacs_cnf_metadata_file(cnf_path, max_bytes=8)
+
+    assert not meta.ok
+    assert meta.rejection_reason == "cnf_oversized"
+
+
 # --------------------------------------------------------------------------
 # Solution parser
 # --------------------------------------------------------------------------
@@ -169,7 +203,52 @@ def test_verify_dimacs_solution_streaming_path() -> None:
     assert result.clause_count == 2
 
 
-def test_verify_dimacs_solution_matches_fred_bsat_strictness() -> None:
+def test_verify_dimacs_solution_file_streams_cnf_from_disk(tmp_path) -> None:
+    cnf_path = tmp_path / "stream.cnf"
+    cnf_path.write_text("p cnf 3 2\n1 -2 0\n2 3 0\n", encoding="utf-8")
+
+    result = verify_dimacs_solution_file(
+        cnf_path,
+        "s SATISFIABLE\nv 1 2 -3 0\n",
+    )
+
+    assert result.parsed_ok
+    assert result.satisfied
+    assert result.clauses_satisfied == 2
+    assert result.clause_count == 2
+
+
+def test_verify_dimacs_solution_file_rejects_unsatisfied_assignment(tmp_path) -> None:
+    cnf_path = tmp_path / "stream.cnf"
+    cnf_path.write_text("p cnf 2 2\n1 0\n2 0\n", encoding="utf-8")
+
+    result = verify_dimacs_solution_file(
+        cnf_path,
+        "s SATISFIABLE\nv 1 -2 0\n",
+    )
+
+    assert result.parsed_ok
+    assert not result.satisfied
+    assert result.rejection_reason == "solution_unsatisfied"
+
+
+def test_verify_dimacs_solution_file_rejects_oversized_file_before_hashing(tmp_path) -> None:
+    original_cnf = "p cnf 1 1\n1 0\n"
+    cnf_path = tmp_path / "stream.cnf"
+    cnf_path.write_text("c replacement grew\np cnf 1 1\n-1 0\n", encoding="utf-8")
+
+    result = verify_dimacs_solution_file(
+        cnf_path,
+        "s SATISFIABLE\nv -1 0\n",
+        max_bytes=len(original_cnf.encode("utf-8")),
+        expected_sha256="0" * 64,
+    )
+
+    assert not result.parsed_ok
+    assert result.rejection_reason == "cnf_oversized"
+
+
+def test_verify_dimacs_solution_matches_reference_strictness() -> None:
     cnf = "p cnf 2 2\n1 0\n2 0\n"
     for bad_solution in [
         "s SATISFIABLE extra\nv 1 2 0\n",
@@ -184,6 +263,33 @@ def test_verify_dimacs_solution_matches_fred_bsat_strictness() -> None:
         result = verify_dimacs_solution(cnf, bad_solution)
         assert not result.satisfied
         assert result.rejection_reason
+
+
+def test_verify_dimacs_solution_rejects_assignment_above_bitset_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dimacs_mod, "MAX_ASSIGNMENT_VARIABLES", 3)
+    cnf = "p cnf 4 1\n1 0\n"
+
+    result = verify_dimacs_solution(cnf, "s SATISFIABLE\nv 1 2 3 4 0\n")
+
+    assert not result.parsed_ok
+    assert result.rejection_reason == "solution_too_many_vars"
+
+
+def test_verify_dimacs_solution_rejects_non_sat_status_before_bitset_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExplodingAssignmentBits:
+        def __init__(self, variable_count: int) -> None:
+            raise AssertionError(f"unexpected bitset allocation for {variable_count}")
+
+    monkeypatch.setattr(dimacs_mod, "_AssignmentBits", _ExplodingAssignmentBits)
+
+    result = verify_dimacs_solution("p cnf 1 1\n1 0\n", "s UNKNOWN\n")
+
+    assert not result.parsed_ok
+    assert result.rejection_reason == "solution_status_unknown"
 
 
 # --------------------------------------------------------------------------

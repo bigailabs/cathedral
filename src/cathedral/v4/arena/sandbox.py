@@ -98,6 +98,7 @@ class ScrambledRepo:
     workspace_path: Path
     seed: int
     files: dict[str, str] = field(default_factory=dict)
+    binary_files: frozenset[str] = frozenset()
     rename_map: dict[str, str] = field(default_factory=dict)
     file_rename_map: dict[str, str] = field(default_factory=dict)
     string_rotation: dict[str, str] = field(default_factory=dict)
@@ -176,6 +177,7 @@ class IsomorphicScrambler:
         target_dir.mkdir(parents=True)
 
         files_out: dict[str, str] = {}
+        binary_files_out: set[str] = set()
         for src_path in sorted(_iter_repo_files(repo_dir)):
             rel = src_path.relative_to(repo_dir).as_posix()
             if rel == "scramble.json":
@@ -194,6 +196,7 @@ class IsomorphicScrambler:
 
             if not is_text:
                 shutil.copyfile(src_path, dest)
+                binary_files_out.add(new_rel)
                 continue
 
             new_text = _apply_text_transforms(
@@ -215,6 +218,7 @@ class IsomorphicScrambler:
             workspace_path=target_dir,
             seed=seed,
             files=files_out,
+            binary_files=frozenset(binary_files_out),
             rename_map=dict(rename_map),
             file_rename_map=dict(file_rename_map),
             string_rotation=dict(string_rotation_pick),
@@ -370,11 +374,52 @@ class MinerArena:
         return dict(self._files)
 
     def _flush_to_disk(self) -> None:
-        root = self._repo.workspace_path
-        for relpath, content in self._files.items():
-            dest = root / relpath
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+        _flush_workspace_files(
+            self._repo.workspace_path,
+            self._files,
+            preserve_files=self._repo.binary_files,
+        )
+
+
+def _flush_workspace_files(
+    root: Path,
+    files: dict[str, str],
+    *,
+    preserve_files: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Synchronize ``root`` to the text map while preserving copied assets."""
+
+    root.mkdir(parents=True, exist_ok=True)
+    normalized_files = {_normalize_relpath(relpath): content for relpath, content in files.items()}
+    preserved = {_normalize_relpath(relpath) for relpath in preserve_files}
+
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        relpath = path.relative_to(root).as_posix()
+        if relpath not in normalized_files and relpath not in preserved:
+            # The disk tree is a transport surface, not a cache. Whole-file
+            # delete hunks must remove stale text files before packaging reads
+            # the workspace, while binary assets copied by the scrambler stay
+            # outside the text map and must be explicitly preserved.
+            path.unlink()
+
+    _prune_empty_workspace_dirs(root)
+    for relpath, content in normalized_files.items():
+        dest = root / relpath
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content)
+    _prune_empty_workspace_dirs(root)
+
+
+def _prune_empty_workspace_dirs(root: Path) -> None:
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if not path.is_dir():
+            continue
+        try:
+            path.rmdir()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------

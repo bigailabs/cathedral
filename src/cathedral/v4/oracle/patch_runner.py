@@ -70,6 +70,7 @@ from __future__ import annotations
 import os
 import resource
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -250,7 +251,7 @@ def resolve_isolation_mode() -> IsolationMode:
         return "jailed"
     if sys.platform.startswith("linux"):
         unshare = shutil.which("unshare")
-        if unshare:
+        if unshare and _jail.unshare_userns_available():
             return "unshare_n_only"
     return "monkeypatch_only"
 
@@ -453,19 +454,25 @@ def _run_subprocess(
         env=env,
         shell=False,
         preexec_fn=preexec,
+        start_new_session=sys.platform != "win32",
     )
     try:
         stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
         timed_out = False
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_fallback_process_tree(proc)
         try:
             stdout_b, stderr_b = proc.communicate(timeout=0.1)
         except subprocess.TimeoutExpired:
             stdout_b, stderr_b = (b"", b"")
         timed_out = True
         returncode = None
+    else:
+        # A malicious patch can spawn a background child, detach its stdio,
+        # and let the parent exit successfully. The fallback runner owns the
+        # whole session, so clean up descendants even on non-timeout exits.
+        _kill_fallback_process_tree(proc)
     run_duration = time.monotonic() - run_start
 
     stdout = stdout_b.decode("utf-8", "replace") if stdout_b else ""
@@ -483,6 +490,19 @@ def _run_subprocess(
         patch_applied=patch_applied,
         isolation_mode=isolation_mode,
     )
+
+
+def _kill_fallback_process_tree(proc: subprocess.Popen[bytes]) -> None:
+    if sys.platform == "win32":  # pragma: no cover -- CI runs POSIX
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _run_jailed(

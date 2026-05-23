@@ -59,7 +59,7 @@ For a SAT launch candidate:
 
 1. Confirm schema-5 rows verify with the pinned Cathedral eval key.
 2. Confirm public rows are hash-only.
-3. Confirm the first verified solution locks the active challenge (the lock fires after the publisher-side verifier runs, not on submission timestamp).
+3. Confirm the first-submitted valid receipt locks the active challenge.
 4. Confirm late solutions do not earn weight for the locked challenge.
 5. Confirm validator-local SAT task-family weight is still `0.0` unless the release intentionally changes it.
 6. Confirm no live website metric is shown unless backed by deployed `state.json` or marked demo.

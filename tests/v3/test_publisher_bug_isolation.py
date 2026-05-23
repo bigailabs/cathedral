@@ -187,6 +187,7 @@ async def test_bug_isolation_persist_is_write_and_read_gated(tmp_path) -> None:
         assert wire["miner_hotkey"] == "5BugIsolationMinerHotkey"
         assert wire["weighted_score"] == pytest.approx(1.0)
         assert wire["challenge_id"] == "ch_pilot_alpha"
+        assert wire["claim"]["challenge_id"] == "ch_pilot_alpha"
         assert wire["challenge_id_public"] == signed.row["challenge_id_public"]
         # epoch_salt is part of the v3 signed subset; the readback
         # path must surface it on the wire or a future regression in
@@ -241,5 +242,6 @@ async def test_orchestrator_runs_bug_isolation_lane_when_feed_is_enabled(
         verify_eval_output_signature(wire, sk.public_key())
         assert wire["task_type"] == "bug_isolation_v1"
         assert wire["weighted_score"] == pytest.approx(1.0)
+        assert wire["challenge_id"] == "ch_pilot_alpha"
     finally:
         await conn.close()

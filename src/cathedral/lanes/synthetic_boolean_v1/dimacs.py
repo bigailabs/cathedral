@@ -27,15 +27,23 @@ storage.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 # Bounds are high enough for the private launch shape while still
 # preventing accidental unbounded strings from entering the Python verifier.
 MAX_CNF_BYTES = 2 * 1024 * 1024 * 1024
 MAX_SOLUTION_BYTES = 2 * 1024 * 1024 * 1024
-MAX_VARIABLES = 1_000_000_000
 MAX_CLAUSES = 1_000_000_000
 MAX_LITERALS_PER_CLAUSE = 10_000_000
+# Assignment verification uses two bitsets. Keep this lower than the parser's
+# launch-file header bound so a seeded-but-impractical CNF cannot allocate
+# hundreds of MiB per bad answer before being rejected.
+MAX_ASSIGNMENT_VARIABLES = 50_000_000
+# Launch records must obey the verifier's assignment budget. Allowing a larger
+# CNF header here would announce challenges that every valid answer later
+# rejects as ``solution_too_many_vars``.
+MAX_VARIABLES = MAX_ASSIGNMENT_VARIABLES
 
 _UINT64_MAX = (1 << 64) - 1
 _ASCII_SPACE = " \t\f\v"
@@ -203,16 +211,12 @@ def _split_ascii_space(value: str) -> list[str]:
     return parts
 
 
-def _scan_dimacs_cnf(text: str, *, collect_clauses: bool) -> Cnf | CnfMetadata:
-    if not isinstance(text, str):
-        return _empty_cnf_result("cnf_not_a_string", collect_clauses=collect_clauses)
-    if not text.strip(_ASCII_STRIP):
-        return _empty_cnf_result("cnf_empty", collect_clauses=collect_clauses)
-    if not _text_size_ok(text, MAX_CNF_BYTES):
-        return _empty_cnf_result("cnf_oversized", collect_clauses=collect_clauses)
-    if _has_nul(text):
-        return _empty_cnf_result("cnf_invalid_character", collect_clauses=collect_clauses)
-
+def _scan_dimacs_cnf_lines(
+    lines: Iterable[str],
+    *,
+    collect_clauses: bool,
+) -> Cnf | CnfMetadata:
+    saw_non_ws = False
     header_seen = False
     declared_vars = 0
     declared_clauses = 0
@@ -220,7 +224,11 @@ def _scan_dimacs_cnf(text: str, *, collect_clauses: bool) -> Cnf | CnfMetadata:
     current: list[int] = []
     clause_count = 0
 
-    for raw_line in text.splitlines():
+    for raw_line in lines:
+        if _has_nul(raw_line):
+            return _empty_cnf_result("cnf_invalid_character", collect_clauses=collect_clauses)
+        if raw_line.strip(_ASCII_STRIP):
+            saw_non_ws = True
         line = _skip_or_strip_line(raw_line)
         if line is None:
             continue
@@ -294,6 +302,8 @@ def _scan_dimacs_cnf(text: str, *, collect_clauses: bool) -> Cnf | CnfMetadata:
                     return _empty_cnf_result("cnf_clause_too_long", collect_clauses=collect_clauses)
 
     if not header_seen:
+        if not saw_non_ws:
+            return _empty_cnf_result("cnf_empty", collect_clauses=collect_clauses)
         return _empty_cnf_result("cnf_missing_header", collect_clauses=collect_clauses)
     if current:
         return _empty_cnf_result("cnf_unterminated_clause", collect_clauses=collect_clauses)
@@ -303,6 +313,18 @@ def _scan_dimacs_cnf(text: str, *, collect_clauses: bool) -> Cnf | CnfMetadata:
     if collect_clauses:
         return Cnf(num_vars=declared_vars, clauses=tuple(clauses), rejection_reason=None)
     return CnfMetadata(num_vars=declared_vars, num_clauses=declared_clauses)
+
+
+def _scan_dimacs_cnf(text: str, *, collect_clauses: bool) -> Cnf | CnfMetadata:
+    if not isinstance(text, str):
+        return _empty_cnf_result("cnf_not_a_string", collect_clauses=collect_clauses)
+    if not text.strip(_ASCII_STRIP):
+        return _empty_cnf_result("cnf_empty", collect_clauses=collect_clauses)
+    if not _text_size_ok(text, MAX_CNF_BYTES):
+        return _empty_cnf_result("cnf_oversized", collect_clauses=collect_clauses)
+    if _has_nul(text):
+        return _empty_cnf_result("cnf_invalid_character", collect_clauses=collect_clauses)
+    return _scan_dimacs_cnf_lines(text.splitlines(), collect_clauses=collect_clauses)
 
 
 def parse_dimacs_cnf(text: str) -> Cnf:
@@ -447,7 +469,7 @@ def _parse_solution_bits(
 
     status: str | None = None
     seen_terminator = False
-    bits = _AssignmentBits(variable_count)
+    bits: _AssignmentBits | None = None
 
     for raw_line in text.splitlines():
         line = _skip_or_strip_line(raw_line)
@@ -465,6 +487,11 @@ def _parse_solution_bits(
             if candidate not in _ALLOWED_STATUSES:
                 return "solution_unknown_status", candidate, None
             status = candidate
+            if status != "SATISFIABLE":
+                return f"solution_status_{status.lower()}", status, None
+            if variable_count > MAX_ASSIGNMENT_VARIABLES:
+                return "solution_too_many_vars", status, None
+            bits = _AssignmentBits(variable_count)
             continue
 
         if seen_terminator:
@@ -476,6 +503,7 @@ def _parse_solution_bits(
         if len(parts) == 1:
             return "solution_missing_assignment", status, None
 
+        assert bits is not None
         for index, tok in enumerate(parts[1:], start=1):
             parsed = _signed_int_token(tok)
             if parsed is None:
@@ -494,17 +522,16 @@ def _parse_solution_bits(
 
     if status is None:
         return "solution_missing_status", "", None
-    if status != "SATISFIABLE":
-        return f"solution_status_{status.lower()}", status, None
     if variable_count > 0 and not seen_terminator:
         return "solution_missing_terminator", status, None
+    assert bits is not None
     if not bits.complete():
         return "solution_incomplete_assignment", status, bits
     return None, status, bits
 
 
-def _evaluate_cnf_streaming(
-    text: str,
+def _evaluate_cnf_streaming_lines(
+    lines: Iterable[str],
     metadata: CnfMetadata,
     assignment: _AssignmentBits,
 ) -> DimacsVerification:
@@ -514,7 +541,9 @@ def _evaluate_cnf_streaming(
     saw_literal = False
     clause_satisfied = False
 
-    for raw_line in text.splitlines():
+    for raw_line in lines:
+        if _has_nul(raw_line):
+            return DimacsVerification(False, False, "cnf_invalid_character")
         line = _skip_or_strip_line(raw_line)
         if line is None:
             continue
@@ -590,6 +619,14 @@ def _evaluate_cnf_streaming(
     )
 
 
+def _evaluate_cnf_streaming(
+    text: str,
+    metadata: CnfMetadata,
+    assignment: _AssignmentBits,
+) -> DimacsVerification:
+    return _evaluate_cnf_streaming_lines(text.splitlines(), metadata, assignment)
+
+
 def verify_dimacs_solution(cnf_text: str, solution_text: str) -> DimacsVerification:
     metadata = parse_dimacs_cnf_metadata(cnf_text)
     if not metadata.ok:
@@ -629,6 +666,7 @@ def assignment_in_range(cnf: Cnf, assignment: dict[int, bool]) -> bool:
 
 
 __all__ = [
+    "MAX_ASSIGNMENT_VARIABLES",
     "MAX_CLAUSES",
     "MAX_CNF_BYTES",
     "MAX_LITERALS_PER_CLAUSE",

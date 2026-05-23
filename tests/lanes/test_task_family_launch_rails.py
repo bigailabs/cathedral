@@ -9,11 +9,18 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.eval.scoring_pipeline import EvalSigner
-from cathedral.lanes.contract import PublicProblem, ScoreResult, Submission, VerifierResult
+from cathedral.lanes.contract import (
+    HiddenMetadata,
+    PublicProblem,
+    ScoreResult,
+    Submission,
+    VerifierResult,
+)
 from cathedral.lanes.publisher import (
     AnswerExtractionError,
     build_task_family_prompt,
     extract_answer,
+    score_and_sign_task_family_stdout,
     task_family_prober_version_warning,
     task_family_runner_skip_reason,
 )
@@ -23,6 +30,7 @@ from cathedral.lanes.sign import (
     build_signed_task_family_row,
     public_task_id,
 )
+from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
 from cathedral.validator import pull_loop
 from cathedral.validator.db import connect
 from cathedral.validator.pull_loop import latest_pulled_score_per_hotkey, upsert_pulled_eval
@@ -115,6 +123,37 @@ def test_task_family_signed_row_rejects_tampered_score() -> None:
 
     with pytest.raises(pull_loop.PullVerificationError):
         pull_loop.verify_eval_output_signature(row, sk.public_key())
+
+
+def test_task_family_zero_all_scores_killswitch_forces_signed_zero(monkeypatch) -> None:
+    sk = Ed25519PrivateKey.generate()
+    monkeypatch.setenv("CATHEDRAL_ZERO_ALL_SCORES", "true")
+
+    signed = score_and_sign_task_family_stdout(
+        lane=SyntheticBooleanV1(),
+        problem=_problem(),
+        hidden=HiddenMetadata(
+            task_id="private-task-id-001",
+            generator_version="test",
+            hidden_payload={"cnf": "p cnf 1 1\n1 0\n"},
+        ),
+        submission_row={
+            "id": "submission-killswitch",
+            "miner_hotkey": "5Miner",
+            "display_name": "Boolean Miner",
+        },
+        stdout='```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}\n```',
+        ran_at_iso="2026-05-18T20:00:00.000Z",
+        signer=EvalSigner(sk),
+        eval_run_id="run-killswitch",
+        epoch_salt="epoch_123:synthetic_boolean_v1",
+    )
+
+    assert signed.score.weighted_score == 0.0
+    assert signed.row["weighted_score"] == 0.0
+    assert signed.row["rejection_reason"] == "CATHEDRAL_ZERO_ALL_SCORES=true"
+    assert signed.row["score_parts"] == {"binary_correct": 0.0}
+    pull_loop.verify_eval_output_signature(signed.row, sk.public_key())
 
 
 def test_task_family_answer_extraction_prefers_final_answer_block() -> None:
@@ -228,7 +267,9 @@ def test_ssh_hermes_task_family_runner_interface_is_launch_smoked() -> None:
         "prompt",
         "miner_hotkey",
         "submission",
+        "receipt_callback",
     ]
+    assert signature.parameters["receipt_callback"].default is None
 
 
 def test_ssh_hermes_redacts_cnf_fetch_tokens_from_errors() -> None:

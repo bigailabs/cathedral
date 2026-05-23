@@ -70,6 +70,7 @@ from cathedral.v4.arena.sandbox import (
     ScrambledRepo,
     _apply_unified_diff,
     _DiffError,
+    _flush_workspace_files,
 )
 from cathedral.v4.oracle.patch_runner import (
     BOOKKEEPING_BUDGET_SECONDS,
@@ -311,12 +312,15 @@ class CathedralEngine:
                 f"bug_patch failed to apply against scrambled {base_repo!r} seed={seed:x}: {e}"
             ) from e
 
-        # Flush broken state to disk so a separate transport (tar,
-        # rsync, signed-url upload) can ship it.
-        for relpath, content in broken.items():
-            dest = scrambled.workspace_path / relpath
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+        # Flush the exact broken state to disk so a separate transport
+        # (tar, rsync, signed-url upload) cannot package files deleted by
+        # the server-side bug patch. Binary assets are copied by the
+        # scrambler but intentionally excluded from the text workspace map.
+        _flush_workspace_files(
+            scrambled.workspace_path,
+            broken,
+            preserve_files=scrambled.binary_files,
+        )
 
         resolved_task_id = task_id or f"v4t_{seed:016x}"
         bundle = MinerBundle(

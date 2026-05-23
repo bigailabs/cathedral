@@ -51,7 +51,8 @@ from cathedral.lanes.challenge_source import (
     SQLITE_SCHEMA as CHALLENGE_SOURCE_SCHEMA,
 )
 from cathedral.lanes.publisher import score_and_sign_task_family_stdout
-from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
+from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1, problem_from_challenge_record
+from cathedral.publisher import challenge_cnf as challenge_cnf_module
 from cathedral.publisher.challenge_cnf import router as challenge_cnf_router
 from cathedral.storage.hippius import StubHippiusClient
 from cathedral.validator.db import connect
@@ -68,6 +69,48 @@ def _ms_iso(dt: datetime) -> str:
         dt = dt.replace(tzinfo=UTC)
     s = dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
     return s + "Z"
+
+
+@pytest.mark.parametrize("challenge_id", ["sat/bad", "sat?bad", "sat#bad", "sat bad"])
+def test_problem_from_challenge_record_rejects_unsafe_cnf_url_challenge_ids(
+    challenge_id: str,
+) -> None:
+    record = ChallengeRecord(
+        challenge_id=challenge_id,
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text=CNF_BODY,
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={"source": "unit"},
+    )
+
+    with pytest.raises(ValueError, match="challenge_id must be"):
+        problem_from_challenge_record(
+            record,
+            public_base_url="https://api.cathedral.test/",
+            fetch_token="token",
+        )
+
+
+def test_problem_from_challenge_record_encodes_cnf_url_fetch_token() -> None:
+    record = ChallengeRecord(
+        challenge_id="sat-safe_001~x",
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text=CNF_BODY,
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={"source": "unit"},
+    )
+
+    problem, _hidden = problem_from_challenge_record(
+        record,
+        public_base_url="https://api.cathedral.test/",
+        fetch_token="tok?x#y",
+    )
+
+    assert problem.public_input["cnf_url"] == (
+        "https://api.cathedral.test/v1/challenges/sat-safe_001~x/cnf?t=tok%3Fx%23y"
+    )
 
 
 @pytest_asyncio.fixture
@@ -183,6 +226,370 @@ async def test_active_with_correct_token_returns_cnf(wired_app: dict[str, Any]) 
     assert r.text == CNF_BODY
     assert hashlib.sha256(r.text.encode("utf-8")).hexdigest() == EXPECTED_SHA
     assert r.headers["content-type"].startswith("text/plain")
+
+
+@pytest.mark.asyncio
+async def test_active_file_backed_with_correct_token_returns_cnf(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert hashlib.sha256(r.content).hexdigest() == EXPECTED_SHA
+
+
+@pytest.mark.asyncio
+async def test_active_file_backed_snapshot_cache_runs_off_event_loop_once(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    original_to_thread = challenge_cnf_module.asyncio.to_thread
+    offloaded: list[Any] = []
+
+    async def spy_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        offloaded.append(func)
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(challenge_cnf_module.asyncio, "to_thread", spy_to_thread)
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    r_again = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert r_again.status_code == 200
+    assert r_again.text == CNF_BODY
+    assert offloaded == [challenge_cnf_module._materialize_verified_cnf_snapshot]
+
+
+@pytest.mark.asyncio
+async def test_active_file_backed_snapshot_cache_uses_configured_root(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cache_root = tmp_path / "operator-cache"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    monkeypatch.setenv(challenge_cnf_module.CNF_SNAPSHOT_DIR_ENV, str(cache_root))
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    cache = wired_app["app"].state.cnf_snapshot_cache
+    assert cache._root == cache_root
+    assert list(cache_root.glob("*.cnf"))
+
+
+@pytest.mark.asyncio
+async def test_file_backed_snapshot_cache_prunes_locked_past_grace(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=1,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    assert r.status_code == 200
+
+    cache = wired_app["app"].state.cnf_snapshot_cache
+    snapshot_paths = [entry.path for entry in cache._by_digest.values()]
+    assert snapshot_paths
+    assert all(path.exists() for path in snapshot_paths)
+
+    locked_at = datetime.now(UTC) - timedelta(seconds=120)
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_LOCKED,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(locked_at),
+        overwrite_status=True,
+    )
+
+    r_past_grace = client.get(
+        f"/v1/challenges/{CHALLENGE_ID}/cnf",
+        params={"t": FAKE_TOKEN},
+    )
+
+    assert r_past_grace.status_code == 404
+    assert r_past_grace.json() == NOT_FOUND_BODY
+    assert cache._by_digest == {}
+    assert all(not path.exists() for path in snapshot_paths)
+
+
+@pytest.mark.asyncio
+async def test_active_file_backed_streams_verified_open_file_after_path_replace(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    replacement_path = tmp_path / "replacement.cnf"
+    mutated_body = "p cnf 1 1\n-1 0\n"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    replacement_path.write_text(mutated_body, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    original_iter = challenge_cnf_module._iter_open_file
+
+    def replace_path_before_stream(handle: Any):
+        cnf_path.unlink()
+        replacement_path.rename(cnf_path)
+        yield from original_iter(handle)
+
+    monkeypatch.setattr(
+        challenge_cnf_module,
+        "_iter_open_file",
+        replace_path_before_stream,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert cnf_path.read_text(encoding="utf-8") == mutated_body
+
+
+@pytest.mark.asyncio
+async def test_active_file_backed_streams_verified_snapshot_after_in_place_write(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    mutated_body = "p cnf 1 1\n-1 0\n"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+
+    original_iter = challenge_cnf_module._iter_open_file
+
+    def mutate_source_before_stream(handle: Any):
+        cnf_path.write_text(mutated_body, encoding="utf-8")
+        yield from original_iter(handle)
+
+    monkeypatch.setattr(
+        challenge_cnf_module,
+        "_iter_open_file",
+        mutate_source_before_stream,
+    )
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 200
+    assert r.text == CNF_BODY
+    assert cnf_path.read_text(encoding="utf-8") == mutated_body
+
+
+@pytest.mark.asyncio
+async def test_active_file_backed_rejects_changed_cnf_digest(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(CNF_BODY, encoding="utf-8")
+    await wired_app["source"].upsert(
+        ChallengeRecord(
+            challenge_id=CHALLENGE_ID,
+            family_id="synthetic_boolean_v1",
+            tier=0,
+            cnf_text="",
+            cnf_path=str(cnf_path),
+            status=CHALLENGE_STATUS_ACTIVE,
+            audit_metadata={
+                "source": "endpoint-test",
+                "storage": "file",
+                "cnf_sha256": EXPECTED_SHA,
+            },
+        ),
+        now_iso=_ms_iso(datetime.now(UTC)),
+    )
+    await wired_app["tokens"].mint_if_absent(
+        CHALLENGE_ID,
+        fetch_token=FAKE_TOKEN,
+        minted_at_iso=_ms_iso(datetime.now(UTC)),
+        announced_time_limit_secs=60,
+    )
+    cnf_path.write_text("p cnf 1 1\n-1 0\n", encoding="utf-8")
+
+    client = TestClient(wired_app["app"])
+    r = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND_BODY
+
+
+def test_file_backed_snapshot_rejects_oversized_replacement_before_copy(
+    tmp_path: Any,
+) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cache_root = tmp_path / "snapshots"
+    cnf_path.write_text(CNF_BODY + "c oversized replacement\n", encoding="utf-8")
+
+    with pytest.raises(challenge_cnf_module._CnfFileOversizedError):
+        challenge_cnf_module._materialize_verified_cnf_snapshot(
+            cnf_path,
+            expected_sha256=EXPECTED_SHA,
+            cache_root=cache_root,
+            max_bytes=len(CNF_BODY.encode("utf-8")),
+        )
+
+    assert not list(cache_root.iterdir())
 
 
 @pytest.mark.asyncio
@@ -343,6 +750,216 @@ async def test_announced_problem_fetches_scores_and_does_not_leak(
         "s SATISFIABLE",
     ):
         assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
+async def test_file_backed_problem_fetches_scores_and_does_not_leak(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    """Exercise the file-backed announce URL, endpoint fetch, and verifier."""
+    cnf_body = "p cnf 2 2\n1 0\n2 0\n"
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(cnf_body, encoding="utf-8")
+    record = ChallengeRecord(
+        challenge_id="sat-file-e2e-001",
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text="",
+        cnf_path=str(cnf_path),
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={
+            "source": "local-e2e",
+            "storage": "file",
+            "cnf_sha256": hashlib.sha256(cnf_body.encode("utf-8")).hexdigest(),
+            "num_vars": 2,
+            "num_clauses": 2,
+        },
+    )
+    await wired_app["source"].upsert(record)
+    orchestrator = EvalOrchestrator(
+        db=wired_app["conn"],
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        registry=object(),
+        task_family_challenge_source=wired_app["source"],
+        task_family_challenge_lock=None,
+        task_family_fetch_token_store=wired_app["tokens"],
+        public_base_url="http://testserver",
+    )
+
+    announced = await orchestrator._announce_synthetic_boolean_problem(
+        record,
+        log=structlog.get_logger("test"),
+        family_id="synthetic_boolean_v1",
+    )
+    assert announced is not None
+    problem, hidden = announced
+    public_input = problem.public_input
+    assert "cnf" not in public_input
+    assert public_input["cnf_sha256"] == record.audit_metadata["cnf_sha256"]
+    assert "cnf" not in hidden.hidden_payload
+    assert hidden.hidden_payload["cnf_path"] == str(cnf_path)
+
+    client = TestClient(wired_app["app"], base_url="http://testserver")
+    fetched = client.get(str(public_input["cnf_url"]))
+    assert fetched.status_code == 200
+    assert fetched.text == cnf_body
+
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv 1 2 0\\n"}\n```'
+    signed = score_and_sign_task_family_stdout(
+        lane=SyntheticBooleanV1(),
+        problem=problem,
+        hidden=hidden,
+        submission_row={
+            "id": "sub-file-e2e",
+            "miner_hotkey": "5MinerLocal",
+            "display_name": "Local Miner",
+        },
+        stdout=stdout,
+        ran_at_iso="2026-05-19T18:00:00.000Z",
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        eval_run_id="run-file-e2e",
+        epoch_salt="epoch_local:synthetic_boolean_v1",
+    )
+    assert signed.row["weighted_score"] == 1.0
+    serialized = json.dumps(signed.row, sort_keys=True, default=str)
+    for forbidden in ("p cnf", "cnf_url", "fetch_token", str(cnf_path), "s SATISFIABLE"):
+        assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
+async def test_file_backed_verifier_rejects_changed_cnf_digest(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    original_cnf = "p cnf 1 1\n1 0\n"
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(original_cnf, encoding="utf-8")
+    record = ChallengeRecord(
+        challenge_id="sat-file-mutated-001",
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text="",
+        cnf_path=str(cnf_path),
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={
+            "source": "local-e2e",
+            "storage": "file",
+            "cnf_sha256": hashlib.sha256(original_cnf.encode("utf-8")).hexdigest(),
+            "num_vars": 1,
+            "num_clauses": 1,
+        },
+    )
+    await wired_app["source"].upsert(record)
+    orchestrator = EvalOrchestrator(
+        db=wired_app["conn"],
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        registry=object(),
+        task_family_challenge_source=wired_app["source"],
+        task_family_challenge_lock=None,
+        task_family_fetch_token_store=wired_app["tokens"],
+        public_base_url="http://testserver",
+    )
+
+    announced = await orchestrator._announce_synthetic_boolean_problem(
+        record,
+        log=structlog.get_logger("test"),
+        family_id="synthetic_boolean_v1",
+    )
+    assert announced is not None
+    problem, hidden = announced
+    cnf_path.write_text("p cnf 1 1\n-1 0\n", encoding="utf-8")
+
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv -1 0\\n"}\n```'
+    signed = score_and_sign_task_family_stdout(
+        lane=SyntheticBooleanV1(),
+        problem=problem,
+        hidden=hidden,
+        submission_row={
+            "id": "sub-file-mutated",
+            "miner_hotkey": "5MinerLocal",
+            "display_name": "Local Miner",
+        },
+        stdout=stdout,
+        ran_at_iso="2026-05-19T18:00:00.000Z",
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        eval_run_id="run-file-mutated",
+        epoch_salt="epoch_local:synthetic_boolean_v1",
+    )
+
+    assert signed.row["weighted_score"] == 0.0
+    assert signed.row["rejection_reason"] == "cnf_hash_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_file_backed_verifier_rejects_replacement_above_seeded_size(
+    wired_app: dict[str, Any],
+    tmp_path: Any,
+) -> None:
+    original_cnf = "p cnf 1 1\n1 0\n"
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(original_cnf, encoding="utf-8")
+    record = ChallengeRecord(
+        challenge_id="sat-file-oversized-001",
+        family_id="synthetic_boolean_v1",
+        tier=0,
+        cnf_text="",
+        cnf_path=str(cnf_path),
+        status=CHALLENGE_STATUS_ACTIVE,
+        audit_metadata={
+            "source": "local-e2e",
+            "storage": "file",
+            "cnf_sha256": hashlib.sha256(original_cnf.encode("utf-8")).hexdigest(),
+            "cnf_bytes": len(original_cnf.encode("utf-8")),
+            "num_vars": 1,
+            "num_clauses": 1,
+        },
+    )
+    await wired_app["source"].upsert(record)
+    orchestrator = EvalOrchestrator(
+        db=wired_app["conn"],
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        registry=object(),
+        task_family_challenge_source=wired_app["source"],
+        task_family_challenge_lock=None,
+        task_family_fetch_token_store=wired_app["tokens"],
+        public_base_url="http://testserver",
+    )
+
+    announced = await orchestrator._announce_synthetic_boolean_problem(
+        record,
+        log=structlog.get_logger("test"),
+        family_id="synthetic_boolean_v1",
+    )
+    assert announced is not None
+    problem, hidden = announced
+    cnf_path.write_text("c replacement grew\np cnf 1 1\n-1 0\n", encoding="utf-8")
+
+    stdout = '```FINAL_ANSWER\n{"dimacs_solution": "s SATISFIABLE\\nv -1 0\\n"}\n```'
+    signed = score_and_sign_task_family_stdout(
+        lane=SyntheticBooleanV1(),
+        problem=problem,
+        hidden=hidden,
+        submission_row={
+            "id": "sub-file-oversized",
+            "miner_hotkey": "5MinerLocal",
+            "display_name": "Local Miner",
+        },
+        stdout=stdout,
+        ran_at_iso="2026-05-19T18:00:00.000Z",
+        signer=EvalSigner(Ed25519PrivateKey.generate()),
+        eval_run_id="run-file-oversized",
+        epoch_salt="epoch_local:synthetic_boolean_v1",
+    )
+
+    assert signed.row["weighted_score"] == 0.0
+    assert signed.row["rejection_reason"] == "cnf_oversized"
 
 
 @pytest.mark.asyncio

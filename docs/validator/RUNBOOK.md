@@ -85,6 +85,76 @@ sudo -u cathedral pm2 logs cathedral-validator --lines 200
 sudo -u cathedral pm2 restart cathedral-validator
 ```
 
+## Enable Remote Weights After The SAT Release
+
+Do this only after the remote-weight release is deployed and the operator has published the weight-policy public key.
+
+The shipped `config/mainnet.toml` and `config/testnet.toml` templates already include a disabled block. Change only `enabled` unless the release notes say otherwise:
+
+```toml
+[remote_weight_source]
+enabled = true
+url = "https://api.cathedral.computer"
+key_id = "cathedral-weight-policy"
+public_key_env = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
+poll_interval_secs = 60.0
+request_timeout_secs = 10.0
+```
+
+Set the pinned key:
+
+```bash
+export CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX=<cathedral-weight-policy-public-key>
+```
+
+Before enabling SAT weight on mainnet, run:
+
+```bash
+cathedral-validator sat-launch-preflight --config config/mainnet.toml
+```
+
+This does not touch Bittensor. It verifies the validator config has no
+placeholder hotkey or Polaris key, the Cathedral eval public key env is
+present, remote signed weights are explicitly enabled, the pinned remote
+weight key env is present, and local `synthetic_boolean_v1` blending is
+still `0.0`.
+
+For a shadow run where SAT remains weightless and remote weights are not
+yet enabled:
+
+```bash
+cathedral-validator sat-launch-preflight \
+  --config config/mainnet.toml \
+  --allow-local-weight-source
+```
+
+Then restart:
+
+```bash
+cathedral-validator migrate --config config/mainnet.toml
+cathedral-validator serve --config config/mainnet.toml
+```
+
+After the publisher is expected to produce signed vectors, verify the
+served vector before relying on it:
+
+```bash
+cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
+```
+
+This fetches `/v1/validator/weights/next`, verifies the Ed25519
+signature against `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX`, checks the
+pinned `key_id`, network, netuid, expiry, finite weights, and signed
+burn policy, then exits before any live metagraph mapping or
+`set_weights` call.
+
+Expected behavior:
+
+- Startup refuses to run if `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX` is missing or invalid.
+- `503` from `/v1/validator/weights/next` means the publisher is up but has no vector yet.
+- The validator keeps last accepted remote state and does not apply a rollback.
+- If remote mode is disabled, the validator uses local scoring and weight computation.
+
 ## Health
 
 ```bash

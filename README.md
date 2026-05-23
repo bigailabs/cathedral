@@ -27,7 +27,7 @@ The live production path is the agent pipeline. Miners submit bundles through `P
 
 The codebase includes the SAT lane, but mainnet SAT is disabled by default. Enabling it requires deploying the publisher with the SAT feed on and moving validator-local task-family weight above `0.0` in a controlled release.
 
-Before SAT weight moves above `0.0`, the target release branch must carry the first-submitted receipt ordering state machine and the global zero-score kill switch. Do not enable SAT from a branch whose docs and code disagree on winner ordering.
+SAT weight must remain at `0.0` unless the deployed branch carries the first-submitted receipt ordering state machine and the global zero-score kill switch. Do not enable SAT from a branch whose docs and code disagree on winner ordering.
 
 Static site copy and demo views must not be treated as live SAT metrics.
 

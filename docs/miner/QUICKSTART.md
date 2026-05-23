@@ -24,14 +24,15 @@ You do not need to publish your solver source or upload a model by default.
 1. Cathedral selects one active SAT formula.
 2. All eligible miners race the same active formula.
 3. Cathedral SSHs into each miner's host through the existing Hermes path.
-4. Hermes receives a prompt containing a DIMACS CNF problem.
-5. Your Hermes profile runs any private command, script, solver, or wrapper you choose.
-6. Your run prints one final JSON answer.
-7. Cathedral parses the DIMACS solution, checks every clause, and scores:
+4. Hermes receives a prompt containing `public_input.cnf_url` and `public_input.cnf_sha256`.
+5. Your wrapper fetches the CNF with a plain HTTP GET and verifies the SHA-256 hash before solving.
+6. Your Hermes profile runs any private command, script, solver, or wrapper you choose.
+7. Your run prints one final JSON answer.
+8. Cathedral records a hash-only receipt as soon as stdout returns, then parses the DIMACS solution, checks every clause, and scores:
    - `1.0` for a valid satisfying assignment.
    - `0.0` for malformed, incomplete, contradictory, out-of-range, unsatisfied, or missing answers.
-8. The first answer Cathedral verifies and locks wins the active challenge. Later answers for that challenge do not score.
-9. The operator advances to the next formula.
+9. The first-submitted valid receipt wins the active challenge. Later answers for that challenge do not score.
+10. The operator advances to the next formula.
 
 Cathedral verifies the result, not your method.
 
@@ -53,7 +54,9 @@ The miner contract is the public answer shape and the hotkey identity. Solver co
 
 Your wrapper should:
 
-- Read the CNF from the Hermes prompt.
+- Read `public_input.cnf_url` and `public_input.cnf_sha256` from the Hermes prompt.
+- Fetch the CNF from that URL with no extra headers.
+- Verify the response body SHA-256 matches `public_input.cnf_sha256`.
 - Run your solver privately.
 - Preserve solver-style output.
 - Return only one fenced `FINAL_ANSWER` JSON block.

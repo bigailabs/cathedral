@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import cast
 
@@ -286,6 +287,144 @@ def archive_cards(
             await conn.close()
 
     asyncio.run(_run())
+
+
+@app.command("sat-launch-preflight")
+def sat_launch_preflight(
+    require_eval_signing_key: bool = typer.Option(
+        True,
+        "--require-eval-signing-key/--no-require-eval-signing-key",
+        help="Require CATHEDRAL_EVAL_SIGNING_KEY to be present and well-formed.",
+    ),
+    require_weight_signing_key: bool = typer.Option(
+        True,
+        "--require-weight-signing-key/--no-require-weight-signing-key",
+        help="Require CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY for signed remote weights.",
+    ),
+    require_runtime_env: bool = typer.Option(
+        True,
+        "--require-runtime-env/--no-require-runtime-env",
+        help="Require SAT feed, SSH/Hermes, prober v2, and public base URL env.",
+    ),
+) -> None:
+    """Validate SAT launch environment without writing to the publisher DB."""
+    configure()
+
+    from cathedral.publisher.sat_preflight import run_synthetic_boolean_launch_preflight
+
+    result = run_synthetic_boolean_launch_preflight(
+        require_eval_signing_key=require_eval_signing_key,
+        require_weight_signing_key=require_weight_signing_key,
+        require_runtime_env=require_runtime_env,
+    )
+
+    detail_keys = (
+        "task_family_feed_enabled",
+        "task_family_ids",
+        "eval_mode",
+        "prober_version",
+        "public_base_url",
+        "storage_mode",
+        "max_cnf_bytes_enforced",
+        "challenge_id",
+        "tier",
+        "num_vars",
+        "num_clauses",
+        "cnf_file_bytes",
+        "cnf_sha256",
+    )
+    for key in detail_keys:
+        if key in result.details:
+            typer.echo(f"{key}: {result.details[key]}")
+    for warning in result.warnings:
+        typer.echo(f"WARNING: {warning}", err=True)
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(1)
+    typer.echo("SAT launch preflight passed")
+
+
+@app.command("remote-weight-vector-preflight")
+def remote_weight_vector_preflight(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+) -> None:
+    """Build and self-verify one signed remote weight vector from the DB."""
+    configure()
+
+    from cathedral.publisher.remote_weight_preflight import (
+        run_publisher_remote_weight_preflight,
+    )
+
+    result = asyncio.run(run_publisher_remote_weight_preflight(database_path))
+    typer.echo(json.dumps(result.details, indent=2, sort_keys=True))
+    for warning in result.warnings:
+        typer.echo(f"WARNING: {warning}", err=True)
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(1)
+    typer.echo("Publisher remote weight vector preflight passed")
+
+
+@app.command("sat-active-challenge-status")
+def sat_active_challenge_status(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    verify_cnf_hash: bool = typer.Option(
+        False,
+        "--verify-cnf-hash/--no-verify-cnf-hash",
+        help="Stream the active file-backed CNF and compare it with audit metadata.",
+    ),
+) -> None:
+    """Print private-safe active SAT challenge status from the publisher DB."""
+    configure()
+
+    from cathedral.publisher.sat_status import active_sat_challenge_status_from_db
+
+    result = asyncio.run(
+        active_sat_challenge_status_from_db(
+            database_path,
+            verify_file_hash=verify_cnf_hash,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result.get("ok"):
+        raise typer.Exit(1)
+
+
+@app.command("sat-active-cnf-probe")
+def sat_active_cnf_probe(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    public_base_url: str = typer.Option(
+        "",
+        "--public-base-url",
+        help="Public publisher base URL. Defaults to CATHEDRAL_PUBLIC_BASE_URL.",
+    ),
+    timeout_secs: float = typer.Option(300.0, "--timeout-secs", min=0.1),
+    min_bytes_per_second: float = typer.Option(
+        0.0,
+        "--min-bytes-per-second",
+        min=0.0,
+    ),
+    announced_time_limit_secs: int = typer.Option(60, "--announced-time-limit-secs", min=1),
+) -> None:
+    """Fetch the active SAT CNF through the public URL and verify its hash."""
+    configure()
+
+    from cathedral.publisher.sat_cnf_probe import probe_active_sat_cnf_url_from_db
+
+    result = asyncio.run(
+        probe_active_sat_cnf_url_from_db(
+            database_path,
+            public_base_url=public_base_url or os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", ""),
+            timeout_secs=timeout_secs,
+            min_bytes_per_second=min_bytes_per_second,
+            announced_time_limit_secs=announced_time_limit_secs,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result.get("ok"):
+        raise typer.Exit(1)
 
 
 @app.callback()
