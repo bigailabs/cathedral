@@ -107,6 +107,24 @@ def test_unsafe_diff_path_returns_patch_failure() -> None:
     assert "path traversal not allowed" in result.stderr
 
 
+def test_empty_diff_path_returns_patch_failure() -> None:
+    empty_path_diff = (
+        "--- /dev/null\n"
+        "+++ b/\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+print('bad path')\n"
+    )
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=empty_path_diff,
+        hidden_test_code=HIDDEN_TEST,
+    )
+
+    assert result.patch_applied is False
+    assert result.passed is False
+    assert "empty paths not allowed" in result.stderr
+
+
 def test_wrong_logic_patch_runs_but_fails() -> None:
     wrong_fix = (
         "--- a/m.py\n"

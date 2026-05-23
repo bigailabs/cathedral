@@ -153,9 +153,11 @@ def test_security_guard_workflow_covers_projection_inputs() -> None:
         encoding="utf-8"
     )
     required_paths = (
-        "src/cathedral/publisher/reads.py",
+        "src/cathedral/eval/ssh_hermes_runner.py",
         "src/cathedral/eval/scoring_pipeline.py",
         "src/cathedral/lanes/**",
+        "src/cathedral/publisher/challenge_cnf.py",
+        "src/cathedral/publisher/reads.py",
         "tests/lanes/**",
     )
     missing = [path for path in required_paths if path not in workflow]

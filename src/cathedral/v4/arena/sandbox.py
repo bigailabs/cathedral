@@ -444,6 +444,10 @@ def _normalize_relpath(path: str) -> str:
     if p.is_absolute():
         raise ArenaError(f"absolute paths not allowed in arena: {path!r}")
     parts = [part for part in p.parts if part not in ("", ".")]
+    if not parts:
+        # Empty paths would materialize as the workspace directory itself in
+        # the oracle. Treat them as invalid diff headers, not filesystem errors.
+        raise ArenaError(f"empty paths not allowed in arena: {path!r}")
     if any(part == ".." for part in parts):
         raise ArenaError(f"path traversal not allowed in arena: {path!r}")
     return "/".join(parts)
@@ -538,14 +542,35 @@ def _apply_hunks(
         raise _DiffError(f"patch target file does not exist: {rel}")
 
     if deleting:
+        if not hunks:
+            raise _DiffError("delete must have at least one hunk")
+        # A deletion patch is valid only if its hunks really apply to and remove
+        # the complete file. Do not delete just because the header says
+        # "+++ /dev/null"; miners must submit a reproducible unified diff.
+        remaining = _apply_hunk_bodies(files[rel], hunks)
+        if remaining:
+            raise _DiffError("delete hunk must remove the entire file")
         new_files = dict(files)
         del new_files[rel]
         return new_files
 
     # mutate file in memory
+    out_lines = _apply_hunk_bodies(files[rel], hunks)
     original_lines = files[rel].splitlines(keepends=True)
-    # Strip keepends for hunk match; re-attach a trailing newline on join.
-    src = files[rel].splitlines()
+    new_text = "\n".join(out_lines)
+    if original_lines and original_lines[-1].endswith("\n"):
+        new_text += "\n"
+    new_files = dict(files)
+    new_files[_normalize_relpath(new_path)] = new_text
+    return new_files
+
+
+def _apply_hunk_bodies(
+    original_text: str,
+    hunks: list[tuple[int, int, int, int, list[str]]],
+) -> list[str]:
+    """Apply hunk bodies to text and return newline-stripped output lines."""
+    src = original_text.splitlines()
     cursor = 0
     out_lines: list[str] = []
     for old_start, _old_len, _new_start, _new_len, body in hunks:
@@ -594,12 +619,7 @@ def _apply_hunks(
                 raise _DiffError(f"unknown diff line tag: {tag!r}")
     # append tail
     out_lines.extend(src[cursor:])
-    new_text = "\n".join(out_lines)
-    if original_lines and original_lines[-1].endswith("\n"):
-        new_text += "\n"
-    new_files = dict(files)
-    new_files[_normalize_relpath(new_path)] = new_text
-    return new_files
+    return out_lines
 
 
 __all__ = [

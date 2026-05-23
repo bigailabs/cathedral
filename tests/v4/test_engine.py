@@ -28,6 +28,13 @@ def _render_template(template: str, rename_map: dict[str, str]) -> str:
     return re.sub(r"\{\{rename:([A-Za-z_][A-Za-z0-9_]*)\}\}", sub, template)
 
 
+def _delete_file_patch(relpath: str, content: str) -> str:
+    """Build a valid unified diff that deletes ``relpath``."""
+    lines = content.splitlines()
+    body = "".join(f"-{line}\n" for line in lines)
+    return f"--- a/{relpath}\n+++ /dev/null\n@@ -1,{len(lines)} +0,0 @@\n{body}"
+
+
 def test_load_and_scramble_task_shape(engine: CathedralEngine) -> None:
     task = engine.load_and_scramble_task("python_fastapi_base")
     assert task["base_repo"] == "python_fastapi_base"
@@ -98,11 +105,10 @@ def test_build_miner_bundle_removes_files_deleted_by_bug_patch(
     engine: CathedralEngine,
 ) -> None:
     seed = 1001
-    bug_patch = (
-        "--- a/app/main.py\n"
-        "+++ /dev/null\n"
-        "@@ -1,1 +0,0 @@\n"
+    scrambled = engine._scrambler.scramble(
+        "python_fastapi_base", seed=seed, workspace_root=engine._workspace_root
     )
+    bug_patch = _delete_file_patch("app/main.py", scrambled.files["app/main.py"])
 
     bundle, handle = engine.build_bundle_and_handle(
         "python_fastapi_base", bug_patch=bug_patch, seed=seed
@@ -127,14 +133,14 @@ def test_build_miner_bundle_preserves_binary_files_outside_text_map(
     (tmp_vault / "python_fastapi_base" / "app" / "asset.bin").write_bytes(binary_bytes)
 
     engine = CathedralEngine(vault_path=str(tmp_vault))
-    bug_patch = (
-        "--- a/app/main.py\n"
-        "+++ /dev/null\n"
-        "@@ -1,1 +0,0 @@\n"
+    seed = 1002
+    scrambled = engine._scrambler.scramble(
+        "python_fastapi_base", seed=seed, workspace_root=engine._workspace_root
     )
+    bug_patch = _delete_file_patch("app/main.py", scrambled.files["app/main.py"])
 
     bundle, handle = engine.build_bundle_and_handle(
-        "python_fastapi_base", bug_patch=bug_patch, seed=1002
+        "python_fastapi_base", bug_patch=bug_patch, seed=seed
     )
 
     workspace_path = Path(handle.workspace_path)
