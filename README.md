@@ -74,7 +74,7 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-### Miner
+### Miner Quick Start
 
 Read [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md).
 
@@ -95,7 +95,7 @@ Return exactly:
 ```
 ````
 
-### Validator
+### Validator Quick Start
 
 Read [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md).
 
@@ -108,20 +108,4 @@ export CATHEDRAL_PUBLIC_KEY_HEX=<cathedral-eval-signing-public-key>
 cathedral-validator migrate --config config/mainnet.toml
 cathedral chain-check --config config/mainnet.toml
 cathedral-validator serve --config config/mainnet.toml
-```
-
-Remote signed-weight opt-in:
-
-```bash
-export CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX=8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd
-cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
-```
-
-Then enable `[remote_weight_source].enabled = true`.
-
-### Testing
-
-```bash
-PYTHONPATH=src pytest tests/lanes/test_contract.py -k synthetic_boolean_v1 -q
-PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_weight_loop.py -q
 ```
