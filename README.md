@@ -31,34 +31,38 @@ Better SAT solvers lower the cost of proving, finding, and optimizing real syste
 
 ### Incentive Mechanism
 
-1. Miner runs under a registered Bittensor hotkey.
-2. Publisher scores the result.
-3. Publisher signs the public row.
-4. Validator verifies the signature.
-5. Validator maps hotkey to UID.
-6. Validator applies the weight policy.
-7. Validator calls `set_weights`.
+1. Miner is scored under a registered Bittensor hotkey.
+2. Cathedral gives the miner a private SAT challenge.
+3. Miner returns a DIMACS satisfying assignment.
+4. Cathedral checks the assignment against the private formula and records publisher-observed receipt time.
+5. Cathedral signs a hash-only score row.
+6. Validator verifies the Cathedral signature and maps the hotkey to the current metagraph UID.
+7. Validator applies the configured weight policy and calls `set_weights`.
+
+By default, validators pull signed score rows. Remote signed-weight mode is opt-in: validators verify signed weight vectors and burn snapshots instead of deriving weights locally.
 
 SAT scoring:
 
-- `1.0`: first submitted valid satisfying assignment.
-- `0.0`: invalid, malformed, incomplete, late, or locked answer.
+- `1.0`: valid satisfying assignment that wins the active challenge.
+- `0.0`: invalid, malformed, incomplete, non-winning, locked, or verifier-error answer.
 
-SAT has no mainnet weight while `synthetic_boolean_v1 = 0.0`.
+Winning is selected by publisher receipt time, not first verified time.
+
+Current defaults give SAT no mainnet contribution: local mainnet config and signed remote policy default `synthetic_boolean_v1` to `0.0`.
 
 ### Proofs and Protections
 
 | Claim | Mechanism |
 |---|---|
-| Sybil resistant | Scores attach to registered Bittensor hotkeys and current metagraph UIDs. |
+| Registered-hotkey scoped | Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped. |
 | Publisher-authentic | Eval rows are Ed25519-signed by Cathedral and verified by validators. |
-| Weight-policy-authentic | Remote weight vectors are Ed25519-signed and key-pinned by validators. |
-| Challenge-private | SAT CNFs use token-gated URLs. Public rows are hash-only. |
-| Answer-checkable | Cathedral parses DIMACS and checks every clause. |
-| Race-defined | Receipt time is recorded when Hermes stdout returns. |
-| Burn-controlled | Current mainnet policy keeps SAT at zero and routes protective burn to owner UID `204`. |
+| Remote-policy-authentic | When enabled, validators require a pinned key and verify the vector signature, key id, network, netuid, expiry, and burn snapshot. |
+| Hash-only public feed | Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers. |
+| Publisher-checkable | Cathedral parses DIMACS and checks clauses before signing a score row. |
+| Receipt-ordered | Winning SAT receipt is selected by publisher-observed receipt time after Hermes stdout returns. |
+| Burn-configured | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID. |
 
-Cathedral is verifier-of-record for private SAT in v1. Validators verify signatures, not raw SAT formulas.
+The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 
 ## Getting Started
 
