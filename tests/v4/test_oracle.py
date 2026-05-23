@@ -130,6 +130,8 @@ def test_wrong_logic_patch_runs_but_fails() -> None:
 def test_hidden_source_is_not_materialized_in_workspace() -> None:
     secret = "HIDDEN_SOURCE_SENTINEL_9371"
     probe_file = """import pathlib
+import sys
+import types
 
 # patch target
 SECRET = "".join(("HIDDEN_SOURCE_", "SENTINEL_9371"))
@@ -150,15 +152,24 @@ def _candidate_blobs():
             pass
 
 LEAKED = any(SECRET.encode() in blob for blob in _candidate_blobs())
+MAIN_EXPOSED = any(
+    name in vars(sys.modules["__main__"])
+    for name in ("_code", "_payload")
+) or any(
+    isinstance(value, types.CodeType) and value.co_filename == "<v4_hidden_test>"
+    for value in vars(sys.modules["__main__"]).values()
+)
 
 def compute(x, y):
-    return -1 if LEAKED else x * y
+    return -1 if (LEAKED or MAIN_EXPOSED) else x * y
 """
     harmless_patch = (
         "--- a/m.py\n"
         "+++ b/m.py\n"
-        "@@ -1,17 +1,17 @@\n"
+        "@@ -1,25 +1,25 @@\n"
         " import pathlib\n"
+        " import sys\n"
+        " import types\n"
         " \n"
         "-# patch target\n"
         "+# patch target accepted\n"

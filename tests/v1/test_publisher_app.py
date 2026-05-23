@@ -87,6 +87,31 @@ def test_env_set_and_file_absent_writes_file_with_0600(
     assert mode == 0o600, f"perms must be 0600 for OpenSSH, got {oct(mode)}"
 
 
+def test_env_set_creates_key_inode_with_0600_before_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first open must create the key with 0600, not chmod after writing."""
+    target = tmp_path / "shared-dir" / "cathedral_probe_ed25519"
+    monkeypatch.setenv("CATHEDRAL_SSH_KEY_PATH", str(target))
+    monkeypatch.setenv("CATHEDRAL_PROBE_SSH_PRIVATE_KEY", _FAKE_PEM)
+
+    real_open = publisher_app.os.open
+    created_modes: list[int] = []
+
+    def recording_open(path: os.PathLike[str] | str, flags: int, mode: int = 0o777) -> int:
+        if flags & os.O_CREAT:
+            created_modes.append(stat.S_IMODE(mode))
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(publisher_app.os, "open", recording_open)
+
+    _materialize_ssh_probe_key()
+
+    assert created_modes
+    assert created_modes[0] == 0o600
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
 def test_env_set_without_path_exports_materialized_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -120,6 +145,23 @@ def test_env_set_and_file_matches_is_noop(
     assert target.stat().st_mtime_ns == original_mtime_ns, (
         "idempotent path must not rewrite (mtime would change)"
     )
+
+
+def test_env_set_and_file_matches_tightens_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matching content still needs 0600; otherwise the key remains exposed."""
+    target = tmp_path / "cathedral_probe_ed25519"
+    target.write_text(_FAKE_PEM)
+    target.chmod(0o644)
+
+    monkeypatch.setenv("CATHEDRAL_SSH_KEY_PATH", str(target))
+    monkeypatch.setenv("CATHEDRAL_PROBE_SSH_PRIVATE_KEY", _FAKE_PEM)
+
+    _materialize_ssh_probe_key()
+
+    assert target.read_text() == _FAKE_PEM
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 def test_env_missing_trailing_newline_is_normalized(

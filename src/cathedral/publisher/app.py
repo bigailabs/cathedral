@@ -108,6 +108,46 @@ class PublisherContext:
 _DEFAULT_SSH_PROBE_KEY_PATH = "/tmp/cathedral_probe_ed25519"  # noqa: S108
 
 
+def _write_private_key_file_0600(target: Path, content: str) -> None:
+    """Atomically publish private-key content with owner-only permissions."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    fd: int | None = None
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        for _ in range(16):
+            candidate = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+            try:
+                # The mode applies at inode creation time. Do not use
+                # Path.write_text() followed by chmod here: on shared hosts that
+                # creates a window where umask-derived permissions can expose
+                # the platform SSH probe key before chmod tightens it.
+                fd = os.open(candidate, flags, stat.S_IRUSR | stat.S_IWUSR)
+            except FileExistsError:
+                continue
+            tmp_path = candidate
+            break
+        if fd is None or tmp_path is None:
+            raise FileExistsError(f"could not reserve temporary key path near {target}")
+
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+        tmp_path = None
+        target.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _materialize_ssh_probe_key() -> None:
     """Write the platform-wide SSH private key from env to disk at startup.
 
@@ -165,11 +205,11 @@ def _materialize_ssh_probe_key() -> None:
         except OSError:
             existing = None
         if existing == raw:
+            target.chmod(stat.S_IRUSR | stat.S_IWUSR)
             logger.info("ssh_probe_key_already_current", path=str(target))
             return
 
-    target.write_text(raw)
-    target.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    _write_private_key_file_0600(target, raw)
     logger.info("ssh_probe_key_materialized", path=str(target))
 
 
