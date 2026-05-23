@@ -11,13 +11,13 @@
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
 
-## <img src="docs/assets/section-what.svg" alt="" width="18"> What Is Cathedral
+## ⛪ [What Is Cathedral](#what-is-cathedral)
 
 Cathedral turns SAT solving into a live mining market. Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
 
 SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
 
-## <img src="docs/assets/section-why.svg" alt="" width="18"> Why Cathedral
+## 🧭 [Why Cathedral](#why-cathedral)
 
 SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
@@ -29,7 +29,7 @@ Better SAT solvers lower the cost of proving, finding, and optimizing real syste
 
 - **Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
 
-## <img src="docs/assets/section-how.svg" alt="" width="18"> How It Works
+## ⚙️ [How It Works](#how-it-works)
 
 ### Incentive Mechanism
 
@@ -66,7 +66,7 @@ The Cathedral publisher is verifier of record for private SAT in v1. Validators 
 
 ---
 
-## <img src="docs/assets/section-start.svg" alt="" width="18"> Getting Started
+## 🚀 [Getting Started](#getting-started)
 
 Use the quick starts below to work inside the subnet.
 
