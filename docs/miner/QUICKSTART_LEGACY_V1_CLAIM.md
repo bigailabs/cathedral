@@ -25,10 +25,10 @@ pip install -e .
 
 Copy `config/miner.toml` and fill in:
 
-- `miner_hotkey` — your hotkey ss58
-- `owner_wallet` — your coldkey ss58 (used by Cathedral to filter self-loop usage)
-- `validator_url` — the validator endpoint (e.g. `https://validator.cathedral.computer`)
-- `validator_bearer_env` — env var holding your bearer token
+- `miner_hotkey` - your hotkey ss58
+- `owner_wallet` - your coldkey ss58 (used by Cathedral to filter self-loop usage)
+- `validator_url` - the validator endpoint (e.g. `https://validator.cathedral.computer`)
+- `validator_bearer_env` - env var holding your bearer token
 
 Set the bearer:
 
@@ -46,18 +46,18 @@ cathedral-miner submit \
   --polaris-artifact-ids art_01H...,art_01H...
 ```
 
-The validator returns `202 Accepted` if the claim shape is valid. Verification is async — check your card on cathedral.computer or query the validator's `/health` to see queue depth.
+The validator returns `202 Accepted` if the claim shape is valid. Verification is async - check your card on cathedral.computer or query the validator's `/health` to see queue depth.
 
 ## What gets rewarded
 
 The validator scores your card on six dimensions:
 
-1. **Source quality** — official sources count more than secondary analysis
-2. **Freshness** — refresh on the schedule from the card registry
-3. **Specificity** — concrete `what_changed` and `why_it_matters`
-4. **Usefulness** — action notes and risks
-5. **Clarity** — readable summary
-6. **Maintenance** — kept current over time
+1. **Source quality** - official sources count more than secondary analysis
+2. **Freshness** - refresh on the schedule from the card registry
+3. **Specificity** - concrete `what_changed` and `why_it_matters`
+4. **Usefulness** - action notes and risks
+5. **Clarity** - readable summary
+6. **Maintenance** - kept current over time
 
 Broken sources, uncited claims, and legal-advice framing fail preflight before scoring.
 

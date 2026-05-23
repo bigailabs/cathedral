@@ -1,10 +1,10 @@
-# Adversarial findings — cathedral v1
+# Adversarial findings - cathedral v1
 
 Reviewer: Team A adversarial agent
 Branch: `feature/v1-launch` (committed: 7 commits including #7 inline cards;
 uncommitted in working tree: full v1 launch modules under
 `src/cathedral/{auth,storage,publisher,eval}/` plus `chain/anchor.py` and
-`v1_types.py` — added by the implementer in parallel during my review.)
+`v1_types.py` - added by the implementer in parallel during my review.)
 Date: 2026-05-10
 
 ## Scope and framing
@@ -51,7 +51,7 @@ split by which code path they hit.
 
 ---
 
-### [CRIT-2] Eval tasks are deterministic from public inputs — miners pre-compute every future task
+### [CRIT-2] Eval tasks are deterministic from public inputs - miners pre-compute every future task
 **Where:** `src/cathedral/eval/task_generator.py:28-67`
 **What:** `generate_task` seeds a `random.Random` with `blake3(f"{card_id}|{epoch}|{round_index}").digest()[:8]` and then picks templates and sources from `card_definition.task_templates` / `source_pool`. Every input is public:
 - `card_id` from `GET /v1/cards`
@@ -59,7 +59,7 @@ split by which code path they hit.
 - `round_index` is a monotonic public counter (visible in eval_runs)
 - `task_templates` + `source_pool` from `GET /v1/cards/{card_id}/eval-spec`
 **How to reproduce:** `tests/v1/exploits/eval_task_predictable_pre_compute.py` enumerates the next ~10 tasks for a sample card_definition. They are byte-identical across runs.
-**Impact:** CONTRACTS critical guardrail #1 — "Eval set MUST NOT be frozen. Source pool refreshes per round. Task templates produce novel queries" — is functionally violated. The set is enumerable in advance. A miner can pre-compute every output for the next year, cache it in-bundle, and respond instantly with whatever "freshness" the scorer wants. This is the SN62 trained-to-test failure mode in a different costume.
+**Impact:** CONTRACTS critical guardrail #1 - "Eval set MUST NOT be frozen. Source pool refreshes per round. Task templates produce novel queries" - is functionally violated. The set is enumerable in advance. A miner can pre-compute every output for the next year, cache it in-bundle, and respond instantly with whatever "freshness" the scorer wants. This is the SN62 trained-to-test failure mode in a different costume.
 **Recommended fix:** Inject server-side randomness into the seed that the miner cannot predict (e.g., a per-round nonce committed at round start, revealed after eval submission). OR use the on-chain block hash at round start as additional entropy. OR rotate the source_pool per epoch from a private pool of pools (so the public spec is "any 5 of the 200 sources we may pick this week").
 **CONTRACTS section violated:** "Critical guardrails" #1; "Locked design choices" row on eval set.
 
@@ -82,7 +82,7 @@ Until path #2 is deleted, an attacker bypasses all of v1's auth by using path #2
 **Where:** `src/cathedral/validator/worker.py:113-127` (`_coerce_card`)
 **What:** Worker forces `card_id = work_unit.removeprefix("card:")` onto the inline payload, overriding the body's `id` field. A miner submitting body for `us-ccpa` under `work_unit=card:eu-ai-act` gets the CCPA content stored as `eu-ai-act`.
 **How to reproduce:** `tests/v1/exploits/work_unit_card_id_swap.py`. CCPA content stored under `card_id='eu-ai-act'`.
-**Impact:** Public read endpoints return wrong-content-for-card_id. The new `/v1/cards/{card_id}` from `cathedral.publisher.reads` reads from the `agent_submissions` + `eval_runs` tables, which use a different storage path — but as long as the legacy `cards` table is also surfaced (it is, via `cathedral.validator.cards`), this is exploitable.
+**Impact:** Public read endpoints return wrong-content-for-card_id. The new `/v1/cards/{card_id}` from `cathedral.publisher.reads` reads from the `agent_submissions` + `eval_runs` tables, which use a different storage path - but as long as the legacy `cards` table is also surfaced (it is, via `cathedral.validator.cards`), this is exploitable.
 **Recommended fix:** Validate that `work_unit` matches a card_definitions row, that the inline payload's `id` (if present) matches `work_unit`, and that the payload's `jurisdiction` matches the registry entry.
 **CONTRACTS section violated:** Section 6 step 4.
 
@@ -101,16 +101,16 @@ Until path #2 is deleted, an attacker bypasses all of v1's auth by using path #2
 
 ---
 
-### [CRIT-6] First-mover delta is computed by `metadata_fingerprint` (display_name + size_bucket) — trivially defeated
+### [CRIT-6] First-mover delta is computed by `metadata_fingerprint` (display_name + size_bucket) - trivially defeated
 **Where:** `src/cathedral/publisher/similarity.py:38-53`, `submit.py:252-269`
 **What:** First-mover status is anchored on `metadata_fingerprint = blake3(normalized_display_name | bundle_size_bucket_1k)`. To defeat this from the COPY side, the attacker:
-- Picks a different display_name (Levenshtein distance > 0.85 from the original — easy with a single-char diff in a long name).
+- Picks a different display_name (Levenshtein distance > 0.85 from the original - easy with a single-char diff in a long name).
 - Pads or trims the bundle by 1024 bytes to land in a different size bucket.
-Result: `metadata_fingerprint` differs, similarity check passes, AND `first_mover_at = now()` is fresh — so the COPY becomes its own "first mover" for a different fingerprint, gets the 1.0 multiplier, and competes with the original on equal terms.
+Result: `metadata_fingerprint` differs, similarity check passes, AND `first_mover_at = now()` is fresh - so the COPY becomes its own "first mover" for a different fingerprint, gets the 1.0 multiplier, and competes with the original on equal terms.
 **How to reproduce:** Conceptually clear from the similarity.py code. The fingerprint is purely public-surface metadata, not bundle content. Bundle hash IS distinct (different padding), so `find_existing_bundle_hash` doesn't fire either.
 **Impact:** First-mover delta + similarity check do nothing against a copy attacker who renames the bundle and adjusts size by 1 KiB. CONTRACTS guardrails #2 and #3 again, by mechanism rather than absence.
 **Recommended fix:** Anchor first-mover by something the copier cannot trivially mutate. Options:
-- `soul_md_preview` semantic hash (after bundle decryption during eval) — but that's eval-time, not submit-time.
+- `soul_md_preview` semantic hash (after bundle decryption during eval) - but that's eval-time, not submit-time.
 - Hash of normalized soul.md content extracted server-side during validation.
 - LLM-judge similarity on bundle contents at eval time.
 For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FULL display name plus bio plus logo_url length together.
@@ -151,7 +151,7 @@ For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FU
 **What:** `if info.compress_size > 0 and info.file_size / max(1, info.compress_size) > 200 and info.file_size > 1*1024*1024`. The third condition (size > 1 MiB) means ratios up to infinity are allowed for entries ≤ 1 MiB. A bundle of 95 entries each 1 MiB-1 (compressing to ~1 KiB each) packs ~95 MiB of inflation into 100 KiB on the wire.
 **How to reproduce:** `tests/v1/exploits/zip_bomb_evades_per_file_check.py`. 108 KiB zip with 95 MiB total inflation accepted.
 **Impact:** N concurrent submissions with this bundle = N × 95 MiB ephemeral disk consumption during eval extraction. The 100 MiB total cap blocks the absolute worst case but allows linear DoS.
-**Recommended fix:** Drop the per-file size guard from the bomb check — apply ratio threshold to ALL entries. Track aggregate ratio across the whole bundle and reject above 50x overall.
+**Recommended fix:** Drop the per-file size guard from the bomb check - apply ratio threshold to ALL entries. Track aggregate ratio across the whole bundle and reject above 50x overall.
 
 ---
 
@@ -164,7 +164,7 @@ For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FU
 
 ---
 
-### [HIGH-6] Polaris record types use `extra="allow"` — signed extras pass verification
+### [HIGH-6] Polaris record types use `extra="allow"` - signed extras pass verification
 **Where:** `src/cathedral/types.py:82-137` (PolarisManifest, PolarisRunRecord, PolarisArtifactRecord, PolarisUsageRecord all use `model_config = ConfigDict(extra="allow")`)
 **What:** Pydantic `extra="allow"` lets the signer attach arbitrary extra fields that flow through `model_dump` and into the verifier-trusted dict. Future Cathedral code reading `manifest.<extra>` would trust attacker-injected data.
 **How to reproduce:** `tests/v1/exploits/canonical_json_default_str.py`. Smuggled `cathedral_admin: true` field passes verify_manifest.
@@ -180,7 +180,7 @@ For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FU
 
 ---
 
-### [HIGH-8] `cathedral.eval` package has a circular import — orchestrator + publisher cannot both load
+### [HIGH-8] `cathedral.eval` package has a circular import - orchestrator + publisher cannot both load
 **Where:** `src/cathedral/eval/__init__.py:3` imports `cathedral.eval.orchestrator` which imports `cathedral.publisher` which imports `cathedral.publisher.app` which imports `cathedral.eval.orchestrator.run_eval_loop`.
 **What:** Importing `cathedral.eval` from a fresh interpreter raises `ImportError: cannot import name 'run_eval_loop' from partially initialized module 'cathedral.eval.orchestrator'`. This means the publisher app cannot start in production, and any tests that import `cathedral.eval` directly fail.
 **How to reproduce:** `python -c 'import cathedral.eval'`. Triggers the cycle.
@@ -191,7 +191,7 @@ For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FU
 
 ## MEDIUM findings
 
-### [MED-1] `merkle_leaf` uses `str(weighted_score)` — float formatting drift breaks audit
+### [MED-1] `merkle_leaf` uses `str(weighted_score)` - float formatting drift breaks audit
 **Where:** `src/cathedral/publisher/merkle.py:63-71`
 **What:** Per CONTRACTS 4.5, leaf = `blake3(":".join([id, output_card_hash, str(weighted_score), cathedral_signature]))`. `str(0.85)` is `'0.85'` in CPython 3.11+, but `str(1/3)` is `'0.3333333333333333'`. If `weighted_score` is computed with slightly different float arithmetic across machines (e.g., due to numpy involvement someday), `str()` differs and the leaf hash diverges. Validators can no longer verify the published root.
 **Impact:** Latent. Consensus break under future scoring refactor.
@@ -227,9 +227,9 @@ For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FU
 
 ### [MED-5] `repository.list_submissions_for_card` interpolates `sort` into SQL string
 **Where:** `src/cathedral/publisher/repository.py:243-249`
-**What:** `f"...ORDER BY {order} LIMIT ? OFFSET ?"` — `order` is whitelisted via if/elif, so this is currently safe. Comment says `# noqa: S608 - sort whitelisted above`. But the pattern is fragile; one developer adding a new sort option without an `elif` branch creates SQL injection. Worth refactoring to a lookup dict.
+**What:** `f"...ORDER BY {order} LIMIT ? OFFSET ?"` - `order` is whitelisted via if/elif, so this is currently safe. Comment says `# noqa: S608 - sort whitelisted above`. But the pattern is fragile; one developer adding a new sort option without an `elif` branch creates SQL injection. Worth refactoring to a lookup dict.
 **Impact:** Latent SQL injection if sort whitelist drifts.
-**Recommended fix:** `_SORT_TO_ORDER = {"score": "...", "recent": "...", "oldest": "..."}` then `order = _SORT_TO_ORDER[sort]` — KeyError on unknown is the right behavior.
+**Recommended fix:** `_SORT_TO_ORDER = {"score": "...", "recent": "...", "oldest": "..."}` then `order = _SORT_TO_ORDER[sort]` - KeyError on unknown is the right behavior.
 
 ---
 
@@ -249,7 +249,7 @@ For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FU
 
 ---
 
-### [MED-8] `confidence > 1.0` and `confidence < 0` rejected by Pydantic — but `_usefulness` still bonuses 0.2 for `confidence > 0.5`
+### [MED-8] `confidence > 1.0` and `confidence < 0` rejected by Pydantic - but `_usefulness` still bonuses 0.2 for `confidence > 0.5`
 **Where:** `src/cathedral/cards/score.py:64-72`
 **What:** `_usefulness` adds 0.2 if `confidence > 0.5`. Pydantic blocks out-of-range, so this is currently safe. But if a future schema migration drops the `Field(ge=0, le=1)` constraint, a miner submitting `confidence=1e10` would get a binary 0.2 bonus AND the high score becomes weight-amplified. Worth pinning the dimension scorer to a clamped value too.
 
@@ -292,37 +292,37 @@ For v1, at minimum: bucket by 100 KiB instead of 1 KiB, and use a hash of the FU
 - Bundle extraction `target.relative_to(dest_root_real)` defense-in-depth catches resolved escapes.
 - `encode_anchor_payload` validates epoch range and merkle_root length (32 bytes hex).
 - sr25519 hotkey signature verification via `substrateinterface.Keypair(ss58_address=...).verify(...)` is the standard Bittensor pattern.
-- Pydantic `extra="forbid"` is correctly used on all v1_types models (AgentSubmission, EvalTask, EvalRun, etc.) — only the legacy Polaris record types use `extra="allow"`.
+- Pydantic `extra="forbid"` is correctly used on all v1_types models (AgentSubmission, EvalTask, EvalRun, etc.) - only the legacy Polaris record types use `extra="allow"`.
 - Display-name fuzzy matching (Levenshtein ratio ≥ 0.85) catches naive copies; only adversarial copies that fly under the threshold + change size bucket evade.
 
 ---
 
 ## Things I couldn't test (gaps for the next pass)
 - The Polaris HTTP runner against a real Polaris instance (`HttpPolarisRunner.run`). The cathedral-eval endpoint contract on the Polaris side is not in this repo.
-- Real Hippius S3 with credentials — only the boto3 client is covered. Bucket-policy verification, IAM-policy traversal, signed-URL leakage all untested live.
+- Real Hippius S3 with credentials - only the boto3 client is covered. Bucket-policy verification, IAM-policy traversal, signed-URL leakage all untested live.
 - Real Bittensor `set_weights` / `system.remarkWithEvent` against testnet. The chain client paths are mocked in CI.
 - Concurrent 100-miner load test against the publisher. The submit path is sync within a single request but the eval orchestrator is async; deadlock potential on the shared aiosqlite connection is plausible but unverified.
 - LLM prompt injection in soul.md preview when surfaced to a future eval-judging LLM. Out of scope until the LLM-judge ships.
-- Frontend (cathedral.computer) signing flow — backend doesn't verify cleanly enough yet (CRIT-1) for frontend tests to mean anything.
+- Frontend (cathedral.computer) signing flow - backend doesn't verify cleanly enough yet (CRIT-1) for frontend tests to mean anything.
 
 ---
 
 ## Out of scope but worth filing
 - Polaris cathedral-eval endpoint shape (`POST /polaris/agents/cathedral-eval`) is described in `polaris_runner.py` but I have no way to verify it matches what the polariscomputer repo actually ships. Cross-repo contract test needed (similar to `test_polaris_contract.py` for the Polaris-record signing format).
 - The `cathedral-eval-spec` content repo is referenced as the source of `card_definitions` rows. Its provisioning workflow isn't in this repo.
-- Frontend XSS surface beyond the logo upload (HTML injection via display_name, bio, card content) — not reviewed.
-- Card content quality (factual accuracy, hallucination, bias) — out of scope for a security review.
+- Frontend XSS surface beyond the logo upload (HTML injection via display_name, bio, card content) - not reviewed.
+- Card content quality (factual accuracy, hallucination, bias) - out of scope for a security review.
 
 ---
 
 ## Coordination notes
 
 ### Findings the IMPLEMENTER should action immediately (before merge)
-1. **CRIT-1** (backdated submitted_at) — one-line removal of the fallback path.
-2. **CRIT-2** (deterministic eval tasks) — design discussion required; CONTRACTS guardrail.
-3. **CRIT-3** (legacy `/v1/claim` no auth) — decide whether to delete the endpoint or harden it. Decide BEFORE launch.
-4. **CRIT-6** (first-mover defeated by metadata change) — need a fingerprint that bites copies.
-5. **HIGH-8** (circular import) — service won't start.
+1. **CRIT-1** (backdated submitted_at) - one-line removal of the fallback path.
+2. **CRIT-2** (deterministic eval tasks) - design discussion required; CONTRACTS guardrail.
+3. **CRIT-3** (legacy `/v1/claim` no auth) - decide whether to delete the endpoint or harden it. Decide BEFORE launch.
+4. **CRIT-6** (first-mover defeated by metadata change) - need a fingerprint that bites copies.
+5. **HIGH-8** (circular import) - service won't start.
 
 ### Findings to flag for Fred review (architectural / scope decisions)
 - The legacy validator + new publisher are TWO services with overlapping but inconsistent surface. CRIT-3 + CRIT-4 both stem from the legacy path being soft-auth while the new path is hard-auth. Clear deprecation path needed.

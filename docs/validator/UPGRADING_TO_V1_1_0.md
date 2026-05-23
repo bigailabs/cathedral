@@ -17,17 +17,17 @@ eval rows. In v1.0.7 the cursor was a single ISO timestamp `since`,
 compared against `ran_at` with `>=`. Under cadence eval load (many
 eval rows written in the same millisecond), the prior cursor could
 silently leak rows at page boundaries because `ran_at` is not a total
-order — see `2026-05-12-track-3-pull-cursor-audit.md`.
+order - see `2026-05-12-track-3-pull-cursor-audit.md`.
 
 v1.1.0 introduces a composite tuple cursor `(since_ran_at, since_id)`
 with strict `>` comparison. The publisher's scan is now ordered by
-`(ran_at ASC, id ASC)` — a total order — so the cursor advances
+`(ran_at ASC, id ASC)` - a total order - so the cursor advances
 strictly forward, no rows are returned twice, and no rows are skipped.
 
 The publisher dual-emits both cursor shapes in `/v1/leaderboard/recent`:
 
-- Legacy: `next_since` — single ISO timestamp, what v1.0.7 reads
-- v1.1.0: `next_since_ran_at` + `next_since_id` — tuple, what v1.1.0 reads
+- Legacy: `next_since` - single ISO timestamp, what v1.0.7 reads
+- v1.1.0: `next_since_ran_at` + `next_since_id` - tuple, what v1.1.0 reads
 
 Default page size also rises from 200 to 500, and the loop now drains
 saturated pages within a single tick (capped at 4 inner pulls) so a
@@ -40,7 +40,7 @@ The signed payload key set is now selected by
 `eval_output_schema_version` on each record. v1.0.7 records do not
 carry this field; the verifier defaults to version 1 and uses the
 existing key set. An unknown version raises `PullVerificationError`
-with `unknown_schema_version: N` — no silent fallback.
+with `unknown_schema_version: N` - no silent fallback.
 
 This is scaffolding for a follow-up release that introduces a v2
 signed payload shape alongside the miner-side eval data model rewrite.
@@ -59,7 +59,7 @@ deploy mode):
 - **Validator local DB is untouched.** The pull-side schema does not
   change in v1.1.0. The publisher's `eval_runs` table gets a new
   composite index (`idx_eval_ran_at_id`), but validators do not run
-  the publisher migration path — that lives on `api.cathedral.computer`.
+  the publisher migration path - that lives on `api.cathedral.computer`.
 - **Cursor advances cleanly.** First-tick cursor on v1.1.0 sends both
   `since_ran_at` and the legacy `since` for back-compat with v1.0.x
   publishers. The v1.1.0 publisher consumes the tuple; a v1.0.x
@@ -67,7 +67,7 @@ deploy mode):
 
 ## What needs operator attention
 
-**Deploy sequencing is required during the rollover window** — see
+**Deploy sequencing is required during the rollover window** - see
 "Deploy sequencing" below. The cross-version window is otherwise
 binary-compatible (v1.0.7 validators continue functioning against a
 v1.1.0 publisher), but cadence orchestration MUST stay gated until the
@@ -91,19 +91,19 @@ against a v1.1.0 publisher AS LONG AS cadence orchestration stays
 disabled. It does NOT get the saturation-pull optimization (its loop
 reads `next_since` as before), and under a cadence burst that writes
 >page-size rows sharing one millisecond it silently drops the rows
-past the first page boundary — which is why the Deploy sequencing
+past the first page boundary - which is why the Deploy sequencing
 below requires the fleet to roll forward before cadence is enabled.
 
 ## Deploy sequencing
 
 v1.1.0 introduces a tuple cursor `(ran_at, id)` on `/v1/leaderboard/recent`. v1.0.7 validators send only a single-string `since` cursor and cannot express a sub-millisecond offset. Under burst writes (>page-size rows sharing a millisecond), v1.0.7 validators will silently drop the rows past the first page boundary.
 
-Resolved at the binary level — v1.1.0 validators always send the tuple cursor and drain bursts correctly. The constraint is only present during the rollover window when the publisher is v1.1.0 but some validators are still v1.0.7.
+Resolved at the binary level - v1.1.0 validators always send the tuple cursor and drain bursts correctly. The constraint is only present during the rollover window when the publisher is v1.1.0 but some validators are still v1.0.7.
 
 **Required deploy order:**
 
 1. Deploy v1.1.0 publisher to production (Railway auto-deploys on push to main).
-2. Wait 2-4 hours for the fleet to auto-cycle. PM2-driven validators pull main, restart, pick up v1.1.0. You can confirm by querying taostats: `GET https://api.taostats.io/api/validator/weights/latest/v1?netuid=39` — count rows with `version_key=1001000`.
+2. Wait 2-4 hours for the fleet to auto-cycle. PM2-driven validators pull main, restart, pick up v1.1.0. You can confirm by querying taostats: `GET https://api.taostats.io/api/validator/weights/latest/v1?netuid=39` - count rows with `version_key=1001000`.
 3. Once a clear majority of validators report `version_key=1001000`, enable cadence orchestrator (env flag `CATHEDRAL_CADENCE_ENABLED=true` on the publisher).
 
 **Why this ordering matters:** Cadence orchestrator writes batches of rows that can share millisecond timestamps. Until validators are on v1.1.0, they will silently lose rows in those bursts. If cadence is enabled before fleet rollover, miners will see successful submissions that never appear on the leaderboard.
@@ -149,18 +149,18 @@ show `pull_loop_tick` with an `inner_pulls` field. v1.0.7 emitted only
 `fetched` and `persisted`; the new field surfaces when the saturation
 inner-pull kicks in.
 
-## v2 signed payload — gated, not active at merge
+## v2 signed payload - gated, not active at merge
 
 v1.1.0 ships the v2 signed payload shape and the new eval data model
 (card excerpt / artifact manifest / encrypted bundle URL) in code, but
 gated behind two publisher env flags so the wire shape on merge day is
 identical to v1.0.7:
 
-- `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD` — when `true`, `score_and_sign`
+- `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD` - when `true`, `score_and_sign`
   produces v2 records (drops `output_card` + `output_card_hash` +
   `polaris_verified`, adds `eval_card_excerpt` +
   `eval_artifact_manifest_hash`). Default `false`.
-- `CATHEDRAL_CADENCE_ENABLED` — when `true`, the eval orchestrator
+- `CATHEDRAL_CADENCE_ENABLED` - when `true`, the eval orchestrator
   honors `card_definitions.refresh_cadence_hours` and re-evaluates
   submissions periodically. Default `false`.
 
@@ -170,5 +170,5 @@ field set), so when the publisher flips `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD`,
 verification routes correctly with no validator action.
 
 See "Deploy sequencing" above for the order in which these flags
-should be enabled — flipping cadence before the validator fleet has
+should be enabled - flipping cadence before the validator fleet has
 rolled forward causes silent row loss on the v1.0.7 stragglers.

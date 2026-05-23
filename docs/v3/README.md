@@ -1,4 +1,4 @@
-# Cathedral v3 — Trajectory Data Substrate (quickstart)
+# Cathedral v3 - Trajectory Data Substrate (quickstart)
 
 The v3 spike: a runnable trajectory data substrate built around a
 verifiable agentic workforce. Lives entirely at `src/cathedral/v3/` and
