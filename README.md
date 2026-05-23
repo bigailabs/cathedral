@@ -11,25 +11,27 @@
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
 
-## Overview
+## ⛪ What Is Cathedral
 
 Cathedral turns SAT solving into a live mining market. Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
 
 SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
 
-## Why Cathedral
+<details>
+<summary><strong>🧭 Why Cathedral</strong></summary>
 
 SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
 Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral creates a Bittensor incentive loop for that work.
 
-**Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
+- **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
+- **Strong today, stronger tomorrow.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. [SolSearch](https://arxiv.org/abs/2502.14328) showed LLM-driven SAT solver code generation improving Z3 PAR-2 by 11 percent on its reported benchmark.
+- **Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
 
-**Strong today, stronger tomorrow.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. [SolSearch](https://arxiv.org/abs/2502.14328) showed LLM-driven SAT solver code generation improving Z3 PAR-2 by 11 percent on its reported benchmark.
+</details>
 
-**Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
-
-## How It Works
+<details>
+<summary><strong>⚙️ How It Works</strong></summary>
 
 ### Incentive Mechanism
 
@@ -62,7 +64,22 @@ SAT has no mainnet weight while `synthetic_boolean_v1 = 0.0`.
 
 Cathedral is verifier-of-record for private SAT in v1. Validators verify signatures, not raw SAT formulas.
 
-## Mining
+</details>
+
+<details>
+<summary><strong>Getting Started</strong></summary>
+
+### Installation
+
+```bash
+git clone https://github.com/cathedralai/cathedral
+cd cathedral
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+```
+
+### Miner
 
 Read [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md).
 
@@ -83,7 +100,7 @@ Return exactly:
 ```
 ````
 
-## Validation
+### Validator
 
 Read [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md).
 
@@ -107,42 +124,11 @@ cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
 
 Then enable `[remote_weight_source].enabled = true`.
 
-## Operations
-
-Cathedral operators use [docs/lanes/sat-operations-runbook.md](docs/lanes/sat-operations-runbook.md).
-
-SAT stays weightless until:
-
-- publisher E2E passes
-- miner E2E passes
-- validator E2E passes
-- remote signed vector verifies
-- chain preflight passes
-- public feed is hash-only
-
-## Installation
-
-```bash
-git clone https://github.com/cathedralai/cathedral
-cd cathedral
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
-```
-
-## Testing
+### Testing
 
 ```bash
 PYTHONPATH=src pytest tests/lanes/test_contract.py -k synthetic_boolean_v1 -q
 PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_weight_loop.py -q
 ```
 
-## Documentation
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [Validator mechanism](docs/VALIDATOR.md)
-- [Validator runbook](docs/validator/RUNBOOK.md)
-- [Miner quickstart](docs/miner/QUICKSTART.md)
-- [SAT migration](docs/miner/MIGRATION_TO_SAT.md)
-- [SAT operations runbook](docs/lanes/sat-operations-runbook.md)
-- [Releases](RELEASES.md)
+</details>
