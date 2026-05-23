@@ -4,7 +4,7 @@
 
 <h1 align="center">Cathedral</h1>
 
-<p align="center">A Bittensor subnet for publisher-scored algorithmic work.</p>
+<p align="center">A Bittensor subnet for competitive SAT solving.</p>
 
 <p align="center">
   <a href="https://cathedral.computer">Site</a> |
@@ -22,11 +22,19 @@
 
 ## What It Does
 
-Cathedral pays miners for work the publisher can score.
+Cathedral turns SAT solving into a live mining market.
 
-Miners run private infrastructure. The publisher evaluates outputs and signs score rows. Validators verify those signatures, map hotkeys to UIDs, and set weights on chain.
+Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
 
 SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
+
+## Why SAT
+
+SAT asks whether a boolean formula can be satisfied.
+
+It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
+
+Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral creates a Bittensor incentive loop for that work.
 
 ## Incentive Mechanism
 
