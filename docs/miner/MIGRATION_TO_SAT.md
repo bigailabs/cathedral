@@ -2,13 +2,7 @@
 
 SAT is additive. Keep the current agent path live.
 
-## Current State
-
-- Agent pipeline is live.
-- SAT uses SSH and Hermes.
-- SAT mainnet weight is `0.0`.
-- Scored SAT needs a signed policy release.
-- Validators see signed hash-only rows.
+SAT uses SSH and Hermes. Validators see signed hash-only rows. Scored SAT requires operator release notice.
 
 ## Add SAT
 

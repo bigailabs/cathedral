@@ -2,12 +2,6 @@
 
 This is the SAT miner contract for `synthetic_boolean_v1`.
 
-## Status
-
-- SAT mainnet weight is `0.0`.
-- Shadow rounds may run.
-- Scored rounds need a signed policy release.
-
 ## You Need
 
 - registered Bittensor hotkey
@@ -17,6 +11,8 @@ This is the SAT miner contract for `synthetic_boolean_v1`.
 - private solver or wrapper
 
 You do not publish solver source.
+
+Shadow rounds may run before SAT has mainnet weight. Scored rounds require operator release notice.
 
 ## Flow
 
@@ -84,7 +80,7 @@ Rules:
 Keep private:
 
 - solver source
-- wrapper internals
+- wrapper details
 - logs
 - raw CNFs
 - raw solutions

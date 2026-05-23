@@ -2,13 +2,7 @@
 
 Rails for `synthetic_boolean_v1`.
 
-## Status
-
-- SAT code exists.
-- SAT mainnet weight is `0.0`.
-- Remote signed weights are available.
-- Validators must opt in.
-- No nonzero SAT weight before full E2E.
+No nonzero SAT weight before full E2E.
 
 ## Rule
 
@@ -98,7 +92,7 @@ cathedral-publisher sat-launch-preflight --no-require-weight-signing-key
 
 ## Validator Gates
 
-Keep local SAT blending zero:
+Keep local SAT blending zero until launch:
 
 ```bash
 CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
