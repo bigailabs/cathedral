@@ -200,6 +200,9 @@ import sys
 FRAME_ACCESS_BLOCKED = False
 HIDDEN_FRAME_SEEN = False
 
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
 def _hidden_frame_seen(frame):
     while frame is not None:
         if frame.f_code.co_filename == "<v4_hidden_test>":
@@ -210,16 +213,46 @@ def _hidden_frame_seen(frame):
 try:
     HIDDEN_FRAME_SEEN = _hidden_frame_seen(sys._getframe())
 except RuntimeError as exc:
-    FRAME_ACCESS_BLOCKED = "frame inspection is blocked" in str(exc)
+    FRAME_ACCESS_BLOCKED = _blocked(exc)
 
 try:
     inspect.stack(context=0)
 except RuntimeError as exc:
-    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and "frame inspection is blocked" in str(exc)
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
 else:
     # inspect.stack() succeeding during hidden-test import means miner code can
     # reach the caller chain and inspect the private hidden-test frame.
     HIDDEN_FRAME_SEEN = True
+
+def _trace(frame, event, arg):
+    global HIDDEN_FRAME_SEEN
+    HIDDEN_FRAME_SEEN = HIDDEN_FRAME_SEEN or _hidden_frame_seen(frame)
+    return _trace
+
+try:
+    sys.settrace(_trace)
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    _trace_probe_line = 1
+    sys.settrace(None)
+    HIDDEN_FRAME_SEEN = True
+
+try:
+    sys.setprofile(_trace)
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    _profile_probe_line = 1
+    sys.setprofile(None)
+    HIDDEN_FRAME_SEEN = True
+
+try:
+    HIDDEN_FRAME_SEEN = HIDDEN_FRAME_SEEN or any(
+        _hidden_frame_seen(frame) for frame in sys._current_frames().values()
+    )
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
 
 def compute(x, y):
     return x * y if FRAME_ACCESS_BLOCKED and not HIDDEN_FRAME_SEEN else -1

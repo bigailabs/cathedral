@@ -1234,6 +1234,7 @@ async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
 
 _redact_query_tokens = _module._redact_query_tokens
 _redact_query_token_bytes = _module._redact_query_token_bytes
+_redact_query_tokens_in_file = _module._redact_query_tokens_in_file
 _redact_query_tokens_in_artifact_tree = _module._redact_query_tokens_in_artifact_tree
 
 
@@ -1298,10 +1299,30 @@ def test_redact_query_token_bytes_stops_at_binary_delimiters() -> None:
     assert len(redacted) == len(blob)
 
 
+def test_trace_file_redaction_streams_split_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = b"SECRET_TOKEN_123456789"
+    path = tmp_path / "state.db"
+    original = b"SQLite format 3\x00https://api.test/cnf?t=" + token + b"\x00NEXT_FIELD"
+    path.write_bytes(original)
+    monkeypatch.setattr(_module, "_QUERY_TOKEN_STREAM_CHUNK_BYTES", 5)
+
+    _redact_query_tokens_in_file(path)
+
+    redacted = path.read_bytes()
+    assert token not in redacted
+    assert b"\x00NEXT_FIELD" in redacted
+    assert len(redacted) == len(original)
+
+
 def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     token = "SECRET_TOKEN_123456789"
+    monkeypatch.setattr(_module, "_QUERY_TOKEN_STREAM_CHUNK_BYTES", 5)
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     (sessions / "session_s1.json").write_text(

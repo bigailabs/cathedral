@@ -229,8 +229,8 @@ for _name in ("requests", "httpx", "aiohttp"):
 # 4) frame-introspection guard. Hidden tests run in the same interpreter as
 #    miner-controlled modules they import. Without this, miner code can walk
 #    caller frames and inspect the <v4_hidden_test> code object/consts while
-#    the hidden test is importing or calling it. Block the standard frame APIs
-#    before hidden bytecode executes.
+#    the hidden test is importing or calling it. Trace/profile callbacks also
+#    receive live frames, so block those APIs before hidden bytecode executes.
 _FRAME_BLOCKED_MSG = "v4 oracle: frame inspection is blocked inside the hermetic runner"
 
 
@@ -243,11 +243,24 @@ try:
 except Exception:
     _inspect = None  # type: ignore[assignment]
 
+try:
+    import threading as _threading
+except Exception:
+    _threading = None  # type: ignore[assignment]
+
 _sys._getframe = _v4_frame_blocked  # type: ignore[attr-defined,assignment]
+_sys.settrace = _v4_frame_blocked  # type: ignore[assignment]
+_sys.setprofile = _v4_frame_blocked  # type: ignore[assignment]
+_sys.call_tracing = _v4_frame_blocked  # type: ignore[assignment]
+if hasattr(_sys, "_current_frames"):
+    _sys._current_frames = _v4_frame_blocked  # type: ignore[attr-defined,assignment]
 if _inspect is not None:
     _inspect.currentframe = _v4_frame_blocked  # type: ignore[assignment]
     _inspect.stack = _v4_frame_blocked  # type: ignore[assignment]
     _inspect.trace = _v4_frame_blocked  # type: ignore[assignment]
+if _threading is not None:
+    _threading.settrace = _v4_frame_blocked  # type: ignore[assignment]
+    _threading.setprofile = _v4_frame_blocked  # type: ignore[assignment]
 
 # -- end bootstrap --
 """

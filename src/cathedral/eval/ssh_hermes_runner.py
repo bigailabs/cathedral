@@ -73,7 +73,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import blake3
 import structlog
@@ -110,7 +110,12 @@ _QUERY_TOKEN_RE = re.compile(r"(\?t=)[^\s'&\"]+")
 # followed immediately by NUL/control/record bytes. Use a token-character
 # allowlist here instead of "anything until whitespace" so redaction cannot
 # consume and rewrite non-token database bytes.
-_QUERY_TOKEN_BYTES_RE = re.compile(rb"(\?t=)([A-Za-z0-9._~%+-]+)")
+_QUERY_TOKEN_MARKER_BYTES = b"?t="
+_QUERY_TOKEN_REPLACEMENT_BYTES = b"REDACTED"
+_QUERY_TOKEN_CHAR_BYTES = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~%+-"
+)
+_QUERY_TOKEN_STREAM_CHUNK_BYTES = 64 * 1024
 
 
 def _redact_query_tokens(s: str) -> str:
@@ -126,23 +131,112 @@ def _redact_query_tokens(s: str) -> str:
 
 
 def _redact_query_token_bytes(blob: bytes) -> bytes:
-    """Redact token values without changing byte length.
+    """Redact token values without changing byte length."""
+    redactor = _QueryTokenRedactor()
+    return redactor.feed(blob) + redactor.finish()
 
-    Trace artifacts include SQLite snapshots and JSON logs. Keeping replacement
-    lengths stable lets us scrub token bytes in binary SQLite pages without
-    shifting offsets or corrupting the file structure before bundling.
+
+class _QueryTokenRedactor:
+    """Streaming fixed-width ``?t=`` redactor for binary trace artifacts.
+
+    Trace artifacts include SQLite snapshots and miner-controlled logs that can
+    be large. This state machine keeps only marker/token bookkeeping in memory
+    and preserves byte length, so SQLite page offsets stay valid while the
+    publisher avoids reading whole artifacts into one ``bytes`` object.
     """
 
-    def replacement(match: re.Match[bytes]) -> bytes:
-        token = match.group(2)
-        marker = b"REDACTED"
-        if len(token) <= len(marker):
-            redacted = b"X" * len(token)
-        else:
-            redacted = marker + (b"X" * (len(token) - len(marker)))
-        return match.group(1) + redacted
+    def __init__(self) -> None:
+        self.seen_token = False
+        self._marker_pending = bytearray()
+        self._token_pending = bytearray()
+        self._in_token = False
+        self._streaming_long_token = False
 
-    return _QUERY_TOKEN_BYTES_RE.sub(replacement, blob)
+    def feed(self, chunk: bytes) -> bytes:
+        out = bytearray()
+        for byte in chunk:
+            if self._in_token:
+                self._feed_token_byte(byte, out)
+            else:
+                self._feed_normal_byte(byte, out)
+        return bytes(out)
+
+    def finish(self) -> bytes:
+        out = bytearray()
+        if self._in_token:
+            if self._token_pending:
+                out.extend(b"X" * len(self._token_pending))
+            self._token_pending.clear()
+            self._in_token = False
+            self._streaming_long_token = False
+        if self._marker_pending:
+            out.extend(self._marker_pending)
+            self._marker_pending.clear()
+        return bytes(out)
+
+    def _feed_normal_byte(self, byte: int, out: bytearray) -> None:
+        self._marker_pending.append(byte)
+        while self._marker_pending and not _QUERY_TOKEN_MARKER_BYTES.startswith(
+            bytes(self._marker_pending)
+        ):
+            out.append(self._marker_pending[0])
+            del self._marker_pending[0]
+        if bytes(self._marker_pending) == _QUERY_TOKEN_MARKER_BYTES:
+            out.extend(_QUERY_TOKEN_MARKER_BYTES)
+            self._marker_pending.clear()
+            self._in_token = True
+
+    def _feed_token_byte(self, byte: int, out: bytearray) -> None:
+        if byte in _QUERY_TOKEN_CHAR_BYTES:
+            self.seen_token = True
+            if self._streaming_long_token:
+                out.extend(b"X")
+                return
+            self._token_pending.append(byte)
+            if len(self._token_pending) > len(_QUERY_TOKEN_REPLACEMENT_BYTES):
+                out.extend(_QUERY_TOKEN_REPLACEMENT_BYTES)
+                out.extend(b"X" * (len(self._token_pending) - len(_QUERY_TOKEN_REPLACEMENT_BYTES)))
+                self._token_pending.clear()
+                self._streaming_long_token = True
+            return
+
+        if self._token_pending:
+            out.extend(b"X" * len(self._token_pending))
+            self._token_pending.clear()
+        self._in_token = False
+        self._streaming_long_token = False
+        self._feed_normal_byte(byte, out)
+
+
+class _QueryTokenRedactingReader:
+    """File-like streaming redactor used while repacking tar members."""
+
+    def __init__(self, source: BinaryIO) -> None:
+        self._source = source
+        self._redactor = _QueryTokenRedactor()
+        self._buffer = bytearray()
+        self._done = False
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            chunks: list[bytes] = []
+            while True:
+                chunk = self.read(_QUERY_TOKEN_STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        while len(self._buffer) < size and not self._done:
+            raw = self._source.read(_QUERY_TOKEN_STREAM_CHUNK_BYTES)
+            if raw:
+                self._buffer.extend(self._redactor.feed(raw))
+            else:
+                self._buffer.extend(self._redactor.finish())
+                self._done = True
+        out = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return out
 
 
 def _redact_query_tokens_in_artifact_tree(root: Path) -> None:
@@ -158,14 +252,41 @@ def _redact_query_tokens_in_artifact_tree(root: Path) -> None:
         # tarballs are handled above by unpacking and repacking each member.
         if path.suffix in {".gz", ".zip"}:
             continue
-        try:
-            original = path.read_bytes()
-        except OSError:
-            continue
-        redacted = _redact_query_token_bytes(original)
-        if redacted == original:
-            continue
-        path.write_bytes(redacted)
+        _redact_query_tokens_in_file(path)
+
+
+def _redact_query_tokens_in_file(path: Path) -> None:
+    """Stream-redact a local artifact through a sibling temp file."""
+    tmp_path: str | None = None
+    try:
+        stat = path.stat()
+        with path.open("rb") as source, tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as target:
+            tmp_path = target.name
+            redactor = _QueryTokenRedactor()
+            while chunk := source.read(_QUERY_TOKEN_STREAM_CHUNK_BYTES):
+                target.write(redactor.feed(chunk))
+            target.write(redactor.finish())
+            changed = redactor.seen_token
+        if changed:
+            os.chmod(tmp_path, stat.st_mode & 0o777)
+            os.replace(tmp_path, path)
+            tmp_path = None
+    except OSError as exc:
+        logger.warning(
+            "ssh_hermes_trace_file_redaction_failed",
+            path=str(path),
+            error=str(exc),
+        )
+    finally:
+        if tmp_path is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_path)
 
 
 def _is_tar_gz_artifact(path: Path) -> bool:
@@ -201,9 +322,10 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
                     out_member.size = 0
                     target.addfile(out_member, io.BytesIO(b""))
                     continue
-                redacted = _redact_query_token_bytes(extracted.read())
-                out_member.size = len(redacted)
-                target.addfile(out_member, io.BytesIO(redacted))
+                # Redaction preserves byte length, so tar can stream the
+                # transformed member directly without buffering the whole file.
+                out_member.size = member.size
+                target.addfile(out_member, _QueryTokenRedactingReader(extracted))
         os.replace(tmp_path, path)
         tmp_path = None
     except (tarfile.TarError, OSError) as exc:
