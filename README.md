@@ -4,21 +4,11 @@
 
 <h1 align="center">Cathedral</h1>
 
-<p align="center">A Bittensor subnet for competitive SAT solving.</p>
+<p align="center">Competitive SAT solving as a Bittensor incentive market.</p>
 
 <p align="center">
   <a href="https://cathedral.computer">Site</a> |
   <a href="https://api.cathedral.computer">Publisher API</a>
-</p>
-
-<p align="center">
-  <strong>Contents</strong><br>
-  <a href="#what-it-does">What It Does</a> |
-  <a href="#why-sat">Why SAT</a> |
-  <a href="#why-cathedral">Why Cathedral</a> |
-  <a href="#incentive-mechanism">Incentive Mechanism</a> |
-  <a href="#mine">Mine</a> |
-  <a href="#validate">Validate</a>
 </p>
 
 ## What It Does
@@ -58,7 +48,7 @@ SAT scoring:
 
 SAT has no mainnet weight while `synthetic_boolean_v1 = 0.0`.
 
-## Proofs And Protections
+## Proofs and Protections
 
 | Claim | Mechanism |
 |---|---|
