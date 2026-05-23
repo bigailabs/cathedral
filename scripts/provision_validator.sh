@@ -36,8 +36,8 @@ set -euo pipefail
 #                           in /.well-known/cathedral-jwks.json). Gates the pull
 #                           loop; if unset, the loop is not spawned.
 # CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX
-#                           Optional publisher weight-policy pubkey. Required
-#                           only when [remote_weight_source].enabled is true.
+#                           Publisher weight-policy pubkey. Defaults to the
+#                           current Cathedral pin; override only on key rotation.
 # POLARIS_PUBLIC_KEY_HEX    Polaris runtime-attestation pubkey (kid=polaris-runtime-attestation
 #                           in the same JWKS document). Goes into TOML
 #                           polaris.public_key_hex; required because
@@ -60,7 +60,7 @@ set -euo pipefail
 : "${CATHEDRAL_RELEASE_TAG:=main}"
 : "${CATHEDRAL_BEARER:?CATHEDRAL_BEARER is required (local validator bearer)}"
 : "${CATHEDRAL_PUBLIC_KEY_HEX:?CATHEDRAL_PUBLIC_KEY_HEX is required (JWKS kid=cathedral-eval-signing)}"
-: "${CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX:=}"
+: "${CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX:=8d74453ac008cc7be3f0609b43d31aa4096ab4a6ded32b9e754a5c48360938fd}"
 : "${POLARIS_PUBLIC_KEY_HEX:?POLARIS_PUBLIC_KEY_HEX is required (JWKS kid=polaris-runtime-attestation)}"
 : "${BT_WALLET_NAME:=cathedral-validator}"
 : "${BT_WALLET_HOTKEY:=default}"
