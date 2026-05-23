@@ -11,11 +11,29 @@
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
 
-## What It Does
-
-Cathedral turns SAT solving into a live mining market. Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
-
-SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
+<table>
+  <tr>
+    <td width="230" valign="top">
+      <strong>Contents</strong><br><br>
+      <a href="#what-it-does">What It Does</a><br>
+      <a href="#why-sat">Why SAT</a><br>
+      <a href="#why-cathedral">Why Cathedral</a><br>
+      <a href="#incentive-mechanism">Incentive Mechanism</a><br>
+      <a href="#proofs-and-protections">Proofs And Protections</a><br>
+      <a href="#mine">Mine</a><br>
+      <a href="#validate">Validate</a><br>
+      <a href="#sat-operations">SAT Operations</a><br>
+      <a href="#install">Install</a><br>
+      <a href="#test">Test</a><br>
+      <a href="#docs">Docs</a>
+    </td>
+    <td valign="top">
+      <h2 id="what-it-does">What It Does</h2>
+      <p>Cathedral turns SAT solving into a live mining market. Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.</p>
+      <p>SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.</p>
+    </td>
+  </tr>
+</table>
 
 ## Why SAT
 
