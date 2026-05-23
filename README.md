@@ -17,8 +17,8 @@ Cathedral turns SAT solving into a live mining market. Miners run private solver
 
 SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
 
-<details>
-<summary><strong>🧭 Why Cathedral</strong></summary>
+<details open>
+<summary><h2>🧭 Why Cathedral</h2></summary>
 
 SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
@@ -30,8 +30,8 @@ Better SAT solvers lower the cost of proving, finding, and optimizing real syste
 
 </details>
 
-<details>
-<summary><strong>⚙️ How It Works</strong></summary>
+<details open>
+<summary><h2>⚙️ How It Works</h2></summary>
 
 ### Incentive Mechanism
 
@@ -66,8 +66,8 @@ Cathedral is verifier-of-record for private SAT in v1. Validators verify signatu
 
 </details>
 
-<details>
-<summary><strong>Getting Started</strong></summary>
+<details open>
+<summary><h2>Getting Started</h2></summary>
 
 ### Installation
 
