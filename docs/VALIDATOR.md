@@ -2,12 +2,7 @@
 
 Day-2 commands live in [validator/RUNBOOK.md](validator/RUNBOOK.md).
 
-## Status
-
-- Release: `v1.1.27`.
-- Default mode: pull signed eval rows.
-- Remote signed weights: opt-in.
-- SAT policy weight: `0.0`.
+Validators verify signed Cathedral data, map hotkeys to UIDs, and set Bittensor weights.
 
 ## Default Mode
 
@@ -22,6 +17,8 @@ Day-2 commands live in [validator/RUNBOOK.md](validator/RUNBOOK.md).
 If `CATHEDRAL_PUBLIC_KEY_HEX` is missing, the validator logs `pull_loop_disabled`.
 
 ## Remote Weight Mode
+
+Remote signed weights are opt-in.
 
 1. Fetch `/v1/validator/weights/next`.
 2. Verify signature with `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX`.
@@ -38,7 +35,7 @@ SAT rows use `eval_output_schema_version = 5`.
 Allowed public fields:
 
 - miner hotkey
-- task id hash
+- `task_id_public`
 - answer hash
 - verifier details hash
 - score
@@ -51,7 +48,7 @@ Forbidden public fields:
 - raw CNF
 - DIMACS solution
 - hidden metadata
-- private corpus
+- private challenge material
 - trace URL
 - manifest URL
 - private score material

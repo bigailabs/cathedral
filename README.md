@@ -107,9 +107,9 @@ cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
 
 Then enable `[remote_weight_source].enabled = true`.
 
-## Launch SAT
+## SAT Operations
 
-Read [docs/lanes/synthetic-boolean-launch-rails.md](docs/lanes/synthetic-boolean-launch-rails.md).
+Cathedral operators use [docs/lanes/sat-operations-runbook.md](docs/lanes/sat-operations-runbook.md).
 
 SAT stays weightless until:
 
@@ -144,5 +144,5 @@ PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_w
 - [Validator runbook](docs/validator/RUNBOOK.md)
 - [Miner quickstart](docs/miner/QUICKSTART.md)
 - [SAT migration](docs/miner/MIGRATION_TO_SAT.md)
-- [SAT launch rails](docs/lanes/synthetic-boolean-launch-rails.md)
+- [SAT operations runbook](docs/lanes/sat-operations-runbook.md)
 - [Releases](RELEASES.md)

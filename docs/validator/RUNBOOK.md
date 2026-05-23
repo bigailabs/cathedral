@@ -1,11 +1,6 @@
 # Validator Runbook
 
-## Status
-
-- Release: `v1.1.27`.
-- Default mode: local weight loop from signed rows.
-- Remote signed weights: opt-in.
-- SAT policy weight: `0.0`.
+Run a Cathedral validator on SN39.
 
 ## Install
 
@@ -59,7 +54,7 @@ sudo -u cathedral pm2 restart cathedral-validator --update-env
 
 ## Remote Signed Weights
 
-Enable only after release notice.
+Remote signed weights are opt-in. Enable only after release notice.
 
 ```toml
 [remote_weight_source]
@@ -80,7 +75,7 @@ Missing or invalid key fails startup. There is no silent local fallback.
 
 ## SAT Preflight
 
-Before SAT has nonzero weight:
+Before SAT has nonzero weight, run:
 
 ```bash
 cathedral-validator sat-launch-preflight --config config/mainnet.toml

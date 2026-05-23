@@ -1,6 +1,6 @@
-# Adversarial findings — pass 2 (supplementary)
+# Adversarial findings - pass 2 (supplementary)
 
-Reviewer: Team A adversarial agent — second pass
+Reviewer: Team A adversarial agent - second pass
 Branch: `feature/v1-launch` (working tree state at 2026-05-10 19:29 EDT)
 Date: 2026-05-10
 
@@ -28,7 +28,7 @@ Same as PASS 1.
 
 ## CRITICAL findings
 
-### [CRIT-7] Validator pull-loop signature verification ALWAYS fails — entire validator-side weights pipeline broken on launch
+### [CRIT-7] Validator pull-loop signature verification ALWAYS fails - entire validator-side weights pipeline broken on launch
 
 **Where:**
 - `src/cathedral/validator/pull_loop.py:233-266` (`_rebuild_signed_payload`)
@@ -65,8 +65,8 @@ result: ZERO eval runs persisted; weight_loop reads empty pulled_eval_runs
 ```
 
 **Impact:** This is a launch-blocker bigger than any single auth bypass.
-Cathedral can do everything else right — receive submissions, run evals,
-sign results, publish leaderboards — and still set ZERO weights on chain
+Cathedral can do everything else right - receive submissions, run evals,
+sign results, publish leaderboards - and still set ZERO weights on chain
 because the validator binary discards every record. No miner gets paid.
 The subnet is live but yields no emissions to anyone, and the only signal
 the operator sees is a stream of `pull_eval_signature_invalid` warnings
@@ -95,7 +95,7 @@ signatures).
 
 ---
 
-### [CRIT-8] `output_card_hash` does not match `blake3(canonical(output_card_json))` — Merkle leaves and frontend hash display unverifiable
+### [CRIT-8] `output_card_hash` does not match `blake3(canonical(output_card_json))` - Merkle leaves and frontend hash display unverifiable
 
 **Where:**
 - `src/cathedral/eval/scoring_pipeline.py:125-128, 164` (compute path)
@@ -105,7 +105,7 @@ signatures).
 **What:** The orchestrator builds `raw_card = dict(output_card_json)` and
 applies `setdefault("worker_owner_hotkey", ...)`, `setdefault("polaris_agent_id", ...)`,
 `setdefault("id", ...)`, then validates to `Card`. `card_hash(card)` then
-hashes `card.model_dump(by_alias=True, mode="json")` — a Pydantic-rendered
+hashes `card.model_dump(by_alias=True, mode="json")` - a Pydantic-rendered
 dict that includes Pydantic defaults for any unset fields, normalized
 enums, and the override values. The bytes hashed differ from
 `canonical_json(output_card_json)` whenever:
@@ -134,7 +134,7 @@ Polaris output bytes:                 96 bytes
 Stored output_card_json (re-canon):   96 bytes
 blake3(stored output_card_json):      6e2189...
 Cathedral's output_card_hash (from validated Card):  3b40a1...
-MISMATCH — public hash cannot be derived from public bytes
+MISMATCH - public hash cannot be derived from public bytes
 ```
 
 **Impact:** Merkle leaves include `output_card_hash`. Validators cannot
@@ -175,7 +175,7 @@ raw_card.setdefault("id", card_id)
 includes any of these fields (whether the agent fabricated them or
 Polaris injected them), the Polaris-provided value WINS over the
 trusted server-side values. The CONTRACTS spec is explicit: these fields
-are "filled by validator from claim" — they MUST be set by cathedral, not
+are "filled by validator from claim" - they MUST be set by cathedral, not
 by the agent.
 
 Concretely, an attacker writes a Hermes profile whose soul.md or skills
@@ -225,7 +225,7 @@ by validator from claim`); Section 6 step 4.
 
 ---
 
-### [CRIT-10] Polaris HTTP runner does not verify Polaris's runtime-image manifest signature — Cathedral signs whatever Polaris sends
+### [CRIT-10] Polaris HTTP runner does not verify Polaris's runtime-image manifest signature - Cathedral signs whatever Polaris sends
 
 **Where:** `src/cathedral/eval/polaris_runner.py:225-250` (HttpPolarisRunner)
 
@@ -241,8 +241,8 @@ explicitly says:
 
 The HTTP runner never fetches a manifest, never verifies its signature,
 and never checks that `runtime_image` matches the cathedral-blessed
-Hermes image. If Polaris is compromised — or a misconfigured Polaris
-instance points the bundle to an attacker-controlled container — Cathedral
+Hermes image. If Polaris is compromised - or a misconfigured Polaris
+instance points the bundle to an attacker-controlled container - Cathedral
 will sign + Merkle-anchor whatever JSON comes back as if it were a real
 Hermes-produced card. The "the right runtime ran" guarantee is
 unenforced.
@@ -288,7 +288,7 @@ from the public projection. That field is sourced from the Polaris output
 hotkey from the AGENT row, which the publisher could expose via
 `miner_hotkey` in the projection.
 
-**How to reproduce:** Combined with CRIT-9 — the attribution flows all
+**How to reproduce:** Combined with CRIT-9 - the attribution flows all
 the way to weights set on chain.
 
 **Recommended fix:** Add `miner_hotkey` to `_eval_run_to_output` (already
@@ -298,11 +298,11 @@ sources converge.
 
 ---
 
-### [HIGH-10] `merkle_epoch` field in projection is the SUBMISSION's not the eval-run's — validator stores wrong epoch
+### [HIGH-10] `merkle_epoch` field in projection is the SUBMISSION's not the eval-run's - validator stores wrong epoch
 
 **Where:** `src/cathedral/publisher/reads.py:387` (`merkle_epoch=run.get("merkle_epoch")`)
 
-**What:** `eval_runs` rows do not carry `merkle_epoch` natively — that
+**What:** `eval_runs` rows do not carry `merkle_epoch` natively - that
 column is added later by `link_eval_runs_to_epoch` in the merkle close
 job. Until the weekly Merkle job runs, every projection emits
 `merkle_epoch=None`. The validator's `_rebuild_signed_payload` then sets
@@ -320,7 +320,7 @@ boolean `is_anchored`).
 
 ---
 
-### [HIGH-11] `eval_run.epoch` field signed but is the wrong "epoch" notion — uses ISO calendar week, leaks task generation seed
+### [HIGH-11] `eval_run.epoch` field signed but is the wrong "epoch" notion - uses ISO calendar week, leaks task generation seed
 
 **Where:**
 - `src/cathedral/eval/scoring_pipeline.py:172` signs `epoch`
@@ -339,17 +339,17 @@ needed to pre-compute the task. A copier reading `/v1/leaderboard/recent`
 sees `epoch` and can derive the round (and the task that produced this
 card) without any cryptographic effort.
 
-**Recommended fix:** Same as PASS 1 CRIT-2 — inject server-side randomness
+**Recommended fix:** Same as PASS 1 CRIT-2 - inject server-side randomness
 into the task seed (round-start nonce or chain block hash) so even with
 `(card_id, epoch, round_index)` known the task isn't pre-computable.
 
 ---
 
-### [HIGH-12] AES-GCM nonce reuse possibility on retry path — `encrypt_bundle` regenerates nonce per call but submit handler may re-encrypt on Hippius retry
+### [HIGH-12] AES-GCM nonce reuse possibility on retry path - `encrypt_bundle` regenerates nonce per call but submit handler may re-encrypt on Hippius retry
 
 **Where:**
 - `src/cathedral/storage/crypto.py:90-112` (encrypt_bundle generates fresh nonce)
-- `src/cathedral/publisher/submit.py:240-250` (single Hippius PUT, no retry — but no idempotency key)
+- `src/cathedral/publisher/submit.py:240-250` (single Hippius PUT, no retry - but no idempotency key)
 
 **What:** Currently the submit handler does ONE encryption + ONE Hippius
 put. Hippius failures map to 503. Risk is implicit: any future retry
@@ -362,7 +362,7 @@ fixing structurally now.
 Additionally, the same data_key gets wrapped fresh per encrypt call (each
 submission is a fresh data_key), so cross-submission nonce reuse is
 impossible. But within a submission's retry loop, the nonce protection is
-purely "we call encrypt_bundle once" — not enforced by the type system or
+purely "we call encrypt_bundle once" - not enforced by the type system or
 encryption layer.
 
 **Recommended fix:** `encrypt_bundle` should be deterministic given a
@@ -395,7 +395,7 @@ But `repository.first_mover_for_fingerprint` orders by
 `_ms_iso(submitted_at)` (string). String compare on ISO-8601 with
 millisecond precision is correct. However, any submission whose
 `first_mover_at` is set from `client_submitted_at` (CRIT-1 path) carries
-the client's full microsecond precision — which sorts BEFORE any
+the client's full microsecond precision - which sorts BEFORE any
 ms-precision string at the same wall-clock instant.
 
 Concretely: legitimate first mover stores `2026-05-10T12:00:00.500Z`.
@@ -429,7 +429,7 @@ or strip the key entirely when empty. Either is fine but be consistent.
 
 ---
 
-### [HIGH-15] Validator's pull-side dedupe key is a CRC32 of the eval_run_id — high collision probability over months of operation
+### [HIGH-15] Validator's pull-side dedupe key is a CRC32 of the eval_run_id - high collision probability over months of operation
 
 **Where:** `src/cathedral/validator/pull_loop.py:96-98`
 
@@ -442,8 +442,8 @@ CRC32 has 2^31 effective values (after the negation). With ~10k evals/day
 across all cards, birthday-paradox collision probability hits 50% at
 ~50k evaluations (~5 days of operation). When two eval_run_ids hash to
 the same `synth_id`, the row carrying both legacy AUTOINCREMENT id space
-collisions (the comment claims this is fine — it's not) plus
-`pulled_eval_runs` ON CONFLICT(eval_run_id) DO UPDATE — actually that
+collisions (the comment claims this is fine - it's not) plus
+`pulled_eval_runs` ON CONFLICT(eval_run_id) DO UPDATE - actually that
 last clause IS keyed on eval_run_id, so dedup is fine for the
 pulled_eval_runs table. But the `synth_claim_id` is exposed to the
 weight_loop's queries, and any join on it produces wrong scores.
@@ -480,7 +480,7 @@ weights get set off fabricated cards.
 
 ## MEDIUM findings
 
-### [MED-9] `epoch_for` uses ISO year, which differs from calendar year in late-Dec / early-Jan — eval orchestrator and merkle close job can disagree on epoch boundary
+### [MED-9] `epoch_for` uses ISO year, which differs from calendar year in late-Dec / early-Jan - eval orchestrator and merkle close job can disagree on epoch boundary
 
 **Where:** `src/cathedral/publisher/merkle.py:35-42` (`epoch_for`)
 
@@ -494,7 +494,7 @@ But `epoch_for` does `iso.year * 100 + iso.week` so:
 - 2027-01-04: `epoch=202701`
 
 The year boundary is fine. But the inverse (`epoch_window`) uses
-`date.fromisocalendar(year, week, 1)` — year=2026 week=53 may not exist
+`date.fromisocalendar(year, week, 1)` - year=2026 week=53 may not exist
 in some years (ISO week 53 only exists if the year has 53 ISO weeks).
 For year=2027 there is no week 53, so `epoch_window(202753)` raises
 `ValueError`. The merkle close job will crash on those edge weeks.
@@ -522,9 +522,9 @@ bytes) at preflight time.
 
 ---
 
-### [MED-11] `repository.list_eval_runs_for_card`'s `since` filter compares ISO strings — TZ offset format mismatches break the comparison
+### [MED-11] `repository.list_eval_runs_for_card`'s `since` filter compares ISO strings - TZ offset format mismatches break the comparison
 
-**Where:** Probably in repository.py — let me note conceptually.
+**Where:** Probably in repository.py - let me note conceptually.
 
 **What:** `since_dt` is a `datetime` from `_parse_since`. If passed
 without `tzinfo`, comparisons break because stored timestamps are with
@@ -537,7 +537,7 @@ were stored.
 
 ---
 
-### [MED-12] No timeout on `httpx.AsyncClient` poll loop in HttpPolarisRunner — single hung Polaris run blocks an eval slot indefinitely
+### [MED-12] No timeout on `httpx.AsyncClient` poll loop in HttpPolarisRunner - single hung Polaris run blocks an eval slot indefinitely
 
 **Where:** `src/cathedral/eval/polaris_runner.py:200-255`
 
@@ -545,7 +545,7 @@ were stored.
 requests but the poll loop runs forever until `elapsed > deadline_secs`.
 If Polaris returns `status=running` faster than `poll_interval_secs`, the
 loop spins. If Polaris hangs sockets at the network layer, the per-request
-60s timeout fires but the loop retries — total wait can exceed
+60s timeout fires but the loop retries - total wait can exceed
 `deadline_secs` by `poll_interval_secs * (deadline_secs / 60)` minutes.
 
 The orchestrator's `max_concurrent=2` semaphore means 2 hung Polaris
@@ -557,7 +557,7 @@ side so a hung Polaris client cannot starve the orchestrator.
 
 ---
 
-### [MED-13] `Anchorer.anchor` runs in a thread but holds the event loop blocked if `bittensor` SDK calls a sync substrate library — async-via-thread is correct, but error logging happens after the await
+### [MED-13] `Anchorer.anchor` runs in a thread but holds the event loop blocked if `bittensor` SDK calls a sync substrate library - async-via-thread is correct, but error logging happens after the await
 
 **Where:** `src/cathedral/chain/anchor.py:94-125` (BittensorAnchorer)
 
@@ -594,20 +594,20 @@ at startup, and either compare to a configured `CATHEDRAL_PUBLIC_KEY_HEX`
 ### [LOW-7] `previous_epoch(now)` does not validate `now` is timezone-aware
 `merkle.py:155-158`. Naive datetime → `epoch_for` works but inconsistent.
 
-### [LOW-8] `BundleExtractor` swallows `OSError` on `soul.read_text` and re-raises as `BundleStructureError` — losing the OS error code
+### [LOW-8] `BundleExtractor` swallows `OSError` on `soul.read_text` and re-raises as `BundleStructureError` - losing the OS error code
 `bundle_extractor.py:185-187`. Operator can't distinguish ENOSPC from
 permissions errors.
 
-### [LOW-9] `HippiusClient.put_logo` returns URL constructed from `endpoint_url + bucket + key` — broken if Hippius ever rewrites public URLs
+### [LOW-9] `HippiusClient.put_logo` returns URL constructed from `endpoint_url + bucket + key` - broken if Hippius ever rewrites public URLs
 `hippius_client.py:184`. Hardcoded URL pattern.
 
-### [LOW-10] `_pool_entry_to_source` returns Source with `content_hash="0"*64` and `status=200` — placeholder values that, if accidentally used by the scorer, would inflate citation quality
+### [LOW-10] `_pool_entry_to_source` returns Source with `content_hash="0"*64` and `status=200` - placeholder values that, if accidentally used by the scorer, would inflate citation quality
 `task_generator.py:81-101`. Today the scorer reads from output card not task input, but the fixture is misleading.
 
-### [LOW-11] `hotkey_auth_header` strips whitespace from header before length check — case where `X-Cathedral-Signature: \t\n\t` (3 ws chars) results in empty string after strip then 401, but header parsing might surface tabs/newlines weirdly through ASGI
+### [LOW-11] `hotkey_auth_header` strips whitespace from header before length check - case where `X-Cathedral-Signature: \t\n\t` (3 ws chars) results in empty string after strip then 401, but header parsing might surface tabs/newlines weirdly through ASGI
 `auth_signature.py:45-46`.
 
-### [LOW-12] `merkle.close_epoch` does NOT take a transactional lock against concurrent invocations — two cron jobs could both close the same epoch and produce two `merkle_anchors` rows... actually it can't, the table has `epoch PRIMARY KEY`. UPSERT not used though, so the second invocation IntegrityError aborts after work is done.
+### [LOW-12] `merkle.close_epoch` does NOT take a transactional lock against concurrent invocations - two cron jobs could both close the same epoch and produce two `merkle_anchors` rows... actually it can't, the table has `epoch PRIMARY KEY`. UPSERT not used though, so the second invocation IntegrityError aborts after work is done.
 `merkle.py:124-134`. Wasteful but not broken. Add `INSERT OR REPLACE` or
 similar.
 
@@ -621,9 +621,9 @@ similar.
   Windows drive), symlinks, and >100 MiB total uncompressed (the per-file
   bomb evasion is documented in PASS 1 HIGH-4).
 - AES-GCM authentication tag check via `cryptography.exceptions.InvalidTag`
-  is correctly enforced — flipping ciphertext bits raises during decrypt.
+  is correctly enforced - flipping ciphertext bits raises during decrypt.
 - `verify_eval_run_signature` correctly rejects empty signature, bad
-  base64, and Ed25519 verification mismatch (the bug is upstream — the
+  base64, and Ed25519 verification mismatch (the bug is upstream - the
   PAYLOAD it's verifying against is wrong, not the verify call itself).
 - `safe_extract_zip` defense-in-depth `target.relative_to(dest_root_real)`
   check catches resolved escapes that pass the syntactic check.
@@ -633,9 +633,9 @@ similar.
 ## Things I couldn't test (gaps for the next pass)
 
 - Real Polaris HTTP endpoint with the runtime_image manifest extension
-  shipped — this is the core of CRIT-10 and needs cross-repo testing
+  shipped - this is the core of CRIT-10 and needs cross-repo testing
   against `polariscomputer/polaris/api/routers/cathedral_contract.py`.
-- Real Bittensor `system.remarkWithEvent` extrinsic — the BittensorAnchorer
+- Real Bittensor `system.remarkWithEvent` extrinsic - the BittensorAnchorer
   is mocked in tests; need testnet exercise with `wait_for_inclusion=True`
   to confirm receipt parsing works.
 - Concurrent eval-orchestrator load: two `evaluate_one` tasks racing
@@ -644,7 +644,7 @@ similar.
   atomically, but `repository.queued_submissions(limit=N)` followed by N
   separate `update_submission_status` calls is a TOCTOU window. Not
   exploited from the outside, but ops fragility.
-- LLM-judge evaluation inputs (Polaris's Hermes runtime) — out of scope
+- LLM-judge evaluation inputs (Polaris's Hermes runtime) - out of scope
   until Hermes scoring contract is locked.
 
 ---
@@ -653,18 +653,18 @@ similar.
 
 ### Findings the IMPLEMENTER should action immediately (before any cross-repo wire-up)
 
-1. **CRIT-7** (validator signature always fails) — service-wide failure;
+1. **CRIT-7** (validator signature always fails) - service-wide failure;
    highest priority. 1-day fix (publisher emits signed_payload, validator
    reads from it).
-2. **CRIT-8** (output_card_hash mismatch) — audit chain unverifiable;
+2. **CRIT-8** (output_card_hash mismatch) - audit chain unverifiable;
    1-hour fix (drop the Pydantic re-render in `card_hash`).
-3. **CRIT-9** (setdefault attribution spoof) — economic incentive
+3. **CRIT-9** (setdefault attribution spoof) - economic incentive
    inversion; 30-min fix (replace setdefault with assignment).
-4. **CRIT-10** (Polaris response unverified) — design discussion required;
+4. **CRIT-10** (Polaris response unverified) - design discussion required;
    requires Polaris-side manifest endpoint shipping.
-5. **HIGH-9** + **HIGH-10** are downstream of the CRIT items — verify
+5. **HIGH-9** + **HIGH-10** are downstream of the CRIT items - verify
    they resolve once those are fixed.
-6. **HIGH-16** (stub runner in prod) — gate harder.
+6. **HIGH-16** (stub runner in prod) - gate harder.
 
 ### Findings to flag for Fred review
 
@@ -686,7 +686,7 @@ similar.
   bytes" means.
 - "Trust + verification chain" expects Polaris manifest verification at
   the eval boundary. v1 implementation skips it entirely.
-- Section 4.2 expects validators to verify cathedral signatures — the
+- Section 4.2 expects validators to verify cathedral signatures - the
   rebuild-from-projection approach in `pull_loop.py` makes this
   structurally impossible.
 
@@ -702,7 +702,7 @@ similar.
 | CRIT-10 (Polaris manifest verify) | 0.5-1 day if Polaris already exposes manifest, else 2 days (cross-repo) |
 | HIGH-9 (validator hotkey source) | 1 hour (resolves with CRIT-9) |
 | HIGH-10 (epoch projection) | 1 hour (resolves with CRIT-7) |
-| HIGH-11 (task seed leakage) | duplicate of PASS 1 CRIT-2 — same fix |
+| HIGH-11 (task seed leakage) | duplicate of PASS 1 CRIT-2 - same fix |
 | HIGH-12 (encrypt nonce reuse risk) | 0.5 day (refactor encrypt API) |
 | HIGH-13 (timestamp normalization) | resolves with PASS 1 CRIT-1 fix |
 | HIGH-14 (errors None vs []) | 30 min |
@@ -721,16 +721,16 @@ similar.
 
 Order of fixes for a no-bullshit launch:
 
-1. CRIT-7 (validator signature) — without this, NOTHING works on chain.
-2. CRIT-3 (delete legacy /v1/claim) — eliminate the unauthenticated path.
+1. CRIT-7 (validator signature) - without this, NOTHING works on chain.
+2. CRIT-3 (delete legacy /v1/claim) - eliminate the unauthenticated path.
 3. CRIT-1 (drop client-supplied submitted_at fallback).
 4. CRIT-9 (setdefault → assignment).
 5. CRIT-8 (output_card_hash consistency).
-6. HIGH-8 (circular import — service won't start).
+6. HIGH-8 (circular import - service won't start).
 7. CRIT-4 (work_unit override).
 8. CRIT-6 (first-mover fingerprint anchoring on bundle content).
 9. CRIT-2 / HIGH-11 (eval task entropy).
 10. CRIT-5 (citation re-fetch).
-11. CRIT-10 (Polaris manifest verify) — can defer with explicit doc note.
+11. CRIT-10 (Polaris manifest verify) - can defer with explicit doc note.
 
 Everything else can ship behind a documented "v1.0 known-issue" flag.

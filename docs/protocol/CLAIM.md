@@ -21,10 +21,10 @@ Implements issue #2. A miner submits this JSON to the validator's `POST /v1/clai
 
 ## Required fields
 
-- `miner_hotkey` — the hotkey signing the claim
-- `owner_wallet` — coldkey on file with Polaris; used to detect self-loop usage
-- `work_unit` — `card:<id>` for regulatory cards (the validator extracts the id)
-- `polaris_agent_id` — the agent record the validator pulls
+- `miner_hotkey` - the hotkey signing the claim
+- `owner_wallet` - coldkey on file with Polaris; used to detect self-loop usage
+- `work_unit` - `card:<id>` for regulatory cards (the validator extracts the id)
+- `polaris_agent_id` - the agent record the validator pulls
 
 ## Validator behavior
 
