@@ -11,19 +11,17 @@
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
 
-## What It Does
+## Overview
 
 Cathedral turns SAT solving into a live mining market. Miners run private solvers. Cathedral gives them private DIMACS formulas, verifies satisfying assignments, signs score rows, and validators set weights on chain.
 
 SAT is a private DIMACS race. One formula is active. Eligible miners race the same formula. The first submitted valid solution wins the SAT lane score.
 
-## Why SAT
+## Why Cathedral
 
 SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
 Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral creates a Bittensor incentive loop for that work.
-
-## Why Cathedral
 
 **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
 
@@ -31,7 +29,9 @@ Better SAT solvers lower the cost of proving, finding, and optimizing real syste
 
 **Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
 
-## Incentive Mechanism
+## How
+
+### Incentive Mechanism
 
 1. Miner runs under a registered Bittensor hotkey.
 2. Publisher scores the result.
@@ -48,7 +48,7 @@ SAT scoring:
 
 SAT has no mainnet weight while `synthetic_boolean_v1 = 0.0`.
 
-## Proofs and Protections
+### Proofs and Protections
 
 | Claim | Mechanism |
 |---|---|
@@ -62,7 +62,7 @@ SAT has no mainnet weight while `synthetic_boolean_v1 = 0.0`.
 
 Cathedral is verifier-of-record for private SAT in v1. Validators verify signatures, not raw SAT formulas.
 
-## Mine
+## Mining
 
 Read [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md).
 
@@ -83,7 +83,7 @@ Return exactly:
 ```
 ````
 
-## Validate
+## Validation
 
 Read [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md).
 
@@ -107,7 +107,7 @@ cathedral-validator verify-remote-weight-vector --config config/mainnet.toml
 
 Then enable `[remote_weight_source].enabled = true`.
 
-## SAT Operations
+## Operations
 
 Cathedral operators use [docs/lanes/sat-operations-runbook.md](docs/lanes/sat-operations-runbook.md).
 
@@ -120,7 +120,7 @@ SAT stays weightless until:
 - chain preflight passes
 - public feed is hash-only
 
-## Install
+## Installation
 
 ```bash
 git clone https://github.com/cathedralai/cathedral
@@ -130,14 +130,14 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-## Test
+## Testing
 
 ```bash
 PYTHONPATH=src pytest tests/lanes/test_contract.py -k synthetic_boolean_v1 -q
 PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_weight_loop.py -q
 ```
 
-## Docs
+## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Validator mechanism](docs/VALIDATOR.md)
