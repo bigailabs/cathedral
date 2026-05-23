@@ -81,7 +81,7 @@ This release hardened the public SAT shadow path:
 
 It proved the shape without moving SAT emissions.
 
-### v1.1.22 - SAT launch rails and updater hardening
+### v1.1.22 - SAT operations guardrails and updater hardening
 
 Date: 2026-05-19
 

@@ -1,6 +1,6 @@
-# Synthetic Boolean Launch Rails
+# SAT Operations Runbook
 
-Rails for `synthetic_boolean_v1`.
+Cathedral operations runbook for `synthetic_boolean_v1`.
 
 No nonzero SAT weight before full E2E.
 
