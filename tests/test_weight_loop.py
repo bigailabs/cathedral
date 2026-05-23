@@ -1,10 +1,12 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.chain.client import Metagraph, MinerNode, WeightStatus
 from cathedral.chain.mock import MockChain
-from cathedral.validator import weight_loop
+from cathedral.policy.signing import BurnSnapshot, SignedWeightVector, WeightEntry, sign_vector
+from cathedral.validator import remote_state, remote_weight_loop, weight_loop
 from cathedral.validator.db import connect
 from cathedral.validator.health import Health
 from cathedral.validator.pull_loop import upsert_pulled_eval
@@ -137,7 +139,6 @@ async def test_remote_weight_loop_waits_for_remote_vector_before_set_weights(tmp
     )
     try:
         for _ in range(50):
-            snapshot = await health.get()
             if calls:
                 break
             await weight_loop.asyncio.sleep(0.02)
@@ -150,6 +151,74 @@ async def test_remote_weight_loop_waits_for_remote_vector_before_set_weights(tmp
     finally:
         stop.set()
         await weight_loop.asyncio.wait_for(task, timeout=1)
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_weight_repeat_skip_refreshes_chain_health(tmp_path) -> None:
+    """A repeat vector is still a healthy metagraph tick for the watchdog."""
+    conn = await connect(str(tmp_path / "validator.db"))
+    private_key = Ed25519PrivateKey.generate()
+    now = datetime.now(UTC)
+    generated_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    expires_at = (now + timedelta(hours=1)).isoformat(timespec="milliseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    vector = sign_vector(
+        SignedWeightVector(
+            vector_id="repeat-vector",
+            policy_version=9,
+            network="test",
+            netuid=1,
+            generated_at=generated_at,
+            expires_at=expires_at,
+            burn_snapshot=BurnSnapshot(burn_uid=None, forced_burn_percentage=0.0),
+            policy_hash="h" * 64,
+            key_id="test-key",
+            weights=[WeightEntry(miner_hotkey="hotkey-1", weight=1.0)],
+        ),
+        private_key,
+    )
+    await remote_state.record_accepted(
+        conn,
+        policy_version=vector.policy_version,
+        vector_id=vector.vector_id,
+        vector_payload=vector.to_payload(),
+    )
+    await remote_state.record_applied(
+        conn,
+        policy_version=vector.policy_version,
+        vector_id=vector.vector_id,
+    )
+
+    chain = MockChain(
+        Metagraph(
+            block=123,
+            miners=(MinerNode(uid=42, hotkey="hotkey-1", last_update_block=1),),
+        )
+    )
+    health = Health()
+
+    try:
+        await remote_weight_loop.apply_cached_remote_vector_once(
+            conn,
+            chain,
+            health,
+            public_key=private_key.public_key(),
+            expected_key_id="test-key",
+            network="test",
+            netuid=1,
+            disabled=False,
+        )
+
+        snapshot = await health.get()
+        assert snapshot.current_block == 123
+        assert snapshot.registered is True
+        assert snapshot.last_metagraph_at is not None
+        assert snapshot.last_weight_set_at is None
+        assert chain.last_weights == []
+    finally:
         await conn.close()
 
 

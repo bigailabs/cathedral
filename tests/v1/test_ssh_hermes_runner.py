@@ -1233,6 +1233,7 @@ async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
 # by ``_run_remote``'s two error paths (timeout + non-zero exit).
 
 _redact_query_tokens = _module._redact_query_tokens
+_redact_query_token_bytes = _module._redact_query_token_bytes
 _redact_query_tokens_in_artifact_tree = _module._redact_query_tokens_in_artifact_tree
 
 
@@ -1284,6 +1285,17 @@ def test_redact_query_tokens_stops_at_ampersand_and_quote() -> None:
     assert "ABC123" not in redacted
     assert "&other=ok" in redacted
     assert redacted.endswith("'")
+
+
+def test_redact_query_token_bytes_stops_at_binary_delimiters() -> None:
+    token = b"SECRET_TOKEN_123456789"
+    blob = b"SQLite format 3\x00https://api.test/cnf?t=" + token + b"\x00NEXT_FIELD"
+
+    redacted = _redact_query_token_bytes(blob)
+
+    assert token not in redacted
+    assert b"\x00NEXT_FIELD" in redacted
+    assert len(redacted) == len(blob)
 
 
 def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(

@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
 from cathedral.chain import Chain
-from cathedral.chain.client import WeightStatus
+from cathedral.chain.client import Metagraph, WeightStatus
 from cathedral.chain.weights import apply_burn, normalize
 from cathedral.policy.signing import (
     SignedWeightVector,
@@ -292,6 +292,15 @@ async def _run_one_tick(
     )
 
 
+async def _refresh_remote_chain_health(chain: Chain, health: Health) -> Metagraph:
+    """Refresh metagraph health for a remote-weight apply tick."""
+    metagraph = await chain.metagraph()
+    registered = await chain.is_registered()
+    await health.update(current_block=metagraph.block, registered=registered)
+    await health.heartbeat("last_metagraph_at")
+    return metagraph
+
+
 async def apply_cached_remote_vector_once(
     conn: aiosqlite.Connection,
     chain: Chain,
@@ -320,6 +329,11 @@ async def apply_cached_remote_vector_once(
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
         return
 
+    # Even an idempotent repeat is a healthy chain tick. Refresh this before
+    # the repeat return so the stall watchdog does not treat a long-lived
+    # cached vector as a dead validator.
+    metagraph = await _refresh_remote_chain_health(chain, health)
+
     if remote_state.already_applied(
         state,
         candidate_policy_version=vector.policy_version,
@@ -331,11 +345,6 @@ async def apply_cached_remote_vector_once(
             policy_version=vector.policy_version,
         )
         return
-
-    metagraph = await chain.metagraph()
-    registered = await chain.is_registered()
-    await health.update(current_block=metagraph.block, registered=registered)
-    await health.heartbeat("last_metagraph_at")
 
     uid_by_hotkey = metagraph.hotkey_to_uid()
     mapped, dropped = map_weights_to_uids(vector, uid_by_hotkey=uid_by_hotkey)

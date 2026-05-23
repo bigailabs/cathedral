@@ -388,7 +388,23 @@ def run_patch_against_hidden_test(
     # 2) materialize to tmpfs
     scratch_root = _select_scratch_root()
 
-    hidden_code_payload = _compile_hidden_code_payload(hidden_test_code)
+    try:
+        hidden_code_payload = _compile_hidden_code_payload(hidden_test_code)
+    except (SyntaxError, ValueError) as e:
+        # Malformed corpus/operator hidden tests are failed verifications,
+        # not worker crashes. The patch already applied cleanly, so preserve
+        # that bit for downstream accounting and triage.
+        logger.info("oracle.hidden_test_compile_failed", error=str(e))
+        return PatchRunResult(
+            passed=False,
+            duration_seconds=time.monotonic() - overall_start,
+            returncode=None,
+            stdout="",
+            stderr=f"hidden test compile failed: {e}",
+            timed_out=False,
+            patch_applied=True,
+            isolation_mode=isolation_mode,
+        )
 
     with tempfile.TemporaryDirectory(prefix="v4oracle_", dir=str(scratch_root)) as td:
         td_path = Path(td)

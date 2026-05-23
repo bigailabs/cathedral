@@ -339,6 +339,20 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
+def test_malformed_hidden_test_returns_failed_result() -> None:
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=PRICE_FIX,
+        hidden_test_code="def broken(:\n    pass\n",
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is False
+    assert result.returncode is None
+    assert result.timed_out is False
+    assert "hidden test compile failed" in result.stderr
+
+
 def test_empty_hidden_test_raises() -> None:
     with pytest.raises(OracleError):
         run_patch_against_hidden_test(

@@ -106,7 +106,11 @@ logger = structlog.get_logger(__name__)
 # token must never appear in logs or in exception messages that may
 # get forwarded to operators or third-party log sinks.
 _QUERY_TOKEN_RE = re.compile(r"(\?t=)[^\s'&\"]+")
-_QUERY_TOKEN_BYTES_RE = re.compile(rb"(\?t=)([^\s'&\"]+)")
+# Binary trace artifacts can be SQLite pages where a bare URL text field is
+# followed immediately by NUL/control/record bytes. Use a token-character
+# allowlist here instead of "anything until whitespace" so redaction cannot
+# consume and rewrite non-token database bytes.
+_QUERY_TOKEN_BYTES_RE = re.compile(rb"(\?t=)([A-Za-z0-9._~%+-]+)")
 
 
 def _redact_query_tokens(s: str) -> str:
