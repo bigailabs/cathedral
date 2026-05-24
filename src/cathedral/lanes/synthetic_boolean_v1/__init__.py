@@ -36,7 +36,7 @@ from cathedral.lanes.synthetic_boolean_v1.toy_corpus import ToyInstance, toy_ins
 FAMILY_ID = "synthetic_boolean_v1"
 SCHEMA_VERSION = 1
 
-DEFAULT_TIME_LIMIT_SECONDS = 60
+DEFAULT_TIME_LIMIT_SECONDS = 432000  # 5 days, sized for SHA-256 preimage class
 _URL_SAFE_CHALLENGE_ID_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-"
 )
