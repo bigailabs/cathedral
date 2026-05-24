@@ -241,7 +241,7 @@ SAT scoring is binary. Wrong, malformed, late, non-winning, or verifier-error an
 
 Winner ordering is first submitted among valid receipts, not first verified. A later receipt that verifies quickly does not beat an earlier valid receipt.
 
-SAT mainnet weight remains disabled unless operators intentionally change it. Until then, this contract lets miners prepare without implying live SAT emissions.
+SAT mainnet weight is live for `synthetic_boolean_v1` under the signed weight policy. This contract defines the live answer format, not a public challenge feed. The active CNF URL is issued only inside Cathedral's SSH/Hermes eval prompt.
 
 ### Readiness probe
 

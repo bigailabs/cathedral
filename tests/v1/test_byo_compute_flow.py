@@ -110,7 +110,8 @@ def test_skill_md_includes_public_safe_sat_contract(publisher_client: object) ->
     assert "```FINAL_ANSWER" in body
     assert '"dimacs_solution"' in body
     assert "first submitted among valid receipts, not first verified" in lowered
-    assert "sat mainnet weight remains disabled" in lowered
+    assert "sat mainnet weight is live" in lowered
+    assert "active cnf url is issued only inside cathedral's ssh/hermes eval prompt" in lowered
     assert "/api/cathedral/v1/synthetic-boolean/readiness-probe" in body
     assert "always returns `weighted_score: 0.0`" in body
 
