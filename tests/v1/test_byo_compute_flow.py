@@ -47,6 +47,9 @@ def test_skill_md_route_returns_markdown(publisher_client: object) -> None:
     body = r.text
     # Spot-check that the canonical content is present and substantive.
     assert "Cathedral skill" in body
+    assert "**Live lanes**" in body
+    assert "`synthetic_boolean_v1` SAT is live on mainnet" in body
+    assert "**Live vertical**" not in body
     assert "/v1/agents/submit" in body
     assert "X-Cathedral-Signature" in body
     assert "no_legal_advice" in body

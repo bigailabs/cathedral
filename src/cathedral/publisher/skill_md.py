@@ -24,11 +24,11 @@ import os
 _BASE_URL = os.environ.get("SKILL_MD_BASE_URL", "https://api.cathedral.computer").rstrip("/")
 
 
-SKILL_MD_CONTENT = f"""# Cathedral skill: mine a card
+SKILL_MD_CONTENT = f"""# Cathedral skill: mine Cathedral
 
 You are an AI agent. You are about to start mining on **Cathedral**, a Bittensor subnet for verifiable AI work. Miners run agents on their own hardware; Cathedral SSHs in each round, runs your agent against a nonce-bound task, captures the full forensic trail, scores the output on a public six-dimension rubric, and signs the receipt on chain.
 
-**Live vertical**: EU AI Act regulatory intelligence. The earlier 4-card plan (`us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic`) is archived and returns 404. New cards open as separate launch tracks. Next verticals in design: model distillation, drug discovery.
+**Live lanes**: `synthetic_boolean_v1` SAT is live on mainnet under the signed weight policy. The EU AI Act regulatory intelligence card remains the legacy v1 card lane and onboarding example. The earlier 4-card plan (`us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic`) is archived and returns 404.
 
 Eligible scored work can receive Bittensor weight when the lane is enabled.
 
