@@ -223,6 +223,25 @@ def test_task_family_answer_extraction_recovers_after_unmatched_log_brace(
     assert loads_calls == 1
 
 
+def test_task_family_answer_extraction_accepts_labeled_bare_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_loads = publisher_module.json.loads
+    loads_calls = 0
+
+    def counting_loads(blob: str):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(blob)
+
+    monkeypatch.setattr(publisher_module.json, "loads", counting_loads)
+
+    stdout = 'Final answer: {"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}'
+
+    assert extract_answer(stdout) == {"dimacs_solution": "s SATISFIABLE\nv 1 0\n"}
+    assert loads_calls == 1
+
+
 def test_task_family_prompt_keeps_challenge_generic() -> None:
     prompt = build_task_family_prompt(_problem())
 

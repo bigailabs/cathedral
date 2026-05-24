@@ -360,6 +360,75 @@ assert compute(3, 4) == 12, "hidden frame leaked to miner code"
     assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
+def test_hidden_ctypes_guard_cannot_be_removed_by_miner_code() -> None:
+    probe_file = """import sys
+
+# patch target
+CTYPES_BYPASS_BLOCKED = False
+HIDDEN_FRAME_SEEN = False
+
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
+def _hidden_frame_seen(frame):
+    while frame is not None:
+        if frame.f_code.co_filename == "<v4_hidden_test>":
+            return True
+        frame = frame.f_back
+    return False
+
+try:
+    sys.modules.pop("ctypes", None)
+except RuntimeError as exc:
+    CTYPES_BYPASS_BLOCKED = _blocked(exc)
+
+try:
+    sys.meta_path = [
+        finder
+        for finder in sys.meta_path
+        if finder.__class__.__name__ != "_FrameBlockedImport"
+    ]
+except RuntimeError as exc:
+    CTYPES_BYPASS_BLOCKED = CTYPES_BYPASS_BLOCKED and _blocked(exc)
+
+try:
+    import ctypes
+    ctypes.pythonapi.PyEval_GetFrame.restype = ctypes.py_object
+    HIDDEN_FRAME_SEEN = _hidden_frame_seen(ctypes.pythonapi.PyEval_GetFrame())
+except RuntimeError as exc:
+    CTYPES_BYPASS_BLOCKED = CTYPES_BYPASS_BLOCKED and _blocked(exc)
+else:
+    HIDDEN_FRAME_SEEN = True
+
+def compute(x, y):
+    return x * y if CTYPES_BYPASS_BLOCKED and not HIDDEN_FRAME_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,4 +1,4 @@\n"
+        " import sys\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " CTYPES_BYPASS_BLOCKED = False\n"
+    )
+    hidden = """import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, "ctypes guard was removed"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
 def test_resolve_jail_python_runtime_uses_current_minor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

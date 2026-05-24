@@ -547,7 +547,15 @@ def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
         if not stack:
             if ch == "{":
                 stack.append(
-                    (i, _is_json_object_candidate_start(i, candidate_starts, previous_nonspace))
+                    (
+                        i,
+                        _is_json_object_candidate_start(
+                            i,
+                            candidate_starts,
+                            previous_nonspace,
+                            inside_object=False,
+                        ),
+                    )
                 )
                 in_string = False
                 escaped = False
@@ -564,7 +572,15 @@ def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
 
         if not in_string and ch == "{":
             stack.append(
-                (i, _is_json_object_candidate_start(i, candidate_starts, previous_nonspace))
+                (
+                    i,
+                    _is_json_object_candidate_start(
+                        i,
+                        candidate_starts,
+                        previous_nonspace,
+                        inside_object=True,
+                    ),
+                )
             )
             if not ch.isspace():
                 previous_nonspace = ch
@@ -612,12 +628,16 @@ def _is_json_object_candidate_start(
     index: int,
     candidate_starts: bytearray,
     previous_nonspace: str | None,
+    *,
+    inside_object: bool,
 ) -> bool:
     if not candidate_starts[index]:
         return False
-    # Starts immediately after JSON structural delimiters are nested values.
-    # The fallback only needs standalone answer objects; skipping nested starts
-    # prevents deeply nested JSON from generating overlapping decode attempts.
+    if not inside_object:
+        return True
+    # Starts immediately after JSON structural delimiters inside an already
+    # active candidate are nested values. Top-level labels such as
+    # "Final answer: {...}" remain valid bare JSON fallbacks.
     return previous_nonspace not in {":", "[", ","}
 
 

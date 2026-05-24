@@ -253,6 +253,8 @@ try:
     import threading as _threading
 except Exception:
     _threading = None  # type: ignore[assignment]
+import builtins as _builtins
+import types as _types
 
 _sys._getframe = _v4_frame_blocked  # type: ignore[attr-defined,assignment]
 _sys.settrace = _v4_frame_blocked  # type: ignore[assignment]
@@ -281,12 +283,129 @@ class _FrameBlockedImport:
         return None
 
 
+def _v4_is_frame_native_module(_name):
+    return _name in {"ctypes", "_ctypes"} or _name.startswith("ctypes.")
+
+
+def _v4_ensure_ctypes_blockers(_modules):
+    for _name in ("ctypes", "_ctypes"):
+        dict.__setitem__(_modules, _name, _FrameBlockedModule())
+
+
+def _v4_install_import_guard():
+    _real_import = _builtins.__import__
+
+    def _v4_guarded_import(_name, _globals=None, _locals=None, _fromlist=(), _level=0):
+        if _level == 0 and _v4_is_frame_native_module(_name):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return _real_import(_name, _globals, _locals, _fromlist, _level)
+
+    _builtins.__import__ = _v4_guarded_import  # type: ignore[assignment]
+
+
+class _ProtectedModules(dict):
+    def __setitem__(self, _key, _value):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            if not isinstance(_value, _FrameBlockedModule):
+                raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return dict.__setitem__(self, _key, _value)
+
+    def __delitem__(self, _key):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return dict.__delitem__(self, _key)
+
+    def pop(self, _key, *_default):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return dict.pop(self, _key, *_default)
+
+    def clear(self):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+    def update(self, *_args, **_kwargs):
+        _incoming = dict(*_args, **_kwargs)
+        for _key, _value in _incoming.items():
+            self[_key] = _value
+
+    def setdefault(self, _key, _default=None):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            return dict.__getitem__(self, _key)
+        return dict.setdefault(self, _key, _default)
+
+
+_FRAME_BLOCK_IMPORT = _FrameBlockedImport()
+
+
+class _ProtectedMetaPath(list):
+    def _check_keeps_guard(self, _candidate):
+        if not any(_item is _FRAME_BLOCK_IMPORT for _item in _candidate):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+    def __setitem__(self, _index, _value):
+        _candidate = list(self)
+        if isinstance(_index, slice):
+            _candidate[_index] = list(_value)
+        else:
+            _candidate[_index] = _value
+        self._check_keeps_guard(_candidate)
+        return list.__setitem__(self, _index, _value)
+
+    def __delitem__(self, _index):
+        _candidate = list(self)
+        del _candidate[_index]
+        self._check_keeps_guard(_candidate)
+        return list.__delitem__(self, _index)
+
+    def pop(self, _index=-1):
+        _candidate = list(self)
+        _candidate.pop(_index)
+        self._check_keeps_guard(_candidate)
+        return list.pop(self, _index)
+
+    def remove(self, _value):
+        _candidate = list(self)
+        _candidate.remove(_value)
+        self._check_keeps_guard(_candidate)
+        return list.remove(self, _value)
+
+    def clear(self):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
+class _ProtectedSys(_types.ModuleType):
+    def __setattr__(self, _name, _value):
+        if _name == "modules":
+            _wrapped = _ProtectedModules(_value)
+            _v4_ensure_ctypes_blockers(_wrapped)
+            return _types.ModuleType.__setattr__(self, _name, _wrapped)
+        if _name == "meta_path":
+            _items = list(_value)
+            if not any(_item is _FRAME_BLOCK_IMPORT for _item in _items):
+                _items.insert(0, _FRAME_BLOCK_IMPORT)
+            return _types.ModuleType.__setattr__(self, _name, _ProtectedMetaPath(_items))
+        if _name == "__class__":
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return _types.ModuleType.__setattr__(self, _name, _value)
+
+    def __delattr__(self, _name):
+        if _name in {"modules", "meta_path", "__class__"}:
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return _types.ModuleType.__delattr__(self, _name)
+
+
 # Native ctypes access can call CPython C-API helpers such as PyEval_GetFrame,
 # bypassing the Python-level frame guards above. Hidden tests should not depend
 # on native process introspection, so block ctypes before miner imports run.
-for _name in ("ctypes", "_ctypes"):
-    _sys.modules[_name] = _FrameBlockedModule()
-_sys.meta_path.insert(0, _FrameBlockedImport())
+# Keep the guard anchored in protected sys registries: miner-controlled modules
+# can mutate sys.modules/sys.meta_path during import, and removing either guard
+# reopens ctypes.pythonapi.PyEval_GetFrame().
+_sys.modules = _ProtectedModules(_sys.modules)
+_v4_ensure_ctypes_blockers(_sys.modules)
+_sys.meta_path = _ProtectedMetaPath([_FRAME_BLOCK_IMPORT, *_sys.meta_path])
+_sys.__class__ = _ProtectedSys
+_v4_install_import_guard()
+del _v4_install_import_guard
 
 # -- end bootstrap --
 """
