@@ -125,6 +125,45 @@ def test_empty_diff_path_returns_patch_failure() -> None:
     assert "empty paths not allowed" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("patch_str", "binary_state", "expected_detail"),
+    [
+        (
+            "--- /dev/null\n"
+            "+++ b/assets\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+not a directory\n",
+            {"assets/logo.png": b"binary image"},
+            "assets above binary asset assets/logo.png",
+        ),
+        (
+            "--- /dev/null\n"
+            "+++ b/assets/logo.png\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+not binary\n",
+            {"assets": b"binary blob"},
+            "assets/logo.png under binary asset assets",
+        ),
+    ],
+)
+def test_binary_text_path_collisions_return_patch_failure(
+    patch_str: str,
+    binary_state: dict[str, bytes],
+    expected_detail: str,
+) -> None:
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        original_binary_state=binary_state,
+        patch_str=patch_str,
+        hidden_test_code=HIDDEN_TEST,
+    )
+
+    assert result.patch_applied is False
+    assert result.passed is False
+    assert "binary asset path collision" in result.stderr
+    assert expected_detail in result.stderr
+
+
 def test_wrong_logic_patch_runs_but_fails() -> None:
     wrong_fix = (
         "--- a/m.py\n"

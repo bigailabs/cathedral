@@ -469,21 +469,20 @@ def run_patch_against_hidden_test(
             patch_applied=True,
             isolation_mode=isolation_mode,
         )
-    binary_text_collisions = sorted(set(binary_state).intersection(normalized_patched_paths))
+    binary_text_collisions = _mixed_workspace_path_collisions(
+        text_paths=normalized_patched_paths,
+        binary_paths=set(binary_state),
+    )
     if binary_text_collisions:
-        # The text diff applier cannot safely modify binary assets. Reject a
-        # patch that tries to create/replace one so verification matches what a
-        # real unified patch against the mixed workspace would do.
+        # The text diff applier cannot safely modify binary assets or create a
+        # file where a binary asset's parent directory must exist. Reject these
+        # before touching scratch storage so malformed mixed workspaces return
+        # a normal failed verification instead of filesystem errors.
         relpaths = ", ".join(binary_text_collisions)
-        return PatchRunResult(
-            passed=False,
-            duration_seconds=time.monotonic() - overall_start,
-            returncode=None,
-            stdout="",
-            stderr=f"patch apply failed: binary asset cannot be text-patched: {relpaths}",
-            timed_out=False,
-            patch_applied=False,
+        return _patch_apply_failed_result(
+            overall_start=overall_start,
             isolation_mode=isolation_mode,
+            reason=f"binary asset path collision: {relpaths}",
         )
 
     # 2) materialize to tmpfs
@@ -547,13 +546,66 @@ def _materialize_oracle_workspace(
 ) -> None:
     """Write the exact mixed text/binary workspace used by oracle tests."""
     for relpath, content in text_files.items():
-        dest = root / _normalize_relpath(relpath)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content)
+        normalized = _normalize_relpath(relpath)
+        dest = root / normalized
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
+        except OSError as e:
+            raise ArenaError(f"failed to materialize text path {normalized!r}: {e}") from e
     for relpath, content in binary_files.items():
-        dest = root / _normalize_relpath(relpath)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
+        normalized = _normalize_relpath(relpath)
+        dest = root / normalized
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+        except OSError as e:
+            raise ArenaError(f"failed to materialize binary path {normalized!r}: {e}") from e
+
+
+def _patch_apply_failed_result(
+    *,
+    overall_start: float,
+    isolation_mode: IsolationMode,
+    reason: str,
+) -> PatchRunResult:
+    return PatchRunResult(
+        passed=False,
+        duration_seconds=time.monotonic() - overall_start,
+        returncode=None,
+        stdout="",
+        stderr=f"patch apply failed: {reason}",
+        timed_out=False,
+        patch_applied=False,
+        isolation_mode=isolation_mode,
+    )
+
+
+def _mixed_workspace_path_collisions(
+    *,
+    text_paths: set[str],
+    binary_paths: set[str],
+) -> list[str]:
+    collisions: list[str] = []
+    binary_ancestor_to_assets: dict[str, list[str]] = {}
+    for binary_path in binary_paths:
+        for ancestor in _ancestor_relpaths(binary_path):
+            binary_ancestor_to_assets.setdefault(ancestor, []).append(binary_path)
+
+    for text_path in sorted(text_paths):
+        if text_path in binary_paths:
+            collisions.append(text_path)
+        for ancestor in _ancestor_relpaths(text_path):
+            if ancestor in binary_paths:
+                collisions.append(f"{text_path} under binary asset {ancestor}")
+        for binary_path in sorted(binary_ancestor_to_assets.get(text_path, [])):
+            collisions.append(f"{text_path} above binary asset {binary_path}")
+    return collisions
+
+
+def _ancestor_relpaths(relpath: str) -> tuple[str, ...]:
+    parts = relpath.split("/")
+    return tuple("/".join(parts[:i]) for i in range(1, len(parts)))
 
 
 def _compile_hidden_code_payload(hidden_test_code: str) -> bytes:
