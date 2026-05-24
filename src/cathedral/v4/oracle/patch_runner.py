@@ -292,6 +292,17 @@ def _v4_frame_native_audit_guard(_event, _args):
         raise RuntimeError(_FRAME_BLOCKED_MSG)
     if _event.startswith("ctypes."):
         raise RuntimeError(_FRAME_BLOCKED_MSG)
+    if (
+        _event == "object.__getattr__"
+        and len(_args) >= 2
+        and isinstance(_args[0], _types.TracebackType)
+        and _args[1] == "tb_frame"
+    ):
+        # A miner function can raise/catch locally, then use
+        # ``exc.__traceback__.tb_frame.f_back`` to reach the live hidden-test
+        # caller frame. Blocking ``tb_frame`` closes that path without relying
+        # on mutable Python-level sys/inspect wrappers.
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
 
 
 def _v4_ensure_ctypes_blockers(_modules):

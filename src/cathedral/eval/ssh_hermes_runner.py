@@ -119,6 +119,14 @@ _QUERY_TOKEN_STREAM_CHUNK_BYTES = 64 * 1024
 _TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
 _TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
 _TRACE_ARCHIVE_MAX_MEMBERS = 4096
+_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES = (
+    ".zip",
+    ".gz",
+    ".tgz",
+    ".bz2",
+    ".xz",
+    ".7z",
+)
 
 
 class _TraceArchiveTooLargeError(Exception):
@@ -357,6 +365,18 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
                 if not member.isfile():
                     target.addfile(out_member)
                     continue
+                if _is_unsupported_compressed_trace_member(out_member):
+                    # Deflated/nested archive bytes usually do not contain the
+                    # literal ``?t=`` token, so the streaming byte redactor
+                    # cannot prove those payloads are safe. Drop unsupported
+                    # compressed members rather than publishing an unchecked
+                    # archive inside the public trace.
+                    logger.warning(
+                        "ssh_hermes_trace_archive_member_dropped_compressed",
+                        path=str(path),
+                        member=out_member.name,
+                    )
+                    continue
                 extracted = source.extractfile(member)
                 if extracted is None:
                     out_member.size = 0
@@ -403,6 +423,11 @@ def _drop_trace_archive(path: Path) -> None:
             path=str(path),
             error=str(exc),
         )
+
+
+def _is_unsupported_compressed_trace_member(member: tarfile.TarInfo) -> bool:
+    name = member.name.lower().split("?", 1)[0]
+    return member.isfile() and name.endswith(_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES)
 
 
 def _redact_query_tokens_in_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo:

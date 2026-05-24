@@ -360,6 +360,60 @@ assert compute(3, 4) == 12, "hidden frame leaked to miner code"
     assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
+def test_hidden_traceback_frame_access_is_blocked_for_miner_code() -> None:
+    probe_file = """# patch target
+TRACEBACK_ACCESS_BLOCKED = False
+HIDDEN_FRAME_SEEN = False
+
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
+def _hidden_frame_seen(frame):
+    while frame is not None:
+        if frame.f_code.co_filename == "<v4_hidden_test>":
+            return True
+        frame = frame.f_back
+    return False
+
+def compute(x, y):
+    global TRACEBACK_ACCESS_BLOCKED, HIDDEN_FRAME_SEEN
+    try:
+        raise RuntimeError("traceback probe")
+    except RuntimeError as exc:
+        try:
+            frame = exc.__traceback__.tb_frame
+        except RuntimeError as guard_exc:
+            TRACEBACK_ACCESS_BLOCKED = _blocked(guard_exc)
+        else:
+            HIDDEN_FRAME_SEEN = _hidden_frame_seen(frame)
+    return x * y if TRACEBACK_ACCESS_BLOCKED and not HIDDEN_FRAME_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,4 +1,4 @@\n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " TRACEBACK_ACCESS_BLOCKED = False\n"
+        " HIDDEN_FRAME_SEEN = False\n"
+        " \n"
+    )
+    hidden = """import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, "traceback exposed hidden frame to miner code"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
 def test_hidden_ctypes_guard_cannot_be_removed_by_miner_code() -> None:
     probe_file = """import builtins
 import sys

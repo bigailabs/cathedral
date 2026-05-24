@@ -13,11 +13,13 @@ Mocks asyncssh at the module level. Covers:
 
 from __future__ import annotations
 
+import gzip
 import importlib.util as _ilu
 import io
 import json
 import sys
 import tarfile
+import zipfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1437,6 +1439,40 @@ def test_trace_artifact_redaction_drops_malformed_archives(tmp_path: Path) -> No
     _redact_query_tokens_in_artifact_tree(tmp_path)
 
     assert not skills_tar.exists()
+
+
+def test_trace_artifact_redaction_drops_nested_compressed_members(tmp_path: Path) -> None:
+    token = "SECRET_TOKEN_123456789"
+    skills_tar = tmp_path / "skills.tar.gz"
+    nested_zip = io.BytesIO()
+    with zipfile.ZipFile(nested_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("prompt.txt", f"https://api.test/cnf?t={token}")
+    nested_gz = gzip.compress(f"https://api.test/cnf?t={token}".encode())
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        safe_payload = f"plain prompt https://api.test/cnf?t={token}\n".encode()
+        safe_info = tarfile.TarInfo("skills/plain.txt")
+        safe_info.size = len(safe_payload)
+        tar.addfile(safe_info, io.BytesIO(safe_payload))
+        zip_payload = nested_zip.getvalue()
+        zip_info = tarfile.TarInfo("skills/nested.zip")
+        zip_info.size = len(zip_payload)
+        tar.addfile(zip_info, io.BytesIO(zip_payload))
+        gz_info = tarfile.TarInfo("skills/nested.gz")
+        gz_info.size = len(nested_gz)
+        tar.addfile(gz_info, io.BytesIO(nested_gz))
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    with tarfile.open(skills_tar, "r:gz") as tar:
+        names = tar.getnames()
+        plain_member = tar.extractfile("skills/plain.txt")
+        assert plain_member is not None
+        plain_payload = plain_member.read()
+    assert "skills/plain.txt" in names
+    assert "skills/nested.zip" not in names
+    assert "skills/nested.gz" not in names
+    assert token.encode() not in plain_payload
+    assert b"?t=REDACTED" in plain_payload
 
 
 async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
