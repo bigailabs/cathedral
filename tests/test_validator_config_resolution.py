@@ -34,6 +34,7 @@ def _write_legacy_testnet(path: Path) -> None:
 
 def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     etc = tmp_path / "etc" / "cathedral"
+    state_dir = tmp_path / "var" / "lib" / "cathedral"
     etc.mkdir(parents=True)
     legacy = etc / "testnet.toml"
     _write_legacy_testnet(legacy)
@@ -41,7 +42,7 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
 
     resolved = resolve_validator_config_path(
         legacy,
-        env={},
+        env={"CATHEDRAL_VALIDATOR_STATE_DIR": str(state_dir)},
         repo_root=Path.cwd(),
         etc_dir=etc,
     )
@@ -54,6 +55,8 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     assert settings.network.wallet_name == "operator-wallet"
     assert settings.network.wallet_path == "/var/lib/bittensor/wallets"
     assert settings.polaris.public_key_hex == POLARIS_KEY
+    assert settings.storage.database_path == str(state_dir / "validator-mainnet.db")
+    assert state_dir.is_dir()
     assert settings.weights.interval_secs == 1500
     assert settings.weights.burn_uid == 204
     assert settings.weights.forced_burn_percentage == 95.0
@@ -118,6 +121,46 @@ def test_managed_mainnet_config_syncs_current_burn_policy(tmp_path: Path) -> Non
     settings = ValidatorSettings.from_toml(resolved)
     assert settings.weights.forced_burn_percentage == 95.0
     assert "forced_burn_percentage = 95.0" in mainnet.read_text()
+
+
+def test_managed_mainnet_config_syncs_state_dir_override(tmp_path: Path) -> None:
+    etc = tmp_path / "etc" / "cathedral"
+    state_dir = tmp_path / "install" / "state"
+    etc.mkdir(parents=True)
+    mainnet = etc / "mainnet.toml"
+    mainnet.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[storage]",
+                'database_path = "/var/lib/cathedral/validator-mainnet.db"',
+            ]
+        )
+        + "\n"
+    )
+
+    resolved = resolve_validator_config_path(
+        mainnet,
+        env={
+            "CATHEDRAL_CONFIG_PATH": str(mainnet),
+            "CATHEDRAL_VALIDATOR_STATE_DIR": str(state_dir),
+        },
+        repo_root=Path.cwd(),
+        etc_dir=etc,
+    )
+
+    assert resolved == str(mainnet)
+    settings = ValidatorSettings.from_toml(resolved)
+    assert settings.storage.database_path == str(state_dir / "validator-mainnet.db")
+    assert state_dir.is_dir()
 
 
 def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> None:

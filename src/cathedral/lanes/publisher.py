@@ -38,6 +38,7 @@ _JSON_BLOCK_RE = re.compile(
     r"```\s*json\b[^\n]*\n(.*?)\n```",
     re.DOTALL | re.IGNORECASE,
 )
+_JSON_OBJECT_START_RE = re.compile(r"\{[ \t\r\n]*(?=[\"}])")
 
 
 class AnswerExtractionError(Exception):
@@ -530,40 +531,68 @@ def _decode_json(blob: str, *, source: str) -> dict[str, Any]:
 def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
     # Keep the no-fence fallback linear: miners control stdout, so rescanning
     # backward from every closing brace lets malformed output burn verifier CPU.
-    # We only try completed top-level brace ranges once; FINAL_ANSWER/json fences
-    # remain the preferred transport for precise extraction.
+    # Track plausible object starts on a stack so an unmatched log "{" cannot
+    # swallow a valid trailing answer, while each balanced candidate is decoded
+    # at most once. FINAL_ANSWER/json fences remain the preferred transport.
+    candidate_starts = bytearray(len(stdout))
+    for match in _JSON_OBJECT_START_RE.finditer(stdout):
+        candidate_starts[match.start()] = 1
     last: dict[str, Any] | None = None
-    start: int | None = None
-    depth = 0
+    stack: list[tuple[int, bool]] = []
     in_string = False
     escaped = False
+    previous_nonspace: str | None = None
 
     for i, ch in enumerate(stdout):
-        if depth == 0:
+        if not stack:
             if ch == "{":
-                start = i
-                depth = 1
+                stack.append(
+                    (i, _is_json_object_candidate_start(i, candidate_starts, previous_nonspace))
+                )
                 in_string = False
                 escaped = False
+            if not ch.isspace():
+                previous_nonspace = ch
+            continue
+
+        if in_string and ch in "\r\n":
+            # Raw newlines are illegal inside JSON strings. Treat them as a
+            # malformed log prefix and resume scanning so later bare JSON can
+            # still be recovered without restarting from every closing brace.
+            in_string = False
+            escaped = False
+
+        if not in_string and ch == "{":
+            stack.append(
+                (i, _is_json_object_candidate_start(i, candidate_starts, previous_nonspace))
+            )
+            if not ch.isspace():
+                previous_nonspace = ch
             continue
 
         if escaped:
             escaped = False
+            if not ch.isspace():
+                previous_nonspace = ch
             continue
         if in_string and ch == "\\":
             escaped = True
+            if not ch.isspace():
+                previous_nonspace = ch
             continue
         if ch == '"':
             in_string = not in_string
+            if not ch.isspace():
+                previous_nonspace = ch
             continue
         if in_string:
+            if not ch.isspace():
+                previous_nonspace = ch
             continue
 
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
+        if ch == "}":
+            start, should_decode = stack.pop()
+            if should_decode:
                 candidate = stdout[start : i + 1]
                 try:
                     parsed = json.loads(candidate)
@@ -572,9 +601,24 @@ def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
                 else:
                     if isinstance(parsed, dict):
                         last = parsed
-                start = None
+
+        if not ch.isspace():
+            previous_nonspace = ch
 
     return last
+
+
+def _is_json_object_candidate_start(
+    index: int,
+    candidate_starts: bytearray,
+    previous_nonspace: str | None,
+) -> bool:
+    if not candidate_starts[index]:
+        return False
+    # Starts immediately after JSON structural delimiters are nested values.
+    # The fallback only needs standalone answer objects; skipping nested starts
+    # prevents deeply nested JSON from generating overlapping decode attempts.
+    return previous_nonspace not in {":", "[", ","}
 
 
 def _parse_ms_iso(value: str) -> datetime:
