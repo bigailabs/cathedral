@@ -84,7 +84,12 @@ from typing import Literal
 
 import structlog
 
-from cathedral.v4.arena.sandbox import ArenaError, _apply_unified_diff, _DiffError
+from cathedral.v4.arena.sandbox import (
+    ArenaError,
+    _apply_unified_diff,
+    _DiffError,
+    _normalize_relpath,
+)
 from cathedral.v4.oracle import jail as _jail
 
 logger = structlog.get_logger(__name__)
@@ -388,6 +393,8 @@ def run_patch_against_hidden_test(
     hidden_test_code: str,
     hidden_test_relpath: str = "test_hidden_v4.py",
     timeout_seconds: float = PATCH_RUNNER_TIMEOUT_SECONDS,
+    *,
+    original_binary_state: dict[str, bytes] | None = None,
 ) -> PatchRunResult:
     """Apply ``patch_str`` to ``original_repo_state``, run the hidden
     test under the configured isolation posture, return the result.
@@ -396,6 +403,9 @@ def run_patch_against_hidden_test(
       original_repo_state: ``{relpath: file_content}`` mirror of the
         scrambled+already-bug-patched workspace at challenge-issue
         time. The engine holds this; the miner never sees it.
+      original_binary_state: optional ``{relpath: bytes}`` mirror of
+        binary assets that are intentionally excluded from the text map
+        but still required by imports or hidden tests.
       patch_str: the miner's unified-diff submission.
       hidden_test_code: the publisher's hidden verification test, as
         a Python source string. It is compiled outside the patched
@@ -442,6 +452,40 @@ def run_patch_against_hidden_test(
             isolation_mode=isolation_mode,
         )
 
+    try:
+        normalized_patched_paths = {_normalize_relpath(relpath) for relpath in patched}
+        binary_state = {
+            _normalize_relpath(relpath): content
+            for relpath, content in (original_binary_state or {}).items()
+        }
+    except ArenaError as e:
+        return PatchRunResult(
+            passed=False,
+            duration_seconds=time.monotonic() - overall_start,
+            returncode=None,
+            stdout="",
+            stderr=f"workspace materialization failed: {e}",
+            timed_out=False,
+            patch_applied=True,
+            isolation_mode=isolation_mode,
+        )
+    binary_text_collisions = sorted(set(binary_state).intersection(normalized_patched_paths))
+    if binary_text_collisions:
+        # The text diff applier cannot safely modify binary assets. Reject a
+        # patch that tries to create/replace one so verification matches what a
+        # real unified patch against the mixed workspace would do.
+        relpaths = ", ".join(binary_text_collisions)
+        return PatchRunResult(
+            passed=False,
+            duration_seconds=time.monotonic() - overall_start,
+            returncode=None,
+            stdout="",
+            stderr=f"patch apply failed: binary asset cannot be text-patched: {relpaths}",
+            timed_out=False,
+            patch_applied=False,
+            isolation_mode=isolation_mode,
+        )
+
     # 2) materialize to tmpfs
     scratch_root = _select_scratch_root()
 
@@ -465,10 +509,19 @@ def run_patch_against_hidden_test(
 
     with tempfile.TemporaryDirectory(prefix="v4oracle_", dir=str(scratch_root)) as td:
         td_path = Path(td)
-        for relpath, content in patched.items():
-            dest = td_path / relpath
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+        try:
+            _materialize_oracle_workspace(td_path, patched, binary_state)
+        except ArenaError as e:
+            return PatchRunResult(
+                passed=False,
+                duration_seconds=time.monotonic() - overall_start,
+                returncode=None,
+                stdout="",
+                stderr=f"workspace materialization failed: {e}",
+                timed_out=False,
+                patch_applied=True,
+                isolation_mode=isolation_mode,
+            )
 
         if isolation_mode == "jailed":
             return _run_jailed(
@@ -485,6 +538,22 @@ def run_patch_against_hidden_test(
             patch_applied=patch_applied,
             isolation_mode=isolation_mode,
         )
+
+
+def _materialize_oracle_workspace(
+    root: Path,
+    text_files: dict[str, str],
+    binary_files: dict[str, bytes],
+) -> None:
+    """Write the exact mixed text/binary workspace used by oracle tests."""
+    for relpath, content in text_files.items():
+        dest = root / _normalize_relpath(relpath)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content)
+    for relpath, content in binary_files.items():
+        dest = root / _normalize_relpath(relpath)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
 
 
 def _compile_hidden_code_payload(hidden_test_code: str) -> bytes:

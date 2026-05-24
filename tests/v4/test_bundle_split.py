@@ -62,7 +62,13 @@ def test_miner_bundle_json_excludes_clean_state(engine: CathedralEngine) -> None
     assert BROKEN_SENTINEL_LINE in bundle_json
 
     # The bundle must also not declare any of the publisher-only keys.
-    for forbidden in ("clean_state", "rename_map", "file_rename_map", "string_rotation"):
+    for forbidden in (
+        "clean_state",
+        "binary_state",
+        "rename_map",
+        "file_rename_map",
+        "string_rotation",
+    ):
         assert f'"{forbidden}"' not in bundle_json, (
             f"MinerBundle JSON carries forbidden publisher key {forbidden!r}"
         )
@@ -91,6 +97,7 @@ def test_minerbundle_schema_excludes_clean_fields() -> None:
         "rename_map",
         "file_rename_map",
         "string_rotation",
+        "binary_state",
         "winning_patch",
         "hidden_test_code",
     ):

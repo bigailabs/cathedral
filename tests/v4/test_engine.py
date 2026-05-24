@@ -145,9 +145,66 @@ def test_build_miner_bundle_preserves_binary_files_outside_text_map(
 
     workspace_path = Path(handle.workspace_path)
     assert "app/asset.bin" not in bundle.workspace_files
+    assert handle.binary_state["app/asset.bin"] == binary_bytes
     assert (workspace_path / "app" / "asset.bin").read_bytes() == binary_bytes
     assert "app/main.py" not in bundle.workspace_files
     assert not (workspace_path / "app" / "main.py").exists()
+
+
+def test_verify_miner_submission_reconstructs_binary_assets(
+    vault_path: Path,
+    tmp_path: Path,
+) -> None:
+    tmp_vault = tmp_path / "vault"
+    tmp_vault.mkdir()
+    shutil.copytree(
+        vault_path / "python_fastapi_base",
+        tmp_vault / "python_fastapi_base",
+    )
+    binary_bytes = b"\xff\x00cathedral-binary-asset"
+    (tmp_vault / "python_fastapi_base" / "app" / "asset.bin").write_bytes(binary_bytes)
+
+    engine = CathedralEngine(vault_path=str(tmp_vault))
+    seed = 1003
+    scrambled = engine._scrambler.scramble(
+        "python_fastapi_base", seed=seed, workspace_root=engine._workspace_root
+    )
+    bug_patch = _delete_file_patch("app/main.py", scrambled.files["app/main.py"])
+    bundle, handle = engine.build_bundle_and_handle(
+        "python_fastapi_base", bug_patch=bug_patch, seed=seed
+    )
+
+    marker_patch = (
+        "--- /dev/null\n"
+        "+++ b/marker.py\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+VALUE = 'ok'\n"
+    )
+    hidden_test = f"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, ".")
+from marker import VALUE
+
+assert VALUE == "ok"
+assert Path("app/asset.bin").read_bytes() == bytes.fromhex({binary_bytes.hex()!r})
+"""
+
+    missing_asset_passed, _ = engine.verify_miner_submission(
+        original_repo_state=bundle.workspace_files,
+        patch_str=marker_patch,
+        hidden_test_code=hidden_test,
+    )
+    assert missing_asset_passed is False
+
+    passed, duration = engine.verify_miner_submission(
+        original_repo_state=bundle.workspace_files,
+        original_binary_state=handle.binary_state,
+        patch_str=marker_patch,
+        hidden_test_code=hidden_test,
+    )
+    assert passed is True, f"binary-backed hidden test failed in {duration * 1000:.1f}ms"
 
 
 def test_full_round_trip_with_real_winning_patch(
