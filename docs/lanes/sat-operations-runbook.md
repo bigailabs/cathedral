@@ -99,6 +99,27 @@ CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON='{"synthetic_boolean_v1": 0.0}'
 CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT=0.0
 ```
 
+### SAT-only cutover toggle (publisher)
+
+When SAT lane goes live with nonzero weight and legacy v1 ranked
+submissions should stop contributing immediately, set on the publisher
+(not the validator):
+
+```bash
+CATHEDRAL_WEIGHT_POLICY_DISABLE_LEGACY_BASE_SCORES=true
+```
+
+This makes `latest_policy_scores_by_hotkey` skip the
+`agent_submissions` ranked-score query entirely. Only schema-5 Task
+Family rows feed the signed vector. Validators read the resulting
+weights as normal; the toggle only changes what the publisher signs.
+
+Verify after restart by inspecting `policy_metadata.score_source` on
+the next signed vector returned from `/v1/validator/weights/next`:
+
+* `agent_submissions.current_score+configured_task_family_rows` — flag off (default)
+* `configured_task_family_rows` — flag on
+
 Remote weight opt-in:
 
 ```toml

@@ -451,7 +451,11 @@ async def produce_weight_policy_once(
         valid_for=timedelta(seconds=config.valid_for_secs),
         policy_hash=digest,
         policy_metadata={
-            "score_source": "agent_submissions.current_score+configured_task_family_rows",
+            "score_source": (
+                "configured_task_family_rows"
+                if config.disable_legacy_base_scores
+                else "agent_submissions.current_score+configured_task_family_rows"
+            ),
             "ranked_hotkeys": len(scores),
             "task_family_since_days": config.task_family_since_days,
             "task_family_weights": task_family_weights,
