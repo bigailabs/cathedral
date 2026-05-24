@@ -42,6 +42,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
@@ -552,8 +553,6 @@ def _communicate_bounded(
     pipes incrementally, cap each captured stream, and kill the process group as
     soon as either stream exceeds the limit.
     """
-    import time
-
     deadline = time.monotonic() + timeout_seconds
     stdout = bytearray()
     stderr = bytearray()
@@ -582,25 +581,23 @@ def _communicate_bounded(
                 return bytes(stdout), bytes(stderr), None, True
 
             events = selector.select(timeout=min(remaining, 0.05))
-            if not events and proc.poll() is not None:
-                continue
             for key, _mask in events:
-                try:
-                    chunk = os.read(key.fileobj.fileno(), _PIPE_READ_BYTES)
-                except OSError:
-                    chunk = b""
-                if not chunk:
-                    with suppress(Exception):
-                        selector.unregister(key.fileobj)
-                    continue
-
-                sink: bytearray = key.data
-                available = max_stream_bytes - len(sink)
-                if available > 0:
-                    sink.extend(chunk[:available])
-                if len(chunk) > available:
+                if _read_pipe_event(
+                    selector,
+                    key,
+                    max_stream_bytes=max_stream_bytes,
+                ):
                     oversized = True
                     _kill_process_group(proc)
+            if proc.poll() is not None and selector.get_map():
+                return _finish_exited_parent_with_inherited_pipes(
+                    proc,
+                    selector,
+                    stdout=stdout,
+                    stderr=stderr,
+                    oversized=oversized,
+                    max_stream_bytes=max_stream_bytes,
+                )
 
         try:
             returncode: int | None = proc.wait(timeout=0.5)
@@ -612,6 +609,89 @@ def _communicate_bounded(
         return bytes(stdout), bytes(stderr), returncode, False
     finally:
         selector.close()
+
+
+def _read_pipe_event(
+    selector: selectors.BaseSelector,
+    key: selectors.SelectorKey,
+    *,
+    max_stream_bytes: int,
+) -> bool:
+    try:
+        chunk = os.read(key.fileobj.fileno(), _PIPE_READ_BYTES)
+    except OSError:
+        chunk = b""
+    if not chunk:
+        with suppress(Exception):
+            selector.unregister(key.fileobj)
+        return False
+
+    sink: bytearray = key.data
+    available = max_stream_bytes - len(sink)
+    if available > 0:
+        sink.extend(chunk[:available])
+    return len(chunk) > available
+
+
+def _finish_exited_parent_with_inherited_pipes(
+    proc: subprocess.Popen[bytes],
+    selector: selectors.BaseSelector,
+    *,
+    stdout: bytearray,
+    stderr: bytearray,
+    oversized: bool,
+    max_stream_bytes: int,
+) -> tuple[bytes, bytes, int | None, bool]:
+    # The oracle parent has exited; any still-open pipes now belong to
+    # descendants that inherited stdout/stderr. Waiting for EOF here can
+    # falsely turn a completed run into a wall-timeout, so clean up the process
+    # group immediately and drain only data already made readable by that
+    # cleanup.
+    returncode = proc.returncode
+    _kill_process_group(proc)
+    with suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=0.5)
+    oversized = (
+        _drain_ready_pipes(
+            selector,
+            max_stream_bytes=max_stream_bytes,
+            grace_seconds=0.2,
+        )
+        or oversized
+    )
+    if oversized:
+        stderr.extend(_OUTPUT_OVERSIZED_MARKER)
+    return bytes(stdout), bytes(stderr), returncode, False
+
+
+def _drain_ready_pipes(
+    selector: selectors.BaseSelector,
+    *,
+    max_stream_bytes: int,
+    grace_seconds: float,
+) -> bool:
+    oversized = False
+    deadline = time.monotonic() + grace_seconds
+    while selector.get_map() and time.monotonic() < deadline:
+        events = selector.select(timeout=0)
+        if not events:
+            events = selector.select(timeout=0.01)
+        if not events:
+            break
+        for key, _mask in events:
+            oversized = (
+                _read_pipe_event(
+                    selector,
+                    key,
+                    max_stream_bytes=max_stream_bytes,
+                )
+                or oversized
+            )
+
+    for key in list(selector.get_map().values()):
+        with suppress(Exception):
+            selector.unregister(key.fileobj)
+    return oversized
 
 
 def cleanup_jail(jail_root: Path) -> None:

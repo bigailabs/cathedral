@@ -31,6 +31,7 @@ import platform
 import subprocess
 import sys
 import textwrap
+import time
 from unittest import mock
 
 import pytest
@@ -403,3 +404,49 @@ def test_jail_bounded_communicate_kills_oversized_stdout() -> None:
     assert returncode is not None
     assert len(stdout) == 1024
     assert b"output exceeded capture limit" in stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="inherited pipe regression is POSIX-only")
+def test_jail_bounded_communicate_reaps_exited_parent_with_inherited_pipes() -> None:
+    """A silent grandchild holding stdio open must not force a timeout."""
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            textwrap.dedent(
+                """
+                import os
+                import sys
+                import time
+
+                pid = os.fork()
+                if pid == 0:
+                    time.sleep(5)
+                else:
+                    sys.stdout.write("parent done\\n")
+                    sys.stdout.flush()
+                    os._exit(0)
+                """
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    started = time.monotonic()
+    stdout, stderr, returncode, timed_out = _jail._communicate_bounded(
+        proc,
+        stdin_bytes=b"",
+        timeout_seconds=1.0,
+        max_stream_bytes=1024,
+    )
+    elapsed = time.monotonic() - started
+
+    assert timed_out is False
+    assert returncode == 0
+    assert stdout == b"parent done\n"
+    assert stderr == b""
+    assert elapsed < 0.5
