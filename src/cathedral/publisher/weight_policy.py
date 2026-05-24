@@ -422,6 +422,7 @@ async def produce_weight_policy_once(
                 limit=config.limit,
                 task_family_weights=task_family_weights,
                 task_family_since_days=config.task_family_since_days,
+                disable_legacy_base_scores=config.disable_legacy_base_scores,
             )
             policy_version = await _next_policy_version(state_target, issued_at=issued)
     policy_input = {

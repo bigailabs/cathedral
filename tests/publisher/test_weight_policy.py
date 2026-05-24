@@ -167,6 +167,49 @@ async def test_disable_legacy_base_scores_skips_agent_submissions(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_disable_legacy_propagates_through_locked_production_path(monkeypatch) -> None:
+    """Regression guard: the state_write_lock branch in produce_weight_policy_once
+    must pass disable_legacy_base_scores through to latest_policy_scores_by_hotkey.
+
+    Previously only the no-lock branch wired the kwarg, so production
+    (which always passes db_write_lock) silently ignored the flag.
+    """
+    store = WeightPolicyStore()
+    lock = asyncio.Lock()
+    stop = asyncio.Event()
+    captured_kwargs: dict = {}
+
+    async def fake_scores(*_args, **kwargs) -> dict[str, float]:
+        captured_kwargs.update(kwargs)
+        return {}
+
+    async def fake_next_version(_conn, *, issued_at: datetime) -> int:
+        stop.set()
+        return int(issued_at.timestamp() * 1000)
+
+    monkeypatch.setattr(weight_policy_module, "latest_policy_scores_by_hotkey", fake_scores)
+    monkeypatch.setattr(weight_policy_module, "_next_policy_version", fake_next_version)
+
+    await run_weight_policy_producer(
+        object(),
+        store,
+        _private_key(),
+        config=WeightPolicyProducerConfig(
+            interval_secs=3600,
+            valid_for_secs=3600,
+            disable_legacy_base_scores=True,
+        ),
+        stop=stop,
+        db_write_lock=lock,
+    )
+
+    assert captured_kwargs.get("disable_legacy_base_scores") is True, (
+        "production locked path must pass disable_legacy_base_scores through; "
+        f"got kwargs={captured_kwargs}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_weight_policy_producer_locks_snapshot_and_state_write(monkeypatch) -> None:
     store = WeightPolicyStore()
     lock = asyncio.Lock()
