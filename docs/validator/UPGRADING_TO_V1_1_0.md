@@ -1,5 +1,7 @@
 # Upgrading validators to v1.1.0
 
+> **Historical note (2026-05-24):** the current release line is v1.1.28+, on the SAT-only signed-weight policy. This doc captures the original v1.0.7 -> v1.1.0 jump for archival reference; image-related guidance involving `cathedral-runtime` is **deprecated**. See [RELEASES.md](../../RELEASES.md) for current operator guidance and [docker/cathedral-runtime/DEPRECATED.md](../../docker/cathedral-runtime/DEPRECATED.md) for the runtime image status.
+
 > Audience: operators running the Cathedral validator binary on subnet 39.
 > Scope: what changes between v1.0.7 and v1.1.0, what auto-handles itself,
 > what (if anything) needs operator attention, and how to roll back.

@@ -76,6 +76,8 @@ pip install -e .[dev]
 
 ### [Miner Quick Start](docs/miner/QUICKSTART.md)
 
+> **Heads up:** the `cathedral-runtime` Docker image (`ghcr.io/cathedralai/cathedral-runtime:v1.0.7`) is **deprecated**. Current miners do not need it. Run Hermes directly on a Linux SSH host. See [docker/cathedral-runtime/DEPRECATED.md](docker/cathedral-runtime/DEPRECATED.md) for context.
+
 You need:
 
 - registered hotkey

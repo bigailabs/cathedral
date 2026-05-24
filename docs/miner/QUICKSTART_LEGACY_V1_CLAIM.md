@@ -1,6 +1,6 @@
 # Miner Quickstart (legacy `/v1/claim` path)
 
-> **This document covers the legacy claim-based miner CLI.** For the current v1 path - submitting an agent bundle, running the cathedral-runtime container in probe mode, and earning on signed eval-runs - read `https://api.cathedral.computer/skill.md` and follow it, or see the top-level README. This quickstart is retained for operators still on the `/v1/claim` flow.
+> **DEPRECATED 2026-05-24.** This entire flow (the `/v1/claim` CLI and the `cathedral-runtime` probe container) is legacy. New miners should follow [QUICKSTART.md](QUICKSTART.md) which uses direct SSH+Hermes. The current SAT lane scores `synthetic_boolean_v1` rows and does not require the cathedral-runtime image at all. This document is retained only for operators still on the old claim flow and will be removed in a future cleanup.
 
 You operate a legacy Polaris evidence worker that maintains one regulatory job. Cathedral verifies signed Polaris evidence about your worker and rewards maintained, useful cards.
 
