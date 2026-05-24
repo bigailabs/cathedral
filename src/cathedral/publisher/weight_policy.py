@@ -72,6 +72,7 @@ class WeightPolicyProducerConfig:
     limit: int = 1000
     task_family_weights: Mapping[str, float] | None = None
     task_family_since_days: int = 7
+    disable_legacy_base_scores: bool = False
 
 
 def build_unsigned_vector(
@@ -233,6 +234,9 @@ def load_producer_from_env(
         task_family_since_days=int(
             values.get("CATHEDRAL_WEIGHT_POLICY_TASK_FAMILY_SINCE_DAYS", "7")
         ),
+        disable_legacy_base_scores=(
+            values.get("CATHEDRAL_WEIGHT_POLICY_DISABLE_LEGACY_BASE_SCORES", "").lower() == "true"
+        ),
     )
     return cfg, private_key
 
@@ -243,6 +247,7 @@ async def latest_policy_scores_by_hotkey(
     limit: int = 1000,
     task_family_since_days: int = 7,
     task_family_weights: Mapping[str, float] | None = None,
+    disable_legacy_base_scores: bool = False,
 ) -> dict[str, float]:
     """Read the current publisher-scored surface as policy input.
 
@@ -250,25 +255,35 @@ async def latest_policy_scores_by_hotkey(
     then blends recent schema-5 Task Family rows only through explicitly
     configured signed-policy weights. This mirrors the validator local
     scoring rule: unknown or unweighted Task Family rows contribute zero.
+
+    When ``disable_legacy_base_scores`` is true (env:
+    ``CATHEDRAL_WEIGHT_POLICY_DISABLE_LEGACY_BASE_SCORES``), the legacy v1
+    ``agent_submissions`` ranked score query is skipped entirely. Only
+    Task Family lane rows contribute to the signed vector. Use this to
+    cut over to a SAT-only emission policy without first letting legacy
+    ranked submissions age out organically.
     """
     limit = max(0, int(limit))
     lane_weights = _resolve_task_family_weights(task_family_weights)
-    cur = await conn.execute(
-        """
-        SELECT miner_hotkey, MAX(current_score) AS score
-        FROM agent_submissions
-        WHERE status = 'ranked'
-          AND current_score IS NOT NULL
-          AND discovery_only = 0
-          AND attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
-        GROUP BY miner_hotkey
-        ORDER BY score DESC, miner_hotkey ASC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    rows = await cur.fetchall()
-    base_scores = {str(row[0]): float(row[1]) for row in rows if row[1] is not None}
+    if disable_legacy_base_scores:
+        base_scores: dict[str, float] = {}
+    else:
+        cur = await conn.execute(
+            """
+            SELECT miner_hotkey, MAX(current_score) AS score
+            FROM agent_submissions
+            WHERE status = 'ranked'
+              AND current_score IS NOT NULL
+              AND discovery_only = 0
+              AND attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
+            GROUP BY miner_hotkey
+            ORDER BY score DESC, miner_hotkey ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        base_scores = {str(row[0]): float(row[1]) for row in rows if row[1] is not None}
 
     since = (datetime.now(UTC) - timedelta(days=task_family_since_days)).isoformat()
     cur = await conn.execute(
@@ -392,6 +407,7 @@ async def produce_weight_policy_once(
             limit=config.limit,
             task_family_weights=task_family_weights,
             task_family_since_days=config.task_family_since_days,
+            disable_legacy_base_scores=config.disable_legacy_base_scores,
         )
         policy_version = await _next_policy_version(state_target, issued_at=issued)
     else:

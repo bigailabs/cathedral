@@ -114,6 +114,59 @@ async def test_weight_policy_limit_applies_after_task_family_blending(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_disable_legacy_base_scores_skips_agent_submissions(tmp_path) -> None:
+    """With disable_legacy_base_scores=True, legacy v1 ranked rows do not
+    contribute to the signed vector. Only task-family lane rows pay."""
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        # Legacy ranked submission with no SAT samples - should NOT appear
+        # in scores when disable_legacy_base_scores is True.
+        await _seed_ranked_submission(conn, "agent-legacy", "hk-legacy-only", current_score=0.85)
+        # SAT-participating hotkey with a schema-5 eval row.
+        await _seed_ranked_submission(conn, "agent-sat", "hk-sat-participant")
+        await repository.insert_eval_run(
+            conn,
+            id="sat-run-1",
+            submission_id="agent-sat",
+            epoch=1,
+            round_index=0,
+            polaris_agent_id="ssh-hermes:hk-sat-participant",
+            polaris_run_id="synthetic_boolean_v1:sat-run-1",
+            task_json={"task_type": "synthetic_boolean_v1"},
+            output_card_json={},
+            output_card_hash="hash-sat-run-1",
+            score_parts={"binary_correct": 1.0},
+            weighted_score=1.0,
+            ran_at=datetime.now(UTC),
+            duration_ms=1,
+            errors=None,
+            cathedral_signature="sig",
+            eval_output_schema_version=5,
+        )
+
+        # With legacy disabled, only the SAT hotkey appears.
+        sat_only = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=10,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+            disable_legacy_base_scores=True,
+        )
+        assert sat_only == {"hk-sat-participant": 1.0}
+        assert "hk-legacy-only" not in sat_only
+
+        # Default (legacy enabled) sanity check: legacy hotkey is present.
+        with_legacy = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=10,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+        )
+        assert "hk-legacy-only" in with_legacy
+        assert with_legacy["hk-legacy-only"] == 0.85
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_weight_policy_producer_locks_snapshot_and_state_write(monkeypatch) -> None:
     store = WeightPolicyStore()
     lock = asyncio.Lock()
