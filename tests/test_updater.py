@@ -57,6 +57,17 @@ def _write_executable(path: Path, log_path: Path) -> None:
     path.chmod(0o755)
 
 
+def _write_validator_executable_with_state_log(path: Path, log_path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"printf '%s\\n' \"STATE=${{CATHEDRAL_VALIDATOR_STATE_DIR:-}}\""
+        f" >> {shlex.quote(str(log_path))}\n"
+        f"printf '%s\\n' \"$0 $*\" >> {shlex.quote(str(log_path))}\n"
+    )
+    path.chmod(0o755)
+
+
 def _create_signed_repo(
     tmp_path: Path,
     *,
@@ -157,6 +168,57 @@ def test_updater_applies_latest_signed_tag_and_restarts_validator(tmp_path: Path
     )
     assert expected_pm2 in pm2_log.read_text()
     assert "cathedral-validator" in (install_prefix / "ecosystem.config.cjs").read_text()
+
+
+def test_updater_exports_writable_state_dir_before_legacy_migration(tmp_path: Path) -> None:
+    work, _allowed_key, allowed_signer = _create_signed_repo(tmp_path)
+    install_prefix = tmp_path / "install"
+    etc_dir = tmp_path / "etc" / "cathedral"
+    bin_dir = tmp_path / "bin"
+    install_prefix.mkdir()
+    etc_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+
+    allowed_signers = install_prefix / "allowed_signers"
+    allowed_signers.write_text(allowed_signer)
+    (etc_dir / "testnet.toml").write_text("[network]\nname = \"test\"\n")
+
+    blocked_parent = tmp_path / "blocked-state-parent"
+    blocked_parent.write_text("not a directory")
+    requested_state_dir = blocked_parent / "cathedral"
+    fallback_state_dir = install_prefix / "state"
+
+    pip_log = tmp_path / "pip.log"
+    validator_log = tmp_path / "validator.log"
+    pm2_log = tmp_path / "pm2.log"
+    fake_pip = bin_dir / "pip"
+    fake_validator = bin_dir / "cathedral-validator"
+    fake_pm2 = bin_dir / "pm2"
+    _write_executable(fake_pip, pip_log)
+    _write_validator_executable_with_state_log(fake_validator, validator_log)
+    _write_executable(fake_pm2, pm2_log)
+
+    env = {
+        **os.environ,
+        "CATHEDRAL_UPDATER_REPO_DIR": str(work),
+        "CATHEDRAL_INSTALL_PREFIX": str(install_prefix),
+        "CATHEDRAL_VALIDATOR_ENV": str(etc_dir / "validator.env"),
+        "CATHEDRAL_ETC_DIR": str(etc_dir),
+        "CATHEDRAL_VALIDATOR_STATE_DIR": str(requested_state_dir),
+        "CATHEDRAL_UPDATER_RUN_ONCE": "1",
+        "CATHEDRAL_UPDATER_PIP_BIN": str(fake_pip),
+        "CATHEDRAL_UPDATER_VALIDATOR_BIN": str(fake_validator),
+        "CATHEDRAL_UPDATER_PM2_BIN": str(fake_pm2),
+    }
+
+    result = _run_unchecked([str(work / "bin" / "updater.sh")], cwd=work, env=env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert fallback_state_dir.is_dir()
+    validator_text = validator_log.read_text()
+    assert f"STATE={fallback_state_dir}" in validator_text
+    assert f" migrate --config {etc_dir / 'testnet.toml'}" in validator_text
+    assert "cannot use validator state dir" in result.stderr
 
 
 def test_updater_refuses_untrusted_latest_tag_before_checkout(tmp_path: Path) -> None:

@@ -71,6 +71,7 @@ from cathedral.v4.arena.sandbox import (
     _apply_unified_diff,
     _DiffError,
     _flush_workspace_files,
+    _normalize_relpath,
 )
 from cathedral.v4.oracle.patch_runner import (
     BOOKKEEPING_BUDGET_SECONDS,
@@ -91,12 +92,24 @@ logger = structlog.get_logger(__name__)
 # Siphon rule constants. Centralized here so tests + audit log share them.
 ONE_SHOT_TURN_THRESHOLD: int = 1
 SIPHON_FLAG_ONE_SHOT: str = "one_shot_no_trace"
+SUPPORTED_ORACLE_LANGUAGES: frozenset[str] = frozenset({"python"})
 
 
 class EngineError(Exception):
     """Raised on operator/wiring errors that the engine cannot recover
     from (missing vault, missing corpus path, malformed task row).
     """
+
+
+def _assert_supported_oracle_language(language: str, *, base_repo: str | None = None) -> None:
+    normalized = language.strip().lower()
+    if normalized in SUPPORTED_ORACLE_LANGUAGES:
+        return
+    repo_hint = f" for {base_repo!r}" if base_repo else ""
+    raise EngineError(
+        f"unsupported v4 oracle language{repo_hint}: {language!r}; "
+        "only Python hidden tests are wired to the publisher oracle"
+    )
 
 
 class PublisherHandle(BaseModel):
@@ -128,11 +141,30 @@ class PublisherHandle(BaseModel):
     clean_state: dict[str, str] = Field(
         ..., description="Pre-bug scrambled file contents (the answer key)"
     )
+    binary_state: dict[str, bytes] = Field(
+        default_factory=dict,
+        description="Publisher-only binary assets required to reconstruct the oracle workspace",
+    )
     rename_map: dict[str, str] = Field(default_factory=dict)
     file_rename_map: dict[str, str] = Field(default_factory=dict)
     string_rotation: dict[str, str] = Field(default_factory=dict)
     compile_command: list[str] = Field(default_factory=list)
     test_entry_path: str | None = None
+
+
+def _read_binary_workspace_state(
+    workspace_path: Path,
+    relpaths: set[str] | frozenset[str],
+) -> dict[str, bytes]:
+    """Read preserved binary assets into publisher-private verification state."""
+    binary_state: dict[str, bytes] = {}
+    for relpath in sorted(relpaths):
+        normalized = _normalize_relpath(relpath)
+        source = workspace_path / normalized
+        if not source.is_file():
+            raise EngineError(f"binary asset missing from scrambled workspace: {normalized}")
+        binary_state[normalized] = source.read_bytes()
+    return binary_state
 
 
 class CathedralEngine:
@@ -257,6 +289,10 @@ class CathedralEngine:
             "language": scrambled.language,
             "workspace_path": str(scrambled.workspace_path),
             "original_repo_state": dict(scrambled.files),
+            "original_binary_state": _read_binary_workspace_state(
+                scrambled.workspace_path,
+                scrambled.binary_files,
+            ),
             "rename_map": dict(scrambled.rename_map),
             "file_rename_map": dict(scrambled.file_rename_map),
             "string_rotation": dict(scrambled.string_rotation),
@@ -305,6 +341,11 @@ class CathedralEngine:
             seed=seed,
             workspace_root=self._workspace_root,
         )
+        # The publisher oracle currently executes Python hidden tests only.
+        # Non-Python vaults may still be used for local scrambler/toolchain
+        # experiments, but production task issuance must wait for a matching
+        # verifier instead of feeding TS source to the Python patch runner.
+        _assert_supported_oracle_language(scrambled.language, base_repo=base_repo)
         try:
             broken = _apply_unified_diff(dict(scrambled.files), bug_patch)
         except _DiffError as e:
@@ -320,6 +361,14 @@ class CathedralEngine:
             scrambled.workspace_path,
             broken,
             preserve_files=scrambled.binary_files,
+        )
+        # The miner-facing map is text-only, but the publisher oracle
+        # reconstructs its scratch workspace from state maps, not from this
+        # preserved disk tree. Keep binary bytes on the private handle so
+        # hidden tests/imports that need assets see the same workspace.
+        binary_state = _read_binary_workspace_state(
+            scrambled.workspace_path,
+            scrambled.binary_files,
         )
 
         resolved_task_id = task_id or f"v4t_{seed:016x}"
@@ -340,6 +389,7 @@ class CathedralEngine:
             seed=seed,
             workspace_path=str(scrambled.workspace_path),
             clean_state=dict(scrambled.files),
+            binary_state=binary_state,
             rename_map=dict(scrambled.rename_map),
             file_rename_map=dict(scrambled.file_rename_map),
             string_rotation=dict(scrambled.string_rotation),
@@ -414,6 +464,9 @@ class CathedralEngine:
         patch_str: str,
         hidden_test_code: str,
         timeout_seconds: float = REPRO_BUDGET_SECONDS,
+        *,
+        original_binary_state: dict[str, bytes] | None = None,
+        language: str = "python",
     ) -> tuple[bool, float]:
         """Run the miner's patch against the hidden test on the
         publisher-side oracle.
@@ -426,12 +479,14 @@ class CathedralEngine:
         lightweight bookkeeping verification a caller can pass the
         tighter ``BOOKKEEPING_BUDGET_SECONDS`` ceiling.
         """
+        _assert_supported_oracle_language(language)
         start = time.monotonic()
         result: PatchRunResult = run_patch_against_hidden_test(
             original_repo_state=original_repo_state,
             patch_str=patch_str,
             hidden_test_code=hidden_test_code,
             timeout_seconds=timeout_seconds,
+            original_binary_state=original_binary_state,
         )
         total = time.monotonic() - start
         budget = max(timeout_seconds, BOOKKEEPING_BUDGET_SECONDS)

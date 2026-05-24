@@ -99,6 +99,70 @@ def test_write_patch_bad_context_returns_false(tmp_path: Path, vault_path: Path)
     assert "this line is not in the file" not in text
 
 
+def test_write_patch_unsafe_path_returns_false(tmp_path: Path, vault_path: Path) -> None:
+    scrambler = IsomorphicScrambler(vault_path)
+    repo = scrambler.scramble("python_fastapi_base", seed=40, workspace_root=tmp_path)
+    arena = MinerArena(repo)
+
+    ok = arena.write_patch(
+        "--- a/../../x\n"
+        "+++ b/../../x\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    assert ok is False
+
+
+def test_write_patch_empty_path_returns_false(tmp_path: Path, vault_path: Path) -> None:
+    scrambler = IsomorphicScrambler(vault_path)
+    repo = scrambler.scramble("python_fastapi_base", seed=41, workspace_root=tmp_path)
+    arena = MinerArena(repo)
+
+    ok = arena.write_patch(
+        "--- /dev/null\n"
+        "+++ b/\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+print('bad path')\n"
+    )
+
+    assert ok is False
+
+
+def test_write_patch_delete_requires_matching_hunk(tmp_path: Path, vault_path: Path) -> None:
+    scrambler = IsomorphicScrambler(vault_path)
+    repo = scrambler.scramble("python_fastapi_base", seed=42, workspace_root=tmp_path)
+    arena = MinerArena(repo)
+    original = arena.read_file("app/calculator.py")
+
+    ok = arena.write_patch(
+        "--- a/app/calculator.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+        "-this line is not in the file\n"
+    )
+
+    assert ok is False
+    assert arena.read_file("app/calculator.py") == original
+
+
+def test_write_patch_deletes_empty_file_without_hunks(tmp_path: Path, vault_path: Path) -> None:
+    scrambler = IsomorphicScrambler(vault_path)
+    repo = scrambler.scramble("python_fastapi_base", seed=43, workspace_root=tmp_path)
+    repo.files["empty.txt"] = ""
+    arena = MinerArena(repo)
+
+    ok = arena.write_patch(
+        "--- a/empty.txt\n"
+        "+++ /dev/null\n"
+    )
+
+    assert ok is True
+    with pytest.raises(ArenaError):
+        arena.read_file("empty.txt")
+
+
 def test_run_local_compile_returns_dict(tmp_path: Path, vault_path: Path) -> None:
     scrambler = IsomorphicScrambler(vault_path)
     repo = scrambler.scramble("python_fastapi_base", seed=5, workspace_root=tmp_path)

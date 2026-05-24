@@ -9,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.eval.scoring_pipeline import EvalSigner
+from cathedral.lanes import publisher as publisher_module
 from cathedral.lanes.contract import (
     HiddenMetadata,
     PublicProblem,
@@ -178,6 +179,91 @@ def test_task_family_answer_extraction_rejects_multiple_final_answer_blocks() ->
     assert exc.value.reason == "multiple_final_answer_blocks"
 
 
+def test_task_family_answer_extraction_fallback_is_linear(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_loads = publisher_module.json.loads
+    loads_calls = 0
+
+    def counting_loads(blob: str):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(blob)
+
+    monkeypatch.setattr(publisher_module.json, "loads", counting_loads)
+
+    stdout = (
+        "miner log without a fence\n"
+        + ("}" * 100_000)
+        + '\n{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}'
+    )
+
+    assert extract_answer(stdout) == {"dimacs_solution": "s SATISFIABLE\nv 1 0\n"}
+    assert loads_calls == 1
+
+
+def test_task_family_answer_extraction_recovers_after_unmatched_log_brace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_loads = publisher_module.json.loads
+    loads_calls = 0
+
+    def counting_loads(blob: str):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(blob)
+
+    monkeypatch.setattr(publisher_module.json, "loads", counting_loads)
+
+    stdout = (
+        "debug: solver emitted an unmatched brace here { still logging\n"
+        "summary follows\n"
+        '{"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}'
+    )
+
+    assert extract_answer(stdout) == {"dimacs_solution": "s SATISFIABLE\nv 1 0\n"}
+    assert loads_calls == 1
+
+
+def test_task_family_answer_extraction_accepts_labeled_bare_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_loads = publisher_module.json.loads
+    loads_calls = 0
+
+    def counting_loads(blob: str):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(blob)
+
+    monkeypatch.setattr(publisher_module.json, "loads", counting_loads)
+
+    stdout = 'Final answer: {"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}'
+
+    assert extract_answer(stdout) == {"dimacs_solution": "s SATISFIABLE\nv 1 0\n"}
+    assert loads_calls == 1
+
+
+def test_task_family_answer_extraction_accepts_labeled_json_after_unmatched_brace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_loads = publisher_module.json.loads
+    loads_calls = 0
+
+    def counting_loads(blob: str):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(blob)
+
+    monkeypatch.setattr(publisher_module.json, "loads", counting_loads)
+
+    stdout = (
+        'debug: solver emitted a partial object here {"event": "still logging"\n'
+        'Final answer: {"dimacs_solution": "s SATISFIABLE\\nv 1 0\\n"}'
+    )
+
+    assert extract_answer(stdout) == {"dimacs_solution": "s SATISFIABLE\nv 1 0\n"}
+    assert loads_calls == 1
+
+
 def test_task_family_prompt_keeps_challenge_generic() -> None:
     prompt = build_task_family_prompt(_problem())
 
@@ -249,6 +335,15 @@ def test_task_family_prober_version_warning_is_explicit() -> None:
             {
                 "CATHEDRAL_TASK_FAMILY_FEED_ENABLED": "true",
                 "CATHEDRAL_PROBER_VERSION": "v2",
+            }
+        )
+        is None
+    )
+    assert (
+        task_family_prober_version_warning(
+            {
+                "CATHEDRAL_TASK_FAMILY_FEED_ENABLED": " true ",
+                "CATHEDRAL_PROBER_VERSION": "v2 ",
             }
         )
         is None

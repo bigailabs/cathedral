@@ -36,11 +36,14 @@ from __future__ import annotations
 
 import os
 import re
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -55,6 +58,10 @@ logger = structlog.get_logger(__name__)
 # the ctypes fallback (not implemented here -- the production
 # startup check refuses to start if the jail cannot be assembled).
 _UNSHARE_MIN_VERSION: tuple[int, int] = (2, 36)
+_MAX_CAPTURED_STREAM_BYTES = 256 * 1024
+_PIPE_READ_BYTES = 16 * 1024
+_PIPE_WRITE_BYTES = 16 * 1024
+_OUTPUT_OVERSIZED_MARKER = b"\n[v4 oracle output exceeded capture limit]\n"
 
 
 class JailError(Exception):
@@ -416,6 +423,7 @@ def run_in_jail(
     workspace_dir: Path,
     python_prefix: Path,
     program: str,
+    stdin_bytes: bytes,
     timeout_seconds: float,
     interpreter_relpath: str = "bin/python3",
     rlimit_cpu_secs: int = 4,
@@ -427,6 +435,8 @@ def run_in_jail(
     We materialize it into ``workspace_dir/__v4_jail_bootstrap.py``
     so the in-namespace bash setup script can ``exec`` it by file
     path rather than ``-c``, sidestepping shell escaping concerns.
+    ``stdin_bytes`` carries the hidden-test bytecode; the bootstrap
+    consumes and closes it before miner-controlled imports execute.
     Returns a ``JailResult`` with stdout / stderr / returncode.
     """
     import time
@@ -489,31 +499,19 @@ def run_in_jail(
     # outer wrapper exits early.
     proc = subprocess.Popen(  # noqa: S603 -- argv list, no shell, fixed binary
         argv,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
         shell=False,
         start_new_session=True,
     )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_seconds)
-        timed_out = False
-        returncode: int | None = proc.returncode
-    except subprocess.TimeoutExpired:
-        # Kill the entire process group (negative pid). start_new_session
-        # made `proc.pid` the pgrp leader, so this reaches every host
-        # process the jail spawned -- not just the unshare(1) wrapper.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            # Race: the wrapper may have already exited cleanly.
-            proc.kill()
-        try:
-            stdout, stderr = proc.communicate(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = (b"", b"")
-        timed_out = True
-        returncode = None
+    stdout, stderr, returncode, timed_out = _communicate_bounded(
+        proc,
+        stdin_bytes=stdin_bytes,
+        timeout_seconds=timeout_seconds,
+        max_stream_bytes=_MAX_CAPTURED_STREAM_BYTES,
+    )
 
     duration = time.monotonic() - started
     return JailResult(
@@ -523,6 +521,235 @@ def run_in_jail(
         timed_out=timed_out,
         duration_seconds=duration,
     )
+
+
+def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
+    if sys.platform == "win32":  # pragma: no cover -- jail is Linux-only
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return
+    # Kill the entire process group (negative pid). start_new_session
+    # made `proc.pid` the pgrp leader, so this reaches every host process the
+    # jail spawned -- not just the unshare(1) wrapper.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # Race: the wrapper may have already exited cleanly.
+        proc.kill()
+
+
+def _communicate_bounded(
+    proc: subprocess.Popen[bytes],
+    *,
+    stdin_bytes: bytes,
+    timeout_seconds: float,
+    max_stream_bytes: int,
+) -> tuple[bytes, bytes, int | None, bool]:
+    """Communicate without letting miner stdout/stderr grow unbounded.
+
+    ``subprocess.communicate()`` buffers the whole pipe in the publisher
+    process. Miner-controlled oracle code can print until timeout, so read the
+    pipes incrementally, cap each captured stream, and kill the process group as
+    soon as either stream exceeds the limit.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    stdout = bytearray()
+    stderr = bytearray()
+    oversized = False
+
+    selector = selectors.DefaultSelector()
+    stdin_state: dict[str, object] | None = None
+    try:
+        if proc.stdin is not None:
+            # Hidden-test bytecode can exceed the OS pipe buffer, and a broken
+            # child may never read stdin. Put stdin under the same selector and
+            # deadline as stdout/stderr so payload delivery cannot hang the
+            # publisher before timeout accounting starts.
+            with suppress(OSError):
+                os.set_blocking(proc.stdin.fileno(), False)
+            stdin_state = {"payload": memoryview(stdin_bytes), "offset": 0}
+            selector.register(proc.stdin, selectors.EVENT_WRITE, ("stdin", stdin_state))
+        if proc.stdout is not None:
+            selector.register(proc.stdout, selectors.EVENT_READ, ("stdout", stdout))
+        if proc.stderr is not None:
+            selector.register(proc.stderr, selectors.EVENT_READ, ("stderr", stderr))
+
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_process_group(proc)
+                with suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=0.5)
+                return bytes(stdout), bytes(stderr), None, True
+
+            events = selector.select(timeout=min(remaining, 0.05))
+            for key, _mask in events:
+                kind, _data = key.data
+                if kind == "stdin":
+                    _write_stdin_event(selector, key)
+                    continue
+                if kind in {"stdout", "stderr"}:
+                    if _read_pipe_event(
+                        selector,
+                        key,
+                        max_stream_bytes=max_stream_bytes,
+                    ):
+                        oversized = True
+                        _kill_process_group(proc)
+                        _close_stdin_pipe(selector, proc.stdin)
+            if proc.poll() is not None and selector.get_map():
+                _close_stdin_pipe(selector, proc.stdin)
+                if selector.get_map():
+                    return _finish_exited_parent_with_inherited_pipes(
+                        proc,
+                        selector,
+                        stdout=stdout,
+                        stderr=stderr,
+                        oversized=oversized,
+                        max_stream_bytes=max_stream_bytes,
+                    )
+
+        try:
+            returncode: int | None = proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            returncode = None
+        if oversized:
+            stderr.extend(_OUTPUT_OVERSIZED_MARKER)
+        return bytes(stdout), bytes(stderr), returncode, False
+    finally:
+        _close_stdin_pipe(selector, proc.stdin)
+        del stdin_state
+        selector.close()
+
+
+def _write_stdin_event(
+    selector: selectors.BaseSelector,
+    key: selectors.SelectorKey,
+) -> None:
+    _kind, state = key.data
+    payload = state["payload"]
+    offset = state["offset"]
+    assert isinstance(payload, memoryview)
+    assert isinstance(offset, int)
+    if offset >= len(payload):
+        _close_registered_file(selector, key.fileobj)
+        return
+
+    try:
+        written = os.write(
+            key.fileobj.fileno(),
+            payload[offset : offset + _PIPE_WRITE_BYTES],
+        )
+    except BlockingIOError:
+        return
+    except (BrokenPipeError, OSError):
+        _close_registered_file(selector, key.fileobj)
+        return
+
+    state["offset"] = offset + written
+    if state["offset"] >= len(payload):
+        _close_registered_file(selector, key.fileobj)
+
+
+def _close_stdin_pipe(
+    selector: selectors.BaseSelector,
+    stdin: object,
+) -> None:
+    if stdin is not None:
+        _close_registered_file(selector, stdin)
+
+
+def _close_registered_file(selector: selectors.BaseSelector, fileobj: object) -> None:
+    with suppress(Exception):
+        selector.unregister(fileobj)
+    with suppress(Exception):
+        fileobj.close()
+
+
+def _read_pipe_event(
+    selector: selectors.BaseSelector,
+    key: selectors.SelectorKey,
+    *,
+    max_stream_bytes: int,
+) -> bool:
+    try:
+        chunk = os.read(key.fileobj.fileno(), _PIPE_READ_BYTES)
+    except OSError:
+        chunk = b""
+    if not chunk:
+        with suppress(Exception):
+            selector.unregister(key.fileobj)
+        return False
+
+    _kind, sink = key.data
+    available = max_stream_bytes - len(sink)
+    if available > 0:
+        sink.extend(chunk[:available])
+    return len(chunk) > available
+
+
+def _finish_exited_parent_with_inherited_pipes(
+    proc: subprocess.Popen[bytes],
+    selector: selectors.BaseSelector,
+    *,
+    stdout: bytearray,
+    stderr: bytearray,
+    oversized: bool,
+    max_stream_bytes: int,
+) -> tuple[bytes, bytes, int | None, bool]:
+    # The oracle parent has exited; any still-open pipes now belong to
+    # descendants that inherited stdout/stderr. Waiting for EOF here can
+    # falsely turn a completed run into a wall-timeout, so clean up the process
+    # group immediately and drain only data already made readable by that
+    # cleanup.
+    returncode = proc.returncode
+    _kill_process_group(proc)
+    with suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=0.5)
+    oversized = (
+        _drain_ready_pipes(
+            selector,
+            max_stream_bytes=max_stream_bytes,
+            grace_seconds=0.2,
+        )
+        or oversized
+    )
+    if oversized:
+        stderr.extend(_OUTPUT_OVERSIZED_MARKER)
+    return bytes(stdout), bytes(stderr), returncode, False
+
+
+def _drain_ready_pipes(
+    selector: selectors.BaseSelector,
+    *,
+    max_stream_bytes: int,
+    grace_seconds: float,
+) -> bool:
+    oversized = False
+    deadline = time.monotonic() + grace_seconds
+    while selector.get_map() and time.monotonic() < deadline:
+        events = selector.select(timeout=0)
+        if not events:
+            events = selector.select(timeout=0.01)
+        if not events:
+            break
+        for key, _mask in events:
+            oversized = (
+                _read_pipe_event(
+                    selector,
+                    key,
+                    max_stream_bytes=max_stream_bytes,
+                )
+                or oversized
+            )
+
+    for key in list(selector.get_map().values()):
+        with suppress(Exception):
+            selector.unregister(key.fileobj)
+    return oversized
 
 
 def cleanup_jail(jail_root: Path) -> None:

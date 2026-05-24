@@ -48,12 +48,17 @@ from cathedral.lanes.challenge_lock import (
 from cathedral.lanes.challenge_lock import (
     SqliteChallengeLock,
 )
-from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
+from cathedral.lanes.challenge_ops import (
+    build_synthetic_boolean_challenge_record,
+    seed_synthetic_boolean_challenge,
+)
 from cathedral.lanes.challenge_receipts import (
     SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA,
 )
 from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_source import (
+    CHALLENGE_STATUS_LOCKED,
+    ChallengeRecord,
     SqliteChallengeSource,
     SqliteFetchTokenStore,
     ensure_sqlite_challenge_source_schema,
@@ -106,6 +111,46 @@ class PublisherContext:
 
 
 _DEFAULT_SSH_PROBE_KEY_PATH = "/tmp/cathedral_probe_ed25519"  # noqa: S108
+
+
+def _write_private_key_file_0600(target: Path, content: str) -> None:
+    """Atomically publish private-key content with owner-only permissions."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    fd: int | None = None
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        for _ in range(16):
+            candidate = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+            try:
+                # The mode applies at inode creation time. Do not use
+                # Path.write_text() followed by chmod here: on shared hosts that
+                # creates a window where umask-derived permissions can expose
+                # the platform SSH probe key before chmod tightens it.
+                fd = os.open(candidate, flags, stat.S_IRUSR | stat.S_IWUSR)
+            except FileExistsError:
+                continue
+            tmp_path = candidate
+            break
+        if fd is None or tmp_path is None:
+            raise FileExistsError(f"could not reserve temporary key path near {target}")
+
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+        tmp_path = None
+        target.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _materialize_ssh_probe_key() -> None:
@@ -165,11 +210,11 @@ def _materialize_ssh_probe_key() -> None:
         except OSError:
             existing = None
         if existing == raw:
+            target.chmod(stat.S_IRUSR | stat.S_IWUSR)
             logger.info("ssh_probe_key_already_current", path=str(target))
             return
 
-    target.write_text(raw)
-    target.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    _write_private_key_file_0600(target, raw)
     logger.info("ssh_probe_key_materialized", path=str(target))
 
 
@@ -288,8 +333,8 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                 #      cathedral-runtime LLM shim path, kept as backup
                 #   5. attestation_mode='tee' - bundled card, pre-verified
                 #   6. anything else falls back to CATHEDRAL_EVAL_MODE
-                mode = (submission.get("attestation_mode") or "").lower()
-                env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+                mode = (submission.get("attestation_mode") or "").strip().lower()
+                env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").strip().lower()
                 has_key = bool(os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"))
                 if env_mode.startswith("stub"):
                     return _resolve_polaris_runner_from_env()
@@ -620,6 +665,8 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
                 if os.environ.get(MAX_CNF_BYTES_ENV, "").strip()
                 else None,
             )
+            if await _skip_locked_synthetic_boolean_seed(source, record):
+                return
             await source.upsert(record, now_iso=_now_ms_iso())
             active = await source.activate(
                 family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
@@ -636,6 +683,14 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
                 raise RuntimeError(f"{ACTIVE_CNF_PATH_ENV} could not be read") from None
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from None
+            record = build_synthetic_boolean_challenge_record(
+                cnf_text=cnf_text,
+                tier=tier,
+                challenge_id=challenge_id or None,
+                source="operator_cnf_path",
+            )
+            if await _skip_locked_synthetic_boolean_seed(source, record):
+                return
             active = await seed_synthetic_boolean_challenge(
                 source,
                 cnf_text=cnf_text,
@@ -657,6 +712,48 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         num_vars=audit.get("num_vars"),
         num_clauses=audit.get("num_clauses"),
         cnf_sha256=audit.get("cnf_sha256"),
+    )
+
+
+async def _skip_locked_synthetic_boolean_seed(
+    source: SqliteChallengeSource,
+    record: ChallengeRecord,
+) -> bool:
+    existing_rows = await source.list_for_family(SYNTHETIC_BOOLEAN_FAMILY_ID)
+    target = next(
+        (row for row in existing_rows if row.challenge_id == record.challenge_id),
+        None,
+    )
+    if target is None or target.status != CHALLENGE_STATUS_LOCKED:
+        return False
+    if not _same_synthetic_boolean_seed_material(target, record):
+        return False
+
+    active = await source.get_active(SYNTHETIC_BOOLEAN_FAMILY_ID)
+    # Startup seeding is replayed from env on every publisher boot. Once a
+    # configured seed has been solved and locked, re-activation would fail and
+    # can brick restarts; skip the idempotent locked row and let any promoted
+    # active challenge continue serving the feed.
+    logger.info(
+        "synthetic_boolean_locked_seed_skipped",
+        family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+        challenge_id=record.challenge_id,
+        active_challenge_id=active.challenge_id if active is not None else None,
+    )
+    return True
+
+
+def _same_synthetic_boolean_seed_material(
+    existing: ChallengeRecord,
+    incoming: ChallengeRecord,
+) -> bool:
+    return (
+        existing.challenge_id == incoming.challenge_id
+        and existing.family_id == incoming.family_id
+        and existing.tier == incoming.tier
+        and existing.cnf_text == incoming.cnf_text
+        and existing.cnf_path == incoming.cnf_path
+        and existing.audit_metadata == incoming.audit_metadata
     )
 
 
@@ -737,7 +834,7 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
         signer = EvalSigner.from_env_hex(signing_hex)
 
         polaris: PolarisRunner
-        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").strip().lower()
         if eval_mode == "stub":
             polaris = StubPolarisRunner()
         elif eval_mode == "bundle":
@@ -884,7 +981,7 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
         signer = EvalSigner.from_env_hex(signing_hex)
 
         # Polaris runner - stub mode unless explicitly configured.
-        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").lower()
+        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").strip().lower()
         polaris: PolarisRunner
         if eval_mode.startswith("stub"):
             polaris = _build_stub_polaris(eval_mode)

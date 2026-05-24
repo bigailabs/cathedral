@@ -160,11 +160,20 @@ def resolve_validator_config_path(
     requested = Path(path)
     legacy_testnet = managed_etc / "testnet.toml"
     mainnet = managed_etc / "mainnet.toml"
+    # The updater exports this for legacy managed migrations after proving the
+    # directory is writable; use it when rendering/syncing managed mainnet TOML
+    # so SQLite does not fail later creating a parent under unwritable /var/lib.
+    validator_state_dir = _validator_state_dir_override(values)
 
     override = values.get("CATHEDRAL_CONFIG_PATH")
     if override:
         override_path = Path(override)
         if selected_network != "testnet":
+            _sync_managed_validator_database_path(
+                override_path,
+                managed_mainnet_path=mainnet,
+                state_dir=validator_state_dir,
+            )
             _sync_sn39_mainnet_weight_policy(override_path)
         return override
 
@@ -172,6 +181,11 @@ def resolve_validator_config_path(
         return str(path)
 
     if requested != legacy_testnet:
+        _sync_managed_validator_database_path(
+            requested,
+            managed_mainnet_path=mainnet,
+            state_dir=validator_state_dir,
+        )
         _sync_sn39_mainnet_weight_policy(requested)
         return str(path)
 
@@ -180,6 +194,13 @@ def resolve_validator_config_path(
             legacy_path=legacy_testnet,
             mainnet_path=mainnet,
             template_path=root / "config" / "mainnet.toml",
+            state_dir=validator_state_dir,
+        )
+    else:
+        _sync_managed_validator_database_path(
+            mainnet,
+            managed_mainnet_path=mainnet,
+            state_dir=validator_state_dir,
         )
     _sync_sn39_mainnet_weight_policy(mainnet)
     _ensure_managed_env_path(managed_etc / "validator.env", mainnet)
@@ -191,6 +212,7 @@ def _render_managed_mainnet_config(
     legacy_path: Path,
     mainnet_path: Path,
     template_path: Path,
+    state_dir: Path | None = None,
 ) -> None:
     if not legacy_path.exists() or not template_path.exists():
         return
@@ -220,6 +242,12 @@ def _render_managed_mainnet_config(
         'public_key_hex = "REPLACE_WITH_POLARIS_ED25519_PUBLIC_KEY_HEX"',
         f"public_key_hex = {_toml_string(polaris_key)}",
     )
+    if state_dir is not None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        rendered = _replace_or_add_database_path(
+            rendered,
+            str(state_dir / "validator-mainnet.db"),
+        )
 
     wallet_path = network.get("wallet_path")
     if wallet_path and "wallet_path =" not in rendered:
@@ -232,6 +260,65 @@ def _render_managed_mainnet_config(
     mainnet_path.parent.mkdir(parents=True, exist_ok=True)
     mainnet_path.write_text(rendered)
     mainnet_path.chmod(0o644)
+
+
+def _validator_state_dir_override(values: Mapping[str, str]) -> Path | None:
+    raw = values.get("CATHEDRAL_VALIDATOR_STATE_DIR")
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _sync_managed_validator_database_path(
+    config_path: Path,
+    *,
+    managed_mainnet_path: Path,
+    state_dir: Path | None,
+) -> None:
+    if (
+        state_dir is None
+        or not config_path.exists()
+        or not _same_path(config_path, managed_mainnet_path)
+    ):
+        return
+    state_dir.mkdir(parents=True, exist_ok=True)
+    desired = str(state_dir / "validator-mainnet.db")
+    current = _load_toml(config_path)
+    storage = current.get("storage", {})
+    if isinstance(storage, dict) and str(storage.get("database_path", "")) == desired:
+        return
+    config_path.write_text(_replace_or_add_database_path(config_path.read_text(), desired))
+
+
+def _replace_or_add_database_path(text: str, database_path: str) -> str:
+    desired_line = f"database_path = {_toml_string(database_path)}"
+    lines = text.splitlines()
+    out: list[str] = []
+    in_storage = False
+    saw_storage = False
+    replaced = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_storage and not replaced:
+                out.append(desired_line)
+                replaced = True
+            in_storage = stripped == "[storage]"
+            saw_storage = saw_storage or in_storage
+
+        if in_storage and stripped.startswith("database_path"):
+            out.append(desired_line)
+            replaced = True
+        else:
+            out.append(line)
+
+    if saw_storage and in_storage and not replaced:
+        out.append(desired_line)
+    elif not saw_storage:
+        out.extend(["", "[storage]", desired_line])
+
+    return "\n".join(out) + "\n"
 
 
 def _ensure_managed_env_path(env_path: Path, config_path: Path) -> None:

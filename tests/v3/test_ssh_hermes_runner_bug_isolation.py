@@ -118,6 +118,37 @@ def _mk_run_result(stdout: str = "", stderr: str = "", exit_status: int = 0) -> 
     return r
 
 
+class _FakeStreamingStdout:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def read(self, _n: int = -1) -> bytes:
+        if self._chunks:
+            return self._chunks.pop(0)
+        return b""
+
+
+class _FakeStreamingProcess:
+    def __init__(self, stdout: str, *, exit_status: int = 0) -> None:
+        self.stdout = _FakeStreamingStdout([stdout.encode("utf-8")])
+        self.exit_status = exit_status
+        self.terminated = False
+        self.killed = False
+        self.closed = False
+
+    async def wait(self, **_kwargs: Any) -> Any:
+        return _mk_run_result(exit_status=self.exit_status)
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait_closed(self) -> None:
+        self.closed = True
+
+
 def _mk_sftp() -> Any:
     sftp = MagicMock()
     sftp.get = AsyncMock(return_value=None)
@@ -182,6 +213,19 @@ def _build_fake_conn(invoke_responses: list[str]) -> tuple[Any, list[str]]:
     conn.wait_closed = AsyncMock(return_value=None)
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
 
+    async def _create_process(cmd: str, **kwargs: Any) -> Any:
+        captured.append(cmd)
+        if "hermes chat -Q" not in cmd:
+            raise AssertionError(f"unexpected streaming cmd={cmd!r}")
+        try:
+            return _FakeStreamingProcess(next(invoke_iter))
+        except StopIteration:
+            raise AssertionError(
+                f"hermes chat called more times than expected; cmd={cmd!r}"
+            ) from None
+
+    conn.create_process = AsyncMock(side_effect=_create_process)
+
     sftp = _mk_sftp()
 
     async def fake_get(remote: str, local: str) -> None:
@@ -205,6 +249,8 @@ def _fake_asyncssh(conn: Any) -> Any:
     fake.connect = AsyncMock(return_value=conn)
     fake.Error = Exception
     fake.PermissionDenied = type("PermissionDenied", (Exception,), {})
+    fake.DEVNULL = object()
+    fake.STDOUT = object()
     return fake
 
 
@@ -350,6 +396,39 @@ async def test_valid_wrong_shape_json_does_not_repair(
     chat_cmds = [c for c in captured if "hermes chat -Q" in c]
     assert len(chat_cmds) == 1
     assert run.trace_bundle is not None
+
+
+async def test_bug_isolation_invocations_use_streaming_stdout_cap(
+    runner_config,
+    submission,
+    challenge,
+) -> None:
+    malformed = "I cannot find a single FINAL_ANSWER block, sorry.\n"
+    good = _valid_final_answer()
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+
+    runner = SshHermesRunner(runner_config)
+    runner._connect_with_retries = AsyncMock(return_value=conn)
+    runner._hermes_version = AsyncMock(return_value="hermes 0.13.0")
+    runner._resolve_hermes_home = AsyncMock(return_value="/home/cathedral-probe/.hermes")
+    runner._verify_hermes_install = AsyncMock(return_value=None)
+    runner._clone_profile = AsyncMock(return_value=None)
+    runner._delete_profile = AsyncMock(return_value=None)
+    runner._collect_and_assemble = AsyncMock(return_value=MagicMock())
+    runner._invoke_hermes_text = AsyncMock(side_effect=[malformed, good])
+
+    with patch.dict(sys.modules, {"asyncssh": _fake_asyncssh(conn)}):
+        await runner.run_bug_isolation_challenge(
+            challenge=challenge,
+            miner_hotkey="5BugIso" + "x" * 41,
+            submission=submission,
+        )
+
+    assert runner._invoke_hermes_text.await_count == 2
+    for call in runner._invoke_hermes_text.await_args_list:
+        assert call.kwargs["max_stdout_bytes"] == runner_config.task_family_stdout_limit_bytes
 
 
 # --------------------------------------------------------------------------

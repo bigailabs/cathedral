@@ -88,6 +88,82 @@ def test_bad_patch_returns_failed() -> None:
     assert result.duration_seconds < REPRO_BUDGET_SECONDS
 
 
+def test_unsafe_diff_path_returns_patch_failure() -> None:
+    unsafe_diff = (
+        "--- a/../../x\n"
+        "+++ b/../../x\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=unsafe_diff,
+        hidden_test_code=HIDDEN_TEST,
+    )
+
+    assert result.patch_applied is False
+    assert result.passed is False
+    assert "path traversal not allowed" in result.stderr
+
+
+def test_empty_diff_path_returns_patch_failure() -> None:
+    empty_path_diff = (
+        "--- /dev/null\n"
+        "+++ b/\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+print('bad path')\n"
+    )
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=empty_path_diff,
+        hidden_test_code=HIDDEN_TEST,
+    )
+
+    assert result.patch_applied is False
+    assert result.passed is False
+    assert "empty paths not allowed" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("patch_str", "binary_state", "expected_detail"),
+    [
+        (
+            "--- /dev/null\n"
+            "+++ b/assets\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+not a directory\n",
+            {"assets/logo.png": b"binary image"},
+            "assets above binary asset assets/logo.png",
+        ),
+        (
+            "--- /dev/null\n"
+            "+++ b/assets/logo.png\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+not binary\n",
+            {"assets": b"binary blob"},
+            "assets/logo.png under binary asset assets",
+        ),
+    ],
+)
+def test_binary_text_path_collisions_return_patch_failure(
+    patch_str: str,
+    binary_state: dict[str, bytes],
+    expected_detail: str,
+) -> None:
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        original_binary_state=binary_state,
+        patch_str=patch_str,
+        hidden_test_code=HIDDEN_TEST,
+    )
+
+    assert result.patch_applied is False
+    assert result.passed is False
+    assert "binary asset path collision" in result.stderr
+    assert expected_detail in result.stderr
+
+
 def test_wrong_logic_patch_runs_but_fails() -> None:
     wrong_fix = (
         "--- a/m.py\n"
@@ -106,6 +182,414 @@ def test_wrong_logic_patch_runs_but_fails() -> None:
     assert result.patch_applied is True
     assert result.passed is False
     assert result.duration_seconds < REPRO_BUDGET_SECONDS
+
+
+def test_hidden_source_is_not_materialized_in_workspace() -> None:
+    secret = "HIDDEN_SOURCE_SENTINEL_9371"
+    probe_file = """import pathlib
+import sys
+import types
+
+# patch target
+SECRET = "".join(("HIDDEN_SOURCE_", "SENTINEL_9371"))
+def _candidate_blobs():
+    for root in (pathlib.Path("."), pathlib.Path("/oracle")):
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                try:
+                    yield path.read_bytes()
+                except OSError:
+                    pass
+    for raw in ("/proc/self/cmdline", "/proc/self/fd/0"):
+        try:
+            yield pathlib.Path(raw).read_bytes()
+        except OSError:
+            pass
+
+LEAKED = any(SECRET.encode() in blob for blob in _candidate_blobs())
+MAIN_EXPOSED = any(
+    name in vars(sys.modules["__main__"])
+    for name in ("_code", "_payload")
+) or any(
+    isinstance(value, types.CodeType) and value.co_filename == "<v4_hidden_test>"
+    for value in vars(sys.modules["__main__"]).values()
+)
+
+def compute(x, y):
+    return -1 if (LEAKED or MAIN_EXPOSED) else x * y
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,25 +1,25 @@\n"
+        " import pathlib\n"
+        " import sys\n"
+        " import types\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " SECRET = \"\".join((\"HIDDEN_SOURCE_\", \"SENTINEL_9371\"))\n"
+        " def _candidate_blobs():\n"
+    )
+    hidden = f"""import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, {secret!r}
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_hidden_frame_inspection_is_blocked_for_miner_code() -> None:
+    probe_file = """import inspect
+import sys
+
+# patch target
+FRAME_ACCESS_BLOCKED = False
+HIDDEN_FRAME_SEEN = False
+
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
+def _hidden_frame_seen(frame):
+    while frame is not None:
+        if frame.f_code.co_filename == "<v4_hidden_test>":
+            return True
+        frame = frame.f_back
+    return False
+
+try:
+    HIDDEN_FRAME_SEEN = _hidden_frame_seen(sys._getframe())
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = _blocked(exc)
+
+try:
+    inspect.stack(context=0)
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    # inspect.stack() succeeding during hidden-test import means miner code can
+    # reach the caller chain and inspect the private hidden-test frame.
+    HIDDEN_FRAME_SEEN = True
+
+def _trace(frame, event, arg):
+    global HIDDEN_FRAME_SEEN
+    HIDDEN_FRAME_SEEN = HIDDEN_FRAME_SEEN or _hidden_frame_seen(frame)
+    return _trace
+
+try:
+    sys.settrace(_trace)
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    _trace_probe_line = 1
+    sys.settrace(None)
+    HIDDEN_FRAME_SEEN = True
+
+try:
+    sys.setprofile(_trace)
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    _profile_probe_line = 1
+    sys.setprofile(None)
+    HIDDEN_FRAME_SEEN = True
+
+try:
+    HIDDEN_FRAME_SEEN = HIDDEN_FRAME_SEEN or any(
+        _hidden_frame_seen(frame) for frame in sys._current_frames().values()
+    )
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+
+try:
+    import ctypes
+    ctypes.pythonapi.PyEval_GetFrame.restype = ctypes.py_object
+    HIDDEN_FRAME_SEEN = HIDDEN_FRAME_SEEN or _hidden_frame_seen(
+        ctypes.pythonapi.PyEval_GetFrame()
+    )
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    HIDDEN_FRAME_SEEN = True
+
+try:
+    import _ctypes  # noqa: PLC2701
+except RuntimeError as exc:
+    FRAME_ACCESS_BLOCKED = FRAME_ACCESS_BLOCKED and _blocked(exc)
+else:
+    HIDDEN_FRAME_SEEN = True
+
+def compute(x, y):
+    return x * y if FRAME_ACCESS_BLOCKED and not HIDDEN_FRAME_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,6 +1,6 @@\n"
+        " import inspect\n"
+        " import sys\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " FRAME_ACCESS_BLOCKED = False\n"
+        " HIDDEN_FRAME_SEEN = False\n"
+    )
+    hidden = """import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, "hidden frame leaked to miner code"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_hidden_traceback_frame_access_is_blocked_for_miner_code() -> None:
+    probe_file = """# patch target
+TRACEBACK_ACCESS_BLOCKED = False
+HIDDEN_FRAME_SEEN = False
+
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
+def _hidden_frame_seen(frame):
+    while frame is not None:
+        if frame.f_code.co_filename == "<v4_hidden_test>":
+            return True
+        frame = frame.f_back
+    return False
+
+def compute(x, y):
+    global TRACEBACK_ACCESS_BLOCKED, HIDDEN_FRAME_SEEN
+    try:
+        raise RuntimeError("traceback probe")
+    except RuntimeError as exc:
+        try:
+            frame = exc.__traceback__.tb_frame
+        except RuntimeError as guard_exc:
+            TRACEBACK_ACCESS_BLOCKED = _blocked(guard_exc)
+        else:
+            HIDDEN_FRAME_SEEN = _hidden_frame_seen(frame)
+    return x * y if TRACEBACK_ACCESS_BLOCKED and not HIDDEN_FRAME_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,4 +1,4 @@\n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " TRACEBACK_ACCESS_BLOCKED = False\n"
+        " HIDDEN_FRAME_SEEN = False\n"
+        " \n"
+    )
+    hidden = """import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, "traceback exposed hidden frame to miner code"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_hidden_gc_object_graph_access_is_blocked_for_miner_code() -> None:
+    probe_file = """import gc
+
+# patch target
+GC_ACCESS_BLOCKED = set()
+HIDDEN_GLOBALS_SEEN = False
+
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
+def _mark_leak(objects):
+    global HIDDEN_GLOBALS_SEEN
+    for obj in objects:
+        if isinstance(obj, dict) and obj.get("__file__") == "<v4_hidden_test>":
+            if obj.get("EXPECTED_VALUE") == 12 or obj.get("SECRET_SENTINEL"):
+                HIDDEN_GLOBALS_SEEN = True
+
+def _probe_gc_api(name, call):
+    try:
+        objects = call()
+    except RuntimeError as exc:
+        if _blocked(exc):
+            GC_ACCESS_BLOCKED.add(name)
+    else:
+        _mark_leak(objects)
+
+def compute(x, y):
+    _probe_gc_api("get_objects", gc.get_objects)
+    _probe_gc_api("get_referrers", lambda: gc.get_referrers(compute))
+    _probe_gc_api("get_referents", lambda: gc.get_referents(compute))
+    blocked = GC_ACCESS_BLOCKED == {"get_objects", "get_referrers", "get_referents"}
+    return x * y if blocked and not HIDDEN_GLOBALS_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,5 +1,5 @@\n"
+        " import gc\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " GC_ACCESS_BLOCKED = set()\n"
+        " HIDDEN_GLOBALS_SEEN = False\n"
+    )
+    hidden = """EXPECTED_VALUE = 12
+SECRET_SENTINEL = "HIDDEN_GC_SENTINEL_9371"
+import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == EXPECTED_VALUE, "gc exposed hidden globals to miner code"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_hidden_ctypes_guard_cannot_be_removed_by_miner_code() -> None:
+    probe_file = """import builtins
+import sys
+import types
+
+# patch target
+REGISTRY_BYPASS_ATTEMPTED = False
+CTYPES_IMPORT_BLOCKED = False
+HIDDEN_FRAME_SEEN = False
+
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
+def _hidden_frame_seen(frame):
+    while frame is not None:
+        if frame.f_code.co_filename == "<v4_hidden_test>":
+            return True
+        frame = frame.f_back
+    return False
+
+try:
+    # These base-class calls bypass Python subclass overrides on the protected
+    # registries. The audit hook must still stop ctypes after this mutation.
+    types.ModuleType.__setattr__(sys, "modules", dict(sys.modules))
+    sys.modules.pop("ctypes", None)
+    sys.modules.pop("_ctypes", None)
+    list.pop(sys.meta_path, 0)
+    for cell in getattr(builtins.__import__, "__closure__", ()) or ():
+        value = cell.cell_contents
+        if callable(value):
+            builtins.__import__ = value
+            break
+    REGISTRY_BYPASS_ATTEMPTED = True
+except Exception:
+    pass
+
+try:
+    import ctypes
+    ctypes.pythonapi.PyEval_GetFrame.restype = ctypes.py_object
+    HIDDEN_FRAME_SEEN = _hidden_frame_seen(ctypes.pythonapi.PyEval_GetFrame())
+except RuntimeError as exc:
+    CTYPES_IMPORT_BLOCKED = _blocked(exc)
+else:
+    HIDDEN_FRAME_SEEN = True
+
+def compute(x, y):
+    blocked = REGISTRY_BYPASS_ATTEMPTED and CTYPES_IMPORT_BLOCKED
+    return x * y if blocked and not HIDDEN_FRAME_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,6 +1,6 @@\n"
+        " import builtins\n"
+        " import sys\n"
+        " import types\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " REGISTRY_BYPASS_ATTEMPTED = False\n"
+    )
+    hidden = """import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12, "ctypes guard was removed"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_hidden_async_import_keeps_sys_modules_compatible() -> None:
+    hidden = """import sys
+assert type(sys.modules) is dict, "sys.modules must remain import-compatible"
+import asyncio
+assert asyncio.__name__ == "asyncio"
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=PRICE_FIX,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_resolve_jail_python_runtime_uses_current_minor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "python-runtime"
+    exe_name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    exe = runtime / "bin" / exe_name
+    exe.parent.mkdir(parents=True)
+    exe.write_text("# executable placeholder\n", encoding="utf-8")
+
+    monkeypatch.setattr(patch_runner.sys, "base_prefix", str(runtime))
+    monkeypatch.setattr(patch_runner.sys, "executable", str(exe))
+
+    prefix, relpath = patch_runner._resolve_jail_python_runtime()
+
+    assert prefix == runtime.resolve()
+    assert relpath == f"bin/{exe_name}"
 
 
 def test_network_is_blocked_inside_runner() -> None:
@@ -197,6 +681,29 @@ print('SHOULD_NEVER_PRINT')
     assert result.duration_seconds < 0.5
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fallback bounded pipes are POSIX-only")
+def test_fallback_output_capture_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(patch_runner, "resolve_isolation_mode", lambda: "monkeypatch_only")
+    noisy_test = """import sys, time
+sys.stdout.write("A" * (512 * 1024))
+sys.stdout.flush()
+time.sleep(5)
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=PRICE_FIX,
+        hidden_test_code=noisy_test,
+        timeout_seconds=2.0,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is False
+    assert result.timed_out is False
+    assert len(result.stdout.encode("utf-8")) <= patch_runner._jail._MAX_CAPTURED_STREAM_BYTES
+    assert "output exceeded capture limit" in result.stderr
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="fallback process groups are POSIX-only")
 def test_fallback_timeout_kills_background_child(
     monkeypatch: pytest.MonkeyPatch,
@@ -253,6 +760,20 @@ def _pid_is_running(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def test_malformed_hidden_test_returns_failed_result() -> None:
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=PRICE_FIX,
+        hidden_test_code="def broken(:\n    pass\n",
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is False
+    assert result.returncode is None
+    assert result.timed_out is False
+    assert "hidden test compile failed" in result.stderr
 
 
 def test_empty_hidden_test_raises() -> None:

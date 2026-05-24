@@ -60,6 +60,24 @@ def test_sat_launch_preflight_accepts_valid_operator_cnf(tmp_path) -> None:
     assert result.details["cnf_file_bytes"] == cnf_path.stat().st_size
 
 
+def test_sat_launch_preflight_accepts_trimmed_runtime_gate_values(tmp_path) -> None:
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+
+    env = _launch_env(cnf_path)
+    env["CATHEDRAL_TASK_FAMILY_FEED_ENABLED"] = " true "
+    env["CATHEDRAL_EVAL_MODE"] = "ssh-probe "
+    env["CATHEDRAL_PROBER_VERSION"] = "v2 "
+    assert task_family_feed_enabled(env) is True
+
+    result = run_synthetic_boolean_launch_preflight(env)
+
+    assert result.ok
+    assert result.details["task_family_feed_enabled"] is True
+    assert result.details["eval_mode"] == "ssh-probe"
+    assert result.details["prober_version"] == "v2"
+
+
 def test_sat_launch_preflight_accepts_file_backed_operator_cnf(tmp_path) -> None:
     cnf_path = tmp_path / "active.cnf"
     cnf_path.write_text("p cnf 2 1\n1 -2 0\n", encoding="utf-8")

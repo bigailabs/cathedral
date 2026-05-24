@@ -4,9 +4,10 @@ This module runs ONLY on the publisher's worker host, never on a
 validator. It takes the original workspace state (the in-memory
 ``{relpath: content}`` map produced by the engine after the
 synthetic bug patch has been applied), applies the miner-submitted
-unified diff to it, appends the hidden verification test, writes
-the resulting workspace to a tmpfs scratch dir, and runs the test
-in a child Python process with a hard wall-clock timeout.
+unified diff to it, writes only the patched workspace to a tmpfs
+scratch dir, compiles the hidden verification test outside that
+workspace, and runs the test in a child Python process with a hard
+wall-clock timeout.
 
 Security posture (publisher-side worker; defence in depth):
 
@@ -39,8 +40,9 @@ Security posture (publisher-side worker; defence in depth):
     chosen CPU budget. Address space is capped at 512MiB.
   * **Strict command allowlist.** The runner only spawns
     ``sys.executable`` with ``-I -c <bootstrap>``. No shell, no
-    user-supplied argv. The hidden test code is materialized to a
-    file inside the scratch dir and discovered with ``runpy``.
+    user-supplied argv. The hidden test source is never written into
+    ``/work`` or argv; the child receives a private marshalled code
+    object over stdin and closes that fd before executing miner code.
   * **No host filesystem writes outside the scratch dir.** ``cwd``
     is pinned to a fresh ``tempfile.TemporaryDirectory`` rooted in
     ``/dev/shm`` (tmpfs) when available, otherwise the platform
@@ -67,6 +69,7 @@ covered by both arena and oracle test suites.
 
 from __future__ import annotations
 
+import marshal
 import os
 import resource
 import shutil
@@ -81,7 +84,12 @@ from typing import Literal
 
 import structlog
 
-from cathedral.v4.arena.sandbox import _apply_unified_diff, _DiffError
+from cathedral.v4.arena.sandbox import (
+    ArenaError,
+    _apply_unified_diff,
+    _DiffError,
+    _normalize_relpath,
+)
 from cathedral.v4.oracle import jail as _jail
 
 logger = structlog.get_logger(__name__)
@@ -110,6 +118,7 @@ PATCH_RUNNER_BUDGET_SECONDS: float = BOOKKEEPING_BUDGET_SECONDS
 
 # Memory ceiling for the spawned hidden-test child (bytes).
 _RLIMIT_AS_BYTES: int = 512 * 1024 * 1024
+_HIDDEN_CODE_FILENAME = "<v4_hidden_test>"
 
 # Jail-side rlimits applied inside the jail bootstrap (before exec of
 # the hidden-test interpreter). Same numeric ceilings as the non-jailed
@@ -222,6 +231,219 @@ class _BlockedModule:
 for _name in ("requests", "httpx", "aiohttp"):
     _sys.modules.setdefault(_name, _BlockedModule())
 
+# 4) introspection guard. Hidden tests run in the same interpreter as
+#    miner-controlled modules they import. Without this, miner code can walk
+#    caller frames, traceback objects, or the GC object graph and inspect the
+#    <v4_hidden_test> code object/globals while the hidden test is importing or
+#    calling it. Trace/profile callbacks and ctypes.pythonapi can also produce
+#    live frames, so block those APIs before hidden bytecode executes.
+_FRAME_BLOCKED_MSG = "v4 oracle: frame inspection is blocked inside the hermetic runner"
+
+
+def _v4_frame_blocked(*_a, **_kw):
+    raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
+try:
+    import inspect as _inspect
+except Exception:
+    _inspect = None  # type: ignore[assignment]
+
+try:
+    import threading as _threading
+except Exception:
+    _threading = None  # type: ignore[assignment]
+try:
+    import gc as _gc
+except Exception:
+    _gc = None  # type: ignore[assignment]
+import builtins as _builtins
+import types as _types
+
+_sys._getframe = _v4_frame_blocked  # type: ignore[attr-defined,assignment]
+_sys.settrace = _v4_frame_blocked  # type: ignore[assignment]
+_sys.setprofile = _v4_frame_blocked  # type: ignore[assignment]
+_sys.call_tracing = _v4_frame_blocked  # type: ignore[assignment]
+if hasattr(_sys, "_current_frames"):
+    _sys._current_frames = _v4_frame_blocked  # type: ignore[attr-defined,assignment]
+if _inspect is not None:
+    _inspect.currentframe = _v4_frame_blocked  # type: ignore[assignment]
+    _inspect.stack = _v4_frame_blocked  # type: ignore[assignment]
+    _inspect.trace = _v4_frame_blocked  # type: ignore[assignment]
+if _threading is not None:
+    _threading.settrace = _v4_frame_blocked  # type: ignore[assignment]
+    _threading.setprofile = _v4_frame_blocked  # type: ignore[assignment]
+if _gc is not None:
+    _gc.get_objects = _v4_frame_blocked  # type: ignore[assignment]
+    _gc.get_referrers = _v4_frame_blocked  # type: ignore[assignment]
+    _gc.get_referents = _v4_frame_blocked  # type: ignore[assignment]
+
+
+class _FrameBlockedModule:
+    def __getattr__(self, _name):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
+class _FrameBlockedImport:
+    def find_spec(self, fullname, _path=None, _target=None):
+        if fullname in {"ctypes", "_ctypes"} or fullname.startswith("ctypes."):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return None
+
+
+def _v4_is_frame_native_module(_name):
+    return _name in {"ctypes", "_ctypes"} or _name.startswith("ctypes.")
+
+
+def _v4_frame_native_audit_guard(_event, _args):
+    if _event == "import" and _args and _v4_is_frame_native_module(str(_args[0])):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+    if _event.startswith("ctypes."):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+    if _event in {"gc.get_objects", "gc.get_referrers", "gc.get_referents"}:
+        # Hidden globals are ordinary Python dicts, so GC object-graph APIs can
+        # discover ``{'__file__': '<v4_hidden_test>', ...}`` even when frame and
+        # ctypes access are blocked. The audit hook is non-removable, unlike the
+        # module-level monkeypatches above.
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+    if (
+        _event == "object.__getattr__"
+        and len(_args) >= 2
+        and isinstance(_args[0], _types.TracebackType)
+        and _args[1] == "tb_frame"
+    ):
+        # A miner function can raise/catch locally, then use
+        # ``exc.__traceback__.tb_frame.f_back`` to reach the live hidden-test
+        # caller frame. Blocking ``tb_frame`` closes that path without relying
+        # on mutable Python-level sys/inspect wrappers.
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
+def _v4_ensure_ctypes_blockers(_modules):
+    for _name in ("ctypes", "_ctypes"):
+        dict.__setitem__(_modules, _name, _FrameBlockedModule())
+
+
+def _v4_install_import_guard():
+    _real_import = _builtins.__import__
+
+    def _v4_guarded_import(_name, _globals=None, _locals=None, _fromlist=(), _level=0):
+        if _level == 0 and _v4_is_frame_native_module(_name):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return _real_import(_name, _globals, _locals, _fromlist, _level)
+
+    _builtins.__import__ = _v4_guarded_import  # type: ignore[assignment]
+
+
+class _ProtectedModules(dict):
+    def __setitem__(self, _key, _value):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            if not isinstance(_value, _FrameBlockedModule):
+                raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return dict.__setitem__(self, _key, _value)
+
+    def __delitem__(self, _key):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return dict.__delitem__(self, _key)
+
+    def pop(self, _key, *_default):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return dict.pop(self, _key, *_default)
+
+    def clear(self):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+    def update(self, *_args, **_kwargs):
+        _incoming = dict(*_args, **_kwargs)
+        for _key, _value in _incoming.items():
+            self[_key] = _value
+
+    def setdefault(self, _key, _default=None):
+        if isinstance(_key, str) and _v4_is_frame_native_module(_key):
+            return dict.__getitem__(self, _key)
+        return dict.setdefault(self, _key, _default)
+
+
+_FRAME_BLOCK_IMPORT = _FrameBlockedImport()
+
+
+class _ProtectedMetaPath(list):
+    def _check_keeps_guard(self, _candidate):
+        if not any(_item is _FRAME_BLOCK_IMPORT for _item in _candidate):
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+    def __setitem__(self, _index, _value):
+        _candidate = list(self)
+        if isinstance(_index, slice):
+            _candidate[_index] = list(_value)
+        else:
+            _candidate[_index] = _value
+        self._check_keeps_guard(_candidate)
+        return list.__setitem__(self, _index, _value)
+
+    def __delitem__(self, _index):
+        _candidate = list(self)
+        del _candidate[_index]
+        self._check_keeps_guard(_candidate)
+        return list.__delitem__(self, _index)
+
+    def pop(self, _index=-1):
+        _candidate = list(self)
+        _candidate.pop(_index)
+        self._check_keeps_guard(_candidate)
+        return list.pop(self, _index)
+
+    def remove(self, _value):
+        _candidate = list(self)
+        _candidate.remove(_value)
+        self._check_keeps_guard(_candidate)
+        return list.remove(self, _value)
+
+    def clear(self):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
+class _ProtectedSys(_types.ModuleType):
+    def __setattr__(self, _name, _value):
+        if _name == "modules":
+            _modules = dict(_value)
+            _v4_ensure_ctypes_blockers(_modules)
+            return _types.ModuleType.__setattr__(self, _name, _modules)
+        if _name == "meta_path":
+            _items = list(_value)
+            if not any(_item is _FRAME_BLOCK_IMPORT for _item in _items):
+                _items.insert(0, _FRAME_BLOCK_IMPORT)
+            return _types.ModuleType.__setattr__(self, _name, _ProtectedMetaPath(_items))
+        if _name == "__class__":
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return _types.ModuleType.__setattr__(self, _name, _value)
+
+    def __delattr__(self, _name):
+        if _name in {"modules", "meta_path", "__class__"}:
+            raise RuntimeError(_FRAME_BLOCKED_MSG)
+        return _types.ModuleType.__delattr__(self, _name)
+
+
+# Native ctypes access can call CPython C-API helpers such as PyEval_GetFrame,
+# bypassing the Python-level frame guards above. Hidden tests should not depend
+# on native process introspection, so block ctypes before miner imports run.
+# The audit hook is the non-removable protection: miner code can invoke base
+# dict/list/module mutators against sys.modules, sys.meta_path, or sys itself,
+# but Python-level code cannot unregister an audit hook once it is installed.
+_sys.addaudithook(_v4_frame_native_audit_guard)
+# Keep mutable registry blockers as defense in depth and for clearer failures
+# on ordinary imports, but leave ``sys.modules`` as an exact ``dict``. CPython's
+# import machinery depends on that implementation detail on some supported
+# versions. The audit hook remains the non-removable protection if miner code
+# deletes these entries or restores ``builtins.__import__``.
+_v4_ensure_ctypes_blockers(_sys.modules)
+_sys.meta_path = _ProtectedMetaPath([_FRAME_BLOCK_IMPORT, *_sys.meta_path])
+_sys.__class__ = _ProtectedSys
+_v4_install_import_guard()
+del _v4_install_import_guard
+
 # -- end bootstrap --
 """
 
@@ -327,20 +549,27 @@ def run_patch_against_hidden_test(
     hidden_test_code: str,
     hidden_test_relpath: str = "test_hidden_v4.py",
     timeout_seconds: float = PATCH_RUNNER_TIMEOUT_SECONDS,
+    *,
+    original_binary_state: dict[str, bytes] | None = None,
 ) -> PatchRunResult:
-    """Apply ``patch_str`` to ``original_repo_state``, append the hidden
-    test, run it under the configured isolation posture, return the
-    result.
+    """Apply ``patch_str`` to ``original_repo_state``, run the hidden
+    test under the configured isolation posture, return the result.
 
     Args:
       original_repo_state: ``{relpath: file_content}`` mirror of the
         scrambled+already-bug-patched workspace at challenge-issue
         time. The engine holds this; the miner never sees it.
+      original_binary_state: optional ``{relpath: bytes}`` mirror of
+        binary assets that are intentionally excluded from the text map
+        but still required by imports or hidden tests.
       patch_str: the miner's unified-diff submission.
       hidden_test_code: the publisher's hidden verification test, as
-        a Python source string. Run via ``runpy.run_path``.
-      hidden_test_relpath: where to write the hidden test inside the
-        scratch dir. Defaults to ``test_hidden_v4.py``.
+        a Python source string. It is compiled outside the patched
+        workspace and streamed over stdin so miner code cannot read
+        ``test_hidden_v4.py`` from ``/work`` or discover a payload path
+        from ``/proc/self/cmdline``.
+      hidden_test_relpath: deprecated compatibility argument. Hidden
+        tests are no longer written into the scratch workspace.
       timeout_seconds: wall-clock subprocess timeout. Defaults to
         ``REPRO_BUDGET_SECONDS`` (3s). Callers that want the tighter
         bookkeeping budget should pass ``BOOKKEEPING_BUDGET_SECONDS``.
@@ -364,7 +593,9 @@ def run_patch_against_hidden_test(
     try:
         patched = _apply_unified_diff(original_repo_state, patch_str)
         patch_applied = True
-    except _DiffError as e:
+    except (_DiffError, ArenaError) as e:
+        # Unsafe diff paths are validation failures, not oracle crashes.
+        # _normalize_relpath raises ArenaError for absolute/traversal paths.
         logger.info("oracle.patch_apply_failed", reason=str(e))
         return PatchRunResult(
             passed=False,
@@ -377,40 +608,205 @@ def run_patch_against_hidden_test(
             isolation_mode=isolation_mode,
         )
 
+    try:
+        normalized_patched_paths = {_normalize_relpath(relpath) for relpath in patched}
+        binary_state = {
+            _normalize_relpath(relpath): content
+            for relpath, content in (original_binary_state or {}).items()
+        }
+    except ArenaError as e:
+        return PatchRunResult(
+            passed=False,
+            duration_seconds=time.monotonic() - overall_start,
+            returncode=None,
+            stdout="",
+            stderr=f"workspace materialization failed: {e}",
+            timed_out=False,
+            patch_applied=True,
+            isolation_mode=isolation_mode,
+        )
+    binary_text_collisions = _mixed_workspace_path_collisions(
+        text_paths=normalized_patched_paths,
+        binary_paths=set(binary_state),
+    )
+    if binary_text_collisions:
+        # The text diff applier cannot safely modify binary assets or create a
+        # file where a binary asset's parent directory must exist. Reject these
+        # before touching scratch storage so malformed mixed workspaces return
+        # a normal failed verification instead of filesystem errors.
+        relpaths = ", ".join(binary_text_collisions)
+        return _patch_apply_failed_result(
+            overall_start=overall_start,
+            isolation_mode=isolation_mode,
+            reason=f"binary asset path collision: {relpaths}",
+        )
+
     # 2) materialize to tmpfs
     scratch_root = _select_scratch_root()
 
+    try:
+        hidden_code_payload = _compile_hidden_code_payload(hidden_test_code)
+    except (SyntaxError, ValueError) as e:
+        # Malformed corpus/operator hidden tests are failed verifications,
+        # not worker crashes. The patch already applied cleanly, so preserve
+        # that bit for downstream accounting and triage.
+        logger.info("oracle.hidden_test_compile_failed", error=str(e))
+        return PatchRunResult(
+            passed=False,
+            duration_seconds=time.monotonic() - overall_start,
+            returncode=None,
+            stdout="",
+            stderr=f"hidden test compile failed: {e}",
+            timed_out=False,
+            patch_applied=True,
+            isolation_mode=isolation_mode,
+        )
+
     with tempfile.TemporaryDirectory(prefix="v4oracle_", dir=str(scratch_root)) as td:
         td_path = Path(td)
-        for relpath, content in patched.items():
-            dest = td_path / relpath
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
-        hidden_dest = td_path / hidden_test_relpath
-        hidden_dest.parent.mkdir(parents=True, exist_ok=True)
-        hidden_dest.write_text(hidden_test_code)
+        try:
+            _materialize_oracle_workspace(td_path, patched, binary_state)
+        except ArenaError as e:
+            return PatchRunResult(
+                passed=False,
+                duration_seconds=time.monotonic() - overall_start,
+                returncode=None,
+                stdout="",
+                stderr=f"workspace materialization failed: {e}",
+                timed_out=False,
+                patch_applied=True,
+                isolation_mode=isolation_mode,
+            )
 
         if isolation_mode == "jailed":
             return _run_jailed(
                 workspace_dir=td_path,
-                hidden_test_relpath=hidden_test_relpath,
+                hidden_code_payload=hidden_code_payload,
                 timeout_seconds=timeout_seconds,
                 patch_applied=patch_applied,
             )
 
         return _run_subprocess(
             workspace_dir=td_path,
-            hidden_dest=hidden_dest,
+            hidden_code_payload=hidden_code_payload,
             timeout_seconds=timeout_seconds,
             patch_applied=patch_applied,
             isolation_mode=isolation_mode,
         )
 
 
+def _materialize_oracle_workspace(
+    root: Path,
+    text_files: dict[str, str],
+    binary_files: dict[str, bytes],
+) -> None:
+    """Write the exact mixed text/binary workspace used by oracle tests."""
+    for relpath, content in text_files.items():
+        normalized = _normalize_relpath(relpath)
+        dest = root / normalized
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
+        except OSError as e:
+            raise ArenaError(f"failed to materialize text path {normalized!r}: {e}") from e
+    for relpath, content in binary_files.items():
+        normalized = _normalize_relpath(relpath)
+        dest = root / normalized
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+        except OSError as e:
+            raise ArenaError(f"failed to materialize binary path {normalized!r}: {e}") from e
+
+
+def _patch_apply_failed_result(
+    *,
+    overall_start: float,
+    isolation_mode: IsolationMode,
+    reason: str,
+) -> PatchRunResult:
+    return PatchRunResult(
+        passed=False,
+        duration_seconds=time.monotonic() - overall_start,
+        returncode=None,
+        stdout="",
+        stderr=f"patch apply failed: {reason}",
+        timed_out=False,
+        patch_applied=False,
+        isolation_mode=isolation_mode,
+    )
+
+
+def _mixed_workspace_path_collisions(
+    *,
+    text_paths: set[str],
+    binary_paths: set[str],
+) -> list[str]:
+    collisions: list[str] = []
+    binary_ancestor_to_assets: dict[str, list[str]] = {}
+    for binary_path in binary_paths:
+        for ancestor in _ancestor_relpaths(binary_path):
+            binary_ancestor_to_assets.setdefault(ancestor, []).append(binary_path)
+
+    for text_path in sorted(text_paths):
+        if text_path in binary_paths:
+            collisions.append(text_path)
+        for ancestor in _ancestor_relpaths(text_path):
+            if ancestor in binary_paths:
+                collisions.append(f"{text_path} under binary asset {ancestor}")
+        for binary_path in sorted(binary_ancestor_to_assets.get(text_path, [])):
+            collisions.append(f"{text_path} above binary asset {binary_path}")
+    return collisions
+
+
+def _ancestor_relpaths(relpath: str) -> tuple[str, ...]:
+    parts = relpath.split("/")
+    return tuple("/".join(parts[:i]) for i in range(1, len(parts)))
+
+
+def _compile_hidden_code_payload(hidden_test_code: str) -> bytes:
+    """Compile hidden source in the publisher process and return bytecode.
+
+    The payload is streamed once to the child over stdin. It is never
+    materialized as a file, mounted in the jail, or embedded in argv, because
+    miner-controlled imports can read ``/work`` and ``/proc/self/cmdline``.
+    """
+    code = compile(hidden_test_code, _HIDDEN_CODE_FILENAME, "exec")
+    return marshal.dumps(code)
+
+
+def _hidden_stdin_bootstrap() -> str:
+    return (
+        "\nimport marshal as _m, os as _os, sys as _sys\n"
+        "def _v4_hidden_globals():\n"
+        f"    return {{'__name__': '__main__', '__file__': {_HIDDEN_CODE_FILENAME!r}}}\n"
+        "def _v4_read_hidden_payload():\n"
+        "    _payload = _sys.stdin.buffer.read()\n"
+        "    # The hidden bytecode arrives through stdin. Close it and replace fd 0\n"
+        "    # with /dev/null before miner-controlled imports run so /proc/self/fd/0\n"
+        "    # cannot be used as a second chance to read the payload.\n"
+        "    try:\n"
+        "        _sys.stdin.close()\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    try:\n"
+        "        _fd = _os.open('/dev/null', _os.O_RDONLY)\n"
+        "        if _fd != 0:\n"
+        "            _os.dup2(_fd, 0)\n"
+        "            _os.close(_fd)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    return _payload\n"
+        "# Do not bind the unmarshalled code object in __main__: miner modules\n"
+        "# imported by the hidden test can inspect sys.modules['__main__'].\n"
+        "exec(_m.loads(_v4_read_hidden_payload()), _v4_hidden_globals())\n"
+    )
+
+
 def _run_subprocess(
     *,
     workspace_dir: Path,
-    hidden_dest: Path,
+    hidden_code_payload: bytes,
     timeout_seconds: float,
     patch_applied: bool,
     isolation_mode: IsolationMode,
@@ -425,8 +821,7 @@ def _run_subprocess(
 
     program = (
         _HERMETIC_BOOTSTRAP
-        + "\nimport runpy as _rp\n"
-        + f"_rp.run_path({str(hidden_dest)!r}, run_name='__main__')\n"
+        + _hidden_stdin_bootstrap()
     )
     argv: list[str] = [
         *isolation_prefix,
@@ -449,6 +844,7 @@ def _run_subprocess(
     proc = subprocess.Popen(  # noqa: S603 -- argv list, no shell, allowlist
         argv,
         cwd=workspace_dir,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -456,19 +852,16 @@ def _run_subprocess(
         preexec_fn=preexec,
         start_new_session=sys.platform != "win32",
     )
-    try:
-        stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
-        timed_out = False
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_fallback_process_tree(proc)
-        try:
-            stdout_b, stderr_b = proc.communicate(timeout=0.1)
-        except subprocess.TimeoutExpired:
-            stdout_b, stderr_b = (b"", b"")
-        timed_out = True
-        returncode = None
-    else:
+    # Fallback isolation still executes miner-controlled code. Use the same
+    # bounded pipe reader as the jailed path so stdout/stderr cannot accumulate
+    # unbounded in the publisher process before timeout.
+    stdout_b, stderr_b, returncode, timed_out = _jail._communicate_bounded(
+        proc,
+        stdin_bytes=hidden_code_payload,
+        timeout_seconds=timeout_seconds,
+        max_stream_bytes=_jail._MAX_CAPTURED_STREAM_BYTES,
+    )
+    if not timed_out:
         # A malicious patch can spawn a background child, detach its stdio,
         # and let the parent exit successfully. The fallback runner owns the
         # whole session, so clean up descendants even on non-timeout exits.
@@ -508,32 +901,33 @@ def _kill_fallback_process_tree(proc: subprocess.Popen[bytes]) -> None:
 def _run_jailed(
     *,
     workspace_dir: Path,
-    hidden_test_relpath: str,
+    hidden_code_payload: bytes,
     timeout_seconds: float,
     patch_applied: bool,
 ) -> PatchRunResult:
     """Linux fs-jail path. See cathedral.v4.oracle.jail for the helper."""
     program = (
         _HERMETIC_BOOTSTRAP
-        + "\nimport runpy as _rp, os as _os\n"
+        + "\nimport os as _os\n"
         + "_os.chdir('/work')\n"
-        + f"_rp.run_path('/work/{hidden_test_relpath}', run_name='__main__')\n"
+        + _hidden_stdin_bootstrap()
     )
 
-    # Use sys.base_prefix (not sys.prefix) so we bind the underlying
-    # python install rather than a venv that just contains symlinks
-    # back into it. For non-venv interpreters base_prefix == prefix so
-    # this is a no-op; for venv interpreters it points at the real
-    # install whose bin/python3 is a usable ELF binary inside the jail.
-    python_prefix = Path(sys.base_prefix)
-    jail_root = _jail.assemble_jail(workspace_dir=workspace_dir, python_prefix=python_prefix)
+    python_prefix, interpreter_relpath = _resolve_jail_python_runtime()
+    jail_root = _jail.assemble_jail(
+        workspace_dir=workspace_dir,
+        python_prefix=python_prefix,
+        interpreter_relpath=interpreter_relpath,
+    )
     try:
         result = _jail.run_in_jail(
             jail_root=jail_root,
             workspace_dir=workspace_dir,
             python_prefix=python_prefix,
             program=program,
+            stdin_bytes=hidden_code_payload,
             timeout_seconds=timeout_seconds,
+            interpreter_relpath=interpreter_relpath,
             rlimit_cpu_secs=JAIL_RLIMIT_CPU_SECS,
             rlimit_as_bytes=JAIL_RLIMIT_AS_BYTES,
         )
@@ -553,6 +947,38 @@ def _run_jailed(
         patch_applied=patch_applied,
         isolation_mode="jailed",
     )
+
+
+def _resolve_jail_python_runtime() -> tuple[Path, str]:
+    """Return the runtime prefix and interpreter path used inside the jail.
+
+    Hidden tests are marshalled by the publisher interpreter, and marshal
+    bytecode is only compatible with the same Python minor version. Bind the
+    exact resolved interpreter when it lives under ``sys.base_prefix``; this
+    keeps venv deployments from accidentally running generic ``python3`` that
+    points at another minor inside the jail.
+    """
+    base_prefix = Path(sys.base_prefix).resolve()
+    executable = Path(sys.executable).resolve()
+
+    try:
+        rel = executable.relative_to(base_prefix)
+    except ValueError:
+        rel = None
+    if rel is not None and (base_prefix / rel).exists():
+        return base_prefix, rel.as_posix()
+
+    versioned = base_prefix / "bin" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    if versioned.exists():
+        return base_prefix, versioned.relative_to(base_prefix).as_posix()
+
+    by_name = base_prefix / "bin" / executable.name
+    if by_name.exists():
+        return base_prefix, by_name.relative_to(base_prefix).as_posix()
+
+    # Last-resort compatibility with older installs. This preserves the
+    # previous jail path but only after all same-minor candidates failed.
+    return base_prefix, "bin/python3"
 
 
 __all__ = [

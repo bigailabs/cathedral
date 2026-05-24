@@ -68,7 +68,6 @@ from cathedral.lanes.publisher import (
     build_generate_ctx,
     build_task_family_prompt,
     enabled_task_family_ids,
-    extract_answer,
     persist_task_family_result,
     score_and_sign_task_family_stdout,
     task_family_feed_enabled,
@@ -76,7 +75,7 @@ from cathedral.lanes.publisher import (
     task_family_runner_skip_reason,
     task_family_tier,
 )
-from cathedral.lanes.sign import canonical_hash, resign_task_family_score
+from cathedral.lanes.sign import resign_task_family_score
 from cathedral.lanes.synthetic_boolean_v1 import (
     FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID,
 )
@@ -132,7 +131,7 @@ def _retry_backoffs() -> tuple[float, ...]:
 
     if os.environ.get("CATHEDRAL_FAST_RETRIES") == "1" or os.environ.get(
         "CATHEDRAL_EVAL_MODE", ""
-    ).lower().startswith("stub"):
+    ).strip().lower().startswith("stub"):
         return (0.0, 0.0, 0.0)
     return _RETRY_BACKOFFS
 
@@ -145,11 +144,12 @@ def _ms_iso(dt: datetime) -> str:
 
 
 def _receipt_answer_hash(stdout: str) -> str:
-    try:
-        answer = extract_answer(stdout)
-    except Exception:
-        return blake3.blake3(str(stdout).encode("utf-8")).hexdigest()
-    return canonical_hash(answer)
+    # Receipt insertion runs under the publisher DB write lock and only needs a
+    # stable attempt fingerprint. Do not call extract_answer() here: malformed
+    # miner stdout can trigger the fallback JSON scan's worst-case behavior and
+    # stall every publisher write while this lock is held. Full answer parsing
+    # still happens during scoring after the receipt is durably recorded.
+    return blake3.blake3(str(stdout).encode("utf-8")).hexdigest()
 
 
 def _task_family_receipt_attempt_id(stable_submission_id: str) -> str:
@@ -2256,7 +2256,9 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         StubPolarisRunner,
     )
 
-    mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").lower()
+    # Normalize operator env values the same way SAT preflight does so a
+    # launch-ready check selects the same runtime path.
+    mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").strip().lower()
     if mode == "stub-fail-polaris":
         return FailingStubPolarisRunner()
     if mode == "stub-bad-card":
@@ -2281,7 +2283,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         #
         # Default is v1 while we smoke-test v2 on the rented Polaris
         # box. Flip via env var when ready to cut over.
-        prober_version = os.environ.get("CATHEDRAL_PROBER_VERSION", "v1").lower()
+        prober_version = os.environ.get("CATHEDRAL_PROBER_VERSION", "v1").strip().lower()
 
         ssh_key_path = os.environ.get("CATHEDRAL_SSH_KEY_PATH") or os.path.expanduser(
             "~/.ssh/cathedral_probe_ed25519"
@@ -2460,8 +2462,8 @@ async def _run_once_async() -> int:
     import os as _os
 
     def runner_for(submission: dict[str, Any]) -> PolarisRunner:
-        mode = (submission.get("attestation_mode") or "").lower()
-        env_mode = _os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+        mode = (submission.get("attestation_mode") or "").strip().lower()
+        env_mode = _os.environ.get("CATHEDRAL_EVAL_MODE", "").strip().lower()
         has_polaris_key = bool(_os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"))
         if env_mode.startswith("stub"):
             r = _resolve_polaris_runner_from_env()

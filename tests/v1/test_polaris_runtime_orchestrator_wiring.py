@@ -144,6 +144,26 @@ def test_ssh_probe_v2_invalid_stdout_cap_env_falls_back(
     )
 
 
+def test_ssh_probe_v2_env_dispatch_strips_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Runtime env parsing must accept the same trimmed values as preflight."""
+    from cathedral.eval.orchestrator import _resolve_polaris_runner_from_env
+    from cathedral.eval.ssh_hermes_runner import SshHermesRunner
+
+    ssh_key_path = tmp_path / "cathedral_probe_ed25519"
+    ssh_key_path.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n")
+    monkeypatch.setenv("CATHEDRAL_SSH_KEY_PATH", str(ssh_key_path))
+    monkeypatch.setenv("CATHEDRAL_BUNDLE_OUTPUT_DIR", str(tmp_path / "bundles"))
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "ssh-probe ")
+    monkeypatch.setenv("CATHEDRAL_PROBER_VERSION", "v2 ")
+
+    runner = _resolve_polaris_runner_from_env()
+
+    assert isinstance(runner, SshHermesRunner)
+
+
 # --------------------------------------------------------------------------
 # Tests 2+3 — score_and_sign persists attestation + flips polaris_verified
 # --------------------------------------------------------------------------

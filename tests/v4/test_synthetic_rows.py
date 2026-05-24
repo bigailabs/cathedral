@@ -59,6 +59,7 @@ def test_synthetic_row_end_to_end(corpus_engine: CathedralEngine, task_id: str) 
     noop_diff = "--- a/_pin\n+++ a/_pin\n"  # malformed -> patch_applied=False
     failed_broken, _ = corpus_engine.verify_miner_submission(
         original_repo_state=bundle.workspace_files,
+        original_binary_state=handle.binary_state,
         patch_str=noop_diff,
         hidden_test_code=hidden_test,
     )
@@ -69,6 +70,7 @@ def test_synthetic_row_end_to_end(corpus_engine: CathedralEngine, task_id: str) 
     # Verify the winning patch FIXES the broken bundle.
     fixed, duration = corpus_engine.verify_miner_submission(
         original_repo_state=bundle.workspace_files,
+        original_binary_state=handle.binary_state,
         patch_str=winning_patch,
         hidden_test_code=hidden_test,
     )

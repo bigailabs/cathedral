@@ -147,6 +147,24 @@ def test_no_large_public_sat_formula_or_solution_artifacts() -> None:
     )
 
 
+def test_security_guard_workflow_covers_projection_inputs() -> None:
+    """The leak guard CI job must run when projection/signing code changes."""
+    workflow = (ROOT / ".github/workflows/task-family-security-guard.yml").read_text(
+        encoding="utf-8"
+    )
+    required_paths = (
+        "src/cathedral/eval/ssh_hermes_runner.py",
+        "src/cathedral/eval/scoring_pipeline.py",
+        "src/cathedral/lanes/**",
+        "src/cathedral/publisher/challenge_cnf.py",
+        "src/cathedral/publisher/reads.py",
+        "tests/lanes/**",
+    )
+    missing = [path for path in required_paths if path not in workflow]
+
+    assert not missing, f"task-family security guard workflow missing path filters: {missing}"
+
+
 def test_private_corpus_markers_are_not_committed_in_text_files() -> None:
     offenders: list[str] = []
     markers = _private_corpus_markers()

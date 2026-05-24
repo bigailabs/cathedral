@@ -14,6 +14,7 @@ VALIDATOR_BIN="${CATHEDRAL_UPDATER_VALIDATOR_BIN:-${INSTALL_PREFIX}/.venv/bin/ca
 PM2_BIN="${CATHEDRAL_UPDATER_PM2_BIN:-pm2}"
 ECOSYSTEM_PATH="${CATHEDRAL_ECOSYSTEM_PATH:-${INSTALL_PREFIX}/ecosystem.config.cjs}"
 EXPECTED_REMOTE_URL="${CATHEDRAL_UPDATER_EXPECTED_REMOTE_URL:-}"
+VALIDATOR_STATE_DIR="${CATHEDRAL_VALIDATOR_STATE_DIR:-/var/lib/cathedral}"
 
 sleep_or_exit() {
   local rc="${1:-0}"
@@ -48,6 +49,24 @@ verify_tag() {
   fi
   echo "$(date -u +%FT%TZ) updater: verify failed for $tag (exit=$rc): $output"
   return "$rc"
+}
+
+ensure_validator_state_dir() {
+  local requested="$1"
+  local fallback="${INSTALL_PREFIX}/state"
+
+  # Legacy managed hosts can update before a root provisioner has created
+  # /var/lib/cathedral. The updater runs as the unprivileged cathedral user,
+  # so fall back to install-owned state and let config rendering point SQLite
+  # there instead of failing later during `cathedral-validator migrate`.
+  if install -d -m 0750 "$requested" 2>/dev/null && [[ -w "$requested" ]]; then
+    printf '%s\n' "$requested"
+    return 0
+  fi
+
+  echo "$(date -u +%FT%TZ) updater: cannot use validator state dir $requested; using $fallback" >&2
+  install -d -m 0750 "$fallback"
+  printf '%s\n' "$fallback"
 }
 
 cd "$REPO_DIR"
@@ -101,6 +120,9 @@ while true; do
     if [[ -z "$config_path" ]]; then
       config_path="$ETC_DIR/mainnet.toml"
     fi
+
+    validator_state_dir="$(ensure_validator_state_dir "$VALIDATOR_STATE_DIR")"
+    export CATHEDRAL_VALIDATOR_STATE_DIR="$validator_state_dir"
 
     echo "$(date -u +%FT%TZ) updater: migrate validator config $config_path"
     "$VALIDATOR_BIN" migrate --config "$config_path"

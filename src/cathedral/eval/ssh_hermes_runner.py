@@ -58,11 +58,14 @@ the rented Polaris box.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import io
 import json
 import os
 import re
 import shlex
+import shutil
 import tarfile
 import tempfile
 import time
@@ -71,7 +74,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import blake3
 import structlog
@@ -104,6 +107,59 @@ logger = structlog.get_logger(__name__)
 # token must never appear in logs or in exception messages that may
 # get forwarded to operators or third-party log sinks.
 _QUERY_TOKEN_RE = re.compile(r"(\?t=)[^\s'&\"]+")
+# Binary trace artifacts can be SQLite pages where a bare URL text field is
+# followed immediately by NUL/control/record bytes. Use a token-character
+# allowlist here instead of "anything until whitespace" so redaction cannot
+# consume and rewrite non-token database bytes.
+_QUERY_TOKEN_MARKER_BYTES = b"?t="
+_QUERY_TOKEN_REPLACEMENT_BYTES = b"REDACTED"
+_QUERY_TOKEN_CHAR_BYTES = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~%+-"
+)
+_QUERY_TOKEN_STREAM_CHUNK_BYTES = 64 * 1024
+_TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
+_TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+_TRACE_ARCHIVE_MAX_MEMBERS = 4096
+_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES = (
+    ".zip",
+    ".gz",
+    ".tgz",
+    ".bz2",
+    ".xz",
+    ".7z",
+)
+
+
+class _TraceArchiveTooLargeError(Exception):
+    """Raised when a compressed trace archive would be too expensive to scrub."""
+
+
+class _TraceArchiveRedactionBudget:
+    """Streaming limits for miner-controlled compressed trace archives."""
+
+    def __init__(self) -> None:
+        self.member_count = 0
+        self.total_file_bytes = 0
+
+    def check(self, member: tarfile.TarInfo) -> None:
+        self.member_count += 1
+        if self.member_count > _TRACE_ARCHIVE_MAX_MEMBERS:
+            raise _TraceArchiveTooLargeError(
+                f"tar archive exceeds member limit: members={self.member_count}"
+            )
+        if not member.isfile():
+            return
+        if member.size < 0:
+            raise _TraceArchiveTooLargeError(f"negative tar member size: {member.name}")
+        if member.size > _TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES:
+            raise _TraceArchiveTooLargeError(
+                f"tar member exceeds redaction limit: {member.name} size={member.size}"
+            )
+        self.total_file_bytes += member.size
+        if self.total_file_bytes > _TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES:
+            raise _TraceArchiveTooLargeError(
+                f"tar archive exceeds redaction limit: total_size={self.total_file_bytes}"
+            )
 
 
 def _redact_query_tokens(s: str) -> str:
@@ -116,6 +172,359 @@ def _redact_query_tokens(s: str) -> str:
     partial token value is still redacted.
     """
     return _QUERY_TOKEN_RE.sub(r"\1REDACTED", s)
+
+
+def _redact_query_token_bytes(blob: bytes) -> bytes:
+    """Redact token values without changing byte length."""
+    redactor = _QueryTokenRedactor()
+    return redactor.feed(blob) + redactor.finish()
+
+
+class _QueryTokenRedactor:
+    """Streaming fixed-width ``?t=`` redactor for binary trace artifacts.
+
+    Trace artifacts include SQLite snapshots and miner-controlled logs that can
+    be large. This state machine keeps only marker/token bookkeeping in memory
+    and preserves byte length, so SQLite page offsets stay valid while the
+    publisher avoids reading whole artifacts into one ``bytes`` object.
+    """
+
+    def __init__(self) -> None:
+        self.seen_token = False
+        self._marker_pending = bytearray()
+        self._token_pending = bytearray()
+        self._in_token = False
+        self._streaming_long_token = False
+
+    def feed(self, chunk: bytes) -> bytes:
+        out = bytearray()
+        for byte in chunk:
+            if self._in_token:
+                self._feed_token_byte(byte, out)
+            else:
+                self._feed_normal_byte(byte, out)
+        return bytes(out)
+
+    def finish(self) -> bytes:
+        out = bytearray()
+        if self._in_token:
+            if self._token_pending:
+                out.extend(b"X" * len(self._token_pending))
+            self._token_pending.clear()
+            self._in_token = False
+            self._streaming_long_token = False
+        if self._marker_pending:
+            out.extend(self._marker_pending)
+            self._marker_pending.clear()
+        return bytes(out)
+
+    def _feed_normal_byte(self, byte: int, out: bytearray) -> None:
+        self._marker_pending.append(byte)
+        while self._marker_pending and not _QUERY_TOKEN_MARKER_BYTES.startswith(
+            bytes(self._marker_pending)
+        ):
+            out.append(self._marker_pending[0])
+            del self._marker_pending[0]
+        if bytes(self._marker_pending) == _QUERY_TOKEN_MARKER_BYTES:
+            out.extend(_QUERY_TOKEN_MARKER_BYTES)
+            self._marker_pending.clear()
+            self._in_token = True
+
+    def _feed_token_byte(self, byte: int, out: bytearray) -> None:
+        if byte in _QUERY_TOKEN_CHAR_BYTES:
+            self.seen_token = True
+            if self._streaming_long_token:
+                out.extend(b"X")
+                return
+            self._token_pending.append(byte)
+            if len(self._token_pending) > len(_QUERY_TOKEN_REPLACEMENT_BYTES):
+                out.extend(_QUERY_TOKEN_REPLACEMENT_BYTES)
+                out.extend(b"X" * (len(self._token_pending) - len(_QUERY_TOKEN_REPLACEMENT_BYTES)))
+                self._token_pending.clear()
+                self._streaming_long_token = True
+            return
+
+        if self._token_pending:
+            out.extend(b"X" * len(self._token_pending))
+            self._token_pending.clear()
+        self._in_token = False
+        self._streaming_long_token = False
+        self._feed_normal_byte(byte, out)
+
+
+class _QueryTokenRedactingReader:
+    """File-like streaming redactor used while repacking tar members."""
+
+    def __init__(self, source: BinaryIO) -> None:
+        self._source = source
+        self._redactor = _QueryTokenRedactor()
+        self._buffer = bytearray()
+        self._done = False
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            chunks: list[bytes] = []
+            while True:
+                chunk = self.read(_QUERY_TOKEN_STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        while len(self._buffer) < size and not self._done:
+            raw = self._source.read(_QUERY_TOKEN_STREAM_CHUNK_BYTES)
+            if raw:
+                self._buffer.extend(self._redactor.feed(raw))
+            else:
+                self._buffer.extend(self._redactor.finish())
+                self._done = True
+        out = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return out
+
+
+def _redact_query_tokens_in_artifact_tree(root: Path) -> None:
+    """Scrub CNF fetch tokens from local files before trace publication."""
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if _is_tar_gz_artifact(path):
+            _redact_query_tokens_in_tar_gz(path)
+            continue
+        # Do not byte-edit unknown compressed archives in place: changing
+        # compressed bytes would invalidate container checksums. Known Hermes
+        # tarballs are handled above by unpacking and repacking each member.
+        if path.suffix in {".gz", ".zip"}:
+            continue
+        _redact_query_tokens_in_file(path)
+    _redact_query_tokens_in_artifact_paths(root)
+
+
+def _redact_query_tokens_in_artifact_paths(root: Path) -> None:
+    """Rename token-bearing trace paths before manifest/tar creation.
+
+    The final public manifest records relative paths and ``tar.add`` preserves
+    names. Content redaction alone is not enough if Hermes/miner-controlled
+    filenames copy a SAT CNF URL token into a path component.
+    """
+    for parent_str, dirnames, filenames in os.walk(root, topdown=False):
+        parent = Path(parent_str)
+        for name in sorted([*filenames, *dirnames]):
+            redacted_name = _redact_query_tokens(name)
+            if redacted_name == name:
+                continue
+            src = parent / name
+            if not src.exists():
+                continue
+            dest = _unique_redacted_artifact_path(src, parent / redacted_name)
+            try:
+                src.rename(dest)
+            except OSError as exc:
+                logger.warning(
+                    "ssh_hermes_trace_path_redaction_failed",
+                    path=_redacted_trace_log_value(src),
+                    error=_redacted_trace_log_value(exc),
+                )
+                _drop_trace_path(src)
+
+
+def _unique_redacted_artifact_path(src: Path, dest: Path) -> Path:
+    if not dest.exists():
+        return dest
+    digest = hashlib.sha256(src.name.encode("utf-8", "surrogatepass")).hexdigest()[:10]
+    candidate = dest.with_name(f"{dest.name}.redacted-{digest}")
+    counter = 1
+    while candidate.exists():
+        candidate = dest.with_name(f"{dest.name}.redacted-{digest}.{counter}")
+        counter += 1
+    return candidate
+
+
+def _drop_trace_path(path: Path) -> None:
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            "ssh_hermes_trace_path_drop_failed",
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
+        )
+
+
+def _redacted_trace_log_value(value: object) -> str:
+    # Trace paths and OSError messages can include miner-controlled filenames.
+    # Run all warning fields through the token scrubber before they reach
+    # operator logs; the artifact redaction path is itself an error surface.
+    return _redact_query_tokens(str(value))
+
+
+def _redact_query_tokens_in_file(path: Path) -> None:
+    """Stream-redact a local artifact through a sibling temp file."""
+    tmp_path: str | None = None
+    try:
+        stat = path.stat()
+        with path.open("rb") as source, tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            # Miner-controlled artifact names can sit near NAME_MAX. Keep the
+            # temp basename short so redaction does not fail before scrubbing.
+            prefix=".redact-",
+            suffix=".tmp",
+            delete=False,
+        ) as target:
+            tmp_path = target.name
+            redactor = _QueryTokenRedactor()
+            while chunk := source.read(_QUERY_TOKEN_STREAM_CHUNK_BYTES):
+                target.write(redactor.feed(chunk))
+            target.write(redactor.finish())
+            changed = redactor.seen_token
+        if changed:
+            os.chmod(tmp_path, stat.st_mode & 0o777)
+            os.replace(tmp_path, path)
+            tmp_path = None
+    except OSError as exc:
+        logger.warning(
+            "ssh_hermes_trace_file_redaction_failed",
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
+        )
+        # Redaction is part of the public trace boundary. If we cannot prove a
+        # file was scrubbed, remove it instead of publishing a possible CNF
+        # fetch token in the final bundle.
+        _drop_trace_path(path)
+    finally:
+        if tmp_path is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_path)
+
+
+def _is_tar_gz_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".tar.gz") or name.endswith(".tgz")
+
+
+def _redact_query_tokens_in_tar_gz(path: Path) -> None:
+    """Repack a tar.gz artifact after redacting token-bearing file members.
+
+    Hermes skills are collected as ``skills.tar.gz``. They can contain prompt
+    copies or logs, so skipping compressed archives would reintroduce CNF token
+    leaks into the final public trace bundle.
+    """
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+        with tarfile.open(path, "r:gz") as source, tarfile.open(tmp_path, "w:gz") as target:
+            budget = _TraceArchiveRedactionBudget()
+            # Do not call ``getmembers()`` here: miner-controlled archives can
+            # contain many tiny headers, so validation must happen before the
+            # TarFile object materializes the complete member list.
+            for member in source:
+                budget.check(member)
+                out_member = _redact_query_tokens_in_tar_member(member)
+                if not member.isfile():
+                    target.addfile(out_member)
+                    continue
+                if _is_unsupported_compressed_trace_member(
+                    member
+                ) or _is_unsupported_compressed_trace_member(out_member):
+                    # Deflated/nested archive bytes usually do not contain the
+                    # literal ``?t=`` token, so the streaming byte redactor
+                    # cannot prove those payloads are safe. Drop unsupported
+                    # compressed members rather than publishing an unchecked
+                    # archive inside the public trace.
+                    logger.warning(
+                        "ssh_hermes_trace_archive_member_dropped_compressed",
+                        path=_redacted_trace_log_value(path),
+                        member=out_member.name,
+                    )
+                    continue
+                extracted = source.extractfile(member)
+                if extracted is None:
+                    out_member.size = 0
+                    target.addfile(out_member, io.BytesIO(b""))
+                    continue
+                # Redaction preserves byte length, so tar can stream the
+                # transformed member directly without buffering the whole file.
+                out_member.size = member.size
+                target.addfile(out_member, _QueryTokenRedactingReader(extracted))
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except _TraceArchiveTooLargeError as exc:
+        # Do not publish a miner-controlled compressed artifact that we refused
+        # to inspect: it may still contain an active CNF fetch token. Dropping
+        # the archive preserves the rest of the trace bundle without letting a
+        # gzip bomb burn publisher CPU/disk during redaction.
+        logger.warning(
+            "ssh_hermes_trace_archive_redaction_dropped_oversized",
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
+        )
+        _drop_trace_archive(path)
+    except (tarfile.TarError, OSError) as exc:
+        logger.warning(
+            "ssh_hermes_trace_archive_redaction_failed",
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
+        )
+        _drop_trace_archive(path)
+    finally:
+        if tmp_path is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_path)
+
+
+def _drop_trace_archive(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            "ssh_hermes_trace_archive_drop_failed",
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
+        )
+
+
+def _is_unsupported_compressed_trace_member(member: tarfile.TarInfo) -> bool:
+    name = member.name.lower()
+    before_query = name.split("?", 1)[0]
+    return member.isfile() and (
+        name.endswith(_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES)
+        or before_query.endswith(_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES)
+    )
+
+
+def _redact_query_tokens_in_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Return a copied ``TarInfo`` with token-bearing metadata scrubbed.
+
+    File content redaction is not enough for SAT traces: tar member names,
+    symlink targets, owners, and pax headers can also carry copied prompts or
+    CNF URLs. Metadata does not have binary offset constraints, so fixed-length
+    replacement is unnecessary here.
+    """
+    out = copy.copy(member)
+    out.name = _redact_query_tokens(out.name)
+    out.linkname = _redact_query_tokens(out.linkname)
+    out.uname = _redact_query_tokens(out.uname)
+    out.gname = _redact_query_tokens(out.gname)
+    out.pax_headers = {
+        _redact_query_tokens(str(key)): _redact_query_tokens(str(value))
+        for key, value in member.pax_headers.items()
+    }
+    return out
 
 
 def _now_utc_iso() -> str:
@@ -606,6 +1015,10 @@ class SshHermesRunner:
                 prompt=build_bug_isolation_prompt(challenge),
                 eval_round=eval_round,
                 resolved_home=resolved_home,
+                # v3 miners control Hermes stdout just like SAT miners do.
+                # Always use the streaming cap so a noisy bug-isolation run
+                # cannot force asyncssh/runner buffering to grow unbounded.
+                max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
             )
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
@@ -624,6 +1037,7 @@ class SshHermesRunner:
                         prompt=build_bug_isolation_repair_prompt(challenge_id_public),
                         eval_round=eval_round,
                         resolved_home=resolved_home,
+                        max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
                     )
 
             synthetic_card: dict[str, Any] = {
@@ -1206,6 +1620,10 @@ class SshHermesRunner:
             prompt=wrapped_prompt,
             eval_round=eval_round,
             resolved_home=resolved_home,
+            # Ordinary v2 ssh-hermes card evals are miner-controlled stdout
+            # too. Use the same streaming cap as SAT/v3 so asyncssh never
+            # buffers unbounded output in the publisher process.
+            max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
         )
         card_json = _extract_card_json(stdout)
         if card_json is None:
@@ -1452,6 +1870,12 @@ class SshHermesRunner:
                     dest = local_root / rel_path
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_text(content, encoding="utf-8")
+
+            # The SAT prompt must carry an authorized cnf_url to the miner, but
+            # trace bundles are public artifacts. Scrub token-shaped ?t= values
+            # from every collected uncompressed artifact before proof, manifest,
+            # hashes, and tarball creation.
+            _redact_query_tokens_in_artifact_tree(local_root)
 
             # Compute proof-of-loop from what we collected
             proof = _compute_proof_of_loop(local_root)

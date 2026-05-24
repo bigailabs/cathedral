@@ -13,9 +13,14 @@ Mocks asyncssh at the module level. Covers:
 
 from __future__ import annotations
 
+import gzip
 import importlib.util as _ilu
+import io
 import json
+import os
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -165,6 +170,21 @@ class _FakeStreamingProcess:
 
     async def wait_closed(self) -> None:
         self.closed = True
+
+
+def _install_streaming_hermes(
+    conn: Any,
+    stdout: str,
+    *,
+    captured_cmds: list[str] | None = None,
+) -> None:
+    async def _create_process(cmd: str, **_kwargs: Any) -> Any:
+        if captured_cmds is not None:
+            captured_cmds.append(cmd)
+        assert "hermes chat -Q" in cmd
+        return _FakeStreamingProcess([stdout.encode("utf-8")])
+
+    conn.create_process = AsyncMock(side_effect=_create_process)
 
 
 # --------------------------------------------------------------------------
@@ -372,6 +392,10 @@ async def test_happy_path_returns_card_and_bundle(runner_config, eval_task, subm
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route_run(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+    )
 
     # SFTP: pretend every requested file exists but write empty bytes
     # to local dest. For session_*.json we plant a realistic doc so
@@ -490,6 +514,7 @@ async def test_hermes_not_found_on_missing_binary(runner_config, eval_task, subm
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(conn, "I cannot produce a card today, sorry.")
 
     fake_asyncssh = MagicMock()
     fake_asyncssh.connect = AsyncMock(return_value=conn)
@@ -625,6 +650,7 @@ async def test_hermes_output_malformed_when_no_json_in_stdout(runner_config, eva
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(conn, "I cannot produce a card today, sorry.")
 
     fake_asyncssh = MagicMock()
     fake_asyncssh.connect = AsyncMock(return_value=conn)
@@ -676,6 +702,10 @@ async def test_manifest_shape_matches_spec(runner_config, eval_task, submission)
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+    )
 
     async def fake_get(remote: str, local: str):
         p = Path(local)
@@ -753,6 +783,11 @@ async def test_verify_command_resolves_tilde_to_absolute_path(runner_config, eva
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -820,6 +855,11 @@ async def test_absolute_hermes_home_still_shlex_quoted(
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -874,6 +914,11 @@ async def test_hermes_chat_q_invocation_no_legacy_flags(runner_config, eval_task
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -930,6 +975,11 @@ async def test_hermes_invocation_uses_chat_q_not_z(runner_config, eval_task, sub
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -1183,6 +1233,33 @@ async def test_task_family_uses_announced_problem_time_limit(runner_config, subm
 
 
 @pytest.mark.asyncio
+async def test_standard_ssh_hermes_invocation_uses_streaming_stdout_cap(
+    runner_config,
+) -> None:
+    runner = SshHermesRunner(runner_config)
+    runner._invoke_hermes_text = AsyncMock(
+        return_value='{"id":"eu-ai-act","no_legal_advice":true}'
+    )
+
+    card, stdout = await runner._invoke_hermes(
+        MagicMock(),
+        eval_profile="cathedral-eval-standard",
+        prompt="Make a card.",
+        eval_round="round-1",
+        resolved_home="/home/cathedral-probe/.hermes",
+    )
+
+    assert card["id"] == "eu-ai-act"
+    assert stdout == '{"id":"eu-ai-act","no_legal_advice":true}'
+    runner._invoke_hermes_text.assert_awaited_once()
+    # Standard v2 card evals are miner-controlled too; this assertion prevents
+    # this path from drifting back to asyncssh's unbounded buffered runner.
+    assert runner._invoke_hermes_text.await_args.kwargs["max_stdout_bytes"] == (
+        runner_config.task_family_stdout_limit_bytes
+    )
+
+
+@pytest.mark.asyncio
 async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
     runner_config,
 ) -> None:
@@ -1231,6 +1308,9 @@ async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
 # by ``_run_remote``'s two error paths (timeout + non-zero exit).
 
 _redact_query_tokens = _module._redact_query_tokens
+_redact_query_token_bytes = _module._redact_query_token_bytes
+_redact_query_tokens_in_file = _module._redact_query_tokens_in_file
+_redact_query_tokens_in_artifact_tree = _module._redact_query_tokens_in_artifact_tree
 
 
 def test_redact_query_tokens_replaces_token_value() -> None:
@@ -1281,3 +1361,361 @@ def test_redact_query_tokens_stops_at_ampersand_and_quote() -> None:
     assert "ABC123" not in redacted
     assert "&other=ok" in redacted
     assert redacted.endswith("'")
+
+
+def test_redact_query_token_bytes_stops_at_binary_delimiters() -> None:
+    token = b"SECRET_TOKEN_123456789"
+    blob = b"SQLite format 3\x00https://api.test/cnf?t=" + token + b"\x00NEXT_FIELD"
+
+    redacted = _redact_query_token_bytes(blob)
+
+    assert token not in redacted
+    assert b"\x00NEXT_FIELD" in redacted
+    assert len(redacted) == len(blob)
+
+
+def test_trace_file_redaction_streams_split_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = b"SECRET_TOKEN_123456789"
+    path = tmp_path / "state.db"
+    original = b"SQLite format 3\x00https://api.test/cnf?t=" + token + b"\x00NEXT_FIELD"
+    path.write_bytes(original)
+    monkeypatch.setattr(_module, "_QUERY_TOKEN_STREAM_CHUNK_BYTES", 5)
+
+    _redact_query_tokens_in_file(path)
+
+    redacted = path.read_bytes()
+    assert token not in redacted
+    assert b"\x00NEXT_FIELD" in redacted
+    assert len(redacted) == len(original)
+
+
+def test_trace_file_redaction_handles_long_artifact_names(tmp_path: Path) -> None:
+    token = "SECRET_TOKEN_123456789"
+    name_max = os.pathconf(tmp_path, "PC_NAME_MAX")
+    prefix = "request_dump_"
+    suffix = ".json"
+    target_len = min(name_max, 250)
+    fill_len = target_len - len(prefix) - len(suffix)
+    if fill_len < 1:
+        pytest.skip("filesystem NAME_MAX too small for long-name regression")
+    long_name = f"{prefix}{'x' * fill_len}{suffix}"
+    path = tmp_path / long_name
+    path.write_text(json.dumps({"prompt": f"https://api.test/cnf?t={token}"}), encoding="utf-8")
+
+    _redact_query_tokens_in_file(path)
+
+    assert path.exists()
+    blob = path.read_bytes()
+    assert token.encode() not in blob
+    assert b"?t=REDACTED" in blob
+
+
+def test_trace_file_redaction_failure_drops_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    path = tmp_path / "state.db"
+    path.write_bytes(b"SQLite format 3\x00" + f"https://api.test/cnf?t={token} ".encode())
+
+    def fail_named_temporary_file(*_args, **_kwargs):
+        raise OSError("temp creation failed")
+
+    monkeypatch.setattr(_module.tempfile, "NamedTemporaryFile", fail_named_temporary_file)
+
+    _redact_query_tokens_in_file(path)
+
+    assert not path.exists()
+
+
+def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    monkeypatch.setattr(_module, "_QUERY_TOKEN_STREAM_CHUNK_BYTES", 5)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "session_s1.json").write_text(
+        json.dumps({"prompt": f"https://api.test/cnf?t={token}&x=1"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "agent.log").write_text(
+        f"fetch https://api.test/cnf?t={token}\n",
+        encoding="utf-8",
+    )
+    sqlite_blob = b"SQLite format 3\x00" + f"https://api.test/cnf?t={token} ".encode()
+    state_db = tmp_path / "state.db"
+    state_db.write_bytes(sqlite_blob)
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        payload = f"skill prompt https://api.test/cnf?t={token}\n".encode()
+        info = tarfile.TarInfo("skills/prompt.txt")
+        info.pax_headers = {"comment": f"https://api.test/cnf?t={token}"}
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+        name_payload = b"token in member name only\n"
+        name_info = tarfile.TarInfo(f"skills/name?t={token}")
+        name_info.size = len(name_payload)
+        tar.addfile(name_info, io.BytesIO(name_payload))
+        link_info = tarfile.TarInfo("skills/link")
+        link_info.type = tarfile.SYMTYPE
+        link_info.linkname = f"https://api.test/cnf?t={token}"
+        tar.addfile(link_info)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    for path in (sessions / "session_s1.json", tmp_path / "logs" / "agent.log", state_db):
+        blob = path.read_bytes()
+        assert token.encode() not in blob
+        assert b"?t=REDACTED" in blob
+    assert state_db.stat().st_size == len(sqlite_blob)
+    with tarfile.open(skills_tar, "r:gz") as tar:
+        member = tar.extractfile("skills/prompt.txt")
+        assert member is not None
+        skills_payload = member.read()
+        members = tar.getmembers()
+    assert token.encode() not in skills_payload
+    assert b"?t=REDACTED" in skills_payload
+    serialized_metadata = "\n".join(
+        f"{member.name} {member.linkname} {member.uname} {member.gname} {member.pax_headers}"
+        for member in members
+    )
+    assert token not in serialized_metadata
+    assert "?t=REDACTED" in serialized_metadata
+
+
+def test_trace_artifact_redaction_scrubs_token_bearing_paths(tmp_path: Path) -> None:
+    token = "SECRET_TOKEN_123456789"
+    sessions = tmp_path / f"sessions?t={token}"
+    sessions.mkdir()
+    token_path = sessions / f"session_?t={token}.json"
+    token_path.write_text(
+        json.dumps({"prompt": f"https://api.test/cnf?t={token}"}),
+        encoding="utf-8",
+    )
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    relative_paths = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    serialized_paths = "\n".join(relative_paths)
+    assert token not in serialized_paths
+    assert "?t=REDACTED" in serialized_paths
+    redacted_files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert len(redacted_files) == 1
+    redacted_blob = redacted_files[0].read_bytes()
+    assert token.encode() not in redacted_blob
+    assert b"?t=REDACTED" in redacted_blob
+
+
+def test_trace_path_redaction_failure_logs_scrub_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    token_path = tmp_path / f"session_?t={token}.json"
+    token_path.write_text("{}", encoding="utf-8")
+    events: list[tuple[str, dict[str, str]]] = []
+
+    class FakeLogger:
+        def warning(self, event: str, **kwargs: str) -> None:
+            events.append((event, kwargs))
+
+    def raising_rename(self: Path, target: Path) -> None:
+        raise OSError(f"cannot rename token path {self} to {target}")
+
+    monkeypatch.setattr(_module, "logger", FakeLogger())
+    monkeypatch.setattr(type(token_path), "rename", raising_rename)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    event, kwargs = next(
+        (event, kwargs)
+        for event, kwargs in events
+        if event == "ssh_hermes_trace_path_redaction_failed"
+    )
+    assert event == "ssh_hermes_trace_path_redaction_failed"
+    assert token not in repr(kwargs)
+    assert "?t=REDACTED" in kwargs["path"]
+    assert "?t=REDACTED" in kwargs["error"]
+
+
+def test_trace_artifact_redaction_drops_archives_with_oversized_members(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        payload = b"x" * 32
+        info = tarfile.TarInfo("skills/huge_prompt.txt")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES", 8)
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES", 64)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
+def test_trace_artifact_redaction_drops_archives_over_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        for idx in range(3):
+            payload = f"member-{idx}".encode()
+            info = tarfile.TarInfo(f"skills/{idx}.txt")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES", 64)
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES", 16)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
+def test_trace_artifact_redaction_drops_archives_over_member_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        for idx in range(3):
+            info = tarfile.TarInfo(f"skills/empty-{idx}.txt")
+            info.size = 0
+            tar.addfile(info, io.BytesIO(b""))
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_MAX_MEMBERS", 2)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
+def test_trace_artifact_redaction_drops_malformed_archives(tmp_path: Path) -> None:
+    token = b"SECRET_TOKEN_123456789"
+    skills_tar = tmp_path / "skills.tar.gz"
+    skills_tar.write_bytes(b"not a valid tarball https://api.test/cnf?t=" + token)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
+def test_trace_artifact_redaction_drops_nested_compressed_members(tmp_path: Path) -> None:
+    token = "SECRET_TOKEN_123456789"
+    skills_tar = tmp_path / "skills.tar.gz"
+    nested_zip = io.BytesIO()
+    with zipfile.ZipFile(nested_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("prompt.txt", f"https://api.test/cnf?t={token}")
+    nested_gz = gzip.compress(f"https://api.test/cnf?t={token}".encode())
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        safe_payload = f"plain prompt https://api.test/cnf?t={token}\n".encode()
+        safe_info = tarfile.TarInfo("skills/plain.txt")
+        safe_info.size = len(safe_payload)
+        tar.addfile(safe_info, io.BytesIO(safe_payload))
+        zip_payload = nested_zip.getvalue()
+        zip_info = tarfile.TarInfo("skills/nested.zip")
+        zip_info.size = len(zip_payload)
+        tar.addfile(zip_info, io.BytesIO(zip_payload))
+        token_named_zip_info = tarfile.TarInfo(f"skills/payload?t={token}.zip")
+        token_named_zip_info.size = len(zip_payload)
+        tar.addfile(token_named_zip_info, io.BytesIO(zip_payload))
+        gz_info = tarfile.TarInfo("skills/nested.gz")
+        gz_info.size = len(nested_gz)
+        tar.addfile(gz_info, io.BytesIO(nested_gz))
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    with tarfile.open(skills_tar, "r:gz") as tar:
+        names = tar.getnames()
+        plain_member = tar.extractfile("skills/plain.txt")
+        assert plain_member is not None
+        plain_payload = plain_member.read()
+    assert "skills/plain.txt" in names
+    assert "skills/nested.zip" not in names
+    assert "skills/payload?t=REDACTED" not in names
+    assert "skills/nested.gz" not in names
+    assert not any("payload" in name for name in names)
+    assert token.encode() not in plain_payload
+    assert b"?t=REDACTED" in plain_payload
+
+
+async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
+    runner_config: SshHermesRunnerConfig,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    conn = MagicMock()
+    conn.run = AsyncMock(return_value=_mk_run_result())
+
+    async def fake_sftp_get(remote: str, local: str) -> None:
+        path = Path(local)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if remote.endswith(".db"):
+            path.write_bytes(b"SQLite format 3\x00" + f"?t={token} ".encode())
+        elif "session_" in remote:
+            path.write_text(json.dumps({"system_prompt": f"https://x/cnf?t={token}"}))
+        elif "request_dump_" in remote:
+            path.write_text(json.dumps({"url": f"https://x/cnf?t={token}&ok=1"}))
+        elif remote.endswith(".log"):
+            path.write_text(f"log url https://x/cnf?t={token}\n")
+        elif remote.endswith(".tar.gz"):
+            with tarfile.open(path, "w:gz") as tar:
+                payload = f"skill memory https://x/cnf?t={token}\n".encode()
+                info = tarfile.TarInfo("skills/memory.txt")
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+        else:
+            path.write_text("stub\n")
+
+    async def fake_listdir(remote: str) -> list[str]:
+        if remote.endswith("/sessions"):
+            return ["session_s1.json", "request_dump_s1_001.json"]
+        return []
+
+    sftp = _mk_sftp()
+    sftp.get = AsyncMock(side_effect=fake_sftp_get)
+    sftp.listdir = AsyncMock(side_effect=fake_listdir)
+    conn.start_sftp_client = MagicMock(return_value=sftp)
+
+    runner = SshHermesRunner(runner_config)
+    bundle = await runner._collect_and_assemble(
+        conn,
+        eval_profile="cathedral-eval-sat",
+        eval_id="eval-sat-redact",
+        submission_id="sub-sat-redact",
+        eval_round="synthetic_boolean_v1-redact",
+        hermes_version="hermes 0.13.0",
+        card_json={"task_type": "synthetic_boolean_v1"},
+        hermes_stdout=f"stdout saw https://x/cnf?t={token}",
+        resolved_home="/home/cathedral-probe/.hermes",
+    )
+
+    found_redaction = False
+    found_inner_redaction = False
+    with tarfile.open(bundle.bundle_tar_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            fileobj = tar.extractfile(member)
+            assert fileobj is not None
+            blob = fileobj.read()
+            assert token.encode() not in blob, member.name
+            found_redaction = found_redaction or b"?t=REDACTED" in blob
+            if member.name.endswith("skills.tar.gz"):
+                with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as skills_tar:
+                    inner = skills_tar.extractfile("skills/memory.txt")
+                    assert inner is not None
+                    inner_blob = inner.read()
+                assert token.encode() not in inner_blob
+                assert b"?t=REDACTED" in inner_blob
+                found_inner_redaction = True
+
+    assert found_redaction
+    assert found_inner_redaction
