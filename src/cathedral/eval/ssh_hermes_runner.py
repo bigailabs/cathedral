@@ -118,10 +118,39 @@ _QUERY_TOKEN_CHAR_BYTES = frozenset(
 _QUERY_TOKEN_STREAM_CHUNK_BYTES = 64 * 1024
 _TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
 _TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+_TRACE_ARCHIVE_MAX_MEMBERS = 4096
 
 
 class _TraceArchiveTooLargeError(Exception):
     """Raised when a compressed trace archive would be too expensive to scrub."""
+
+
+class _TraceArchiveRedactionBudget:
+    """Streaming limits for miner-controlled compressed trace archives."""
+
+    def __init__(self) -> None:
+        self.member_count = 0
+        self.total_file_bytes = 0
+
+    def check(self, member: tarfile.TarInfo) -> None:
+        self.member_count += 1
+        if self.member_count > _TRACE_ARCHIVE_MAX_MEMBERS:
+            raise _TraceArchiveTooLargeError(
+                f"tar archive exceeds member limit: members={self.member_count}"
+            )
+        if not member.isfile():
+            return
+        if member.size < 0:
+            raise _TraceArchiveTooLargeError(f"negative tar member size: {member.name}")
+        if member.size > _TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES:
+            raise _TraceArchiveTooLargeError(
+                f"tar member exceeds redaction limit: {member.name} size={member.size}"
+            )
+        self.total_file_bytes += member.size
+        if self.total_file_bytes > _TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES:
+            raise _TraceArchiveTooLargeError(
+                f"tar archive exceeds redaction limit: total_size={self.total_file_bytes}"
+            )
 
 
 def _redact_query_tokens(s: str) -> str:
@@ -318,9 +347,12 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
         ) as tmp:
             tmp_path = tmp.name
         with tarfile.open(path, "r:gz") as source, tarfile.open(tmp_path, "w:gz") as target:
-            members = source.getmembers()
-            _enforce_trace_archive_redaction_budget(members)
-            for member in members:
+            budget = _TraceArchiveRedactionBudget()
+            # Do not call ``getmembers()`` here: miner-controlled archives can
+            # contain many tiny headers, so validation must happen before the
+            # TarFile object materializes the complete member list.
+            for member in source:
+                budget.check(member)
                 out_member = _redact_query_tokens_in_tar_member(member)
                 if not member.isfile():
                     target.addfile(out_member)
@@ -346,36 +378,31 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
             path=str(path),
             error=str(exc),
         )
-        with suppress(FileNotFoundError):
-            path.unlink()
+        _drop_trace_archive(path)
     except (tarfile.TarError, OSError) as exc:
         logger.warning(
             "ssh_hermes_trace_archive_redaction_failed",
             path=str(path),
             error=str(exc),
         )
+        _drop_trace_archive(path)
     finally:
         if tmp_path is not None:
             with suppress(FileNotFoundError):
                 os.unlink(tmp_path)
 
 
-def _enforce_trace_archive_redaction_budget(members: list[tarfile.TarInfo]) -> None:
-    total = 0
-    for member in members:
-        if not member.isfile():
-            continue
-        if member.size < 0:
-            raise _TraceArchiveTooLargeError(f"negative tar member size: {member.name}")
-        if member.size > _TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES:
-            raise _TraceArchiveTooLargeError(
-                f"tar member exceeds redaction limit: {member.name} size={member.size}"
-            )
-        total += member.size
-        if total > _TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES:
-            raise _TraceArchiveTooLargeError(
-                f"tar archive exceeds redaction limit: total_size={total}"
-            )
+def _drop_trace_archive(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            "ssh_hermes_trace_archive_drop_failed",
+            path=str(path),
+            error=str(exc),
+        )
 
 
 def _redact_query_tokens_in_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo:

@@ -1412,6 +1412,33 @@ def test_trace_artifact_redaction_drops_archives_over_total_budget(
     assert not skills_tar.exists()
 
 
+def test_trace_artifact_redaction_drops_archives_over_member_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        for idx in range(3):
+            info = tarfile.TarInfo(f"skills/empty-{idx}.txt")
+            info.size = 0
+            tar.addfile(info, io.BytesIO(b""))
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_MAX_MEMBERS", 2)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
+def test_trace_artifact_redaction_drops_malformed_archives(tmp_path: Path) -> None:
+    token = b"SECRET_TOKEN_123456789"
+    skills_tar = tmp_path / "skills.tar.gz"
+    skills_tar.write_bytes(b"not a valid tarball https://api.test/cnf?t=" + token)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
 async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
     runner_config: SshHermesRunnerConfig,
 ) -> None:
