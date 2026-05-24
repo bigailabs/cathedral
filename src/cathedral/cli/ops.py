@@ -11,6 +11,8 @@ from pathlib import Path
 import httpx
 import typer
 
+from cathedral.lanes.synthetic_boolean_v1 import DEFAULT_TIME_LIMIT_SECONDS
+
 app = typer.Typer(no_args_is_help=True, help="Cathedral operator CLI")
 
 
@@ -206,7 +208,9 @@ def sat_active_cnf_probe(
         "--min-bytes-per-second",
         min=0.0,
     ),
-    announced_time_limit_secs: int = typer.Option(60, "--announced-time-limit-secs", min=1),
+    announced_time_limit_secs: int = typer.Option(
+        DEFAULT_TIME_LIMIT_SECONDS, "--announced-time-limit-secs", min=1
+    ),
 ) -> None:
     """Fetch the active SAT CNF through the public URL and verify its hash."""
     from cathedral.publisher.sat_cnf_probe import probe_active_sat_cnf_url_from_db
