@@ -361,10 +361,13 @@ assert compute(3, 4) == 12, "hidden frame leaked to miner code"
 
 
 def test_hidden_ctypes_guard_cannot_be_removed_by_miner_code() -> None:
-    probe_file = """import sys
+    probe_file = """import builtins
+import sys
+import types
 
 # patch target
-CTYPES_BYPASS_BLOCKED = False
+REGISTRY_BYPASS_ATTEMPTED = False
+CTYPES_IMPORT_BLOCKED = False
 HIDDEN_FRAME_SEEN = False
 
 def _blocked(exc):
@@ -378,40 +381,45 @@ def _hidden_frame_seen(frame):
     return False
 
 try:
+    # These base-class calls bypass Python subclass overrides on the protected
+    # registries. The audit hook must still stop ctypes after this mutation.
+    types.ModuleType.__setattr__(sys, "modules", dict(sys.modules))
     sys.modules.pop("ctypes", None)
-except RuntimeError as exc:
-    CTYPES_BYPASS_BLOCKED = _blocked(exc)
-
-try:
-    sys.meta_path = [
-        finder
-        for finder in sys.meta_path
-        if finder.__class__.__name__ != "_FrameBlockedImport"
-    ]
-except RuntimeError as exc:
-    CTYPES_BYPASS_BLOCKED = CTYPES_BYPASS_BLOCKED and _blocked(exc)
+    sys.modules.pop("_ctypes", None)
+    list.pop(sys.meta_path, 0)
+    for cell in getattr(builtins.__import__, "__closure__", ()) or ():
+        value = cell.cell_contents
+        if callable(value):
+            builtins.__import__ = value
+            break
+    REGISTRY_BYPASS_ATTEMPTED = True
+except Exception:
+    pass
 
 try:
     import ctypes
     ctypes.pythonapi.PyEval_GetFrame.restype = ctypes.py_object
     HIDDEN_FRAME_SEEN = _hidden_frame_seen(ctypes.pythonapi.PyEval_GetFrame())
 except RuntimeError as exc:
-    CTYPES_BYPASS_BLOCKED = CTYPES_BYPASS_BLOCKED and _blocked(exc)
+    CTYPES_IMPORT_BLOCKED = _blocked(exc)
 else:
     HIDDEN_FRAME_SEEN = True
 
 def compute(x, y):
-    return x * y if CTYPES_BYPASS_BLOCKED and not HIDDEN_FRAME_SEEN else -1
+    blocked = REGISTRY_BYPASS_ATTEMPTED and CTYPES_IMPORT_BLOCKED
+    return x * y if blocked and not HIDDEN_FRAME_SEEN else -1
 """
     harmless_patch = (
         "--- a/m.py\n"
         "+++ b/m.py\n"
-        "@@ -1,4 +1,4 @@\n"
+        "@@ -1,6 +1,6 @@\n"
+        " import builtins\n"
         " import sys\n"
+        " import types\n"
         " \n"
         "-# patch target\n"
         "+# patch target accepted\n"
-        " CTYPES_BYPASS_BLOCKED = False\n"
+        " REGISTRY_BYPASS_ATTEMPTED = False\n"
     )
     hidden = """import sys
 sys.path.insert(0, ".")

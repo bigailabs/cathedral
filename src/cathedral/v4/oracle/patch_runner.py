@@ -287,6 +287,13 @@ def _v4_is_frame_native_module(_name):
     return _name in {"ctypes", "_ctypes"} or _name.startswith("ctypes.")
 
 
+def _v4_frame_native_audit_guard(_event, _args):
+    if _event == "import" and _args and _v4_is_frame_native_module(str(_args[0])):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+    if _event.startswith("ctypes."):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+
+
 def _v4_ensure_ctypes_blockers(_modules):
     for _name in ("ctypes", "_ctypes"):
         dict.__setitem__(_modules, _name, _FrameBlockedModule())
@@ -397,9 +404,12 @@ class _ProtectedSys(_types.ModuleType):
 # Native ctypes access can call CPython C-API helpers such as PyEval_GetFrame,
 # bypassing the Python-level frame guards above. Hidden tests should not depend
 # on native process introspection, so block ctypes before miner imports run.
-# Keep the guard anchored in protected sys registries: miner-controlled modules
-# can mutate sys.modules/sys.meta_path during import, and removing either guard
-# reopens ctypes.pythonapi.PyEval_GetFrame().
+# The audit hook is the non-removable protection: miner code can invoke base
+# dict/list/module mutators against sys.modules, sys.meta_path, or sys itself,
+# but Python-level code cannot unregister an audit hook once it is installed.
+_sys.addaudithook(_v4_frame_native_audit_guard)
+# Keep the mutable registry blockers as defense in depth and for clearer
+# failures on ordinary imports. The audit hook remains authoritative.
 _sys.modules = _ProtectedModules(_sys.modules)
 _v4_ensure_ctypes_blockers(_sys.modules)
 _sys.meta_path = _ProtectedMetaPath([_FRAME_BLOCK_IMPORT, *_sys.meta_path])
