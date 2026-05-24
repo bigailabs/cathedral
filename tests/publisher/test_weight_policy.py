@@ -114,6 +114,163 @@ async def test_weight_policy_limit_applies_after_task_family_blending(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_disable_legacy_base_scores_skips_agent_submissions(tmp_path) -> None:
+    """With disable_legacy_base_scores=True, legacy v1 ranked rows do not
+    contribute to the signed vector. Only task-family lane rows pay."""
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        # Legacy ranked submission with no SAT samples - should NOT appear
+        # in scores when disable_legacy_base_scores is True.
+        await _seed_ranked_submission(conn, "agent-legacy", "hk-legacy-only", current_score=0.85)
+        # SAT-participating hotkey with a schema-5 eval row.
+        await _seed_ranked_submission(conn, "agent-sat", "hk-sat-participant")
+        await repository.insert_eval_run(
+            conn,
+            id="sat-run-1",
+            submission_id="agent-sat",
+            epoch=1,
+            round_index=0,
+            polaris_agent_id="ssh-hermes:hk-sat-participant",
+            polaris_run_id="synthetic_boolean_v1:sat-run-1",
+            task_json={"task_type": "synthetic_boolean_v1"},
+            output_card_json={},
+            output_card_hash="hash-sat-run-1",
+            score_parts={"binary_correct": 1.0},
+            weighted_score=1.0,
+            ran_at=datetime.now(UTC),
+            duration_ms=1,
+            errors=None,
+            cathedral_signature="sig",
+            eval_output_schema_version=5,
+        )
+
+        # With legacy disabled, only the SAT hotkey appears.
+        sat_only = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=10,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+            disable_legacy_base_scores=True,
+        )
+        assert sat_only == {"hk-sat-participant": 1.0}
+        assert "hk-legacy-only" not in sat_only
+
+        # Default (legacy enabled) sanity check: legacy hotkey is present.
+        with_legacy = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=10,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+        )
+        assert "hk-legacy-only" in with_legacy
+        assert with_legacy["hk-legacy-only"] == 0.85
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_disable_legacy_full_producer_locked_path_excludes_legacy_hotkey(tmp_path) -> None:
+    """End-to-end producer test through the locked branch (production config).
+
+    Seeds a legacy-only ranked hotkey and a SAT-participating hotkey, runs
+    produce_weight_policy_once with state_write_lock + disable_legacy=True,
+    and asserts the SignedWeightVector contains only the SAT hotkey AND
+    that policy_metadata.score_source reflects the SAT-only input.
+    """
+    conn = await connect(str(tmp_path / "publisher.db"))
+    lock = asyncio.Lock()
+    store = WeightPolicyStore()
+    try:
+        await _seed_ranked_submission(conn, "agent-legacy", "hk-legacy-only", current_score=0.77)
+        await _seed_ranked_submission(conn, "agent-sat", "hk-sat-participant")
+        await repository.insert_eval_run(
+            conn,
+            id="sat-run-production",
+            submission_id="agent-sat",
+            epoch=1,
+            round_index=0,
+            polaris_agent_id="ssh-hermes:hk-sat-participant",
+            polaris_run_id="synthetic_boolean_v1:sat-run-production",
+            task_json={"task_type": "synthetic_boolean_v1"},
+            output_card_json={},
+            output_card_hash="hash-sat-run-production",
+            score_parts={"binary_correct": 1.0},
+            weighted_score=1.0,
+            ran_at=datetime.now(UTC),
+            duration_ms=1,
+            errors=None,
+            cathedral_signature="sig",
+            eval_output_schema_version=5,
+        )
+
+        config = WeightPolicyProducerConfig(
+            valid_for_secs=3600,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+            disable_legacy_base_scores=True,
+        )
+        vector = await produce_weight_policy_once(
+            conn,
+            store,
+            _private_key(),
+            config=config,
+            issued_at=datetime(2026, 5, 24, 12, 0, tzinfo=UTC),
+            state_write_lock=lock,
+        )
+
+        hotkeys = {entry.miner_hotkey: entry.weight for entry in vector.weights}
+        assert hotkeys == {"hk-sat-participant": 1.0}, (
+            f"locked production path leaked legacy hotkey: {hotkeys}"
+        )
+        assert vector.policy_metadata["score_source"] == "configured_task_family_rows", (
+            f"score_source must reflect SAT-only input when flag is on, "
+            f"got {vector.policy_metadata['score_source']!r}"
+        )
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_disable_legacy_propagates_through_locked_production_path(monkeypatch) -> None:
+    """Regression guard: the state_write_lock branch in produce_weight_policy_once
+    must pass disable_legacy_base_scores through to latest_policy_scores_by_hotkey.
+
+    Previously only the no-lock branch wired the kwarg, so production
+    (which always passes db_write_lock) silently ignored the flag.
+    """
+    store = WeightPolicyStore()
+    lock = asyncio.Lock()
+    stop = asyncio.Event()
+    captured_kwargs: dict = {}
+
+    async def fake_scores(*_args, **kwargs) -> dict[str, float]:
+        captured_kwargs.update(kwargs)
+        return {}
+
+    async def fake_next_version(_conn, *, issued_at: datetime) -> int:
+        stop.set()
+        return int(issued_at.timestamp() * 1000)
+
+    monkeypatch.setattr(weight_policy_module, "latest_policy_scores_by_hotkey", fake_scores)
+    monkeypatch.setattr(weight_policy_module, "_next_policy_version", fake_next_version)
+
+    await run_weight_policy_producer(
+        object(),
+        store,
+        _private_key(),
+        config=WeightPolicyProducerConfig(
+            interval_secs=3600,
+            valid_for_secs=3600,
+            disable_legacy_base_scores=True,
+        ),
+        stop=stop,
+        db_write_lock=lock,
+    )
+
+    assert captured_kwargs.get("disable_legacy_base_scores") is True, (
+        "production locked path must pass disable_legacy_base_scores through; "
+        f"got kwargs={captured_kwargs}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_weight_policy_producer_locks_snapshot_and_state_write(monkeypatch) -> None:
     store = WeightPolicyStore()
     lock = asyncio.Lock()

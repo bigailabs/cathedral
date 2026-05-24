@@ -29,6 +29,11 @@ Keep:
 task_family_weights = { synthetic_boolean_v1 = 0.0 }
 ```
 
+For the publisher-side SAT cutover toggle
+(`CATHEDRAL_WEIGHT_POLICY_DISABLE_LEGACY_BASE_SCORES`) see
+[../lanes/sat-operations-runbook.md](../lanes/sat-operations-runbook.md#sat-only-cutover-toggle-publisher).
+Validators read the resulting signed weights as normal.
+
 Env:
 
 ```bash

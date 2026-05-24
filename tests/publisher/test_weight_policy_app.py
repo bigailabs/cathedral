@@ -22,6 +22,8 @@ def _clear_weight_policy_env(monkeypatch) -> None:
         "CATHEDRAL_WEIGHT_POLICY_LIMIT",
         "CATHEDRAL_WEIGHT_POLICY_TASK_FAMILY_WEIGHTS_JSON",
         "CATHEDRAL_WEIGHT_POLICY_SYNTHETIC_BOOLEAN_V1_WEIGHT",
+        "CATHEDRAL_WEIGHT_POLICY_TASK_FAMILY_SINCE_DAYS",
+        "CATHEDRAL_WEIGHT_POLICY_DISABLE_LEGACY_BASE_SCORES",
     ):
         monkeypatch.delenv(name, raising=False)
 
