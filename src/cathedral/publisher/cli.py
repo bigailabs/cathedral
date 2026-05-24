@@ -11,6 +11,7 @@ import structlog
 import typer
 import uvicorn
 
+from cathedral.lanes.synthetic_boolean_v1 import DEFAULT_TIME_LIMIT_SECONDS
 from cathedral.logging import configure
 from cathedral.validator.db import connect
 
@@ -406,7 +407,9 @@ def sat_active_cnf_probe(
         "--min-bytes-per-second",
         min=0.0,
     ),
-    announced_time_limit_secs: int = typer.Option(60, "--announced-time-limit-secs", min=1),
+    announced_time_limit_secs: int = typer.Option(
+        DEFAULT_TIME_LIMIT_SECONDS, "--announced-time-limit-secs", min=1
+    ),
 ) -> None:
     """Fetch the active SAT CNF through the public URL and verify its hash."""
     configure()
