@@ -48,12 +48,17 @@ from cathedral.lanes.challenge_lock import (
 from cathedral.lanes.challenge_lock import (
     SqliteChallengeLock,
 )
-from cathedral.lanes.challenge_ops import seed_synthetic_boolean_challenge
+from cathedral.lanes.challenge_ops import (
+    build_synthetic_boolean_challenge_record,
+    seed_synthetic_boolean_challenge,
+)
 from cathedral.lanes.challenge_receipts import (
     SQLITE_SCHEMA as CHALLENGE_RECEIPT_SCHEMA,
 )
 from cathedral.lanes.challenge_receipts import SqliteChallengeReceiptStore
 from cathedral.lanes.challenge_source import (
+    CHALLENGE_STATUS_LOCKED,
+    ChallengeRecord,
     SqliteChallengeSource,
     SqliteFetchTokenStore,
     ensure_sqlite_challenge_source_schema,
@@ -660,6 +665,8 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
                 if os.environ.get(MAX_CNF_BYTES_ENV, "").strip()
                 else None,
             )
+            if await _skip_locked_synthetic_boolean_seed(source, record):
+                return
             await source.upsert(record, now_iso=_now_ms_iso())
             active = await source.activate(
                 family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
@@ -676,6 +683,14 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
                 raise RuntimeError(f"{ACTIVE_CNF_PATH_ENV} could not be read") from None
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from None
+            record = build_synthetic_boolean_challenge_record(
+                cnf_text=cnf_text,
+                tier=tier,
+                challenge_id=challenge_id or None,
+                source="operator_cnf_path",
+            )
+            if await _skip_locked_synthetic_boolean_seed(source, record):
+                return
             active = await seed_synthetic_boolean_challenge(
                 source,
                 cnf_text=cnf_text,
@@ -697,6 +712,48 @@ async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSour
         num_vars=audit.get("num_vars"),
         num_clauses=audit.get("num_clauses"),
         cnf_sha256=audit.get("cnf_sha256"),
+    )
+
+
+async def _skip_locked_synthetic_boolean_seed(
+    source: SqliteChallengeSource,
+    record: ChallengeRecord,
+) -> bool:
+    existing_rows = await source.list_for_family(SYNTHETIC_BOOLEAN_FAMILY_ID)
+    target = next(
+        (row for row in existing_rows if row.challenge_id == record.challenge_id),
+        None,
+    )
+    if target is None or target.status != CHALLENGE_STATUS_LOCKED:
+        return False
+    if not _same_synthetic_boolean_seed_material(target, record):
+        return False
+
+    active = await source.get_active(SYNTHETIC_BOOLEAN_FAMILY_ID)
+    # Startup seeding is replayed from env on every publisher boot. Once a
+    # configured seed has been solved and locked, re-activation would fail and
+    # can brick restarts; skip the idempotent locked row and let any promoted
+    # active challenge continue serving the feed.
+    logger.info(
+        "synthetic_boolean_locked_seed_skipped",
+        family_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+        challenge_id=record.challenge_id,
+        active_challenge_id=active.challenge_id if active is not None else None,
+    )
+    return True
+
+
+def _same_synthetic_boolean_seed_material(
+    existing: ChallengeRecord,
+    incoming: ChallengeRecord,
+) -> bool:
+    return (
+        existing.challenge_id == incoming.challenge_id
+        and existing.family_id == incoming.family_id
+        and existing.tier == incoming.tier
+        and existing.cnf_text == incoming.cnf_text
+        and existing.cnf_path == incoming.cnf_path
+        and existing.audit_metadata == incoming.audit_metadata
     )
 
 

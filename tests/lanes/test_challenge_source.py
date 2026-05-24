@@ -420,3 +420,46 @@ async def test_seed_does_not_reactivate_locked_challenge_on_restart(tmp_path) ->
         ]
     finally:
         await conn.close()
+
+
+async def test_env_seed_skips_locked_seed_after_restart_with_promoted_active(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from cathedral.publisher.app import _seed_synthetic_boolean_challenge_from_env
+
+    cnf_path = tmp_path / "active.cnf"
+    cnf_path.write_text(_TOY_CNF, encoding="utf-8")
+    monkeypatch.setenv("CATHEDRAL_SYNTHETIC_BOOLEAN_V1_ACTIVE_CNF_PATH", str(cnf_path))
+
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await _seed_synthetic_boolean_challenge_from_env(src)
+        first = await src.get_active(_FAMILY)
+        assert first is not None
+        next_challenge = await seed_synthetic_boolean_challenge(
+            src,
+            cnf_text=_OTHER_TOY_CNF,
+            tier=0,
+            now_iso="2026-05-19T00:00:00.500Z",
+            activate=False,
+        )
+        await src.mark_locked_and_promote_next(
+            family_id=_FAMILY,
+            challenge_id=first.challenge_id,
+            now_iso="2026-05-19T00:00:01.000Z",
+        )
+
+        await _seed_synthetic_boolean_challenge_from_env(src)
+
+        active = await src.get_active(_FAMILY)
+        rows = await src.list_for_family(_FAMILY)
+        assert active is not None
+        assert active.challenge_id == next_challenge.challenge_id
+        assert {row.challenge_id: row.status for row in rows} == {
+            first.challenge_id: CHALLENGE_STATUS_LOCKED,
+            next_challenge.challenge_id: CHALLENGE_STATUS_ACTIVE,
+        }
+    finally:
+        await conn.close()

@@ -1009,6 +1009,10 @@ class SshHermesRunner:
                 prompt=build_bug_isolation_prompt(challenge),
                 eval_round=eval_round,
                 resolved_home=resolved_home,
+                # v3 miners control Hermes stdout just like SAT miners do.
+                # Always use the streaming cap so a noisy bug-isolation run
+                # cannot force asyncssh/runner buffering to grow unbounded.
+                max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
             )
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
@@ -1027,6 +1031,7 @@ class SshHermesRunner:
                         prompt=build_bug_isolation_repair_prompt(challenge_id_public),
                         eval_round=eval_round,
                         resolved_home=resolved_home,
+                        max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
                     )
 
             synthetic_card: dict[str, Any] = {
