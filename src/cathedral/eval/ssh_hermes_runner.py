@@ -322,8 +322,8 @@ def _redact_query_tokens_in_artifact_paths(root: Path) -> None:
             except OSError as exc:
                 logger.warning(
                     "ssh_hermes_trace_path_redaction_failed",
-                    path=str(src),
-                    error=str(exc),
+                    path=_redacted_trace_log_value(src),
+                    error=_redacted_trace_log_value(exc),
                 )
                 _drop_trace_path(src)
 
@@ -351,9 +351,16 @@ def _drop_trace_path(path: Path) -> None:
     except OSError as exc:
         logger.warning(
             "ssh_hermes_trace_path_drop_failed",
-            path=str(path),
-            error=str(exc),
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
         )
+
+
+def _redacted_trace_log_value(value: object) -> str:
+    # Trace paths and OSError messages can include miner-controlled filenames.
+    # Run all warning fields through the token scrubber before they reach
+    # operator logs; the artifact redaction path is itself an error surface.
+    return _redact_query_tokens(str(value))
 
 
 def _redact_query_tokens_in_file(path: Path) -> None:
@@ -381,8 +388,8 @@ def _redact_query_tokens_in_file(path: Path) -> None:
     except OSError as exc:
         logger.warning(
             "ssh_hermes_trace_file_redaction_failed",
-            path=str(path),
-            error=str(exc),
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
         )
     finally:
         if tmp_path is not None:
@@ -431,7 +438,7 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
                     # archive inside the public trace.
                     logger.warning(
                         "ssh_hermes_trace_archive_member_dropped_compressed",
-                        path=str(path),
+                        path=_redacted_trace_log_value(path),
                         member=out_member.name,
                     )
                     continue
@@ -453,15 +460,15 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
         # gzip bomb burn publisher CPU/disk during redaction.
         logger.warning(
             "ssh_hermes_trace_archive_redaction_dropped_oversized",
-            path=str(path),
-            error=str(exc),
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
         )
         _drop_trace_archive(path)
     except (tarfile.TarError, OSError) as exc:
         logger.warning(
             "ssh_hermes_trace_archive_redaction_failed",
-            path=str(path),
-            error=str(exc),
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
         )
         _drop_trace_archive(path)
     finally:
@@ -478,8 +485,8 @@ def _drop_trace_archive(path: Path) -> None:
     except OSError as exc:
         logger.warning(
             "ssh_hermes_trace_archive_drop_failed",
-            path=str(path),
-            error=str(exc),
+            path=_redacted_trace_log_value(path),
+            error=_redacted_trace_log_value(exc),
         )
 
 

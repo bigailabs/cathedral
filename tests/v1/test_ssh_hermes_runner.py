@@ -1400,6 +1400,38 @@ def test_trace_artifact_redaction_scrubs_token_bearing_paths(tmp_path: Path) -> 
     assert b"?t=REDACTED" in redacted_blob
 
 
+def test_trace_path_redaction_failure_logs_scrub_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    token_path = tmp_path / f"session_?t={token}.json"
+    token_path.write_text("{}", encoding="utf-8")
+    events: list[tuple[str, dict[str, str]]] = []
+
+    class FakeLogger:
+        def warning(self, event: str, **kwargs: str) -> None:
+            events.append((event, kwargs))
+
+    def raising_rename(self: Path, target: Path) -> None:
+        raise OSError(f"cannot rename token path {self} to {target}")
+
+    monkeypatch.setattr(_module, "logger", FakeLogger())
+    monkeypatch.setattr(type(token_path), "rename", raising_rename)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    event, kwargs = next(
+        (event, kwargs)
+        for event, kwargs in events
+        if event == "ssh_hermes_trace_path_redaction_failed"
+    )
+    assert event == "ssh_hermes_trace_path_redaction_failed"
+    assert token not in repr(kwargs)
+    assert "?t=REDACTED" in kwargs["path"]
+    assert "?t=REDACTED" in kwargs["error"]
+
+
 def test_trace_artifact_redaction_drops_archives_with_oversized_members(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
