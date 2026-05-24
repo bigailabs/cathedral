@@ -414,6 +414,68 @@ assert compute(3, 4) == 12, "traceback exposed hidden frame to miner code"
     assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
+def test_hidden_gc_object_graph_access_is_blocked_for_miner_code() -> None:
+    probe_file = """import gc
+
+# patch target
+GC_ACCESS_BLOCKED = set()
+HIDDEN_GLOBALS_SEEN = False
+
+def _blocked(exc):
+    return "frame inspection is blocked" in str(exc)
+
+def _mark_leak(objects):
+    global HIDDEN_GLOBALS_SEEN
+    for obj in objects:
+        if isinstance(obj, dict) and obj.get("__file__") == "<v4_hidden_test>":
+            if obj.get("EXPECTED_VALUE") == 12 or obj.get("SECRET_SENTINEL"):
+                HIDDEN_GLOBALS_SEEN = True
+
+def _probe_gc_api(name, call):
+    try:
+        objects = call()
+    except RuntimeError as exc:
+        if _blocked(exc):
+            GC_ACCESS_BLOCKED.add(name)
+    else:
+        _mark_leak(objects)
+
+def compute(x, y):
+    _probe_gc_api("get_objects", gc.get_objects)
+    _probe_gc_api("get_referrers", lambda: gc.get_referrers(compute))
+    _probe_gc_api("get_referents", lambda: gc.get_referents(compute))
+    blocked = GC_ACCESS_BLOCKED == {"get_objects", "get_referrers", "get_referents"}
+    return x * y if blocked and not HIDDEN_GLOBALS_SEEN else -1
+"""
+    harmless_patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,5 +1,5 @@\n"
+        " import gc\n"
+        " \n"
+        "-# patch target\n"
+        "+# patch target accepted\n"
+        " GC_ACCESS_BLOCKED = set()\n"
+        " HIDDEN_GLOBALS_SEEN = False\n"
+    )
+    hidden = """EXPECTED_VALUE = 12
+SECRET_SENTINEL = "HIDDEN_GC_SENTINEL_9371"
+import sys
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == EXPECTED_VALUE, "gc exposed hidden globals to miner code"
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": probe_file},
+        patch_str=harmless_patch,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
 def test_hidden_ctypes_guard_cannot_be_removed_by_miner_code() -> None:
     probe_file = """import builtins
 import sys

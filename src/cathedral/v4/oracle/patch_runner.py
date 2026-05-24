@@ -231,12 +231,12 @@ class _BlockedModule:
 for _name in ("requests", "httpx", "aiohttp"):
     _sys.modules.setdefault(_name, _BlockedModule())
 
-# 4) frame-introspection guard. Hidden tests run in the same interpreter as
+# 4) introspection guard. Hidden tests run in the same interpreter as
 #    miner-controlled modules they import. Without this, miner code can walk
-#    caller frames and inspect the <v4_hidden_test> code object/consts while
-#    the hidden test is importing or calling it. Trace/profile callbacks and
-#    ctypes.pythonapi can also produce live frames, so block those APIs before
-#    hidden bytecode executes.
+#    caller frames, traceback objects, or the GC object graph and inspect the
+#    <v4_hidden_test> code object/globals while the hidden test is importing or
+#    calling it. Trace/profile callbacks and ctypes.pythonapi can also produce
+#    live frames, so block those APIs before hidden bytecode executes.
 _FRAME_BLOCKED_MSG = "v4 oracle: frame inspection is blocked inside the hermetic runner"
 
 
@@ -253,6 +253,10 @@ try:
     import threading as _threading
 except Exception:
     _threading = None  # type: ignore[assignment]
+try:
+    import gc as _gc
+except Exception:
+    _gc = None  # type: ignore[assignment]
 import builtins as _builtins
 import types as _types
 
@@ -269,6 +273,10 @@ if _inspect is not None:
 if _threading is not None:
     _threading.settrace = _v4_frame_blocked  # type: ignore[assignment]
     _threading.setprofile = _v4_frame_blocked  # type: ignore[assignment]
+if _gc is not None:
+    _gc.get_objects = _v4_frame_blocked  # type: ignore[assignment]
+    _gc.get_referrers = _v4_frame_blocked  # type: ignore[assignment]
+    _gc.get_referents = _v4_frame_blocked  # type: ignore[assignment]
 
 
 class _FrameBlockedModule:
@@ -291,6 +299,12 @@ def _v4_frame_native_audit_guard(_event, _args):
     if _event == "import" and _args and _v4_is_frame_native_module(str(_args[0])):
         raise RuntimeError(_FRAME_BLOCKED_MSG)
     if _event.startswith("ctypes."):
+        raise RuntimeError(_FRAME_BLOCKED_MSG)
+    if _event in {"gc.get_objects", "gc.get_referrers", "gc.get_referents"}:
+        # Hidden globals are ordinary Python dicts, so GC object-graph APIs can
+        # discover ``{'__file__': '<v4_hidden_test>', ...}`` even when frame and
+        # ctypes access are blocked. The audit hook is non-removable, unlike the
+        # module-level monkeypatches above.
         raise RuntimeError(_FRAME_BLOCKED_MSG)
     if (
         _event == "object.__getattr__"
