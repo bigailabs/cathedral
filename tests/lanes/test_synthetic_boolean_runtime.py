@@ -910,6 +910,14 @@ async def test_synthetic_boolean_reconcile_expires_stale_blocker_and_finalizes_v
 ) -> None:
     monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+    # Test seeds a receipt at now-120s expecting expiration. Pin the timeout
+    # short so this test stays independent of the production default.
+    monkeypatch.setattr(
+        "cathedral.lanes.synthetic_boolean_v1.DEFAULT_TIME_LIMIT_SECONDS", 60
+    )
+    monkeypatch.setattr(
+        "cathedral.eval.orchestrator.DEFAULT_TIME_LIMIT_SECONDS", 60, raising=False
+    )
 
     conn = await connect(str(tmp_path / "publisher.db"))
     try:
