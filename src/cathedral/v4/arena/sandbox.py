@@ -543,7 +543,14 @@ def _apply_hunks(
 
     if deleting:
         if not hunks:
-            raise _DiffError("delete must have at least one hunk")
+            if files[rel]:
+                raise _DiffError("delete must have at least one hunk")
+            # Git emits a no-hunk deletion diff for an empty file. Keep the
+            # stricter hunk validation for non-empty files, but allow this
+            # standard empty-file shape so reproducible patches are accepted.
+            new_files = dict(files)
+            del new_files[rel]
+            return new_files
         # A deletion patch is valid only if its hunks really apply to and remove
         # the complete file. Do not delete just because the header says
         # "+++ /dev/null"; miners must submit a reproducible unified diff.

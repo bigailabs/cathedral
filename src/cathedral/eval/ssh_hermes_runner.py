@@ -116,6 +116,12 @@ _QUERY_TOKEN_CHAR_BYTES = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~%+-"
 )
 _QUERY_TOKEN_STREAM_CHUNK_BYTES = 64 * 1024
+_TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
+_TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+
+
+class _TraceArchiveTooLargeError(Exception):
+    """Raised when a compressed trace archive would be too expensive to scrub."""
 
 
 def _redact_query_tokens(s: str) -> str:
@@ -312,7 +318,9 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
         ) as tmp:
             tmp_path = tmp.name
         with tarfile.open(path, "r:gz") as source, tarfile.open(tmp_path, "w:gz") as target:
-            for member in source.getmembers():
+            members = source.getmembers()
+            _enforce_trace_archive_redaction_budget(members)
+            for member in members:
                 out_member = _redact_query_tokens_in_tar_member(member)
                 if not member.isfile():
                     target.addfile(out_member)
@@ -328,6 +336,18 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
                 target.addfile(out_member, _QueryTokenRedactingReader(extracted))
         os.replace(tmp_path, path)
         tmp_path = None
+    except _TraceArchiveTooLargeError as exc:
+        # Do not publish a miner-controlled compressed artifact that we refused
+        # to inspect: it may still contain an active CNF fetch token. Dropping
+        # the archive preserves the rest of the trace bundle without letting a
+        # gzip bomb burn publisher CPU/disk during redaction.
+        logger.warning(
+            "ssh_hermes_trace_archive_redaction_dropped_oversized",
+            path=str(path),
+            error=str(exc),
+        )
+        with suppress(FileNotFoundError):
+            path.unlink()
     except (tarfile.TarError, OSError) as exc:
         logger.warning(
             "ssh_hermes_trace_archive_redaction_failed",
@@ -338,6 +358,24 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
         if tmp_path is not None:
             with suppress(FileNotFoundError):
                 os.unlink(tmp_path)
+
+
+def _enforce_trace_archive_redaction_budget(members: list[tarfile.TarInfo]) -> None:
+    total = 0
+    for member in members:
+        if not member.isfile():
+            continue
+        if member.size < 0:
+            raise _TraceArchiveTooLargeError(f"negative tar member size: {member.name}")
+        if member.size > _TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES:
+            raise _TraceArchiveTooLargeError(
+                f"tar member exceeds redaction limit: {member.name} size={member.size}"
+            )
+        total += member.size
+        if total > _TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES:
+            raise _TraceArchiveTooLargeError(
+                f"tar archive exceeds redaction limit: total_size={total}"
+            )
 
 
 def _redact_query_tokens_in_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo:

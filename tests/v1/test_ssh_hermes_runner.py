@@ -1375,6 +1375,43 @@ def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
     assert "?t=REDACTED" in serialized_metadata
 
 
+def test_trace_artifact_redaction_drops_archives_with_oversized_members(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        payload = b"x" * 32
+        info = tarfile.TarInfo("skills/huge_prompt.txt")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES", 8)
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES", 64)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
+def test_trace_artifact_redaction_drops_archives_over_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skills_tar = tmp_path / "skills.tar.gz"
+    with tarfile.open(skills_tar, "w:gz") as tar:
+        for idx in range(3):
+            payload = f"member-{idx}".encode()
+            info = tarfile.TarInfo(f"skills/{idx}.txt")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_MEMBER_MAX_UNCOMPRESSED_BYTES", 64)
+    monkeypatch.setattr(_module, "_TRACE_ARCHIVE_TOTAL_MAX_UNCOMPRESSED_BYTES", 16)
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    assert not skills_tar.exists()
+
+
 async def test_collect_and_assemble_redacts_cnf_tokens_before_tarring(
     runner_config: SshHermesRunnerConfig,
 ) -> None:

@@ -147,6 +147,22 @@ def test_write_patch_delete_requires_matching_hunk(tmp_path: Path, vault_path: P
     assert arena.read_file("app/calculator.py") == original
 
 
+def test_write_patch_deletes_empty_file_without_hunks(tmp_path: Path, vault_path: Path) -> None:
+    scrambler = IsomorphicScrambler(vault_path)
+    repo = scrambler.scramble("python_fastapi_base", seed=43, workspace_root=tmp_path)
+    repo.files["empty.txt"] = ""
+    arena = MinerArena(repo)
+
+    ok = arena.write_patch(
+        "--- a/empty.txt\n"
+        "+++ /dev/null\n"
+    )
+
+    assert ok is True
+    with pytest.raises(ArenaError):
+        arena.read_file("empty.txt")
+
+
 def test_run_local_compile_returns_dict(tmp_path: Path, vault_path: Path) -> None:
     scrambler = IsomorphicScrambler(vault_path)
     repo = scrambler.scramble("python_fastapi_base", seed=5, workspace_root=tmp_path)

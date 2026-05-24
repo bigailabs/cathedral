@@ -539,27 +539,31 @@ def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
         candidate_starts[match.start()] = 1
     last: dict[str, Any] | None = None
     stack: list[tuple[int, bool]] = []
+    # Keep this as a counter instead of scanning the stack on every "{";
+    # miners control stdout and brace-heavy logs must remain linear.
+    decodable_depth = 0
     in_string = False
     escaped = False
     previous_nonspace: str | None = None
+    previous_previous_nonspace: str | None = None
 
     for i, ch in enumerate(stdout):
         if not stack:
             if ch == "{":
-                stack.append(
-                    (
-                        i,
-                        _is_json_object_candidate_start(
-                            i,
-                            candidate_starts,
-                            previous_nonspace,
-                            inside_object=False,
-                        ),
-                    )
+                should_decode = _is_json_object_candidate_start(
+                    i,
+                    candidate_starts,
+                    previous_nonspace,
+                    previous_previous_nonspace,
+                    inside_object=False,
                 )
+                stack.append((i, should_decode))
+                if should_decode:
+                    decodable_depth += 1
                 in_string = False
                 escaped = False
             if not ch.isspace():
+                previous_previous_nonspace = previous_nonspace
                 previous_nonspace = ch
             continue
 
@@ -571,44 +575,49 @@ def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
             escaped = False
 
         if not in_string and ch == "{":
-            stack.append(
-                (
-                    i,
-                    _is_json_object_candidate_start(
-                        i,
-                        candidate_starts,
-                        previous_nonspace,
-                        inside_object=True,
-                    ),
-                )
+            should_decode = _is_json_object_candidate_start(
+                i,
+                candidate_starts,
+                previous_nonspace,
+                previous_previous_nonspace,
+                inside_object=decodable_depth > 0,
             )
+            stack.append((i, should_decode))
+            if should_decode:
+                decodable_depth += 1
             if not ch.isspace():
+                previous_previous_nonspace = previous_nonspace
                 previous_nonspace = ch
             continue
 
         if escaped:
             escaped = False
             if not ch.isspace():
+                previous_previous_nonspace = previous_nonspace
                 previous_nonspace = ch
             continue
         if in_string and ch == "\\":
             escaped = True
             if not ch.isspace():
+                previous_previous_nonspace = previous_nonspace
                 previous_nonspace = ch
             continue
         if ch == '"':
             in_string = not in_string
             if not ch.isspace():
+                previous_previous_nonspace = previous_nonspace
                 previous_nonspace = ch
             continue
         if in_string:
             if not ch.isspace():
+                previous_previous_nonspace = previous_nonspace
                 previous_nonspace = ch
             continue
 
         if ch == "}":
             start, should_decode = stack.pop()
             if should_decode:
+                decodable_depth -= 1
                 candidate = stdout[start : i + 1]
                 try:
                     parsed = json.loads(candidate)
@@ -619,6 +628,7 @@ def _scan_last_json_object(stdout: str) -> dict[str, Any] | None:
                         last = parsed
 
         if not ch.isspace():
+            previous_previous_nonspace = previous_nonspace
             previous_nonspace = ch
 
     return last
@@ -628,6 +638,7 @@ def _is_json_object_candidate_start(
     index: int,
     candidate_starts: bytearray,
     previous_nonspace: str | None,
+    previous_previous_nonspace: str | None,
     *,
     inside_object: bool,
 ) -> bool:
@@ -636,9 +647,15 @@ def _is_json_object_candidate_start(
     if not inside_object:
         return True
     # Starts immediately after JSON structural delimiters inside an already
-    # active candidate are nested values. Top-level labels such as
-    # "Final answer: {...}" remain valid bare JSON fallbacks.
-    return previous_nonspace not in {":", "[", ","}
+    # active candidate are nested values. Malformed log prefixes can leave an
+    # outer object open, so labeled bare answers such as "Final answer: {...}"
+    # still need to be eligible while true `"key": {}` values are skipped.
+    if previous_nonspace == ":":
+        # A JSON object value has the shape `"key": {`, but prose labels use
+        # normal word punctuation (`Final answer: {`). Treat only the former as
+        # a nested object when recovering from malformed log prefixes.
+        return previous_previous_nonspace != '"'
+    return previous_nonspace not in {"[", ","}
 
 
 def _parse_ms_iso(value: str) -> datetime:
