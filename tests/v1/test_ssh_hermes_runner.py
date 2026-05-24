@@ -17,6 +17,7 @@ import gzip
 import importlib.util as _ilu
 import io
 import json
+import os
 import sys
 import tarfile
 import zipfile
@@ -1317,6 +1318,45 @@ def test_trace_file_redaction_streams_split_tokens(
     assert token not in redacted
     assert b"\x00NEXT_FIELD" in redacted
     assert len(redacted) == len(original)
+
+
+def test_trace_file_redaction_handles_long_artifact_names(tmp_path: Path) -> None:
+    token = "SECRET_TOKEN_123456789"
+    name_max = os.pathconf(tmp_path, "PC_NAME_MAX")
+    prefix = "request_dump_"
+    suffix = ".json"
+    target_len = min(name_max, 250)
+    fill_len = target_len - len(prefix) - len(suffix)
+    if fill_len < 1:
+        pytest.skip("filesystem NAME_MAX too small for long-name regression")
+    long_name = f"{prefix}{'x' * fill_len}{suffix}"
+    path = tmp_path / long_name
+    path.write_text(json.dumps({"prompt": f"https://api.test/cnf?t={token}"}), encoding="utf-8")
+
+    _redact_query_tokens_in_file(path)
+
+    assert path.exists()
+    blob = path.read_bytes()
+    assert token.encode() not in blob
+    assert b"?t=REDACTED" in blob
+
+
+def test_trace_file_redaction_failure_drops_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = "SECRET_TOKEN_123456789"
+    path = tmp_path / "state.db"
+    path.write_bytes(b"SQLite format 3\x00" + f"https://api.test/cnf?t={token} ".encode())
+
+    def fail_named_temporary_file(*_args, **_kwargs):
+        raise OSError("temp creation failed")
+
+    monkeypatch.setattr(_module.tempfile, "NamedTemporaryFile", fail_named_temporary_file)
+
+    _redact_query_tokens_in_file(path)
+
+    assert not path.exists()
 
 
 def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(

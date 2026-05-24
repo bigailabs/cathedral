@@ -371,7 +371,9 @@ def _redact_query_tokens_in_file(path: Path) -> None:
         with path.open("rb") as source, tempfile.NamedTemporaryFile(
             "wb",
             dir=path.parent,
-            prefix=f".{path.name}.",
+            # Miner-controlled artifact names can sit near NAME_MAX. Keep the
+            # temp basename short so redaction does not fail before scrubbing.
+            prefix=".redact-",
             suffix=".tmp",
             delete=False,
         ) as target:
@@ -391,6 +393,10 @@ def _redact_query_tokens_in_file(path: Path) -> None:
             path=_redacted_trace_log_value(path),
             error=_redacted_trace_log_value(exc),
         )
+        # Redaction is part of the public trace boundary. If we cannot prove a
+        # file was scrubbed, remove it instead of publishing a possible CNF
+        # fetch token in the final bundle.
+        _drop_trace_path(path)
     finally:
         if tmp_path is not None:
             with suppress(FileNotFoundError):
