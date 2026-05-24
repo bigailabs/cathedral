@@ -2,7 +2,7 @@
   <img src="docs/assets/cathedral-mark.svg" alt="Cathedral mark" width="112">
 </p>
 
-<p align="center">Competitive SAT solving as a Bittensor incentive market.</p>
+<p align="center">Agentic SAT solving as a Bittensor incentive market.</p>
 
 <p align="center">
   <a href="https://cathedral.computer">Site</a> |
