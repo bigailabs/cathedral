@@ -60,6 +60,7 @@ logger = structlog.get_logger(__name__)
 _UNSHARE_MIN_VERSION: tuple[int, int] = (2, 36)
 _MAX_CAPTURED_STREAM_BYTES = 256 * 1024
 _PIPE_READ_BYTES = 16 * 1024
+_PIPE_WRITE_BYTES = 16 * 1024
 _OUTPUT_OVERSIZED_MARKER = b"\n[v4 oracle output exceeded capture limit]\n"
 
 
@@ -558,19 +559,22 @@ def _communicate_bounded(
     stderr = bytearray()
     oversized = False
 
-    if proc.stdin is not None:
-        try:
-            proc.stdin.write(stdin_bytes)
-            proc.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass
-
     selector = selectors.DefaultSelector()
+    stdin_state: dict[str, object] | None = None
     try:
+        if proc.stdin is not None:
+            # Hidden-test bytecode can exceed the OS pipe buffer, and a broken
+            # child may never read stdin. Put stdin under the same selector and
+            # deadline as stdout/stderr so payload delivery cannot hang the
+            # publisher before timeout accounting starts.
+            with suppress(OSError):
+                os.set_blocking(proc.stdin.fileno(), False)
+            stdin_state = {"payload": memoryview(stdin_bytes), "offset": 0}
+            selector.register(proc.stdin, selectors.EVENT_WRITE, ("stdin", stdin_state))
         if proc.stdout is not None:
-            selector.register(proc.stdout, selectors.EVENT_READ, stdout)
+            selector.register(proc.stdout, selectors.EVENT_READ, ("stdout", stdout))
         if proc.stderr is not None:
-            selector.register(proc.stderr, selectors.EVENT_READ, stderr)
+            selector.register(proc.stderr, selectors.EVENT_READ, ("stderr", stderr))
 
         while selector.get_map():
             remaining = deadline - time.monotonic()
@@ -582,22 +586,30 @@ def _communicate_bounded(
 
             events = selector.select(timeout=min(remaining, 0.05))
             for key, _mask in events:
-                if _read_pipe_event(
-                    selector,
-                    key,
-                    max_stream_bytes=max_stream_bytes,
-                ):
-                    oversized = True
-                    _kill_process_group(proc)
+                kind, _data = key.data
+                if kind == "stdin":
+                    _write_stdin_event(selector, key)
+                    continue
+                if kind in {"stdout", "stderr"}:
+                    if _read_pipe_event(
+                        selector,
+                        key,
+                        max_stream_bytes=max_stream_bytes,
+                    ):
+                        oversized = True
+                        _kill_process_group(proc)
+                        _close_stdin_pipe(selector, proc.stdin)
             if proc.poll() is not None and selector.get_map():
-                return _finish_exited_parent_with_inherited_pipes(
-                    proc,
-                    selector,
-                    stdout=stdout,
-                    stderr=stderr,
-                    oversized=oversized,
-                    max_stream_bytes=max_stream_bytes,
-                )
+                _close_stdin_pipe(selector, proc.stdin)
+                if selector.get_map():
+                    return _finish_exited_parent_with_inherited_pipes(
+                        proc,
+                        selector,
+                        stdout=stdout,
+                        stderr=stderr,
+                        oversized=oversized,
+                        max_stream_bytes=max_stream_bytes,
+                    )
 
         try:
             returncode: int | None = proc.wait(timeout=0.5)
@@ -608,7 +620,53 @@ def _communicate_bounded(
             stderr.extend(_OUTPUT_OVERSIZED_MARKER)
         return bytes(stdout), bytes(stderr), returncode, False
     finally:
+        _close_stdin_pipe(selector, proc.stdin)
+        del stdin_state
         selector.close()
+
+
+def _write_stdin_event(
+    selector: selectors.BaseSelector,
+    key: selectors.SelectorKey,
+) -> None:
+    _kind, state = key.data
+    payload = state["payload"]
+    offset = state["offset"]
+    assert isinstance(payload, memoryview)
+    assert isinstance(offset, int)
+    if offset >= len(payload):
+        _close_registered_file(selector, key.fileobj)
+        return
+
+    try:
+        written = os.write(
+            key.fileobj.fileno(),
+            payload[offset : offset + _PIPE_WRITE_BYTES],
+        )
+    except BlockingIOError:
+        return
+    except (BrokenPipeError, OSError):
+        _close_registered_file(selector, key.fileobj)
+        return
+
+    state["offset"] = offset + written
+    if state["offset"] >= len(payload):
+        _close_registered_file(selector, key.fileobj)
+
+
+def _close_stdin_pipe(
+    selector: selectors.BaseSelector,
+    stdin: object,
+) -> None:
+    if stdin is not None:
+        _close_registered_file(selector, stdin)
+
+
+def _close_registered_file(selector: selectors.BaseSelector, fileobj: object) -> None:
+    with suppress(Exception):
+        selector.unregister(fileobj)
+    with suppress(Exception):
+        fileobj.close()
 
 
 def _read_pipe_event(
@@ -626,7 +684,7 @@ def _read_pipe_event(
             selector.unregister(key.fileobj)
         return False
 
-    sink: bytearray = key.data
+    _kind, sink = key.data
     available = max_stream_bytes - len(sink)
     if available > 0:
         sink.extend(chunk[:available])

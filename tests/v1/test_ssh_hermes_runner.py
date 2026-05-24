@@ -1377,6 +1377,29 @@ def test_trace_artifact_redaction_scrubs_cnf_tokens_preserving_sqlite_bytes(
     assert "?t=REDACTED" in serialized_metadata
 
 
+def test_trace_artifact_redaction_scrubs_token_bearing_paths(tmp_path: Path) -> None:
+    token = "SECRET_TOKEN_123456789"
+    sessions = tmp_path / f"sessions?t={token}"
+    sessions.mkdir()
+    token_path = sessions / f"session_?t={token}.json"
+    token_path.write_text(
+        json.dumps({"prompt": f"https://api.test/cnf?t={token}"}),
+        encoding="utf-8",
+    )
+
+    _redact_query_tokens_in_artifact_tree(tmp_path)
+
+    relative_paths = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    serialized_paths = "\n".join(relative_paths)
+    assert token not in serialized_paths
+    assert "?t=REDACTED" in serialized_paths
+    redacted_files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert len(redacted_files) == 1
+    redacted_blob = redacted_files[0].read_bytes()
+    assert token.encode() not in redacted_blob
+    assert b"?t=REDACTED" in redacted_blob
+
+
 def test_trace_artifact_redaction_drops_archives_with_oversized_members(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -406,6 +406,37 @@ def test_jail_bounded_communicate_kills_oversized_stdout() -> None:
     assert b"output exceeded capture limit" in stderr
 
 
+def test_jail_bounded_communicate_times_out_while_writing_stdin() -> None:
+    """A child that never reads stdin must still respect the wall timeout."""
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import time; time.sleep(5)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    started = time.monotonic()
+    stdout, stderr, returncode, timed_out = _jail._communicate_bounded(
+        proc,
+        stdin_bytes=b"x" * (4 * 1024 * 1024),
+        timeout_seconds=0.2,
+        max_stream_bytes=1024,
+    )
+    elapsed = time.monotonic() - started
+
+    assert timed_out is True
+    assert returncode is None
+    assert stdout == b""
+    assert stderr == b""
+    assert elapsed < 1.0
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="inherited pipe regression is POSIX-only")
 def test_jail_bounded_communicate_reaps_exited_parent_with_inherited_pipes() -> None:
     """A silent grandchild holding stdio open must not force a timeout."""

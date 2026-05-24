@@ -65,6 +65,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import tarfile
 import tempfile
 import time
@@ -296,6 +297,63 @@ def _redact_query_tokens_in_artifact_tree(root: Path) -> None:
         if path.suffix in {".gz", ".zip"}:
             continue
         _redact_query_tokens_in_file(path)
+    _redact_query_tokens_in_artifact_paths(root)
+
+
+def _redact_query_tokens_in_artifact_paths(root: Path) -> None:
+    """Rename token-bearing trace paths before manifest/tar creation.
+
+    The final public manifest records relative paths and ``tar.add`` preserves
+    names. Content redaction alone is not enough if Hermes/miner-controlled
+    filenames copy a SAT CNF URL token into a path component.
+    """
+    for parent_str, dirnames, filenames in os.walk(root, topdown=False):
+        parent = Path(parent_str)
+        for name in sorted([*filenames, *dirnames]):
+            redacted_name = _redact_query_tokens(name)
+            if redacted_name == name:
+                continue
+            src = parent / name
+            if not src.exists():
+                continue
+            dest = _unique_redacted_artifact_path(src, parent / redacted_name)
+            try:
+                src.rename(dest)
+            except OSError as exc:
+                logger.warning(
+                    "ssh_hermes_trace_path_redaction_failed",
+                    path=str(src),
+                    error=str(exc),
+                )
+                _drop_trace_path(src)
+
+
+def _unique_redacted_artifact_path(src: Path, dest: Path) -> Path:
+    if not dest.exists():
+        return dest
+    digest = hashlib.sha256(src.name.encode("utf-8", "surrogatepass")).hexdigest()[:10]
+    candidate = dest.with_name(f"{dest.name}.redacted-{digest}")
+    counter = 1
+    while candidate.exists():
+        candidate = dest.with_name(f"{dest.name}.redacted-{digest}.{counter}")
+        counter += 1
+    return candidate
+
+
+def _drop_trace_path(path: Path) -> None:
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            "ssh_hermes_trace_path_drop_failed",
+            path=str(path),
+            error=str(exc),
+        )
 
 
 def _redact_query_tokens_in_file(path: Path) -> None:
