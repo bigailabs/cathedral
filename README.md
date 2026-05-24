@@ -2,63 +2,69 @@
   <img src="docs/assets/cathedral-mark.svg" alt="Cathedral mark" width="112">
 </p>
 
-<h1 align="center">Cathedral</h1>
-
-<h3 align="center">Cathedral pays for fundamental algorithmic change in the substrate underneath modern computing.</h3>
-
-<p align="center">A Bittensor subnet with publisher-scored work and on-chain weight finalization.</p>
+<p align="center">Competitive SAT solving as a Bittensor incentive market.</p>
 
 <p align="center">
   <a href="https://cathedral.computer">Site</a> |
   <a href="https://api.cathedral.computer">Publisher API</a>
 </p>
 
-## How Cathedral works
+<h1 align="center">Cathedral</h1>
 
-- Miners run their own agents and infrastructure. The live agent path is BYO Box: miners submit an agent bundle, and Cathedral evaluates it through SSH/Hermes.
-- Cathedral still keeps the legacy `/v1/claim` path alive for existing Polaris-evidence submissions.
-- Cathedral signs every evaluation row with its Ed25519 key.
-- Validators pull signed rows, verify Cathedral signatures, map hotkeys to local metagraph uids, and call `set_weights`. Validators do not re-run the eval.
-- `synthetic_boolean_v1` (SAT) is the first Task Family lane on top of this scored-and-signed pipeline. It is one lane, not a new protocol.
+## [Why Cathedral](#why-cathedral)
 
-## Current Path And SAT Lane
+SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
-The live production path is the agent pipeline. Miners submit bundles through `POST /v1/agents/submit`; the publisher evaluates them and signs rows that validators pull. The legacy `/v1/claim` worker still exists for older Polaris-evidence submissions. SAT weight on `config/mainnet.toml` is `0.0`.
+Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral creates a Bittensor incentive loop for that work.
 
-The codebase includes the SAT lane, but mainnet SAT is disabled by default. Enabling it requires deploying the publisher with the SAT feed on and moving validator-local task-family weight above `0.0` in a controlled release.
+- **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
 
-SAT weight must remain at `0.0` unless the deployed branch carries the first-submitted receipt ordering state machine and the global zero-score kill switch. Do not enable SAT from a branch whose docs and code disagree on winner ordering.
+- **Strong today, stronger tomorrow.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. [SolSearch](https://arxiv.org/abs/2502.14328) showed LLM-driven SAT solver code generation improving Z3 PAR-2 by 11 percent on its reported benchmark.
 
-Static site copy and demo views must not be treated as live SAT metrics.
+- **Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
 
-## Getting started
+## [How It Works](#how-it-works)
 
-### For miners
+### Incentive Mechanism
 
-[docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md)
+1. Miner is scored under a registered Bittensor hotkey.
+2. Cathedral gives the miner a private SAT challenge.
+3. Miner returns a DIMACS satisfying assignment.
+4. Cathedral checks the assignment against the private formula and records publisher-observed receipt time.
+5. Cathedral signs a hash-only score row.
+6. Validator verifies the Cathedral signature and maps the hotkey to the current metagraph UID.
+7. Validator applies the configured weight policy and calls `set_weights`.
 
-You need:
+By default, validators pull signed score rows. Remote signed-weight mode is opt-in: validators verify signed weight vectors and burn snapshots instead of deriving weights locally.
 
-- A registered Bittensor hotkey.
-- A reachable Linux host that Cathedral can SSH into.
-- Hermes installed for the SSH user Cathedral will run.
-- Your own solver or wrapper available inside that environment.
+SAT scoring:
 
-Miners keep solver source, wrappers, logs, and infrastructure private. Cathedral verifies only the final DIMACS answer returned by the run.
+- `1.0`: valid satisfying assignment that wins the active challenge.
+- `0.0`: invalid, malformed, incomplete, non-winning, locked, or verifier-error answer.
 
-### For validators
+Winning is selected by publisher receipt time, not first verified time.
 
-[docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md)
+### Proofs and Protections
 
-The validator pulls signed eval rows, verifies Ed25519 signatures, stores rows, maps hotkeys to uids, computes weights locally, and calls `set_weights`.
+| Claim | Mechanism |
+|---|---|
+| **Hotkey scoped** | Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped. |
+| **Publisher signed** | Eval rows are Ed25519-signed by Cathedral and verified by validators. |
+| **Remote policy** | When enabled, validators require a pinned key and verify the vector signature, key id, network, netuid, expiry, and burn snapshot. |
+| **Hash-only feed** | Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers. |
+| **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
+| **Receipt ordered** | Winning SAT receipt is selected by publisher-observed receipt time after Hermes stdout returns. |
+| **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID. |
 
-### For operators
+The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 
-[docs/lanes/synthetic-boolean-launch-rails.md](docs/lanes/synthetic-boolean-launch-rails.md)
+---
 
-One active formula at a time. Eligible miners race the same formula. The launch rule is first submitted among valid receipts: Cathedral records receipt time before trace collection, verification marks receipts valid or invalid, and durable selection waits behind earlier unresolved receipts before selecting the earliest valid answer.
+## 🚀 [Getting Started](#getting-started)
 
-## Install
+Use the quick starts below to work inside the subnet.
+
+### Installation
 
 ```bash
 git clone https://github.com/cathedralai/cathedral
@@ -68,43 +74,34 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-This installs `cathedral`, `cathedral-validator`, and `cathedral-miner`.
+### [Miner Quick Start](docs/miner/QUICKSTART.md)
 
-## Tests
+You need:
 
-```bash
-PYTHONPATH=src pytest tests/lanes/test_contract.py -k synthetic_boolean_v1 -q
-PYTHONPATH=src pytest tests/lanes/test_synthetic_boolean_runtime.py tests/test_weight_loop.py -q
+- registered hotkey
+- Linux SSH host
+- Hermes on `PATH`
+- private solver or wrapper
+
+Return exactly:
+
+````text
+```FINAL_ANSWER
+{
+  "dimacs_solution": "s SATISFIABLE\nv 1 -2 3 0\n"
+}
 ```
+````
 
-## Run
+### [Validator Quick Start](docs/validator/RUNBOOK.md)
+
+Default mode pulls signed rows:
 
 ```bash
 export CATHEDRAL_BEARER=$(openssl rand -hex 32)
 export CATHEDRAL_PUBLIC_KEY_HEX=<cathedral-eval-signing-public-key>
 
 cathedral-validator migrate --config config/mainnet.toml
+cathedral chain-check --config config/mainnet.toml
 cathedral-validator serve --config config/mainnet.toml
 ```
-
-## Trust model in one paragraph
-
-Cathedral is the verifier-of-record for private SAT challenges. Validators verify Cathedral's signature and the policy fields on each row, not the SAT solution itself. The private corpus and active formulas stay publisher-private. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#trust-model) for the full statement and the conditions under which validator-independent verification could be added later.
-
-## Public and private boundaries
-
-Public surfaces may expose only hash-backed SAT result rows: task id hash, answer hash, verifier details hash, score fields, schema version, Cathedral signature.
-
-Public surfaces must not expose raw CNF text, submitted DIMACS solutions, hidden metadata, private corpus material, trace bundle URLs, manifest URLs, or private score material.
-
-The public repository must not contain real `.cnf`, `.dimacs`, or `.sol` files.
-
-## Documentation map
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): component map, async loops, database, trust model.
-- [docs/VALIDATOR.md](docs/VALIDATOR.md): validator mechanism notes.
-- [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md): day-2 validator operator runbook.
-- [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md): primary SAT miner guide.
-- [docs/miner/MIGRATION_TO_SAT.md](docs/miner/MIGRATION_TO_SAT.md): staged miner migration plan.
-- [docs/lanes/synthetic-boolean-launch-rails.md](docs/lanes/synthetic-boolean-launch-rails.md): SAT launch sequencing and public/private boundaries.
-- [RELEASES.md](RELEASES.md): shipped release history.

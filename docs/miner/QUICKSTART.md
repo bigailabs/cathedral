@@ -1,88 +1,37 @@
 # Miner Quickstart
 
-This is the primary miner guide for the SAT launch path.
+This is the SAT miner contract for `synthetic_boolean_v1`.
 
-Cathedral uses your own infrastructure. Cathedral SSHs into your declared host, invokes Hermes, sends the active DIMACS CNF challenge, and reads your final answer from stdout. Your solver stays private.
+## You Need
 
-## Status
+- registered Bittensor hotkey
+- Linux SSH host
+- dedicated SSH user
+- Hermes on `PATH`
+- private solver or wrapper
 
-The codebase includes the SAT lane. Mainnet SAT is disabled until operators deploy the feed and intentionally change validator-local SAT weighting.
+You do not publish solver source.
 
-## Prerequisites
+Shadow rounds may run before SAT has mainnet weight. Scored rounds require operator release notice.
 
-- Bittensor coldkey and hotkey registered on the target subnet.
-- Linux host reachable by SSH from Cathedral.
-- Dedicated unprivileged SSH user for Cathedral runs.
-- Hermes installed and on `PATH` for that SSH user.
-- A solver or wrapper available to Hermes on your host.
-- Enough local CPU, memory, disk, and timeout budget for your solver.
+## Flow
 
-You do not need to publish your solver source or upload a model by default.
+1. Cathedral picks one active CNF.
+2. Eligible miners race it.
+3. Cathedral SSHs into your host.
+4. Hermes gives your wrapper:
+   - `public_input.cnf_url`
+   - `public_input.cnf_sha256`
+5. Your wrapper fetches the CNF.
+6. Your wrapper checks SHA-256.
+7. Your solver runs privately.
+8. Your wrapper prints one final answer.
+9. Cathedral verifies every clause.
+10. First submitted valid answer wins.
 
-## How Mining Works
+## Final Answer
 
-1. Cathedral selects one active SAT formula.
-2. All eligible miners race the same active formula.
-3. Cathedral SSHs into each miner's host through the existing Hermes path.
-4. Hermes receives a prompt containing `public_input.cnf_url` and `public_input.cnf_sha256`.
-5. Your wrapper fetches the CNF with a plain HTTP GET and verifies the SHA-256 hash before solving.
-6. Your Hermes profile runs any private command, script, solver, or wrapper you choose.
-7. Your run prints one final JSON answer.
-8. Cathedral records a hash-only receipt as soon as stdout returns, then parses the DIMACS solution, checks every clause, and scores:
-   - `1.0` for a valid satisfying assignment.
-   - `0.0` for malformed, incomplete, contradictory, out-of-range, unsatisfied, or missing answers.
-9. The first-submitted valid receipt wins the active challenge. Later answers for that challenge do not score.
-10. The operator advances to the next formula.
-
-Cathedral verifies the result, not your method.
-
-## Migration From The Current Miner Path
-
-Existing miners do not need to stop mining the agent pipeline while SAT is staged. Migration is additive:
-
-1. Keep the current registered hotkey and agent submission path running.
-2. Add a SAT wrapper on the same host or a separate Linux host.
-3. Install Hermes for the SSH user Cathedral will invoke.
-4. Dry-run the wrapper against toy DIMACS locally before exposing the host.
-5. Register the host, SSH user, display name, hotkey, and hardware line with Cathedral operators.
-6. Join SAT shadow rounds while `synthetic_boolean_v1` weight remains `0.0`.
-7. Move to scored SAT rounds only after the feed, verifier, and validator-local weight path are stable.
-
-The miner contract is the public answer shape and the hotkey identity. Solver code, solver strategy, and infrastructure details stay private.
-
-## Expected Wrapper Behavior
-
-Your wrapper should:
-
-- Read `public_input.cnf_url` and `public_input.cnf_sha256` from the Hermes prompt.
-- Fetch the CNF from that URL with no extra headers.
-- Verify the response body SHA-256 matches `public_input.cnf_sha256`.
-- Run your solver privately.
-- Preserve solver-style output.
-- Return only one fenced `FINAL_ANSWER` JSON block.
-- Cover every variable in the `v` lines.
-- End DIMACS solution lines with `0`.
-
-The accepted JSON shape is:
-
-```json
-{
-  "dimacs_solution": "s SATISFIABLE\nv 1 -2 3 0\n"
-}
-```
-
-The `dimacs_solution` value should look like normal SAT solver output:
-
-```text
-s SATISFIABLE
-v 1 -2 3 0
-```
-
-Multiple `v` lines are allowed. Cathedral combines them during parsing.
-
-## Answer Format
-
-Print exactly one final answer block:
+Print exactly:
 
 ````text
 ```FINAL_ANSWER
@@ -92,42 +41,54 @@ Print exactly one final answer block:
 ```
 ````
 
-Do not include explanations, markdown tables, logs, or extra JSON keys in the final answer.
+Rules:
 
-## What Not To Submit
+- one JSON key only
+- key is `dimacs_solution`
+- value is SAT solver output
+- include `s SATISFIABLE`
+- assign every variable
+- end `v` lines with `0`
+- no logs
+- no explanations
+- no extra keys
 
-Do not submit:
+## Score
 
-- Solver source code.
-- Raw formula files.
-- Separate `.cnf`, `.dimacs`, or `.sol` files.
-- Private corpus material.
-- Your logs or infrastructure details.
-- Multiple answer objects.
-- An `assignment` dictionary. That draft shape is retired.
+| Case | Score |
+|---|---:|
+| First valid satisfying assignment | `1.0` |
+| Invalid answer | `0.0` |
+| Malformed answer | `0.0` |
+| Incomplete assignment | `0.0` |
+| Late after challenge lock | `0.0` |
 
 ## Common Rejections
 
-| Rejection | Meaning | Fix |
-|---|---|---|
-| `answer_missing_dimacs_solution` | Final JSON did not include `dimacs_solution`. | Return the exact key. |
-| `answer_unexpected_keys` | Final JSON included extra keys. | Return only `dimacs_solution`. |
-| `solution_unparseable` | DIMACS solver output could not be parsed. | Keep `s SATISFIABLE` and `v ... 0` lines. |
-| `solution_incomplete_assignment` | Not every variable was assigned. | Emit a complete assignment. |
-| `solution_variable_out_of_range` | Assignment referenced a variable outside the CNF range. | Check variable ids before returning. |
-| `solution_unsatisfied` | At least one clause is false. | Re-run verification locally before printing. |
-| `challenge_already_locked` | Another miner already solved this active challenge. | Wait for the next challenge. |
+| Rejection | Meaning |
+|---|---|
+| `answer_missing_dimacs_solution` | Missing required key. |
+| `answer_unexpected_keys` | Extra key returned. |
+| `solution_unparseable` | DIMACS could not be parsed. |
+| `solution_incomplete_assignment` | Not every variable was assigned. |
+| `solution_variable_out_of_range` | Variable id is outside the CNF. |
+| `solution_unsatisfied` | At least one clause is false. |
+| `challenge_already_locked` | Another miner already won. |
 
-## Troubleshooting
+## Private
 
-- If Cathedral cannot connect, check SSH reachability, the SSH user, and firewall rules.
-- If Hermes is not found, make sure `hermes` is on `PATH` for the SSH user, not only your login shell.
-- If your run times out, make your wrapper fail fast and print no final answer unless it has a valid solution.
-- If your answer parses locally but scores `0.0`, verify that every variable is assigned exactly once and every clause is satisfied.
-- If you see no SAT challenge, the lane may not be enabled on the deployed publisher yet.
+Keep private:
 
-## Support
+- solver source
+- wrapper details
+- logs
+- raw CNFs
+- raw solutions
+- benchmark notes
 
-- Public site: <https://cathedral.computer>
-- Publisher API: <https://api.cathedral.computer>
-- Release state: [../../RELEASES.md](../../RELEASES.md)
+Public miner surface:
+
+- hotkey
+- host reachability
+- hardware line
+- final answer format

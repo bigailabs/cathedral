@@ -1,6 +1,6 @@
 # Validator Handoff
 
-A clean handoff is a property of the system, not a one-time event. If the validator cannot be handed to another operator with this document plus credentials, the handoff itself is broken — file an issue.
+A clean handoff is a property of the system, not a one-time event. If the validator cannot be handed to another operator with this document plus credentials, the handoff itself is broken - file an issue.
 
 ## What the incoming operator gets
 
