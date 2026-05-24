@@ -436,7 +436,9 @@ def _redact_query_tokens_in_tar_gz(path: Path) -> None:
                 if not member.isfile():
                     target.addfile(out_member)
                     continue
-                if _is_unsupported_compressed_trace_member(out_member):
+                if _is_unsupported_compressed_trace_member(
+                    member
+                ) or _is_unsupported_compressed_trace_member(out_member):
                     # Deflated/nested archive bytes usually do not contain the
                     # literal ``?t=`` token, so the streaming byte redactor
                     # cannot prove those payloads are safe. Drop unsupported
@@ -497,8 +499,12 @@ def _drop_trace_archive(path: Path) -> None:
 
 
 def _is_unsupported_compressed_trace_member(member: tarfile.TarInfo) -> bool:
-    name = member.name.lower().split("?", 1)[0]
-    return member.isfile() and name.endswith(_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES)
+    name = member.name.lower()
+    before_query = name.split("?", 1)[0]
+    return member.isfile() and (
+        name.endswith(_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES)
+        or before_query.endswith(_TRACE_ARCHIVE_UNSUPPORTED_COMPRESSED_MEMBER_SUFFIXES)
+    )
 
 
 def _redact_query_tokens_in_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -1614,6 +1620,10 @@ class SshHermesRunner:
             prompt=wrapped_prompt,
             eval_round=eval_round,
             resolved_home=resolved_home,
+            # Ordinary v2 ssh-hermes card evals are miner-controlled stdout
+            # too. Use the same streaming cap as SAT/v3 so asyncssh never
+            # buffers unbounded output in the publisher process.
+            max_stdout_bytes=self.config.task_family_stdout_limit_bytes,
         )
         card_json = _extract_card_json(stdout)
         if card_json is None:

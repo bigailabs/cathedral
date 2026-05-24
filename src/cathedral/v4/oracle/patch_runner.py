@@ -408,9 +408,9 @@ class _ProtectedMetaPath(list):
 class _ProtectedSys(_types.ModuleType):
     def __setattr__(self, _name, _value):
         if _name == "modules":
-            _wrapped = _ProtectedModules(_value)
-            _v4_ensure_ctypes_blockers(_wrapped)
-            return _types.ModuleType.__setattr__(self, _name, _wrapped)
+            _modules = dict(_value)
+            _v4_ensure_ctypes_blockers(_modules)
+            return _types.ModuleType.__setattr__(self, _name, _modules)
         if _name == "meta_path":
             _items = list(_value)
             if not any(_item is _FRAME_BLOCK_IMPORT for _item in _items):
@@ -433,9 +433,11 @@ class _ProtectedSys(_types.ModuleType):
 # dict/list/module mutators against sys.modules, sys.meta_path, or sys itself,
 # but Python-level code cannot unregister an audit hook once it is installed.
 _sys.addaudithook(_v4_frame_native_audit_guard)
-# Keep the mutable registry blockers as defense in depth and for clearer
-# failures on ordinary imports. The audit hook remains authoritative.
-_sys.modules = _ProtectedModules(_sys.modules)
+# Keep mutable registry blockers as defense in depth and for clearer failures
+# on ordinary imports, but leave ``sys.modules`` as an exact ``dict``. CPython's
+# import machinery depends on that implementation detail on some supported
+# versions. The audit hook remains the non-removable protection if miner code
+# deletes these entries or restores ``builtins.__import__``.
 _v4_ensure_ctypes_blockers(_sys.modules)
 _sys.meta_path = _ProtectedMetaPath([_FRAME_BLOCK_IMPORT, *_sys.meta_path])
 _sys.__class__ = _ProtectedSys

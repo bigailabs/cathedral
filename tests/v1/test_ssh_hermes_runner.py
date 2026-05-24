@@ -172,6 +172,21 @@ class _FakeStreamingProcess:
         self.closed = True
 
 
+def _install_streaming_hermes(
+    conn: Any,
+    stdout: str,
+    *,
+    captured_cmds: list[str] | None = None,
+) -> None:
+    async def _create_process(cmd: str, **_kwargs: Any) -> Any:
+        if captured_cmds is not None:
+            captured_cmds.append(cmd)
+        assert "hermes chat -Q" in cmd
+        return _FakeStreamingProcess([stdout.encode("utf-8")])
+
+    conn.create_process = AsyncMock(side_effect=_create_process)
+
+
 # --------------------------------------------------------------------------
 # Config + constructor
 # --------------------------------------------------------------------------
@@ -377,6 +392,10 @@ async def test_happy_path_returns_card_and_bundle(runner_config, eval_task, subm
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route_run(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+    )
 
     # SFTP: pretend every requested file exists but write empty bytes
     # to local dest. For session_*.json we plant a realistic doc so
@@ -495,6 +514,7 @@ async def test_hermes_not_found_on_missing_binary(runner_config, eval_task, subm
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(conn, "I cannot produce a card today, sorry.")
 
     fake_asyncssh = MagicMock()
     fake_asyncssh.connect = AsyncMock(return_value=conn)
@@ -630,6 +650,7 @@ async def test_hermes_output_malformed_when_no_json_in_stdout(runner_config, eva
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(conn, "I cannot produce a card today, sorry.")
 
     fake_asyncssh = MagicMock()
     fake_asyncssh.connect = AsyncMock(return_value=conn)
@@ -681,6 +702,10 @@ async def test_manifest_shape_matches_spec(runner_config, eval_task, submission)
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+    )
 
     async def fake_get(remote: str, local: str):
         p = Path(local)
@@ -758,6 +783,11 @@ async def test_verify_command_resolves_tilde_to_absolute_path(runner_config, eva
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -825,6 +855,11 @@ async def test_absolute_hermes_home_still_shlex_quoted(
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -879,6 +914,11 @@ async def test_hermes_chat_q_invocation_no_legacy_flags(runner_config, eval_task
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -935,6 +975,11 @@ async def test_hermes_invocation_uses_chat_q_not_z(runner_config, eval_task, sub
         return _mk_run_result()
 
     conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    _install_streaming_hermes(
+        conn,
+        f"```json\n{json.dumps(card_json)}\n```\n",
+        captured_cmds=captured_cmds,
+    )
     sftp = _mk_sftp()
     conn.start_sftp_client = MagicMock(return_value=sftp)
 
@@ -1182,6 +1227,33 @@ async def test_task_family_uses_announced_problem_time_limit(runner_config, subm
 
     runner._invoke_hermes_text.assert_awaited_once()
     assert runner._invoke_hermes_text.await_args.kwargs["timeout_secs"] == 7.0
+    assert runner._invoke_hermes_text.await_args.kwargs["max_stdout_bytes"] == (
+        runner_config.task_family_stdout_limit_bytes
+    )
+
+
+@pytest.mark.asyncio
+async def test_standard_ssh_hermes_invocation_uses_streaming_stdout_cap(
+    runner_config,
+) -> None:
+    runner = SshHermesRunner(runner_config)
+    runner._invoke_hermes_text = AsyncMock(
+        return_value='{"id":"eu-ai-act","no_legal_advice":true}'
+    )
+
+    card, stdout = await runner._invoke_hermes(
+        MagicMock(),
+        eval_profile="cathedral-eval-standard",
+        prompt="Make a card.",
+        eval_round="round-1",
+        resolved_home="/home/cathedral-probe/.hermes",
+    )
+
+    assert card["id"] == "eu-ai-act"
+    assert stdout == '{"id":"eu-ai-act","no_legal_advice":true}'
+    runner._invoke_hermes_text.assert_awaited_once()
+    # Standard v2 card evals are miner-controlled too; this assertion prevents
+    # this path from drifting back to asyncssh's unbounded buffered runner.
     assert runner._invoke_hermes_text.await_args.kwargs["max_stdout_bytes"] == (
         runner_config.task_family_stdout_limit_bytes
     )
@@ -1552,6 +1624,9 @@ def test_trace_artifact_redaction_drops_nested_compressed_members(tmp_path: Path
         zip_info = tarfile.TarInfo("skills/nested.zip")
         zip_info.size = len(zip_payload)
         tar.addfile(zip_info, io.BytesIO(zip_payload))
+        token_named_zip_info = tarfile.TarInfo(f"skills/payload?t={token}.zip")
+        token_named_zip_info.size = len(zip_payload)
+        tar.addfile(token_named_zip_info, io.BytesIO(zip_payload))
         gz_info = tarfile.TarInfo("skills/nested.gz")
         gz_info.size = len(nested_gz)
         tar.addfile(gz_info, io.BytesIO(nested_gz))
@@ -1565,7 +1640,9 @@ def test_trace_artifact_redaction_drops_nested_compressed_members(tmp_path: Path
         plain_payload = plain_member.read()
     assert "skills/plain.txt" in names
     assert "skills/nested.zip" not in names
+    assert "skills/payload?t=REDACTED" not in names
     assert "skills/nested.gz" not in names
+    assert not any("payload" in name for name in names)
     assert token.encode() not in plain_payload
     assert b"?t=REDACTED" in plain_payload
 

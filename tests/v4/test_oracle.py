@@ -553,6 +553,26 @@ assert compute(3, 4) == 12, "ctypes guard was removed"
     assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
+def test_hidden_async_import_keeps_sys_modules_compatible() -> None:
+    hidden = """import sys
+assert type(sys.modules) is dict, "sys.modules must remain import-compatible"
+import asyncio
+assert asyncio.__name__ == "asyncio"
+sys.path.insert(0, ".")
+from m import compute
+assert compute(3, 4) == 12
+"""
+
+    result = run_patch_against_hidden_test(
+        original_repo_state={"m.py": PRICE_FILE},
+        patch_str=PRICE_FIX,
+        hidden_test_code=hidden,
+    )
+
+    assert result.patch_applied is True
+    assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
 def test_resolve_jail_python_runtime_uses_current_minor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
