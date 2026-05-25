@@ -178,7 +178,19 @@ async def test_bug_isolation_persist_is_write_and_read_gated(tmp_path) -> None:
         gated = await repository.list_eval_runs_recent(conn, since=since, include_v3=False)
         assert gated == []
 
-        rows = await repository.list_eval_runs_recent(conn, since=since, include_v3=True)
+        # PR1 (SN39 recovery): leaderboard reads are scoped to
+        # schema_version >= 5 unconditionally. bug_isolation_v1 writes
+        # schema 3 so it is no longer surfaced through
+        # list_eval_runs_recent regardless of feed flags. The
+        # wire/signature roundtrip is verified against the per-submission
+        # read instead.
+        leaderboard_rows = await repository.list_eval_runs_recent(
+            conn, since=since, include_v3=True
+        )
+        assert leaderboard_rows == []
+        rows = await repository.list_eval_runs_for_submission(
+            conn, submission["id"]
+        )
         assert len(rows) == 1
         wire = _eval_run_to_output(rows[0], submission)
         verify_eval_output_signature(wire, sk.public_key())
@@ -236,7 +248,17 @@ async def test_orchestrator_runs_bug_isolation_lane_when_feed_is_enabled(
         assert len(runner.calls) == 1
         assert runner.calls[0]["miner_hotkey"] == "5BugIsolationMinerHotkey"
         since = datetime(2000, 1, 1, tzinfo=UTC)
-        rows = await repository.list_eval_runs_recent(conn, since=since, include_v3=True)
+        # PR1 (SN39 recovery): leaderboard reads are scoped to
+        # schema_version >= 5; bug_isolation_v1 (schema 3) is
+        # intentionally absent from the public feed. The wire/signature
+        # roundtrip is verified against the per-submission read.
+        leaderboard_rows = await repository.list_eval_runs_recent(
+            conn, since=since, include_v3=True
+        )
+        assert leaderboard_rows == []
+        rows = await repository.list_eval_runs_for_submission(
+            conn, submission["id"]
+        )
         assert len(rows) == 1
         wire = _eval_run_to_output(rows[0], submission)
         verify_eval_output_signature(wire, sk.public_key())
