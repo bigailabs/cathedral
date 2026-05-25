@@ -272,9 +272,13 @@ async def test_v3_full_package_firewall(
         assert rec["manifest_hash"] == "MANIFEST_HASH_HEX"
 
         # 2. Public output_card_json must not leak oracle or sidecar URLs.
-        since = datetime(2000, 1, 1, tzinfo=UTC)
-        rows = await repository.list_eval_runs_recent(
-            conn, since=since, include_v3=True
+        # PR1 (SN39 recovery): list_eval_runs_recent is scoped to
+        # schema_version >= 5 so bug_isolation_v1 (schema 3) no longer
+        # appears on the leaderboard. The per-submission read still
+        # surfaces the row and lets us assert the public-projection
+        # contract on output_card_json.
+        rows = await repository.list_eval_runs_for_submission(
+            conn, submission["id"]
         )
         assert len(rows) == 1
         row = rows[0]
@@ -397,9 +401,13 @@ async def test_v3_sidecar_failure_does_not_crash_eval(
             log=_FakeLog(),
         )
 
-        since = datetime(2000, 1, 1, tzinfo=UTC)
-        rows = await repository.list_eval_runs_recent(
-            conn, since=since, include_v3=True
+        # PR1 (SN39 recovery): leaderboard reads are scoped to
+        # schema_version >= 5; bug_isolation_v1 writes schema 3 so the
+        # row is intentionally absent from the public feed. The
+        # per-submission read still surfaces the row and lets the
+        # sidecar-failure smoke test verify that one row was persisted.
+        rows = await repository.list_eval_runs_for_submission(
+            conn, submission["id"]
         )
         assert len(rows) == 1
     finally:
