@@ -78,6 +78,7 @@ from cathedral.publisher.sat_preflight import (
     STORAGE_MODE_SQLITE_TEXT,
     read_operator_cnf_file,
 )
+from cathedral.publisher.dead_routes import router as dead_routes_router
 from cathedral.publisher.submit import router as submit_router
 from cathedral.publisher.weight_policy import (
     WeightPolicyStore,
@@ -445,12 +446,11 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     async def _root() -> dict[str, Any]:
         return {
             "service": "cathedral-publisher",
-            "description": "Publisher API for Cathedral SN39.",
+            "description": "Publisher API for Cathedral SN39 (SAT lane).",
             "links": {
                 "health": "/health",
                 "skill": "/skill.md",
                 "api": "/api/cathedral",
-                "eval_spec": "/api/cathedral/v1/cards/eu-ai-act/eval-spec",
                 "recent_signed_evals": "/api/cathedral/v1/leaderboard/recent",
                 "sat_readiness": (
                     "/api/cathedral/v1/synthetic-boolean/readiness-probe"
@@ -471,6 +471,13 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     app.include_router(reads_router, prefix="/api/cathedral")
     app.include_router(submit_router, include_in_schema=False)
     app.include_router(reads_router, include_in_schema=False)
+
+    # PR2: card-era endpoints respond with HTTP 410 Gone. Mounted on both
+    # prefixes so legacy callers using either the canonical /api/cathedral
+    # path or the back-compat /v1 root land on the same migration pointer.
+    # `include_in_schema=False` on every route keeps /openapi.json clean.
+    app.include_router(dead_routes_router, prefix="/api/cathedral")
+    app.include_router(dead_routes_router, include_in_schema=False)
 
     # Public CNF endpoint for the synthetic boolean lane. Same dual-mount
     # so callers using either the canonical /api/cathedral prefix or the
