@@ -927,12 +927,18 @@ async def list_eval_runs_recent(
     the join is defense-in-depth in case a future code path inserts one.
     """
     since_str = _ms_z(since)
-    schema_gates: list[str] = []
+    # PR1 (SN39 recovery): unconditional SAT-era inclusion filter. Card-era
+    # rows (schema_version=1, task_type 'eu-ai-act'/'us-ai-eo'/etc.) were
+    # being bucketed by Path A validators as v1 primary incentive and paid
+    # out on chain despite zero SAT work. Scoping the recent-feed to
+    # schema >= 5 closes that leak at the source for
+    # ``/v1/leaderboard/recent`` and the validator pull loop.
+    schema_gates: list[str] = ["er.eval_output_schema_version >= 5"]
     if not include_v3:
         schema_gates.append("er.eval_output_schema_version != 3")
     if not include_task_families:
         schema_gates.append("er.eval_output_schema_version != 5")
-    schema_gate = "AND " + " AND ".join(schema_gates) if schema_gates else ""
+    schema_gate = "AND " + " AND ".join(schema_gates)
     if since_id is None:
         # Legacy v1.0.7-style cursor: strict `>` on ran_at only.
         cur = await conn.execute(
