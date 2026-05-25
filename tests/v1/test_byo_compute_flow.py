@@ -46,13 +46,14 @@ def test_skill_md_route_returns_markdown(publisher_client: object) -> None:
     assert "text/markdown" in ctype, f"expected text/markdown, got {ctype!r}"
     body = r.text
     # Spot-check that the canonical content is present and substantive.
-    assert "Cathedral skill" in body
-    assert "**Live lanes**" in body
+    assert "Cathedral SAT miner contract" in body
     assert "`synthetic_boolean_v1` SAT is live on mainnet" in body
     assert "**Live vertical**" not in body
+    assert "EU AI Act" not in body
+    assert "bug_isolation_v1" not in body
+    assert "Card schema" not in body
     assert "/v1/agents/submit" in body
     assert "X-Cathedral-Signature" in body
-    assert "no_legal_advice" in body
     assert len(body) > 2000, "skill.md should be substantive (> 2 KiB)"
 
 
@@ -78,18 +79,14 @@ def test_api_root_points_to_public_entrypoints(publisher_client: object) -> None
 
 
 def test_skill_md_mentions_byo_path(publisher_client: object) -> None:
-    """skill.md must teach BYO-compute, the only live mining path in v1.
-
-    v1.1.0 made BYO Box (`ssh-probe`) the sole production path. The
-    legacy Polaris-hosted runtime is no longer the alternative; the
-    previous "polaris must be named" assertion was retired with that
-    migration.
-    """
+    """skill.md must teach the SSH-probe registration path."""
     if publisher_client is None:
         pytest.skip("publisher app not buildable")
     r = publisher_client.get("/skill.md")  # type: ignore[attr-defined]
     body = r.text.lower()
-    assert "byo" in body or "bring your own" in body
+    assert "ssh-probe" in body
+    assert "ssh_host" in body
+    assert "ssh_user" in body
 
 
 def test_skill_md_includes_public_safe_sat_contract(publisher_client: object) -> None:
@@ -101,9 +98,8 @@ def test_skill_md_includes_public_safe_sat_contract(publisher_client: object) ->
     lowered = body.lower()
 
     assert "synthetic_boolean_v1" in body
-    assert "static contract and onboarding reference" in lowered
-    assert "not a challenge feed" in lowered
-    assert "sat challenges are not listed" in lowered
+    assert "the active cnf url is not public or enumerable" in lowered
+    assert "issued only inside" in lowered
     assert "public_input.cnf_url" in body
     assert "public_input.cnf_sha256" in body
     assert "num_vars" in body
@@ -112,9 +108,8 @@ def test_skill_md_includes_public_safe_sat_contract(publisher_client: object) ->
     assert "SHA-256" in body
     assert "```FINAL_ANSWER" in body
     assert '"dimacs_solution"' in body
-    assert "first submitted among valid receipts, not first verified" in lowered
-    assert "sat mainnet weight is live" in lowered
-    assert "active cnf url is issued only inside cathedral's ssh/hermes eval prompt" in lowered
+    assert "race order is first submitted valid receipt" in lowered
+    assert "`synthetic_boolean_v1` sat is live on mainnet" in lowered
     assert "/api/cathedral/v1/synthetic-boolean/readiness-probe" in body
     assert "always returns `weighted_score: 0.0`" in body
 

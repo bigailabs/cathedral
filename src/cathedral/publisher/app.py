@@ -492,10 +492,9 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     app.include_router(weight_policy_router, prefix="/api/cathedral")
     app.include_router(weight_policy_router, include_in_schema=False)
 
-    # Agent-facing onboarding - Moltbook-style. A miner pastes
-    # `Read https://api.cathedral.computer/skill.md and follow the
-    # instructions to mine the eu-ai-act card` into their AI agent;
-    # the agent fetches this URL and self-registers.
+    # Agent-facing onboarding. A miner points their agent at skill.md;
+    # the agent reads the live SAT contract and registers through the
+    # SSH-probe flow.
     from fastapi.responses import PlainTextResponse
 
     from cathedral.publisher.skill_md import SKILL_MD_CONTENT
