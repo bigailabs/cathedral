@@ -811,6 +811,11 @@ def _seed_eval_runs_at_same_ms(db_path: str, *, count: int, ran_at_iso: str) -> 
                     duration_ms=100,
                     errors=None,
                     cathedral_signature="stub-signature-not-verified-by-this-test",
+                    # PR1 (SN39 recovery): list_eval_runs_recent now filters
+                    # to eval_output_schema_version >= 5; seed the cursor-
+                    # mechanics fixtures as SAT-shaped rows so the tests
+                    # exercise pagination behaviour, not the schema gate.
+                    eval_output_schema_version=5,
                 )
             await conn.commit()
         finally:
@@ -820,7 +825,9 @@ def _seed_eval_runs_at_same_ms(db_path: str, *, count: int, ran_at_iso: str) -> 
     return asyncio.run(_do())
 
 
-def test_leaderboard_recent_legacy_cursor_drains_ms_collision_burst(publisher_app, tmp_path):
+def test_leaderboard_recent_legacy_cursor_drains_ms_collision_burst(
+    publisher_app, tmp_path, monkeypatch
+):
     """v1.1.0 deploy-blocker fix: a v1.0.7 validator polling with just
     ``?since=...`` (no ``since_id``) MUST be able to walk through more
     rows than ``limit`` at the same millisecond.
@@ -838,9 +845,14 @@ def test_leaderboard_recent_legacy_cursor_drains_ms_collision_burst(publisher_ap
     via normal traffic. The audit acknowledges that >limit rows at one
     millisecond is unsolvable for a stateless single-string cursor —
     this test pins the cursor-advancement behavior, not full drain.
+
+    PR1 (SN39 recovery): the cursor fixture inserts schema_version=5
+    rows; the ``/v1/leaderboard/recent`` handler only surfaces them when
+    ``CATHEDRAL_TASK_FAMILY_FEED_ENABLED`` is on.
     """
     from fastapi.testclient import TestClient
 
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
     ran_at_iso = "2026-05-10T12:00:00.000Z"
     db_path = str(tmp_path / "publisher.db")
 
@@ -891,7 +903,9 @@ def test_leaderboard_recent_legacy_cursor_drains_ms_collision_burst(publisher_ap
         )
 
 
-def test_leaderboard_recent_tuple_cursor_drains_ms_collision_burst(publisher_app, tmp_path):
+def test_leaderboard_recent_tuple_cursor_drains_ms_collision_burst(
+    publisher_app, tmp_path, monkeypatch
+):
     """v1.1.0 tuple cursor: a validator threading
     ``since_ran_at`` + ``since_id`` MUST drain all rows at a boundary
     millisecond across pages of ``limit``.
@@ -900,9 +914,14 @@ def test_leaderboard_recent_tuple_cursor_drains_ms_collision_burst(publisher_app
     smoke test ``test_v107_v110_back_compat`` exercises the v1.0.7 side
     of the wire; this one pins the v1.1.0-validator side against the
     real publisher (no in-memory fake).
+
+    PR1 (SN39 recovery): the cursor fixture inserts schema_version=5
+    rows; the ``/v1/leaderboard/recent`` handler only surfaces them when
+    ``CATHEDRAL_TASK_FAMILY_FEED_ENABLED`` is on.
     """
     from fastapi.testclient import TestClient
 
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
     ran_at_iso = "2026-05-10T12:00:00.000Z"
     db_path = str(tmp_path / "publisher.db")
 
@@ -948,7 +967,9 @@ def test_leaderboard_recent_tuple_cursor_drains_ms_collision_burst(publisher_app
         )
 
 
-def test_leaderboard_recent_legacy_and_tuple_agree_on_normal_traffic(publisher_app, tmp_path):
+def test_leaderboard_recent_legacy_and_tuple_agree_on_normal_traffic(
+    publisher_app, tmp_path, monkeypatch
+):
     """Sanity: when ``ran_at`` values do NOT collide, the legacy cursor
     (``?since=...``) and the tuple cursor
     (``?since_ran_at=...&since_id=...``) return the same set of rows
@@ -957,6 +978,10 @@ def test_leaderboard_recent_legacy_and_tuple_agree_on_normal_traffic(publisher_a
     Pins forward-progress equivalence so a single subnet running a mix
     of v1.0.x and v1.1.0 validators sees the same eval feed on both
     binaries during the rollout window.
+
+    PR1 (SN39 recovery): the cursor fixture inserts schema_version=5
+    rows; the ``/v1/leaderboard/recent`` handler only surfaces them when
+    ``CATHEDRAL_TASK_FAMILY_FEED_ENABLED`` is on.
     """
     import asyncio
     import secrets
@@ -967,6 +992,7 @@ def test_leaderboard_recent_legacy_and_tuple_agree_on_normal_traffic(publisher_a
     from cathedral.publisher import repository
     from cathedral.validator.db import connect as connect_db
 
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
     db_path = str(tmp_path / "publisher.db")
 
     with TestClient(publisher_app) as client:
@@ -1033,6 +1059,12 @@ def test_leaderboard_recent_legacy_and_tuple_agree_on_normal_traffic(publisher_a
                         duration_ms=100,
                         errors=None,
                         cathedral_signature="stub-signature-not-verified-by-this-test",
+                        # PR1 (SN39 recovery): list_eval_runs_recent now
+                        # filters to eval_output_schema_version >= 5; seed
+                        # this cursor-equivalence fixture as SAT-shaped
+                        # rows so the test exercises cursor mechanics, not
+                        # the schema gate.
+                        eval_output_schema_version=5,
                     )
                 await conn.commit()
             finally:
