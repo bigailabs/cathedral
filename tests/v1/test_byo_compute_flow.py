@@ -58,18 +58,25 @@ def test_skill_md_route_returns_markdown(publisher_client: object) -> None:
 
 
 def test_api_root_points_to_public_entrypoints(publisher_client: object) -> None:
-    """GET / gives humans a small map instead of FastAPI's default 404."""
+    """GET / gives humans a small map instead of FastAPI's default 404.
+
+    PR2: the card-era eval-spec link is gone — that endpoint now returns
+    HTTP 410. The root response was updated to drop the link and the
+    description gained a ``(SAT lane)`` suffix.
+    """
     if publisher_client is None:
         pytest.skip("publisher app not buildable")
     r = publisher_client.get("/")  # type: ignore[attr-defined]
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "cathedral-publisher"
-    assert body["description"] == "Publisher API for Cathedral SN39."
+    assert "SAT lane" in body["description"], body["description"]
     assert body["links"]["health"] == "/health"
     assert body["links"]["skill"] == "/skill.md"
     assert body["links"]["api"] == "/api/cathedral"
-    assert body["links"]["eval_spec"] == "/api/cathedral/v1/cards/eu-ai-act/eval-spec"
+    assert "eval_spec" not in body["links"], (
+        "PR2: /v1/cards/{id}/eval-spec is now a 410 stub; drop the link"
+    )
     assert body["links"]["recent_signed_evals"] == "/api/cathedral/v1/leaderboard/recent"
     assert (
         body["links"]["sat_readiness"]
