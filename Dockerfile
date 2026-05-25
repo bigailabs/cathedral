@@ -29,24 +29,12 @@ EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONFAULTHANDLER=1
 
-# Bootstrap on every container start:
-# 1. seed-cards: idempotent INSERT-or-UPDATE of the launch card_definitions
-#    row (EU AI Act). Cheap; runs even if the row already exists.
-# 2. load-eval-spec: pulls real EU AI Act content from the public
-#    cathedral-eval-spec GitHub repo and updates the row. Idempotent.
-#    Failure is non-fatal (logs to stderr, container still starts); we'd
-#    rather serve placeholder content than refuse to start.
-# 3. archive-cards: marks the 4 deprecated launch-plan card IDs as
-#    status='archived' so submit and eval-spec endpoints return 404 for
-#    them. Idempotent; no-op on a fresh DB that never seeded them.
-# 4. serve: start uvicorn + the FastAPI app + background eval orchestrator.
+# Post-PR2 bootstrap: SAT lane only. The card_definitions seed /
+# load-eval-spec / archive-cards bootstrap steps were removed when the
+# card-era endpoints were stripped — there are no cards to seed, the
+# only accepted card_id is `synthetic_boolean_v1` (the SAT task family
+# marker), and registrations never read card_definitions.
 CMD ["sh", "-c", "\
-  echo '[startup] seed-cards' && \
-  cathedral-publisher seed-cards --db ${CATHEDRAL_DB_PATH} && \
-  echo '[startup] load-eval-spec' && \
-  cathedral-publisher load-eval-spec --db ${CATHEDRAL_DB_PATH} || echo '[startup] load-eval-spec failed; continuing with placeholder content' && \
-  echo '[startup] archive-cards (deprecated launch-plan IDs)' && \
-  cathedral-publisher archive-cards us-ai-eo uk-ai-whitepaper singapore-pdpc japan-meti-mic --db ${CATHEDRAL_DB_PATH} && \
   echo '[startup] serve --db '${CATHEDRAL_DB_PATH}' --port '${PORT:-8080} && \
   cathedral-publisher serve --db ${CATHEDRAL_DB_PATH} --port ${PORT:-8080} --host 0.0.0.0 \
 "]
