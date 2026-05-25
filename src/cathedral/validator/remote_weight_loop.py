@@ -402,6 +402,25 @@ async def apply_cached_remote_vector_once(
             vector_id=vector.vector_id,
         )
 
+    # Canonical event name for a Path B chain.set_weights completion. The
+    # `status` field is authoritative - HEALTHY means the extrinsic landed,
+    # DISABLED means dry-run completed, BLOCKED_BY_* means the chain rejected
+    # or never accepted it. Pairs with `chain_weights_set_local` in
+    # weight_loop.py for Path A. Operators querying "did the validator
+    # complete a set_weights attempt this tick?" should grep for
+    # `chain_weights_set_*` and then read `status` to know the outcome.
+    logger.info(
+        "chain_weights_set_remote",
+        vector_id=vector.vector_id,
+        policy_version=vector.policy_version,
+        status=status.value,
+        count=len(normalized),
+        uids=[uid for uid, _ in normalized][:20],
+    )
+    # DEPRECATED: dual-emitted for one release so log consumers can migrate to
+    # `chain_weights_set_remote`. Will be removed in the next minor release.
+    # The name is misleading: this is the chain set_weights completion event
+    # (status field is authoritative), not a relay step. See AGENTS.md glossary.
     logger.info(
         "remote_weight_relayed",
         vector_id=vector.vector_id,

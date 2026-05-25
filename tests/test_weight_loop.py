@@ -223,6 +223,199 @@ async def test_remote_weight_repeat_skip_refreshes_chain_health(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_apply_cached_remote_vector_dual_emits_chain_weights_set_remote(
+    tmp_path, monkeypatch
+) -> None:
+    """Workstream A diagnostic guardrail: a successful Path B set_weights
+    must emit BOTH the new canonical `chain_weights_set_remote` event AND
+    the legacy `remote_weight_relayed` alias for one release.
+
+    The legacy name is misleading (it is not a relay, it is the chain
+    set_weights success event). Dual-emit lets log consumers migrate
+    without losing the legacy stream mid-flight.
+    """
+    conn = await connect(str(tmp_path / "validator.db"))
+    private_key = Ed25519PrivateKey.generate()
+    now = datetime.now(UTC)
+    generated_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    expires_at = (
+        (now + timedelta(hours=1))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    vector = sign_vector(
+        SignedWeightVector(
+            vector_id="fresh-vector",
+            policy_version=10,
+            network="test",
+            netuid=1,
+            generated_at=generated_at,
+            expires_at=expires_at,
+            burn_snapshot=BurnSnapshot(burn_uid=None, forced_burn_percentage=0.0),
+            policy_hash="h" * 64,
+            key_id="test-key",
+            weights=[WeightEntry(miner_hotkey="hotkey-1", weight=1.0)],
+        ),
+        private_key,
+    )
+    await remote_state.record_accepted(
+        conn,
+        policy_version=vector.policy_version,
+        vector_id=vector.vector_id,
+        vector_payload=vector.to_payload(),
+    )
+    # NOTE: deliberately NOT calling record_applied — this is a fresh apply.
+
+    chain = MockChain(
+        Metagraph(
+            block=456,
+            miners=(MinerNode(uid=42, hotkey="hotkey-1", last_update_block=1),),
+        )
+    )
+    health = Health()
+
+    info_events: list[tuple[str, dict[str, object]]] = []
+    warning_events: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLogger:
+        def info(self, event: str, **fields: object) -> None:
+            info_events.append((event, dict(fields)))
+
+        def warning(self, event: str, **fields: object) -> None:
+            warning_events.append((event, dict(fields)))
+
+        def debug(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(remote_weight_loop, "logger", FakeLogger())
+
+    try:
+        await remote_weight_loop.apply_cached_remote_vector_once(
+            conn,
+            chain,
+            health,
+            public_key=private_key.public_key(),
+            expected_key_id="test-key",
+            network="test",
+            netuid=1,
+            disabled=False,
+        )
+
+        # Sanity: the chain set_weights actually fired.
+        assert chain.last_weights == [(42, 1.0)]
+
+        event_names = [event for event, _ in info_events]
+        assert "chain_weights_set_remote" in event_names, (
+            "Missing canonical event; got: " + ", ".join(event_names)
+        )
+        assert "remote_weight_relayed" in event_names, (
+            "Legacy alias must still fire for one release; got: "
+            + ", ".join(event_names)
+        )
+
+        # Same payload on both events so downstream consumers can switch
+        # over without losing fields.
+        new_fields = next(f for e, f in info_events if e == "chain_weights_set_remote")
+        legacy_fields = next(f for e, f in info_events if e == "remote_weight_relayed")
+        assert new_fields["vector_id"] == legacy_fields["vector_id"] == "fresh-vector"
+        assert new_fields["policy_version"] == legacy_fields["policy_version"] == 10
+        assert new_fields["count"] == legacy_fields["count"] == 1
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_weight_loop_dual_emits_chain_weights_set_local(
+    tmp_path, monkeypatch
+) -> None:
+    """Path A counterpart of the dual-emit pattern: `weights_set` (legacy)
+    AND `chain_weights_set_local` (canonical) must both fire on a
+    successful Path A set_weights tick.
+    """
+    conn = await connect(str(tmp_path / "validator.db"))
+    now_iso = datetime.now(UTC).isoformat()
+    await upsert_pulled_eval(
+        conn,
+        eval_run={"id": "run-1", "weighted_score": 0.75, "ran_at": now_iso},
+        miner_hotkey="hotkey-1",
+    )
+
+    chain = MockChain(
+        Metagraph(
+            block=7,
+            miners=(
+                MinerNode(uid=0, hotkey="burn-hotkey", last_update_block=1),
+                MinerNode(uid=42, hotkey="hotkey-1", last_update_block=1),
+            ),
+        )
+    )
+    health = Health()
+    info_events: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLogger:
+        def info(self, event: str, **fields: object) -> None:
+            info_events.append((event, dict(fields)))
+
+        def warning(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+        def debug(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(weight_loop, "logger", FakeLogger())
+
+    stop = weight_loop.asyncio.Event()
+    task = weight_loop.asyncio.create_task(
+        weight_loop.run_weight_loop(
+            conn,
+            chain,
+            health,
+            interval_secs=60,
+            # disabled=False exercises the real chain.set_weights path on
+            # MockChain so the dual-emit test would fail if the chain call
+            # site were broken or moved. Codex review caught the
+            # disabled=True false-positive risk.
+            disabled=False,
+            burn_uid=0,
+            forced_burn_percentage=98.0,
+            stop=stop,
+        )
+    )
+    try:
+        for _ in range(50):
+            snapshot = await health.get()
+            if snapshot.last_weight_set_at is not None:
+                break
+            await weight_loop.asyncio.sleep(0.02)
+        else:
+            raise AssertionError("Path A weight loop did not complete one tick")
+
+        # MockChain.set_weights records the normalized vector. Confirming
+        # this is non-empty proves we actually went through the chain call.
+        assert chain.last_weights, "chain.set_weights was never invoked"
+
+        event_names = [event for event, _ in info_events]
+        assert "weights_set" in event_names, (
+            "Legacy event must still fire for one release; got: "
+            + ", ".join(event_names)
+        )
+        assert "chain_weights_set_local" in event_names, (
+            "Missing canonical Path A event; got: " + ", ".join(event_names)
+        )
+
+        legacy = next(f for e, f in info_events if e == "weights_set")
+        canonical = next(f for e, f in info_events if e == "chain_weights_set_local")
+        # Same load-bearing fields on both for log-consumer migration.
+        assert legacy["status"] == canonical["status"]
+        assert legacy["count"] == canonical["count"]
+        assert legacy["uids"] == canonical["uids"]
+    finally:
+        stop.set()
+        await weight_loop.asyncio.wait_for(task, timeout=1)
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_weight_loop_waits_for_backfill_event_before_first_tick(
     tmp_path, monkeypatch
 ) -> None:

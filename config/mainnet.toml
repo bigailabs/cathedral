@@ -27,6 +27,10 @@ disabled = false
 # the subnet owner and reserve 5% for measured miner signal. Revert toward 0
 # once v3 is producing real per-miner separation on mainnet.
 burn_uid = 204
+# WARNING: this value is rewritten on startup by _sync_sn39_mainnet_weight_policy
+# in src/cathedral/config.py when network=finney AND netuid=39. Edits here are
+# clobbered on next start unless you also change the MAINNET_FORCED_BURN_PERCENTAGE
+# constant in src/cathedral/config.py. See AGENTS.md "Footgun list" for context.
 forced_burn_percentage = 95.0
 # Off until the bug_isolation_v1 feed is intentionally enabled.
 v3_bug_isolation_weight = 0.0
