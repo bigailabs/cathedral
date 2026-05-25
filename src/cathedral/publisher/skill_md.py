@@ -38,7 +38,7 @@ Required form fields:
 | Field | Value |
 |-------|-------|
 | `bundle` | zip file containing your Hermes profile |
-| `card_id` | current registration id from the live operator instructions |
+| `card_id` | `synthetic_boolean_v1` |
 | `display_name` | public miner name |
 | `attestation_mode` | `ssh-probe` |
 | `ssh_host` | hostname or IP Cathedral can SSH into |
