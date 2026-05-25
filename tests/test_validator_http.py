@@ -13,11 +13,11 @@ from cathedral.config import (
     HttpConfig,
     NetworkConfig,
     PolarisConfig,
+    RemoteWeightSourceConfig,
     StallConfig,
     StorageConfig,
     ValidatorSettings,
     WeightsConfig,
-    RemoteWeightSourceConfig,
     WorkerConfig,
 )
 from cathedral.evidence import EvidenceCollector
@@ -78,6 +78,66 @@ def test_health_is_public(app_and_client) -> None:
     body = r.json()
     assert "weight_status" in body
     assert "stalled" in body
+
+
+def test_health_reports_weight_path_a_when_remote_disabled(app_and_client) -> None:
+    """Diagnostic guardrail: stock validators (remote_weight_source disabled)
+    must report `weight_path="A"` so operators do not have to grep config to
+    know which loop is running.
+    """
+    _, client = app_and_client
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["weight_path"] == "A"
+
+
+def test_health_reports_weight_path_b_when_remote_enabled(
+    tmp_path, monkeypatch
+) -> None:
+    """Same as above for opt-in Path B. Mocks `run_remote_weight_loop` and
+    `apply_cached_remote_vector_once` so the test does not initiate an
+    external HTTP request to the default publisher URL during lifespan.
+    """
+    from cathedral.validator import remote_weight_loop as rwl
+
+    async def _noop_remote_fetch(*args, **kwargs):
+        stop_event = kwargs.get("stop")
+        if stop_event is not None:
+            await stop_event.wait()
+
+    async def _noop_remote_apply(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(rwl, "run_remote_weight_loop", _noop_remote_fetch)
+    monkeypatch.setattr(rwl, "apply_cached_remote_vector_once", _noop_remote_apply)
+
+    sk = Ed25519PrivateKey.generate()
+    settings = _settings(str(tmp_path / "remote.db")).model_copy(
+        update={"remote_weight_source": RemoteWeightSourceConfig(enabled=True)}
+    )
+    chain = MockChain(
+        Metagraph(
+            block=1,
+            miners=(MinerNode(uid=0, hotkey="5Miner", last_update_block=1),),
+        )
+    )
+    fetcher = StubFetcher()
+    collector = EvidenceCollector(fetcher, sk.public_key())
+    ctx = RuntimeContext(
+        settings=settings,
+        bearer="testtoken",
+        chain=chain,
+        collector=collector,
+        registry=CardRegistry.baseline(),
+        health=Health(),
+        # Provide the pinned key so lifespan does not refuse to start.
+        remote_weight_public_key=sk.public_key(),
+    )
+    app = build_app(ctx)
+    with TestClient(app) as client:
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert r.json()["weight_path"] == "B"
 
 
 def test_claim_requires_bearer(app_and_client) -> None:

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from cathedral import config as config_module
 from cathedral.config import ValidatorSettings, resolve_validator_config_path
 
 POLARIS_KEY = "11" * 32
@@ -292,3 +293,118 @@ def test_unmanaged_testnet_path_is_unchanged(tmp_path: Path) -> None:
     )
 
     assert resolved == str(unmanaged)
+
+
+def test_sync_sn39_mainnet_weight_policy_emits_config_override_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Workstream A diagnostic guardrail: the silent toml rewrite must now
+    emit a `config_override_applied` warning so operators editing
+    `forced_burn_percentage` can see in stderr that their edit was clobbered.
+    """
+    config_path = tmp_path / "mainnet.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[weights]",
+                "interval_secs = 1500",
+                "burn_uid = 204",
+                # Off-policy value -> triggers the rewrite -> must log.
+                "forced_burn_percentage = 50.0",
+            ]
+        )
+        + "\n"
+    )
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLogger:
+        def warning(self, event: str, **fields: object) -> None:
+            events.append((event, dict(fields)))
+
+        def info(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+        def error(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+        def debug(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(config_module, "logger", FakeLogger())
+
+    config_module._sync_sn39_mainnet_weight_policy(config_path)
+
+    # The rewrite happened: file is now on policy.
+    assert "forced_burn_percentage = 95.0" in config_path.read_text()
+
+    # The log was emitted with the expected fields.
+    override_events = [
+        (event, fields) for event, fields in events if event == "config_override_applied"
+    ]
+    assert len(override_events) == 1, f"expected one override event, got {events}"
+    _, fields = override_events[0]
+    assert fields["path"] == str(config_path)
+    assert fields["field"] == "forced_burn_percentage"
+    assert fields["old_value"] == 50.0
+    assert fields["new_value"] == config_module.MAINNET_FORCED_BURN_PERCENTAGE
+    assert fields["reason"] == "mainnet_policy"
+
+
+def test_sync_sn39_mainnet_weight_policy_does_not_log_when_value_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No spurious override log when the operator's value already matches."""
+    config_path = tmp_path / "mainnet.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[weights]",
+                f"forced_burn_percentage = {config_module.MAINNET_FORCED_BURN_PERCENTAGE}",
+            ]
+        )
+        + "\n"
+    )
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class FakeLogger:
+        def warning(self, event: str, **fields: object) -> None:
+            events.append((event, dict(fields)))
+
+        def info(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+        def error(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+        def debug(self, event: str, **fields: object) -> None:  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(config_module, "logger", FakeLogger())
+
+    config_module._sync_sn39_mainnet_weight_policy(config_path)
+
+    # No override fired.
+    override_events = [
+        (event, fields) for event, fields in events if event == "config_override_applied"
+    ]
+    assert override_events == []

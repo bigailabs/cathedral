@@ -52,6 +52,23 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                 f"{ctx.settings.remote_weight_source.public_key_env}; refusing local fallback"
             )
 
+        # Diagnostic-only: surface which of the two weight paths is active so
+        # operators (and future debugging agents) do not have to grep config to
+        # determine whether this validator computes weights locally (Path A)
+        # or relays the publisher's signed vector (Path B). See AGENTS.md
+        # "Two weight paths" for the full description. This log line is the
+        # canonical signpost; the same value is mirrored to /health.weight_path.
+        weight_path = "B" if ctx.settings.remote_weight_source.enabled else "A"
+        logger.info(
+            "weight_path_selected",
+            path=weight_path,
+            reason=(
+                f"remote_weight_source.enabled="
+                f"{ctx.settings.remote_weight_source.enabled}"
+            ),
+        )
+        await ctx.health.update(weight_path=weight_path)
+
         if ctx.settings.remote_weight_source.enabled:
             remote_fetch_task = asyncio.create_task(
                 remote_weight_loop.run_remote_weight_loop(

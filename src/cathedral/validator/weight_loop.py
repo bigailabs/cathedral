@@ -214,6 +214,19 @@ async def run_weight_loop(
                 # local DB (timeout fallback path or no pull loop wired).
                 backfill_ready=backfill_ready,
             )
+            # Canonical event name for a Path A chain.set_weights completion.
+            # The `status` field is authoritative - HEALTHY means the extrinsic
+            # landed, DISABLED means dry-run completed, BLOCKED_BY_* means the
+            # chain rejected or never accepted it. Pairs with
+            # `chain_weights_set_remote` in remote_weight_loop.py for Path B.
+            # Dual-emitted with the legacy `weights_set` event for one release.
+            logger.info(
+                "chain_weights_set_local",
+                count=len(normalized),
+                status=status.value,
+                uids=[uid for uid, _ in normalized][:20],
+                backfill_ready=backfill_ready,
+            )
         except Exception as e:
             logger.warning("weight_loop_error", error=str(e))
             await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)

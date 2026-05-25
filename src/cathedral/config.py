@@ -8,8 +8,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger(__name__)
 
 MAINNET_FORCED_BURN_PERCENTAGE = 95.0
 
@@ -404,6 +407,19 @@ def _sync_sn39_mainnet_weight_policy(config_path: Path) -> None:
             ]
         )
 
+    # Surface the rewrite. Historically this function silently clobbered an
+    # operator's `forced_burn_percentage` edit with `MAINNET_FORCED_BURN_PERCENTAGE`
+    # from config.py, with zero log output. Operators editing the toml saw their
+    # change "revert itself" on next start and concluded their config was broken.
+    # The warning makes the override discoverable in startup logs.
+    logger.warning(
+        "config_override_applied",
+        path=str(config_path),
+        field="forced_burn_percentage",
+        old_value=float(weights.get("forced_burn_percentage", MAINNET_FORCED_BURN_PERCENTAGE)),
+        new_value=MAINNET_FORCED_BURN_PERCENTAGE,
+        reason="mainnet_policy",
+    )
     config_path.write_text("\n".join(out) + "\n")
 
 
