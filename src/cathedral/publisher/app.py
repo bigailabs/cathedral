@@ -280,6 +280,14 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         else:
             logger.info("stale_evaluating_rows_repaired", count=0)
 
+        # PR2: SAT registrations write into agent_submissions with
+        # card_id="synthetic_boolean_v1" (Decision 1 Option A). The schema
+        # holds an FK from agent_submissions.card_id into card_definitions,
+        # so the SAT row has to exist before the first submit lands.
+        # Idempotent ON CONFLICT upsert; replaces the per-Docker
+        # `cathedral-publisher seed-cards` bootstrap step removed in PR2.
+        await _ensure_sat_lane_card_definition(ctx.db)
+
         # Preload the v3 bug-isolation private corpus so the operator can
         # confirm a non-empty corpus from boot logs BEFORE flipping
         # CATHEDRAL_V3_FEED_ENABLED. Without this, the loader is only
@@ -631,6 +639,48 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         return out
 
     return app
+
+
+async def _ensure_sat_lane_card_definition(conn: aiosqlite.Connection) -> None:
+    """Seed the SAT lane row into ``card_definitions`` if missing.
+
+    PR2 (Decision 1, Option A) repurposes ``card_id`` as the SAT
+    task-family discriminator. ``agent_submissions.card_id`` retains its
+    FK into ``card_definitions(id)``, so the SAT row must exist or
+    every registration hits a FOREIGN KEY constraint failure. This
+    replaces the per-Docker ``cathedral-publisher seed-cards`` bootstrap
+    step that PR2 removed.
+    """
+    existing = await repository.get_card_definition(conn, SYNTHETIC_BOOLEAN_FAMILY_ID)
+    if existing is not None and existing.get("status") == "active":
+        return
+    await repository.insert_card_definition(
+        conn,
+        id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+        display_name="Synthetic Boolean (SAT) v1",
+        jurisdiction="task-family",
+        topic="Synthetic boolean SAT task family lane",
+        description=(
+            "Cathedral SN39 SAT lane. Miners register their BYO Box via "
+            "POST /v1/agents/submit with card_id='synthetic_boolean_v1' "
+            "and attestation_mode='ssh-probe'. See "
+            "https://cathedral.computer/skill.md for the live contract."
+        ),
+        eval_spec_md=(
+            "# Synthetic Boolean SAT v1\n\n"
+            "Task family eval spec is served from the SAT readiness probe "
+            "surface; see /v1/synthetic-boolean/readiness-probe."
+        ),
+        source_pool=[],
+        task_templates=[],
+        scoring_rubric={},
+        refresh_cadence_hours=24,
+        status="active",
+    )
+    logger.info(
+        "sat_lane_card_definition_seeded",
+        card_id=SYNTHETIC_BOOLEAN_FAMILY_ID,
+    )
 
 
 async def _seed_synthetic_boolean_challenge_from_env(source: SqliteChallengeSource) -> None:
