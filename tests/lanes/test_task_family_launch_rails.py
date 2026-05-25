@@ -385,7 +385,14 @@ def test_ssh_hermes_redacts_cnf_fetch_tokens_from_errors() -> None:
 async def test_synthetic_boolean_weight_defaults_off_and_blends_when_enabled(tmp_path) -> None:
     conn = await connect(str(tmp_path / "validator.db"))
     try:
-        now = "2026-05-18T20:00:00.000Z"
+        # ran_at must stay inside latest_pulled_score_per_hotkey's
+        # since_days=7 window; using a fixed literal made this a
+        # time-bomb test that started failing once main aged past the
+        # original 2026-05-18 fixture date.
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        now = _dt.now(_UTC).isoformat()
         await upsert_pulled_eval(
             conn,
             eval_run={
@@ -451,7 +458,12 @@ async def test_unknown_schema5_task_family_contributes_zero(tmp_path) -> None:
     """
     conn = await connect(str(tmp_path / "validator.db"))
     try:
-        now = "2026-05-18T20:00:00.000Z"
+        # ran_at must stay inside the since_days=7 window; same
+        # time-bomb fix as the boolean-weight test above.
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        now = _dt.now(_UTC).isoformat()
         # Hotkey has only a schema-5 row from an unknown family --
         # nothing else to fall back to.
         await upsert_pulled_eval(
