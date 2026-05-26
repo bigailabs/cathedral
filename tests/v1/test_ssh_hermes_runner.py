@@ -151,9 +151,22 @@ class _FakeStreamingStdout:
         return b""
 
 
+class _FakeStreamingStdin:
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self.eof = False
+
+    def write(self, data: bytes) -> None:
+        self.chunks.append(data)
+
+    def write_eof(self) -> None:
+        self.eof = True
+
+
 class _FakeStreamingProcess:
     def __init__(self, chunks: list[bytes], *, exit_status: int = 0) -> None:
         self.stdout = _FakeStreamingStdout(chunks)
+        self.stdin = _FakeStreamingStdin()
         self.exit_status = exit_status
         self.terminated = False
         self.killed = False
@@ -181,6 +194,8 @@ def _install_streaming_hermes(
     async def _create_process(cmd: str, **_kwargs: Any) -> Any:
         if captured_cmds is not None:
             captured_cmds.append(cmd)
+        if "cat >" in cmd:
+            return _FakeStreamingProcess([])
         assert "hermes chat -Q" in cmd
         return _FakeStreamingProcess([stdout.encode("utf-8")])
 
@@ -1039,6 +1054,8 @@ async def test_task_family_records_stdout_receipt_before_trace_collection(
         return _mk_run_result()
 
     async def _create_process(cmd, **kwargs):
+        if "cat >" in cmd:
+            return _FakeStreamingProcess([])
         assert "hermes chat -Q" in cmd
         events.append("hermes_stdout")
         return _FakeStreamingProcess([stdout.encode("utf-8")])
@@ -1284,7 +1301,45 @@ async def test_invoke_hermes_text_streams_and_rejects_oversized_stdout(
     assert process.terminated is True
     assert process.closed is True
     conn.run.assert_not_called()
-    conn.create_process.assert_awaited_once()
+    assert conn.create_process.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_invoke_hermes_text_keeps_prompt_off_command_line(runner_config) -> None:
+    runner = SshHermesRunner(runner_config)
+    captured: list[tuple[str, _FakeStreamingProcess]] = []
+
+    async def _create_process(cmd: str, **_kwargs: Any) -> _FakeStreamingProcess:
+        process = _FakeStreamingProcess(
+            [b"```FINAL_ANSWER\n{}\n```"] if "hermes chat -Q" in cmd else []
+        )
+        captured.append((cmd, process))
+        return process
+
+    conn = MagicMock()
+    conn.create_process = AsyncMock(side_effect=_create_process)
+    conn.run = AsyncMock(side_effect=AssertionError("conn.run buffers stdout"))
+    prompt = "fetch https://api.cathedral.test/v1/challenges/sat-x/cnf?t=SECRET123"
+
+    stdout = await runner._invoke_hermes_text(
+        conn,
+        eval_profile="cathedral-eval-sat",
+        prompt=prompt,
+        eval_round="synthetic_boolean_v1-test",
+        resolved_home="/home/cathedral-probe/.hermes",
+        timeout_secs=30,
+        max_stdout_bytes=1024,
+    )
+
+    assert "FINAL_ANSWER" in stdout
+    commands = [cmd for cmd, _process in captured]
+    assert len(commands) == 2
+    assert all("SECRET123" not in cmd for cmd in commands)
+    assert any("cathedral_prompt.txt" in cmd and "cat >" in cmd for cmd in commands)
+    assert any("$(cat " in cmd for cmd in commands if "hermes chat -Q" in cmd)
+    upload = next(process for cmd, process in captured if "cat >" in cmd)
+    assert b"SECRET123" in b"".join(upload.stdin.chunks)
+    assert upload.stdin.eof is True
 
 
 # --------------------------------------------------------------------------

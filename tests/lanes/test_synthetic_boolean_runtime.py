@@ -284,6 +284,59 @@ async def _seed_submission(conn, *, submission_id: str, miner_hotkey: str) -> di
     return seeded
 
 
+async def _seed_sat_registration(
+    conn,
+    *,
+    submission_id: str,
+    miner_hotkey: str,
+    status: str = "pending_check",
+) -> dict[str, Any]:
+    existing = await repository.get_card_definition(conn, "synthetic_boolean_v1")
+    if existing is None:
+        await repository.insert_card_definition(
+            conn,
+            id="synthetic_boolean_v1",
+            display_name="Synthetic Boolean",
+            jurisdiction="task-family",
+            topic="SAT",
+            description="SAT lane",
+            eval_spec_md="spec",
+            source_pool=[],
+            task_templates=[],
+            scoring_rubric={},
+        )
+    await repository.insert_agent_submission(
+        conn,
+        id=submission_id,
+        miner_hotkey=miner_hotkey,
+        card_id="synthetic_boolean_v1",
+        bundle_blob_key="",
+        bundle_hash="",
+        bundle_size_bytes=0,
+        encryption_key_id="",
+        bundle_signature="",
+        display_name=f"SAT Miner {miner_hotkey[-1]}",
+        bio=None,
+        logo_url=None,
+        soul_md_preview=None,
+        metadata_fingerprint=f"fp-{submission_id}",
+        similarity_check_passed=True,
+        rejection_reason=None,
+        status=status,
+        submitted_at=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+        submitted_at_iso="2026-05-20T12:00:00.000Z",
+        first_mover_at=None,
+        attestation_mode="ssh-probe",
+        discovery_only=False,
+        ssh_host="203.0.113.10",
+        ssh_port=22,
+        ssh_user="cathedral",
+    )
+    seeded = await repository.get_agent_submission(conn, submission_id)
+    assert seeded is not None
+    return seeded
+
+
 async def _store_valid_sat_receipt(
     receipt_store: SqliteChallengeReceiptStore,
     *,
@@ -500,6 +553,61 @@ async def test_synthetic_boolean_runtime_uses_one_active_formula_and_first_valid
             ("active-boolean-001", CHALLENGE_STATUS_LOCKED),
             ("active-boolean-002", CHALLENGE_STATUS_LOCKED),
         ]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_one_runs_sat_registration_without_legacy_card_bundle(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub = await _seed_sat_registration(
+            conn, submission_id="sat-sub-a", miner_hotkey="5SatMinerA"
+        )
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "sat-registration-test"},
+            )
+        )
+        runner = _SolvingRunner()
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=SqliteChallengeReceiptStore(conn),
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        await orch.evaluate_one(sub)
+
+        refreshed = await repository.get_agent_submission(conn, "sat-sub-a")
+        assert refreshed is not None
+        assert refreshed["status"] == "ranked"
+        rows = await repository.list_eval_runs_for_submission(conn, "sat-sub-a")
+        assert [(row["eval_output_schema_version"], row["weighted_score"]) for row in rows] == [
+            (5, 1.0)
+        ]
+        assert runner.task_ids == ["active-boolean-001"]
     finally:
         await conn.close()
 

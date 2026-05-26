@@ -1065,7 +1065,10 @@ async def incumbent_best_score(
 
 async def queued_submissions(conn: aiosqlite.Connection, limit: int = 4) -> list[dict[str, Any]]:
     cur = await conn.execute(
-        "SELECT * FROM agent_submissions WHERE status='queued' ORDER BY submitted_at ASC LIMIT ?",
+        "SELECT * FROM agent_submissions "
+        "WHERE card_id='synthetic_boolean_v1' "
+        "AND status IN ('pending_check','queued') "
+        "ORDER BY submitted_at ASC LIMIT ?",
         (limit,),
     )
     rows = await cur.fetchall()
@@ -1106,6 +1109,7 @@ async def submissions_due_for_cadence(
         JOIN card_definitions cd ON cd.id = sub.card_id
         LEFT JOIN eval_runs er ON er.submission_id = sub.id
         WHERE sub.status = 'ranked'
+          AND sub.card_id = 'synthetic_boolean_v1'
           AND sub.attestation_mode IN ('polaris', 'polaris-deploy', 'ssh-probe', 'tee', 'bundle')
           AND sub.discovery_only = 0
         GROUP BY sub.id
