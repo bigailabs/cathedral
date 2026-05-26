@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import aiosqlite
 
@@ -53,6 +53,8 @@ _ALLOWED_STATUSES = frozenset(
         CHALLENGE_STATUS_RETIRED,
     }
 )
+
+ActiveChallengeScope = Literal["family", "tier"]
 
 
 class ChallengeSourceError(Exception):
@@ -94,7 +96,15 @@ class ChallengeSource(Protocol):
     """
 
     async def get_active(self, family_id: str) -> ChallengeRecord | None:
-        """Return the currently active challenge for the family, or None."""
+        """Return the default active challenge for the family, or None."""
+        ...
+
+    async def get_active_for_tier(self, family_id: str, tier: int) -> ChallengeRecord | None:
+        """Return the currently active challenge for one family+tier slot, or None."""
+        ...
+
+    async def list_active(self, family_id: str) -> list[ChallengeRecord]:
+        """Return all active challenges for the family, ordered by tier then id."""
         ...
 
     async def list_for_family(
@@ -114,6 +124,7 @@ class ChallengeSource(Protocol):
         challenge_id: str,
         now_iso: str,
         retire_current: bool = False,
+        active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord:
         """Activate one queued challenge for a family."""
         ...
@@ -125,6 +136,7 @@ class ChallengeSource(Protocol):
         challenge_id: str,
         now_iso: str,
         manage_transaction: bool = True,
+        active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord | None:
         """Lock the solved challenge and activate the next pending row."""
         ...
@@ -160,10 +172,28 @@ class InMemoryChallengeSource:
         self._rows: dict[str, ChallengeRecord] = {}
 
     async def get_active(self, family_id: str) -> ChallengeRecord | None:
-        for rec in self._rows.values():
-            if rec.family_id == family_id and rec.status == CHALLENGE_STATUS_ACTIVE:
-                return rec
-        return None
+        active = await self.list_active(family_id)
+        return active[0] if active else None
+
+    async def get_active_for_tier(self, family_id: str, tier: int) -> ChallengeRecord | None:
+        active = [
+            rec
+            for rec in self._rows.values()
+            if rec.family_id == family_id
+            and rec.tier == int(tier)
+            and rec.status == CHALLENGE_STATUS_ACTIVE
+        ]
+        return sorted(active, key=lambda r: r.challenge_id)[0] if active else None
+
+    async def list_active(self, family_id: str) -> list[ChallengeRecord]:
+        return sorted(
+            [
+                rec
+                for rec in self._rows.values()
+                if rec.family_id == family_id and rec.status == CHALLENGE_STATUS_ACTIVE
+            ],
+            key=lambda r: (r.tier, r.challenge_id),
+        )
 
     async def list_for_family(
         self, family_id: str, *, status: str | None = None
@@ -208,27 +238,42 @@ class InMemoryChallengeSource:
         challenge_id: str,
         now_iso: str,
         retire_current: bool = False,
+        active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord:
         target = self._rows.get(challenge_id)
         if target is None or target.family_id != family_id:
             raise ChallengeSourceError("challenge not found")
         if target.status not in {CHALLENGE_STATUS_PENDING, CHALLENGE_STATUS_ACTIVE}:
             raise ChallengeSourceError("challenge is not activatable")
+        if active_scope not in {"family", "tier"}:
+            raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
 
-        active = await self.get_active(family_id)
-        if active is not None and active.challenge_id != challenge_id:
+        if active_scope == "tier":
+            active_rows = [
+                rec
+                for rec in await self.list_active(family_id)
+                if rec.tier == target.tier and rec.challenge_id != challenge_id
+            ]
+        else:
+            active_rows = [
+                rec
+                for rec in await self.list_active(family_id)
+                if rec.challenge_id != challenge_id
+            ]
+        if active_rows:
             if not retire_current:
                 raise ChallengeSourceError("another active challenge exists")
-            self._rows[active.challenge_id] = ChallengeRecord(
-                challenge_id=active.challenge_id,
-                family_id=active.family_id,
-                tier=active.tier,
-                cnf_text=active.cnf_text,
-                status=CHALLENGE_STATUS_RETIRED,
-                audit_metadata=active.audit_metadata,
-                cnf_path=active.cnf_path,
-                losers_published_at_iso=active.losers_published_at_iso,
-            )
+            for active in active_rows:
+                self._rows[active.challenge_id] = ChallengeRecord(
+                    challenge_id=active.challenge_id,
+                    family_id=active.family_id,
+                    tier=active.tier,
+                    cnf_text=active.cnf_text,
+                    status=CHALLENGE_STATUS_RETIRED,
+                    audit_metadata=active.audit_metadata,
+                    cnf_path=active.cnf_path,
+                    losers_published_at_iso=active.losers_published_at_iso,
+                )
 
         activated = ChallengeRecord(
             challenge_id=target.challenge_id,
@@ -250,8 +295,12 @@ class InMemoryChallengeSource:
         challenge_id: str,
         now_iso: str,
         manage_transaction: bool = True,
+        active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord | None:
+        if active_scope not in {"family", "tier"}:
+            raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
         current = self._rows.get(challenge_id)
+        current_tier = current.tier if current is not None else None
         if current is not None and current.family_id == family_id:
             self._rows[challenge_id] = ChallengeRecord(
                 challenge_id=current.challenge_id,
@@ -264,16 +313,27 @@ class InMemoryChallengeSource:
                 losers_published_at_iso=None,
             )
 
-        if await self.get_active(family_id) is not None:
-            return None
-
-        pending = await self.list_for_family(family_id, status=CHALLENGE_STATUS_PENDING)
+        if active_scope == "tier" and current_tier is not None:
+            if await self.get_active_for_tier(family_id, current_tier) is not None:
+                return None
+            pending = [
+                rec
+                for rec in await self.list_for_family(
+                    family_id, status=CHALLENGE_STATUS_PENDING
+                )
+                if rec.tier == current_tier
+            ]
+        else:
+            if await self.get_active(family_id) is not None:
+                return None
+            pending = await self.list_for_family(family_id, status=CHALLENGE_STATUS_PENDING)
         if not pending:
             return None
         return await self.activate(
             family_id=family_id,
             challenge_id=pending[0].challenge_id,
             now_iso=now_iso,
+            active_scope=active_scope,
         )
 
     async def list_locked_needing_loser_reconciliation(
@@ -332,8 +392,8 @@ CREATE TABLE IF NOT EXISTS lane_challenges (
 );
 CREATE INDEX IF NOT EXISTS idx_lane_challenges_family_status
     ON lane_challenges(family_id, status);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_challenges_one_active_per_family
-    ON lane_challenges(family_id)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_challenges_one_active_per_family_tier
+    ON lane_challenges(family_id, tier)
     WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS lane_challenge_fetch_tokens (
@@ -368,6 +428,11 @@ async def ensure_sqlite_challenge_source_schema(conn: aiosqlite.Connection) -> N
         await conn.execute("ALTER TABLE lane_challenges ADD COLUMN cnf_path TEXT")
     if "losers_published_at_iso" not in columns:
         await conn.execute("ALTER TABLE lane_challenges ADD COLUMN losers_published_at_iso TEXT")
+    await conn.execute("DROP INDEX IF EXISTS idx_lane_challenges_one_active_per_family")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_challenges_one_active_per_family_tier "
+        "ON lane_challenges(family_id, tier) WHERE status = 'active'"
+    )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lane_challenges_locked_losers "
         "ON lane_challenges(family_id, status, losers_published_at_iso, updated_at_iso)"
@@ -394,13 +459,36 @@ class SqliteChallengeSource:
     async def get_active(self, family_id: str) -> ChallengeRecord | None:
         cur = await self._conn.execute(
             "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
-            "FROM lane_challenges WHERE family_id = ? AND status = ? LIMIT 1",
+            "FROM lane_challenges WHERE family_id = ? AND status = ? "
+            "ORDER BY tier ASC, challenge_id ASC LIMIT 1",
             (family_id, CHALLENGE_STATUS_ACTIVE),
         )
         row = await cur.fetchone()
         if row is None:
             return None
         return _row_to_record(row)
+
+    async def get_active_for_tier(self, family_id: str, tier: int) -> ChallengeRecord | None:
+        cur = await self._conn.execute(
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
+            "FROM lane_challenges WHERE family_id = ? AND tier = ? AND status = ? "
+            "ORDER BY challenge_id ASC LIMIT 1",
+            (family_id, int(tier), CHALLENGE_STATUS_ACTIVE),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return _row_to_record(row)
+
+    async def list_active(self, family_id: str) -> list[ChallengeRecord]:
+        cur = await self._conn.execute(
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
+            "FROM lane_challenges WHERE family_id = ? AND status = ? "
+            "ORDER BY tier ASC, challenge_id ASC",
+            (family_id, CHALLENGE_STATUS_ACTIVE),
+        )
+        rows = await cur.fetchall()
+        return [_row_to_record(r) for r in rows]
 
     async def get_for_endpoint(self, challenge_id: str) -> EndpointLookup | None:
         """Single-row read for the public CNF endpoint.
@@ -595,8 +683,11 @@ class SqliteChallengeSource:
         challenge_id: str,
         now_iso: str,
         retire_current: bool = False,
+        active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord:
         try:
+            if active_scope not in {"family", "tier"}:
+                raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
             await self._conn.execute("BEGIN IMMEDIATE")
             target = await self._fetch_one_for_update(family_id, challenge_id)
             if target is None:
@@ -604,20 +695,28 @@ class SqliteChallengeSource:
             if target.status not in {CHALLENGE_STATUS_PENDING, CHALLENGE_STATUS_ACTIVE}:
                 raise ChallengeSourceError("challenge is not activatable")
 
-            active = await self._fetch_active_for_update(family_id)
-            if active is not None and active.challenge_id != challenge_id:
+            active_rows = [
+                row
+                for row in await self._fetch_active_rows_for_update(
+                    family_id,
+                    tier=target.tier if active_scope == "tier" else None,
+                )
+                if row.challenge_id != challenge_id
+            ]
+            if active_rows:
                 if not retire_current:
                     raise ChallengeSourceError("another active challenge exists")
-                await self._conn.execute(
-                    "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
-                    "WHERE family_id = ? AND challenge_id = ?",
-                    (
-                        CHALLENGE_STATUS_RETIRED,
-                        now_iso,
-                        family_id,
-                        active.challenge_id,
-                    ),
-                )
+                for active in active_rows:
+                    await self._conn.execute(
+                        "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
+                        "WHERE family_id = ? AND challenge_id = ?",
+                        (
+                            CHALLENGE_STATUS_RETIRED,
+                            now_iso,
+                            family_id,
+                            active.challenge_id,
+                        ),
+                    )
 
             await self._conn.execute(
                 "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
@@ -637,8 +736,12 @@ class SqliteChallengeSource:
             await self._conn.rollback()
             raise ChallengeSourceError("challenge source constraint violation") from exc
 
-        activated = await self.get_active(family_id)
-        if activated is None or activated.challenge_id != challenge_id:
+        activated = await self._fetch_one_for_update(family_id, challenge_id)
+        if (
+            activated is None
+            or activated.challenge_id != challenge_id
+            or activated.status != CHALLENGE_STATUS_ACTIVE
+        ):
             raise ChallengeSourceError("challenge activation failed")
         return activated
 
@@ -649,10 +752,15 @@ class SqliteChallengeSource:
         challenge_id: str,
         now_iso: str,
         manage_transaction: bool = True,
+        active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord | None:
         try:
+            if active_scope not in {"family", "tier"}:
+                raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
             if manage_transaction:
                 await self._conn.execute("BEGIN IMMEDIATE")
+            target = await self._fetch_one_for_update(family_id, challenge_id)
+            target_tier = target.tier if target is not None else None
             await self._conn.execute(
                 "UPDATE lane_challenges SET status = ?, losers_published_at_iso = NULL, "
                 "updated_at_iso = ? "
@@ -666,19 +774,32 @@ class SqliteChallengeSource:
                 ),
             )
 
-            active = await self._fetch_active_for_update(family_id)
+            active = await self._fetch_active_for_update(
+                family_id,
+                tier=target_tier if active_scope == "tier" else None,
+            )
             if active is not None:
                 if manage_transaction:
                     await self._conn.commit()
                 return None
 
-            cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
-                "status, audit_metadata "
-                "FROM lane_challenges WHERE family_id = ? AND status = ? "
-                "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
-                (family_id, CHALLENGE_STATUS_PENDING),
-            )
+            if active_scope == "tier" and target_tier is not None:
+                cur = await self._conn.execute(
+                    "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                    "status, audit_metadata "
+                    "FROM lane_challenges "
+                    "WHERE family_id = ? AND status = ? AND tier = ? "
+                    "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
+                    (family_id, CHALLENGE_STATUS_PENDING, int(target_tier)),
+                )
+            else:
+                cur = await self._conn.execute(
+                    "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                    "status, audit_metadata "
+                    "FROM lane_challenges WHERE family_id = ? AND status = ? "
+                    "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
+                    (family_id, CHALLENGE_STATUS_PENDING),
+                )
             row = await cur.fetchone()
             if row is None:
                 if manage_transaction:
@@ -730,17 +851,33 @@ class SqliteChallengeSource:
             return None
         return _row_to_record(row)
 
-    async def _fetch_active_for_update(self, family_id: str) -> ChallengeRecord | None:
-        cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
-            "FROM lane_challenges WHERE family_id = ? AND status = ? LIMIT 1",
-            (family_id, CHALLENGE_STATUS_ACTIVE),
-        )
-        row = await cur.fetchone()
-        if row is None:
-            return None
-        return _row_to_record(row)
+    async def _fetch_active_for_update(
+        self, family_id: str, *, tier: int | None = None
+    ) -> ChallengeRecord | None:
+        rows = await self._fetch_active_rows_for_update(family_id, tier=tier)
+        return rows[0] if rows else None
 
+    async def _fetch_active_rows_for_update(
+        self, family_id: str, *, tier: int | None = None
+    ) -> list[ChallengeRecord]:
+        if tier is None:
+            cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "audit_metadata "
+                "FROM lane_challenges WHERE family_id = ? AND status = ? "
+                "ORDER BY tier ASC, challenge_id ASC",
+                (family_id, CHALLENGE_STATUS_ACTIVE),
+            )
+        else:
+            cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "audit_metadata "
+                "FROM lane_challenges WHERE family_id = ? AND tier = ? AND status = ? "
+                "ORDER BY challenge_id ASC",
+                (family_id, int(tier), CHALLENGE_STATUS_ACTIVE),
+            )
+        rows = await cur.fetchall()
+        return [_row_to_record(row) for row in rows]
 
 @dataclass(frozen=True)
 class EndpointLookup:

@@ -254,6 +254,61 @@ async def test_sqlite_lock_and_promote_next_pending_challenge(tmp_path) -> None:
         await src_conn.close()
 
 
+async def test_sqlite_lock_can_promote_next_pending_challenge_within_tier(tmp_path) -> None:
+    src_conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(src_conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(
+            ChallengeRecord(
+                challenge_id="tier-1-active",
+                family_id=_FAMILY,
+                tier=1,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={},
+            )
+        )
+        await src.upsert(
+            ChallengeRecord(
+                challenge_id="tier-3-active",
+                family_id=_FAMILY,
+                tier=3,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={},
+            )
+        )
+        await src.upsert(
+            ChallengeRecord(
+                challenge_id="tier-3-next",
+                family_id=_FAMILY,
+                tier=3,
+                cnf_text="p cnf 1 1\n-1 0\n",
+                status=CHALLENGE_STATUS_PENDING,
+                audit_metadata={},
+            ),
+            now_iso="2026-05-19T00:00:01.000Z",
+        )
+
+        promoted = await src.mark_locked_and_promote_next(
+            family_id=_FAMILY,
+            challenge_id="tier-3-active",
+            now_iso="2026-05-19T00:00:02.000Z",
+            active_scope="tier",
+        )
+
+        assert promoted is not None
+        assert promoted.challenge_id == "tier-3-next"
+        rows = await src.list_for_family(_FAMILY)
+        assert {row.challenge_id: row.status for row in rows} == {
+            "tier-1-active": CHALLENGE_STATUS_ACTIVE,
+            "tier-3-active": CHALLENGE_STATUS_LOCKED,
+            "tier-3-next": CHALLENGE_STATUS_ACTIVE,
+        }
+    finally:
+        await src_conn.close()
+
+
 def test_serialize_audit_is_stable() -> None:
     from cathedral.lanes.challenge_lock import LockRecord
 
