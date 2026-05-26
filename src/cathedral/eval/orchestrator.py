@@ -373,6 +373,43 @@ class EvalOrchestrator:
         original_status = submission.get("status")
         is_cadence_refresh = original_status == "ranked"
 
+        if submission.get("card_id") == SYNTHETIC_BOOLEAN_FAMILY_ID:
+            if not is_cadence_refresh:
+                async with self._db_write_lock:
+                    await repository.update_submission_status(
+                        self.db, submission["id"], status="evaluating"
+                    )
+            epoch = epoch_for(datetime.now(UTC))
+            round_index = self._round_counter.next_index(SYNTHETIC_BOOLEAN_FAMILY_ID, epoch)
+            runner = self._resolve_runner(submission)
+            ran = await self._maybe_run_task_family_lanes(
+                submission=submission,
+                runner=runner,
+                epoch=epoch,
+                round_index=round_index,
+                log=log,
+                problem_overrides=task_family_problem_overrides,
+            )
+            async with self._db_write_lock:
+                if ran:
+                    cur = await self.db.execute(
+                        "SELECT weighted_score FROM eval_runs "
+                        "WHERE submission_id=? ORDER BY ran_at DESC LIMIT 1",
+                        (submission["id"],),
+                    )
+                    row = await cur.fetchone()
+                    await repository.update_submission_score(
+                        self.db,
+                        submission["id"],
+                        current_score=float(row[0]) if row is not None else 0.0,
+                        current_rank=0,
+                    )
+                elif not is_cadence_refresh:
+                    await repository.update_submission_status(
+                        self.db, submission["id"], status="pending_check"
+                    )
+            return
+
         card_def = await repository.get_card_definition(self.db, submission["card_id"])
         if card_def is None:
             await self._fail_terminal(
@@ -714,9 +751,9 @@ class EvalOrchestrator:
         round_index: int,
         log: structlog.stdlib.BoundLogger,
         problem_overrides: dict[str, tuple[PublicProblem, HiddenMetadata]] | None = None,
-    ) -> None:
+    ) -> bool:
         if not task_family_feed_enabled():
-            return
+            return False
 
         warning = task_family_prober_version_warning()
         if warning is not None:
@@ -725,11 +762,12 @@ class EvalOrchestrator:
         skip = task_family_runner_skip_reason(runner)
         if skip is not None:
             log.info("task_family_skipped", **skip)
-            return
+            return False
         run_challenge = runner.run_task_family_challenge
 
         miner_hotkey = str(submission["miner_hotkey"])
         issued_at_iso = _ms_iso(datetime.now(UTC))
+        ran_any = False
         for family_id in enabled_task_family_ids():
             try:
                 lane = lane_registry.lookup(family_id)
@@ -920,6 +958,7 @@ class EvalOrchestrator:
                     task_id_public=signed.row.get("task_id_public"),
                     weighted_score=signed.row.get("weighted_score"),
                 )
+                ran_any = True
                 continue
             signed = await self._score_and_sign_task_family_stdout(
                 lane=lane,
@@ -1052,6 +1091,8 @@ class EvalOrchestrator:
                 task_id_public=signed.row.get("task_id_public"),
                 weighted_score=signed.row.get("weighted_score"),
             )
+            ran_any = True
+        return ran_any
 
     async def _mark_sat_receipt_verifying(
         self,
@@ -2137,7 +2178,7 @@ async def run_eval_loop(
                     # either re-queues or eventually rejects rather than
                     # sitting in 'evaluating' forever. Cadence rows
                     # stayed 'ranked' the whole time — nothing to do.
-                    if s.get("status") == "queued":
+                    if s.get("status") in {"pending_check", "queued"}:
                         await orchestrator._on_retryable_failure(
                             s, logger.bind(submission_id=s["id"]), f"evaluate_one crash: {e}"
                         )

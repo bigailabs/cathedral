@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
+_SAT_CARD_ID = "synthetic_boolean_v1"
 
 
 # Direct module load (publisher import cycle avoidance, same dance
@@ -160,12 +161,12 @@ async def test_ranked_submission_overdue_is_returned(db, tmp_path: Path):
     """A ranked submission with an eval older than `cadence_hours` ago
     is returned by submissions_due_for_cadence."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     # Submission scored 25h ago — past the 24h cadence window
     sub_id = await _seed_submission(
-        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=2)
+        db, card_id=_SAT_CARD_ID, status="ranked", submitted_at=now - timedelta(days=2)
     )
     await _seed_eval_run(db, submission_id=sub_id, ran_at=now - timedelta(hours=25))
 
@@ -179,11 +180,11 @@ async def test_ranked_submission_within_window_not_returned(db, tmp_path: Path):
     """A ranked submission with a recent eval is NOT returned —
     it's not yet due for cadence."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     sub_id = await _seed_submission(
-        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=2)
+        db, card_id=_SAT_CARD_ID, status="ranked", submitted_at=now - timedelta(days=2)
     )
     # Eval 2h ago — well within the 24h window
     await _seed_eval_run(db, submission_id=sub_id, ran_at=now - timedelta(hours=2))
@@ -198,14 +199,40 @@ async def test_queued_submission_not_returned_by_cadence(db, tmp_path: Path):
     submissions go through the queued_submissions path. This separation
     means queued rows are prioritized in the orchestrator's batch."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     await _seed_submission(
-        db, card_id="eu-ai-act", status="queued", submitted_at=now - timedelta(days=3)
+        db, card_id=_SAT_CARD_ID, status="queued", submitted_at=now - timedelta(days=3)
     )
     due = await repo.submissions_due_for_cadence(db, now=now, limit=10)
     assert len(due) == 0
+
+
+@pytest.mark.asyncio
+async def test_queued_submissions_returns_sat_pending_check_not_legacy_cards(
+    db, tmp_path: Path
+):
+    """SAT registrations land as pending_check; legacy queued cards are dead."""
+    repo = _load_repository()
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
+    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    now = datetime.now(UTC)
+
+    legacy = await _seed_submission(
+        db, card_id="eu-ai-act", status="queued", submitted_at=now - timedelta(minutes=3)
+    )
+    sat_pending = await _seed_submission(
+        db, card_id=_SAT_CARD_ID, status="pending_check", submitted_at=now - timedelta(minutes=2)
+    )
+    sat_retry = await _seed_submission(
+        db, card_id=_SAT_CARD_ID, status="queued", submitted_at=now - timedelta(minutes=1)
+    )
+
+    queued = await repo.queued_submissions(db, limit=10)
+    ids = [row["id"] for row in queued]
+    assert ids == [sat_pending, sat_retry]
+    assert legacy not in ids
 
 
 @pytest.mark.asyncio
@@ -213,12 +240,12 @@ async def test_discovery_submission_not_returned_by_cadence(db, tmp_path: Path):
     """Discovery rows never run evals, so they're never due for cadence
     even when they would otherwise match."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     sub_id = await _seed_submission(
         db,
-        card_id="eu-ai-act",
+        card_id=_SAT_CARD_ID,
         status="ranked",  # hypothetical — wouldn't actually happen
         submitted_at=now - timedelta(days=5),
         discovery_only=True,
@@ -236,14 +263,14 @@ async def test_cadence_ordering_most_overdue_first(db, tmp_path: Path):
     """When multiple rows are due, the most-overdue one comes first.
     Drains backlog fairly under load."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     a = await _seed_submission(
-        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=10)
+        db, card_id=_SAT_CARD_ID, status="ranked", submitted_at=now - timedelta(days=10)
     )
     b = await _seed_submission(
-        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=10)
+        db, card_id=_SAT_CARD_ID, status="ranked", submitted_at=now - timedelta(days=10)
     )
     # b is older (more overdue) than a
     await _seed_eval_run(db, submission_id=a, ran_at=now - timedelta(hours=30))
@@ -259,11 +286,11 @@ async def test_cadence_uses_latest_eval_not_first_eval(db, tmp_path: Path):
     before), the query uses MAX(ran_at), not the first eval. Without
     this, a 30-day-old submission would always look overdue."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     sub_id = await _seed_submission(
-        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=30)
+        db, card_id=_SAT_CARD_ID, status="ranked", submitted_at=now - timedelta(days=30)
     )
     # Old eval AND a recent one — recent should win, row is NOT due
     await _seed_eval_run(db, submission_id=sub_id, ran_at=now - timedelta(days=28))
@@ -280,11 +307,11 @@ async def test_cadence_with_no_eval_runs_uses_submitted_at(db, tmp_path: Path):
     submitted_at). A ranked-but-uneval'd row submitted 25h ago against
     a 24h cadence is overdue."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     sub_id = await _seed_submission(
-        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(hours=25)
+        db, card_id=_SAT_CARD_ID, status="ranked", submitted_at=now - timedelta(hours=25)
     )
     # No eval_runs
 
@@ -295,27 +322,25 @@ async def test_cadence_with_no_eval_runs_uses_submitted_at(db, tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_cadence_respects_per_card_refresh_hours(db, tmp_path: Path):
-    """Two cards with different cadences. A row on the 12h card is due
-    after 13h; a row on the 24h card is not due after 13h."""
+    """SAT cadence still respects the card's refresh interval."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="fast-card", cadence_hours=12)
-    await _seed_card_def(db, card_id="slow-card", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=12)
+    await _seed_card_def(db, card_id="legacy-fast-card", cadence_hours=12)
     now = datetime.now(UTC)
 
-    fast_sub = await _seed_submission(
-        db, card_id="fast-card", status="ranked", submitted_at=now - timedelta(days=2)
+    sat_sub = await _seed_submission(
+        db, card_id=_SAT_CARD_ID, status="ranked", submitted_at=now - timedelta(days=2)
     )
-    slow_sub = await _seed_submission(
-        db, card_id="slow-card", status="ranked", submitted_at=now - timedelta(days=2)
+    legacy_sub = await _seed_submission(
+        db, card_id="legacy-fast-card", status="ranked", submitted_at=now - timedelta(days=2)
     )
-    # Both evaluated 13h ago
-    await _seed_eval_run(db, submission_id=fast_sub, ran_at=now - timedelta(hours=13))
-    await _seed_eval_run(db, submission_id=slow_sub, ran_at=now - timedelta(hours=13))
+    await _seed_eval_run(db, submission_id=sat_sub, ran_at=now - timedelta(hours=13))
+    await _seed_eval_run(db, submission_id=legacy_sub, ran_at=now - timedelta(hours=13))
 
     due = await repo.submissions_due_for_cadence(db, now=now, limit=10)
     ids = {r["id"] for r in due}
-    assert fast_sub in ids
-    assert slow_sub not in ids
+    assert sat_sub in ids
+    assert legacy_sub not in ids
 
 
 @pytest.mark.asyncio
@@ -323,13 +348,13 @@ async def test_cadence_limit_bounds_batch_size(db, tmp_path: Path):
     """`limit` parameter caps the batch. Used by the orchestrator to
     cap concurrent eval work."""
     repo = _load_repository()
-    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    await _seed_card_def(db, card_id=_SAT_CARD_ID, cadence_hours=24)
     now = datetime.now(UTC)
 
     for _ in range(5):
         sub_id = await _seed_submission(
             db,
-            card_id="eu-ai-act",
+                card_id=_SAT_CARD_ID,
             status="ranked",
             submitted_at=now - timedelta(days=10),
         )

@@ -63,6 +63,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -1649,13 +1650,22 @@ class SshHermesRunner:
     ) -> str:
         """Run ``hermes chat -q`` and return raw stdout."""
         hermes_home = self._profile_path(eval_profile, resolved_home)
+        prompt_path = f"{hermes_home}/cathedral_prompt.txt"
+        await self._write_remote_text_file(
+            conn,
+            prompt_path,
+            prompt,
+            timeout=min(timeout_secs or self.config.eval_timeout_secs, 30.0),
+        )
         envs = [f"HERMES_HOME={shlex.quote(hermes_home)}"]
         if self.config.pinned_provider:
             envs.append(f"HERMES_INFERENCE_PROVIDER={shlex.quote(self.config.pinned_provider)}")
         if self.config.pinned_model:
             envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
-        cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(prompt)}"
+        # Do not put the prompt on the SSH command line. AsyncSSH logs remote
+        # commands, and SAT prompts carry token-gated CNF URLs.
+        cmd = " ".join(envs) + f" hermes chat -Q -q \"$(cat {shlex.quote(prompt_path)})\""
         timeout = timeout_secs if timeout_secs is not None else self.config.eval_timeout_secs
         if max_stdout_bytes is None:
             stdout, stderr, exit_status = await self._run_remote(
@@ -1681,6 +1691,46 @@ class SshHermesRunner:
                 ),
             )
         return stdout
+
+    async def _write_remote_text_file(
+        self,
+        conn: Any,
+        remote_path: str,
+        text: str,
+        *,
+        timeout: float,  # noqa: ASYNC109 — matches local runner timeout API.
+    ) -> None:
+        """Write UTF-8 text to a remote path without exposing it in the command."""
+
+        parent = posixpath.dirname(remote_path.rstrip("/")) or "."
+        cmd = (
+            f"mkdir -p {shlex.quote(parent)} && "
+            f"umask 077 && "
+            f"cat > {shlex.quote(remote_path)}"
+        )
+        process: Any | None = None
+        try:
+            process = await asyncio.wait_for(
+                conn.create_process(cmd, encoding=None),
+                timeout=timeout,
+            )
+            process.stdin.write(text.encode("utf-8"))
+            process.stdin.write_eof()
+            result = await asyncio.wait_for(process.wait(check=False), timeout=timeout)
+        except TimeoutError as e:
+            if process is not None:
+                await self._stop_remote_process(process)
+            raise SshHermesError(
+                "prompt_timeout",
+                f"prompt upload timed out after {timeout}s: {remote_path!r}",
+            ) from e
+
+        exit_status = int(getattr(result, "exit_status", 0) or 0)
+        if exit_status != 0:
+            raise SshHermesError(
+                "hermes_invocation_failed",
+                f"prompt upload failed exit={exit_status} path={remote_path!r}",
+            )
 
     def _profile_path(self, eval_profile: str, resolved_home: str) -> str:
         # Mirrors hermes_cli/profiles.py: profiles live at

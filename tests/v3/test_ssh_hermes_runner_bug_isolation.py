@@ -128,9 +128,22 @@ class _FakeStreamingStdout:
         return b""
 
 
+class _FakeStreamingStdin:
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self.eof = False
+
+    def write(self, data: bytes) -> None:
+        self.chunks.append(data)
+
+    def write_eof(self) -> None:
+        self.eof = True
+
+
 class _FakeStreamingProcess:
     def __init__(self, stdout: str, *, exit_status: int = 0) -> None:
         self.stdout = _FakeStreamingStdout([stdout.encode("utf-8")])
+        self.stdin = _FakeStreamingStdin()
         self.exit_status = exit_status
         self.terminated = False
         self.killed = False
@@ -215,6 +228,8 @@ def _build_fake_conn(invoke_responses: list[str]) -> tuple[Any, list[str]]:
 
     async def _create_process(cmd: str, **kwargs: Any) -> Any:
         captured.append(cmd)
+        if "cat >" in cmd:
+            return _FakeStreamingProcess("")
         if "hermes chat -Q" not in cmd:
             raise AssertionError(f"unexpected streaming cmd={cmd!r}")
         try:
