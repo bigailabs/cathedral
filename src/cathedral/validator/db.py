@@ -141,7 +141,17 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     status                   TEXT NOT NULL CHECK (status IN
                                ('pending_check','queued','evaluating',
                                 'ranked','rejected','withdrawn',
-                                'discovery')),
+                                'discovery',
+                                -- PR5 solve-on-submit registration rows that
+                                -- have SSH coordinates but no valid candidate
+                                -- DIMACS solution yet. The eval scheduler
+                                -- must not probe these rows.
+                                'pending_solution',
+                                -- PR5 (solve-on-submit) values. Direct valid
+                                -- solve-POSTs are ranked immediately; these
+                                -- values cover registration-only rows and
+                                -- legacy pending-attest rows during rollout.
+                                'valid_attestation_pending','attest_failed')),
     current_score            REAL,
     current_rank             INTEGER,
     first_mover_at           TEXT,
@@ -208,7 +218,14 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     eval_artifact_manifest_hash TEXT,
     eval_artifact_bundle_url    TEXT,
     eval_artifact_manifest_url  TEXT,
-    eval_output_schema_version  INTEGER NOT NULL DEFAULT 1
+    eval_output_schema_version  INTEGER NOT NULL DEFAULT 1,
+    -- PR5 (solve-on-submit). Default 'attested' so the legacy SSH-pushed
+    -- eval flow keeps writing rows that the validator treats as final.
+    -- The PR5 solve path writes signed rows immediately and marks them
+    -- 'pending' while the async SAT attest worker audits the registered
+    -- SSH endpoint. The explicit column makes the worker's state machine
+    -- easy to query without blocking the signed weight path.
+    attestation_status          TEXT NOT NULL DEFAULT 'attested'
 );
 CREATE INDEX IF NOT EXISTS idx_eval_submission_time
     ON eval_runs(submission_id, ran_at DESC);
@@ -318,6 +335,15 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "ALTER TABLE eval_runs ADD COLUMN eval_output_schema_version INTEGER NOT NULL DEFAULT 1"
         )
+    # PR5 (solve-on-submit): eval_runs.attestation_status. Defaults to
+    # 'attested' so historical SSH-pushed rows stay treated as final by
+    # the validator gate. The PR5 solve path writes 'pending' on insert
+    # and the async SAT attest worker flips it to 'attested' or 'failed'.
+    if "attestation_status" not in cols:
+        await conn.execute(
+            "ALTER TABLE eval_runs ADD COLUMN attestation_status "
+            "TEXT NOT NULL DEFAULT 'attested'"
+        )
 
     # agent_submissions: attestation_mode branching (polaris/tee/unverified).
     # Existing rows default to 'polaris' so back-compat with pre-attestation
@@ -358,6 +384,26 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     needs_widen = "attestation_mode IN" in create_sql and "'polaris-deploy'" not in create_sql
     if needs_widen:
         await _widen_attestation_mode_check(conn)
+        # Re-read after rebuild for the PR5 status widen check below.
+        cur = await conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_submissions'"
+        )
+        row = await cur.fetchone()
+        create_sql = (row[0] if row else "") or ""
+
+    # PR5 (solve-on-submit): widen agent_submissions.status CHECK to admit
+    # 'pending_solution', 'valid_attestation_pending', and 'attest_failed'. Same SQLite caveat
+    # as the attestation_mode widen above — CHECK can't be ALTERed in
+    # place, so we rebuild the table when the narrow form is detected.
+    needs_status_widen = (
+        "status IN" in create_sql
+        and (
+            "'pending_solution'" not in create_sql
+            or "'valid_attestation_pending'" not in create_sql
+        )
+    )
+    if needs_status_widen:
+        await _widen_status_check(conn)
 
     # ssh-probe free-tier coordinates. Only populated when
     # attestation_mode='ssh-probe'. The publisher's submit-starter form
@@ -547,3 +593,128 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
     )
 
     _log.info("widen_attestation_mode_check_done")
+
+
+async def _widen_status_check(conn: aiosqlite.Connection) -> None:
+    """Rebuild agent_submissions with the PR5-widened status CHECK constraint.
+
+    Same SQLite 12-step CHECK-widening procedure as
+    ``_widen_attestation_mode_check`` above. The new shape admits the
+    PR5 (solve-on-submit) status values ``'pending_solution'``,
+    ``'valid_attestation_pending'``, and ``'attest_failed'`` alongside
+    the existing legacy values.
+
+    Carries every existing column (queried via ``PRAGMA table_info``) so
+    any prior migrations (attestation_mode widen, ssh_* columns,
+    PR5 attestation_status on eval_runs — irrelevant to this table —
+    etc.) are preserved across the rebuild.
+    """
+    import structlog as _structlog
+
+    _log = _structlog.get_logger(__name__)
+    _log.info("widen_status_check_start")
+
+    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
+    info = await cur.fetchall()
+    old_cols = [str(row[1]) for row in info]
+
+    # The canonical new shape — mirrors the SCHEMA constant above.
+    await conn.execute(
+        """
+        CREATE TABLE agent_submissions_new (
+            id                       TEXT PRIMARY KEY,
+            miner_hotkey             TEXT NOT NULL,
+            card_id                  TEXT NOT NULL REFERENCES card_definitions(id),
+            bundle_blob_key          TEXT NOT NULL,
+            bundle_hash              TEXT NOT NULL,
+            bundle_size_bytes        INTEGER NOT NULL,
+            encryption_key_id        TEXT NOT NULL,
+            bundle_signature         TEXT NOT NULL,
+            display_name             TEXT NOT NULL,
+            bio                      TEXT,
+            logo_url                 TEXT,
+            soul_md_preview          TEXT,
+            metadata_fingerprint     TEXT NOT NULL,
+            similarity_check_passed  INTEGER NOT NULL,
+            rejection_reason         TEXT,
+            submitted_at             TEXT NOT NULL,
+            status                   TEXT NOT NULL CHECK (status IN
+                                       ('pending_check','queued','evaluating',
+                                        'ranked','rejected','withdrawn',
+                                        'discovery',
+                                        'pending_solution',
+                                        'valid_attestation_pending','attest_failed')),
+            current_score            REAL,
+            current_rank             INTEGER,
+            first_mover_at           TEXT,
+            attestation_mode         TEXT NOT NULL DEFAULT 'polaris'
+                                     CHECK (attestation_mode IN
+                                       ('bundle','polaris','polaris-deploy','ssh-probe','tee','unverified')),
+            attestation_type         TEXT,
+            attestation_blob         BLOB,
+            attestation_verified_at  TEXT,
+            discovery_only           INTEGER NOT NULL DEFAULT 0,
+            ssh_host                 TEXT,
+            ssh_port                 INTEGER,
+            ssh_user                 TEXT,
+            hermes_port              INTEGER
+        )
+        """
+    )
+
+    # Carry every column the old table had that the new table also has.
+    new_cols = {
+        "id",
+        "miner_hotkey",
+        "card_id",
+        "bundle_blob_key",
+        "bundle_hash",
+        "bundle_size_bytes",
+        "encryption_key_id",
+        "bundle_signature",
+        "display_name",
+        "bio",
+        "logo_url",
+        "soul_md_preview",
+        "metadata_fingerprint",
+        "similarity_check_passed",
+        "rejection_reason",
+        "submitted_at",
+        "status",
+        "current_score",
+        "current_rank",
+        "first_mover_at",
+        "attestation_mode",
+        "attestation_type",
+        "attestation_blob",
+        "attestation_verified_at",
+        "discovery_only",
+        "ssh_host",
+        "ssh_port",
+        "ssh_user",
+        "hermes_port",
+    }
+    carry = [c for c in old_cols if c in new_cols]
+    cols_sql = ", ".join(carry)
+    await conn.execute(
+        f"INSERT INTO agent_submissions_new ({cols_sql}) "
+        f"SELECT {cols_sql} FROM agent_submissions"
+    )
+    await conn.execute("DROP TABLE agent_submissions")
+    await conn.execute("ALTER TABLE agent_submissions_new RENAME TO agent_submissions")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_card_status ON agent_submissions(card_id, status)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_card_score "
+        "ON agent_submissions(card_id, current_score DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_first_mover "
+        "ON agent_submissions(card_id, first_mover_at)"
+    )
+    _log.info("widen_status_check_done")

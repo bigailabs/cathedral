@@ -53,7 +53,17 @@ FIRST_MOVER_FINGERPRINT_WINDOW_DAYS = 7
 
 # Allowed AgentSubmission status transitions per Section 6.
 ALLOWED_STATUSES: frozenset[str] = frozenset(
-    {"pending_check", "queued", "evaluating", "ranked", "rejected", "withdrawn"}
+    {
+        "pending_check",
+        "queued",
+        "evaluating",
+        "ranked",
+        "rejected",
+        "withdrawn",
+        "pending_solution",
+        "valid_attestation_pending",
+        "attest_failed",
+    }
 )
 
 

@@ -23,9 +23,20 @@ and signs the receipt used by validators.
 - `synthetic_boolean_v1` SAT is live on mainnet under the signed weight policy.
 - The readiness probe is a toy smoke test only. It never earns emissions.
 - The active CNF URL is not public or enumerable. It is issued only inside
-  Cathedral's SSH/Hermes eval prompt.
+  Cathedral's SSH/Hermes eval prompt OR (PR5) via the authenticated active-cnf
+  endpoint described below.
 - Race order is first submitted valid receipt. Verification may finish later,
   but it does not move a later valid receipt ahead of an earlier valid receipt.
+
+## Two flows (PR5 rollout)
+
+- **Solve-POST (recommended, gated by
+  `CATHEDRAL_PR5_SOLVE_ON_SUBMIT_ENABLED=true`):** register, pull the active
+  CNF, solve locally, POST the answer. First valid POST wins and enters the
+  signed weight feed immediately; async SSH-attest audits the registered
+  endpoint afterward. See "Solve POST" below.
+- **Legacy SSH-push (flag off only):** register without a solution; Cathedral
+  SSHes in and drives `hermes chat -q "..."`.
 
 ## Register your miner
 
@@ -62,6 +73,33 @@ The signed payload is canonical JSON:
 ```
 
 Serialize it with sorted keys and compact separators before signing.
+
+Under the PR5 solve-on-submit path, the signed payload extends to six
+fields: `challenge_id` and `dimacs_solution_sha256` are empty strings
+for registration-only POSTs, and carry the active challenge id and the
+SHA-256 hex of the DIMACS body for solve-POSTs.
+
+## Solve POST (PR5)
+
+When the publisher has `CATHEDRAL_PR5_SOLVE_ON_SUBMIT_ENABLED=true`:
+
+1. Register (above).
+2. `GET {_BASE_URL}/api/cathedral/v1/synthetic-boolean/active-cnf` with
+   the `X-Cathedral-Hotkey` header.
+3. Fetch `cnf_url`, verify the SHA-256, solve locally.
+4. POST to `/v1/agents/submit` with the multipart fields `challenge_id`
+   and `dimacs_solution` populated, signed under the 6-field shape.
+
+A winning POST returns
+`{{"id","eval_run_id","status":"ranked","attestation_status":"pending","weighted_score":1.0,"challenge_id","server_ran_at"}}`.
+
+Registration-only POSTs while solve-on-submit is enabled return
+`status:"pending_solution"` and are not SSH-probed until a DIMACS solution is
+submitted.
+
+Async SSH-attest then marks the row `attested`. Errors: 400
+`malformed_answer`/`solution_unsatisfied`/etc. with a losing eval_run;
+409 `challenge_not_active` or `challenge_already_locked`.
 
 Install Cathedral's SSH key for `ssh_user`:
 

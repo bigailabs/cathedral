@@ -32,6 +32,10 @@ class AgentSubmissionStatus(str, Enum):
     RANKED = "ranked"
     REJECTED = "rejected"
     WITHDRAWN = "withdrawn"
+    DISCOVERY = "discovery"
+    PENDING_SOLUTION = "pending_solution"
+    VALID_ATTESTATION_PENDING = "valid_attestation_pending"
+    ATTEST_FAILED = "attest_failed"
 
 
 class AgentSubmission(BaseModel):
