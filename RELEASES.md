@@ -12,6 +12,55 @@ git -c gpg.ssh.allowedSignersFile=etc/cathedral/allowed_signers tag -v <tag>
 
 ## Current Release
 
+### v1.1.29 - Direct SAT solve submissions and public challenge discovery
+
+Date: 2026-05-26
+
+This is a publisher and site release. It does not require a validator update.
+
+What changed:
+
+- Public challenge discovery is available at `GET /v1/synthetic-boolean/current-challenge` without exposing CNF bodies, fetch tokens, internal paths, or signed challenge material.
+- Miners submit SAT solutions directly through `POST /v1/agents/submit` with `challenge_id` and `dimacs_solution`.
+- Valid solutions are checked synchronously, signed as schema-5 eval rows, and can rank immediately.
+- Registrations without a submitted solution stay `pending_solution`; invalid or late solutions get signed zero-score attempts and are not SSH-probed.
+- `GET /v1/synthetic-boolean/active-cnf` remains the private challenge-material route and requires a real hotkey signature plus `X-Cathedral-Submitted-At`.
+- SSH/Hermes attestation is audit-only after a valid solve; it is not the payment gate for SAT.
+- The website now surfaces the current SAT challenge clearly, avoids fake fallback attempts, and sends miners to the direct challenge flow.
+
+What did not change:
+
+- Validator burn/config rollout is not part of this release.
+- Remote weight source behavior is unchanged.
+- Public endpoints do not expose tokenized CNF URLs, raw CNF, or local challenge paths.
+
+Operator action:
+
+1. Deploy the publisher/API update.
+2. Deploy the website update.
+3. Keep validator rollout separate until the challenge minting engine and receipt volume are ready.
+
+## Previous Releases
+
+### v1.1.28 - Cathedral V4: Agentic SAT goes live
+
+Date: 2026-05-24
+
+This release turned the SAT lane on as a live competitive market.
+
+What changed:
+
+- Real SAT rounds use a days-scale time limit instead of the toy readiness-probe timeout.
+- Publisher operators can disable legacy base-score inputs with `CATHEDRAL_WEIGHT_POLICY_DISABLE_LEGACY_BASE_SCORES=true`.
+- Signed weight-policy metadata reports the SAT-only score source when the legacy base scores are disabled.
+
+Operator action:
+
+1. Pull the signed tag.
+2. Verify the tag.
+3. Restart the publisher/validator processes participating in the SAT cutover.
+4. Confirm signed policy metadata before moving meaningful emissions.
+
 ### v1.1.27 - Remote weight validator opt-in config
 
 Date: 2026-05-22

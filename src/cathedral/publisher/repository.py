@@ -13,6 +13,8 @@ opens the publisher's sqlite file.
 from __future__ import annotations
 
 import json
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -1221,5 +1223,581 @@ async def link_eval_runs_to_epoch(
     await conn.executemany(
         "INSERT OR REPLACE INTO eval_run_to_epoch (eval_run_id, epoch) VALUES (?, ?)",
         [(rid, epoch) for rid in eval_run_ids],
+    )
+    await conn.commit()
+
+
+# --------------------------------------------------------------------------
+# PR5 (solve-on-submit) helpers
+# --------------------------------------------------------------------------
+
+
+async def upsert_sat_registration(
+    conn: aiosqlite.Connection,
+    *,
+    miner_hotkey: str,
+    card_id: str,
+    bundle_hash: str,
+    bundle_size_bytes: int,
+    bundle_signature: str,
+    display_name: str,
+    bio: str | None,
+    ssh_host: str,
+    ssh_port: int,
+    ssh_user: str,
+    submitted_at_iso: str,
+    initial_status: str = "pending_check",
+) -> str:
+    """Upsert an ``agent_submissions`` row for the SAT lane.
+
+    If a row already exists for ``(miner_hotkey, card_id, bundle_hash)``
+    (the UNIQUE index), update the SSH coordinates + display fields and
+    bump the timestamp; otherwise insert a new row in ``initial_status``.
+    Returns the row id.
+
+    Used by the PR5 solve-on-submit path so a re-POST from the same
+    hotkey doesn't 409 — re-submission is a normal flow once miners
+    iterate on their solver setup.
+
+    Caller MUST hold ``ctx.db_write_lock`` because this performs a
+    read-then-write sequence on the shared connection.
+    """
+    from uuid import uuid4
+
+    cur = await conn.execute(
+        "SELECT id, status FROM agent_submissions "
+        "WHERE miner_hotkey = ? AND card_id = ? AND bundle_hash = ? LIMIT 1",
+        (miner_hotkey, card_id, bundle_hash),
+    )
+    row = await cur.fetchone()
+    if row is not None:
+        existing_id = str(row[0])
+        existing_status = str(row[1])
+        # Don't downgrade a ranked/valid row back to a registration state.
+        # Non-final rows move to the caller's requested initial status;
+        # PR5 uses this to keep no-solution rows out of the eval queue.
+        next_status = existing_status
+        if existing_status not in {"ranked", "valid_attestation_pending"}:
+            next_status = initial_status
+        await conn.execute(
+            "UPDATE agent_submissions "
+            "SET ssh_host = ?, ssh_port = ?, ssh_user = ?, "
+            "    display_name = ?, bio = COALESCE(?, bio), "
+            "    bundle_signature = ?, bundle_size_bytes = ?, "
+            "    submitted_at = ?, status = ? "
+            "WHERE id = ?",
+            (
+                ssh_host,
+                ssh_port,
+                ssh_user,
+                display_name,
+                bio,
+                bundle_signature,
+                bundle_size_bytes,
+                submitted_at_iso,
+                next_status,
+                existing_id,
+            ),
+        )
+        return existing_id
+
+    new_id = str(uuid4())
+    await conn.execute(
+        """
+        INSERT INTO agent_submissions (
+            id, miner_hotkey, card_id, bundle_blob_key, bundle_hash,
+            bundle_size_bytes, encryption_key_id, bundle_signature,
+            display_name, bio, logo_url, soul_md_preview,
+            metadata_fingerprint, similarity_check_passed,
+            rejection_reason, submitted_at, status, first_mover_at,
+            attestation_mode, attestation_type, attestation_blob,
+            attestation_verified_at, discovery_only,
+            ssh_host, ssh_port, ssh_user, hermes_port
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            new_id,
+            miner_hotkey,
+            card_id,
+            "",
+            bundle_hash,
+            bundle_size_bytes,
+            "",
+            bundle_signature,
+            display_name,
+            bio,
+            None,
+            None,
+            "",
+            1,
+            None,
+            submitted_at_iso,
+            initial_status,
+            None,
+            "ssh-probe",
+            None,
+            None,
+            None,
+            0,
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            None,
+        ),
+    )
+    return new_id
+
+
+@dataclass
+class AtomicWinnerResult:
+    """Outcome of :func:`atomic_claim_winner`.
+
+    ``won`` is True iff this call wrote the winning eval_run + lock row.
+    ``won=False`` means another caller beat us to it; ``existing_winner``
+    carries the row data so the handler can build the 409 body.
+    """
+
+    won: bool
+    eval_run_id: str
+    existing_winner_hotkey: str | None = None
+    existing_winner_won_at_iso: str | None = None
+
+
+async def atomic_claim_winner(
+    conn: aiosqlite.Connection,
+    *,
+    family_id: str,
+    challenge_id: str,
+    miner_hotkey: str,
+    submission_id: str,
+    cnf_sha256: str,
+    dimacs_solution_sha256: str,
+    ran_at_iso: str,
+    signed_row: dict[str, Any],
+    epoch: int,
+    round_index: int,
+    time_limit_seconds: int,
+    weighted_score: float = 1.0,
+    attestation_status: str = "pending",
+) -> AtomicWinnerResult:
+    """Atomically claim the round winner for the SAT lane.
+
+    Uses ``BEGIN IMMEDIATE`` to upgrade to a write-lock before reading
+    the active-challenge state, then:
+
+    1. Re-checks ``lane_challenges.status='active'`` and the requested
+       ``challenge_id`` matches. If not, rolls back and returns
+       ``AtomicWinnerResult(won=False, ...)``.
+    2. Inserts the winning ``eval_runs`` row with the already-signed
+       schema-5 task-family payload. ``attestation_status='pending'``
+       means the async SSH attest worker may audit the endpoint later,
+       but valid mathematical work enters the signed payment path now.
+    3. Inserts the winner row into ``lane_challenge_winners`` via
+       ``INSERT OR IGNORE``. If another caller already claimed it
+       (the PRIMARY KEY collides), rolls back the eval_run insert and
+       returns ``won=False`` with the existing winner's hotkey.
+    4. Flips ``lane_challenges.status`` to ``locked``.
+    5. Updates ``agent_submissions`` to ``status='ranked'`` +
+       ``current_score=1.0`` so signed remote weights can pick it up
+       immediately.
+    6. Commits.
+
+    Caller MUST hold ``ctx.db_write_lock`` so a separate code path on
+    the shared connection (eval_loop, weight policy producer) does not
+    interleave with our explicit transaction. The asyncio lock + the
+    ``BEGIN IMMEDIATE`` give us a single writer + an explicit
+    SQLite-level write lock for defense in depth.
+    """
+    eval_run_id = str(signed_row["id"])
+    task_json, output_card_json, output_card_hash = _task_family_storage_from_signed_row(
+        signed_row,
+        family_id=family_id,
+        challenge_id=challenge_id,
+        cnf_sha256=cnf_sha256,
+        dimacs_solution_sha256=dimacs_solution_sha256,
+        time_limit_seconds=time_limit_seconds,
+        miner_hotkey=miner_hotkey,
+    )
+
+    # BEGIN IMMEDIATE upgrades to a write-lock straight away. Together
+    # with the asyncio lock the caller is holding, this serializes
+    # concurrent POSTs that want to lock the same round.
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Step 1: re-check the active challenge. Reading inside the
+        # write transaction guarantees the row state is stable until
+        # our commit/rollback.
+        cur = await conn.execute(
+            "SELECT status FROM lane_challenges "
+            "WHERE family_id = ? AND challenge_id = ?",
+            (family_id, challenge_id),
+        )
+        row = await cur.fetchone()
+        if row is None or str(row[0]) != "active":
+            await conn.rollback()
+            # Look up who already won so the handler can include it in
+            # the 409 body. Read outside the transaction since the
+            # response is informational.
+            existing = await _existing_winner(conn, family_id, challenge_id)
+            return AtomicWinnerResult(
+                won=False,
+                eval_run_id=eval_run_id,
+                existing_winner_hotkey=existing[0] if existing else None,
+                existing_winner_won_at_iso=existing[1] if existing else None,
+            )
+
+        # Step 3 first (CAS via INSERT OR IGNORE on PRIMARY KEY) — if
+        # another caller is in the same transaction window, the PK
+        # collision is the canonical "I lost" signal.
+        await conn.execute(
+            "INSERT OR IGNORE INTO lane_challenge_winners ("
+            "family_id, challenge_id, miner_hotkey, eval_run_id, "
+            "weighted_score, won_at_iso) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                family_id,
+                challenge_id,
+                miner_hotkey,
+                eval_run_id,
+                float(signed_row["weighted_score"]),
+                ran_at_iso,
+            ),
+        )
+        winner_cur = await conn.execute(
+            "SELECT miner_hotkey, eval_run_id, won_at_iso "
+            "FROM lane_challenge_winners "
+            "WHERE family_id = ? AND challenge_id = ?",
+            (family_id, challenge_id),
+        )
+        winner_row = await winner_cur.fetchone()
+        if winner_row is None:
+            # Should be impossible after INSERT OR IGNORE — treat as a
+            # programming error.
+            await conn.rollback()
+            raise RuntimeError(
+                "lane_challenge_winners row missing after INSERT OR IGNORE"
+            )
+        existing_hotkey = str(winner_row[0])
+        existing_eval_run_id = str(winner_row[1])
+        existing_won_at_iso = str(winner_row[2])
+        if existing_eval_run_id != eval_run_id:
+            # Another caller won. Roll back so no eval_run row is
+            # written for this attempt; the caller can write a losing
+            # eval_run separately.
+            await conn.rollback()
+            return AtomicWinnerResult(
+                won=False,
+                eval_run_id=eval_run_id,
+                existing_winner_hotkey=existing_hotkey,
+                existing_winner_won_at_iso=existing_won_at_iso,
+            )
+
+        # We are the winner. Step 2: insert the eval_run.
+        await conn.execute(
+            """
+            INSERT INTO eval_runs (
+                id, submission_id, epoch, round_index, polaris_agent_id,
+                polaris_run_id, task_json, output_card_json, output_card_hash,
+                score_parts, weighted_score, ran_at, duration_ms, errors,
+                cathedral_signature, polaris_verified, polaris_attestation,
+                trace_json, polaris_manifest,
+                eval_card_excerpt, eval_artifact_manifest_hash,
+                eval_artifact_bundle_url, eval_artifact_manifest_url,
+                eval_output_schema_version, attestation_status
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                eval_run_id,
+                submission_id,
+                int(epoch),
+                int(round_index),
+                f"direct-submit:{miner_hotkey[:12]}",
+                f"{family_id}:{eval_run_id}",
+                json.dumps(task_json, sort_keys=True),
+                json.dumps(output_card_json, sort_keys=True),
+                output_card_hash,
+                json.dumps(dict(signed_row["score_parts"])),
+                float(signed_row["weighted_score"]),
+                ran_at_iso,
+                0,
+                None,
+                str(signed_row["cathedral_signature"]),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                int(signed_row.get("eval_output_schema_version") or 5),
+                attestation_status,
+            ),
+        )
+
+        # Step 4: lock the challenge.
+        await conn.execute(
+            "UPDATE lane_challenges "
+            "SET status = 'locked', losers_published_at_iso = NULL, "
+            "    updated_at_iso = ? "
+            "WHERE family_id = ? AND challenge_id = ? AND status = 'active'",
+            (ran_at_iso, family_id, challenge_id),
+        )
+
+        # Step 5: valid solve is payable immediately. The SAT attest
+        # worker can still audit the SSH endpoint later, but no valid
+        # mathematical answer waits on SSH before entering weights.
+        await conn.execute(
+            "UPDATE agent_submissions "
+            "SET status = 'ranked', current_score = ?, rejection_reason = NULL "
+            "WHERE id = ?",
+            (float(signed_row["weighted_score"]), submission_id),
+        )
+
+        await conn.commit()
+        return AtomicWinnerResult(
+            won=True,
+            eval_run_id=eval_run_id,
+        )
+    except Exception:
+        with suppress(Exception):
+            await conn.rollback()
+        raise
+
+
+async def _existing_winner(
+    conn: aiosqlite.Connection, family_id: str, challenge_id: str
+) -> tuple[str, str] | None:
+    cur = await conn.execute(
+        "SELECT miner_hotkey, won_at_iso FROM lane_challenge_winners "
+        "WHERE family_id = ? AND challenge_id = ?",
+        (family_id, challenge_id),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return (str(row[0]), str(row[1]))
+
+
+async def insert_losing_eval_run(
+    conn: aiosqlite.Connection,
+    *,
+    submission_id: str,
+    challenge_id: str,
+    cnf_sha256: str,
+    dimacs_solution_sha256: str,
+    error_code: str,
+    ran_at_iso: str,
+    signed_row: dict[str, Any],
+    epoch: int,
+    round_index: int,
+    time_limit_seconds: int,
+    miner_hotkey: str,
+) -> str:
+    """Write a losing/invalid ``eval_runs`` row for leaderboard transparency.
+
+    Used when a solve-POST either:
+    - has invalid DIMACS (the spec wants a row with score 0 + error), or
+    - arrives after the round was already locked.
+
+    Losing rows are still signed schema-5 rows with ``weighted_score=0``
+    so validators and the public dashboard can authenticate the attempt.
+    The companion submission is marked ``rejected`` so the legacy SSH
+    scheduler never probes an invalid/no-winning answer. Caller MUST
+    hold the db_write_lock.
+    """
+    eval_run_id = str(signed_row["id"])
+    task_json, output_card_json, output_card_hash = _task_family_storage_from_signed_row(
+        signed_row,
+        family_id="synthetic_boolean_v1",
+        challenge_id=challenge_id,
+        cnf_sha256=cnf_sha256,
+        dimacs_solution_sha256=dimacs_solution_sha256,
+        time_limit_seconds=time_limit_seconds,
+        miner_hotkey=miner_hotkey,
+    )
+    await conn.execute(
+        """
+        INSERT INTO eval_runs (
+            id, submission_id, epoch, round_index, polaris_agent_id,
+            polaris_run_id, task_json, output_card_json, output_card_hash,
+            score_parts, weighted_score, ran_at, duration_ms, errors,
+            cathedral_signature, polaris_verified, polaris_attestation,
+            trace_json, polaris_manifest,
+            eval_card_excerpt, eval_artifact_manifest_hash,
+            eval_artifact_bundle_url, eval_artifact_manifest_url,
+            eval_output_schema_version, attestation_status
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            eval_run_id,
+            submission_id,
+            int(epoch),
+            int(round_index),
+            f"direct-submit:{miner_hotkey[:12]}",
+            f"synthetic_boolean_v1:{eval_run_id}",
+            json.dumps(task_json, sort_keys=True),
+            json.dumps(output_card_json, sort_keys=True),
+            output_card_hash,
+            json.dumps(dict(signed_row["score_parts"])),
+            float(signed_row["weighted_score"]),
+            ran_at_iso,
+            0,
+            json.dumps([error_code]),
+            str(signed_row["cathedral_signature"]),
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            int(signed_row.get("eval_output_schema_version") or 5),
+            # Losing rows don't need attestation — the score is already
+            # 0 and the normal ranking keeps them out. Mark
+            # 'not_applicable' so the attest worker doesn't pick them up.
+            "not_applicable",
+        ),
+    )
+    await conn.execute(
+        "UPDATE agent_submissions "
+        "SET status = 'rejected', current_score = 0.0, rejection_reason = ? "
+        "WHERE id = ?",
+        (error_code, submission_id),
+    )
+    await conn.commit()
+    return eval_run_id
+
+
+def _task_family_storage_from_signed_row(
+    signed_row: dict[str, Any],
+    *,
+    family_id: str,
+    challenge_id: str,
+    cnf_sha256: str,
+    dimacs_solution_sha256: str,
+    time_limit_seconds: int,
+    miner_hotkey: str,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Build eval_runs storage JSON from a signed schema-5 row."""
+    import blake3
+
+    from cathedral.v1_types import canonical_json
+
+    output_card_json = {
+        "task_type": family_id,
+        "task_id_public": signed_row["task_id_public"],
+        "difficulty_tier": signed_row["difficulty_tier"],
+        "weighted_score": signed_row["weighted_score"],
+        "rejection_reason": signed_row.get("rejection_reason"),
+        "worker_owner_hotkey": miner_hotkey,
+    }
+    output_card_hash = blake3.blake3(canonical_json(output_card_json)).hexdigest()
+    task_json = {
+        "task_type": family_id,
+        "task_id_public": signed_row["task_id_public"],
+        "epoch_salt": signed_row["epoch_salt"],
+        "difficulty_tier": signed_row["difficulty_tier"],
+        "time_limit_seconds": int(time_limit_seconds),
+        "answer_hash": signed_row["answer_hash"],
+        "verifier_details_hash": signed_row["verifier_details_hash"],
+        "challenge_id": challenge_id,
+        "cnf_sha256": cnf_sha256,
+        "miner_solution_sha256": dimacs_solution_sha256,
+    }
+    return task_json, output_card_json, output_card_hash
+
+
+async def list_pending_sat_attest(
+    conn: aiosqlite.Connection,
+    *,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    """List eval_runs awaiting async SAT attestation.
+
+    Joined against ``agent_submissions`` so the attest worker has the
+    ssh coordinates it needs. Ordered oldest-first so the queue drains
+    in arrival order.
+    """
+    cur = await conn.execute(
+        """
+        SELECT er.id, er.submission_id, er.task_json, er.ran_at,
+               sub.miner_hotkey, sub.ssh_host, sub.ssh_port, sub.ssh_user,
+               sub.card_id
+        FROM eval_runs er
+        JOIN agent_submissions sub ON sub.id = er.submission_id
+        WHERE er.attestation_status = 'pending'
+        ORDER BY er.ran_at ASC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = await cur.fetchall()
+    return [
+        {
+            "eval_run_id": str(r[0]),
+            "submission_id": str(r[1]),
+            "task_json": json.loads(r[2]) if r[2] else {},
+            "ran_at_iso": str(r[3]),
+            "miner_hotkey": str(r[4]),
+            "ssh_host": str(r[5]) if r[5] else None,
+            "ssh_port": int(r[6]) if r[6] is not None else None,
+            "ssh_user": str(r[7]) if r[7] else None,
+            "card_id": str(r[8]),
+        }
+        for r in rows
+    ]
+
+
+async def mark_sat_attest_passed(
+    conn: aiosqlite.Connection,
+    *,
+    eval_run_id: str,
+) -> None:
+    """Mark a pending eval_run as attested.
+
+    Direct solve rows are already signed and ranked before this worker
+    runs; attest only updates the audit status.
+    """
+    await conn.execute(
+        "UPDATE eval_runs "
+        "SET attestation_status = 'attested' "
+        "WHERE id = ? AND attestation_status = 'pending'",
+        (eval_run_id,),
+    )
+    await conn.execute(
+        "UPDATE agent_submissions SET status = 'ranked' "
+        "WHERE id = (SELECT submission_id FROM eval_runs WHERE id = ?) "
+        "  AND status IN ('valid_attestation_pending', 'ranked')",
+        (eval_run_id,),
+    )
+    await conn.commit()
+
+
+async def mark_sat_attest_failed(
+    conn: aiosqlite.Connection,
+    *,
+    eval_run_id: str,
+    reason: str,
+) -> None:
+    """Mark a pending eval_run as attest-failed without revoking payment.
+
+    The direct solve was already mathematically verified and signed. SSH
+    attest is an audit signal, not a payment gate; mutating weighted_score
+    would also invalidate the existing schema-5 signature.
+    """
+    await conn.execute(
+        "UPDATE eval_runs "
+        "SET attestation_status = 'failed', errors = ? "
+        "WHERE id = ? AND attestation_status = 'pending'",
+        (json.dumps([f"attest_failed: {reason}"]), eval_run_id),
     )
     await conn.commit()

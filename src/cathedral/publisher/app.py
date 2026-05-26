@@ -34,6 +34,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cathedral.cards.registry import CardRegistry
 from cathedral.eval.orchestrator import run_eval_loop
+from cathedral.eval.sat_attest_worker import run_sat_attest_loop
 from cathedral.eval.polaris_runner import (
     BundleCardRunner,
     HttpPolarisRunner,
@@ -112,6 +113,16 @@ class PublisherContext:
 
 
 _DEFAULT_SSH_PROBE_KEY_PATH = "/tmp/cathedral_probe_ed25519"  # noqa: S108
+
+
+def _pr5_solve_on_submit_loop_enabled() -> bool:
+    """Sibling of submit._pr5_solve_on_submit_enabled() for the lifespan.
+
+    Kept here (not imported from submit.py) so the lifespan doesn't
+    accidentally pull in the submit module's transitive imports.
+    """
+    raw = os.environ.get("CATHEDRAL_PR5_SOLVE_ON_SUBMIT_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _write_private_key_file_0600(target: Path, content: str) -> None:
@@ -315,6 +326,23 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                         config=config,
                         stop=stop,
                         db_write_lock=ctx.db_write_lock,
+                    )
+                )
+            )
+
+        # PR5 (solve-on-submit): drain pending SAT-attest rows in the
+        # background. Same lifespan as the eval loop so it stops cleanly
+        # on shutdown. Gated by the same flag as the submit handler so
+        # an operator flipping it off disables both the new write path
+        # and the new background worker.
+        if _pr5_solve_on_submit_loop_enabled():
+            ctx.background_tasks.append(
+                asyncio.create_task(
+                    run_sat_attest_loop(
+                        db=ctx.db,
+                        signer=ctx.signer,
+                        db_write_lock=ctx.db_write_lock,
+                        stop=stop,
                     )
                 )
             )

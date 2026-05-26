@@ -12,6 +12,25 @@ header — base64 sr25519 over canonical_json of the locked payload shape:
 
 Reference: CONTRACTS.md Section 4.1.
 
+PR5 (`solve-on-submit`) extends the canonical shape with two optional
+fields used when a miner POSTs a SAT solution alongside registration:
+
+    {
+      "bundle_hash":            "...",
+      "card_id":                "synthetic_boolean_v1",
+      "challenge_id":           "<challenge being solved>",
+      "dimacs_solution_sha256": "<sha256 hex of dimacs body>",
+      "miner_hotkey":           "...",
+      "submitted_at":           "..."
+    }
+
+The `dimacs_solution_sha256` binds the signature to the specific solution
+body the miner sent (prevents a MITM from swapping in another valid
+solution to claim the win on someone else's behalf). Both new fields are
+empty strings when the miner is only registering (no solve POST) so the
+extended shape stays backwards-compatible with the 4-field signed payload
+when callers explicitly request the legacy form.
+
 We use `substrateinterface.Keypair` for verification (the standard
 Bittensor / Substrate sr25519 implementation). Signing helpers exist
 mostly for tests; production miners use `bittensor.wallet.hotkey.sign`.
@@ -57,12 +76,21 @@ def canonical_claim_bytes(
     card_id: str,
     miner_hotkey: str,
     submitted_at: str,
+    challenge_id: str | None = None,
+    dimacs_solution_sha256: str | None = None,
 ) -> bytes:
     """Return the exact bytes the miner signs.
 
     The dict shape is the locked payload from CONTRACTS.md Section 4.1.
     Built deterministically here so callers cannot accidentally drift
     from the canonicalization rule.
+
+    PR5 extension: when ``challenge_id`` AND ``dimacs_solution_sha256``
+    are both provided (i.e. not ``None``), they are added to the signed
+    payload. Pass them as empty strings explicitly to indicate "I'm
+    using the 6-field shape but I'm only registering" — most callers
+    should just leave both ``None`` (legacy 4-field shape) unless the
+    caller is in the solve-on-submit path.
     """
     payload: dict[str, Any] = {
         "bundle_hash": bundle_hash,
@@ -70,6 +98,12 @@ def canonical_claim_bytes(
         "miner_hotkey": miner_hotkey,
         "submitted_at": submitted_at,
     }
+    if challenge_id is not None or dimacs_solution_sha256 is not None:
+        # Both fields move together to keep the payload shape predictable.
+        # Each defaults to empty string when only one was provided so the
+        # signed dict always carries both keys when either is in play.
+        payload["challenge_id"] = challenge_id or ""
+        payload["dimacs_solution_sha256"] = dimacs_solution_sha256 or ""
     return canonical_json(payload)
 
 
@@ -80,6 +114,8 @@ def verify_hotkey_signature(
     bundle_hash: str,
     card_id: str,
     submitted_at: str,
+    challenge_id: str | None = None,
+    dimacs_solution_sha256: str | None = None,
 ) -> None:
     """Verify the sr25519 signature; raise `InvalidSignatureError` on failure.
 
@@ -89,6 +125,11 @@ def verify_hotkey_signature(
     those exactly. This means a miner cannot sign a payload claiming a
     different bundle_hash than the one cathedral computed from the
     uploaded bytes (Section 6 step 1).
+
+    PR5 extension: if ``challenge_id`` or ``dimacs_solution_sha256`` is
+    provided, verification uses the 6-field canonical shape. Callers in
+    the solve-on-submit path always pass both (using empty strings to
+    mean "no challenge / no solution"); legacy callers omit both.
     """
     keypair_cls = _load_keypair_class()
 
@@ -102,6 +143,8 @@ def verify_hotkey_signature(
         card_id=card_id,
         miner_hotkey=hotkey_ss58,
         submitted_at=submitted_at,
+        challenge_id=challenge_id,
+        dimacs_solution_sha256=dimacs_solution_sha256,
     )
 
     try:
@@ -125,11 +168,16 @@ def sign_claim(
     card_id: str,
     miner_hotkey: str,
     submitted_at: str,
+    challenge_id: str | None = None,
+    dimacs_solution_sha256: str | None = None,
 ) -> str:
     """Sign a claim payload with a raw sr25519 seed (hex). Test/CLI helper.
 
     Production miners should use `bittensor.wallet.hotkey.sign(...)` to
     keep keys in their wallet. The output is base64 (standard, padded).
+
+    PR5 extension: pass ``challenge_id`` and ``dimacs_solution_sha256``
+    to sign the 6-field solve-on-submit payload.
     """
     keypair_cls = _load_keypair_class()
     kp = keypair_cls.create_from_seed(seed_hex, crypto_type=1)  # 1 == sr25519
@@ -143,6 +191,8 @@ def sign_claim(
         card_id=card_id,
         miner_hotkey=miner_hotkey,
         submitted_at=submitted_at,
+        challenge_id=challenge_id,
+        dimacs_solution_sha256=dimacs_solution_sha256,
     )
     sig = kp.sign(payload)
     return base64.b64encode(sig).decode("ascii")
