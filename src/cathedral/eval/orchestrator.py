@@ -766,9 +766,29 @@ class EvalOrchestrator:
         run_challenge = runner.run_task_family_challenge
 
         miner_hotkey = str(submission["miner_hotkey"])
+        submission_card_id = str(submission["card_id"])
         issued_at_iso = _ms_iso(datetime.now(UTC))
         ran_any = False
-        for family_id in enabled_task_family_ids():
+        # Lane gating: only probe a submission with the task family it
+        # explicitly opted into via agent_submissions.card_id. Before this
+        # gate, the task-family feed iterated every enabled family per
+        # submission, which caused card-mining baseline-runners (e.g.
+        # eu-ai-act) to receive SAT prompts they never registered for.
+        # Mismatch is the common case, so aggregate to one debug log per
+        # submission rather than per (submission, family) pair.
+        enabled_families = enabled_task_family_ids()
+        gated_families = [fid for fid in enabled_families if fid == submission_card_id]
+        skipped_families = [fid for fid in enabled_families if fid != submission_card_id]
+        if skipped_families:
+            log.debug(
+                "task_family_skipped",
+                reason="submission_card_id_mismatch",
+                submission_id=str(submission["id"]),
+                miner_hotkey=miner_hotkey,
+                submission_card_id=submission_card_id,
+                skipped_family_ids=skipped_families,
+            )
+        for family_id in gated_families:
             try:
                 lane = lane_registry.lookup(family_id)
             except KeyError:
