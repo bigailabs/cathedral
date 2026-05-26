@@ -874,9 +874,8 @@ async def get_active_cnf(
     - cnf metadata (sha256, num_vars, num_clauses)
     - the announcement window (``active_since``, ``expires_at``)
 
-    The endpoint is hotkey-authenticated so only registered miners can
-    fetch. (Open Question 4: auth gives anti-precompute; spec leans
-    "auth, short TTL on token".)
+    The endpoint is hotkey-authenticated so only a hotkey holder can fetch
+    the tokenized CNF URL. Public metadata lives on ``current-challenge``.
 
     Idempotent: calling it again returns the same token (existing
     ``lane_challenge_fetch_tokens`` row is reused — see
@@ -994,6 +993,58 @@ def _add_secs_iso(start_iso: str, secs: int) -> str:
     from datetime import timedelta
 
     return _ms_iso(parsed + timedelta(seconds=int(secs)))
+
+
+@router.get("/v1/synthetic-boolean/current-challenge")
+async def get_current_sat_challenge(request: Request) -> dict[str, object]:
+    """Return public, metadata-only status for the active SAT challenge.
+
+    This is the website/miner-discovery surface. It deliberately does not
+    return ``cnf_url``, fetch tokens, raw CNF text, local paths, or solver
+    answers. Miners still use signed ``active-cnf`` to fetch challenge
+    material.
+    """
+    source = getattr(request.app.state, "task_family_challenge_source", None)
+    if source is None:
+        raise HTTPException(
+            status_code=503,
+            detail="challenge surface not configured",
+        )
+
+    active = await source.get_active(SAT_FAMILY_ID)
+    if active is None:
+        raise HTTPException(status_code=404, detail="no_active_challenge")
+
+    audit = active.audit_metadata or {}
+    cnf_sha256 = str(audit.get("cnf_sha256") or "")
+    num_vars = int(audit.get("num_vars") or 0)
+    num_clauses = int(audit.get("num_clauses") or 0)
+    cnf_bytes_raw = audit.get("cnf_bytes")
+    try:
+        cnf_bytes = int(cnf_bytes_raw) if cnf_bytes_raw is not None else None
+    except (TypeError, ValueError):
+        cnf_bytes = None
+    if cnf_bytes is None and active.cnf_text:
+        cnf_bytes = len(active.cnf_text.encode("utf-8"))
+
+    announced_time_limit_secs = _challenge_time_limit_seconds(active)
+
+    return {
+        "family_id": SAT_FAMILY_ID,
+        "challenge_id": active.challenge_id,
+        "status": active.status,
+        "tier": active.tier,
+        "storage": "file" if active.cnf_path else "sqlite_text",
+        "cnf_sha256": cnf_sha256,
+        "cnf_bytes": cnf_bytes,
+        "num_vars": num_vars,
+        "num_clauses": num_clauses,
+        "announced_time_limit_secs": announced_time_limit_secs,
+        "solve_on_submit_enabled": _pr5_solve_on_submit_enabled(),
+        "win_rule": "First submitted valid SAT receipt wins.",
+        "active_cnf_path": "/api/cathedral/v1/synthetic-boolean/active-cnf",
+        "submit_path": "/api/cathedral/v1/agents/submit",
+    }
 
 
 def _resolve_challenge_source(ctx: PublisherContext):

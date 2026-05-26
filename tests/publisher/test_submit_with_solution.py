@@ -248,6 +248,28 @@ def test_active_cnf_rejects_stale_signed_timestamp(
     assert "outside acceptable clock-skew window" in resp.json()["detail"]
 
 
+def test_current_challenge_returns_public_metadata_without_cnf_url(
+    client: TestClient,
+) -> None:
+    resp = client.get("/v1/synthetic-boolean/current-challenge")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["family_id"] == _FAMILY
+    assert body["challenge_id"] == _CHALLENGE
+    assert body["status"] == "active"
+    assert body["tier"] == 1
+    assert body["storage"] == "sqlite_text"
+    assert body["cnf_sha256"] == _CNF_SHA256
+    assert body["cnf_bytes"] == len(_CNF.encode("utf-8"))
+    assert body["num_vars"] == 3
+    assert body["num_clauses"] == 2
+    assert body["active_cnf_path"] == "/api/cathedral/v1/synthetic-boolean/active-cnf"
+    assert body["submit_path"] == "/api/cathedral/v1/agents/submit"
+    assert "cnf_url" not in body
+    assert "cnf_text" not in body
+    assert "cnf_path" not in body
+
+
 def test_winner_gets_200_ranked_and_attestation_pending(
     client: TestClient, alice: Keypair, tmp_path: Path
 ) -> None:
