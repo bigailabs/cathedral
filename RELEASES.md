@@ -12,11 +12,60 @@ git -c gpg.ssh.allowedSignersFile=etc/cathedral/allowed_signers tag -v <tag>
 
 ## Current Release
 
+### v2.0.0 - SAT mining cutover
+
+Date: 2026-05-26
+
+This is the major SAT cutover release for Cathedral validators,
+publishers, and miner-facing APIs. It moves the live mining path away
+from card-era work and onto `synthetic_boolean_v1` SAT challenges.
+
+What changed:
+
+- Cathedral validators stamp Bittensor `set_weights` calls with
+  `version_key=2000000`.
+- The SAT lane is the primary miner path.
+- Public challenge discovery is available at `GET /v1/synthetic-boolean/current-challenge` without exposing CNF bodies, fetch tokens, internal paths, or signed challenge material.
+- Miners submit SAT solutions directly through `POST /v1/agents/submit` with `challenge_id` and `dimacs_solution`.
+- Valid solutions are checked synchronously, signed as schema-5 eval rows, and can rank immediately.
+- Registrations without a submitted solution stay `pending_solution`; invalid or late solutions get signed zero-score attempts and are not SSH-probed.
+- `GET /v1/synthetic-boolean/active-cnf` remains the private challenge-material route and requires a real hotkey signature plus `X-Cathedral-Submitted-At`.
+- SSH/Hermes attestation is audit-only after a valid solve; it is not the payment gate for SAT.
+- The challenge source can safely prepare one active SAT challenge per
+  `(family_id, tier)` while existing callers keep one-active-per-family
+  behavior by default.
+- The private generator-to-publisher lease contract is documented for
+  pre-generated CNF pools, lease TTLs, health/depth reporting,
+  idempotent leases, and hash-confirmed imports.
+
+What did not change:
+
+- Public HTTP paths remain `/v1/...`; this is a release/protocol major,
+  not an HTTP path rename.
+- Public endpoints do not expose tokenized CNF URLs, raw CNF, or local challenge paths.
+- The generator API is private Cathedral infrastructure. Miners and
+  validators do not call it.
+
+Operator action:
+
+1. Pull and verify the signed `v2.0.0` tag.
+2. Restart validators and confirm the emitted chain `version_key` is
+   `2000000`.
+3. Ensure remote signed-weight verification is configured with the
+   Cathedral weight-policy public key before enabling remote mode.
+4. Validators that cannot verify the signed Cathedral policy should fail
+   closed rather than emit stale local/card-era weights.
+5. Keep the operator file-backed SAT challenge path available as the
+   break-glass fallback while the generator pool is introduced.
+
+## Previous Releases
+
 ### v1.1.29 - Direct SAT solve submissions and public challenge discovery
 
 Date: 2026-05-26
 
-This is a publisher and site release. It does not require a validator update.
+This was a publisher and site release. It did not require a validator
+update.
 
 What changed:
 
@@ -39,8 +88,6 @@ Operator action:
 1. Deploy the publisher/API update.
 2. Deploy the website update.
 3. Keep validator rollout separate until the challenge minting engine and receipt volume are ready.
-
-## Previous Releases
 
 ### v1.1.28 - Cathedral V4: Agentic SAT goes live
 
@@ -65,7 +112,7 @@ Operator action:
 
 Date: 2026-05-22
 
-This is the current validator-facing release.
+This was the validator-facing remote-weight opt-in release.
 
 What changed:
 

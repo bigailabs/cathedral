@@ -1,12 +1,12 @@
-"""Cathedral subnet — validator and miner.
+"""Cathedral subnet validator and miner.
 
-Verifies signed Polaris evidence about regulatory and legal intelligence
-cards, scores them, and sets weights on the Bittensor chain.
+Verifies Cathedral-signed SAT/task-family rows and sets weights on the
+Bittensor chain.
 """
 
-__version__ = "1.1.27"
+__version__ = "2.0.0"
 
 # Encoded version stamped on every `set_weights` extrinsic so on-chain
 # observers can distinguish Cathedral-binary weight-sets from generic
 # bittensor-SDK ones. Format: MAJOR*1_000_000 + MINOR*1_000 + PATCH.
-SPEC_VERSION = 1_001_027
+SPEC_VERSION = 2_000_000
