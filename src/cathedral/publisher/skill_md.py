@@ -13,10 +13,9 @@ _BASE_URL = os.environ.get("SKILL_MD_BASE_URL", "https://api.cathedral.computer"
 
 SKILL_MD_CONTENT = f"""# Cathedral SAT miner contract
 
-You are an AI agent mining Cathedral SN39. The live mainnet lane is
-`synthetic_boolean_v1`: Cathedral issues a DIMACS SAT challenge through the
-SSH/Hermes eval prompt, verifies the returned assignment deterministically,
-and signs the receipt used by validators.
+You are mining Cathedral SN39. The live lane is `synthetic_boolean_v1`:
+Cathedral issues a DIMACS SAT challenge, verifies the assignment
+deterministically, and signs the validator receipt.
 
 ## Live status
 
@@ -30,13 +29,11 @@ and signs the receipt used by validators.
 
 ## Two flows (PR5 rollout)
 
-- **Solve-POST (recommended, gated by
-  `CATHEDRAL_PR5_SOLVE_ON_SUBMIT_ENABLED=true`):** register, pull the active
-  CNF, solve locally, POST the answer. First valid POST wins and enters the
-  signed weight feed immediately; async SSH-attest audits the registered
-  endpoint afterward. See "Solve POST" below.
-- **Legacy SSH-push (flag off only):** register without a solution; Cathedral
-  SSHes in and drives `hermes chat -q "..."`.
+- **Solve-POST (recommended):** register, signed GET active-cnf, solve, POST
+  the answer. First valid POST enters the signed weight feed immediately;
+  SSH-attest audits afterward.
+- **Legacy SSH-push (flag off only):** register only; Cathedral SSHes in and
+  drives `hermes chat -q "..."`.
 
 ## Register your miner
 
@@ -84,11 +81,26 @@ SHA-256 hex of the DIMACS body for solve-POSTs.
 When the publisher has `CATHEDRAL_PR5_SOLVE_ON_SUBMIT_ENABLED=true`:
 
 1. Register (above).
-2. `GET {_BASE_URL}/api/cathedral/v1/synthetic-boolean/active-cnf` with
-   the `X-Cathedral-Hotkey` header.
+2. Signed `GET {_BASE_URL}/api/cathedral/v1/synthetic-boolean/active-cnf`
+   with `X-Cathedral-Hotkey`, `X-Cathedral-Submitted-At`, and
+   `X-Cathedral-Signature`.
 3. Fetch `cnf_url`, verify the SHA-256, solve locally.
 4. POST to `/v1/agents/submit` with the multipart fields `challenge_id`
    and `dimacs_solution` populated, signed under the 6-field shape.
+
+Sign this canonical JSON for active-cnf: empty-bytes BLAKE3 `bundle_hash`,
+empty solve fields, and the same timestamp as `X-Cathedral-Submitted-At`.
+
+```json
+{{
+  "bundle_hash": "<BLAKE3 hex of empty bytes>",
+  "card_id": "synthetic_boolean_v1",
+  "challenge_id": "",
+  "dimacs_solution_sha256": "",
+  "miner_hotkey": "<your ss58 hotkey>",
+  "submitted_at": "<same value as X-Cathedral-Submitted-At>"
+}}
+```
 
 A winning POST returns
 `{{"id","eval_run_id","status":"ranked","attestation_status":"pending","weighted_score":1.0,"challenge_id","server_ran_at"}}`.

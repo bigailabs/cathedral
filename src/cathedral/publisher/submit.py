@@ -59,7 +59,17 @@ from uuid import uuid4
 
 import blake3
 import structlog
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 
 from cathedral.auth import InvalidSignatureError, verify_hotkey_signature
 from cathedral.lanes.contract import PublicProblem, ScoreResult, Submission, VerifierResult
@@ -851,6 +861,7 @@ def _build_direct_solve_signed_row(
 @router.get("/v1/synthetic-boolean/active-cnf")
 async def get_active_cnf(
     request: Request,
+    x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
     auth: HotkeyAuth = Depends(hotkey_auth_header),
 ) -> dict[str, object]:
     """Return the currently-active SAT challenge metadata + a fetch token.
@@ -871,6 +882,49 @@ async def get_active_cnf(
     ``lane_challenge_fetch_tokens`` row is reused — see
     :class:`SqliteFetchTokenStore`).
     """
+    ctx: PublisherContext = request.app.state.ctx
+
+    signed_submitted_at_iso = x_cathedral_submitted_at.strip()
+    if not signed_submitted_at_iso:
+        raise HTTPException(status_code=401, detail="missing X-Cathedral-Submitted-At")
+    now = datetime.now(UTC)
+    try:
+        client_submitted_at = datetime.fromisoformat(
+            signed_submitted_at_iso.replace("Z", "+00:00")
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Cathedral-Submitted-At must be ISO-8601",
+        ) from e
+    if client_submitted_at.tzinfo is None:
+        client_submitted_at = client_submitted_at.replace(tzinfo=UTC)
+    skew_secs = abs((now - client_submitted_at).total_seconds())
+    if skew_secs > 300:
+        logger.info(
+            "active_cnf_clock_skew",
+            hotkey=auth.hotkey_ss58,
+            skew_secs=skew_secs,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="X-Cathedral-Submitted-At outside acceptable clock-skew window",
+        )
+
+    try:
+        verify_hotkey_signature(
+            hotkey_ss58=auth.hotkey_ss58,
+            signature_b64=auth.signature_b64,
+            bundle_hash=blake3.blake3(b"").hexdigest(),
+            card_id=SAT_CARD_ID,
+            submitted_at=signed_submitted_at_iso,
+            challenge_id="",
+            dimacs_solution_sha256="",
+        )
+    except InvalidSignatureError as e:
+        logger.info("active_cnf_sig_failed", hotkey=auth.hotkey_ss58)
+        raise HTTPException(status_code=401, detail="invalid hotkey signature") from e
+
     source = getattr(request.app.state, "task_family_challenge_source", None)
     tokens = getattr(request.app.state, "task_family_fetch_token_store", None)
     if source is None or tokens is None:
@@ -895,12 +949,13 @@ async def get_active_cnf(
 
     minted_at_iso = _ms_iso(datetime.now(UTC))
     fresh_token = secrets.token_urlsafe(32)
-    token_row = await tokens.mint_if_absent(
-        active.challenge_id,
-        fetch_token=fresh_token,
-        minted_at_iso=minted_at_iso,
-        announced_time_limit_secs=time_limit_secs,
-    )
+    async with ctx.db_write_lock:
+        token_row = await tokens.mint_if_absent(
+            active.challenge_id,
+            fetch_token=fresh_token,
+            minted_at_iso=minted_at_iso,
+            announced_time_limit_secs=time_limit_secs,
+        )
 
     base_url = (
         os.environ.get("CATHEDRAL_PUBLIC_BASE_URL", "").strip().rstrip("/")

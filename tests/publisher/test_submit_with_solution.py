@@ -144,6 +144,31 @@ def _sign_solve(
     return base64.b64encode(kp.sign(payload)).decode("ascii")
 
 
+def _sign_active_cnf(kp: Keypair, *, submitted_at: str) -> str:
+    import blake3
+
+    payload = canonical_claim_bytes(
+        bundle_hash=blake3.blake3(b"").hexdigest(),
+        card_id=_FAMILY,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=submitted_at,
+        challenge_id="",
+        dimacs_solution_sha256="",
+    )
+    return base64.b64encode(kp.sign(payload)).decode("ascii")
+
+
+def _active_cnf_headers(
+    kp: Keypair, *, submitted_at: str | None = None
+) -> dict[str, str]:
+    submitted_at = submitted_at or _now_iso_ms()
+    return {
+        "X-Cathedral-Hotkey": kp.ss58_address,
+        "X-Cathedral-Submitted-At": submitted_at,
+        "X-Cathedral-Signature": _sign_active_cnf(kp, submitted_at=submitted_at),
+    }
+
+
 def _solve_post_form(
     *,
     kp: Keypair,
@@ -178,6 +203,49 @@ def _solve_post_form(
         "X-Cathedral-Signature": sig,
     }
     return data, headers
+
+
+def test_active_cnf_requires_valid_hotkey_signature(
+    client: TestClient, alice: Keypair, bob: Keypair
+) -> None:
+    headers = _active_cnf_headers(alice)
+    ok = client.get("/v1/synthetic-boolean/active-cnf", headers=headers)
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["challenge_id"] == _CHALLENGE
+    assert body["cnf_sha256"] == _CNF_SHA256
+    assert f"/v1/challenges/{_CHALLENGE}/cnf?t=" in body["cnf_url"]
+
+    submitted_at = headers["X-Cathedral-Submitted-At"]
+    bad_headers = dict(headers)
+    bad_headers["X-Cathedral-Signature"] = _sign_active_cnf(
+        bob,
+        submitted_at=submitted_at,
+    )
+    bad = client.get("/v1/synthetic-boolean/active-cnf", headers=bad_headers)
+    assert bad.status_code == 401, bad.text
+    assert bad.json()["detail"] == "invalid hotkey signature"
+
+
+def test_active_cnf_requires_submitted_at_header(
+    client: TestClient, alice: Keypair
+) -> None:
+    headers = _active_cnf_headers(alice)
+    headers.pop("X-Cathedral-Submitted-At")
+
+    resp = client.get("/v1/synthetic-boolean/active-cnf", headers=headers)
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["detail"] == "missing X-Cathedral-Submitted-At"
+
+
+def test_active_cnf_rejects_stale_signed_timestamp(
+    client: TestClient, alice: Keypair
+) -> None:
+    headers = _active_cnf_headers(alice, submitted_at="2020-01-01T00:00:00.000Z")
+
+    resp = client.get("/v1/synthetic-boolean/active-cnf", headers=headers)
+    assert resp.status_code == 400, resp.text
+    assert "outside acceptable clock-skew window" in resp.json()["detail"]
 
 
 def test_winner_gets_200_ranked_and_attestation_pending(
