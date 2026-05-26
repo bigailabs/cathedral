@@ -236,16 +236,22 @@ class _ScriptedDelayedRunner(_SolvingRunner):
         return _HermesResult(stdout=stdout, trace={})
 
 
-async def _seed_submission(conn, *, submission_id: str, miner_hotkey: str) -> dict[str, Any]:
-    existing = await repository.get_card_definition(conn, "eu-ai-act")
+async def _seed_submission(
+    conn,
+    *,
+    submission_id: str,
+    miner_hotkey: str,
+    card_id: str = "synthetic_boolean_v1",
+) -> dict[str, Any]:
+    existing = await repository.get_card_definition(conn, card_id)
     if existing is None:
         await repository.insert_card_definition(
             conn,
-            id="eu-ai-act",
-            display_name="EU AI Act",
-            jurisdiction="EU",
-            topic="AI Act",
-            description="primary v1 card",
+            id=card_id,
+            display_name=card_id,
+            jurisdiction="task-family" if card_id == "synthetic_boolean_v1" else "EU",
+            topic=card_id,
+            description=f"seeded for {card_id}",
             eval_spec_md="spec",
             source_pool=[],
             task_templates=[],
@@ -256,7 +262,7 @@ async def _seed_submission(conn, *, submission_id: str, miner_hotkey: str) -> di
         conn,
         id=submission_id,
         miner_hotkey=miner_hotkey,
-        card_id="eu-ai-act",
+        card_id=card_id,
         bundle_blob_key=f"bundles/{submission_id}.zip",
         bundle_hash="0" * 64,
         bundle_size_bytes=1024,
@@ -608,6 +614,78 @@ async def test_evaluate_one_runs_sat_registration_without_legacy_card_bundle(
             (5, 1.0)
         ]
         assert runner.task_ids == ["active-boolean-001"]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_task_family_probe_skips_submission_with_mismatched_card_id(
+    tmp_path, monkeypatch
+) -> None:
+    """A submission registered for one lane must not receive probes for another.
+
+    Before lane gating, the task-family feed iterated every active ssh-probe
+    endpoint and pushed SAT prompts to card-mining baseline-runners (e.g.
+    eu-ai-act) that never opted into SAT. Those Hermes endpoints would
+    accidentally produce valid DIMACS answers via the underlying LLM and
+    win SAT challenges they were never meant to compete in.
+    """
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
+
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        sub = await _seed_submission(
+            conn,
+            submission_id="eu-sub-x",
+            miner_hotkey="5EuMinerX",
+            card_id="eu-ai-act",
+        )
+        assert sub["card_id"] == "eu-ai-act"
+
+        await conn.executescript(CHALLENGE_SOURCE_SCHEMA)
+        await conn.executescript(CHALLENGE_LOCK_SCHEMA)
+        await conn.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        await conn.commit()
+        source = SqliteChallengeSource(conn)
+        await source.upsert(
+            ChallengeRecord(
+                challenge_id="active-boolean-001",
+                family_id="synthetic_boolean_v1",
+                tier=0,
+                cnf_text="p cnf 1 1\n1 0\n",
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata={"source": "card-id-gate-test"},
+            )
+        )
+        runner = _SolvingRunner()
+        orch = EvalOrchestrator(
+            db=conn,
+            hippius=StubHippiusClient(),
+            polaris=runner,
+            signer=EvalSigner(Ed25519PrivateKey.generate()),
+            registry=_Registry(),  # type: ignore[arg-type]
+            task_family_challenge_source=source,
+            task_family_challenge_lock=SqliteChallengeLock(conn),
+            task_family_fetch_token_store=SqliteFetchTokenStore(conn),
+            task_family_receipt_store=SqliteChallengeReceiptStore(conn),
+            public_base_url=_TEST_PUBLIC_BASE_URL,
+        )
+
+        ran = await orch._maybe_run_task_family_lanes(
+            submission=sub,
+            runner=runner,
+            epoch=0,
+            round_index=0,
+            log=structlog.get_logger(),
+        )
+
+        assert ran is False
+        assert runner.task_ids == [], (
+            "card-mining submission was probed with a task family it did not register for"
+        )
+        eval_runs = await repository.list_eval_runs_for_submission(conn, "eu-sub-x")
+        assert eval_runs == []
     finally:
         await conn.close()
 
