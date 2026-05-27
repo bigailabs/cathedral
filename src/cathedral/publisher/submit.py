@@ -55,6 +55,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 from uuid import uuid4
 
 import blake3
@@ -66,6 +67,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -442,8 +444,33 @@ async def submit_agent(
 
 
 # --------------------------------------------------------------------------
-# PR5 solve-on-submit branch
+# Solve-on-submit branch
 # --------------------------------------------------------------------------
+
+
+async def _select_active_sat_challenge(
+    source,
+    *,
+    challenge_id: str | None = None,
+    tier: int | None = None,
+):
+    """Return one active SAT challenge selected by id, tier, or default order."""
+    selected_challenge_id = (challenge_id or "").strip()
+    if selected_challenge_id and tier is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="use either challenge_id or tier, not both",
+        )
+    if tier is not None:
+        if tier < 0:
+            raise HTTPException(status_code=400, detail="tier must be >= 0")
+        return await source.get_active_for_tier(SAT_FAMILY_ID, int(tier))
+    if selected_challenge_id:
+        for rec in await source.list_active(SAT_FAMILY_ID):
+            if rec.challenge_id == selected_challenge_id:
+                return rec
+        return None
+    return await source.get_active(SAT_FAMILY_ID)
 
 
 async def _handle_solve_post(
@@ -488,13 +515,14 @@ async def _handle_solve_post(
             detail="solve-on-submit not configured: challenge source missing",
         )
 
-    active = await source.get_active(SAT_FAMILY_ID)
-    if active is None or active.challenge_id != challenge_id:
-        # Either no challenge is active, OR a different challenge is
-        # active. Differentiate the two cases for clearer client UX,
-        # and detect the "challenge already locked" case by looking up
-        # the requested row directly (locked rows aren't 'active' but
-        # they're a normal post-winner state).
+    active_rows = await source.list_active(SAT_FAMILY_ID)
+    active = next((rec for rec in active_rows if rec.challenge_id == challenge_id), None)
+    if active is None:
+        # Either no SAT challenge is active, OR the requested challenge
+        # is no longer one of the active SAT tier slots. Differentiate
+        # the cases for clearer client UX, and detect the normal
+        # post-winner "already locked" state by looking up the row
+        # directly.
         requested_lookup = await source.get_for_endpoint(challenge_id)
         if requested_lookup is not None and requested_lookup.status == "locked":
             # The challenge the miner is solving was just locked by
@@ -552,7 +580,7 @@ async def _handle_solve_post(
                     "winner_won_at": existing[1] if existing else None,
                 },
             )
-        if active is None:
+        if not active_rows:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -564,7 +592,8 @@ async def _handle_solve_post(
             status_code=409,
             detail={
                 "detail": "challenge_not_active",
-                "active_challenge_id": active.challenge_id,
+                "active_challenge_id": active_rows[0].challenge_id,
+                "active_challenge_ids": [rec.challenge_id for rec in active_rows],
                 "requested": challenge_id,
             },
         )
@@ -861,12 +890,14 @@ def _build_direct_solve_signed_row(
 @router.get("/v1/synthetic-boolean/active-cnf")
 async def get_active_cnf(
     request: Request,
+    challenge_id: str | None = Query(default=None),
+    tier: int | None = Query(default=None),
     x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
     auth: HotkeyAuth = Depends(hotkey_auth_header),
 ) -> dict[str, object]:
-    """Return the currently-active SAT challenge metadata + a fetch token.
+    """Return selected active SAT challenge metadata + a fetch token.
 
-    PR5 (solve-on-submit) miners call this to learn:
+    Solve-on-submit miners call this to learn:
     - what challenge to solve (``challenge_id``)
     - where to fetch the CNF body (``cnf_url`` — a short-lived signed
       URL pointing at the existing ``/v1/challenges/{id}/cnf?t=...``
@@ -874,8 +905,13 @@ async def get_active_cnf(
     - cnf metadata (sha256, num_vars, num_clauses)
     - the announcement window (``active_since``, ``expires_at``)
 
-    The endpoint is hotkey-authenticated so only a hotkey holder can fetch
-    the tokenized CNF URL. Public metadata lives on ``current-challenge``.
+    With no query string, this returns the default active challenge
+    (lowest tier). Miners can pass ``?challenge_id=...`` or ``?tier=N``
+    after discovering live slots from ``active-challenges``.
+
+    The endpoint is hotkey-authenticated so only a hotkey holder can
+    fetch the tokenized CNF URL. Public metadata lives on
+    ``active-challenges`` / ``current-challenge``.
 
     Idempotent: calling it again returns the same token (existing
     ``lane_challenge_fetch_tokens`` row is reused — see
@@ -932,8 +968,29 @@ async def get_active_cnf(
             detail="challenge surface not configured",
         )
 
-    active = await source.get_active(SAT_FAMILY_ID)
+    active = await _select_active_sat_challenge(
+        source,
+        challenge_id=challenge_id,
+        tier=tier,
+    )
     if active is None:
+        selected_challenge_id = (challenge_id or "").strip()
+        if selected_challenge_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "detail": "challenge_not_active",
+                    "requested": selected_challenge_id,
+                },
+            )
+        if tier is not None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "detail": "no_active_challenge_for_tier",
+                    "tier": tier,
+                },
+            )
         raise HTTPException(status_code=404, detail="no_active_challenge")
 
     audit = active.audit_metadata or {}
@@ -973,6 +1030,7 @@ async def get_active_cnf(
 
     return {
         "challenge_id": active.challenge_id,
+        "tier": active.tier,
         "cnf_url": cnf_url,
         "cnf_sha256": cnf_sha256,
         "num_vars": num_vars,
@@ -1015,6 +1073,10 @@ def _public_challenge_view(active) -> dict[str, object]:
         cnf_bytes = len(active.cnf_text.encode("utf-8"))
 
     kind = audit.get("kind")
+    active_cnf_path = (
+        "/api/cathedral/v1/synthetic-boolean/active-cnf"
+        f"?challenge_id={quote(active.challenge_id, safe='')}"
+    )
     return {
         "family_id": SAT_FAMILY_ID,
         "challenge_id": active.challenge_id,
@@ -1029,7 +1091,7 @@ def _public_challenge_view(active) -> dict[str, object]:
         "announced_time_limit_secs": _challenge_time_limit_seconds(active),
         "solve_on_submit_enabled": _pr5_solve_on_submit_enabled(),
         "win_rule": "First submitted valid SAT receipt wins.",
-        "active_cnf_path": "/api/cathedral/v1/synthetic-boolean/active-cnf",
+        "active_cnf_path": active_cnf_path,
         "submit_path": "/api/cathedral/v1/agents/submit",
     }
 

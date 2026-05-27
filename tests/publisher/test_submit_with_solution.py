@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,6 +36,10 @@ _CNF = "p cnf 3 2\n1 2 0\n-2 3 0\n"
 _VALID_SOL = "s SATISFIABLE\nv 1 2 3 0\n"
 _UNSAT_SOL = "s SATISFIABLE\nv 1 2 -3 0\n"
 _CNF_SHA256 = hashlib.sha256(_CNF.encode("utf-8")).hexdigest()
+_TIER2_CHALLENGE = "pr5-test-tier2"
+_TIER2_CNF = "p cnf 2 1\n1 0\n"
+_TIER2_VALID_SOL = "s SATISFIABLE\nv 1 2 0\n"
+_TIER2_CNF_SHA256 = hashlib.sha256(_TIER2_CNF.encode("utf-8")).hexdigest()
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +65,45 @@ def bob() -> Keypair:
     return Keypair.create_from_uri("//Bob")
 
 
+def _insert_challenge_sync(
+    conn: Any,
+    *,
+    challenge_id: str,
+    tier: int,
+    cnf_text: str,
+    status: str = "active",
+) -> None:
+    cnf_sha256 = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+    header = next(line for line in cnf_text.splitlines() if line.startswith("p cnf "))
+    _, _, num_vars, num_clauses = header.split()
+    conn.execute(
+        "INSERT OR REPLACE INTO lane_challenges ("
+        "challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+        "audit_metadata, losers_published_at_iso, "
+        "created_at_iso, updated_at_iso) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            challenge_id,
+            _FAMILY,
+            tier,
+            cnf_text,
+            None,
+            status,
+            json.dumps(
+                {
+                    "cnf_sha256": cnf_sha256,
+                    "num_vars": int(num_vars),
+                    "num_clauses": int(num_clauses),
+                },
+                sort_keys=True,
+            ),
+            None,
+            "2026-05-26T00:00:00.000Z",
+            "2026-05-26T00:00:00.000Z",
+        ),
+    )
+
+
 def _seed_active_challenge_sync(db_path: str) -> None:
     """Synchronously seed an active challenge before app startup.
 
@@ -68,7 +112,6 @@ def _seed_active_challenge_sync(db_path: str) -> None:
     publisher's lifespan then layers its own migrations on top — they
     are all idempotent so the seed survives.
     """
-    import json
     import sqlite3
 
     from cathedral.lanes.challenge_source import SQLITE_SCHEMA
@@ -77,31 +120,27 @@ def _seed_active_challenge_sync(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(SQLITE_SCHEMA)
-        conn.execute(
-            "INSERT OR REPLACE INTO lane_challenges ("
-            "challenge_id, family_id, tier, cnf_text, cnf_path, status, "
-            "audit_metadata, losers_published_at_iso, "
-            "created_at_iso, updated_at_iso) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                _CHALLENGE,
-                _FAMILY,
-                1,
-                _CNF,
-                None,
-                "active",
-                json.dumps(
-                    {
-                        "cnf_sha256": _CNF_SHA256,
-                        "num_vars": 3,
-                        "num_clauses": 2,
-                    },
-                    sort_keys=True,
-                ),
-                None,
-                "2026-05-26T00:00:00.000Z",
-                "2026-05-26T00:00:00.000Z",
-            ),
+        _insert_challenge_sync(conn, challenge_id=_CHALLENGE, tier=1, cnf_text=_CNF)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_two_active_challenges_sync(db_path: str) -> None:
+    import sqlite3
+
+    from cathedral.lanes.challenge_source import SQLITE_SCHEMA
+
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(SQLITE_SCHEMA)
+        _insert_challenge_sync(conn, challenge_id=_CHALLENGE, tier=1, cnf_text=_CNF)
+        _insert_challenge_sync(
+            conn,
+            challenge_id=_TIER2_CHALLENGE,
+            tier=2,
+            cnf_text=_TIER2_CNF,
         )
         conn.commit()
     finally:
@@ -112,6 +151,15 @@ def _seed_active_challenge_sync(db_path: str) -> None:
 def client(tmp_path: Path) -> Iterator[TestClient]:
     db_path = str(tmp_path / "publisher.db")
     _seed_active_challenge_sync(db_path)
+    app = build_app(database_path=db_path)
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def multi_tier_client(tmp_path: Path) -> Iterator[TestClient]:
+    db_path = str(tmp_path / "publisher-multi-tier.db")
+    _seed_two_active_challenges_sync(db_path)
     app = build_app(database_path=db_path)
     with TestClient(app) as c:
         yield c
@@ -263,7 +311,9 @@ def test_current_challenge_returns_public_metadata_without_cnf_url(
     assert body["cnf_bytes"] == len(_CNF.encode("utf-8"))
     assert body["num_vars"] == 3
     assert body["num_clauses"] == 2
-    assert body["active_cnf_path"] == "/api/cathedral/v1/synthetic-boolean/active-cnf"
+    assert body["active_cnf_path"] == (
+        f"/api/cathedral/v1/synthetic-boolean/active-cnf?challenge_id={_CHALLENGE}"
+    )
     assert body["submit_path"] == "/api/cathedral/v1/agents/submit"
     assert "cnf_url" not in body
     assert "cnf_text" not in body
@@ -303,6 +353,69 @@ def test_active_challenges_list_endpoint_returns_all_actives(
         assert "cnf_path" not in item
         assert item["family_id"] == _FAMILY
         assert item["status"] == "active"
+
+
+def test_active_cnf_can_select_active_challenge_by_tier_or_id(
+    multi_tier_client: TestClient,
+    alice: Keypair,
+) -> None:
+    headers = _active_cnf_headers(alice)
+
+    by_tier = multi_tier_client.get(
+        "/v1/synthetic-boolean/active-cnf?tier=2",
+        headers=headers,
+    )
+    assert by_tier.status_code == 200, by_tier.text
+    tier_body = by_tier.json()
+    assert tier_body["challenge_id"] == _TIER2_CHALLENGE
+    assert tier_body["tier"] == 2
+    assert tier_body["cnf_sha256"] == _TIER2_CNF_SHA256
+
+    by_id = multi_tier_client.get(
+        f"/v1/synthetic-boolean/active-cnf?challenge_id={_TIER2_CHALLENGE}",
+        headers=headers,
+    )
+    assert by_id.status_code == 200, by_id.text
+    id_body = by_id.json()
+    assert id_body["challenge_id"] == _TIER2_CHALLENGE
+    assert id_body["tier"] == 2
+
+    ambiguous = multi_tier_client.get(
+        f"/v1/synthetic-boolean/active-cnf?challenge_id={_TIER2_CHALLENGE}&tier=2",
+        headers=headers,
+    )
+    assert ambiguous.status_code == 400
+    assert ambiguous.json()["detail"] == "use either challenge_id or tier, not both"
+
+
+def test_solve_post_accepts_non_default_active_tier(
+    multi_tier_client: TestClient,
+    alice: Keypair,
+    tmp_path: Path,
+) -> None:
+    data, headers = _solve_post_form(
+        kp=alice,
+        challenge_id=_TIER2_CHALLENGE,
+        dimacs_solution=_TIER2_VALID_SOL,
+    )
+    resp = multi_tier_client.post("/v1/agents/submit", data=data, headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ranked"
+    assert body["challenge_id"] == _TIER2_CHALLENGE
+
+    import sqlite3
+
+    with sqlite3.connect(str(tmp_path / "publisher-multi-tier.db")) as raw:
+        rows = dict(
+            raw.execute(
+                "SELECT challenge_id, status FROM lane_challenges "
+                "WHERE challenge_id IN (?, ?)",
+                (_CHALLENGE, _TIER2_CHALLENGE),
+            ).fetchall()
+        )
+    assert rows[_CHALLENGE] == "active"
+    assert rows[_TIER2_CHALLENGE] == "locked"
 
 
 def test_winner_gets_200_ranked_and_attestation_pending(

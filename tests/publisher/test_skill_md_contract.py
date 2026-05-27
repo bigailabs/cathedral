@@ -3,13 +3,16 @@ from __future__ import annotations
 from cathedral.publisher.skill_md import SKILL_MD_CONTENT
 
 
-def test_skill_md_is_sat_first_and_concise() -> None:
+def test_skill_md_is_sat_first_and_actionable() -> None:
     assert SKILL_MD_CONTENT.startswith("# Cathedral SAT miner contract")
     assert "`synthetic_boolean_v1`" in SKILL_MD_CONTENT
     assert "public_input.cnf_url" in SKILL_MD_CONTENT
     assert "FINAL_ANSWER" in SKILL_MD_CONTENT
     assert "dimacs_solution" in SKILL_MD_CONTENT
-    assert len(SKILL_MD_CONTENT) < 6000
+    assert "active-challenges" in SKILL_MD_CONTENT
+    assert "Common rejection reasons" in SKILL_MD_CONTENT
+    assert "Starter solvers" in SKILL_MD_CONTENT
+    assert len(SKILL_MD_CONTENT) < 12000
 
 
 def test_skill_md_excludes_retired_lane_material() -> None:

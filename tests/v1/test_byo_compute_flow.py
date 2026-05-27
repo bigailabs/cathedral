@@ -49,6 +49,8 @@ def test_skill_md_route_returns_markdown(publisher_client: object) -> None:
     assert "Cathedral SAT miner contract" in body
     assert "`synthetic_boolean_v1` SAT is live on mainnet" in body
     assert "**Live vertical**" not in body
+    assert "PR5" not in body
+    assert "Legacy SSH-push" not in body
     assert "EU AI Act" not in body
     assert "bug_isolation_v1" not in body
     assert "Card schema" not in body
@@ -105,6 +107,7 @@ def test_skill_md_includes_public_safe_sat_contract(publisher_client: object) ->
     lowered = body.lower()
 
     assert "synthetic_boolean_v1" in body
+    assert "/api/cathedral/v1/synthetic-boolean/active-challenges" in body
     assert "the active cnf url is not public or enumerable" in lowered
     assert "issued only inside" in lowered
     assert "public_input.cnf_url" in body
