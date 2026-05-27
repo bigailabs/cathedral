@@ -791,6 +791,33 @@ async def _handle_solve_post(
         eval_run_id=result.eval_run_id,
     )
 
+    # Auto-promote the next pending challenge of the same tier so the
+    # lane stays warm without operator intervention. Best-effort: a
+    # promote failure does NOT roll back the just-recorded win, since the
+    # winner is already durable via atomic_claim_winner. This mirrors the
+    # SSH/eval path's call site after PR #232.
+    try:
+        promoted = await source.mark_locked_and_promote_next(
+            family_id=SAT_FAMILY_ID,
+            challenge_id=challenge_id,
+            now_iso=now_iso,
+            manage_transaction=True,
+            active_scope="tier",
+        )
+        if promoted is not None:
+            logger.info(
+                "solve_post_promoted_next",
+                locked_challenge_id=challenge_id,
+                promoted_challenge_id=promoted.challenge_id,
+                tier=promoted.tier,
+            )
+    except Exception as exc:
+        logger.exception(
+            "solve_post_promote_failed",
+            locked_challenge_id=challenge_id,
+            error=str(exc),
+        )
+
     return {
         "id": submission_id,
         "eval_run_id": result.eval_run_id,
