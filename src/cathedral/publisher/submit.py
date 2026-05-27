@@ -995,26 +995,13 @@ def _add_secs_iso(start_iso: str, secs: int) -> str:
     return _ms_iso(parsed + timedelta(seconds=int(secs)))
 
 
-@router.get("/v1/synthetic-boolean/current-challenge")
-async def get_current_sat_challenge(request: Request) -> dict[str, object]:
-    """Return public, metadata-only status for the active SAT challenge.
+def _public_challenge_view(active) -> dict[str, object]:
+    """Build the public, metadata-only projection of a ChallengeRecord.
 
-    This is the website/miner-discovery surface. It deliberately does not
-    return ``cnf_url``, fetch tokens, raw CNF text, local paths, or solver
-    answers. Miners still use signed ``active-cnf`` to fetch challenge
-    material.
+    Never include ``cnf_url``, fetch tokens, raw CNF text, local paths,
+    generator IDs, or any solver state. Miners still use signed
+    ``active-cnf`` to fetch challenge material.
     """
-    source = getattr(request.app.state, "task_family_challenge_source", None)
-    if source is None:
-        raise HTTPException(
-            status_code=503,
-            detail="challenge surface not configured",
-        )
-
-    active = await source.get_active(SAT_FAMILY_ID)
-    if active is None:
-        raise HTTPException(status_code=404, detail="no_active_challenge")
-
     audit = active.audit_metadata or {}
     cnf_sha256 = str(audit.get("cnf_sha256") or "")
     num_vars = int(audit.get("num_vars") or 0)
@@ -1027,23 +1014,77 @@ async def get_current_sat_challenge(request: Request) -> dict[str, object]:
     if cnf_bytes is None and active.cnf_text:
         cnf_bytes = len(active.cnf_text.encode("utf-8"))
 
-    announced_time_limit_secs = _challenge_time_limit_seconds(active)
-
+    kind = audit.get("kind")
     return {
         "family_id": SAT_FAMILY_ID,
         "challenge_id": active.challenge_id,
         "status": active.status,
         "tier": active.tier,
+        "kind": str(kind) if kind else None,
         "storage": "file" if active.cnf_path else "sqlite_text",
         "cnf_sha256": cnf_sha256,
         "cnf_bytes": cnf_bytes,
         "num_vars": num_vars,
         "num_clauses": num_clauses,
-        "announced_time_limit_secs": announced_time_limit_secs,
+        "announced_time_limit_secs": _challenge_time_limit_seconds(active),
         "solve_on_submit_enabled": _pr5_solve_on_submit_enabled(),
         "win_rule": "First submitted valid SAT receipt wins.",
         "active_cnf_path": "/api/cathedral/v1/synthetic-boolean/active-cnf",
         "submit_path": "/api/cathedral/v1/agents/submit",
+    }
+
+
+@router.get("/v1/synthetic-boolean/current-challenge")
+async def get_current_sat_challenge(
+    request: Request,
+    tier: int | None = None,
+) -> dict[str, object]:
+    """Return public metadata for one active SAT challenge.
+
+    With no query string, returns the lowest-tier active challenge (legacy
+    behaviour). With ``?tier=N``, returns the active challenge at that
+    specific tier slot, or 404 if no active row exists there.
+    """
+    source = getattr(request.app.state, "task_family_challenge_source", None)
+    if source is None:
+        raise HTTPException(
+            status_code=503,
+            detail="challenge surface not configured",
+        )
+
+    if tier is None:
+        active = await source.get_active(SAT_FAMILY_ID)
+    else:
+        if tier < 0:
+            raise HTTPException(status_code=400, detail="tier must be >= 0")
+        active = await source.get_active_for_tier(SAT_FAMILY_ID, tier)
+
+    if active is None:
+        raise HTTPException(status_code=404, detail="no_active_challenge")
+
+    return _public_challenge_view(active)
+
+
+@router.get("/v1/synthetic-boolean/active-challenges")
+async def list_active_sat_challenges(request: Request) -> dict[str, object]:
+    """Return public metadata for every currently active SAT challenge.
+
+    Multi-tier discovery surface. With multiple actives (one per tier),
+    miners can see all available challenges and pick the tier that suits
+    their solver. Each entry is the same shape as ``current-challenge``;
+    ordered by tier ascending then ``challenge_id`` ascending.
+    """
+    source = getattr(request.app.state, "task_family_challenge_source", None)
+    if source is None:
+        raise HTTPException(
+            status_code=503,
+            detail="challenge surface not configured",
+        )
+    actives = await source.list_active(SAT_FAMILY_ID)
+    return {
+        "family_id": SAT_FAMILY_ID,
+        "count": len(actives),
+        "items": [_public_challenge_view(rec) for rec in actives],
     }
 
 
