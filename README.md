@@ -1,4 +1,6 @@
-<h1 align="center">Marketplace for Verifiable Intelligence. Built on SAT.</h1>
+<h1 align="center">Marketplace for verifiable intelligence</h1>
+
+<p align="center"><strong>Built on SAT.</strong></p>
 
 <p align="center">
   Documentation:
