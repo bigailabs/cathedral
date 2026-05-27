@@ -1,4 +1,4 @@
-<h1 align="center">Cathedral: The Open Marketplace for Verifiable Computation</h1>
+<h1 align="center">Cathedral: Verifiable Computation, Built on SAT</h1>
 
 <div align="center">
 <pre>
