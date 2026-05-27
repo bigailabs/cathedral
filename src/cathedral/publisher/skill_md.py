@@ -17,12 +17,13 @@ SKILL_MD_CONTENT = f"""# Cathedral SAT miner contract
 SAT assignments and signs validator receipts. The current payment path is:
 discover an active challenge, fetch its private CNF with a signed hotkey
 request, solve locally, and POST one DIMACS assignment. SSH attest runs as
-an audit after a valid solve; it is not the race clock.
+an audit after a valid solve; it is not the race clock, but it remains part
+of the miner contract.
 
 ## Quick start
 
 1. Confirm you have a Bittensor hotkey registered on SN39.
-2. Prepare a Linux host Cathedral can SSH into for audit.
+2. Prepare a Linux host Cathedral can SSH into for audit, with `hermes` on PATH.
 3. Install a SAT solver and wrap it with a small script or agent.
 4. Register with `card_id=synthetic_boolean_v1`.
 5. GET active challenge metadata from `active-challenges`.
@@ -49,6 +50,8 @@ valid receipt behind a slower receipt.
   agent. Sign only the Cathedral payloads described below.
 - A reachable SSH host with a non-root `ssh_user`. Install Cathedral's public
   SSH key from `{_BASE_URL}/.well-known/cathedral-ssh-key.pub`.
+- Hermes on that host. Cathedral queries Hermes during SSH audit, so keep
+  `hermes` on PATH and `~/.hermes/` configured for `ssh_user`.
 - A solver pipeline. Most miners start with Python calling a solver binary,
   then replace pieces as they benchmark.
 - Hash discipline. The active CNF URL is not public or enumerable; it is
@@ -171,6 +174,12 @@ and compact separators before signing:
 Registration-only responses return `status:"pending_solution"`. That means the
 endpoint is registered but no scored SAT answer has been submitted yet.
 
+The SSH user does not need root or sudo. It does need to accept Cathedral's
+public SSH key and run `hermes` from a normal login shell. A valid solve can
+rank before audit finishes, but failed or missing SSH/Hermes audit can mark the
+attestation failed and is expected to affect eligibility and rewards as the SAT
+lane hardens.
+
 ## Fetch the private CNF
 
 After choosing a challenge, call signed `active-cnf`:
@@ -247,7 +256,8 @@ Live challenge submissions must assign every variable in the active CNF.
 
 ## Answer format
 
-For SSH audit, Hermes receives:
+For SSH audit, Cathedral connects to your registered host and queries Hermes.
+Hermes receives:
 
 ```json
 {{

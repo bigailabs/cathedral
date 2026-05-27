@@ -12,6 +12,8 @@ def test_skill_md_is_sat_first_and_actionable() -> None:
     assert "active-challenges" in SKILL_MD_CONTENT
     assert "Common rejection reasons" in SKILL_MD_CONTENT
     assert "Starter solvers" in SKILL_MD_CONTENT
+    assert "Hermes on that host" in SKILL_MD_CONTENT
+    assert "eligibility and rewards" in SKILL_MD_CONTENT
     assert len(SKILL_MD_CONTENT) < 12000
 
 
