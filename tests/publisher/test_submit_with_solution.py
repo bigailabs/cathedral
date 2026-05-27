@@ -270,6 +270,41 @@ def test_current_challenge_returns_public_metadata_without_cnf_url(
     assert "cnf_path" not in body
 
 
+def test_current_challenge_tier_param_filters_by_tier(
+    client: TestClient,
+) -> None:
+    # Tier 1 fixture matches; mismatched tier returns 404.
+    resp1 = client.get("/v1/synthetic-boolean/current-challenge?tier=1")
+    assert resp1.status_code == 200, resp1.text
+    assert resp1.json()["tier"] == 1
+    assert resp1.json()["challenge_id"] == _CHALLENGE
+
+    resp_missing = client.get("/v1/synthetic-boolean/current-challenge?tier=2")
+    assert resp_missing.status_code == 404
+    assert resp_missing.json()["detail"] == "no_active_challenge"
+
+    resp_bad = client.get("/v1/synthetic-boolean/current-challenge?tier=-1")
+    assert resp_bad.status_code == 400
+
+
+def test_active_challenges_list_endpoint_returns_all_actives(
+    client: TestClient,
+) -> None:
+    resp = client.get("/v1/synthetic-boolean/active-challenges")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["family_id"] == _FAMILY
+    assert body["count"] == len(body["items"])
+    assert body["count"] >= 1
+    # Every item carries the same public-only shape; same leak-guarantees.
+    for item in body["items"]:
+        assert "cnf_url" not in item
+        assert "cnf_text" not in item
+        assert "cnf_path" not in item
+        assert item["family_id"] == _FAMILY
+        assert item["status"] == "active"
+
+
 def test_winner_gets_200_ranked_and_attestation_pending(
     client: TestClient, alice: Keypair, tmp_path: Path
 ) -> None:
