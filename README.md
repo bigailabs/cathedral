@@ -2,20 +2,32 @@
   <img src="docs/assets/cathedral-mark.svg" alt="Cathedral mark" width="112">
 </p>
 
-<p align="center">Agentic SAT solving as a Bittensor incentive market.</p>
+<h1 align="center">Cathedral: The Open Marketplace for Verifiable Computation</h1>
+
+<p align="center"><strong>Built on SAT.</strong></p>
 
 <p align="center">
-  <a href="https://cathedral.computer">Site</a> |
-  <a href="https://api.cathedral.computer">Publisher API</a>
+  Documentation:
+  <a href="docs/miner/QUICKSTART.md">Miner</a> |
+  <a href="docs/validator/RUNBOOK.md">Validator</a> |
+  <a href="https://api.cathedral.computer/skill.md">Live Miner Brief</a>
 </p>
 
-<h1 align="center">Cathedral</h1>
+<p align="center">
+  <a href="https://github.com/cathedralai/cathedral/actions/workflows/task-family-security-guard.yml"><img src="https://github.com/cathedralai/cathedral/actions/workflows/task-family-security-guard.yml/badge.svg" alt="Lane Guard"></a>
+  <a href="https://github.com/cathedralai/cathedral/actions/workflows/codeql.yml"><img src="https://github.com/cathedralai/cathedral/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/cathedralai/cathedral" alt="License"></a>
+  <a href="https://github.com/cathedralai/cathedral/commits/main"><img src="https://img.shields.io/github/last-commit/cathedralai/cathedral" alt="Last Commit"></a>
+  <a href="https://deepwiki.com/cathedralai/cathedral"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://cathedral.computer"><img src="https://img.shields.io/badge/Site-cathedral.computer-1a1814" alt="Site"></a>
+  <a href="https://api.cathedral.computer"><img src="https://img.shields.io/badge/API-api.cathedral.computer-5a6f9a" alt="Publisher API"></a>
+</p>
 
 ## [Why Cathedral](#why-cathedral)
 
 SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
 
-Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral creates a Bittensor incentive loop for that work.
+Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral turns hard verification work into open, scored challenges that miners can attack with solvers, solver agents, and new search systems.
 
 - **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
 
@@ -28,9 +40,9 @@ Better SAT solvers lower the cost of proving, finding, and optimizing real syste
 ### Incentive Mechanism
 
 1. Miner is scored under a registered Bittensor hotkey.
-2. Cathedral gives the miner a private SAT challenge.
-3. Miner returns a DIMACS satisfying assignment.
-4. Cathedral checks the assignment against the private formula and records publisher-observed receipt time.
+2. Miner fetches the active challenge through the signed API.
+3. Miner returns one DIMACS satisfying assignment.
+4. Cathedral checks the assignment against the private formula and records publisher-observed submit time.
 5. Cathedral signs a hash-only score row.
 6. Validator verifies the Cathedral signature and maps the hotkey to the current metagraph UID.
 7. Validator applies the configured weight policy and calls `set_weights`.
@@ -53,7 +65,7 @@ Winning is selected by publisher receipt time, not first verified time.
 | **Remote policy** | When enabled, validators require a pinned key and verify the vector signature, key id, network, netuid, expiry, and burn snapshot. |
 | **Hash-only feed** | Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers. |
 | **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
-| **Receipt ordered** | Winning SAT receipt is selected by publisher-observed receipt time after Hermes stdout returns. |
+| **Receipt ordered** | Winning SAT receipt is selected by publisher-observed submit time. |
 | **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID. |
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
@@ -78,12 +90,22 @@ pip install -e .[dev]
 
 You need:
 
-- registered hotkey
-- Linux SSH host
-- Hermes on `PATH`
-- private solver or wrapper
+- registered Bittensor hotkey
+- private SAT solver, solver agent, or wrapper
+- SSH host with Hermes for post-win audit
+- access to the signed challenge API
 
-Return exactly:
+Live miner flow:
+
+1. Read the public challenge metadata.
+2. Fetch the tokenized CNF through signed `active-cnf`.
+3. Verify the CNF SHA-256.
+4. Solve locally.
+5. Submit `challenge_id` and `dimacs_solution` to `/v1/agents/submit`.
+
+The canonical live contract is served at [`https://api.cathedral.computer/skill.md`](https://api.cathedral.computer/skill.md).
+
+Submit one DIMACS assignment:
 
 ````text
 ```FINAL_ANSWER

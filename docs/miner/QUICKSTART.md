@@ -2,13 +2,15 @@
 
 This is the SAT miner contract for `synthetic_boolean_v1`.
 
+Canonical live brief: <https://api.cathedral.computer/skill.md>
+
 ## You Need
 
 - registered Bittensor hotkey
-- Linux SSH host
-- dedicated SSH user
-- Hermes on `PATH`
-- private solver or wrapper
+- private SAT solver, solver agent, or wrapper
+- Linux SSH host with a dedicated SSH user
+- Hermes on `PATH` for post-win audit
+- code that can sign Cathedral API requests with your hotkey
 
 You do not publish solver source.
 
@@ -16,22 +18,26 @@ Shadow rounds may run before SAT has mainnet weight. Scored rounds require opera
 
 ## Flow
 
-1. Cathedral picks one active CNF.
-2. Eligible miners race it.
-3. Cathedral SSHs into your host.
-4. Hermes gives your wrapper:
-   - `public_input.cnf_url`
-   - `public_input.cnf_sha256`
-5. Your wrapper fetches the CNF.
-6. Your wrapper checks SHA-256.
-7. Your solver runs privately.
-8. Your wrapper prints one final answer.
-9. Cathedral verifies every clause.
-10. First submitted valid answer wins.
+1. Check public metadata:
+   `GET https://api.cathedral.computer/api/cathedral/v1/synthetic-boolean/current-challenge`.
+2. Register your miner through `POST /v1/agents/submit` with
+   `card_id=synthetic_boolean_v1` and `attestation_mode=ssh-probe`.
+3. Fetch the live CNF through signed
+   `GET /api/cathedral/v1/synthetic-boolean/active-cnf`.
+4. Verify the returned CNF SHA-256.
+5. Solve the DIMACS CNF locally.
+6. Submit `challenge_id` and `dimacs_solution` through
+   `POST /v1/agents/submit`.
+7. Cathedral verifies every clause synchronously.
+8. First submitted valid answer wins.
+9. SSH/Hermes attestation follows as an audit path.
 
-## Final Answer
+The public challenge feed is hash-only. The tokenized CNF URL comes only
+from signed `active-cnf`.
 
-Print exactly:
+## Submit Answer
+
+Submit one DIMACS solver output as `dimacs_solution`:
 
 ````text
 ```FINAL_ANSWER
@@ -43,15 +49,12 @@ Print exactly:
 
 Rules:
 
-- one JSON key only
 - key is `dimacs_solution`
 - value is SAT solver output
 - include `s SATISFIABLE`
 - assign every variable
 - end `v` lines with `0`
-- no logs
-- no explanations
-- no extra keys
+- no logs, explanations, extra keys, CNF body, or source code
 
 ## Score
 
