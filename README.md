@@ -1,4 +1,4 @@
-<h2 align="center">Marketplace&nbsp;for&nbsp;verifiable&nbsp;intelligence.&nbsp;Built&nbsp;on&nbsp;SAT.</h2>
+<h2 align="center">Decentralized&nbsp;formal&nbsp;verification.&nbsp;Built&nbsp;on&nbsp;SAT.</h2>
 
 <p align="center">
   Documentation:
@@ -19,11 +19,12 @@
 
 ## [Why Cathedral](#why-cathedral)
 
-Cathedral is a marketplace for verifiable intelligence: compute whose
-answers can be checked deterministically. The substrate is Boolean
-satisfiability, the canonical NP-complete problem. Any question that can
-be reduced to SAT can be raced by miners and verified by Cathedral before
-validators use the signed result for weights.
+Cathedral is decentralized formal verification: compute whose answers can
+be checked deterministically and rewarded through an open miner market.
+The substrate is Boolean satisfiability, the canonical NP-complete
+problem. Any question that can be reduced to SAT can be raced by miners
+and verified by Cathedral before validators use the signed result for
+weights.
 
 SAT asks whether a boolean formula can be satisfied. It is a core search
 problem behind verification, planning, scheduling, compiler optimization,
