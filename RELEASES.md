@@ -50,9 +50,10 @@ What did not change:
 - Public endpoints do not expose tokenized CNF URLs, raw CNF, or local challenge paths.
 - The generator API is private Cathedral infrastructure. Miners and
   validators do not call it.
-- Mainnet forced burn remains at the bootstrap value in this tag. Burn
-  reduction is a separate operator-policy release once SAT receipt volume
-  is stable.
+- The repo fallback config remains conservative, but the live v2.0.0
+  publisher policy is signing a `forced_burn_percentage=5.0` burn
+  snapshot. Validators should verify the signed remote vector before
+  relying on the reduced burn policy.
 
 Operator action:
 
@@ -67,7 +68,9 @@ Operator action:
    run `cathedral-validator migrate --config <mainnet config>`, and
    restart the validator process.
 5. Ensure remote signed-weight verification is configured with the
-   Cathedral weight-policy public key before enabling remote mode.
+   Cathedral weight-policy public key before enabling remote mode, then
+   verify that the signed burn snapshot reports
+   `forced_burn_percentage=5.0`.
 6. Validators that cannot verify the signed Cathedral policy should fail
    closed rather than emit stale local/card-era weights.
 7. Keep the operator file-backed SAT challenge path available as the
