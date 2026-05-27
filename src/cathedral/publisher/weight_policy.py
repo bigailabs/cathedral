@@ -66,7 +66,7 @@ class WeightPolicyProducerConfig:
     netuid: int = 39
     key_id: str = "cathedral-weight-policy"
     burn_uid: int | None = 204
-    forced_burn_percentage: float = 95.0
+    forced_burn_percentage: float = 85.0
     interval_secs: float = 1500.0
     valid_for_secs: float = 1800.0
     limit: int = 1000
@@ -225,7 +225,7 @@ def load_producer_from_env(
         key_id=values.get("CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy"),
         burn_uid=burn_uid,
         forced_burn_percentage=float(
-            values.get("CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE", "95.0")
+            values.get("CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE", "85.0")
         ),
         interval_secs=float(values.get("CATHEDRAL_WEIGHT_POLICY_INTERVAL_SECS", "1500.0")),
         valid_for_secs=float(values.get("CATHEDRAL_WEIGHT_POLICY_VALID_FOR_SECS", "1800.0")),

@@ -60,7 +60,7 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     assert state_dir.is_dir()
     assert settings.weights.interval_secs == 1500
     assert settings.weights.burn_uid == 204
-    assert settings.weights.forced_burn_percentage == 95.0
+    assert settings.weights.forced_burn_percentage == 85.0
 
     env_text = (etc / "validator.env").read_text()
     assert f"CATHEDRAL_CONFIG_PATH={etc / 'mainnet.toml'}" in env_text
@@ -120,8 +120,8 @@ def test_managed_mainnet_config_syncs_current_burn_policy(tmp_path: Path) -> Non
 
     assert resolved == str(mainnet)
     settings = ValidatorSettings.from_toml(resolved)
-    assert settings.weights.forced_burn_percentage == 95.0
-    assert "forced_burn_percentage = 95.0" in mainnet.read_text()
+    assert settings.weights.forced_burn_percentage == 85.0
+    assert "forced_burn_percentage = 85.0" in mainnet.read_text()
 
 
 def test_managed_mainnet_config_syncs_state_dir_override(tmp_path: Path) -> None:
@@ -199,8 +199,8 @@ def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> No
 
     assert resolved == str(custom)
     settings = ValidatorSettings.from_toml(resolved)
-    assert settings.weights.forced_burn_percentage == 95.0
-    assert "forced_burn_percentage = 95.0" in custom.read_text()
+    assert settings.weights.forced_burn_percentage == 85.0
+    assert "forced_burn_percentage = 85.0" in custom.read_text()
 
 
 def test_retired_weight_config_sections_are_ignored(tmp_path: Path) -> None:
@@ -219,7 +219,7 @@ def test_retired_weight_config_sections_are_ignored(tmp_path: Path) -> None:
                 "",
                 "[weights]",
                 "interval_secs = 1500",
-                "forced_burn_percentage = 95.0",
+                "forced_burn_percentage = 85.0",
                 "",
                 "[weight_source]",
                 'mode = "remote"',
@@ -345,7 +345,7 @@ def test_sync_sn39_mainnet_weight_policy_emits_config_override_log(
     config_module._sync_sn39_mainnet_weight_policy(config_path)
 
     # The rewrite happened: file is now on policy.
-    assert "forced_burn_percentage = 95.0" in config_path.read_text()
+    assert "forced_burn_percentage = 85.0" in config_path.read_text()
 
     # The log was emitted with the expected fields.
     override_events = [

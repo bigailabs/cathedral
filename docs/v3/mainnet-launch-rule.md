@@ -5,7 +5,7 @@ The mainnet v3 feed flag (`CATHEDRAL_V3_FEED_ENABLED`) may turn on under the fol
 ## Permitted on mainnet ONLY when ALL of these hold
 
 1. The full testnet E2E checklist (`docs/v3/testnet-e2e-checklist.md`) has passed end-to-end.
-2. Mainnet burn stays high: `forced_burn_percentage = 95.0` in `config/mainnet.toml`.
+2. Mainnet burn stays high: `forced_burn_percentage = 85.0` in `config/mainnet.toml`.
 3. Mainnet v3 weight stays zero: `v3_bug_isolation_weight = 0.0` in `config/mainnet.toml`.
 4. No code path raises v3 weight above 0 on mainnet under any env var.
 

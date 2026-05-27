@@ -28,7 +28,7 @@ def _settings(*, interval_secs: int = 1500, weights_disabled: bool = False) -> V
                 "interval_secs": interval_secs,
                 "disabled": weights_disabled,
                 "burn_uid": 204,
-                "forced_burn_percentage": 95.0,
+                "forced_burn_percentage": 85.0,
                 "task_family_weights": {"synthetic_boolean_v1": 0.0},
             },
             "publisher": {
@@ -200,7 +200,7 @@ public_key_hex = "11111111111111111111111111111111111111111111111111111111111111
 interval_secs = 1500
 disabled = false
 burn_uid = 204
-forced_burn_percentage = 95.0
+forced_burn_percentage = 85.0
 task_family_weights = { synthetic_boolean_v1 = 0.0 }
 
 [publisher]

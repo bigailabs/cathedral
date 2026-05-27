@@ -1,6 +1,6 @@
 # v3 launch readiness
 
-The goal of this milestone is to start collecting full task-scoped Hermes packages from `bug_isolation_v1` evals on mainnet, with v3 weight = 0 and burn high (95%), so we accumulate trajectory data before any meaningful v3 payouts.
+The goal of this milestone is to start collecting full task-scoped Hermes packages from `bug_isolation_v1` evals on mainnet, with v3 weight = 0 and burn high (85%), so we accumulate trajectory data before any meaningful v3 payouts.
 
 ## What ships in this milestone
 
@@ -11,7 +11,7 @@ The goal of this milestone is to start collecting full task-scoped Hermes packag
 
 ## What does NOT ship
 
-- v3 mainnet emissions. `forced_burn_percentage` stays 95%, `v3_bug_isolation_weight` stays 0.0 on mainnet.
+- v3 mainnet emissions. `forced_burn_percentage` stays 85%, `v3_bug_isolation_weight` stays 0.0 on mainnet.
 - Tokenized SFT/DPO/RM datasets. Export skeleton is real schema, placeholder content.
 - Public feed leakage of any oracle / package content. Feed stays minimal.
 

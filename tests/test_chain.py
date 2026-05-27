@@ -55,8 +55,8 @@ async def test_mock_chain_set_weights_records_input() -> None:
 
 
 def test_spec_version_matches_release() -> None:
-    # MAJOR=2, MINOR=0, PATCH=0 -> 2_000_000
-    assert SPEC_VERSION == 2_000_000
+    # MAJOR=2, MINOR=0, PATCH=1 -> 2_000_001
+    assert SPEC_VERSION == 2_000_001
 
 
 @pytest.mark.asyncio

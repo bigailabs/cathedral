@@ -52,7 +52,7 @@ def _vector(sk: Ed25519PrivateKey, *, network: str = "finney", netuid: int = 39)
         key_id="cathedral-weight-policy",
         policy_reason="staging-test",
         burn_uid=204,
-        forced_burn_percentage=95.0,
+        forced_burn_percentage=85.0,
         generated_at=issued,
         valid_for=timedelta(hours=1),
     )

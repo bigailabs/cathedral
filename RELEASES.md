@@ -12,6 +12,52 @@ git -c gpg.ssh.allowedSignersFile=etc/cathedral/allowed_signers tag -v <tag>
 
 ## Current Release
 
+### v2.0.1 - Apache-2.0 and 85% burn reserve
+
+Date: 2026-05-27
+
+This is the validator-policy patch after the v2.0.0 SAT cutover. It
+keeps the SAT-only miner path live while making the repository license
+more standard for commercial and research reuse and moving the mainnet
+burn reserve to 85%.
+
+What changed:
+
+- The repository license changed from MIT to Apache-2.0.
+- Cathedral validators stamp Bittensor `set_weights` calls with
+  `version_key=2000001`.
+- Mainnet config now sets `forced_burn_percentage = 85.0`.
+- Publisher signed-weight defaults and env fallback now use
+  `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE=85.0`.
+- Documentation and validator guardrail tests now reflect the 85%
+  burn reserve.
+
+What did not change:
+
+- SAT remains the live miner lane.
+- Public challenge discovery remains available at
+  `GET /v1/synthetic-boolean/current-challenge`,
+  `GET /v1/synthetic-boolean/current-challenge?tier=N`, and
+  `GET /v1/synthetic-boolean/active-challenges`.
+- Public endpoints still do not expose tokenized CNF URLs, raw CNF, or
+  local challenge paths.
+- Remote signed weights remain opt-in for validators.
+
+Operator action:
+
+1. Pull and verify the signed `v2.0.1` tag.
+2. Restart validators and confirm the emitted chain `version_key` is
+   `2000001`.
+3. Managed PM2 operators should keep `cathedral-updater` running so the
+   signed tag is picked up automatically.
+4. Manual operators should fetch tags, check out `v2.0.1`, reinstall,
+   run `cathedral-validator migrate --config <mainnet config>`, and
+   restart the validator process.
+5. Validators using remote signed weights should verify that the signed
+   burn snapshot reports `forced_burn_percentage=85.0`.
+
+## Previous Releases
+
 ### v2.0.0 - SAT mining cutover
 
 Date: 2026-05-27
@@ -75,8 +121,6 @@ Operator action:
    closed rather than emit stale local/card-era weights.
 7. Keep the operator file-backed SAT challenge path available as the
    break-glass fallback while the generator pool is introduced.
-
-## Previous Releases
 
 ### v1.1.29 - Direct SAT solve submissions and public challenge discovery
 

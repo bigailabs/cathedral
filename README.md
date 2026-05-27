@@ -71,7 +71,7 @@ Winning is selected by publisher receipt time, not first verified time.
 | **Hash-only feed** | Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers. |
 | **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
 | **Receipt ordered** | Winning SAT receipt is selected by publisher-observed submit time. |
-| **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0` during bootstrap to align emissions with active miner output. The percentage is expected to reduce as the SAT lane produces consistent positive scores. If no positive non-burn scores exist, weight falls back to the burn UID. |
+| **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 85.0` during bootstrap to align emissions with active miner output. The percentage is expected to reduce as the SAT lane produces consistent positive scores. If no positive non-burn scores exist, weight falls back to the burn UID. |
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 

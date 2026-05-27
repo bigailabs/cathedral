@@ -14,7 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = structlog.get_logger(__name__)
 
-MAINNET_FORCED_BURN_PERCENTAGE = 95.0
+MAINNET_FORCED_BURN_PERCENTAGE = 85.0
 
 
 def _load_toml(path: Path) -> dict[str, Any]:

@@ -30,7 +30,7 @@ def _settings(
                 "interval_secs": 1500,
                 "disabled": False,
                 "burn_uid": 204,
-                "forced_burn_percentage": 95.0,
+                "forced_burn_percentage": 85.0,
                 "task_family_weights": {"synthetic_boolean_v1": local_sat_weight},
             },
             "publisher": {
