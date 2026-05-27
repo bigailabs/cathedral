@@ -18,6 +18,7 @@ import asyncio
 import os
 import secrets
 import stat
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -34,7 +35,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cathedral.cards.registry import CardRegistry
 from cathedral.eval.orchestrator import run_eval_loop
-from cathedral.eval.sat_attest_worker import run_sat_attest_loop
 from cathedral.eval.polaris_runner import (
     BundleCardRunner,
     HttpPolarisRunner,
@@ -42,6 +42,7 @@ from cathedral.eval.polaris_runner import (
     PolarisRunner,
     StubPolarisRunner,
 )
+from cathedral.eval.sat_attest_worker import run_sat_attest_loop
 from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import (
     SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA,
@@ -66,6 +67,7 @@ from cathedral.lanes.challenge_source import (
 )
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_FAMILY_ID
 from cathedral.publisher import repository
+from cathedral.publisher.dead_routes import router as dead_routes_router
 from cathedral.publisher.reads import router as reads_router
 from cathedral.publisher.sat_file_challenges import (
     build_synthetic_boolean_file_challenge_record,
@@ -79,7 +81,6 @@ from cathedral.publisher.sat_preflight import (
     STORAGE_MODE_SQLITE_TEXT,
     read_operator_cnf_file,
 )
-from cathedral.publisher.dead_routes import router as dead_routes_router
 from cathedral.publisher.submit import router as submit_router
 from cathedral.publisher.weight_policy import (
     WeightPolicyStore,
@@ -95,6 +96,27 @@ from cathedral.validator.db import connect
 logger = structlog.get_logger(__name__)
 
 
+class AsyncDbWriteLock:
+    """Async context manager around a process-local thread lock.
+
+    HTTP routes, background tasks, and TestClient-driven race tests can touch the
+    same aiosqlite connection from different threads/portals. The connection
+    only tolerates one writer at a time, especially around explicit
+    BEGIN IMMEDIATE windows, so the write gate must serialize both asyncio tasks
+    and cross-thread callers.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    async def __aenter__(self) -> AsyncDbWriteLock:
+        await asyncio.to_thread(self._lock.acquire)
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        self._lock.release()
+
+
 @dataclass
 class PublisherContext:
     """Wired into `app.state.ctx`. Holds connections + background dependencies."""
@@ -108,7 +130,7 @@ class PublisherContext:
     # One aiosqlite connection is shared by HTTP routes and the evaluator.
     # SAT finalization opens explicit transactions on that connection, so
     # every connection writer must acquire this gate before a commit.
-    db_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    db_write_lock: AsyncDbWriteLock = field(default_factory=AsyncDbWriteLock)
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
 
@@ -409,6 +431,52 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                 )
             )
             ctx.background_tasks.append(eval_task)
+
+        # SAT autopilot: keep the pending pool topped up from the
+        # private generator. Opt-in via CATHEDRAL_SAT_AUTOPILOT_ENABLED;
+        # silently a no-op when either the autopilot flag or the
+        # generator client itself is not configured. The loop only
+        # writes `pending` rows; promotion stays with the existing
+        # hourly watch routine and in-process direct-submit rotation.
+        from cathedral.publisher.sat_autopilot import (
+            autopilot_enabled,
+            run_autopilot_supervisor,
+        )
+        from cathedral.publisher.sat_autopilot import (
+            config_from_env as _autopilot_config_from_env,
+        )
+        from cathedral.publisher.sat_generator_client import (
+            client_from_env as _sat_generator_client_from_env,
+        )
+
+        if autopilot_enabled():
+            _autopilot_client = _sat_generator_client_from_env()
+            if _autopilot_client is None:
+                logger.warning(
+                    "sat_autopilot_enabled_but_generator_client_not_configured",
+                )
+            else:
+                _autopilot_config = _autopilot_config_from_env()
+                # Reuse the same SqliteChallengeSource the rest of the
+                # lifespan already wired so writes share the connection
+                # and the existing db_write_lock semantics.
+                ctx.background_tasks.append(
+                    asyncio.create_task(
+                        run_autopilot_supervisor(
+                            client=_autopilot_client,
+                            source=task_family_challenge_source,
+                            config=_autopilot_config,
+                            stop=stop,
+                        )
+                    )
+                )
+                logger.info(
+                    "sat_autopilot_scheduled",
+                    interval_seconds=_autopilot_config.interval_seconds,
+                    target_pending=_autopilot_config.default_target_pending,
+                    max_imports_per_tick=_autopilot_config.max_imports_per_tick,
+                )
+
         try:
             yield
         finally:
