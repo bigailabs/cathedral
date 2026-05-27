@@ -1,14 +1,4 @@
-<h1 align="center">Verifiable Computation, Built on SAT</h1>
-
-<div align="center">
-<pre>
-      /\          /\          /\
-     /  \        /  \        /  \
-    /____\  /\  /____\  /\  /____\
-    | [] | /__\ | SAT | /__\ | [] |
-    |____|_|__|_|____|_|__|_|____|
-</pre>
-</div>
+<h1 align="center">Verifiable Computation</h1>
 
 <p align="center"><strong>Built on SAT.</strong></p>
 
