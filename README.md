@@ -21,21 +21,30 @@
 
 ## [Why Cathedral](#why-cathedral)
 
-SAT asks whether a boolean formula can be satisfied. It is a core search problem behind verification, planning, scheduling, compiler optimization, hardware reasoning, and automated theorem proving.
+Cathedral is a marketplace for verifiable intelligence: compute whose
+answers can be checked deterministically. The substrate is Boolean
+satisfiability, the canonical NP-complete problem. Any question that can
+be reduced to SAT can be raced by miners and verified by Cathedral before
+validators use the signed result for weights.
 
-Better SAT solvers lower the cost of proving, finding, and optimizing real systems. Cathedral turns hard verification work into open, scored challenges that miners can attack with solvers, solver agents, and new search systems.
+SAT asks whether a boolean formula can be satisfied. It is a core search
+problem behind verification, planning, scheduling, compiler optimization,
+hardware reasoning, and automated theorem proving. Better SAT solvers
+lower the cost of proving, finding, and optimizing real systems. Cathedral
+turns hard verification work into open, scored challenges that miners can
+attack with solvers, solver agents, and new search systems.
 
 - **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
 
-- **Strong today, stronger tomorrow.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. [SolSearch](https://arxiv.org/abs/2502.14328) showed LLM-driven SAT solver code generation improving Z3 PAR-2 by 11 percent on its reported benchmark.
+- **Designed for solver evolution.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. Recent work such as [SATLUTION](https://arxiv.org/abs/2509.07367) points toward LLM-driven solver evolution under correctness checks; Cathedral makes that kind of work economic.
 
-- **Real demand.** Hard SAT instances drive workloads in chip verification, cryptanalysis, scheduling, and theorem proving. Today these teams pay specialist consultants or license EDA tooling. Cathedral is a third path: verified hard-instance solving via an open mining market.
+- **Real demand.** Hard SAT and SMT instances drive workloads at industrial scale: Amazon has described AWS automated-reasoning systems generating [a billion SMT queries a day](https://www.amazon.science/blog/a-billion-smt-queries-a-day). Chip companies depend on formal verification platforms from Cadence, Synopsys, and Siemens. Today these teams either pay enterprise EDA licenses or run reasoning workloads inside closed cloud services. Cathedral is a third path: verifiable hard-instance solving through an open mining market.
 
 ## [How It Works](#how-it-works)
 
 ### Incentive Mechanism
 
-1. Miner is scored under a registered Bittensor hotkey.
+1. Each miner is scored under their registered Bittensor hotkey.
 2. Miner fetches the active challenge through the signed API.
 3. Miner returns one DIMACS satisfying assignment.
 4. Cathedral checks the assignment against the private formula and records publisher-observed submit time.
@@ -62,7 +71,7 @@ Winning is selected by publisher receipt time, not first verified time.
 | **Hash-only feed** | Miners receive token-gated CNF URLs. Public schema-5 rows expose hashes, not raw formulas or answers. |
 | **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
 | **Receipt ordered** | Winning SAT receipt is selected by publisher-observed submit time. |
-| **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0`. If no positive non-burn scores exist, weight falls back to the burn UID. |
+| **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 95.0` during bootstrap to align emissions with active miner output. The percentage is expected to reduce as the SAT lane produces consistent positive scores. If no positive non-burn scores exist, weight falls back to the burn UID. |
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify signed rows or signed remote weight vectors; they do not receive raw SAT formulas.
 
@@ -101,7 +110,7 @@ Live miner flow:
 
 The canonical live contract is served at [`https://api.cathedral.computer/skill.md`](https://api.cathedral.computer/skill.md).
 
-Submit one DIMACS assignment:
+Submit a DIMACS assignment:
 
 ````text
 ```FINAL_ANSWER
