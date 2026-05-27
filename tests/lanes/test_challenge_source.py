@@ -120,13 +120,39 @@ async def test_sqlite_only_active_returned_by_get_active(tmp_path) -> None:
         await conn.close()
 
 
-async def test_sqlite_rejects_second_active_for_family(tmp_path) -> None:
+async def test_sqlite_rejects_second_active_for_same_tier(tmp_path) -> None:
     conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
     try:
         src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
         await src.upsert(_record("c1", CHALLENGE_STATUS_ACTIVE))
         with pytest.raises(ChallengeSourceError):
             await src.upsert(_record("c2", CHALLENGE_STATUS_ACTIVE))
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_allows_one_active_challenge_per_tier(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("tier-1", CHALLENGE_STATUS_ACTIVE, tier=1))
+        await src.upsert(_record("tier-3", CHALLENGE_STATUS_ACTIVE, tier=3))
+
+        tier_1 = await src.get_active_for_tier(_FAMILY, 1)
+        tier_3 = await src.get_active_for_tier(_FAMILY, 3)
+        assert tier_1 is not None
+        assert tier_3 is not None
+        assert tier_1.challenge_id == "tier-1"
+        assert tier_3.challenge_id == "tier-3"
+        active = await src.list_active(_FAMILY)
+        assert [(row.challenge_id, row.tier) for row in active] == [
+            ("tier-1", 1),
+            ("tier-3", 3),
+        ]
+
+        default = await src.get_active(_FAMILY)
+        assert default is not None
+        assert default.challenge_id == "tier-1"
     finally:
         await conn.close()
 
@@ -308,6 +334,36 @@ async def test_sqlite_activate_requires_explicit_retire_current(tmp_path) -> Non
             "c1": "retired",
             "c2": CHALLENGE_STATUS_ACTIVE,
         }
+    finally:
+        await conn.close()
+
+
+async def test_sqlite_activate_can_target_only_the_same_tier_slot(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("tier-1-active", CHALLENGE_STATUS_ACTIVE, tier=1))
+        await src.upsert(_record("tier-3-next", CHALLENGE_STATUS_PENDING, tier=3))
+
+        with pytest.raises(ChallengeSourceError, match="another active"):
+            await src.activate(
+                family_id=_FAMILY,
+                challenge_id="tier-3-next",
+                now_iso="2026-05-19T00:00:01.000Z",
+            )
+
+        active = await src.activate(
+            family_id=_FAMILY,
+            challenge_id="tier-3-next",
+            now_iso="2026-05-19T00:00:02.000Z",
+            active_scope="tier",
+        )
+
+        assert active.challenge_id == "tier-3-next"
+        assert [(row.challenge_id, row.tier) for row in await src.list_active(_FAMILY)] == [
+            ("tier-1-active", 1),
+            ("tier-3-next", 3),
+        ]
     finally:
         await conn.close()
 

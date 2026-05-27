@@ -60,6 +60,11 @@ Core responsibilities:
 
 The publisher is verifier-of-record for private SAT challenges.
 
+Challenge material may come from an operator-mounted file or a private
+generator service. The generator boundary is private Cathedral-to-generator
+infrastructure; miners still receive CNFs only through Cathedral's
+token-gated fetch path. See `docs/lanes/sat-generator-contract.md`.
+
 ## Validator
 
 Validators have two weight paths.
