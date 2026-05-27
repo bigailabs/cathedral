@@ -1,4 +1,4 @@
-<h1 align="center">The Open Marketplace for Verifiable Computation, Built on SAT</h1>
+<h1 align="center">Marketplace for Verifiable Computation, Built on SAT</h1>
 
 <p align="center">
   Documentation:
