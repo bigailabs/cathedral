@@ -1,8 +1,14 @@
-<p align="center">
-  <img src="docs/assets/cathedral-mark.svg" alt="Cathedral mark" width="112">
-</p>
-
 <h1 align="center">Cathedral: The Open Marketplace for Verifiable Computation</h1>
+
+<div align="center">
+<pre>
+      /\          /\          /\
+     /  \        /  \        /  \
+    /____\  /\  /____\  /\  /____\
+    | [] | /__\ | SAT | /__\ | [] |
+    |____|_|__|_|____|_|__|_|____|
+</pre>
+</div>
 
 <p align="center"><strong>Built on SAT.</strong></p>
 
