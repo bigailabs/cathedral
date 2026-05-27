@@ -1063,6 +1063,7 @@ class EvalOrchestrator:
                                     challenge_id=problem.task_id,
                                     now_iso=str(signed.row["ran_at"]),
                                     manage_transaction=False,
+                                    active_scope="tier",
                                 )
                             )
                         await self.db.commit()
@@ -1537,6 +1538,7 @@ class EvalOrchestrator:
                             challenge_id=winner.challenge_id,
                             now_iso=lock_commit_iso,
                             manage_transaction=False,
+                            active_scope="tier",
                         )
                         )
                 await self.db.commit()
