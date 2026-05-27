@@ -1150,6 +1150,85 @@ async def list_active_sat_challenges(request: Request) -> dict[str, object]:
     }
 
 
+@router.get("/v1/synthetic-boolean/recent-wins")
+async def list_recent_sat_wins(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, object]:
+    """Return the most-recent solved SAT challenges with winner hotkey.
+
+    Powers the leaderboard / "recently won" surface on the site so solved
+    challenges remain visible alongside the active set with the winning
+    miner's hotkey called out. Public metadata only: same shape as
+    ``current-challenge`` for the challenge fields, plus ``winner_hotkey``
+    and ``won_at`` from ``lane_challenge_winners``. No cnf_url, no tokens,
+    no internal paths.
+
+    Ordered by ``won_at`` descending; ``limit`` is clamped to [1, 100].
+    """
+    source = getattr(request.app.state, "task_family_challenge_source", None)
+    if source is None:
+        raise HTTPException(
+            status_code=503,
+            detail="challenge surface not configured",
+        )
+
+    # Pull winners + JOIN to lane_challenges in one round-trip. We rely on
+    # the SqliteChallengeSource's internal connection — there is no
+    # protocol method for this view yet because it is a denormalized
+    # leaderboard projection rather than core challenge-source state.
+    db = getattr(source, "_conn", None)
+    if db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="challenge source backing connection not exposed",
+        )
+    cur = await db.execute(
+        "SELECT w.challenge_id, w.miner_hotkey, w.weighted_score, w.won_at_iso, "
+        "       c.tier, c.cnf_text, c.cnf_path, c.status, c.audit_metadata "
+        "FROM lane_challenge_winners w "
+        "JOIN lane_challenges c ON c.challenge_id = w.challenge_id "
+        "WHERE w.family_id = ? "
+        "ORDER BY w.won_at_iso DESC LIMIT ?",
+        (SAT_FAMILY_ID, int(limit)),
+    )
+    rows = await cur.fetchall()
+
+    items: list[dict[str, object]] = []
+    for row in rows:
+        # Reuse the public projection by faking a record-shaped object so
+        # the no-leak guarantee is identical to current-challenge.
+        from cathedral.lanes.challenge_source import ChallengeRecord
+
+        rec_audit = row[8]
+        try:
+            audit_dict = (
+                rec_audit if isinstance(rec_audit, dict) else __import__("json").loads(rec_audit)
+            )
+        except Exception:
+            audit_dict = {}
+        rec = ChallengeRecord(
+            challenge_id=row[0],
+            family_id=SAT_FAMILY_ID,
+            tier=int(row[4]) if row[4] is not None else 0,
+            cnf_text=row[5] or "",
+            cnf_path=row[6],
+            status=row[7],
+            audit_metadata=audit_dict,
+        )
+        view = _public_challenge_view(rec)
+        view["winner_hotkey"] = row[1]
+        view["weighted_score"] = float(row[2]) if row[2] is not None else None
+        view["won_at"] = row[3]
+        items.append(view)
+
+    return {
+        "family_id": SAT_FAMILY_ID,
+        "count": len(items),
+        "items": items,
+    }
+
+
 def _resolve_challenge_source(ctx: PublisherContext):
     """Pull the challenge source off the app state via ctx if possible."""
     # The challenge source is wired in publisher.app.lifespan onto

@@ -355,6 +355,42 @@ def test_active_challenges_list_endpoint_returns_all_actives(
         assert item["status"] == "active"
 
 
+def test_recent_wins_endpoint_returns_winners_and_leaks_nothing(
+    client: TestClient, alice: Keypair
+) -> None:
+    # Submit a winning solve so we have at least one entry to find.
+    data, headers = _solve_post_form(
+        kp=alice,
+        challenge_id=_CHALLENGE,
+        dimacs_solution=_VALID_SOL,
+    )
+    resp = client.post("/v1/agents/submit", data=data, headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    # Now the recent-wins endpoint should surface the win + winner_hotkey.
+    wins = client.get("/v1/synthetic-boolean/recent-wins")
+    assert wins.status_code == 200, wins.text
+    body = wins.json()
+    assert body["family_id"] == _FAMILY
+    assert body["count"] >= 1
+    item = body["items"][0]
+    assert item["challenge_id"] == _CHALLENGE
+    assert item["winner_hotkey"] == alice.ss58_address
+    assert item["weighted_score"] == 1.0
+    assert item["won_at"]
+    # Same no-leak guarantee as active-challenges.
+    assert "cnf_url" not in item
+    assert "cnf_text" not in item
+    assert "cnf_path" not in item
+
+    # limit param: out-of-range values must be rejected (FastAPI returns
+    # 400/422 depending on version — both indicate validation failure).
+    bad_lo = client.get("/v1/synthetic-boolean/recent-wins?limit=0")
+    assert bad_lo.status_code in {400, 422}
+    bad_hi = client.get("/v1/synthetic-boolean/recent-wins?limit=200")
+    assert bad_hi.status_code in {400, 422}
+
+
 def test_active_cnf_can_select_active_challenge_by_tier_or_id(
     multi_tier_client: TestClient,
     alice: Keypair,
