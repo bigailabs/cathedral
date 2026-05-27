@@ -14,11 +14,12 @@ git -c gpg.ssh.allowedSignersFile=etc/cathedral/allowed_signers tag -v <tag>
 
 ### v2.0.0 - SAT mining cutover
 
-Date: 2026-05-26
+Date: 2026-05-27
 
 This is the major SAT cutover release for Cathedral validators,
 publishers, and miner-facing APIs. It moves the live mining path away
-from card-era work and onto `synthetic_boolean_v1` SAT challenges.
+from card-era work and onto `synthetic_boolean_v1` SAT challenges,
+including concurrent active challenges by tier.
 
 What changed:
 
@@ -26,6 +27,8 @@ What changed:
   `version_key=2000000`.
 - The SAT lane is the primary miner path.
 - Public challenge discovery is available at `GET /v1/synthetic-boolean/current-challenge` without exposing CNF bodies, fetch tokens, internal paths, or signed challenge material.
+- Tier-specific challenge discovery is available at `GET /v1/synthetic-boolean/current-challenge?tier=N`.
+- Miners can discover every currently active SAT tier through `GET /v1/synthetic-boolean/active-challenges`; the response uses the same public-only projection as `current-challenge`.
 - Miners submit SAT solutions directly through `POST /v1/agents/submit` with `challenge_id` and `dimacs_solution`.
 - Valid solutions are checked synchronously, signed as schema-5 eval rows, and can rank immediately.
 - Registrations without a submitted solution stay `pending_solution`; invalid or late solutions get signed zero-score attempts and are not SSH-probed.
@@ -34,6 +37,8 @@ What changed:
 - The challenge source can safely prepare one active SAT challenge per
   `(family_id, tier)` while existing callers keep one-active-per-family
   behavior by default.
+- Tier-scoped lock-and-promote keeps a won tier moving by promoting the
+  next pending challenge in that same tier.
 - The private generator-to-publisher lease contract is documented for
   pre-generated CNF pools, lease TTLs, health/depth reporting,
   idempotent leases, and hash-confirmed imports.
@@ -45,17 +50,27 @@ What did not change:
 - Public endpoints do not expose tokenized CNF URLs, raw CNF, or local challenge paths.
 - The generator API is private Cathedral infrastructure. Miners and
   validators do not call it.
+- Mainnet forced burn remains at the bootstrap value in this tag. Burn
+  reduction is a separate operator-policy release once SAT receipt volume
+  is stable.
 
 Operator action:
 
 1. Pull and verify the signed `v2.0.0` tag.
 2. Restart validators and confirm the emitted chain `version_key` is
    `2000000`.
-3. Ensure remote signed-weight verification is configured with the
+3. Managed PM2 operators should keep `cathedral-updater` running. It
+   polls signed tags, verifies them with `/opt/cathedral/allowed_signers`,
+   reinstalls Cathedral, migrates the validator DB, and reloads
+   `cathedral-validator`.
+4. Manual operators should fetch tags, check out `v2.0.0`, reinstall,
+   run `cathedral-validator migrate --config <mainnet config>`, and
+   restart the validator process.
+5. Ensure remote signed-weight verification is configured with the
    Cathedral weight-policy public key before enabling remote mode.
-4. Validators that cannot verify the signed Cathedral policy should fail
+6. Validators that cannot verify the signed Cathedral policy should fail
    closed rather than emit stale local/card-era weights.
-5. Keep the operator file-backed SAT challenge path available as the
+7. Keep the operator file-backed SAT challenge path available as the
    break-glass fallback while the generator pool is introduced.
 
 ## Previous Releases
