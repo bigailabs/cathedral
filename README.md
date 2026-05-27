@@ -1,6 +1,4 @@
-<h1 align="center">Verifiable Computation</h1>
-
-<p align="center"><strong>Built on SAT.</strong></p>
+<h1 align="center">The Open Marketplace for Verifiable Computation, Built on SAT</h1>
 
 <p align="center">
   Documentation:
