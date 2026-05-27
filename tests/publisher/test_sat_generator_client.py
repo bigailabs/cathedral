@@ -210,6 +210,59 @@ async def test_fetch_cnf_hash_mismatch_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_cnf_follows_redirect_to_signed_storage_url() -> None:
+    """Generators commonly 301/302 the artifact URL to a signed object
+    store (R2/S3). The client must follow that redirect AND still
+    sha256-verify the final bytes."""
+    body = b"p cnf 3 1\n1 -2 3 0\n"
+    sha = hashlib.sha256(body).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/v1/artifacts/" in request.url.path:
+            # Pretend the generator front door redirects to a signed CDN URL.
+            return httpx.Response(
+                301, headers={"location": f"{_BASE}/cdn-cnf-signed-url"}
+            )
+        if request.url.path == "/cdn-cnf-signed-url":
+            return httpx.Response(200, content=body)
+        return httpx.Response(404)
+
+    async with SatGeneratorClient(
+        base_url=_BASE, token=_TOKEN, transport=_mock(handler)
+    ) as client:
+        lease = LeaseResult.from_json(_lease_body(sha=sha, byte_size=len(body)))
+        result = await client.fetch_cnf(lease)
+    assert result == body
+
+
+@pytest.mark.asyncio
+async def test_fetch_cnf_hash_verify_still_gates_after_redirect() -> None:
+    """If a redirect target returns the wrong bytes, the sha256 check
+    must still reject — defense against a malicious redirect target."""
+    real_body = b"p cnf 3 1\n1 -2 3 0\n"
+    wrong_body = b"p cnf 99 99\nfake cnf\n"
+    expected_sha = hashlib.sha256(real_body).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/v1/artifacts/" in request.url.path:
+            return httpx.Response(
+                302, headers={"location": f"{_BASE}/cdn-evil"}
+            )
+        if request.url.path == "/cdn-evil":
+            return httpx.Response(200, content=wrong_body)
+        return httpx.Response(404)
+
+    async with SatGeneratorClient(
+        base_url=_BASE, token=_TOKEN, transport=_mock(handler)
+    ) as client:
+        lease = LeaseResult.from_json(
+            _lease_body(sha=expected_sha, byte_size=len(real_body))
+        )
+        with pytest.raises(SatGeneratorHashMismatch):
+            await client.fetch_cnf(lease)
+
+
+@pytest.mark.asyncio
 async def test_fetch_cnf_oversize_aborts() -> None:
     # 2 KiB body, but cap is 1 KiB
     body = b"x" * 2048

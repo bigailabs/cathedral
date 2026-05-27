@@ -238,8 +238,16 @@ class SatGeneratorClient:
         except Exception:
             path_only = "<opaque>"
         try:
+            # follow_redirects=True: generators commonly serve artifacts
+            # via a 301/302 to a signed object-store URL (R2/S3). The
+            # sha256 verify below still gates which bytes we accept, so
+            # following the redirect is safe.
             async with self._client.stream(
-                "GET", url, headers=self._auth_headers(), timeout=self._timeout
+                "GET",
+                url,
+                headers=self._auth_headers(),
+                timeout=self._timeout,
+                follow_redirects=True,
             ) as resp:
                 if resp.status_code in (401, 403):
                     raise SatGeneratorAuthError(
