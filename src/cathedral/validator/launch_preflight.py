@@ -70,9 +70,20 @@ def run_validator_sat_launch_preflight(
     env: Mapping[str, str] | None = None,
     *,
     require_remote_weight_source: bool = True,
-    require_zero_local_sat_weight: bool = True,
+    require_zero_local_sat_weight: bool = False,
 ) -> ValidatorLaunchPreflightResult:
-    """Validate validator config/env for SAT launch without touching chain state."""
+    """Validate validator config/env for SAT launch without touching chain state.
+
+    ``require_zero_local_sat_weight`` defaults to ``False`` as of v2.1. The
+    old guard (force local SAT weight to 0.0 when remote weights are
+    enabled) was meant to prevent double-counting, but it also meant that
+    when the remote vector expired the validator would fall back to a
+    zero-SAT local calc — which silently zeroes SAT miners during any
+    publisher outage. Operators who want the strict guard back can pass
+    ``require_zero_local_sat_weight=True`` explicitly. The new always-on
+    check is ``0.0 <= sat_weight <= 1.0``: anything else is a config
+    error regardless of mode.
+    """
 
     env = os.environ if env is None else env
     errors: list[str] = []
@@ -118,6 +129,11 @@ def run_validator_sat_launch_preflight(
     if not 0.0 <= settings.weights.forced_burn_percentage <= 100.0:
         errors.append("weights.forced_burn_percentage must be between 0 and 100")
 
+    if not 0.0 <= sat_weight <= 1.0:
+        errors.append(
+            f"weights.task_family_weights.{SAT_FAMILY_ID} must be in [0.0, 1.0] "
+            f"(got {sat_weight})"
+        )
     if require_zero_local_sat_weight and sat_weight != 0.0:
         errors.append(
             f"weights.task_family_weights.{SAT_FAMILY_ID} must stay 0.0 for remote-weight launch"

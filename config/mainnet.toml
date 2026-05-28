@@ -33,8 +33,12 @@ burn_uid = 204
 forced_burn_percentage = 85.0
 # Off until the bug_isolation_v1 feed is intentionally enabled.
 v3_bug_isolation_weight = 0.0
-# Off until synthetic_boolean_v1 is intentionally enabled.
-task_family_weights = { synthetic_boolean_v1 = 0.0 }
+# SAT lane is the live emission target as of v2.0.0. 1.0 means the v1 card-era
+# bucket is shut out of the local weight calculation (active_special_weight=1.0
+# in the blend formula in publisher/weight_policy.py drives v1 contribution to
+# 0). Operators upgrading from <v2.1 had this at 0.0 — flip is intentional and
+# stops stale eu-ai-act scores from coasting in the 7-day rolling window.
+task_family_weights = { synthetic_boolean_v1 = 1.0 }
 
 [publisher]
 url = "https://api.cathedral.computer"
