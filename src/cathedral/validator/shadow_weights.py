@@ -68,6 +68,7 @@ def compute_shadow_weight_diff(
     legacy_weights: WeightInput,
     decentralized_weights: WeightInput,
     *,
+    investigate_abs_diff_sum: float = 0.01,
     blocker_abs_diff_sum: float = 0.10,
 ) -> ShadowWeightDiff:
     legacy = _normalize_input(legacy_weights)
@@ -77,6 +78,12 @@ def compute_shadow_weight_diff(
     abs_diff_sum = sum(diffs.values())
     max_diff = max(diffs.values(), default=0.0)
     top_diffs = sorted(diffs.items(), key=lambda item: (-item[1], item[0]))[:20]
+    if abs_diff_sum >= blocker_abs_diff_sum:
+        diff_level = "blocker"
+    elif abs_diff_sum >= investigate_abs_diff_sum:
+        diff_level = "investigate"
+    else:
+        diff_level = "clean"
     return ShadowWeightDiff(
         legacy_vector_sha256=vector_sha256(legacy),
         decentralized_vector_sha256=vector_sha256(decentralized),
@@ -86,6 +93,8 @@ def compute_shadow_weight_diff(
         decentralized_weight_count=len(decentralized),
         blocker=abs_diff_sum >= blocker_abs_diff_sum,
         details={
+            "diff_level": diff_level,
+            "investigate_abs_diff_sum": investigate_abs_diff_sum,
             "blocker_abs_diff_sum": blocker_abs_diff_sum,
             "top_diffs": [[uid, diff] for uid, diff in top_diffs],
         },
@@ -139,4 +148,3 @@ async def record_shadow_weight_diff(
     )
     await conn.commit()
     return int(cur.lastrowid)
-
