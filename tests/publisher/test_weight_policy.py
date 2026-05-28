@@ -397,3 +397,171 @@ async def _seed_ranked_submission(
             current_score=current_score,
             current_rank=1,
         )
+
+
+# --------------------------------------------------------------------------
+# #236: score_multiplier blended into the per-hotkey aggregate.
+# --------------------------------------------------------------------------
+
+
+async def _seed_lane_challenge(
+    conn,
+    *,
+    challenge_id: str,
+    tier: int,
+    score_multiplier: float,
+    difficulty_label: str | None = None,
+) -> None:
+    from cathedral.lanes.challenge_source import (
+        SqliteChallengeSource,
+        ensure_sqlite_challenge_source_schema,
+    )
+
+    await ensure_sqlite_challenge_source_schema(conn)
+    src = SqliteChallengeSource(conn, now_iso="2026-05-27T00:00:00.000Z")
+    from cathedral.lanes.challenge_source import (
+        CHALLENGE_STATUS_PENDING,
+        ChallengeRecord,
+    )
+
+    await src.upsert(
+        ChallengeRecord(
+            challenge_id=challenge_id,
+            family_id="synthetic_boolean_v1",
+            tier=tier,
+            cnf_text="p cnf 1 1\n1 0\n",
+            status=CHALLENGE_STATUS_PENDING,
+            audit_metadata={"kind": "sha256_preimage"},
+            score_multiplier=score_multiplier,
+            difficulty_label=difficulty_label,
+        )
+    )
+
+
+async def _seed_schema5_eval_run(
+    conn,
+    *,
+    eval_run_id: str,
+    submission_id: str,
+    weighted_score: float,
+    challenge_id: str,
+) -> None:
+    await repository.insert_eval_run(
+        conn,
+        id=eval_run_id,
+        submission_id=submission_id,
+        epoch=1,
+        round_index=0,
+        polaris_agent_id=f"ssh-hermes:{submission_id[:12]}",
+        polaris_run_id=f"synthetic_boolean_v1:{eval_run_id}",
+        task_json={
+            "task_type": "synthetic_boolean_v1",
+            "challenge_id": challenge_id,
+        },
+        output_card_json={},
+        output_card_hash=f"hash-{eval_run_id}",
+        score_parts={"binary_correct": 1.0},
+        weighted_score=weighted_score,
+        ran_at=datetime.now(UTC),
+        duration_ms=1,
+        errors=None,
+        cathedral_signature="sig",
+        eval_output_schema_version=5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_score_multiplier_scales_weighted_score(tmp_path) -> None:
+    """A T1 win with ``score_multiplier=0.05`` contributes 0.05 to the aggregate;
+    a T3 win with ``score_multiplier=50.0`` contributes 50.0 (clamped later).
+
+    Existing rows that materialize as the default ``1.0`` continue to
+    contribute their full ``weighted_score`` — backward compatible.
+    """
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        await _seed_lane_challenge(
+            conn, challenge_id="t1-cheap", tier=1, score_multiplier=0.05
+        )
+        await _seed_lane_challenge(
+            conn, challenge_id="t3-jackpot", tier=3, score_multiplier=50.0
+        )
+        await _seed_lane_challenge(
+            conn, challenge_id="t2-default", tier=2, score_multiplier=1.0
+        )
+
+        await _seed_ranked_submission(conn, "agent-cheap", "hk-cheap")
+        await _seed_ranked_submission(conn, "agent-jackpot", "hk-jackpot")
+        await _seed_ranked_submission(conn, "agent-default", "hk-default")
+        await _seed_schema5_eval_run(
+            conn,
+            eval_run_id="run-cheap",
+            submission_id="agent-cheap",
+            weighted_score=1.0,
+            challenge_id="t1-cheap",
+        )
+        await _seed_schema5_eval_run(
+            conn,
+            eval_run_id="run-jackpot",
+            submission_id="agent-jackpot",
+            weighted_score=1.0,
+            challenge_id="t3-jackpot",
+        )
+        await _seed_schema5_eval_run(
+            conn,
+            eval_run_id="run-default",
+            submission_id="agent-default",
+            weighted_score=1.0,
+            challenge_id="t2-default",
+        )
+
+        scores = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=10,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+            disable_legacy_base_scores=True,
+        )
+        # weighted_total is clamped to <= 1.0 after blending. The cheap
+        # row pays 0.05 (clamped down from 0.05*1 = 0.05 unchanged), the
+        # default row pays 1.0, and the jackpot row pays 1.0 (clamped
+        # down from 50.0 by the existing min(weighted_total, 1.0) guard).
+        assert scores["hk-cheap"] == pytest.approx(0.05)
+        assert scores["hk-default"] == pytest.approx(1.0)
+        assert scores["hk-jackpot"] == pytest.approx(1.0)
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_challenge_id_in_lane_table_defaults_to_unit_multiplier(
+    tmp_path,
+) -> None:
+    """If the eval_runs row's challenge_id is not in ``lane_challenges`` at all,
+    the LEFT JOIN's COALESCE keeps the contribution at 1.0x — same as
+    pre-#236 behaviour.
+    """
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        from cathedral.lanes.challenge_source import (
+            ensure_sqlite_challenge_source_schema,
+        )
+
+        await ensure_sqlite_challenge_source_schema(conn)
+        await _seed_ranked_submission(conn, "agent-orphan", "hk-orphan")
+        await _seed_schema5_eval_run(
+            conn,
+            eval_run_id="run-orphan",
+            submission_id="agent-orphan",
+            weighted_score=1.0,
+            challenge_id="not-in-lane-store",
+        )
+
+        scores = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=10,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+            disable_legacy_base_scores=True,
+        )
+        assert scores["hk-orphan"] == pytest.approx(1.0)
+    finally:
+        await conn.close()

@@ -482,6 +482,11 @@ async def persist_task_family_result(
         "time_limit_seconds": problem.time_limit_seconds,
         "answer_hash": row["answer_hash"],
         "verifier_details_hash": row["verifier_details_hash"],
+        # Persisted so the publisher weight-policy aggregator can JOIN
+        # eval_runs back to ``lane_challenges`` for the per-challenge
+        # ``score_multiplier`` (issue #236). ``problem.task_id`` is the
+        # challenge_id for SAT (see lanes/synthetic_boolean_v1).
+        "challenge_id": problem.task_id,
     }
     errors = [str(row["rejection_reason"])] if row.get("rejection_reason") else None
 

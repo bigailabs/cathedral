@@ -1,7 +1,7 @@
 """HTTP client for the private SAT challenge generator service.
 
 Pairs with the contract documented in ``docs/lanes/sat-generator-contract.md``
-and Serge's implementation at ``fred-bsat/src/generator/service/app.py``.
+and the private generator service implementation.
 
 The generator is Cathedral-internal infrastructure: miners and validators
 NEVER hit it. This client is only used by the Cathedral publisher to

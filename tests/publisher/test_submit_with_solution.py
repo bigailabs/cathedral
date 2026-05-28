@@ -685,3 +685,196 @@ def test_concurrent_winners_exactly_one_wins(
     losses = sum(1 for s in statuses if s == 409)
     assert wins == 1, f"expected exactly 1 winner; got {wins}. statuses={statuses!r}"
     assert wins + losses == n, f"unexpected status counts: {statuses!r}"
+
+
+# --------------------------------------------------------------------------
+# PR-bundle: tier_difficulty multi-active + score_multiplier on public API.
+# --------------------------------------------------------------------------
+
+
+def _insert_labeled_challenge_sync(
+    conn: Any,
+    *,
+    challenge_id: str,
+    tier: int,
+    cnf_text: str,
+    difficulty_label: str | None,
+    score_multiplier: float = 1.0,
+    status: str = "active",
+) -> None:
+    cnf_sha256 = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+    header = next(line for line in cnf_text.splitlines() if line.startswith("p cnf "))
+    _, _, num_vars, num_clauses = header.split()
+    conn.execute(
+        "INSERT OR REPLACE INTO lane_challenges ("
+        "challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+        "audit_metadata, losers_published_at_iso, "
+        "score_multiplier, difficulty_label, "
+        "created_at_iso, updated_at_iso) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            challenge_id,
+            _FAMILY,
+            tier,
+            cnf_text,
+            None,
+            status,
+            json.dumps(
+                {
+                    "cnf_sha256": cnf_sha256,
+                    "num_vars": int(num_vars),
+                    "num_clauses": int(num_clauses),
+                    "kind": "sha256_preimage",
+                },
+                sort_keys=True,
+            ),
+            None,
+            float(score_multiplier),
+            difficulty_label,
+            "2026-05-27T00:00:00.000Z",
+            "2026-05-27T00:00:00.000Z",
+        ),
+    )
+
+
+def _seed_two_difficulty_actives_sync(db_path: str) -> None:
+    """Seed two simultaneously-active rows at tier=1 with distinct difficulty_label."""
+    import sqlite3
+
+    from cathedral.lanes.challenge_source import ensure_sqlite_challenge_source_schema
+
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        # Drive the schema through the async migration path. We bridge
+        # sync sqlite3 → aiosqlite via a one-shot asyncio.run so the
+        # ALTER + index migrations match production exactly.
+        import asyncio
+
+        import aiosqlite
+
+        async def _migrate() -> None:
+            a_conn = await aiosqlite.connect(db_path)
+            try:
+                await ensure_sqlite_challenge_source_schema(a_conn)
+            finally:
+                await a_conn.close()
+
+        conn.close()
+        asyncio.run(_migrate())
+        conn = sqlite3.connect(db_path)
+        _insert_labeled_challenge_sync(
+            conn,
+            challenge_id="t1-3b",
+            tier=1,
+            cnf_text=_CNF,
+            difficulty_label="3b",
+            score_multiplier=1.0,
+        )
+        _insert_labeled_challenge_sync(
+            conn,
+            challenge_id="t1-6b",
+            tier=1,
+            cnf_text=_TIER2_CNF,
+            difficulty_label="6b",
+            score_multiplier=10.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def two_difficulty_client(tmp_path: Path) -> Iterator[TestClient]:
+    db_path = str(tmp_path / "publisher-two-diff.db")
+    _seed_two_difficulty_actives_sync(db_path)
+    app = build_app(database_path=db_path)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_active_challenges_returns_two_rows_when_two_difficulty_actives(
+    two_difficulty_client: TestClient,
+) -> None:
+    """``/active-challenges`` must list both labeled actives + carry new fields."""
+    resp = two_difficulty_client.get("/v1/synthetic-boolean/active-challenges")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["count"] == 2
+    ids = {item["challenge_id"] for item in body["items"]}
+    assert ids == {"t1-3b", "t1-6b"}
+    by_id = {item["challenge_id"]: item for item in body["items"]}
+    assert by_id["t1-3b"]["difficulty_label"] == "3b"
+    assert by_id["t1-6b"]["difficulty_label"] == "6b"
+    assert by_id["t1-3b"]["score_multiplier"] == pytest.approx(1.0)
+    assert by_id["t1-6b"]["score_multiplier"] == pytest.approx(10.0)
+    # No leak.
+    for item in body["items"]:
+        assert "cnf_text" not in item
+        assert "cnf_path" not in item
+
+
+def test_current_challenge_difficulty_filter_prefers_label_then_falls_back(
+    two_difficulty_client: TestClient,
+) -> None:
+    """``?tier=1&difficulty=3b`` returns the labeled row; unknown label falls back."""
+    resp = two_difficulty_client.get(
+        "/v1/synthetic-boolean/current-challenge?tier=1&difficulty=3b"
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["challenge_id"] == "t1-3b"
+    assert body["difficulty_label"] == "3b"
+    assert body["score_multiplier"] == pytest.approx(1.0)
+
+    # Unknown difficulty: degrades to the tier-only active (whichever
+    # the source picks first — ordered by challenge_id ASC).
+    resp_unknown = two_difficulty_client.get(
+        "/v1/synthetic-boolean/current-challenge?tier=1&difficulty=99x"
+    )
+    assert resp_unknown.status_code == 200
+    body_unknown = resp_unknown.json()
+    assert body_unknown["challenge_id"] in {"t1-3b", "t1-6b"}
+
+
+def test_recent_wins_carries_difficulty_label_and_score_multiplier(
+    two_difficulty_client: TestClient,
+    alice: Keypair,
+) -> None:
+    """Solving the labeled active surfaces the label + multiplier on recent-wins."""
+    data, headers = _solve_post_form(
+        kp=alice,
+        challenge_id="t1-3b",
+        dimacs_solution=_VALID_SOL,
+    )
+    resp = two_difficulty_client.post("/v1/agents/submit", data=data, headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    wins = two_difficulty_client.get("/v1/synthetic-boolean/recent-wins")
+    body = wins.json()
+    matched = [w for w in body["items"] if w["challenge_id"] == "t1-3b"]
+    assert matched, body
+    assert matched[0]["difficulty_label"] == "3b"
+    assert matched[0]["score_multiplier"] == pytest.approx(1.0)
+
+
+def test_solve_post_locking_labeled_row_keeps_other_labeled_active(
+    two_difficulty_client: TestClient,
+    alice: Keypair,
+) -> None:
+    """Solve the 3b row; the 6b row must stay active (promote-next scoped)."""
+    data, headers = _solve_post_form(
+        kp=alice,
+        challenge_id="t1-3b",
+        dimacs_solution=_VALID_SOL,
+    )
+    resp = two_difficulty_client.post("/v1/agents/submit", data=data, headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    actives = two_difficulty_client.get("/v1/synthetic-boolean/active-challenges")
+    body = actives.json()
+    ids = {item["challenge_id"] for item in body["items"]}
+    # The 6b labeled active must remain. The 3b row is now locked
+    # (its slot is empty until a 3b-labeled pending is promoted).
+    assert "t1-6b" in ids
+    assert "t1-3b" not in ids
