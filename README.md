@@ -4,7 +4,8 @@
   Documentation:
   <a href="docs/miner/QUICKSTART.md">Miner</a> |
   <a href="docs/validator/RUNBOOK.md">Validator</a> |
-  <a href="https://api.cathedral.computer/skill.md">Live Miner Brief</a>
+  <a href="https://api.cathedral.computer/skill.md">Live Miner Brief</a> |
+  <a href="https://github.com/cathedralai/cathedral/releases">Releases</a>
 </p>
 
 <p align="center">
