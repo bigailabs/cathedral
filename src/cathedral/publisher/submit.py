@@ -715,6 +715,13 @@ async def _handle_solve_post(
         epoch=epoch,
     )
     async with ctx.db_write_lock:
+        # Issue #242: pass the raw DIMACS body so atomic_claim_winner
+        # writes the audit sidecar in the SAME transactional scope as
+        # the eval_runs INSERT. Either both rows land or neither does
+        # — critical so a later auditor never sees a verdict without
+        # the body that produced it. body_sha256 mirrors
+        # miner_solution_sha256 (computed at submit.py:322 as part of
+        # the signed 6-field shape).
         result = await repository.atomic_claim_winner(
             ctx.db,
             family_id=SAT_FAMILY_ID,
@@ -728,6 +735,7 @@ async def _handle_solve_post(
             epoch=epoch,
             round_index=0,
             time_limit_seconds=time_limit_seconds,
+            dimacs_solution=dimacs_solution,
         )
 
     if not result.won:

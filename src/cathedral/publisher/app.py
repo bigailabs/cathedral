@@ -274,6 +274,13 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         await ensure_sqlite_challenge_source_schema(ctx.db)
         await ctx.db.executescript(CHALLENGE_LOCK_SCHEMA)
         await ctx.db.executescript(CHALLENGE_RECEIPT_SCHEMA)
+        # Issue #242: sidecar table for raw DIMACS bodies. Must be ensured
+        # alongside the other schema scripts so a fresh publisher boot has
+        # the audit surface ready before the first solve POST lands.
+        # CASCADE off eval_runs.id ties the sidecar lifetime to the
+        # verdict; the connection-level PRAGMA foreign_keys=ON is set in
+        # `cathedral.validator.db.connect`, so the CASCADE actually fires.
+        await ctx.db.executescript(repository.EVAL_RUN_SOLUTIONS_SCHEMA)
         await ctx.db.commit()
         task_family_challenge_source = SqliteChallengeSource(ctx.db)
         task_family_challenge_lock = SqliteChallengeLock(ctx.db)
@@ -602,6 +609,15 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     # for the same dual-routing reason as the submit/reads routers.
     app.include_router(weight_policy_router, prefix="/api/cathedral")
     app.include_router(weight_policy_router, include_in_schema=False)
+
+    # Issue #242: bearer-gated audit endpoint for raw DIMACS bodies.
+    # OFF by default (503 until CATHEDRAL_AUDIT_TOKEN is set in env).
+    # Same dual-mount pattern as the rest of the public surface so audit
+    # callers using either prefix resolve to the same handler.
+    from cathedral.publisher.audit import router as audit_router
+
+    app.include_router(audit_router, prefix="/api/cathedral", include_in_schema=False)
+    app.include_router(audit_router, include_in_schema=False)
 
     # Agent-facing onboarding. A miner points their agent at skill.md;
     # the agent reads the live SAT contract and registers through the
