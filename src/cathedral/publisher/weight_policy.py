@@ -286,23 +286,65 @@ async def latest_policy_scores_by_hotkey(
         base_scores = {str(row[0]): float(row[1]) for row in rows if row[1] is not None}
 
     since = (datetime.now(UTC) - timedelta(days=task_family_since_days)).isoformat()
-    cur = await conn.execute(
-        """
-        SELECT sub.miner_hotkey, er.weighted_score, er.task_json
-        FROM eval_runs er
-        JOIN agent_submissions sub ON sub.id = er.submission_id
-        WHERE er.eval_output_schema_version = 5
-          AND er.ran_at >= ?
-          AND sub.status = 'ranked'
-          AND sub.discovery_only = 0
-          AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
-        ORDER BY er.ran_at DESC
-        """,
-        (since,),
-    )
+    # Task Family rows are LEFT JOIN'd against ``lane_challenges`` so the
+    # per-challenge ``score_multiplier`` (issue #236) is applied at the
+    # aggregator. The JOIN is LEFT so rows whose ``challenge_id`` is not
+    # in the local lane store (rare; happens when the publisher pulled an
+    # eval row from a peer source) still contribute at the default
+    # multiplier of 1.0 — backward compatible with pre-#236 data.
+    # In production the publisher lifespan applies the lane schema to the
+    # same connection (see ``app.lifespan``); tests that drive
+    # ``latest_policy_scores_by_hotkey`` against a bare validator DB skip
+    # that step, so we tolerate a missing ``lane_challenges`` table by
+    # falling back to a multiplier-less query — every row materializes at
+    # 1.0, which matches pre-#236 behaviour.
+    try:
+        cur = await conn.execute(
+            """
+            SELECT sub.miner_hotkey,
+                   er.weighted_score,
+                   er.task_json,
+                   COALESCE(lc.score_multiplier, 1.0) AS score_multiplier
+            FROM eval_runs er
+            JOIN agent_submissions sub ON sub.id = er.submission_id
+            LEFT JOIN lane_challenges lc
+                ON lc.challenge_id = json_extract(er.task_json, '$.challenge_id')
+            WHERE er.eval_output_schema_version = 5
+              AND er.ran_at >= ?
+              AND sub.status = 'ranked'
+              AND sub.discovery_only = 0
+              AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
+            ORDER BY er.ran_at DESC
+            """,
+            (since,),
+        )
+    except Exception as exc:
+        if "lane_challenges" not in str(exc):
+            raise
+        logger.warning(
+            "weight_policy_lane_challenges_missing_fallback_to_default_multiplier"
+        )
+        cur = await conn.execute(
+            """
+            SELECT sub.miner_hotkey,
+                   er.weighted_score,
+                   er.task_json,
+                   1.0 AS score_multiplier
+            FROM eval_runs er
+            JOIN agent_submissions sub ON sub.id = er.submission_id
+            WHERE er.eval_output_schema_version = 5
+              AND er.ran_at >= ?
+              AND sub.status = 'ranked'
+              AND sub.discovery_only = 0
+              AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
+            ORDER BY er.ran_at DESC
+            """,
+            (since,),
+        )
     task_rows = await cur.fetchall()
     samples_by_hotkey: dict[str, dict[str, list[float]]] = {}
-    for hotkey_raw, weighted_raw, task_json_raw in task_rows:
+    for row in task_rows:
+        hotkey_raw, weighted_raw, task_json_raw, score_multiplier_raw = row
         try:
             task_json = json.loads(task_json_raw) if isinstance(task_json_raw, str) else {}
         except json.JSONDecodeError:
@@ -310,9 +352,13 @@ async def latest_policy_scores_by_hotkey(
         task_type = str(task_json.get("task_type") or "")
         if task_type not in lane_weights:
             continue
+        try:
+            multiplier = float(score_multiplier_raw) if score_multiplier_raw is not None else 1.0
+        except (TypeError, ValueError):
+            multiplier = 1.0
         hotkey = str(hotkey_raw)
         samples_by_hotkey.setdefault(hotkey, {}).setdefault(task_type, []).append(
-            float(weighted_raw)
+            float(weighted_raw) * multiplier
         )
 
     scores = dict(base_scores)

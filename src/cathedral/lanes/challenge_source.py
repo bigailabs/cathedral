@@ -54,7 +54,8 @@ _ALLOWED_STATUSES = frozenset(
     }
 )
 
-ActiveChallengeScope = Literal["family", "tier"]
+ActiveChallengeScope = Literal["family", "tier", "tier_difficulty"]
+_ALLOWED_ACTIVE_SCOPES = frozenset({"family", "tier", "tier_difficulty"})
 
 
 class ChallengeSourceError(Exception):
@@ -71,6 +72,14 @@ class ChallengeRecord:
     ``cnf_path`` and leave ``cnf_text`` empty. Treat this dataclass the
     way you would treat a Supabase row: it crosses the publisher
     boundary but never reaches a miner-visible feed.
+
+    ``score_multiplier`` (default ``1.0``) is the per-challenge payout
+    weight applied by ``weight_policy`` when aggregating Task Family
+    rows per hotkey (issue #236). ``difficulty_label`` (default
+    ``None``) is the operator-set bucket that lets multiple challenges
+    share a ``(family, tier)`` slot under
+    ``active_scope='tier_difficulty'`` (issue #241). Both are publisher
+    metadata and surface on the public projections.
     """
 
     challenge_id: str
@@ -81,6 +90,8 @@ class ChallengeRecord:
     audit_metadata: dict[str, Any] = field(default_factory=dict)
     cnf_path: str | None = None
     losers_published_at_iso: str | None = None
+    score_multiplier: float = 1.0
+    difficulty_label: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in _ALLOWED_STATUSES:
@@ -139,6 +150,19 @@ class ChallengeSource(Protocol):
         active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord | None:
         """Lock the solved challenge and activate the next pending row."""
+        ...
+
+    async def promote_pending_batch(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        now_iso: str,
+        max_count: int,
+        kind: str | None = None,
+        difficulty_label: str | None = None,
+    ) -> list[str]:
+        """Promote up to ``max_count`` pending rows in one operation."""
         ...
 
     async def list_locked_needing_loser_reconciliation(
@@ -227,6 +251,8 @@ class InMemoryChallengeSource:
                 audit_metadata=record.audit_metadata,
                 cnf_path=record.cnf_path,
                 losers_published_at_iso=current.losers_published_at_iso,
+                score_multiplier=record.score_multiplier,
+                difficulty_label=record.difficulty_label,
             )
             return
         self._rows[record.challenge_id] = record
@@ -245,10 +271,26 @@ class InMemoryChallengeSource:
             raise ChallengeSourceError("challenge not found")
         if target.status not in {CHALLENGE_STATUS_PENDING, CHALLENGE_STATUS_ACTIVE}:
             raise ChallengeSourceError("challenge is not activatable")
-        if active_scope not in {"family", "tier"}:
-            raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
+        if active_scope not in _ALLOWED_ACTIVE_SCOPES:
+            raise ChallengeSourceError(
+                "active_scope must be 'family', 'tier', or 'tier_difficulty'"
+            )
 
-        if active_scope == "tier":
+        # 'tier_difficulty' on an unlabeled target degrades to 'tier'
+        # so legacy data retains the one-active-per-tier invariant.
+        effective_scope: str = active_scope
+        if effective_scope == "tier_difficulty" and target.difficulty_label is None:
+            effective_scope = "tier"
+
+        if effective_scope == "tier_difficulty":
+            active_rows = [
+                rec
+                for rec in await self.list_active(family_id)
+                if rec.tier == target.tier
+                and rec.difficulty_label == target.difficulty_label
+                and rec.challenge_id != challenge_id
+            ]
+        elif effective_scope == "tier":
             active_rows = [
                 rec
                 for rec in await self.list_active(family_id)
@@ -273,6 +315,8 @@ class InMemoryChallengeSource:
                     audit_metadata=active.audit_metadata,
                     cnf_path=active.cnf_path,
                     losers_published_at_iso=active.losers_published_at_iso,
+                    score_multiplier=active.score_multiplier,
+                    difficulty_label=active.difficulty_label,
                 )
 
         activated = ChallengeRecord(
@@ -284,6 +328,8 @@ class InMemoryChallengeSource:
             audit_metadata=target.audit_metadata,
             cnf_path=target.cnf_path,
             losers_published_at_iso=target.losers_published_at_iso,
+            score_multiplier=target.score_multiplier,
+            difficulty_label=target.difficulty_label,
         )
         self._rows[challenge_id] = activated
         return activated
@@ -297,10 +343,13 @@ class InMemoryChallengeSource:
         manage_transaction: bool = True,
         active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord | None:
-        if active_scope not in {"family", "tier"}:
-            raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
+        if active_scope not in _ALLOWED_ACTIVE_SCOPES:
+            raise ChallengeSourceError(
+                "active_scope must be 'family', 'tier', or 'tier_difficulty'"
+            )
         current = self._rows.get(challenge_id)
         current_tier = current.tier if current is not None else None
+        current_difficulty = current.difficulty_label if current is not None else None
         if current is not None and current.family_id == family_id:
             self._rows[challenge_id] = ChallengeRecord(
                 challenge_id=current.challenge_id,
@@ -311,9 +360,32 @@ class InMemoryChallengeSource:
                 audit_metadata=current.audit_metadata,
                 cnf_path=current.cnf_path,
                 losers_published_at_iso=None,
+                score_multiplier=current.score_multiplier,
+                difficulty_label=current.difficulty_label,
             )
 
-        if active_scope == "tier" and current_tier is not None:
+        # 'tier_difficulty' on an unlabeled locked row degrades to 'tier'
+        # so legacy rows keep the original 1-per-tier semantics.
+        effective_scope: str = active_scope
+        if effective_scope == "tier_difficulty" and current_difficulty is None:
+            effective_scope = "tier"
+
+        if effective_scope == "tier_difficulty" and current_tier is not None:
+            existing = [
+                rec
+                for rec in await self.list_active(family_id)
+                if rec.tier == current_tier and rec.difficulty_label == current_difficulty
+            ]
+            if existing:
+                return None
+            pending = [
+                rec
+                for rec in await self.list_for_family(
+                    family_id, status=CHALLENGE_STATUS_PENDING
+                )
+                if rec.tier == current_tier and rec.difficulty_label == current_difficulty
+            ]
+        elif effective_scope == "tier" and current_tier is not None:
             if await self.get_active_for_tier(family_id, current_tier) is not None:
                 return None
             pending = [
@@ -335,6 +407,61 @@ class InMemoryChallengeSource:
             now_iso=now_iso,
             active_scope=active_scope,
         )
+
+    async def promote_pending_batch(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        now_iso: str,
+        max_count: int,
+        kind: str | None = None,
+        difficulty_label: str | None = None,
+    ) -> list[str]:
+        """Match :meth:`SqliteChallengeSource.promote_pending_batch` exactly.
+
+        ``difficulty_label=None`` filters to unlabeled candidates ONLY
+        so the legacy one-active-per-tier rule continues to hold.
+        Stops iterating on the first ``ChallengeSourceError`` so the
+        unlabeled "tier" scope yields at most one promotion per call
+        — same as the SQLite path.
+        """
+        max_count = max(0, int(max_count))
+        if max_count == 0:
+            return []
+        scope: ActiveChallengeScope = (
+            "tier_difficulty" if difficulty_label is not None else "tier"
+        )
+        candidates: list[ChallengeRecord] = []
+        for rec in await self.list_for_family(family_id, status=CHALLENGE_STATUS_PENDING):
+            if rec.tier != int(tier):
+                continue
+            if difficulty_label is None:
+                if rec.difficulty_label is not None:
+                    continue
+            elif rec.difficulty_label != difficulty_label:
+                continue
+            if kind is not None:
+                audit_kind = (rec.audit_metadata or {}).get("kind")
+                if audit_kind != kind:
+                    continue
+            candidates.append(rec)
+            if len(candidates) >= max_count:
+                break
+
+        promoted: list[str] = []
+        for cand in candidates:
+            try:
+                await self.activate(
+                    family_id=family_id,
+                    challenge_id=cand.challenge_id,
+                    now_iso=now_iso,
+                    active_scope=scope,
+                )
+            except ChallengeSourceError:
+                break
+            promoted.append(cand.challenge_id)
+        return promoted
 
     async def list_locked_needing_loser_reconciliation(
         self, family_id: str, *, limit: int = 32
@@ -369,6 +496,8 @@ class InMemoryChallengeSource:
             audit_metadata=current.audit_metadata,
             cnf_path=current.cnf_path,
             losers_published_at_iso=now_iso,
+            score_multiplier=current.score_multiplier,
+            difficulty_label=current.difficulty_label,
         )
 
 
@@ -388,13 +517,12 @@ CREATE TABLE IF NOT EXISTS lane_challenges (
     audit_metadata  TEXT NOT NULL,
     losers_published_at_iso TEXT,
     created_at_iso  TEXT NOT NULL,
-    updated_at_iso  TEXT NOT NULL
+    updated_at_iso  TEXT NOT NULL,
+    score_multiplier REAL NOT NULL DEFAULT 1.0,
+    difficulty_label TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_lane_challenges_family_status
     ON lane_challenges(family_id, status);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_challenges_one_active_per_family_tier
-    ON lane_challenges(family_id, tier)
-    WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS lane_challenge_fetch_tokens (
     challenge_id              TEXT PRIMARY KEY,
@@ -420,7 +548,16 @@ async def init_sqlite_challenge_source(database_path: str) -> aiosqlite.Connecti
 
 
 async def ensure_sqlite_challenge_source_schema(conn: aiosqlite.Connection) -> None:
-    """Apply the challenge-source schema and lightweight additive migrations."""
+    """Apply the challenge-source schema and lightweight additive migrations.
+
+    Idempotent: safe to call on every connection open. Migrations are
+    purely additive (``ALTER TABLE ... ADD COLUMN`` with defaults, or
+    ``CREATE INDEX IF NOT EXISTS``), so existing rows keep their values
+    and existing queries continue to work. The
+    one-active-per-(family, tier) unique index is rebuilt as a partial
+    index over ``difficulty_label IS NULL`` so unlabeled rows retain
+    the legacy invariant while labeled rows can share a tier slot.
+    """
     await conn.executescript(SQLITE_SCHEMA)
     cur = await conn.execute("PRAGMA table_info(lane_challenges)")
     columns = {str(row[1]) for row in await cur.fetchall()}
@@ -428,10 +565,38 @@ async def ensure_sqlite_challenge_source_schema(conn: aiosqlite.Connection) -> N
         await conn.execute("ALTER TABLE lane_challenges ADD COLUMN cnf_path TEXT")
     if "losers_published_at_iso" not in columns:
         await conn.execute("ALTER TABLE lane_challenges ADD COLUMN losers_published_at_iso TEXT")
+    # PR-bundled additive migrations (#236 + #241). SQLite does not allow
+    # adding a NOT NULL column without a default, so the score multiplier
+    # column carries DEFAULT 1.0 — existing rows materialize as 1.0 and
+    # keep producing the same weight contribution as before.
+    if "score_multiplier" not in columns:
+        await conn.execute(
+            "ALTER TABLE lane_challenges ADD COLUMN score_multiplier REAL NOT NULL DEFAULT 1.0"
+        )
+    if "difficulty_label" not in columns:
+        await conn.execute("ALTER TABLE lane_challenges ADD COLUMN difficulty_label TEXT")
     await conn.execute("DROP INDEX IF EXISTS idx_lane_challenges_one_active_per_family")
+    # The legacy tier-only unique active index is being narrowed to apply
+    # only to unlabeled rows so labeled rows can share a tier slot. Drop
+    # any pre-existing (unconditional) version first so the rebuild picks
+    # up the partial-index predicate even on already-migrated DBs.
+    await conn.execute(
+        "DROP INDEX IF EXISTS idx_lane_challenges_one_active_per_family_tier"
+    )
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_challenges_one_active_per_family_tier "
-        "ON lane_challenges(family_id, tier) WHERE status = 'active'"
+        "ON lane_challenges(family_id, tier) "
+        "WHERE status = 'active' AND difficulty_label IS NULL"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "idx_lane_challenges_one_active_per_family_tier_difficulty "
+        "ON lane_challenges(family_id, tier, difficulty_label) "
+        "WHERE status = 'active' AND difficulty_label IS NOT NULL"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lane_challenges_tier_diff_status "
+        "ON lane_challenges(family_id, tier, difficulty_label, status)"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lane_challenges_locked_losers "
@@ -458,7 +623,8 @@ class SqliteChallengeSource:
 
     async def get_active(self, family_id: str) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata, "
+            "score_multiplier, difficulty_label "
             "FROM lane_challenges WHERE family_id = ? AND status = ? "
             "ORDER BY tier ASC, challenge_id ASC LIMIT 1",
             (family_id, CHALLENGE_STATUS_ACTIVE),
@@ -470,7 +636,8 @@ class SqliteChallengeSource:
 
     async def get_active_for_tier(self, family_id: str, tier: int) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata, "
+            "score_multiplier, difficulty_label "
             "FROM lane_challenges WHERE family_id = ? AND tier = ? AND status = ? "
             "ORDER BY challenge_id ASC LIMIT 1",
             (family_id, int(tier), CHALLENGE_STATUS_ACTIVE),
@@ -482,7 +649,8 @@ class SqliteChallengeSource:
 
     async def list_active(self, family_id: str) -> list[ChallengeRecord]:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata, "
+            "score_multiplier, difficulty_label "
             "FROM lane_challenges WHERE family_id = ? AND status = ? "
             "ORDER BY tier ASC, challenge_id ASC",
             (family_id, CHALLENGE_STATUS_ACTIVE),
@@ -537,14 +705,14 @@ class SqliteChallengeSource:
         if status is None:
             cur = await self._conn.execute(
                 "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
-                "status, audit_metadata "
+                "status, audit_metadata, score_multiplier, difficulty_label "
                 "FROM lane_challenges WHERE family_id = ? ORDER BY challenge_id",
                 (family_id,),
             )
         else:
             cur = await self._conn.execute(
                 "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
-                "status, audit_metadata "
+                "status, audit_metadata, score_multiplier, difficulty_label "
                 "FROM lane_challenges WHERE family_id = ? AND status = ? "
                 "ORDER BY challenge_id",
                 (family_id, status),
@@ -558,7 +726,8 @@ class SqliteChallengeSource:
         limit = max(1, int(limit))
         cur = await self._conn.execute(
             "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
-            "audit_metadata, losers_published_at_iso "
+            "audit_metadata, score_multiplier, difficulty_label, "
+            "losers_published_at_iso "
             "FROM lane_challenges "
             "WHERE family_id = ? AND status = ? AND losers_published_at_iso IS NULL "
             "ORDER BY updated_at_iso DESC, challenge_id DESC LIMIT ?",
@@ -601,7 +770,8 @@ class SqliteChallengeSource:
             await self._conn.execute("BEGIN IMMEDIATE")
             current_cur = await self._conn.execute(
                 "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
-                "audit_metadata FROM lane_challenges WHERE challenge_id = ? LIMIT 1",
+                "audit_metadata, score_multiplier, difficulty_label "
+                "FROM lane_challenges WHERE challenge_id = ? LIMIT 1",
                 (record.challenge_id,),
             )
             current_row = await current_cur.fetchone()
@@ -622,9 +792,11 @@ class SqliteChallengeSource:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
                         challenge_id, family_id, tier, cnf_text, cnf_path, status,
-                        audit_metadata, losers_published_at_iso, created_at_iso, updated_at_iso
+                        audit_metadata, losers_published_at_iso,
+                        score_multiplier, difficulty_label,
+                        created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
@@ -633,21 +805,27 @@ class SqliteChallengeSource:
                         status=excluded.status,
                         audit_metadata=excluded.audit_metadata,
                         losers_published_at_iso=excluded.losers_published_at_iso,
+                        score_multiplier=excluded.score_multiplier,
+                        difficulty_label=excluded.difficulty_label,
                         updated_at_iso=excluded.updated_at_iso
                     """
             else:
                 upsert_sql = """
                     INSERT INTO lane_challenges (
                         challenge_id, family_id, tier, cnf_text, cnf_path, status,
-                        audit_metadata, losers_published_at_iso, created_at_iso, updated_at_iso
+                        audit_metadata, losers_published_at_iso,
+                        score_multiplier, difficulty_label,
+                        created_at_iso, updated_at_iso
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(challenge_id) DO UPDATE SET
                         family_id=excluded.family_id,
                         tier=excluded.tier,
                         cnf_text=excluded.cnf_text,
                         cnf_path=excluded.cnf_path,
                         audit_metadata=excluded.audit_metadata,
+                        score_multiplier=excluded.score_multiplier,
+                        difficulty_label=excluded.difficulty_label,
                         updated_at_iso=excluded.updated_at_iso
                     """
             await self._conn.execute(
@@ -661,6 +839,8 @@ class SqliteChallengeSource:
                     record.status,
                     json.dumps(record.audit_metadata, sort_keys=True),
                     record.losers_published_at_iso,
+                    float(record.score_multiplier),
+                    record.difficulty_label,
                     ts,
                     ts,
                 ),
@@ -686,8 +866,10 @@ class SqliteChallengeSource:
         active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord:
         try:
-            if active_scope not in {"family", "tier"}:
-                raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
+            if active_scope not in _ALLOWED_ACTIVE_SCOPES:
+                raise ChallengeSourceError(
+                    "active_scope must be 'family', 'tier', or 'tier_difficulty'"
+                )
             await self._conn.execute("BEGIN IMMEDIATE")
             target = await self._fetch_one_for_update(family_id, challenge_id)
             if target is None:
@@ -695,11 +877,27 @@ class SqliteChallengeSource:
             if target.status not in {CHALLENGE_STATUS_PENDING, CHALLENGE_STATUS_ACTIVE}:
                 raise ChallengeSourceError("challenge is not activatable")
 
+            # 'tier_difficulty' on an unlabeled target degrades to 'tier'
+            # so legacy data retains the one-active-per-tier invariant.
+            effective_scope: str = active_scope
+            if effective_scope == "tier_difficulty" and target.difficulty_label is None:
+                effective_scope = "tier"
+
             active_rows = [
                 row
                 for row in await self._fetch_active_rows_for_update(
                     family_id,
-                    tier=target.tier if active_scope == "tier" else None,
+                    tier=(
+                        target.tier
+                        if effective_scope in {"tier", "tier_difficulty"}
+                        else None
+                    ),
+                    difficulty_label=(
+                        target.difficulty_label
+                        if effective_scope == "tier_difficulty"
+                        else None
+                    ),
+                    match_difficulty=effective_scope == "tier_difficulty",
                 )
                 if row.challenge_id != challenge_id
             ]
@@ -755,12 +953,21 @@ class SqliteChallengeSource:
         active_scope: ActiveChallengeScope = "family",
     ) -> ChallengeRecord | None:
         try:
-            if active_scope not in {"family", "tier"}:
-                raise ChallengeSourceError("active_scope must be 'family' or 'tier'")
+            if active_scope not in _ALLOWED_ACTIVE_SCOPES:
+                raise ChallengeSourceError(
+                    "active_scope must be 'family', 'tier', or 'tier_difficulty'"
+                )
             if manage_transaction:
                 await self._conn.execute("BEGIN IMMEDIATE")
             target = await self._fetch_one_for_update(family_id, challenge_id)
             target_tier = target.tier if target is not None else None
+            target_difficulty = target.difficulty_label if target is not None else None
+            # 'tier_difficulty' on an unlabeled locked row degrades to
+            # 'tier' so legacy data continues to use the 1-per-tier
+            # invariant.
+            effective_scope: str = active_scope
+            if effective_scope == "tier_difficulty" and target_difficulty is None:
+                effective_scope = "tier"
             await self._conn.execute(
                 "UPDATE lane_challenges SET status = ?, losers_published_at_iso = NULL, "
                 "updated_at_iso = ? "
@@ -776,17 +983,40 @@ class SqliteChallengeSource:
 
             active = await self._fetch_active_for_update(
                 family_id,
-                tier=target_tier if active_scope == "tier" else None,
+                tier=(
+                    target_tier
+                    if effective_scope in {"tier", "tier_difficulty"}
+                    else None
+                ),
+                difficulty_label=(
+                    target_difficulty if effective_scope == "tier_difficulty" else None
+                ),
+                match_difficulty=effective_scope == "tier_difficulty",
             )
             if active is not None:
                 if manage_transaction:
                     await self._conn.commit()
                 return None
 
-            if active_scope == "tier" and target_tier is not None:
+            if effective_scope == "tier_difficulty" and target_tier is not None:
                 cur = await self._conn.execute(
                     "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
-                    "status, audit_metadata "
+                    "status, audit_metadata, score_multiplier, difficulty_label "
+                    "FROM lane_challenges "
+                    "WHERE family_id = ? AND status = ? AND tier = ? "
+                    "AND difficulty_label IS ? "
+                    "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
+                    (
+                        family_id,
+                        CHALLENGE_STATUS_PENDING,
+                        int(target_tier),
+                        target_difficulty,
+                    ),
+                )
+            elif effective_scope == "tier" and target_tier is not None:
+                cur = await self._conn.execute(
+                    "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
+                    "status, audit_metadata, score_multiplier, difficulty_label "
                     "FROM lane_challenges "
                     "WHERE family_id = ? AND status = ? AND tier = ? "
                     "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
@@ -795,7 +1025,7 @@ class SqliteChallengeSource:
             else:
                 cur = await self._conn.execute(
                     "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, "
-                    "status, audit_metadata "
+                    "status, audit_metadata, score_multiplier, difficulty_label "
                     "FROM lane_challenges WHERE family_id = ? AND status = ? "
                     "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT 1",
                     (family_id, CHALLENGE_STATUS_PENDING),
@@ -828,6 +1058,8 @@ class SqliteChallengeSource:
                 cnf_path=pending.cnf_path,
                 status=CHALLENGE_STATUS_ACTIVE,
                 audit_metadata=pending.audit_metadata,
+                score_multiplier=pending.score_multiplier,
+                difficulty_label=pending.difficulty_label,
             )
         except aiosqlite.IntegrityError as exc:
             if manage_transaction:
@@ -838,11 +1070,118 @@ class SqliteChallengeSource:
                 await self._conn.rollback()
             raise
 
+    async def promote_pending_batch(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        now_iso: str,
+        max_count: int,
+        kind: str | None = None,
+        difficulty_label: str | None = None,
+    ) -> list[str]:
+        """Promote up to ``max_count`` pending rows in one transaction.
+
+        Filters by ``tier`` (required), and optionally narrows by
+        ``kind`` (matched against ``audit_metadata['kind']``) and
+        ``difficulty_label``. When ``difficulty_label`` is provided we
+        use ``active_scope='tier_difficulty'`` and pick only rows whose
+        ``difficulty_label`` matches. When it is ``None`` we use
+        ``active_scope='tier'`` and pick ONLY unlabeled rows
+        (``difficulty_label IS NULL``) — this is the production
+        invariant the partial unique index can't express by itself:
+        without that filter we could promote a labeled row under
+        tier-scope and leave the unlabeled-active invariant violated.
+        (Codex review P0, 2026-05-28.)
+
+        After candidate selection the batch falls through to
+        :meth:`activate` per row so the *same* scope-guard runs as it
+        would on the single-row path. ``activate`` is internally
+        transactional, so this method does NOT wrap the loop in
+        ``BEGIN IMMEDIATE`` — the per-row transactions provide the
+        commit boundary, and a per-row failure rolls back only the
+        offending row instead of the whole batch.
+        """
+        max_count = max(0, int(max_count))
+        if max_count == 0:
+            return []
+        # Narrow the candidate query to only rows whose difficulty_label
+        # matches the requested invariant. ``None`` means "unlabeled
+        # only" so the legacy one-active-per-tier rule continues to
+        # hold; an explicit label means "exact match" so labeled rows
+        # share the tier without colliding.
+        if difficulty_label is not None:
+            cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "audit_metadata, score_multiplier, difficulty_label "
+                "FROM lane_challenges "
+                "WHERE family_id = ? AND status = ? AND tier = ? "
+                "AND difficulty_label = ? "
+                "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT ?",
+                (
+                    family_id,
+                    CHALLENGE_STATUS_PENDING,
+                    int(tier),
+                    difficulty_label,
+                    # Over-pull modestly so the kind filter can still find
+                    # ``max_count`` matches when some rows are non-matching.
+                    max_count * 4,
+                ),
+            )
+        else:
+            cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "audit_metadata, score_multiplier, difficulty_label "
+                "FROM lane_challenges "
+                "WHERE family_id = ? AND status = ? AND tier = ? "
+                "AND difficulty_label IS NULL "
+                "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT ?",
+                (
+                    family_id,
+                    CHALLENGE_STATUS_PENDING,
+                    int(tier),
+                    max_count * 4,
+                ),
+            )
+        rows = await cur.fetchall()
+        candidates: list[ChallengeRecord] = []
+        for raw in rows:
+            rec = _row_to_record(raw)
+            if kind is not None:
+                audit_kind = (rec.audit_metadata or {}).get("kind")
+                if audit_kind != kind:
+                    continue
+            candidates.append(rec)
+            if len(candidates) >= max_count:
+                break
+
+        scope: ActiveChallengeScope = (
+            "tier_difficulty" if difficulty_label is not None else "tier"
+        )
+        promoted: list[str] = []
+        for cand in candidates:
+            try:
+                await self.activate(
+                    family_id=family_id,
+                    challenge_id=cand.challenge_id,
+                    now_iso=now_iso,
+                    active_scope=scope,
+                )
+            except ChallengeSourceError:
+                # Most likely "another active challenge exists" — under
+                # ``'tier'`` scope only one unlabeled row can occupy a
+                # slot at a time. We stop iterating because subsequent
+                # candidates would hit the same guard.
+                break
+            promoted.append(cand.challenge_id)
+        return promoted
+
     async def _fetch_one_for_update(
         self, family_id: str, challenge_id: str
     ) -> ChallengeRecord | None:
         cur = await self._conn.execute(
-            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata "
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_metadata, "
+            "score_multiplier, difficulty_label "
             "FROM lane_challenges WHERE family_id = ? AND challenge_id = ? LIMIT 1",
             (family_id, challenge_id),
         )
@@ -852,30 +1191,45 @@ class SqliteChallengeSource:
         return _row_to_record(row)
 
     async def _fetch_active_for_update(
-        self, family_id: str, *, tier: int | None = None
+        self,
+        family_id: str,
+        *,
+        tier: int | None = None,
+        difficulty_label: str | None = None,
+        match_difficulty: bool = False,
     ) -> ChallengeRecord | None:
-        rows = await self._fetch_active_rows_for_update(family_id, tier=tier)
+        rows = await self._fetch_active_rows_for_update(
+            family_id,
+            tier=tier,
+            difficulty_label=difficulty_label,
+            match_difficulty=match_difficulty,
+        )
         return rows[0] if rows else None
 
     async def _fetch_active_rows_for_update(
-        self, family_id: str, *, tier: int | None = None
+        self,
+        family_id: str,
+        *,
+        tier: int | None = None,
+        difficulty_label: str | None = None,
+        match_difficulty: bool = False,
     ) -> list[ChallengeRecord]:
-        if tier is None:
-            cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
-                "audit_metadata "
-                "FROM lane_challenges WHERE family_id = ? AND status = ? "
-                "ORDER BY tier ASC, challenge_id ASC",
-                (family_id, CHALLENGE_STATUS_ACTIVE),
-            )
-        else:
-            cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
-                "audit_metadata "
-                "FROM lane_challenges WHERE family_id = ? AND tier = ? AND status = ? "
-                "ORDER BY challenge_id ASC",
-                (family_id, int(tier), CHALLENGE_STATUS_ACTIVE),
-            )
+        base = (
+            "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+            "audit_metadata, score_multiplier, difficulty_label "
+            "FROM lane_challenges WHERE family_id = ? AND status = ?"
+        )
+        params: list[Any] = [family_id, CHALLENGE_STATUS_ACTIVE]
+        if tier is not None:
+            base += " AND tier = ?"
+            params.append(int(tier))
+        if match_difficulty:
+            # IS ? matches NULL too, so unlabeled rows still pair correctly
+            # when the locked row was itself unlabeled.
+            base += " AND difficulty_label IS ?"
+            params.append(difficulty_label)
+        base += " ORDER BY tier ASC, challenge_id ASC"
+        cur = await self._conn.execute(base, tuple(params))
         rows = await cur.fetchall()
         return [_row_to_record(row) for row in rows]
 
@@ -977,7 +1331,50 @@ class SqliteFetchTokenStore:
 
 
 def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
-    challenge_id, family_id, tier, cnf_text, cnf_path, status, audit_json, *rest = row
+    """Build a :class:`ChallengeRecord` from a SELECT row.
+
+    Tolerates two SELECT projections so callers don't have to recheck
+    column order at every call site:
+
+    * 7-column legacy ``(challenge_id, family_id, tier, cnf_text,
+      cnf_path, status, audit_metadata)`` — only the row tests still
+      use this shape directly.
+    * 9-column post-#236/#241 ``(... audit_metadata, score_multiplier,
+      difficulty_label)``.
+    * 10-column loser-reconciliation projection that appends
+      ``losers_published_at_iso`` after the 9-column block.
+
+    The variant is detected by the trailing slot types: the 9-column
+    projection's ``rest`` is ``[float, str | None]``; the 10-column
+    projection's ``rest`` is ``[float, str | None, str | None]``.
+    """
+    challenge_id = row[0]
+    family_id = row[1]
+    tier = row[2]
+    cnf_text = row[3]
+    cnf_path = row[4]
+    status = row[5]
+    audit_json = row[6]
+    score_multiplier: float = 1.0
+    difficulty_label: str | None = None
+    losers_published_at_iso: str | None = None
+    rest = list(row[7:])
+    if rest:
+        head = rest[0]
+        if isinstance(head, (int, float)) and not isinstance(head, bool):
+            # 9- or 10-column post-#236 projection.
+            score_multiplier = float(head)
+            if len(rest) > 1:
+                difficulty_label = (
+                    str(rest[1]) if rest[1] is not None else None
+                )
+            if len(rest) > 2:
+                losers_published_at_iso = (
+                    str(rest[2]) if rest[2] is not None else None
+                )
+        else:
+            # Legacy 8-column projection (audit + losers only).
+            losers_published_at_iso = str(head) if head is not None else None
     audit: dict[str, Any]
     try:
         audit = json.loads(audit_json) if audit_json else {}
@@ -991,7 +1388,9 @@ def _row_to_record(row: Sequence[Any]) -> ChallengeRecord:
         cnf_path=str(cnf_path) if cnf_path else None,
         status=str(status),
         audit_metadata=audit,
-        losers_published_at_iso=str(rest[0]) if rest and rest[0] else None,
+        losers_published_at_iso=losers_published_at_iso,
+        score_multiplier=score_multiplier,
+        difficulty_label=difficulty_label,
     )
 
 

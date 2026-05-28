@@ -228,6 +228,87 @@ def sat_active_cnf_probe(
         raise typer.Exit(1)
 
 
+@app.command("promote-pending")
+def promote_pending(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    tier: int = typer.Option(..., "--tier", help="Required: tier whose pending rows to promote."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Optional: narrow to rows whose audit_metadata.kind matches.",
+    ),
+    difficulty_label: str | None = typer.Option(
+        None,
+        "--difficulty-label",
+        help="Optional: narrow to rows with this difficulty_label "
+        "(uses active_scope='tier_difficulty').",
+    ),
+    max_count: int = typer.Option(
+        30, "--max", min=1, help="Maximum number of rows to promote."
+    ),
+    family_id: str = typer.Option(
+        "synthetic_boolean_v1",
+        "--family-id",
+        help="Task Family identifier; defaults to SAT.",
+    ),
+) -> None:
+    """Promote up to N pending challenges into the active set in one call.
+
+    Operator entry point for issue #241 multi-active rollouts. When
+    ``--difficulty-label`` is set the promotion runs under
+    ``active_scope='tier_difficulty'`` so labeled rows can share a tier
+    slot; otherwise it falls back to ``active_scope='tier'`` which
+    preserves the legacy one-active-per-(family, tier) invariant for
+    unlabeled rows. Prints the promoted ids plus the resulting active
+    set for the filter so the operator can audit the outcome.
+    """
+    configure()
+
+    async def _run() -> int:
+        from cathedral.lanes.challenge_source import (
+            SqliteChallengeSource,
+            init_sqlite_challenge_source,
+        )
+
+        conn = await init_sqlite_challenge_source(database_path)
+        try:
+            source = SqliteChallengeSource(conn)
+            from datetime import UTC, datetime
+
+            now_iso = (
+                datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.")
+                + f"{datetime.now(UTC).microsecond // 1000:03d}"
+                + "Z"
+            )
+            promoted = await source.promote_pending_batch(
+                family_id,
+                tier=tier,
+                kind=kind,
+                difficulty_label=difficulty_label,
+                now_iso=now_iso,
+                max_count=max_count,
+            )
+            actives = [
+                rec
+                for rec in await source.list_active(family_id)
+                if rec.tier == tier
+                and (difficulty_label is None or rec.difficulty_label == difficulty_label)
+                and (kind is None or (rec.audit_metadata or {}).get("kind") == kind)
+            ]
+            typer.echo(f"promoted_count={len(promoted)}")
+            typer.echo("promoted_ids=" + ",".join(promoted))
+            typer.echo(
+                "active_ids=" + ",".join(rec.challenge_id for rec in actives)
+            )
+            return 0
+        finally:
+            await conn.close()
+
+    code = asyncio.run(_run())
+    if code != 0:
+        raise typer.Exit(code)
+
+
 @app.callback()
 def _callback() -> None:
     """Common config (no-op; lets typer build subcommand help cleanly)."""

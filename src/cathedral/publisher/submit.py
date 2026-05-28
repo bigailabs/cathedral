@@ -791,18 +791,31 @@ async def _handle_solve_post(
         eval_run_id=result.eval_run_id,
     )
 
-    # Auto-promote the next pending challenge of the same tier so the
-    # lane stays warm without operator intervention. Best-effort: a
-    # promote failure does NOT roll back the just-recorded win, since the
-    # winner is already durable via atomic_claim_winner. This mirrors the
-    # SSH/eval path's call site after PR #232.
+    # Auto-promote the next pending challenge so the lane stays warm
+    # without operator intervention. Best-effort: a promote failure does
+    # NOT roll back the just-recorded win, since the winner is already
+    # durable via atomic_claim_winner. This mirrors the SSH/eval path's
+    # call site after PR #232.
+    #
+    # Issue #241: when the locked row carries a ``difficulty_label`` the
+    # promotion must stay scoped to the same ``(tier, difficulty_label)``
+    # pair so winning the easy 3b challenge does not retire the harder
+    # 6b that is still live. ``active_scope='tier_difficulty'``
+    # degrades to ``'tier'`` for unlabeled rows inside
+    # ``mark_locked_and_promote_next``, so legacy data continues to
+    # behave exactly as before.
+    from typing import Literal, cast
+
+    promote_scope: Literal["tier", "tier_difficulty"] = (
+        "tier_difficulty" if active.difficulty_label is not None else "tier"
+    )
     try:
         promoted = await source.mark_locked_and_promote_next(
             family_id=SAT_FAMILY_ID,
             challenge_id=challenge_id,
             now_iso=now_iso,
             manage_transaction=True,
-            active_scope="tier",
+            active_scope=cast("Literal['family', 'tier', 'tier_difficulty']", promote_scope),
         )
         if promoted is not None:
             logger.info(
@@ -1104,11 +1117,22 @@ def _public_challenge_view(active) -> dict[str, object]:
         "/api/cathedral/v1/synthetic-boolean/active-cnf"
         f"?challenge_id={quote(active.challenge_id, safe='')}"
     )
+    # ``difficulty_label`` (#241) and ``score_multiplier`` (#236) are
+    # operator-set publisher metadata that miners must see to choose a
+    # challenge and to verify what each tier currently pays.
+    score_multiplier = getattr(active, "score_multiplier", 1.0)
+    try:
+        score_multiplier_out = float(score_multiplier)
+    except (TypeError, ValueError):
+        score_multiplier_out = 1.0
+    difficulty_label = getattr(active, "difficulty_label", None)
     return {
         "family_id": SAT_FAMILY_ID,
         "challenge_id": active.challenge_id,
         "status": active.status,
         "tier": active.tier,
+        "difficulty_label": difficulty_label,
+        "score_multiplier": score_multiplier_out,
         "kind": str(kind) if kind else None,
         "storage": "file" if active.cnf_path else "sqlite_text",
         "cnf_sha256": cnf_sha256,
@@ -1127,12 +1151,19 @@ def _public_challenge_view(active) -> dict[str, object]:
 async def get_current_sat_challenge(
     request: Request,
     tier: int | None = None,
+    difficulty: str | None = None,
 ) -> dict[str, object]:
     """Return public metadata for one active SAT challenge.
 
     With no query string, returns the lowest-tier active challenge (legacy
-    behaviour). With ``?tier=N``, returns the active challenge at that
+    behaviour). With ``?tier=N``, returns an active challenge at that
     specific tier slot, or 404 if no active row exists there.
+
+    With ``?difficulty=X`` (issue #241), returns the active challenge for
+    the requested ``(tier, difficulty_label)`` pair. If no labeled row
+    matches, falls back to the unlabeled active for that tier so legacy
+    clients keep working during the multi-active rollout. Returns 404
+    only when neither candidate exists.
     """
     source = getattr(request.app.state, "task_family_challenge_source", None)
     if source is None:
@@ -1142,11 +1173,32 @@ async def get_current_sat_challenge(
         )
 
     if tier is None:
+        if difficulty is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="difficulty requires tier",
+            )
         active = await source.get_active(SAT_FAMILY_ID)
     else:
         if tier < 0:
             raise HTTPException(status_code=400, detail="tier must be >= 0")
-        active = await source.get_active_for_tier(SAT_FAMILY_ID, tier)
+        if difficulty is None:
+            active = await source.get_active_for_tier(SAT_FAMILY_ID, tier)
+        else:
+            # Difficulty-scoped lookup: prefer an exact-label match, then
+            # fall back to the unlabeled tier active so the legacy
+            # ``?tier=N`` semantic remains intact while the operator
+            # rolls out labeled rows.
+            actives = await source.list_active(SAT_FAMILY_ID)
+            matches = [
+                rec
+                for rec in actives
+                if rec.tier == tier and rec.difficulty_label == difficulty
+            ]
+            if matches:
+                active = matches[0]
+            else:
+                active = await source.get_active_for_tier(SAT_FAMILY_ID, tier)
 
     if active is None:
         raise HTTPException(status_code=404, detail="no_active_challenge")
@@ -1212,7 +1264,8 @@ async def list_recent_sat_wins(
         )
     cur = await db.execute(
         "SELECT w.challenge_id, w.miner_hotkey, w.weighted_score, w.won_at_iso, "
-        "       c.tier, c.cnf_text, c.cnf_path, c.status, c.audit_metadata "
+        "       c.tier, c.cnf_text, c.cnf_path, c.status, c.audit_metadata, "
+        "       c.score_multiplier, c.difficulty_label "
         "FROM lane_challenge_winners w "
         "JOIN lane_challenges c ON c.challenge_id = w.challenge_id "
         "WHERE w.family_id = ? "
@@ -1234,6 +1287,13 @@ async def list_recent_sat_wins(
             )
         except Exception:
             audit_dict = {}
+        try:
+            score_multiplier_val = float(row[9]) if row[9] is not None else 1.0
+        except (TypeError, ValueError):
+            score_multiplier_val = 1.0
+        difficulty_label_val = (
+            str(row[10]) if len(row) > 10 and row[10] is not None else None
+        )
         rec = ChallengeRecord(
             challenge_id=row[0],
             family_id=SAT_FAMILY_ID,
@@ -1242,6 +1302,8 @@ async def list_recent_sat_wins(
             cnf_path=row[6],
             status=row[7],
             audit_metadata=audit_dict,
+            score_multiplier=score_multiplier_val,
+            difficulty_label=difficulty_label_val,
         )
         view = _public_challenge_view(rec)
         view["winner_hotkey"] = row[1]
