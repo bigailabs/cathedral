@@ -74,7 +74,14 @@ def test_validator_sat_launch_preflight_rejects_placeholders_and_missing_keys() 
     assert "remote_weight_source.enabled must be true before mainnet SAT weight" in result.errors
 
 
-def test_validator_sat_launch_preflight_rejects_nonzero_local_sat_weight() -> None:
+def test_validator_sat_launch_preflight_accepts_intermediate_sat_weight_by_default() -> None:
+    """v2.1+: local SAT weight in (0, 1] is allowed even with remote-weight launch.
+
+    The old guard (force 0.0) silently zeroed SAT miners during publisher
+    outages because the fallback local calc honored task_family_weights.
+    Now any value in [0, 1] is accepted; operators wanting the strict
+    guard pass ``require_zero_local_sat_weight=True``.
+    """
     result = run_validator_sat_launch_preflight(
         _settings(local_sat_weight=0.05),
         env={
@@ -82,7 +89,20 @@ def test_validator_sat_launch_preflight_rejects_nonzero_local_sat_weight() -> No
             "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
         },
     )
+    assert result.ok
+    assert result.details["local_sat_weight"] == 0.05
 
+
+def test_validator_sat_launch_preflight_strict_mode_still_rejects_nonzero() -> None:
+    """Opt-in strict guard preserves the old behavior for operators who want it."""
+    result = run_validator_sat_launch_preflight(
+        _settings(local_sat_weight=0.05),
+        env={
+            "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
+            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
+        },
+        require_zero_local_sat_weight=True,
+    )
     assert not result.ok
     assert (
         "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
@@ -90,7 +110,22 @@ def test_validator_sat_launch_preflight_rejects_nonzero_local_sat_weight() -> No
     ) in result.errors
 
 
-def test_validator_sat_launch_preflight_honors_sat_weight_env_override() -> None:
+def test_validator_sat_launch_preflight_rejects_out_of_range_sat_weight() -> None:
+    """Always-on bounds check: sat_weight must be in [0, 1] regardless of mode."""
+    result = run_validator_sat_launch_preflight(
+        _settings(local_sat_weight=1.5),
+        env={
+            "CATHEDRAL_PUBLIC_KEY_HEX": _key(),
+            "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": _key(),
+        },
+    )
+    assert not result.ok
+    assert any(
+        "must be in [0.0, 1.0]" in err for err in result.errors
+    ), result.errors
+
+
+def test_validator_sat_launch_preflight_accepts_sat_weight_env_override() -> None:
     result = run_validator_sat_launch_preflight(
         _settings(local_sat_weight=0.0),
         env={
@@ -99,16 +134,11 @@ def test_validator_sat_launch_preflight_honors_sat_weight_env_override() -> None
             "CATHEDRAL_SYNTHETIC_BOOLEAN_V1_WEIGHT": "0.15",
         },
     )
-
-    assert not result.ok
+    assert result.ok
     assert result.details["local_sat_weight"] == 0.15
-    assert (
-        "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
-        "for remote-weight launch"
-    ) in result.errors
 
 
-def test_validator_sat_launch_preflight_honors_task_family_weights_json_env() -> None:
+def test_validator_sat_launch_preflight_accepts_task_family_weights_json_env() -> None:
     result = run_validator_sat_launch_preflight(
         _settings(local_sat_weight=0.0),
         env={
@@ -117,14 +147,9 @@ def test_validator_sat_launch_preflight_honors_task_family_weights_json_env() ->
             "CATHEDRAL_TASK_FAMILY_WEIGHTS_JSON": '{"synthetic_boolean_v1": 0.2}',
         },
     )
-
-    assert not result.ok
+    assert result.ok
     assert result.details["local_sat_weight"] == 0.2
     assert result.details["task_family_weights"]["synthetic_boolean_v1"] == 0.2
-    assert (
-        "weights.task_family_weights.synthetic_boolean_v1 must stay 0.0 "
-        "for remote-weight launch"
-    ) in result.errors
 
 
 def test_validator_sat_launch_preflight_can_shadow_without_remote_opt_in() -> None:

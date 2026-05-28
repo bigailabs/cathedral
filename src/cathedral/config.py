@@ -58,7 +58,13 @@ class WeightsConfig(BaseModel):
     burn_uid: int = 204
     forced_burn_percentage: float = MAINNET_FORCED_BURN_PERCENTAGE
     v3_bug_isolation_weight: float = 0.0
-    task_family_weights: dict[str, float] = Field(default_factory=dict)
+    # Default-flipped in v2.1: SAT lane gets full weight so v1 card-era scores
+    # are zeroed out via the blend formula. Pre-v2.1 configs that explicitly
+    # set this to {} or {"synthetic_boolean_v1": 0.0} keep their override; only
+    # operators with NO task_family_weights line pick up the new default.
+    task_family_weights: dict[str, float] = Field(
+        default_factory=lambda: {"synthetic_boolean_v1": 1.0}
+    )
 
 
 class WeightSourceConfig(BaseModel):
