@@ -20,12 +20,9 @@
 
 ## [Why Cathedral](#why-cathedral)
 
-Cathedral is decentralized formal verification: compute whose answers can
-be checked deterministically and rewarded through an open miner market.
 The substrate is Boolean satisfiability, the canonical NP-complete
-problem. Any question that can be reduced to SAT can be raced by miners
-and verified by Cathedral before validators use the signed result for
-weights.
+problem.** Any question that can be reduced to SAT can be raced by miners
+and formally verified by Cathedral**. 
 
 SAT asks whether a boolean formula can be satisfied. It is a core search
 problem behind verification, planning, scheduling, compiler optimization,
