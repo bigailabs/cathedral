@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from cathedral.publisher import repository
-from cathedral.publisher.app import build_app
+from cathedral.publisher.app import build_app, latest_ctx
 from cathedral.publisher.rules import (
     RULES_KEY_ID_ENV,
     RULES_PRIVATE_KEY_ENV,
@@ -53,6 +53,18 @@ def _insert_signed_rules(
 
 def json_dumps(body: dict[str, object]) -> str:
     return json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+
+class _TrackingAsyncLock:
+    def __init__(self) -> None:
+        self.enter_count = 0
+
+    async def __aenter__(self) -> _TrackingAsyncLock:
+        self.enter_count += 1
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -198,6 +210,26 @@ def test_rules_route_refreshes_expired_persisted_rules(tmp_path, monkeypatch) ->
     assert payload["key_id"] == "route-rules"
     assert payload["body"]["version_id"] == 2
     assert payload["body"]["expires_at"] != "2000-01-01T00:00:00.000Z"
+
+
+def test_rules_route_refresh_uses_publisher_write_lock(tmp_path, monkeypatch) -> None:
+    key_hex = "66" * 32
+    monkeypatch.delenv(RULES_PRIVATE_KEY_ENV, raising=False)
+    monkeypatch.delenv(RULES_KEY_ID_ENV, raising=False)
+
+    app = build_app(str(tmp_path / "publisher.db"))
+    with TestClient(app) as client:
+        ctx = latest_ctx()
+        assert ctx is not None
+        tracking_lock = _TrackingAsyncLock()
+        ctx.db_write_lock = tracking_lock
+        monkeypatch.setenv(RULES_PRIVATE_KEY_ENV, key_hex)
+        monkeypatch.setenv(RULES_KEY_ID_ENV, "route-rules")
+
+        response = client.get("/v1/rules/active")
+
+    assert response.status_code == 200
+    assert tracking_lock.enter_count == 1
 
 
 def test_rules_route_bootstraps_when_signing_key_configured(tmp_path, monkeypatch) -> None:

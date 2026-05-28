@@ -31,12 +31,15 @@ Flow:
        │   - card_id != "synthetic_boolean_v1"  -> 400
        │   - attestation_mode != "ssh-probe"    -> 400
        ▼
+    Preflight solve-POST challenge id (before assigning SAT seq_no)
+       │   - challenge_not_active  -> 409
+       │
+       ▼
     UPSERT agent_submissions  (status='pending_solution' with PR5 flag on;
                                 status='pending_check' on legacy flag-off path)
        │
        ▼  (only when PR5 flag is on AND dimacs_solution present)
     Verify DIMACS against active challenge
-       │   - challenge_not_active  -> 409
        │   - malformed/unsatisfied -> 400 + losing eval_run
        ▼
     BEGIN IMMEDIATE; atomic CAS on lane_challenge_winners
@@ -91,6 +94,7 @@ from cathedral.publisher.auth_signature import HotkeyAuth, hotkey_auth_header
 from cathedral.publisher.merkle import epoch_for
 
 if TYPE_CHECKING:
+    from cathedral.lanes.challenge_source import ChallengeRecord, SqliteChallengeSource
     from cathedral.publisher.app import PublisherContext
 
 logger = structlog.get_logger(__name__)
@@ -374,12 +378,27 @@ async def submit_agent(
             raise HTTPException(status_code=401, detail="invalid hotkey signature") from e
 
     submitted_at_iso = server_submitted_at_iso
+    solve_challenge_id = (challenge_id or "").strip()
+    solve_challenge_source: SqliteChallengeSource | None = None
+    solve_challenge: ChallengeRecord | None = None
+    if is_solve_post:
+        if len(dimacs_solution or "") > _MAX_DIMACS_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="dimacs_solution exceeds size limit",
+            )
+        solve_challenge_source, solve_challenge = await _preflight_solve_post_challenge(
+            ctx=ctx,
+            challenge_id=solve_challenge_id,
+        )
 
     # ----- UPSERT agent_submissions -----------------------------------------
     # PR5: a re-submission from the same hotkey + bundle_hash is now an
     # UPDATE of the SSH coordinates rather than a 409. This is a UX fix
     # for solve-POSTs: miners iterating on their solver setup expect to
-    # re-register without 409.
+    # re-register without 409. Solve-POSTs preflight the requested
+    # challenge before this point so bogus challenge ids never allocate
+    # challenge-local seq_no rows.
     from cathedral.publisher import repository
 
     async with ctx.db_write_lock:
@@ -396,7 +415,7 @@ async def submit_agent(
             ssh_port=ssh_port,
             ssh_user=ssh_user,
             submitted_at_iso=submitted_at_iso,
-            challenge_id=(challenge_id or "").strip() if is_solve_post else None,
+            challenge_id=solve_challenge_id if is_solve_post else None,
             initial_status="pending_solution" if pr5_enabled else "pending_check",
         )
         await ctx.db.commit()
@@ -414,20 +433,17 @@ async def submit_agent(
 
     # ----- (PR5) optional solve-POST branch ---------------------------------
     if is_solve_post:
-        if len(dimacs_solution or "") > _MAX_DIMACS_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail="dimacs_solution exceeds size limit",
-            )
         result_body = await _handle_solve_post(
             ctx=ctx,
             submission_id=submission_id,
             miner_hotkey=auth.hotkey_ss58,
             agent_display_name=display_name,
-            challenge_id=(challenge_id or "").strip(),
+            challenge_id=solve_challenge_id,
             dimacs_solution=dimacs_solution or "",
             dimacs_solution_sha256=solution_sha256,
             submitted_at_iso=submitted_at_iso,
+            challenge_source=solve_challenge_source,
+            active_challenge=solve_challenge,
         )
         # The solve path returns HTTP 200, not the 202 registration default.
         from fastapi.responses import JSONResponse
@@ -474,6 +490,74 @@ async def _select_active_sat_challenge(
     return await source.get_active(SAT_FAMILY_ID)
 
 
+async def _preflight_solve_post_challenge(
+    *,
+    ctx: PublisherContext,
+    challenge_id: str,
+) -> tuple[SqliteChallengeSource, ChallengeRecord]:
+    """Validate the solve target before allocating a submission sequence.
+
+    The SAT registration table is challenge-aware. If we assign
+    ``sat_challenge_id``/``seq_no`` before checking the challenge exists and is
+    active, callers can persist one pending row per bogus id. Races after this
+    point are still handled in ``_handle_solve_post`` and the atomic winner
+    claim path.
+    """
+
+    if not challenge_id:
+        raise HTTPException(
+            status_code=400,
+            detail="challenge_id required when dimacs_solution is present",
+        )
+
+    source: SqliteChallengeSource | None = getattr(
+        ctx, "task_family_challenge_source", None
+    )
+    if source is None:
+        source = _resolve_challenge_source(ctx)
+    if source is None:
+        raise HTTPException(
+            status_code=503,
+            detail="solve-on-submit not configured: challenge source missing",
+        )
+
+    active_rows = await source.list_active(SAT_FAMILY_ID)
+    active = next((rec for rec in active_rows if rec.challenge_id == challenge_id), None)
+    if active is not None:
+        return source, active
+
+    requested_lookup = await source.get_for_endpoint(challenge_id)
+    if requested_lookup is not None and requested_lookup.status == "locked":
+        from cathedral.publisher import repository
+
+        existing = await repository._existing_winner(ctx.db, SAT_FAMILY_ID, challenge_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": "challenge_already_locked",
+                "challenge_id": challenge_id,
+                "winner_won_at": existing[1] if existing else None,
+            },
+        )
+    if not active_rows:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": "no_active_challenge",
+                "requested": challenge_id,
+            },
+        )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "detail": "challenge_not_active",
+            "active_challenge_id": active_rows[0].challenge_id,
+            "active_challenge_ids": [rec.challenge_id for rec in active_rows],
+            "requested": challenge_id,
+        },
+    )
+
+
 async def _handle_solve_post(
     *,
     ctx: PublisherContext,
@@ -484,6 +568,8 @@ async def _handle_solve_post(
     dimacs_solution: str,
     dimacs_solution_sha256: str,
     submitted_at_iso: str,
+    challenge_source: SqliteChallengeSource | None = None,
+    active_challenge: ChallengeRecord | None = None,
 ) -> dict[str, object]:
     """Verify, lock, and persist a solve-POST.
 
@@ -493,7 +579,6 @@ async def _handle_solve_post(
     Returns the JSON body the client receives; raises HTTPException with
     the spec's documented status codes for every error path.
     """
-    from cathedral.lanes.challenge_source import SqliteChallengeSource
     from cathedral.publisher import repository
 
     if not challenge_id:
@@ -504,7 +589,7 @@ async def _handle_solve_post(
 
     # The challenge source is wired onto app.state by the lifespan. In
     # tests with no lifespan the attribute may be missing; treat as 503.
-    source: SqliteChallengeSource | None = getattr(
+    source: SqliteChallengeSource | None = challenge_source or getattr(
         ctx, "task_family_challenge_source", None
     )
     if source is None:
@@ -516,8 +601,10 @@ async def _handle_solve_post(
             detail="solve-on-submit not configured: challenge source missing",
         )
 
-    active_rows = await source.list_active(SAT_FAMILY_ID)
-    active = next((rec for rec in active_rows if rec.challenge_id == challenge_id), None)
+    active = active_challenge
+    active_rows = [] if active is not None else await source.list_active(SAT_FAMILY_ID)
+    if active is None:
+        active = next((rec for rec in active_rows if rec.challenge_id == challenge_id), None)
     if active is None:
         # Either no SAT challenge is active, OR the requested challenge
         # is no longer one of the active SAT tier slots. Differentiate

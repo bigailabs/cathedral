@@ -301,7 +301,12 @@ async def load_current_rules_from_env(
 @router.get("/v1/rules/active")
 async def get_active_rules(request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
-    signed = await load_current_rules_from_env(ctx.db)
+    # load_current_rules_from_env() may publish a replacement row when the
+    # persisted active document is missing, expired, or signed by an old key.
+    # This route shares the publisher's single SQLite connection with solve
+    # submission and weight-policy writers, so refreshes must use the same gate.
+    async with ctx.db_write_lock:
+        signed = await load_current_rules_from_env(ctx.db)
     if signed is None:
         raise HTTPException(status_code=503, detail="no active rules document available")
     return signed.to_wire()

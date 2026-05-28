@@ -568,8 +568,8 @@ def test_invalid_dimacs_returns_400_and_writes_losing_eval_run(
     assert row == ("rejected", "solution_unsatisfied")
 
 
-def test_challenge_not_active_returns_409(
-    client: TestClient, alice: Keypair
+def test_challenge_not_active_returns_409_without_persisting_submission(
+    client: TestClient, alice: Keypair, tmp_path: Path
 ) -> None:
     data, headers = _solve_post_form(
         kp=alice,
@@ -581,6 +581,15 @@ def test_challenge_not_active_returns_409(
     detail = resp.json().get("detail")
     detail_str = detail if isinstance(detail, str) else detail.get("detail", "")
     assert "challenge_not_active" in detail_str or "challenge_not_active" in str(detail)
+
+    import sqlite3
+
+    with sqlite3.connect(str(tmp_path / "publisher.db")) as raw:
+        row_count = raw.execute(
+            "SELECT COUNT(*) FROM agent_submissions WHERE miner_hotkey = ?",
+            (alice.ss58_address,),
+        ).fetchone()[0]
+    assert row_count == 0
 
 
 def test_second_valid_post_loses_to_locked_winner(
@@ -614,10 +623,7 @@ def test_second_valid_post_loses_to_locked_winner(
             "WHERE sat_challenge_id = ? ORDER BY seq_no",
             (_CHALLENGE,),
         ).fetchall()
-    assert rows == [
-        (alice.ss58_address, _CHALLENGE, 1),
-        (bob.ss58_address, _CHALLENGE, 2),
-    ]
+    assert rows == [(alice.ss58_address, _CHALLENGE, 1)]
 
 
 def test_flag_off_ignores_dimacs_solution(
