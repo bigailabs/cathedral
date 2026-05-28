@@ -37,6 +37,7 @@ from cathedral.policy.signing import (
     verify_vector,
 )
 from cathedral.validator import remote_state
+from cathedral.validator.chain_bridge import publish_weight_vector
 from cathedral.validator.health import Health
 
 logger = structlog.get_logger(__name__)
@@ -385,10 +386,13 @@ async def apply_cached_remote_vector_once(
         await health.update(weight_status=WeightStatus.BLOCKED_BY_TRANSACTION_ERROR)
         return
 
-    if disabled:
-        status = WeightStatus.DISABLED
-    else:
-        status = await chain.set_weights(normalized)
+    status = await publish_weight_vector(
+        chain,
+        normalized,
+        disabled=disabled,
+        network=vector.network,
+        netuid=vector.netuid,
+    )
     await health.update(weight_status=status)
     await health.heartbeat("last_weight_set_at")
 

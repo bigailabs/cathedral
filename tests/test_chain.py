@@ -13,6 +13,7 @@ from cathedral.chain.client import (
     _classify_error,
     network_endpoint,
 )
+from cathedral.validator.chain_bridge import publish_weight_vector
 
 
 def test_network_endpoint_known() -> None:
@@ -52,6 +53,42 @@ async def test_mock_chain_set_weights_records_input() -> None:
     status = await chain.set_weights([(1, 0.5), (2, 0.5)])
     assert status is WeightStatus.HEALTHY
     assert chain.last_weights == [(1, 0.5), (2, 0.5)]
+
+
+@pytest.mark.asyncio
+async def test_chain_bridge_publishes_weight_vector() -> None:
+    chain = MockChain()
+    status = await publish_weight_vector(
+        chain,
+        [(1, 0.75), (2, 0.25)],
+        network="finney",
+        netuid=39,
+    )
+    assert status is WeightStatus.HEALTHY
+    assert chain.last_weights == [(1, 0.75), (2, 0.25)]
+
+
+@pytest.mark.asyncio
+async def test_chain_bridge_disabled_does_not_call_set_weights() -> None:
+    chain = MockChain()
+    status = await publish_weight_vector(
+        chain,
+        [(1, 1.0)],
+        disabled=True,
+        network="finney",
+        netuid=39,
+    )
+    assert status is WeightStatus.DISABLED
+    assert chain.last_weights == []
+
+
+@pytest.mark.asyncio
+async def test_chain_bridge_fails_closed_on_netuid_mismatch() -> None:
+    chain = MockChain()
+    chain.netuid = 39
+    with pytest.raises(ValueError, match="netuid mismatch"):
+        await publish_weight_vector(chain, [(1, 1.0)], netuid=1)
+    assert chain.last_weights == []
 
 
 def test_spec_version_matches_release() -> None:
