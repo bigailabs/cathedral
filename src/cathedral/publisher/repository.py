@@ -1381,6 +1381,7 @@ async def atomic_claim_winner(
     time_limit_seconds: int,
     weighted_score: float = 1.0,
     attestation_status: str = "pending",
+    dimacs_solution: str | None = None,
 ) -> AtomicWinnerResult:
     """Atomically claim the round winner for the SAT lane.
 
@@ -1558,6 +1559,25 @@ async def atomic_claim_winner(
             (float(signed_row["weighted_score"]), submission_id),
         )
 
+        # Step 6 (issue #242): retain the raw DIMACS body in the audit
+        # sidecar. Inside the SAME transaction as the eval_runs INSERT
+        # above, so the audit row and the verdict either both land or
+        # neither does. Opt-in via the `dimacs_solution` kwarg so the
+        # ssh-pushed path (which does not have the body at claim time)
+        # can omit it; the direct-submit path in submit.py passes it.
+        if dimacs_solution is not None:
+            await conn.execute(
+                "INSERT INTO eval_run_solutions ("
+                "eval_run_id, dimacs_solution, body_sha256, stored_at"
+                ") VALUES (?, ?, ?, ?)",
+                (
+                    eval_run_id,
+                    dimacs_solution,
+                    dimacs_solution_sha256,
+                    ran_at_iso,
+                ),
+            )
+
         await conn.commit()
         return AtomicWinnerResult(
             won=True,
@@ -1675,6 +1695,94 @@ async def insert_losing_eval_run(
     )
     await conn.commit()
     return eval_run_id
+
+
+# --------------------------------------------------------------------------
+# eval_run_solutions sidecar — see issue #242.
+#
+# The publisher historically stored only the SHA-256 of submitted DIMACS
+# solutions. That made post-hoc audit/dispute resolution impossible (a
+# hash is one-way). This sidecar table retains the raw body next to the
+# eval_runs row that scored it, with ON DELETE CASCADE so the audit
+# record disappears with the verdict if a verdict is ever expunged.
+#
+# Bodies are written ONLY via `insert_eval_run_solution`, inside the
+# same db_write_lock + transaction scope as the parent eval_runs INSERT,
+# so either both rows land or neither does. Reads go via the dedicated
+# bearer-gated audit endpoint (`/v1/audit/eval-runs/{id}/solution`) —
+# the public projection in `list_eval_runs_recent` does NOT join here.
+# --------------------------------------------------------------------------
+
+EVAL_RUN_SOLUTIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS eval_run_solutions (
+    eval_run_id     TEXT PRIMARY KEY REFERENCES eval_runs(id) ON DELETE CASCADE,
+    dimacs_solution TEXT NOT NULL,
+    body_sha256     TEXT NOT NULL,
+    stored_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_run_solutions_stored_at
+    ON eval_run_solutions(stored_at);
+"""
+
+
+async def insert_eval_run_solution(
+    conn: aiosqlite.Connection,
+    *,
+    eval_run_id: str,
+    dimacs_solution: str,
+    body_sha256: str,
+    stored_at: str,
+) -> None:
+    """Persist the raw DIMACS body for an eval_run.
+
+    Must be called inside the SAME ``db_write_lock`` context that wraps
+    the parent ``eval_runs`` INSERT (see ``submit.py`` direct-submit
+    path). The helper does NOT manage its own transaction — it issues a
+    bare INSERT and lets the surrounding caller commit, so the sidecar
+    row lands in the same transactional scope as the verdict.
+
+    The body is written verbatim (UTF-8 string) — we DO NOT
+    re-canonicalise. ``body_sha256`` should mirror the value already
+    stored in ``eval_runs`` / ``agent_submissions`` as
+    ``miner_solution_sha256`` so a later audit can independently confirm
+    the body has not drifted from the hash the publisher signed against.
+
+    Caller MUST hold ``ctx.db_write_lock`` — the helper writes on the
+    publisher's shared connection and must not interleave with other
+    writers (eval_loop, weight policy producer).
+    """
+    await conn.execute(
+        "INSERT INTO eval_run_solutions ("
+        "eval_run_id, dimacs_solution, body_sha256, stored_at"
+        ") VALUES (?, ?, ?, ?)",
+        (eval_run_id, dimacs_solution, body_sha256, stored_at),
+    )
+
+
+async def get_eval_run_solution(
+    conn: aiosqlite.Connection,
+    *,
+    eval_run_id: str,
+) -> dict[str, str] | None:
+    """Read the sidecar body for an eval_run, or None if missing/pruned.
+
+    Used by the bearer-gated audit endpoint. NEVER call from a public
+    read path — bodies are private (see issue #242).
+    """
+    cur = await conn.execute(
+        "SELECT eval_run_id, dimacs_solution, body_sha256, stored_at "
+        "FROM eval_run_solutions WHERE eval_run_id = ?",
+        (eval_run_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "eval_run_id": str(row[0]),
+        "dimacs_solution": str(row[1]),
+        "body_sha256": str(row[2]),
+        "stored_at": str(row[3]),
+    }
 
 
 def _task_family_storage_from_signed_row(
