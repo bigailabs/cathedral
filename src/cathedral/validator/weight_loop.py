@@ -11,6 +11,7 @@ import structlog
 from cathedral.chain import Chain, apply_burn, normalize
 from cathedral.chain.client import WeightStatus
 from cathedral.validator import queue
+from cathedral.validator.chain_bridge import publish_weight_vector
 from cathedral.validator.health import Health
 from cathedral.validator.pull_loop import latest_pulled_score_per_hotkey
 
@@ -198,7 +199,7 @@ async def run_weight_loop(
             )
             normalized = normalize(burned)
 
-            status = WeightStatus.DISABLED if disabled else await chain.set_weights(normalized)
+            status = await publish_weight_vector(chain, normalized, disabled=disabled)
             await health.update(weight_status=status)
             await health.heartbeat("last_weight_set_at")
             logger.info(
