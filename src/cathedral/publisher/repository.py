@@ -1725,6 +1725,35 @@ CREATE INDEX IF NOT EXISTS idx_eval_run_solutions_stored_at
 """
 
 
+# --------------------------------------------------------------------------
+# rules_versions — signed v1.3 rules documents.
+#
+# PR1 for the decentralized SAT lane adds the durable table but does not make
+# validators consume it yet. At most one row may be active. The publisher
+# writes rules through cathedral.publisher.rules.publish_new_rules(), which
+# computes version_id before signing so the body has no autoincrement/signature
+# circularity.
+# --------------------------------------------------------------------------
+
+RULES_VERSIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS rules_versions (
+    version_id               INTEGER PRIMARY KEY,
+    body_json                TEXT NOT NULL,
+    body_sha256              TEXT NOT NULL,
+    cathedral_sig            TEXT NOT NULL,
+    key_id                   TEXT NOT NULL,
+    canonicalization_version TEXT NOT NULL,
+    published_at             TEXT NOT NULL,
+    active                   INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0, 1))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_versions_one_active
+    ON rules_versions(active)
+    WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_rules_versions_published_at
+    ON rules_versions(published_at DESC);
+"""
+
+
 async def insert_eval_run_solution(
     conn: aiosqlite.Connection,
     *,

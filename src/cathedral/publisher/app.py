@@ -69,6 +69,12 @@ from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SYNTHETIC_BOOLEAN_
 from cathedral.publisher import repository
 from cathedral.publisher.dead_routes import router as dead_routes_router
 from cathedral.publisher.reads import router as reads_router
+from cathedral.publisher.rules import (
+    ensure_bootstrap_rules_from_env,
+)
+from cathedral.publisher.rules import (
+    router as rules_router,
+)
 from cathedral.publisher.sat_file_challenges import (
     build_synthetic_boolean_file_challenge_record,
 )
@@ -281,7 +287,9 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         # verdict; the connection-level PRAGMA foreign_keys=ON is set in
         # `cathedral.validator.db.connect`, so the CASCADE actually fires.
         await ctx.db.executescript(repository.EVAL_RUN_SOLUTIONS_SCHEMA)
+        await ctx.db.executescript(repository.RULES_VERSIONS_SCHEMA)
         await ctx.db.commit()
+        await ensure_bootstrap_rules_from_env(ctx.db)
         task_family_challenge_source = SqliteChallengeSource(ctx.db)
         task_family_challenge_lock = SqliteChallengeLock(ctx.db)
         task_family_fetch_token_store = SqliteFetchTokenStore(ctx.db)
@@ -609,6 +617,11 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
     # for the same dual-routing reason as the submit/reads routers.
     app.include_router(weight_policy_router, prefix="/api/cathedral")
     app.include_router(weight_policy_router, include_in_schema=False)
+
+    # v1.3 PR1: signed rules document surface. Mounted on both prefixes
+    # but inert until CATHEDRAL_RULES_PRIVATE_KEY is configured.
+    app.include_router(rules_router, prefix="/api/cathedral")
+    app.include_router(rules_router, include_in_schema=False)
 
     # Issue #242: bearer-gated audit endpoint for raw DIMACS bodies.
     # OFF by default (503 until CATHEDRAL_AUDIT_TOKEN is set in env).
