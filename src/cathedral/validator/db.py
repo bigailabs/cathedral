@@ -177,17 +177,9 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     -- rolling window. Search marker: `removable-in-v1-2-0`.
     hermes_port              INTEGER
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique
-    ON agent_submissions(miner_hotkey, card_id, bundle_hash)
-    WHERE sat_challenge_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique_sat_challenge
-    ON agent_submissions(miner_hotkey, card_id, bundle_hash, sat_challenge_id)
-    WHERE sat_challenge_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_no
-    ON agent_submissions(sat_challenge_id, seq_no)
-    WHERE sat_challenge_id IS NOT NULL AND seq_no IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_scan
-    ON agent_submissions(sat_challenge_id, seq_no, id);
+-- SAT-aware agent_submissions indexes are created in _apply_migrations()
+-- after sat_challenge_id/seq_no are guaranteed to exist. Keeping them out
+-- of this bootstrap script lets old databases start far enough to migrate.
 CREATE INDEX IF NOT EXISTS idx_agent_card_status
     ON agent_submissions(card_id, status);
 CREATE INDEX IF NOT EXISTS idx_agent_card_score
@@ -283,6 +275,173 @@ async def connect(database_path: str) -> aiosqlite.Connection:
     return conn
 
 
+async def _ensure_agent_submission_migration_columns(conn: aiosqlite.Connection) -> set[str]:
+    """Add nullable/defaulted agent_submissions columns before any rebuild.
+
+    The rebuild helpers below use a fixed INSERT...SELECT column list rather
+    than dynamic SQL. That keeps migration SQL lint-clean and makes old-table
+    compatibility explicit in one place.
+    """
+    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
+    cols = {row[1] for row in await cur.fetchall()}
+    if "attestation_mode" not in cols:
+        await conn.execute(
+            "ALTER TABLE agent_submissions ADD COLUMN attestation_mode "
+            "TEXT NOT NULL DEFAULT 'polaris'"
+        )
+        cols.add("attestation_mode")
+    if "attestation_type" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_type TEXT")
+        cols.add("attestation_type")
+    if "attestation_blob" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_blob BLOB")
+        cols.add("attestation_blob")
+    if "attestation_verified_at" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_verified_at TEXT")
+        cols.add("attestation_verified_at")
+    if "discovery_only" not in cols:
+        await conn.execute(
+            "ALTER TABLE agent_submissions ADD COLUMN discovery_only INTEGER NOT NULL DEFAULT 0"
+        )
+        cols.add("discovery_only")
+    if "sat_challenge_id" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN sat_challenge_id TEXT")
+        cols.add("sat_challenge_id")
+    if "seq_no" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN seq_no INTEGER")
+        cols.add("seq_no")
+    if "ssh_host" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_host TEXT")
+        cols.add("ssh_host")
+    if "ssh_port" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_port INTEGER")
+        cols.add("ssh_port")
+    if "ssh_user" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
+        cols.add("ssh_user")
+    # DEPRECATED v1.1.0 (cathedralai/cathedral#75, PR #77). The column is
+    # kept so v1.0.x historical rows preserve their port value through
+    # the transition; new rows always write NULL. Removable in v1.2.0
+    # once all historical rows have aged out of the 30-day rolling
+    # window. Search marker: `removable-in-v1-2-0`.
+    if "hermes_port" not in cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
+        cols.add("hermes_port")
+    return cols
+
+
+async def _copy_agent_submissions_for_rebuild(conn: aiosqlite.Connection) -> None:
+    """Copy rows into agent_submissions_new after migration columns exist."""
+    await conn.execute(
+        """
+        INSERT INTO agent_submissions_new (
+            id,
+            miner_hotkey,
+            card_id,
+            bundle_blob_key,
+            bundle_hash,
+            bundle_size_bytes,
+            encryption_key_id,
+            bundle_signature,
+            display_name,
+            bio,
+            logo_url,
+            soul_md_preview,
+            metadata_fingerprint,
+            similarity_check_passed,
+            rejection_reason,
+            submitted_at,
+            sat_challenge_id,
+            seq_no,
+            status,
+            current_score,
+            current_rank,
+            first_mover_at,
+            attestation_mode,
+            attestation_type,
+            attestation_blob,
+            attestation_verified_at,
+            discovery_only,
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            hermes_port
+        )
+        SELECT
+            id,
+            miner_hotkey,
+            card_id,
+            bundle_blob_key,
+            bundle_hash,
+            bundle_size_bytes,
+            encryption_key_id,
+            bundle_signature,
+            display_name,
+            bio,
+            logo_url,
+            soul_md_preview,
+            metadata_fingerprint,
+            similarity_check_passed,
+            rejection_reason,
+            submitted_at,
+            sat_challenge_id,
+            seq_no,
+            status,
+            current_score,
+            current_rank,
+            first_mover_at,
+            attestation_mode,
+            attestation_type,
+            attestation_blob,
+            attestation_verified_at,
+            discovery_only,
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            hermes_port
+        FROM agent_submissions
+        """
+    )
+
+
+async def _recreate_agent_submission_indexes(conn: aiosqlite.Connection) -> None:
+    """Install canonical indexes after SAT migration columns exist."""
+    await conn.execute("DROP INDEX IF EXISTS idx_agent_unique")
+    await conn.execute("DROP INDEX IF EXISTS idx_agent_unique_sat_challenge")
+    await conn.execute("DROP INDEX IF EXISTS idx_agent_sat_challenge_seq_no")
+    await conn.execute("DROP INDEX IF EXISTS idx_agent_sat_challenge_seq_scan")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash) "
+        "WHERE sat_challenge_id IS NULL"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique_sat_challenge "
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash, sat_challenge_id) "
+        "WHERE sat_challenge_id IS NOT NULL"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_no "
+        "ON agent_submissions(sat_challenge_id, seq_no) "
+        "WHERE sat_challenge_id IS NOT NULL AND seq_no IS NOT NULL"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_scan "
+        "ON agent_submissions(sat_challenge_id, seq_no, id)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_card_status ON agent_submissions(card_id, status)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_card_score "
+        "ON agent_submissions(card_id, current_score DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_first_mover "
+        "ON agent_submissions(card_id, first_mover_at)"
+    )
+
+
 async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     """Idempotent column additions for tables created by an earlier schema.
 
@@ -364,27 +523,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     # add a column WITH a CHECK constraint in ALTER TABLE, so the constraint
     # is enforced at the application layer for existing tables; new tables
     # created via SCHEMA above carry the CHECK natively.
-    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
-    sub_cols = {row[1] for row in await cur.fetchall()}
-    if "attestation_mode" not in sub_cols:
-        await conn.execute(
-            "ALTER TABLE agent_submissions ADD COLUMN attestation_mode "
-            "TEXT NOT NULL DEFAULT 'polaris'"
-        )
-    if "attestation_type" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_type TEXT")
-    if "attestation_blob" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_blob BLOB")
-    if "attestation_verified_at" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_verified_at TEXT")
-    if "discovery_only" not in sub_cols:
-        await conn.execute(
-            "ALTER TABLE agent_submissions ADD COLUMN discovery_only INTEGER NOT NULL DEFAULT 0"
-        )
-    if "sat_challenge_id" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN sat_challenge_id TEXT")
-    if "seq_no" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN seq_no INTEGER")
+    await _ensure_agent_submission_migration_columns(conn)
 
     # agent_submissions.attestation_mode CHECK constraint widening.
     # SQLite cannot ALTER a CHECK in place; tables created before v2
@@ -422,51 +561,12 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     if needs_status_widen:
         await _widen_status_check(conn)
 
-    # ssh-probe free-tier coordinates. Only populated when
-    # attestation_mode='ssh-probe'. The publisher's submit-starter form
-    # collects these; the SshProbeRunner reads them off the submission row.
-    # Re-read columns in case the table was just rebuilt above.
-    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
-    sub_cols = {row[1] for row in await cur.fetchall()}
-    if "ssh_host" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_host TEXT")
-    if "ssh_port" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_port INTEGER")
-    if "ssh_user" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
-    # DEPRECATED v1.1.0 (cathedralai/cathedral#75, PR #77). The column is
-    # kept so v1.0.x historical rows preserve their port value through
-    # the transition; new rows always write NULL. Removable in v1.2.0
-    # once all historical rows have aged out of the 30-day rolling
-    # window. Search marker: `removable-in-v1-2-0`.
-    if "hermes_port" not in sub_cols:
-        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
-
     # v1.3: SAT direct-submit rows need deterministic challenge-local ingest
     # order. The previous uniqueness key collapsed repeated solve posts from
     # the same miner/card/bundle across different challenges; keep that legacy
     # shape only for rows with no SAT challenge id, and make SAT uniqueness
     # challenge-aware.
-    await conn.execute("DROP INDEX IF EXISTS idx_agent_unique")
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash) "
-        "WHERE sat_challenge_id IS NULL"
-    )
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique_sat_challenge "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash, sat_challenge_id) "
-        "WHERE sat_challenge_id IS NOT NULL"
-    )
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_no "
-        "ON agent_submissions(sat_challenge_id, seq_no) "
-        "WHERE sat_challenge_id IS NOT NULL AND seq_no IS NOT NULL"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_scan "
-        "ON agent_submissions(sat_challenge_id, seq_no, id)"
-    )
+    await _recreate_agent_submission_indexes(conn)
     await _backfill_sat_submission_order(conn)
 
     # v1.1.0: composite ascending index for the tuple-cursor leaderboard
@@ -568,14 +668,14 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
     6. Recreate indexes
 
     The new schema mirrors the canonical SCHEMA above. Any columns the
-    old table had but the new schema doesn't are dropped silently; any
-    new columns the new schema has get NULL defaults. Caller is
-    expected to follow up with the column ALTERs for ssh_*.
+    old table had but the new schema doesn't are dropped silently.
     """
     import structlog as _structlog
 
     _log = _structlog.get_logger(__name__)
     _log.info("widen_attestation_mode_check_start")
+
+    await _ensure_agent_submission_migration_columns(conn)
 
     # Step 2: create the replacement table. Carries the full new
     # constraint set including 'polaris-deploy' and 'ssh-probe', plus
@@ -627,48 +727,9 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
         """
     )
 
-    # Step 3: copy. The old table may or may not have ssh_* columns
-    # depending on which migration ran first; the new table has them,
-    # so we list the carry-over columns explicitly.
-    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
-    old_cols = {row[1] for row in await cur.fetchall()}
-    carry_cols = [
-        "id",
-        "miner_hotkey",
-        "card_id",
-        "bundle_blob_key",
-        "bundle_hash",
-        "bundle_size_bytes",
-        "encryption_key_id",
-        "bundle_signature",
-        "display_name",
-        "bio",
-        "logo_url",
-        "soul_md_preview",
-        "metadata_fingerprint",
-        "similarity_check_passed",
-        "rejection_reason",
-        "submitted_at",
-        "status",
-        "current_score",
-        "current_rank",
-        "first_mover_at",
-        "sat_challenge_id",
-        "seq_no",
-        "attestation_mode",
-        "attestation_type",
-        "attestation_blob",
-        "attestation_verified_at",
-        "discovery_only",
-    ]
-    # ssh_* may not exist on the old table — only carry them if so.
-    for col in ("ssh_host", "ssh_port", "ssh_user", "hermes_port"):
-        if col in old_cols:
-            carry_cols.append(col)
-    cols_sql = ", ".join(carry_cols)
-    await conn.execute(
-        f"INSERT INTO agent_submissions_new ({cols_sql}) SELECT {cols_sql} FROM agent_submissions"  # noqa: S608
-    )
+    # Step 3: copy via a static column list. The preflight helper above
+    # guarantees these columns exist on both sides before this executes.
+    await _copy_agent_submissions_for_rebuild(conn)
 
     # Step 4: drop the old table (drops associated indexes too).
     await conn.execute("DROP TABLE agent_submissions")
@@ -676,37 +737,8 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
     # Step 5: rename.
     await conn.execute("ALTER TABLE agent_submissions_new RENAME TO agent_submissions")
 
-    # Step 6: recreate indexes (matches canonical SCHEMA).
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash) "
-        "WHERE sat_challenge_id IS NULL"
-    )
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique_sat_challenge "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash, sat_challenge_id) "
-        "WHERE sat_challenge_id IS NOT NULL"
-    )
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_no "
-        "ON agent_submissions(sat_challenge_id, seq_no) "
-        "WHERE sat_challenge_id IS NOT NULL AND seq_no IS NOT NULL"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_scan "
-        "ON agent_submissions(sat_challenge_id, seq_no, id)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_card_status ON agent_submissions(card_id, status)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_card_score "
-        "ON agent_submissions(card_id, current_score DESC)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_first_mover "
-        "ON agent_submissions(card_id, first_mover_at)"
-    )
+    # Step 6: recreate indexes after the SAT columns are present.
+    await _recreate_agent_submission_indexes(conn)
 
     _log.info("widen_attestation_mode_check_done")
 
@@ -720,19 +752,15 @@ async def _widen_status_check(conn: aiosqlite.Connection) -> None:
     ``'valid_attestation_pending'``, and ``'attest_failed'`` alongside
     the existing legacy values.
 
-    Carries every existing column (queried via ``PRAGMA table_info``) so
-    any prior migrations (attestation_mode widen, ssh_* columns,
-    PR5 attestation_status on eval_runs — irrelevant to this table —
-    etc.) are preserved across the rebuild.
+    Carries the full canonical column set after additive migrations have
+    run, so the copy can stay static and lint-clean.
     """
     import structlog as _structlog
 
     _log = _structlog.get_logger(__name__)
     _log.info("widen_status_check_start")
 
-    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
-    info = await cur.fetchall()
-    old_cols = [str(row[1]) for row in info]
+    await _ensure_agent_submission_migration_columns(conn)
 
     # The canonical new shape — mirrors the SCHEMA constant above.
     await conn.execute(
@@ -780,76 +808,8 @@ async def _widen_status_check(conn: aiosqlite.Connection) -> None:
         """
     )
 
-    # Carry every column the old table had that the new table also has.
-    new_cols = {
-        "id",
-        "miner_hotkey",
-        "card_id",
-        "bundle_blob_key",
-        "bundle_hash",
-        "bundle_size_bytes",
-        "encryption_key_id",
-        "bundle_signature",
-        "display_name",
-        "bio",
-        "logo_url",
-        "soul_md_preview",
-        "metadata_fingerprint",
-        "similarity_check_passed",
-        "rejection_reason",
-        "submitted_at",
-        "sat_challenge_id",
-        "seq_no",
-        "status",
-        "current_score",
-        "current_rank",
-        "first_mover_at",
-        "attestation_mode",
-        "attestation_type",
-        "attestation_blob",
-        "attestation_verified_at",
-        "discovery_only",
-        "ssh_host",
-        "ssh_port",
-        "ssh_user",
-        "hermes_port",
-    }
-    carry = [c for c in old_cols if c in new_cols]
-    cols_sql = ", ".join(carry)
-    await conn.execute(
-        f"INSERT INTO agent_submissions_new ({cols_sql}) "  # noqa: S608
-        f"SELECT {cols_sql} FROM agent_submissions"
-    )
+    await _copy_agent_submissions_for_rebuild(conn)
     await conn.execute("DROP TABLE agent_submissions")
     await conn.execute("ALTER TABLE agent_submissions_new RENAME TO agent_submissions")
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash) "
-        "WHERE sat_challenge_id IS NULL"
-    )
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique_sat_challenge "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash, sat_challenge_id) "
-        "WHERE sat_challenge_id IS NOT NULL"
-    )
-    await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_no "
-        "ON agent_submissions(sat_challenge_id, seq_no) "
-        "WHERE sat_challenge_id IS NOT NULL AND seq_no IS NOT NULL"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_scan "
-        "ON agent_submissions(sat_challenge_id, seq_no, id)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_card_status ON agent_submissions(card_id, status)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_card_score "
-        "ON agent_submissions(card_id, current_score DESC)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_first_mover "
-        "ON agent_submissions(card_id, first_mover_at)"
-    )
+    await _recreate_agent_submission_indexes(conn)
     _log.info("widen_status_check_done")
