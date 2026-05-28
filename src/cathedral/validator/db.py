@@ -601,6 +601,8 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
             similarity_check_passed  INTEGER NOT NULL,
             rejection_reason         TEXT,
             submitted_at             TEXT NOT NULL,
+            sat_challenge_id         TEXT,
+            seq_no                   INTEGER,
             status                   TEXT NOT NULL CHECK (status IN
                                        ('pending_check','queued','evaluating',
                                         'ranked','rejected','withdrawn',
@@ -651,6 +653,8 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
         "current_score",
         "current_rank",
         "first_mover_at",
+        "sat_challenge_id",
+        "seq_no",
         "attestation_mode",
         "attestation_type",
         "attestation_blob",
@@ -675,7 +679,22 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
     # Step 6: recreate indexes (matches canonical SCHEMA).
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash)"
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash) "
+        "WHERE sat_challenge_id IS NULL"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique_sat_challenge "
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash, sat_challenge_id) "
+        "WHERE sat_challenge_id IS NOT NULL"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_no "
+        "ON agent_submissions(sat_challenge_id, seq_no) "
+        "WHERE sat_challenge_id IS NOT NULL AND seq_no IS NOT NULL"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_scan "
+        "ON agent_submissions(sat_challenge_id, seq_no, id)"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_card_status ON agent_submissions(card_id, status)"
@@ -735,6 +754,8 @@ async def _widen_status_check(conn: aiosqlite.Connection) -> None:
             similarity_check_passed  INTEGER NOT NULL,
             rejection_reason         TEXT,
             submitted_at             TEXT NOT NULL,
+            sat_challenge_id         TEXT,
+            seq_no                   INTEGER,
             status                   TEXT NOT NULL CHECK (status IN
                                        ('pending_check','queued','evaluating',
                                         'ranked','rejected','withdrawn',
@@ -777,6 +798,8 @@ async def _widen_status_check(conn: aiosqlite.Connection) -> None:
         "similarity_check_passed",
         "rejection_reason",
         "submitted_at",
+        "sat_challenge_id",
+        "seq_no",
         "status",
         "current_score",
         "current_rank",
@@ -801,7 +824,22 @@ async def _widen_status_check(conn: aiosqlite.Connection) -> None:
     await conn.execute("ALTER TABLE agent_submissions_new RENAME TO agent_submissions")
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
-        "ON agent_submissions(miner_hotkey, card_id, bundle_hash)"
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash) "
+        "WHERE sat_challenge_id IS NULL"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique_sat_challenge "
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash, sat_challenge_id) "
+        "WHERE sat_challenge_id IS NOT NULL"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_no "
+        "ON agent_submissions(sat_challenge_id, seq_no) "
+        "WHERE sat_challenge_id IS NOT NULL AND seq_no IS NOT NULL"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sat_challenge_seq_scan "
+        "ON agent_submissions(sat_challenge_id, seq_no, id)"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_card_status ON agent_submissions(card_id, status)"
