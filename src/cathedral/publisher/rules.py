@@ -7,6 +7,7 @@ consume these rules until the later Reward Engine phase.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -116,7 +117,7 @@ def verify_rules(
     try:
         sig = base64.b64decode(rules.signature.encode("ascii"), validate=True)
         public_key.verify(sig, canonical)
-    except (ValueError, InvalidSignature) as exc:
+    except (binascii.Error, ValueError, InvalidSignature) as exc:
         raise ValueError("rules signature verification failed") from exc
 
 
@@ -186,6 +187,54 @@ async def load_active_rules(conn: aiosqlite.Connection) -> SignedRules | None:
     )
 
 
+def _parse_expires_at(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _rules_current_for_env(
+    signed: SignedRules,
+    values: Mapping[str, str],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a persisted rules row is safe to serve now.
+
+    Active rows are durable, but serving them is conditional on the live
+    signing-key configuration and the signed body's TTL. This prevents a
+    removed/rotated key or expired policy from lingering in the public API
+    until an operator manually rewrites the database.
+    """
+
+    seed_hex = values.get(RULES_PRIVATE_KEY_ENV, "").strip()
+    if not seed_hex:
+        return False
+    key_id = values.get(RULES_KEY_ID_ENV, DEFAULT_RULES_KEY_ID)
+    private_key = _private_key_from_hex(seed_hex)
+    try:
+        verify_rules(
+            signed,
+            public_key=private_key.public_key(),
+            expected_key_id=key_id,
+        )
+    except ValueError:
+        return False
+    expires_at = _parse_expires_at(signed.body.get("expires_at"))
+    if expires_at is None:
+        return False
+    current_time = now or datetime.now(UTC)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=UTC)
+    return expires_at > current_time.astimezone(UTC)
+
+
 def build_default_rules_body(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     values = os.environ if env is None else env
     now = datetime.now(UTC)
@@ -215,8 +264,8 @@ async def ensure_bootstrap_rules_from_env(
     """Publish v1 rules only when a rules signing key is configured."""
 
     values = os.environ if env is None else env
-    cur = await conn.execute("SELECT 1 FROM rules_versions WHERE active = 1 LIMIT 1")
-    if await cur.fetchone() is not None:
+    signed = await load_active_rules(conn)
+    if signed is not None and _rules_current_for_env(signed, values):
         return None
     seed_hex = values.get(RULES_PRIVATE_KEY_ENV, "").strip()
     if not seed_hex:
@@ -231,10 +280,28 @@ async def ensure_bootstrap_rules_from_env(
     )
 
 
+async def load_current_rules_from_env(
+    conn: aiosqlite.Connection,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> SignedRules | None:
+    """Load a current active rules document, refreshing stale rows if possible."""
+
+    values = os.environ if env is None else env
+    signed = await load_active_rules(conn)
+    if signed is not None and _rules_current_for_env(signed, values):
+        return signed
+    await ensure_bootstrap_rules_from_env(conn, env=values)
+    signed = await load_active_rules(conn)
+    if signed is None or not _rules_current_for_env(signed, values):
+        return None
+    return signed
+
+
 @router.get("/v1/rules/active")
 async def get_active_rules(request: Request) -> dict[str, Any]:
     ctx = request.app.state.ctx
-    signed = await load_active_rules(ctx.db)
+    signed = await load_current_rules_from_env(ctx.db)
     if signed is None:
         raise HTTPException(status_code=503, detail="no active rules document available")
     return signed.to_wire()

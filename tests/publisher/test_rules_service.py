@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 
 import aiosqlite
@@ -11,13 +12,47 @@ from fastapi.testclient import TestClient
 from cathedral.publisher import repository
 from cathedral.publisher.app import build_app
 from cathedral.publisher.rules import (
+    RULES_KEY_ID_ENV,
     RULES_PRIVATE_KEY_ENV,
+    SignedRules,
     build_default_rules_body,
     canonical_rules_bytes,
     load_active_rules,
     publish_new_rules,
+    sign_rules_body,
     verify_rules,
 )
+
+
+def _insert_signed_rules(
+    conn: sqlite3.Connection,
+    body: dict[str, object],
+    key: Ed25519PrivateKey,
+    *,
+    key_id: str,
+) -> None:
+    signed = sign_rules_body(body, key, key_id=key_id)
+    conn.executescript(repository.RULES_VERSIONS_SCHEMA)
+    conn.execute(
+        "INSERT INTO rules_versions ("
+        "version_id, body_json, body_sha256, cathedral_sig, key_id, "
+        "canonicalization_version, published_at, active"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        (
+            int(body["version_id"]),
+            json_dumps(signed.body),
+            signed.body_sha256,
+            signed.signature,
+            signed.key_id,
+            signed.canonicalization_version,
+            str(body["published_at"]),
+        ),
+    )
+    conn.commit()
+
+
+def json_dumps(body: dict[str, object]) -> str:
+    return json.dumps(body, sort_keys=True, separators=(",", ":"))
 
 
 @pytest.mark.asyncio
@@ -64,6 +99,23 @@ async def test_publish_rules_allocates_version_before_signing(tmp_path) -> None:
         await db.close()
 
 
+def test_verify_rules_rejects_malformed_base64_signature() -> None:
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("55" * 32))
+    body = build_default_rules_body({"CATHEDRAL_RULES_TTL_SECONDS": "60"})
+    body["version_id"] = 1
+    signed = sign_rules_body(body, key, key_id="rules-test")
+    malformed = SignedRules(
+        body=signed.body,
+        signature="not base64!!!",
+        key_id=signed.key_id,
+        body_sha256=signed.body_sha256,
+        canonicalization_version=signed.canonicalization_version,
+    )
+
+    with pytest.raises(ValueError, match="rules signature verification failed"):
+        verify_rules(malformed, public_key=key.public_key(), expected_key_id="rules-test")
+
+
 def test_rules_schema_allows_only_one_active_row(tmp_path) -> None:
     conn = sqlite3.connect(tmp_path / "publisher.db")
     try:
@@ -94,6 +146,58 @@ def test_rules_route_503_without_signing_key(tmp_path, monkeypatch) -> None:
             response = client.get(path)
             assert response.status_code == 503
             assert response.json() == {"detail": "no active rules document available"}
+
+
+def test_rules_route_503_when_persisted_rules_key_removed(tmp_path, monkeypatch) -> None:
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("33" * 32))
+    db_path = tmp_path / "publisher.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        body = build_default_rules_body({"CATHEDRAL_RULES_TTL_SECONDS": "3600"})
+        body["version_id"] = 1
+        body["published_at"] = "2026-05-28T12:00:00.000Z"
+        _insert_signed_rules(conn, body, key, key_id="removed-key")
+    finally:
+        conn.close()
+
+    monkeypatch.delenv(RULES_PRIVATE_KEY_ENV, raising=False)
+    monkeypatch.delenv(RULES_KEY_ID_ENV, raising=False)
+
+    app = build_app(str(db_path))
+    with TestClient(app) as client:
+        response = client.get("/v1/rules/active")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "no active rules document available"}
+
+
+def test_rules_route_refreshes_expired_persisted_rules(tmp_path, monkeypatch) -> None:
+    key_hex = "44" * 32
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key_hex))
+    db_path = tmp_path / "publisher.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        body = build_default_rules_body({"CATHEDRAL_RULES_TTL_SECONDS": "3600"})
+        body["version_id"] = 1
+        body["published_at"] = "2026-05-28T12:00:00.000Z"
+        body["expires_at"] = "2000-01-01T00:00:00.000Z"
+        _insert_signed_rules(conn, body, key, key_id="route-rules")
+    finally:
+        conn.close()
+
+    monkeypatch.setenv(RULES_PRIVATE_KEY_ENV, key_hex)
+    monkeypatch.setenv(RULES_KEY_ID_ENV, "route-rules")
+    monkeypatch.setenv("CATHEDRAL_RULES_TTL_SECONDS", "120")
+
+    app = build_app(str(db_path))
+    with TestClient(app) as client:
+        response = client.get("/v1/rules/active")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["key_id"] == "route-rules"
+    assert payload["body"]["version_id"] == 2
+    assert payload["body"]["expires_at"] != "2000-01-01T00:00:00.000Z"
 
 
 def test_rules_route_bootstraps_when_signing_key_configured(tmp_path, monkeypatch) -> None:
