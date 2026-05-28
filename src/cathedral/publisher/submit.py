@@ -396,6 +396,7 @@ async def submit_agent(
             ssh_port=ssh_port,
             ssh_user=ssh_user,
             submitted_at_iso=submitted_at_iso,
+            challenge_id=(challenge_id or "").strip() if is_solve_post else None,
             initial_status="pending_solution" if pr5_enabled else "pending_check",
         )
         await ctx.db.commit()

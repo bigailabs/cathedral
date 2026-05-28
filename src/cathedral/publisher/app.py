@@ -288,6 +288,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         # `cathedral.validator.db.connect`, so the CASCADE actually fires.
         await ctx.db.executescript(repository.EVAL_RUN_SOLUTIONS_SCHEMA)
         await ctx.db.executescript(repository.RULES_VERSIONS_SCHEMA)
+        await ctx.db.executescript(repository.V13_DECENTRALIZED_LANE_SCHEMA)
         await ctx.db.commit()
         await ensure_bootstrap_rules_from_env(ctx.db)
         task_family_challenge_source = SqliteChallengeSource(ctx.db)

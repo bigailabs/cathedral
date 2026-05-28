@@ -454,6 +454,46 @@ def test_solve_post_accepts_non_default_active_tier(
     assert rows[_TIER2_CHALLENGE] == "locked"
 
 
+def test_same_miner_same_bundle_can_submit_distinct_challenges(
+    multi_tier_client: TestClient,
+    alice: Keypair,
+    tmp_path: Path,
+) -> None:
+    first_data, first_headers = _solve_post_form(
+        kp=alice,
+        challenge_id=_CHALLENGE,
+        dimacs_solution=_VALID_SOL,
+    )
+    first = multi_tier_client.post(
+        "/v1/agents/submit", data=first_data, headers=first_headers
+    )
+    assert first.status_code == 200, first.text
+
+    second_data, second_headers = _solve_post_form(
+        kp=alice,
+        challenge_id=_TIER2_CHALLENGE,
+        dimacs_solution=_TIER2_VALID_SOL,
+    )
+    second = multi_tier_client.post(
+        "/v1/agents/submit", data=second_data, headers=second_headers
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] != first.json()["id"]
+
+    import sqlite3
+
+    with sqlite3.connect(str(tmp_path / "publisher-multi-tier.db")) as raw:
+        rows = raw.execute(
+            "SELECT sat_challenge_id, seq_no, status FROM agent_submissions "
+            "WHERE miner_hotkey = ? ORDER BY sat_challenge_id",
+            (alice.ss58_address,),
+        ).fetchall()
+    assert set(rows) == {
+        (_CHALLENGE, 1, "ranked"),
+        (_TIER2_CHALLENGE, 1, "ranked"),
+    }
+
+
 def test_winner_gets_200_ranked_and_attestation_pending(
     client: TestClient, alice: Keypair, tmp_path: Path
 ) -> None:
@@ -476,7 +516,8 @@ def test_winner_gets_200_ranked_and_attestation_pending(
 
     with sqlite3.connect(str(tmp_path / "publisher.db")) as raw:
         sub = raw.execute(
-            "SELECT status, current_score FROM agent_submissions WHERE id = ?",
+            "SELECT status, current_score, sat_challenge_id, seq_no "
+            "FROM agent_submissions WHERE id = ?",
             (body["id"],),
         ).fetchone()
         run = raw.execute(
@@ -488,7 +529,7 @@ def test_winner_gets_200_ranked_and_attestation_pending(
             "SELECT status FROM lane_challenges WHERE challenge_id = ?",
             (_CHALLENGE,),
         ).fetchone()
-    assert sub == ("ranked", 1.0)
+    assert sub == ("ranked", 1.0, _CHALLENGE, 1)
     assert run is not None
     assert run[0] == 1.0
     assert isinstance(run[1], str) and run[1]
@@ -543,7 +584,7 @@ def test_challenge_not_active_returns_409(
 
 
 def test_second_valid_post_loses_to_locked_winner(
-    client: TestClient, alice: Keypair, bob: Keypair
+    client: TestClient, alice: Keypair, bob: Keypair, tmp_path: Path
 ) -> None:
     data1, h1 = _solve_post_form(
         kp=alice, challenge_id=_CHALLENGE, dimacs_solution=_VALID_SOL
@@ -563,6 +604,20 @@ def test_second_valid_post_loses_to_locked_winner(
     detail = r2.json().get("detail")
     detail_str = detail if isinstance(detail, str) else (detail or {}).get("detail", "")
     assert "challenge_already_locked" in detail_str or "challenge_already_locked" in str(detail)
+
+    import sqlite3
+
+    with sqlite3.connect(str(tmp_path / "publisher.db")) as raw:
+        rows = raw.execute(
+            "SELECT miner_hotkey, sat_challenge_id, seq_no "
+            "FROM agent_submissions "
+            "WHERE sat_challenge_id = ? ORDER BY seq_no",
+            (_CHALLENGE,),
+        ).fetchall()
+    assert rows == [
+        (alice.ss58_address, _CHALLENGE, 1),
+        (bob.ss58_address, _CHALLENGE, 2),
+    ]
 
 
 def test_flag_off_ignores_dimacs_solution(

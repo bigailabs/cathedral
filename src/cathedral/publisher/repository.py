@@ -1246,6 +1246,7 @@ async def upsert_sat_registration(
     ssh_port: int,
     ssh_user: str,
     submitted_at_iso: str,
+    challenge_id: str | None = None,
     initial_status: str = "pending_check",
 ) -> str:
     """Upsert an ``agent_submissions`` row for the SAT lane.
@@ -1264,44 +1265,66 @@ async def upsert_sat_registration(
     """
     from uuid import uuid4
 
-    cur = await conn.execute(
-        "SELECT id, status FROM agent_submissions "
-        "WHERE miner_hotkey = ? AND card_id = ? AND bundle_hash = ? LIMIT 1",
-        (miner_hotkey, card_id, bundle_hash),
-    )
+    sat_challenge_id = (challenge_id or "").strip() or None
+    if sat_challenge_id is None:
+        cur = await conn.execute(
+            "SELECT id, status, sat_challenge_id, seq_no FROM agent_submissions "
+            "WHERE miner_hotkey = ? AND card_id = ? AND bundle_hash = ? "
+            "AND sat_challenge_id IS NULL LIMIT 1",
+            (miner_hotkey, card_id, bundle_hash),
+        )
+    else:
+        cur = await conn.execute(
+            "SELECT id, status, sat_challenge_id, seq_no FROM agent_submissions "
+            "WHERE miner_hotkey = ? AND card_id = ? AND bundle_hash = ? "
+            "AND sat_challenge_id = ? LIMIT 1",
+            (miner_hotkey, card_id, bundle_hash, sat_challenge_id),
+        )
     row = await cur.fetchone()
     if row is not None:
         existing_id = str(row[0])
         existing_status = str(row[1])
+        existing_seq_no = row[3]
         # Don't downgrade a ranked/valid row back to a registration state.
         # Non-final rows move to the caller's requested initial status;
         # PR5 uses this to keep no-solution rows out of the eval queue.
         next_status = existing_status
         if existing_status not in {"ranked", "valid_attestation_pending"}:
             next_status = initial_status
+        seq_update = ""
+        params: list[Any] = [
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            display_name,
+            bio,
+            bundle_signature,
+            bundle_size_bytes,
+            submitted_at_iso,
+            next_status,
+        ]
+        if sat_challenge_id is not None and existing_seq_no is None:
+            seq_no = await _next_sat_submission_seq_no(conn, sat_challenge_id)
+            seq_update = ", sat_challenge_id = ?, seq_no = ? "
+            params.extend([sat_challenge_id, seq_no])
+        params.append(existing_id)
         await conn.execute(
             "UPDATE agent_submissions "
             "SET ssh_host = ?, ssh_port = ?, ssh_user = ?, "
             "    display_name = ?, bio = COALESCE(?, bio), "
             "    bundle_signature = ?, bundle_size_bytes = ?, "
-            "    submitted_at = ?, status = ? "
+            f"    submitted_at = ?, status = ? {seq_update}"
             "WHERE id = ?",
-            (
-                ssh_host,
-                ssh_port,
-                ssh_user,
-                display_name,
-                bio,
-                bundle_signature,
-                bundle_size_bytes,
-                submitted_at_iso,
-                next_status,
-                existing_id,
-            ),
+            params,
         )
         return existing_id
 
     new_id = str(uuid4())
+    seq_no = (
+        await _next_sat_submission_seq_no(conn, sat_challenge_id)
+        if sat_challenge_id is not None
+        else None
+    )
     await conn.execute(
         """
         INSERT INTO agent_submissions (
@@ -1310,12 +1333,13 @@ async def upsert_sat_registration(
             display_name, bio, logo_url, soul_md_preview,
             metadata_fingerprint, similarity_check_passed,
             rejection_reason, submitted_at, status, first_mover_at,
+            sat_challenge_id, seq_no,
             attestation_mode, attestation_type, attestation_blob,
             attestation_verified_at, discovery_only,
             ssh_host, ssh_port, ssh_user, hermes_port
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             new_id,
@@ -1336,6 +1360,8 @@ async def upsert_sat_registration(
             submitted_at_iso,
             initial_status,
             None,
+            sat_challenge_id,
+            seq_no,
             "ssh-probe",
             None,
             None,
@@ -1348,6 +1374,19 @@ async def upsert_sat_registration(
         ),
     )
     return new_id
+
+
+async def _next_sat_submission_seq_no(
+    conn: aiosqlite.Connection,
+    challenge_id: str,
+) -> int:
+    cur = await conn.execute(
+        "SELECT COALESCE(MAX(seq_no), 0) + 1 "
+        "FROM agent_submissions WHERE sat_challenge_id = ?",
+        (challenge_id,),
+    )
+    row = await cur.fetchone()
+    return int(row[0] or 1)
 
 
 @dataclass
@@ -1421,6 +1460,14 @@ async def atomic_claim_winner(
         time_limit_seconds=time_limit_seconds,
         miner_hotkey=miner_hotkey,
     )
+
+    # The shared publisher connection also serves older implicit-transaction
+    # helpers. Under thread-heavy TestClient traffic, sqlite can still report
+    # an open implicit transaction when this explicit CAS begins. The caller
+    # holds ctx.db_write_lock, so it is safe to close that prior transaction
+    # boundary before taking the real BEGIN IMMEDIATE lock.
+    if conn.in_transaction:
+        await conn.commit()
 
     # BEGIN IMMEDIATE upgrades to a write-lock straight away. Together
     # with the asyncio lock the caller is holding, this serializes
@@ -1751,6 +1798,60 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_versions_one_active
     WHERE active = 1;
 CREATE INDEX IF NOT EXISTS idx_rules_versions_published_at
     ON rules_versions(published_at DESC);
+"""
+
+
+# --------------------------------------------------------------------------
+# v1.3 decentralized SAT lane audit/shadow tables.
+#
+# `eval_run_solutions` remains the PR #243 raw-body sidecar. Validator-local
+# verdicts and legacy-vs-decentralized weight diffs live in their own tables so
+# later reward-engine work can shadow without mutating the payment path.
+# --------------------------------------------------------------------------
+
+V13_DECENTRALIZED_LANE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS validator_verdicts (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    validator_hotkey      TEXT NOT NULL,
+    challenge_id          TEXT NOT NULL,
+    seq_no                INTEGER NOT NULL,
+    submission_id         TEXT,
+    eval_run_id           TEXT,
+    dimacs_sha256         TEXT NOT NULL,
+    valid                 INTEGER NOT NULL CHECK(valid IN (0, 1)),
+    score                 REAL NOT NULL DEFAULT 0.0,
+    rejection_reason      TEXT,
+    verifier_version      TEXT NOT NULL,
+    verifier_details_hash TEXT,
+    reported_at           TEXT NOT NULL,
+    created_at            TEXT NOT NULL,
+    UNIQUE(validator_hotkey, challenge_id, seq_no, verifier_version)
+);
+CREATE INDEX IF NOT EXISTS idx_validator_verdicts_challenge_seq
+    ON validator_verdicts(challenge_id, seq_no);
+CREATE INDEX IF NOT EXISTS idx_validator_verdicts_reported_at
+    ON validator_verdicts(reported_at DESC);
+
+CREATE TABLE IF NOT EXISTS shadow_weight_diffs (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    rules_version_id            INTEGER,
+    validator_hotkey            TEXT NOT NULL,
+    network                     TEXT NOT NULL,
+    netuid                      INTEGER NOT NULL,
+    legacy_vector_sha256        TEXT NOT NULL,
+    decentralized_vector_sha256 TEXT NOT NULL,
+    abs_diff_sum                REAL NOT NULL,
+    max_diff                    REAL NOT NULL,
+    legacy_weight_count         INTEGER NOT NULL,
+    decentralized_weight_count  INTEGER NOT NULL,
+    blocker                     INTEGER NOT NULL DEFAULT 0 CHECK(blocker IN (0, 1)),
+    details_json                TEXT NOT NULL DEFAULT '{}',
+    computed_at                 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_weight_diffs_computed_at
+    ON shadow_weight_diffs(computed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shadow_weight_diffs_blocker
+    ON shadow_weight_diffs(blocker, computed_at DESC);
 """
 
 
