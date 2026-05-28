@@ -82,6 +82,15 @@ async def test_chain_bridge_disabled_does_not_call_set_weights() -> None:
     assert chain.last_weights == []
 
 
+@pytest.mark.asyncio
+async def test_chain_bridge_fails_closed_on_netuid_mismatch() -> None:
+    chain = MockChain()
+    chain.netuid = 39
+    with pytest.raises(ValueError, match="netuid mismatch"):
+        await publish_weight_vector(chain, [(1, 1.0)], netuid=1)
+    assert chain.last_weights == []
+
+
 def test_spec_version_matches_release() -> None:
     # MAJOR=2, MINOR=0, PATCH=1 -> 2_000_001
     assert SPEC_VERSION == 2_000_001
