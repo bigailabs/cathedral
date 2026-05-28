@@ -30,7 +30,30 @@ def test_compute_shadow_weight_diff_flags_blocker() -> None:
     assert diff.legacy_weight_count == 2
     assert diff.decentralized_weight_count == 2
     assert diff.blocker is True
+    assert diff.details["diff_level"] == "blocker"
     assert diff.details["top_diffs"][0] == [3, pytest.approx(0.6)]
+
+
+def test_compute_shadow_weight_diff_flags_investigate_tier() -> None:
+    diff = compute_shadow_weight_diff(
+        [(1, 0.50), (2, 0.50)],
+        [(1, 0.485), (2, 0.515)],
+    )
+
+    assert diff.abs_diff_sum == pytest.approx(0.03)
+    assert diff.blocker is False
+    assert diff.details["diff_level"] == "investigate"
+
+
+def test_compute_shadow_weight_diff_flags_clean_tier() -> None:
+    diff = compute_shadow_weight_diff(
+        [(1, 0.50), (2, 0.50)],
+        [(1, 0.497), (2, 0.503)],
+    )
+
+    assert diff.abs_diff_sum == pytest.approx(0.006)
+    assert diff.blocker is False
+    assert diff.details["diff_level"] == "clean"
 
 
 @pytest.mark.asyncio
@@ -66,4 +89,3 @@ async def test_record_shadow_weight_diff(tmp_path) -> None:
         )
     finally:
         await conn.close()
-
