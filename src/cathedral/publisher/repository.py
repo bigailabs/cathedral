@@ -1422,6 +1422,14 @@ async def atomic_claim_winner(
         miner_hotkey=miner_hotkey,
     )
 
+    # The shared publisher connection also serves older implicit-transaction
+    # helpers. Under thread-heavy TestClient traffic, sqlite can still report
+    # an open implicit transaction when this explicit CAS begins. The caller
+    # holds ctx.db_write_lock, so it is safe to close that prior transaction
+    # boundary before taking the real BEGIN IMMEDIATE lock.
+    if conn.in_transaction:
+        await conn.commit()
+
     # BEGIN IMMEDIATE upgrades to a write-lock straight away. Together
     # with the asyncio lock the caller is holding, this serializes
     # concurrent POSTs that want to lock the same round.
