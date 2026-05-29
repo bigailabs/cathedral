@@ -15,9 +15,9 @@ import structlog
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.eval import orchestrator as orchestrator_module
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.orchestrator import EvalOrchestrator
 from cathedral.eval.runner_types import StubPolarisRunner
-from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import (
     SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA,
 )

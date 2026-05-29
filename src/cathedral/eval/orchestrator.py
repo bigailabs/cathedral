@@ -31,8 +31,8 @@ import aiosqlite
 import structlog
 
 from cathedral.cards.registry import CardRegistry
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.runner_types import PolarisRunner
-from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import ChallengeLock, SqliteChallengeLock
 from cathedral.lanes.challenge_receipts import (
     ChallengeReceiptStore,
@@ -53,7 +53,6 @@ from cathedral.lanes.synthetic_boolean_v1 import (
 )
 from cathedral.publisher import repository
 from cathedral.publisher.merkle import epoch_for
-from cathedral.publisher.sat_serving import SatServing
 from cathedral.storage import (
     HippiusClient,
 )
@@ -189,6 +188,17 @@ class EvalOrchestrator:
         # substrate (challenge source/lock/fetch-token/receipt stores, the
         # shared db_write_lock, public base URL, hippius, signer) is passed
         # straight through so the two share one transaction gate on ctx.db.
+        #
+        # Imported lazily here (not module-top) to break a circular import:
+        # sat_serving imports cathedral.eval.eval_signer, which runs
+        # cathedral/eval/__init__.py, which eager-imports this orchestrator
+        # module. A module-top `from cathedral.publisher.sat_serving import
+        # SatServing` therefore fails when sat_serving is the first module
+        # loaded in a fresh interpreter. Deferring it to construction time
+        # (after eval_signer is fully initialized) makes sat_serving
+        # independently importable while keeping the live lane unchanged.
+        from cathedral.publisher.sat_serving import SatServing
+
         self._sat = SatServing(
             db=db,
             hippius=hippius,

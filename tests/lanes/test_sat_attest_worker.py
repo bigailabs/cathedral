@@ -18,11 +18,11 @@ from typing import Any
 import aiosqlite
 import pytest
 
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.sat_attest_worker import (
     _AttestError,
     run_sat_attest_loop,
 )
-from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import SQLITE_SCHEMA as LOCK_SCHEMA
 from cathedral.lanes.challenge_source import (
     CHALLENGE_STATUS_ACTIVE,

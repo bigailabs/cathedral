@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cathedral.eval.scoring_pipeline import EvalSigner
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.lanes import publisher as publisher_module
 from cathedral.lanes.contract import (
     HiddenMetadata,

@@ -8,7 +8,6 @@ from cathedral.eval.runner_types import (
     PolarisRunResult,
     StubPolarisRunner,
 )
-from cathedral.eval.scoring_pipeline import score_and_sign
 
 __all__ = [
     "EvalOrchestrator",
@@ -18,5 +17,4 @@ __all__ = [
     "PolarisRunnerError",
     "StubPolarisRunner",
     "run_eval_loop",
-    "score_and_sign",
 ]

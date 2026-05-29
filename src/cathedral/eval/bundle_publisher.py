@@ -46,7 +46,7 @@ from typing import Any
 import blake3
 import structlog
 
-from cathedral.eval.scoring_pipeline import EvalSigner
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.ssh_hermes_runner import TraceBundle
 from cathedral.storage import HippiusClient
 from cathedral.storage.crypto import encrypt_bundle
