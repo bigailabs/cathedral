@@ -156,8 +156,8 @@ class HippiusClient:
     def presigned_get_url(self, blob_key: str, *, expires_in: int = 3600) -> str:
         """Generate a short-lived presigned GET URL for an encrypted bundle.
 
-        Used by `PolarisRuntimeRunner` so Polaris can fetch the miner's
-        bundle directly from R2/Hippius without Cathedral having to stream
+        Used by the runtime bundle-fetch path so a runner can fetch the
+        miner's bundle directly from R2/Hippius without Cathedral having to stream
         the bytes through its own HTTP request. The bundle remains
         encrypted at rest; the runtime image decrypts it using the KEK
         passed via `env_overrides`.

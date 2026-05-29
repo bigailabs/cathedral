@@ -96,8 +96,8 @@ class ProbeRunner:
     """POST /probe/run -> ProbeOutput -> verify -> PolarisRunResult.
 
     Init args carry per-miner config; `run()` follows the PolarisRunner
-    Protocol so the orchestrator can wire this exactly like
-    PolarisRuntimeRunner.
+    Protocol so the orchestrator can wire this exactly like any other
+    PolarisRunner.
 
     Parameters
     ----------

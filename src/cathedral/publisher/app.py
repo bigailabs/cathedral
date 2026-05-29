@@ -310,7 +310,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         # Make ctx visible to the orchestrator's env-resolver. Production
         # `from_settings` previously skipped this; the test-only `build_app`
         # set it inside its own factory. Hoisting to the shared lifespan
-        # so PolarisRuntimeRunner can find HippiusClient in both modes.
+        # so the orchestrator's runner can find HippiusClient in both modes.
         global _LATEST_CTX
         _LATEST_CTX = ctx
 

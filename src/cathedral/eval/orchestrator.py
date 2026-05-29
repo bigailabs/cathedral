@@ -55,9 +55,6 @@ from cathedral.publisher.merkle import epoch_for
 from cathedral.storage import (
     HippiusClient,
 )
-from cathedral.v3.publisher import (
-    v3_feed_enabled,
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -138,10 +135,8 @@ class EvalOrchestrator:
 
         `runner_for` (preferred) — a callable `submission -> PolarisRunner`.
         Lets the orchestrator dispatch on the submission's
-        `attestation_mode` so Tier A (polaris-hosted) goes to
-        `PolarisRuntimeRunner`, BYO miners go to `BundleCardRunner`,
-        and unverified discovery submissions are filtered out at the
-        queue layer before reaching here.
+        `attestation_mode`; SAT-lane submissions resolve to the
+        SSH-Hermes prober (ssh-probe / v2).
 
         Exactly one of `polaris` or `runner_for` must be supplied;
         if both are present, `runner_for` wins.
@@ -277,7 +272,6 @@ class EvalOrchestrator:
         self,
         submission: dict[str, Any],
         *,
-        v3_active_hotkeys: list[str] | None = None,
         task_family_problem_overrides: dict[str, tuple[PublicProblem, HiddenMetadata]]
         | None = None,
     ) -> None:
@@ -533,8 +527,8 @@ async def run_eval_loop(
 
     Pass either `polaris=` (legacy single runner) OR `runner_for=` (a
     callable that returns a runner per submission). Production wants
-    `runner_for=` so polaris-tier submissions route to
-    `PolarisRuntimeRunner` while BYO go to `BundleCardRunner` etc.
+    `runner_for=` so each submission resolves to its prober
+    (SAT-lane submissions go to the SSH-Hermes runner).
 
     Single-writer design: each submission is updated to 'evaluating'
     atomically before the work begins, so two concurrent loop iterations
@@ -610,11 +604,6 @@ async def run_eval_loop(
             cadence_count=len(due),
         )
         try:
-            v3_active_hotkeys = await _v3_active_hotkeys_snapshot(db) if v3_feed_enabled() else None
-        except aiosqlite.Error as e:
-            logger.warning("v3_active_hotkeys_query_failed", error=str(e))
-            v3_active_hotkeys = None
-        try:
             task_family_problem_overrides = await orchestrator.snapshot_task_family_batch_problems(
                 log=logger
             )
@@ -624,7 +613,6 @@ async def run_eval_loop(
 
         async def _process(
             s: dict[str, Any],
-            active_hotkeys: list[str] | None = v3_active_hotkeys,
             problem_overrides: dict[str, tuple[PublicProblem, HiddenMetadata]] = (
                 task_family_problem_overrides
             ),
@@ -633,7 +621,6 @@ async def run_eval_loop(
                 try:
                     await orchestrator.evaluate_one(
                         s,
-                        v3_active_hotkeys=active_hotkeys,
                         task_family_problem_overrides=problem_overrides,
                     )
                 except Exception as e:
@@ -651,20 +638,6 @@ async def run_eval_loop(
                         )
 
         await asyncio.gather(*[_process(s) for s in batch])
-
-
-async def _v3_active_hotkeys_snapshot(db: aiosqlite.Connection) -> list[str]:
-    ranked, _total = await repository.list_submissions_all(
-        db,
-        verified_only=True,
-        ranked_only=True,
-        limit=10000,
-    )
-    return [
-        str(row["miner_hotkey"])
-        for row in ranked
-        if isinstance(row.get("miner_hotkey"), str) and row["miner_hotkey"]
-    ]
 
 
 async def _sleep_or_stop(stop: asyncio.Event, secs: float) -> None:
