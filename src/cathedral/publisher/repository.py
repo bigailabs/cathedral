@@ -1390,6 +1390,75 @@ async def _next_sat_submission_seq_no(
 
 
 @dataclass
+class RankedSolveResult:
+    """Outcome of :func:`record_ranked_solve`.
+
+    ``solve_rank`` is the operator's 1-indexed position among valid solvers of
+    this challenge (publisher receipt order). ``newly_recorded`` is False when
+    the hotkey had already solved this challenge — the prior rank is returned
+    and no second row is written (idempotent re-submit).
+    """
+
+    solve_rank: int
+    newly_recorded: bool
+
+
+async def record_ranked_solve(
+    conn: aiosqlite.Connection,
+    *,
+    family_id: str,
+    challenge_id: str,
+    miner_hotkey: str,
+    eval_run_id: str,
+    weighted_score: float,
+    solved_at_iso: str,
+) -> RankedSolveResult:
+    """Record a valid solve in the open-window ledger and return its rank.
+
+    Open-window analogue of :func:`atomic_claim_winner`: instead of locking a
+    single winner, every valid solver is appended with a monotonic
+    ``solve_rank``. Idempotent per ``(family, challenge, miner_hotkey)`` — a
+    re-submit returns the existing rank without writing a second row.
+
+    MUST be called while holding the publisher write lock (``ctx.db_write_lock``),
+    the same contract as ``atomic_claim_winner``: rank assignment reads the
+    current count then inserts, so it is only race-free under that serialization.
+    """
+    cur = await conn.execute(
+        "SELECT solve_rank FROM lane_challenge_solves "
+        "WHERE family_id = ? AND challenge_id = ? AND miner_hotkey = ?",
+        (family_id, challenge_id, miner_hotkey),
+    )
+    existing = await cur.fetchone()
+    if existing is not None:
+        return RankedSolveResult(solve_rank=int(existing[0]), newly_recorded=False)
+
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM lane_challenge_solves WHERE family_id = ? AND challenge_id = ?",
+        (family_id, challenge_id),
+    )
+    count_row = await cur.fetchone()
+    rank = int(count_row[0] if count_row else 0) + 1
+
+    await conn.execute(
+        "INSERT INTO lane_challenge_solves ("
+        "family_id, challenge_id, miner_hotkey, eval_run_id, solve_rank, "
+        "weighted_score, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            family_id,
+            challenge_id,
+            miner_hotkey,
+            eval_run_id,
+            rank,
+            float(weighted_score),
+            solved_at_iso,
+        ),
+    )
+    await conn.commit()
+    return RankedSolveResult(solve_rank=rank, newly_recorded=True)
+
+
+@dataclass
 class AtomicWinnerResult:
     """Outcome of :func:`atomic_claim_winner`.
 
@@ -1852,6 +1921,35 @@ CREATE INDEX IF NOT EXISTS idx_shadow_weight_diffs_computed_at
     ON shadow_weight_diffs(computed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_shadow_weight_diffs_blocker
     ON shadow_weight_diffs(blocker, computed_at DESC);
+"""
+
+
+# --------------------------------------------------------------------------
+# lane_challenge_solves — open-window (PAR-2) ranked solve ledger.
+#
+# Replaces the single-winner lane_challenge_winners lock for the open-window
+# scoring model: EVERY valid solve is recorded with a monotonic solve_rank
+# (publisher receipt order) instead of only the first. UNIQUE(family, challenge,
+# miner_hotkey) makes a re-submit idempotent (one scored solve per hotkey per
+# challenge). Used only when open-window scoring is enabled; the legacy winner
+# lock stays intact behind the flag so live behavior and contract tests are
+# unchanged until the cutover.
+# --------------------------------------------------------------------------
+
+LANE_CHALLENGE_SOLVES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS lane_challenge_solves (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    family_id      TEXT NOT NULL,
+    challenge_id   TEXT NOT NULL,
+    miner_hotkey   TEXT NOT NULL,
+    eval_run_id    TEXT NOT NULL,
+    solve_rank     INTEGER NOT NULL,
+    weighted_score REAL NOT NULL DEFAULT 1.0,
+    solved_at_iso  TEXT NOT NULL,
+    UNIQUE(family_id, challenge_id, miner_hotkey)
+);
+CREATE INDEX IF NOT EXISTS idx_lane_challenge_solves_challenge
+    ON lane_challenge_solves(family_id, challenge_id, solve_rank);
 """
 
 

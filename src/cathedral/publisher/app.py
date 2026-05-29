@@ -289,6 +289,9 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         await ctx.db.executescript(repository.EVAL_RUN_SOLUTIONS_SCHEMA)
         await ctx.db.executescript(repository.RULES_VERSIONS_SCHEMA)
         await ctx.db.executescript(repository.V13_DECENTRALIZED_LANE_SCHEMA)
+        # Open-window (PAR-2) ranked-solve ledger. Inert until open-window
+        # scoring is enabled; ensured at boot so the table is ready for the flip.
+        await ctx.db.executescript(repository.LANE_CHALLENGE_SOLVES_SCHEMA)
         await ctx.db.commit()
         await ensure_bootstrap_rules_from_env(ctx.db)
         task_family_challenge_source = SqliteChallengeSource(ctx.db)
