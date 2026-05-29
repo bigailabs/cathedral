@@ -188,10 +188,12 @@ async def latest_pulled_score_per_hotkey(
 ) -> dict[str, float]:
     """Rolling mean per hotkey from the pull-side table.
 
-    v1 card scores remain primary. bug_isolation_v1 can contribute a
-    small configurable share once enabled. Generic Task Family rows
-    follow the same rule: they contribute only their configured slice
-    and default to zero weight.
+    SAT lane (schema v5/v6) rows are the only incentive bucket. The
+    legacy EU-AI-Act card "v1" bucket has been removed: non-SAT,
+    non-bug-isolation rows are dropped rather than silently weighted as
+    v1 incentive. bug_isolation_v1 can still contribute a small
+    configurable share once enabled. Generic Task Family rows contribute
+    only their configured slice and default to zero weight.
     """
     await _ensure_pulled_eval_runs_table(conn)
     v3_weight = max(0.0, min(1.0, float(v3_bug_isolation_weight or 0.0)))
@@ -226,7 +228,10 @@ async def latest_pulled_score_per_hotkey(
         elif task_type == "bug_isolation_v1":
             score_bucket = "v3"
         else:
-            score_bucket = "v1"
+            # Legacy EU-AI-Act card rows no longer earn incentive. Drop
+            # them rather than bucketing as the old "v1" pool (closes the
+            # card-era leaderboard-leak weighting path).
+            continue
         score = float(row[2])
         samples_by_hotkey.setdefault(hotkey, {}).setdefault(score_bucket, []).append(score)
 
@@ -238,27 +243,17 @@ async def latest_pulled_score_per_hotkey(
 
     out: dict[str, float] = {}
     for hotkey, scores in by_hotkey.items():
-        v1_score = scores.get("v1")
         weighted_total = 0.0
-        active_special_weight = 0.0
         v3_score = scores.get("v3")
         if v3_score is not None and v3_weight > 0.0:
             weighted_total += v3_score * v3_weight
-            active_special_weight += v3_weight
         for task_type, lane_weight in lane_weights.items():
             lane_score = scores.get(task_type)
             if lane_score is not None and lane_weight > 0.0:
                 weighted_total += lane_score * lane_weight
-                active_special_weight += lane_weight
 
-        active_special_weight = min(active_special_weight, 1.0)
         weighted_total = min(weighted_total, 1.0)
-        if v1_score is not None:
-            if active_special_weight == 0.0:
-                out[hotkey] = v1_score
-            else:
-                out[hotkey] = (v1_score * (1.0 - active_special_weight)) + weighted_total
-        elif weighted_total > 0.0:
+        if weighted_total > 0.0:
             out[hotkey] = weighted_total
     return out
 

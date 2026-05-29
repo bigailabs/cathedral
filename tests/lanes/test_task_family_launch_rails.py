@@ -456,6 +456,7 @@ async def test_synthetic_boolean_weight_defaults_off_and_blends_when_enabled(tmp
         from datetime import datetime as _dt
 
         now = _dt.now(_UTC).isoformat()
+        # Legacy card row: post-strip this no longer earns incentive.
         await upsert_pulled_eval(
             conn,
             eval_run={
@@ -489,12 +490,14 @@ async def test_synthetic_boolean_weight_defaults_off_and_blends_when_enabled(tmp
             miner_hotkey="hk-boolean-only",
         )
 
+        # SAT lane weight off -> nobody scores (the legacy card row is
+        # dropped, not bucketed as v1).
         disabled = await latest_pulled_score_per_hotkey(
             conn,
             since_days=7,
             task_family_weights={"synthetic_boolean_v1": 0.0},
         )
-        assert disabled["hk-mixed"] == pytest.approx(0.80)
+        assert "hk-mixed" not in disabled
         assert "hk-boolean-only" not in disabled
 
         enabled = await latest_pulled_score_per_hotkey(
@@ -502,7 +505,7 @@ async def test_synthetic_boolean_weight_defaults_off_and_blends_when_enabled(tmp
             since_days=7,
             task_family_weights={"synthetic_boolean_v1": 0.05},
         )
-        assert enabled["hk-mixed"] == pytest.approx((0.80 * 0.95) + 0.05)
+        assert enabled["hk-mixed"] == pytest.approx(0.05)
         assert enabled["hk-boolean-only"] == pytest.approx(0.05)
     finally:
         await conn.close()
@@ -511,13 +514,14 @@ async def test_synthetic_boolean_weight_defaults_off_and_blends_when_enabled(tmp
 @pytest.mark.asyncio
 async def test_unknown_schema5_task_family_contributes_zero(tmp_path) -> None:
     """A schema-5 row whose task_type is not in the configured
-    ``task_family_weights`` map must NOT be bucketed as v1 and must
-    contribute zero to the miner's score.
+    ``task_family_weights`` map must contribute zero to the miner's score.
 
     Regression for the schema-5 weighting blocker: previously an
     unconfigured task family would fall through to the v1 bucket and
     silently award v1-share emissions to a brand-new lane that the
-    validator had not yet opted in to.
+    validator had not yet opted in to. Post card-strip there is no v1
+    bucket at all, so both the unknown family AND legacy card rows score
+    zero.
     """
     conn = await connect(str(tmp_path / "validator.db"))
     try:
@@ -540,8 +544,8 @@ async def test_unknown_schema5_task_family_contributes_zero(tmp_path) -> None:
             },
             miner_hotkey="hk-future-only",
         )
-        # Mixed hotkey: has a real v1 score AND an unconfigured schema-5
-        # row. The unknown family must NOT contribute; only v1 should.
+        # Mixed hotkey: has an unconfigured schema-5 row AND a legacy
+        # card row. Neither contributes post-strip.
         await upsert_pulled_eval(
             conn,
             eval_run={
@@ -575,10 +579,11 @@ async def test_unknown_schema5_task_family_contributes_zero(tmp_path) -> None:
         assert "hk-future-only" not in scores, (
             f"unknown schema-5 family must not score; got {scores.get('hk-future-only')!r}"
         )
-        # hk-mixed-future gets its v1 score back unchanged. The
-        # unknown-family row contributes zero, not v1-bucketed.
-        assert scores["hk-mixed-future"] == pytest.approx(0.50), (
-            f"unknown schema-5 family must not be bucketed as v1; got {scores['hk-mixed-future']}"
+        # hk-mixed-future has only an unknown-family row + a legacy card
+        # row; both score zero, so the hotkey drops out entirely.
+        assert "hk-mixed-future" not in scores, (
+            f"unknown schema-5 family + legacy card must not score; got "
+            f"{scores.get('hk-mixed-future')!r}"
         )
     finally:
         await conn.close()

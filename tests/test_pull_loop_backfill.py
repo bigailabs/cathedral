@@ -213,6 +213,8 @@ async def test_repeated_startup_backfill_is_idempotent(tmp_path) -> None:
     try:
         eval_run = {
             "id": "eval-rep",
+            "task_type": "synthetic_boolean_v1",
+            "eval_output_schema_version": 5,
             "weighted_score": 0.42,
             "ran_at": datetime.now(UTC).isoformat(),
         }
@@ -230,7 +232,9 @@ async def test_repeated_startup_backfill_is_idempotent(tmp_path) -> None:
             f"upsert must dedupe by eval_run_id; got {row[0]} rows after 3 repeated startups"
         )
 
-        scores = await latest_pulled_score_per_hotkey(conn, since_days=7)
+        scores = await latest_pulled_score_per_hotkey(
+            conn, since_days=7, task_family_weights={"synthetic_boolean_v1": 1.0}
+        )
         assert scores.get("hk-1") == pytest.approx(0.42), (
             f"repeated startup re-pulls must not skew the mean — got {scores.get('hk-1')}"
         )
@@ -266,6 +270,8 @@ async def test_production_upgrade_failure_pattern(tmp_path) -> None:
             conn,
             eval_run={
                 "id": "eval-recent",
+                "task_type": "synthetic_boolean_v1",
+                "eval_output_schema_version": 5,
                 "weighted_score": 0.5,
                 "ran_at": recent,
             },
@@ -293,13 +299,17 @@ async def test_production_upgrade_failure_pattern(tmp_path) -> None:
             conn,
             eval_run={
                 "id": "eval-older-backfilled",
+                "task_type": "synthetic_boolean_v1",
+                "eval_output_schema_version": 5,
                 "weighted_score": 0.9,
                 "ran_at": four_days_ago,
             },
             miner_hotkey="hk-backfilled",
         )
 
-        scores = await latest_pulled_score_per_hotkey(conn, since_days=7)
+        scores = await latest_pulled_score_per_hotkey(
+            conn, since_days=7, task_family_weights={"synthetic_boolean_v1": 1.0}
+        )
         assert "hk-existing" in scores, "recent row's hotkey must survive"
         assert "hk-backfilled" in scores, (
             "backfilled older hotkey must appear in the 7-day score aggregator after backfill"
@@ -328,37 +338,35 @@ async def test_fresh_validator_backfill_hydrates_weight_window(tmp_path) -> None
         Ed25519PrivateKey,
     )
 
-    from cathedral.types import canonical_json_for_signing
+    from cathedral.v1_types import canonical_json
 
     sk = Ed25519PrivateKey.generate()
     pk = sk.public_key()
 
     six_days_ago = (datetime.now(UTC) - timedelta(days=6)).isoformat()
-    output_card = {
-        "id": "eu-ai-act",
-        "topic": "demo",
-        "worker_owner_hotkey": "5HotkeyOfMasonBackfilledByFreshValidator",
-    }
-    import json as _json
-
-    import blake3 as _blake3
-
-    output_card_hash = _blake3.blake3(
-        _json.dumps(output_card, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
+    miner_hotkey = "5HotkeyOfMasonBackfilledByFreshValidator"
+    # v5 (SAT lane) signed row. Only the v5 keyset is in the signed bytes
+    # (see pull_loop._SIGNED_EVAL_OUTPUT_KEYS_V5); the schema-version field
+    # and signature/merkle envelope are not.
     signed = {
         "id": "00000000-0000-4000-8000-000000000099",
         "agent_id": "11111111-1111-4111-8111-000000000099",
         "agent_display_name": "Backfilled Agent",
-        "card_id": "eu-ai-act",
-        "output_card": output_card,
-        "output_card_hash": output_card_hash,
+        "miner_hotkey": miner_hotkey,
+        "task_type": "synthetic_boolean_v1",
+        "task_id_public": "task-pub-099",
+        "epoch_salt": "salt-099",
+        "difficulty_tier": 0,
         "weighted_score": 0.66,
-        "polaris_verified": False,
+        "score_parts": {},
+        "answer_hash": "a" * 64,
+        "verifier_details_hash": "b" * 64,
+        "rejection_reason": None,
         "ran_at": six_days_ago,
     }
-    blob = canonical_json_for_signing(signed)
+    blob = canonical_json(signed)
     payload_entry = dict(signed)
+    payload_entry["eval_output_schema_version"] = 5
     payload_entry["cathedral_signature"] = base64.b64encode(sk.sign(blob)).decode("ascii")
     payload_entry["merkle_epoch"] = None
 
@@ -373,22 +381,24 @@ async def test_fresh_validator_backfill_hydrates_weight_window(tmp_path) -> None
     await upsert_pulled_eval(
         conn,
         eval_run=payload_entry,
-        miner_hotkey=output_card["worker_owner_hotkey"],
+        miner_hotkey=miner_hotkey,
     )
 
-    scores = await latest_pulled_score_per_hotkey(conn, since_days=7)
+    scores = await latest_pulled_score_per_hotkey(
+        conn, since_days=7, task_family_weights={"synthetic_boolean_v1": 1.0}
+    )
     assert scores.get("5HotkeyOfMasonBackfilledByFreshValidator") == pytest.approx(0.66)
 
     await conn.close()
 
 
 @pytest.mark.asyncio
-async def test_v3_bug_isolation_weight_blends_without_diluting_v1_only_rows(tmp_path) -> None:
+async def test_v3_bug_isolation_weight_blends_with_sat_rows(tmp_path) -> None:
     """bug_isolation_v1 contributes only the configured slice.
 
-    EU AI Act rows stay primary. A miner with no v3 row keeps its v1
-    score, a mixed miner gets the configured blend, and a v3-only miner
-    cannot take a full-weight slot when the blend is 5 percent.
+    SAT (synthetic_boolean_v1) rows are the primary lane. A mixed miner
+    gets the configured blend, and a v3-only miner cannot take a
+    full-weight slot when the blend is 5 percent.
     """
     conn = await connect(str(tmp_path / "v.db"))
     try:
@@ -396,18 +406,9 @@ async def test_v3_bug_isolation_weight_blends_without_diluting_v1_only_rows(tmp_
         await upsert_pulled_eval(
             conn,
             eval_run={
-                "id": "eval-v1-only",
-                "card_id": "eu-ai-act",
-                "weighted_score": 0.70,
-                "ran_at": now,
-            },
-            miner_hotkey="hk-v1-only",
-        )
-        await upsert_pulled_eval(
-            conn,
-            eval_run={
-                "id": "eval-mixed-v1",
-                "card_id": "eu-ai-act",
+                "id": "eval-mixed-sat",
+                "task_type": "synthetic_boolean_v1",
+                "eval_output_schema_version": 5,
                 "weighted_score": 0.80,
                 "ran_at": now,
             },
@@ -440,8 +441,8 @@ async def test_v3_bug_isolation_weight_blends_without_diluting_v1_only_rows(tmp_
             conn,
             since_days=7,
             v3_bug_isolation_weight=0.05,
+            task_family_weights={"synthetic_boolean_v1": 0.95},
         )
-        assert scores["hk-v1-only"] == pytest.approx(0.70)
         assert scores["hk-mixed"] == pytest.approx((0.80 * 0.95) + (0.20 * 0.05))
         assert scores["hk-v3-only"] == pytest.approx(0.60 * 0.05)
 
@@ -449,16 +450,21 @@ async def test_v3_bug_isolation_weight_blends_without_diluting_v1_only_rows(tmp_
             conn,
             since_days=7,
             v3_bug_isolation_weight=0.0,
+            task_family_weights={"synthetic_boolean_v1": 0.95},
         )
-        assert scores_disabled["hk-mixed"] == pytest.approx(0.80)
+        assert scores_disabled["hk-mixed"] == pytest.approx(0.80 * 0.95)
         assert "hk-v3-only" not in scores_disabled
     finally:
         await conn.close()
 
 
 @pytest.mark.asyncio
-async def test_v1_pool_averages_rows_not_task_type_averages(tmp_path) -> None:
-    """Migrated unknown rows and new card rows belong to one v1 pool."""
+async def test_legacy_card_rows_no_longer_earn_incentive(tmp_path) -> None:
+    """Non-SAT, non-bug-isolation (legacy EU-AI-Act card) rows are dropped.
+
+    Replaces the old v1-pool averaging test: the v1 card bucket has been
+    removed, so card-era rows contribute nothing to the weight vector.
+    """
     conn = await connect(str(tmp_path / "v.db"))
     try:
         now = datetime.now(UTC).isoformat()
@@ -468,10 +474,10 @@ async def test_v1_pool_averages_rows_not_task_type_averages(tmp_path) -> None:
                 eval_run={
                     "id": f"eval-historical-{idx}",
                     "card_id": "eu-ai-act",
-                    "weighted_score": 0.0,
+                    "weighted_score": 1.0,
                     "ran_at": now,
                 },
-                miner_hotkey="hk-migrated",
+                miner_hotkey="hk-card-only",
             )
             await conn.execute(
                 "UPDATE pulled_eval_runs SET task_type='unknown' WHERE eval_run_id=?",
@@ -485,7 +491,7 @@ async def test_v1_pool_averages_rows_not_task_type_averages(tmp_path) -> None:
                 "weighted_score": 1.0,
                 "ran_at": now,
             },
-            miner_hotkey="hk-migrated",
+            miner_hotkey="hk-card-only",
         )
         await conn.commit()
 
@@ -493,8 +499,9 @@ async def test_v1_pool_averages_rows_not_task_type_averages(tmp_path) -> None:
             conn,
             since_days=7,
             v3_bug_isolation_weight=0.05,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
         )
-        assert scores["hk-migrated"] == pytest.approx(0.2)
+        assert "hk-card-only" not in scores, "legacy card rows must not earn incentive"
     finally:
         await conn.close()
 

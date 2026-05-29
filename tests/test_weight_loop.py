@@ -28,7 +28,13 @@ async def test_disabled_weight_loop_computes_without_submitting(tmp_path, monkey
     now = datetime.now(UTC).isoformat()
     await upsert_pulled_eval(
         conn,
-        eval_run={"id": "run-1", "weighted_score": 0.75, "ran_at": now},
+        eval_run={
+            "id": "run-1",
+            "task_type": "synthetic_boolean_v1",
+            "eval_output_schema_version": 5,
+            "weighted_score": 0.75,
+            "ran_at": now,
+        },
         miner_hotkey="hotkey-1",
     )
 
@@ -66,6 +72,7 @@ async def test_disabled_weight_loop_computes_without_submitting(tmp_path, monkey
             disabled=True,
             burn_uid=0,
             forced_burn_percentage=98.0,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
             stop=stop,
         )
     )
@@ -336,7 +343,13 @@ async def test_weight_loop_dual_emits_chain_weights_set_local(
     now_iso = datetime.now(UTC).isoformat()
     await upsert_pulled_eval(
         conn,
-        eval_run={"id": "run-1", "weighted_score": 0.75, "ran_at": now_iso},
+        eval_run={
+            "id": "run-1",
+            "task_type": "synthetic_boolean_v1",
+            "eval_output_schema_version": 5,
+            "weighted_score": 0.75,
+            "ran_at": now_iso,
+        },
         miner_hotkey="hotkey-1",
     )
 
@@ -378,6 +391,7 @@ async def test_weight_loop_dual_emits_chain_weights_set_local(
             disabled=False,
             burn_uid=0,
             forced_burn_percentage=98.0,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
             stop=stop,
         )
     )
