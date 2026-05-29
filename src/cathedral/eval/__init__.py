@@ -12,7 +12,6 @@ from cathedral.eval.runner_types import (
     StubPolarisRunner,
 )
 from cathedral.eval.scoring_pipeline import score_and_sign
-from cathedral.eval.task_generator import generate_task
 
 __all__ = [
     "BundleCardRunner",
@@ -22,7 +21,6 @@ __all__ = [
     "PolarisRunner",
     "PolarisRunnerError",
     "StubPolarisRunner",
-    "generate_task",
     "run_eval_loop",
     "score_and_sign",
 ]
