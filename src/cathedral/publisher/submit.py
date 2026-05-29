@@ -78,7 +78,11 @@ from fastapi import (
 
 from cathedral.auth import InvalidSignatureError, verify_hotkey_signature
 from cathedral.lanes.contract import PublicProblem, ScoreResult, Submission, VerifierResult
-from cathedral.lanes.sign import build_signed_task_family_row
+from cathedral.lanes.sign import (
+    TASK_FAMILY_SCHEMA_VERSION,
+    TASK_FAMILY_SCHEMA_VERSION_V6,
+    build_signed_task_family_row,
+)
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SAT_FAMILY_ID
 from cathedral.lanes.synthetic_boolean_v1 import SCHEMA_VERSION as SAT_SCHEMA_VERSION
 from cathedral.lanes.synthetic_boolean_v1.verify_submission import (
@@ -142,6 +146,21 @@ def _pr5_solve_on_submit_enabled() -> bool:
     fixed at process start.
     """
     raw = os.environ.get(PR5_SOLVE_ON_SUBMIT_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+OPEN_WINDOW_ENV = "CATHEDRAL_OPEN_WINDOW_ENABLED"
+
+
+def _open_window_enabled() -> bool:
+    """True iff open-window (PAR-2) scoring is on.
+
+    When set, a valid solve is recorded as a ranked open-window solve (every
+    solver scored, no single-winner lock) emitting a schema-6 PAR-2 fact row,
+    instead of the legacy first-valid winner lock. Off by default so the
+    single-winner path and its contract tests are unchanged until the cutover.
+    """
+    raw = os.environ.get(OPEN_WINDOW_ENV, "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -805,7 +824,83 @@ async def _handle_solve_post(
             },
         )
 
-    # ----- Atomic lock + insert --------------------------------------------
+    # ----- Open-window (PAR-2) ranked scoring (WS-SCORE.C) -----------------
+    # When enabled, every valid solver is recorded with a rank and a schema-6
+    # PAR-2 fact row; the challenge stays active for the rest of the window.
+    # No single-winner lock. Default off — falls through to the legacy path.
+    if _open_window_enabled():
+        challenge_value = float(getattr(active, "score_multiplier", 1.0) or 1.0)
+        open_eval_run_id = str(uuid4())
+        async with ctx.db_write_lock:
+            ledger = await repository.record_ranked_solve(
+                ctx.db,
+                family_id=SAT_FAMILY_ID,
+                challenge_id=challenge_id,
+                miner_hotkey=miner_hotkey,
+                eval_run_id=open_eval_run_id,
+                weighted_score=1.0,
+                solved_at_iso=now_iso,
+            )
+            if ledger.newly_recorded:
+                signed_ranked = _build_direct_solve_signed_row(
+                    ctx=ctx,
+                    eval_run_id=open_eval_run_id,
+                    submission_id=submission_id,
+                    agent_display_name=agent_display_name,
+                    miner_hotkey=miner_hotkey,
+                    challenge_id=challenge_id,
+                    tier=active.tier,
+                    time_limit_seconds=time_limit_seconds,
+                    cnf_sha256=cnf_sha256,
+                    num_vars=verification.num_vars,
+                    num_clauses=verification.num_clauses,
+                    dimacs_solution=dimacs_solution,
+                    verification=verification,
+                    weighted_score=1.0,
+                    rejection_reason=None,
+                    ran_at_iso=now_iso,
+                    epoch=epoch,
+                    schema_version=TASK_FAMILY_SCHEMA_VERSION_V6,
+                    challenge_value=challenge_value,
+                    solve_rank=ledger.solve_rank,
+                    solved=True,
+                    operator=miner_hotkey,
+                )
+                await repository.insert_ranked_eval_run(
+                    ctx.db,
+                    family_id=SAT_FAMILY_ID,
+                    challenge_id=challenge_id,
+                    miner_hotkey=miner_hotkey,
+                    submission_id=submission_id,
+                    cnf_sha256=cnf_sha256,
+                    dimacs_solution_sha256=dimacs_solution_sha256,
+                    ran_at_iso=now_iso,
+                    signed_row=signed_ranked,
+                    epoch=epoch,
+                    round_index=0,
+                    time_limit_seconds=time_limit_seconds,
+                    dimacs_solution=dimacs_solution,
+                )
+        logger.info(
+            "solve_post_ranked",
+            submission_id=submission_id,
+            hotkey=miner_hotkey,
+            challenge_id=challenge_id,
+            solve_rank=ledger.solve_rank,
+            newly_recorded=ledger.newly_recorded,
+        )
+        return {
+            "id": submission_id,
+            "eval_run_id": open_eval_run_id,
+            "status": "ranked",
+            "attestation_status": "pending",
+            "weighted_score": 1.0,
+            "solve_rank": ledger.solve_rank,
+            "challenge_id": challenge_id,
+            "server_ran_at": now_iso,
+        }
+
+    # ----- Atomic lock + insert (legacy single-winner) ---------------------
     signed_winner = _build_direct_solve_signed_row(
         ctx=ctx,
         eval_run_id=str(uuid4()),
@@ -993,8 +1088,17 @@ def _build_direct_solve_signed_row(
     rejection_reason: str | None,
     ran_at_iso: str,
     epoch: int,
+    schema_version: int = TASK_FAMILY_SCHEMA_VERSION,
+    challenge_value: float | None = None,
+    solve_rank: int | None = None,
+    solved: bool | None = None,
+    operator: str | None = None,
 ) -> dict[str, object]:
-    """Build the canonical signed schema-5 row for direct solve POSTs."""
+    """Build the canonical signed row for direct solve POSTs.
+
+    Defaults to schema 5 (single-winner path, byte-identical legacy shape).
+    Pass ``schema_version=6`` + the PAR-2 facts for the open-window path.
+    """
     epoch_salt = f"epoch_{epoch}:{SAT_FAMILY_ID}"
     problem = PublicProblem(
         task_family=SAT_FAMILY_ID,
@@ -1043,6 +1147,11 @@ def _build_direct_solve_signed_row(
         ran_at_iso=ran_at_iso,
         signer=ctx.signer,
         epoch_salt=epoch_salt,
+        schema_version=schema_version,
+        challenge_value=challenge_value,
+        solve_rank=solve_rank,
+        solved=solved,
+        operator=operator,
     )
 
 
