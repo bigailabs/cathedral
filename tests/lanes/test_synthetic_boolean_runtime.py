@@ -48,6 +48,7 @@ from cathedral.lanes.contract import GenerateCtx
 from cathedral.lanes.publisher import score_and_sign_task_family_stdout
 from cathedral.lanes.synthetic_boolean_v1 import SyntheticBooleanV1
 from cathedral.publisher import repository
+from cathedral.publisher import sat_serving as sat_serving_module
 from cathedral.publisher.app import PublisherContext
 from cathedral.publisher.reads import _eval_run_to_output
 from cathedral.storage.hippius import StubHippiusClient
@@ -99,13 +100,13 @@ def test_receipt_answer_hash_never_parses_miner_stdout(monkeypatch) -> None:
         raise AssertionError("receipt hashing must not parse stdout")
 
     monkeypatch.setattr(
-        orchestrator_module,
+        sat_serving_module,
         "extract_answer",
         fail_if_parse_attempted,
         raising=False,
     )
 
-    assert orchestrator_module._receipt_answer_hash(stdout) == blake3.blake3(
+    assert sat_serving_module._receipt_answer_hash(stdout) == blake3.blake3(
         stdout.encode("utf-8")
     ).hexdigest()
 
@@ -1102,7 +1103,7 @@ async def test_synthetic_boolean_reconcile_expires_stale_blocker_and_finalizes_v
         "cathedral.lanes.synthetic_boolean_v1.DEFAULT_TIME_LIMIT_SECONDS", 60
     )
     monkeypatch.setattr(
-        "cathedral.eval.orchestrator.DEFAULT_TIME_LIMIT_SECONDS", 60, raising=False
+        "cathedral.publisher.sat_serving.DEFAULT_TIME_LIMIT_SECONDS", 60, raising=False
     )
 
     conn = await connect(str(tmp_path / "publisher.db"))
@@ -1437,7 +1438,7 @@ async def test_synthetic_boolean_marks_receipt_verifying_before_scoring(
             )
         )
 
-        original_score = orchestrator_module.score_and_sign_task_family_stdout
+        original_score = sat_serving_module.score_and_sign_task_family_stdout
         statuses_during_score: list[str] = []
 
         def score_after_simulated_expiry(*args: Any, **kwargs: Any):
@@ -1467,7 +1468,7 @@ async def test_synthetic_boolean_marks_receipt_verifying_before_scoring(
             return original_score(*args, **kwargs)
 
         monkeypatch.setattr(
-            orchestrator_module,
+            sat_serving_module,
             "score_and_sign_task_family_stdout",
             score_after_simulated_expiry,
         )
@@ -1617,12 +1618,12 @@ async def test_synthetic_boolean_refreshes_receipt_heartbeat_during_post_run_wor
     monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
     monkeypatch.setattr(
-        orchestrator_module,
+        sat_serving_module,
         "_SAT_VERIFYING_STALE_TIMEOUT",
         timedelta(milliseconds=60),
     )
     monkeypatch.setattr(
-        orchestrator_module,
+        sat_serving_module,
         "_SAT_RECEIPT_HEARTBEAT_INTERVAL",
         timedelta(milliseconds=10),
     )
@@ -1775,14 +1776,14 @@ async def test_synthetic_boolean_file_backed_scoring_runs_off_event_loop(
 
         event_loop_thread_id = threading.get_ident()
         score_thread_ids: list[int] = []
-        original_score = orchestrator_module.score_and_sign_task_family_stdout
+        original_score = sat_serving_module.score_and_sign_task_family_stdout
 
         def recording_score(*args: Any, **kwargs: Any):
             score_thread_ids.append(threading.get_ident())
             return original_score(*args, **kwargs)
 
         monkeypatch.setattr(
-            orchestrator_module,
+            sat_serving_module,
             "score_and_sign_task_family_stdout",
             recording_score,
         )
@@ -1862,7 +1863,7 @@ async def test_synthetic_boolean_serializes_winner_finalization_on_shared_connec
             )
         )
 
-        original_persist = orchestrator_module.persist_task_family_result
+        original_persist = sat_serving_module.persist_task_family_result
         winner_transaction_open = asyncio.Event()
         release_winner_transaction = asyncio.Event()
         blocked_once = False
@@ -1877,7 +1878,7 @@ async def test_synthetic_boolean_serializes_winner_finalization_on_shared_connec
                 winner_transaction_open.set()
                 await release_winner_transaction.wait()
 
-        monkeypatch.setattr(orchestrator_module, "persist_task_family_result", gated_persist)
+        monkeypatch.setattr(sat_serving_module, "persist_task_family_result", gated_persist)
 
         received_base = datetime.now(UTC)
         runner = _SolvingRunner(
@@ -2067,7 +2068,7 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
         )
         assert winner is not None
 
-        original_persist = orchestrator_module.persist_task_family_result
+        original_persist = sat_serving_module.persist_task_family_result
         persist_started = asyncio.Event()
         persist_finished = asyncio.Event()
 
@@ -2076,7 +2077,7 @@ async def test_synthetic_boolean_resolved_loser_publish_waits_for_db_write_lock(
             await original_persist(*args, **kwargs)
             persist_finished.set()
 
-        monkeypatch.setattr(orchestrator_module, "persist_task_family_result", signaling_persist)
+        monkeypatch.setattr(sat_serving_module, "persist_task_family_result", signaling_persist)
 
         await shared_write_lock.acquire()
         try:
@@ -2302,12 +2303,12 @@ async def test_synthetic_boolean_reconcile_locked_challenge_publishes_losers_aft
             round_index=1,
         )
 
-        original_publish = orch._publish_resolved_sat_losers
+        original_publish = orch._sat._publish_resolved_sat_losers
 
         async def failing_publish(**_kwargs: Any) -> int:
             raise RuntimeError("loser publish failed")
 
-        monkeypatch.setattr(orch, "_publish_resolved_sat_losers", failing_publish)
+        monkeypatch.setattr(orch._sat, "_publish_resolved_sat_losers", failing_publish)
         with pytest.raises(RuntimeError, match="loser publish failed"):
             await orch._finalize_ready_sat_winner(
                 receipt_store=receipt_store,
@@ -2325,7 +2326,7 @@ async def test_synthetic_boolean_reconcile_locked_challenge_publishes_losers_aft
         assert len(await repository.list_eval_runs_for_submission(conn, "sub-a")) == 1
         assert await repository.list_eval_runs_for_submission(conn, "sub-b") == []
 
-        monkeypatch.setattr(orch, "_publish_resolved_sat_losers", original_publish)
+        monkeypatch.setattr(orch._sat, "_publish_resolved_sat_losers", original_publish)
         finalized = await orch.reconcile_sat_receipts(log=structlog.get_logger("test"))
 
         assert finalized == 1
@@ -2344,8 +2345,8 @@ async def test_synthetic_boolean_reconcile_locked_challenge_publishes_losers_aft
             raise AssertionError("completed locked challenge was reconciled again")
 
         monkeypatch.setattr(
-            orch,
-            "_announce_synthetic_boolean_problem",
+            orch._sat,
+            "announce_synthetic_boolean_problem",
             fail_if_locked_reannounce,
         )
         assert await orch.reconcile_sat_receipts(log=structlog.get_logger("test")) == 0
@@ -2393,7 +2394,7 @@ async def test_synthetic_boolean_reconcile_marks_legacy_receiptless_lock_done(
         async def fail_if_announced(*_args: Any, **_kwargs: Any) -> Any:
             raise AssertionError("receipt-less locked challenge should not be re-announced")
 
-        monkeypatch.setattr(orch, "_announce_synthetic_boolean_problem", fail_if_announced)
+        monkeypatch.setattr(orch._sat, "announce_synthetic_boolean_problem", fail_if_announced)
 
         finalized = await orch.reconcile_sat_receipts(log=structlog.get_logger("test"))
 
@@ -2718,7 +2719,7 @@ async def test_synthetic_boolean_does_not_promote_if_persist_fails(tmp_path, mon
         async def boom(*args: Any, **kwargs: Any) -> None:
             raise RuntimeError("persist failed")
 
-        monkeypatch.setattr(orchestrator_module, "persist_task_family_result", boom)
+        monkeypatch.setattr(sat_serving_module, "persist_task_family_result", boom)
 
         with pytest.raises(RuntimeError, match="persist failed"):
             await orch._maybe_run_task_family_lanes(
