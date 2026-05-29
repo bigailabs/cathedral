@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cathedral.cards.registry import CardRegistry
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.orchestrator import run_eval_loop
 from cathedral.eval.polaris_runner import (
     BundleCardRunner,
@@ -43,7 +44,6 @@ from cathedral.eval.polaris_runner import (
     StubPolarisRunner,
 )
 from cathedral.eval.sat_attest_worker import run_sat_attest_loop
-from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import (
     SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA,
 )
