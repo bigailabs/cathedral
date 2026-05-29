@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 
 import aiosqlite
@@ -13,7 +14,14 @@ from cathedral.chain.client import WeightStatus
 from cathedral.validator import queue
 from cathedral.validator.chain_bridge import publish_weight_vector
 from cathedral.validator.health import Health
-from cathedral.validator.pull_loop import latest_pulled_score_per_hotkey
+from cathedral.validator.pull_loop import (
+    latest_pulled_score_per_hotkey,
+    par2_merit_per_operator,
+)
+from cathedral.validator.shadow_weights import (
+    compute_shadow_weight_diff,
+    record_shadow_weight_diff,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -56,6 +64,25 @@ def _resolve_task_family_weights(configured: dict[str, float] | None) -> dict[st
             logger.warning("synthetic_boolean_v1_weight_invalid", value=raw_boolean)
 
     return out
+
+
+def _par2_weights_enabled() -> bool:
+    """True iff the PAR-2 vector should DRIVE set_weights (the flip).
+
+    Default off: PAR-2 is computed in shadow and diffed against the legacy
+    vector, but the legacy vector still drives weights until this flip — which
+    is gated on shadow convergence + an operator deploy.
+    """
+    raw = os.environ.get("CATHEDRAL_PAR2_WEIGHTS_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _par2_alpha() -> float:
+    raw = os.environ.get("CATHEDRAL_PAR2_ALPHA", "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else 0.5
+    except ValueError:
+        return 0.5
 
 
 async def run_weight_loop(
@@ -199,16 +226,65 @@ async def run_weight_loop(
             )
             normalized = normalize(burned)
 
-            status = await publish_weight_vector(chain, normalized, disabled=disabled)
+            # ----- Shadow PAR-2 vector + divergence (WS-SCORE.D/F) ----------
+            # Compute the PAR-2 weight vector alongside the legacy one and
+            # record the divergence into shadow_weight_diffs. Best-effort and
+            # flag-gated: by default the legacy vector still drives set_weights
+            # (shadow only). When CATHEDRAL_PAR2_WEIGHTS_ENABLED is set the
+            # PAR-2 vector becomes authoritative — the flip, which is gated on
+            # shadow convergence + an operator deploy, never a PR merge.
+            final_vector = normalized
+            try:
+                par2_merit = await par2_merit_per_operator(
+                    conn, since_days=7, alpha=_par2_alpha()
+                )
+                par2_raw = [
+                    (uid_by_hotkey[hk], m)
+                    for hk, m in par2_merit.items()
+                    if hk in uid_by_hotkey
+                ]
+                par2_normalized = normalize(
+                    apply_burn(
+                        par2_raw,
+                        burn_uid=burn_uid,
+                        forced_burn_percentage=forced_burn_percentage,
+                    )
+                )
+                diff = compute_shadow_weight_diff(normalized, par2_normalized)
+                await record_shadow_weight_diff(
+                    conn,
+                    validator_hotkey=str(
+                        getattr(chain, "hotkey_ss58", "")
+                        or getattr(chain, "validator_hotkey", "")
+                        or ""
+                    ),
+                    network=str(getattr(chain, "network", "") or ""),
+                    netuid=int(getattr(chain, "netuid", 0) or 0),
+                    diff=diff,
+                )
+                logger.info(
+                    "par2_shadow_diff",
+                    abs_diff_sum=round(diff.abs_diff_sum, 4),
+                    blocker=diff.blocker,
+                    par2_count=len(par2_normalized),
+                    legacy_count=len(normalized),
+                )
+                if _par2_weights_enabled():
+                    final_vector = par2_normalized
+                    logger.info("par2_weights_driving", count=len(par2_normalized))
+            except Exception as ex:
+                logger.warning("par2_shadow_failed", error=str(ex))
+
+            status = await publish_weight_vector(chain, final_vector, disabled=disabled)
             await health.update(weight_status=status)
             await health.heartbeat("last_weight_set_at")
             logger.info(
                 "weights_set",
-                count=len(normalized),
+                count=len(final_vector),
                 status=status.value,
                 # Surface which uids actually shipped so operators can sanity-
                 # check against the on-chain weight set without diffing logs.
-                uids=[uid for uid, _ in normalized][:20],
+                uids=[uid for uid, _ in final_vector][:20],
                 # True only when this validator's pull_loop has signalled
                 # that the 7-day backfill drained. A `False` here means
                 # the weight vector was computed from a possibly-thin
@@ -223,9 +299,9 @@ async def run_weight_loop(
             # Dual-emitted with the legacy `weights_set` event for one release.
             logger.info(
                 "chain_weights_set_local",
-                count=len(normalized),
+                count=len(final_vector),
                 status=status.value,
-                uids=[uid for uid, _ in normalized][:20],
+                uids=[uid for uid, _ in final_vector][:20],
                 backfill_ready=backfill_ready,
             )
         except Exception as e:
