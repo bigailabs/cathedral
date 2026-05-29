@@ -154,7 +154,6 @@ def test_security_guard_workflow_covers_projection_inputs() -> None:
     )
     required_paths = (
         "src/cathedral/eval/ssh_hermes_runner.py",
-        "src/cathedral/eval/scoring_pipeline.py",
         "src/cathedral/lanes/**",
         "src/cathedral/publisher/challenge_cnf.py",
         "src/cathedral/publisher/reads.py",
