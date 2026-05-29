@@ -11,7 +11,6 @@ import structlog
 
 from cathedral.chain import Chain, apply_burn, normalize
 from cathedral.chain.client import WeightStatus
-from cathedral.validator import queue
 from cathedral.validator.chain_bridge import publish_weight_vector
 from cathedral.validator.health import Health
 from cathedral.validator.pull_loop import (
@@ -177,19 +176,16 @@ async def run_weight_loop(
             )
             await health.heartbeat("last_metagraph_at")
 
-            scores = await queue.latest_score_per_hotkey(conn)
-            # V1: blend pulled scores from publisher (canonical going forward).
-            # Pulled scores override legacy claim-derived scores per hotkey.
+            # Pulled SAT scores from the publisher are the sole score source.
+            # 7-day window matches the cadence of SAT challenge refresh + miner
+            # iteration. A 30-day mean penalises a miner who fixed a bug
+            # yesterday by averaging in last week's zero scores; in practice
+            # that anti-recency bias is what's been pinning legitimate masons
+            # near zero weight. 7d lets a debugged miner climb within a day of
+            # shipping a real solve, while still smoothing out single-eval
+            # noise. Full time-decayed mean is the next iteration.
             try:
-                # 7-day window matches the cadence of card refresh + miner
-                # iteration. A 30-day mean penalises a miner who fixed a
-                # schema bug yesterday by averaging in last week's zero
-                # scores; in practice that anti-recency bias is what's
-                # been pinning legitimate masons near zero weight. 7d
-                # lets a debugged miner climb within a day of shipping
-                # a real card, while still smoothing out single-eval
-                # noise. Full time-decayed mean is the next iteration.
-                pulled = await latest_pulled_score_per_hotkey(
+                scores = await latest_pulled_score_per_hotkey(
                     conn,
                     since_days=7,
                     v3_bug_isolation_weight=_resolve_v3_bug_isolation_weight(
@@ -197,9 +193,9 @@ async def run_weight_loop(
                     ),
                     task_family_weights=_resolve_task_family_weights(task_family_weights),
                 )
-                scores.update(pulled)
             except Exception as ex:
                 logger.debug("pulled_scores_unavailable", error=str(ex))
+                scores = {}
             uid_by_hotkey = metagraph.hotkey_to_uid()
             # Observability: surface which hotkeys we know vs. which the
             # metagraph drops. Without this you only see `count=N` in the

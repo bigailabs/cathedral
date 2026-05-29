@@ -1,4 +1,4 @@
-"""FastAPI app + lifespan that wires the worker, weight loop, and watchdog."""
+"""FastAPI app + lifespan that wires the pull loop, weight loop, and watchdog."""
 
 from __future__ import annotations
 
@@ -7,18 +7,14 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import aiosqlite
 import structlog
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import FastAPI
 
 from cathedral.cards.registry import CardRegistry
 from cathedral.chain import BittensorChain, Chain
 from cathedral.evidence import EvidenceCollector, HttpPolarisFetcher
-from cathedral.types import PolarisAgentClaim
-from cathedral.validator import cards as cards_store
-from cathedral.validator import pull_loop, queue, remote_weight_loop, weight_loop, worker
-from cathedral.validator.auth import make_bearer_dep
+from cathedral.validator import pull_loop, weight_loop
 from cathedral.validator.config_runtime import RuntimeContext
 from cathedral.validator.db import connect
 from cathedral.validator.health import Health, HealthSnapshot
@@ -42,100 +38,29 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
         # computed off a half-hydrated 7-day window. Set once, never reset.
         initial_backfill_complete = asyncio.Event()
 
-        if ctx.settings.remote_weight_source.enabled and ctx.remote_weight_public_key is None:
-            logger.error(
-                "remote_weight_source_enabled_but_key_missing",
-                env=ctx.settings.remote_weight_source.public_key_env,
-            )
-            raise RuntimeError(
-                "remote_weight_source.enabled requires "
-                f"{ctx.settings.remote_weight_source.public_key_env}; refusing local fallback"
-            )
+        # Single weight path: pull_loop feeds pulled SAT scores into the local
+        # weight_loop (PAR-2 + hardcoded burn) which drives chain.set_weights.
+        # The signed-publisher-vector relay (Path B) was removed; this is the
+        # only path the validator runs.
+        await ctx.health.update(weight_path="A")
 
-        # Diagnostic-only: surface which of the two weight paths is active so
-        # operators (and future debugging agents) do not have to grep config to
-        # determine whether this validator computes weights locally (Path A)
-        # or relays the publisher's signed vector (Path B). See AGENTS.md
-        # "Two weight paths" for the full description. This log line is the
-        # canonical signpost; the same value is mirrored to /health.weight_path.
-        weight_path = "B" if ctx.settings.remote_weight_source.enabled else "A"
-        logger.info(
-            "weight_path_selected",
-            path=weight_path,
-            reason=(
-                f"remote_weight_source.enabled="
-                f"{ctx.settings.remote_weight_source.enabled}"
-            ),
+        weight_task = asyncio.create_task(
+            weight_loop.run_weight_loop(
+                conn,
+                ctx.chain,
+                ctx.health,
+                interval_secs=ctx.settings.weights.interval_secs,
+                disabled=ctx.settings.weights.disabled,
+                burn_uid=ctx.settings.weights.burn_uid,
+                forced_burn_percentage=ctx.settings.weights.forced_burn_percentage,
+                v3_bug_isolation_weight=ctx.settings.weights.v3_bug_isolation_weight,
+                task_family_weights=ctx.settings.weights.task_family_weights,
+                stop=stop,
+                initial_backfill_complete=initial_backfill_complete,
+            )
         )
-        await ctx.health.update(weight_path=weight_path)
-
-        if ctx.settings.remote_weight_source.enabled:
-            remote_fetch_task = asyncio.create_task(
-                remote_weight_loop.run_remote_weight_loop(
-                    conn,
-                    ctx.health,
-                    publisher_url=ctx.settings.remote_weight_source.url,
-                    public_key=ctx.remote_weight_public_key,
-                    expected_key_id=ctx.settings.remote_weight_source.key_id,
-                    network=ctx.settings.network.name,
-                    netuid=ctx.settings.network.netuid,
-                    poll_interval_secs=ctx.settings.remote_weight_source.poll_interval_secs,
-                    request_timeout_secs=ctx.settings.remote_weight_source.request_timeout_secs,
-                    stop=stop,
-                )
-            )
-            initial_backfill_complete.set()
-            weight_task = asyncio.create_task(
-                weight_loop.run_weight_loop(
-                    conn,
-                    ctx.chain,
-                    ctx.health,
-                    interval_secs=ctx.settings.weights.interval_secs,
-                    disabled=ctx.settings.weights.disabled,
-                    stop=stop,
-                    initial_backfill_complete=initial_backfill_complete,
-                    remote_weight_apply=lambda: remote_weight_loop.apply_cached_remote_vector_once(
-                        conn,
-                        ctx.chain,
-                        ctx.health,
-                        public_key=ctx.remote_weight_public_key,
-                        expected_key_id=ctx.settings.remote_weight_source.key_id,
-                        network=ctx.settings.network.name,
-                        netuid=ctx.settings.network.netuid,
-                        disabled=ctx.settings.weights.disabled,
-                    ),
-                )
-            )
-        else:
-            remote_fetch_task = None
-            weight_task = asyncio.create_task(
-                weight_loop.run_weight_loop(
-                    conn,
-                    ctx.chain,
-                    ctx.health,
-                    interval_secs=ctx.settings.weights.interval_secs,
-                    disabled=ctx.settings.weights.disabled,
-                    burn_uid=ctx.settings.weights.burn_uid,
-                    forced_burn_percentage=ctx.settings.weights.forced_burn_percentage,
-                    v3_bug_isolation_weight=ctx.settings.weights.v3_bug_isolation_weight,
-                    task_family_weights=ctx.settings.weights.task_family_weights,
-                    stop=stop,
-                    initial_backfill_complete=initial_backfill_complete,
-                )
-            )
 
         tasks = [
-            asyncio.create_task(
-                worker.run_worker(
-                    conn,
-                    ctx.collector,
-                    ctx.registry,
-                    ctx.health,
-                    poll_interval_secs=ctx.settings.worker.poll_interval_secs,
-                    max_concurrent=ctx.settings.worker.max_concurrent_verifications,
-                    stop=stop,
-                )
-            ),
             weight_task,
             asyncio.create_task(
                 run_stall_watchdog(
@@ -146,8 +71,6 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                 )
             ),
         ]
-        if remote_fetch_task is not None:
-            tasks.append(remote_fetch_task)
         if ctx.cathedral_public_key is not None:
             tasks.append(
                 asyncio.create_task(
@@ -183,40 +106,10 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                 await ctx.fetcher_close()
 
     app = FastAPI(title="Cathedral Validator", lifespan=lifespan)
-    bearer_dep = make_bearer_dep(ctx.bearer)
 
     @app.get("/health", response_model=HealthSnapshot)
     async def get_health() -> HealthSnapshot:
         return await ctx.health.get()
-
-    @app.post("/v1/claim", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(bearer_dep)])
-    async def post_claim(claim: PolarisAgentClaim) -> dict[str, int | str]:
-        try:
-            claim_id = await queue.insert_claim(app.state.db, claim)
-        except aiosqlite.IntegrityError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        return {"id": claim_id, "status": "pending"}
-
-    @app.get("/v1/cards/{card_id}")
-    async def get_card(card_id: str) -> dict:
-        """Return the highest-scoring verified version of `card_id`.
-
-        Public read - cards are public information. Used by
-        cathedral.computer to display the canonical view of each card.
-        404 if no miner has produced a verified version yet.
-        """
-        row = await cards_store.best_card(app.state.db, card_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="card not found")
-        return row
-
-    @app.get("/v1/cards/{card_id}/history")
-    async def get_card_history(card_id: str) -> list[dict]:
-        """Return all verified versions of `card_id` across miners,
-        newest verification first. Used by cathedral.computer to show
-        which miners are maintaining a card and how their entries
-        compare."""
-        return await cards_store.card_history(app.state.db, card_id)
 
     return app
 
@@ -260,27 +153,6 @@ def from_settings(settings_path: str) -> FastAPI:
     if settings.publisher.api_token_env:
         publisher_api_token = os.environ.get(settings.publisher.api_token_env)
 
-    remote_weight_pubkey: Ed25519PublicKey | None = None
-    if settings.remote_weight_source.enabled:
-        rw_hex = os.environ.get(settings.remote_weight_source.public_key_env, "").strip()
-        if rw_hex:
-            try:
-                remote_weight_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(rw_hex))
-            except ValueError as exc:
-                raise RuntimeError(
-                    f"{settings.remote_weight_source.public_key_env} must be "
-                    "a 32-byte Ed25519 public-key hex"
-                ) from exc
-        else:
-            logger.error(
-                "remote_weight_public_key_missing",
-                env=settings.remote_weight_source.public_key_env,
-            )
-            raise RuntimeError(
-                "remote_weight_source.enabled requires "
-                f"{settings.remote_weight_source.public_key_env}; refusing local fallback"
-            )
-
     ctx = RuntimeContext(
         settings=settings,
         bearer=bearer,
@@ -291,6 +163,5 @@ def from_settings(settings_path: str) -> FastAPI:
         cathedral_public_key=cathedral_pubkey,
         publisher_api_token=publisher_api_token,
         fetcher_close=fetcher.aclose,
-        remote_weight_public_key=remote_weight_pubkey,
     )
     return build_app(ctx)

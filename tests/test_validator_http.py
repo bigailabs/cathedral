@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
@@ -13,7 +11,6 @@ from cathedral.config import (
     HttpConfig,
     NetworkConfig,
     PolarisConfig,
-    RemoteWeightSourceConfig,
     StallConfig,
     StorageConfig,
     ValidatorSettings,
@@ -21,7 +18,6 @@ from cathedral.config import (
     WorkerConfig,
 )
 from cathedral.evidence import EvidenceCollector
-from cathedral.types import PolarisAgentClaim
 from cathedral.validator import build_app
 from cathedral.validator.config_runtime import RuntimeContext
 from cathedral.validator.health import Health
@@ -80,113 +76,12 @@ def test_health_is_public(app_and_client) -> None:
     assert "stalled" in body
 
 
-def test_health_reports_weight_path_a_when_remote_disabled(app_and_client) -> None:
-    """Diagnostic guardrail: stock validators (remote_weight_source disabled)
-    must report `weight_path="A"` so operators do not have to grep config to
-    know which loop is running.
+def test_health_reports_weight_path_a(app_and_client) -> None:
+    """Diagnostic guardrail: the validator now runs a single weight path
+    (local pull_loop + weight_loop) and must report `weight_path="A"` so
+    operators do not have to grep config to know which loop is running.
     """
     _, client = app_and_client
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["weight_path"] == "A"
-
-
-def test_health_reports_weight_path_b_when_remote_enabled(
-    tmp_path, monkeypatch
-) -> None:
-    """Same as above for opt-in Path B. Mocks `run_remote_weight_loop` and
-    `apply_cached_remote_vector_once` so the test does not initiate an
-    external HTTP request to the default publisher URL during lifespan.
-    """
-    from cathedral.validator import remote_weight_loop as rwl
-
-    async def _noop_remote_fetch(*args, **kwargs):
-        stop_event = kwargs.get("stop")
-        if stop_event is not None:
-            await stop_event.wait()
-
-    async def _noop_remote_apply(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(rwl, "run_remote_weight_loop", _noop_remote_fetch)
-    monkeypatch.setattr(rwl, "apply_cached_remote_vector_once", _noop_remote_apply)
-
-    sk = Ed25519PrivateKey.generate()
-    settings = _settings(str(tmp_path / "remote.db")).model_copy(
-        update={"remote_weight_source": RemoteWeightSourceConfig(enabled=True)}
-    )
-    chain = MockChain(
-        Metagraph(
-            block=1,
-            miners=(MinerNode(uid=0, hotkey="5Miner", last_update_block=1),),
-        )
-    )
-    fetcher = StubFetcher()
-    collector = EvidenceCollector(fetcher, sk.public_key())
-    ctx = RuntimeContext(
-        settings=settings,
-        bearer="testtoken",
-        chain=chain,
-        collector=collector,
-        registry=CardRegistry.baseline(),
-        health=Health(),
-        # Provide the pinned key so lifespan does not refuse to start.
-        remote_weight_public_key=sk.public_key(),
-    )
-    app = build_app(ctx)
-    with TestClient(app) as client:
-        r = client.get("/health")
-        assert r.status_code == 200
-        assert r.json()["weight_path"] == "B"
-
-
-def test_claim_requires_bearer(app_and_client) -> None:
-    _, client = app_and_client
-    claim = PolarisAgentClaim(
-        miner_hotkey="5Miner",
-        owner_wallet="5Owner",
-        work_unit="card:eu-ai-act",
-        polaris_agent_id="agt_1",
-        submitted_at=datetime.now(UTC),
-    )
-    r = client.post("/v1/claim", json=claim.model_dump(mode="json"))
-    assert r.status_code == 401
-
-
-def test_claim_accepted_with_bearer(app_and_client) -> None:
-    _, client = app_and_client
-    claim = PolarisAgentClaim(
-        miner_hotkey="5Miner",
-        owner_wallet="5Owner",
-        work_unit="card:eu-ai-act",
-        polaris_agent_id="agt_1",
-        submitted_at=datetime.now(UTC),
-    )
-    r = client.post(
-        "/v1/claim",
-        headers={"Authorization": "Bearer testtoken"},
-        json=claim.model_dump(mode="json"),
-    )
-    assert r.status_code == 202
-    body = r.json()
-    assert body["status"] == "pending"
-    assert isinstance(body["id"], int)
-
-
-def test_remote_weight_source_refuses_missing_pinned_key(tmp_path) -> None:
-    sk = Ed25519PrivateKey.generate()
-    settings = _settings(str(tmp_path / "remote.db")).model_copy(
-        update={"remote_weight_source": RemoteWeightSourceConfig(enabled=True)}
-    )
-    ctx = RuntimeContext(
-        settings=settings,
-        bearer="testtoken",
-        chain=MockChain(),
-        collector=EvidenceCollector(StubFetcher(), sk.public_key()),
-        registry=CardRegistry.baseline(),
-        health=Health(),
-    )
-    app = build_app(ctx)
-    with pytest.raises(RuntimeError, match="remote_weight_source.enabled requires"):
-        with TestClient(app):
-            pass

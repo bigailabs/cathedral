@@ -95,15 +95,13 @@ async def upsert_pulled_eval(
 ) -> None:
     """Persist a pulled eval result to the validator's local DB.
 
-    We reuse the existing `scores` table — it's keyed by `claim_id` for
-    the legacy path, but we extend to the v1 path by inserting one row
-    per pulled eval, using a synthetic negative claim_id derived from
-    the eval-run UUID hash so it cannot collide with the legacy
-    AUTOINCREMENT positive ids.
+    We reuse the existing `scores` table, inserting one row per pulled
+    eval using a synthetic negative claim_id derived from the eval-run
+    UUID hash. The negative id cannot collide with the (now historical)
+    AUTOINCREMENT positive ids from the removed claim queue.
 
-    The weight_loop reads `latest_score_per_hotkey()` which picks the
-    most recent score per hotkey across ALL claim_ids — so legacy and
-    pulled rows blend cleanly.
+    The weight_loop reads `latest_pulled_score_per_hotkey()` (the sole
+    score source) which picks the most recent pulled score per hotkey.
     """
     eval_run_id = str(eval_run["id"])
     weighted = float(eval_run["weighted_score"])
