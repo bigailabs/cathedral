@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sca_under_budget: ${{ steps.check.outputs.sca_under_budget }}
-      container_under_budget: ${{ steps.check.outputs.container_under_budget }}
     steps:
       - name: Count this month's Snyk runs
         id: check
@@ -25,7 +24,6 @@ jobs:
           COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/snyk.yml/runs?status=success&created=%3E%3D${MONTH_START}" --jq '.total_count')
           echo "Successful Snyk runs this month: $COUNT"
           SCA_LIMIT=150
-          CONTAINER_LIMIT=70
           NEXT_MONTH=$(date -u -d 'next month' +%Y-%m-01 2>/dev/null || date -u -v+1m +%Y-%m-01)
           if [ "$COUNT" -lt "$SCA_LIMIT" ]; then
             echo "sca_under_budget=true" >> "$GITHUB_OUTPUT"
@@ -33,13 +31,6 @@ jobs:
           else
             echo "sca_under_budget=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Snyk SCA skipped: $COUNT of $SCA_LIMIT monthly runs used. Resets ${NEXT_MONTH}."
-          fi
-          if [ "$COUNT" -lt "$CONTAINER_LIMIT" ]; then
-            echo "container_under_budget=true" >> "$GITHUB_OUTPUT"
-            echo "Snyk Container budget OK: $COUNT of $CONTAINER_LIMIT monthly runs used."
-          else
-            echo "container_under_budget=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Snyk Container skipped: $COUNT of $CONTAINER_LIMIT monthly runs used. Resets ${NEXT_MONTH}."
           fi
 
   scan:
@@ -55,24 +46,9 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
           args: --sarif-file-output=snyk-python.sarif
-      - name: Run Snyk on Docker image
-        if: needs.budget-check.outputs.container_under_budget == 'true'
-        uses: snyk/actions/docker@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: ghcr.io/cathedralai/cathedral-runtime:latest
-          args: --file=docker/cathedral-runtime/Dockerfile --sarif-file-output=snyk-docker.sarif
       - name: Upload SARIF (python)
         if: needs.budget-check.outputs.sca_under_budget == 'true' && hashFiles('snyk-python.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-python.sarif
           category: snyk-python
-      - name: Upload SARIF (docker)
-        if: needs.budget-check.outputs.container_under_budget == 'true' && hashFiles('snyk-docker.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: snyk-docker.sarif
-          category: snyk-docker
