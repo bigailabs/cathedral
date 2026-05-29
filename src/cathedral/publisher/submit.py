@@ -92,6 +92,7 @@ from cathedral.lanes.synthetic_boolean_v1.verify_submission import (
 )
 from cathedral.publisher.auth_signature import HotkeyAuth, hotkey_auth_header
 from cathedral.publisher.merkle import epoch_for
+from cathedral.publisher.rate_limit import RateLimitError, SubmitRateGuard
 
 if TYPE_CHECKING:
     from cathedral.lanes.challenge_source import ChallengeRecord, SqliteChallengeSource
@@ -193,6 +194,28 @@ async def submit_agent(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="submissions paused",
         )
+
+    # ----- rate limit + signature-replay dedup (WS2) -------------------------
+    # Per-hotkey min-interval blunts the tight-poll/proximity advantage; the
+    # replay guard closes the ±300s skew-window replay hole. Single-instance
+    # publisher, so an app.state-scoped in-memory guard is sufficient.
+    guard = getattr(request.app.state, "submit_guard", None)
+    if guard is None:
+        guard = SubmitRateGuard()
+        request.app.state.submit_guard = guard
+    try:
+        guard.check(
+            hotkey=auth.hotkey_ss58,
+            signature=request.headers.get("X-Cathedral-Signature", ""),
+            now=datetime.now(UTC).timestamp(),
+        )
+    except RateLimitError as exc:
+        logger.info(
+            "submit_rate_limited",
+            hotkey=auth.hotkey_ss58,
+            replay=exc.replay,
+        )
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     # ----- card_id gate (Decision 1, Option A) -------------------------------
     # ``card_id`` is no longer a card; it's the task-family lane marker.

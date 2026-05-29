@@ -23,6 +23,14 @@ from cathedral.types import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_submit_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WS2: the per-hotkey submit rate limit defaults to 60s in production;
+    disable it for tests (which fire many rapid submits per hotkey). Tests
+    that specifically exercise rate limiting set their own interval."""
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_MIN_INTERVAL_SECS", "0")
+
+
 @pytest.fixture
 def keypair() -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
     sk = Ed25519PrivateKey.generate()
