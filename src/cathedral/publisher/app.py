@@ -40,6 +40,8 @@ from cathedral.eval.polaris_runner import (
     BundleCardRunner,
     HttpPolarisRunner,
     HttpPolarisRunnerConfig,
+)
+from cathedral.eval.runner_types import (
     PolarisRunner,
     StubPolarisRunner,
 )

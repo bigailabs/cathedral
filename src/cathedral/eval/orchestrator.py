@@ -34,7 +34,7 @@ import aiosqlite
 import structlog
 
 from cathedral.cards.registry import CardRegistry
-from cathedral.eval.polaris_runner import PolarisRunner, PolarisRunnerError
+from cathedral.eval.runner_types import PolarisRunner, PolarisRunnerError
 from cathedral.eval.scoring_pipeline import EvalSigner, score_and_sign
 from cathedral.eval.task_generator import generate_task
 from cathedral.lanes.challenge_lock import ChallengeLock, SqliteChallengeLock

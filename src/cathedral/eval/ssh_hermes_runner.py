@@ -80,7 +80,7 @@ from typing import Any, BinaryIO
 import blake3
 import structlog
 
-from cathedral.eval.polaris_runner import (
+from cathedral.eval.runner_types import (
     PolarisRunnerError,
     PolarisRunResult,
 )

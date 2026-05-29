@@ -25,7 +25,7 @@ import blake3
 import httpx
 import structlog
 
-from cathedral.eval.polaris_runner import (
+from cathedral.eval.runner_types import (
     PolarisRunnerError,
     PolarisRunResult,
 )
