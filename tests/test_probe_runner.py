@@ -13,7 +13,7 @@ import pytest
 # Pre-warm the publisher import path before touching cathedral.eval.* - same
 # pattern as tests/v1/test_polaris_runtime_orchestrator_wiring.py.
 import cathedral.publisher.app  # noqa: F401
-from cathedral.eval.polaris_runner import PolarisRunnerError
+from cathedral.eval.runner_types import PolarisRunnerError
 from cathedral.eval.probe_runner import (
     ProbeRunner,
     ProbeSignatureError,

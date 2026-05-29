@@ -23,15 +23,13 @@ import pytest
 # import cycle: matches the pattern in tests/v1/test_ssh_hermes_runner.py.
 _ROOT = Path(__file__).resolve().parents[2]
 
-if "cathedral.eval.polaris_runner" in sys.modules:
-    _pr = sys.modules["cathedral.eval.polaris_runner"]
-else:
-    _PR_PATH = _ROOT / "src" / "cathedral" / "eval" / "polaris_runner.py"
-    _pr_spec = _ilu.spec_from_file_location("cathedral.eval.polaris_runner", _PR_PATH)
-    assert _pr_spec and _pr_spec.loader
-    _pr = _ilu.module_from_spec(_pr_spec)
-    sys.modules["cathedral.eval.polaris_runner"] = _pr
-    _pr_spec.loader.exec_module(_pr)
+if "cathedral.eval.runner_types" not in sys.modules:
+    _RT_PATH = _ROOT / "src" / "cathedral" / "eval" / "runner_types.py"
+    _rt_spec = _ilu.spec_from_file_location("cathedral.eval.runner_types", _RT_PATH)
+    assert _rt_spec and _rt_spec.loader
+    _rt = _ilu.module_from_spec(_rt_spec)
+    sys.modules["cathedral.eval.runner_types"] = _rt
+    _rt_spec.loader.exec_module(_rt)
 
 if "_ssh_hermes_runner_for_test" in sys.modules:
     _module = sys.modules["_ssh_hermes_runner_for_test"]

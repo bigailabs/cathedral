@@ -35,7 +35,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from cathedral.eval.orchestrator import EvalOrchestrator
-from cathedral.eval.polaris_runner import StubPolarisRunner
+from cathedral.eval.runner_types import StubPolarisRunner
 from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import (
     SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA,

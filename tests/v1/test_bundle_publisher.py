@@ -49,16 +49,6 @@ if "cathedral.eval" not in sys.modules:
     _stub_eval_pkg.__path__ = [str(_ROOT / "src" / "cathedral" / "eval")]  # type: ignore[attr-defined]
     sys.modules["cathedral.eval"] = _stub_eval_pkg
 
-if "cathedral.eval.polaris_runner" in sys.modules:
-    _pr = sys.modules["cathedral.eval.polaris_runner"]
-else:
-    _PR_PATH = _ROOT / "src" / "cathedral" / "eval" / "polaris_runner.py"
-    _pr_spec = _ilu.spec_from_file_location("cathedral.eval.polaris_runner", _PR_PATH)
-    assert _pr_spec and _pr_spec.loader
-    _pr = _ilu.module_from_spec(_pr_spec)
-    sys.modules["cathedral.eval.polaris_runner"] = _pr
-    _pr_spec.loader.exec_module(_pr)
-
 # ssh_hermes_runner needs to be loadable so TraceBundle is in scope.
 # Register under BOTH the test-local name AND the canonical name so
 # `from cathedral.eval.ssh_hermes_runner import TraceBundle` resolves

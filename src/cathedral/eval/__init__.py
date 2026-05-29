@@ -2,9 +2,6 @@
 
 from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.orchestrator import EvalOrchestrator, run_eval_loop
-from cathedral.eval.polaris_runner import (
-    BundleCardRunner,
-)
 from cathedral.eval.runner_types import (
     PolarisRunner,
     PolarisRunnerError,
@@ -14,7 +11,6 @@ from cathedral.eval.runner_types import (
 from cathedral.eval.scoring_pipeline import score_and_sign
 
 __all__ = [
-    "BundleCardRunner",
     "EvalOrchestrator",
     "EvalSigner",
     "PolarisRunResult",

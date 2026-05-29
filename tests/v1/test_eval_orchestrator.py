@@ -345,7 +345,7 @@ async def test_cadence_refresh_retryable_failure_keeps_ranked():
     NOT be flipped to 'queued' or 'rejected'. It stays 'ranked' with its
     prior score/rank — the cadence loop will retry it next window."""
     from cathedral.eval.orchestrator import EvalOrchestrator
-    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.eval.runner_types import StubPolarisRunner
     from cathedral.storage.hippius import StubHippiusClient
 
     db = _CapturingDB()
@@ -389,7 +389,7 @@ async def test_first_eval_retryable_failure_requeues_then_rejects():
     """Counterpart: first-eval rows MUST still flow through the existing
     3-attempt retry policy — re-queue twice, reject on the third."""
     from cathedral.eval.orchestrator import EvalOrchestrator
-    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.eval.runner_types import StubPolarisRunner
     from cathedral.storage.hippius import StubHippiusClient
 
     db = _CapturingDB()
@@ -421,7 +421,7 @@ async def test_terminal_failure_keeps_ranked_for_cadence():
     """A terminal failure (decryption / structure / missing card_def) on
     a cadence refresh must not strip the row off the leaderboard."""
     from cathedral.eval.orchestrator import EvalOrchestrator
-    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.eval.runner_types import StubPolarisRunner
     from cathedral.storage.hippius import StubHippiusClient
 
     db = _CapturingDB()
@@ -465,7 +465,7 @@ async def test_crashed_first_eval_does_not_strand_evaluating():
     queued row must route through the retry policy rather than leaving
     the row in 'evaluating' forever. Three crashes in a row reject."""
     from cathedral.eval.orchestrator import EvalOrchestrator
-    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.eval.runner_types import StubPolarisRunner
     from cathedral.storage.hippius import StubHippiusClient
 
     db = _CapturingDB()
@@ -501,7 +501,7 @@ async def test_cadence_failure_arms_cooldown_blocking_immediate_re_pick():
     the same row because no eval_run was written, spamming logs and
     consuming cadence slots."""
     from cathedral.eval.orchestrator import EvalOrchestrator
-    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.eval.runner_types import StubPolarisRunner
     from cathedral.storage.hippius import StubHippiusClient
 
     orch = EvalOrchestrator(
@@ -558,7 +558,7 @@ async def test_cadence_cooldown_expires_after_window():
     from datetime import UTC, datetime, timedelta
 
     from cathedral.eval.orchestrator import EvalOrchestrator
-    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.eval.runner_types import StubPolarisRunner
     from cathedral.storage.hippius import StubHippiusClient
 
     orch = EvalOrchestrator(

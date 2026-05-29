@@ -1174,21 +1174,12 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
 def _build_stub_polaris(mode: str) -> PolarisRunner:
     """Pick a Polaris stub flavor from CATHEDRAL_EVAL_MODE.
 
-    - "stub"                        : default happy-path stub
-    - "stub-fail-polaris"           : always raises PolarisRunnerError
-    - "stub-bad-card"               : returns malformed Card JSON
-    - "stub-deterministic-score"    : returns valid card; score driven by
-                                       CATHEDRAL_STUB_SCORE env var
+    The card-only fail/bad-card stub variants (``FailingStubPolarisRunner``
+    / ``MalformedStubPolarisRunner``) were removed with the card-core strip;
+    every ``stub*`` mode now resolves to the happy-path ``StubPolarisRunner``
+    (its score can still be pinned via ``CATHEDRAL_STUB_SCORE`` for the
+    deterministic-score mode).
     """
-    from cathedral.eval.polaris_runner import (
-        FailingStubPolarisRunner,
-        MalformedStubPolarisRunner,
-    )
-
-    if mode == "stub-fail-polaris":
-        return FailingStubPolarisRunner()
-    if mode == "stub-bad-card":
-        return MalformedStubPolarisRunner()
     return StubPolarisRunner()
 
 
