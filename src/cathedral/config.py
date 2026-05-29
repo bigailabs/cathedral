@@ -67,45 +67,6 @@ class WeightsConfig(BaseModel):
     )
 
 
-class WeightSourceConfig(BaseModel):
-    """Deprecated pre-#155 remote-weight config block.
-
-    Shipped validator TOML files still carry ``[weight_source]`` for
-    older binaries. Parse it so current binaries accept those files, but
-    do not use it for remote mode. The authoritative opt-in is
-    ``[remote_weight_source].enabled``.
-    """
-
-    mode: str = "local"
-    publisher_weights_url: str = "https://api.cathedral.computer/v1/validator/weights/next"
-    poll_interval_secs: float = 60.0
-    request_timeout_secs: float = 10.0
-    fallback_after_stale_minutes: float = 10.0
-    refuse_after_stale_minutes: float = 30.0
-    cathedral_policy_public_key_hex: str | None = None
-    cathedral_policy_public_key_env: str = "CATHEDRAL_POLICY_PUBLIC_KEY_HEX"
-    cathedral_policy_key_id: str = "cathedral-weight-policy"
-
-
-class RemoteWeightSourceConfig(BaseModel):
-    """Optional opt-in remote signed-weight source (issue #155).
-
-    Default ``enabled=False`` preserves local-only behaviour. When
-    enabled the validator runs the remote weight loop instead of the
-    local one, fetching from ``url`` and verifying signatures against
-    the pinned ``key_id``. Poll cadence (``poll_interval_secs``) is
-    decoupled from the chain set_weights cadence; the loop only relays
-    to chain when a new accepted vector arrives.
-    """
-
-    enabled: bool = False
-    url: str = "https://api.cathedral.computer"
-    key_id: str = "cathedral-weight-policy"
-    public_key_env: str = "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX"
-    poll_interval_secs: float = 60.0
-    request_timeout_secs: float = 10.0
-
-
 class PublisherConfig(BaseModel):
     """Where the validator pulls signed eval-runs from."""
 
@@ -135,16 +96,22 @@ class ValidatorSettings(BaseSettings):
     polaris: PolarisConfig
     http: HttpConfig = Field(default_factory=HttpConfig)
     weights: WeightsConfig = Field(default_factory=WeightsConfig)
-    weight_source: WeightSourceConfig = Field(default_factory=WeightSourceConfig)
     publisher: PublisherConfig = Field(default_factory=PublisherConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
     stall: StallConfig = Field(default_factory=StallConfig)
-    remote_weight_source: RemoteWeightSourceConfig = Field(default_factory=RemoteWeightSourceConfig)
 
     @classmethod
     def from_toml(cls, path: str | Path) -> ValidatorSettings:
         data = _load_toml(Path(path))
+        # Back-compat: deployed hosts may still carry the retired
+        # [weight_source] / [remote_weight_source] (Path B) sections on
+        # disk. Their fields no longer exist on the model, and BaseSettings
+        # forbids extra inputs, so drop the retired sections before
+        # validation rather than fail an otherwise-valid config. Genuinely
+        # unknown sections still raise (Extra inputs are not permitted).
+        for retired in ("weight_source", "remote_weight_source"):
+            data.pop(retired, None)
         return cls.model_validate(data)
 
 

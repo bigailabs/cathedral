@@ -69,20 +69,16 @@ def run_validator_sat_launch_preflight(
     settings: ValidatorSettings,
     env: Mapping[str, str] | None = None,
     *,
-    require_remote_weight_source: bool = True,
     require_zero_local_sat_weight: bool = False,
 ) -> ValidatorLaunchPreflightResult:
     """Validate validator config/env for SAT launch without touching chain state.
 
-    ``require_zero_local_sat_weight`` defaults to ``False`` as of v2.1. The
-    old guard (force local SAT weight to 0.0 when remote weights are
-    enabled) was meant to prevent double-counting, but it also meant that
-    when the remote vector expired the validator would fall back to a
-    zero-SAT local calc — which silently zeroes SAT miners during any
-    publisher outage. Operators who want the strict guard back can pass
-    ``require_zero_local_sat_weight=True`` explicitly. The new always-on
-    check is ``0.0 <= sat_weight <= 1.0``: anything else is a config
-    error regardless of mode.
+    The validator runs a single local weight path (pull_loop + weight_loop
+    with PAR-2 + hardcoded burn); the signed-publisher-vector relay (Path B)
+    was removed, so there is no remote-weight opt-in to gate on. The
+    always-on check is ``0.0 <= sat_weight <= 1.0``. ``require_zero_local_sat_weight``
+    (default ``False``) preserves the optional strict guard that forces the
+    local SAT blend to 0.0 for operators who want it.
     """
 
     env = os.environ if env is None else env
@@ -103,7 +99,6 @@ def run_validator_sat_launch_preflight(
         "network": settings.network.name,
         "netuid": settings.network.netuid,
         "validator_hotkey": settings.network.validator_hotkey,
-        "remote_weight_source_enabled": settings.remote_weight_source.enabled,
         "local_sat_weight": sat_weight,
         "task_family_weights": task_family_weights,
         "weights_disabled": settings.weights.disabled,
@@ -136,26 +131,7 @@ def run_validator_sat_launch_preflight(
         )
     if require_zero_local_sat_weight and sat_weight != 0.0:
         errors.append(
-            f"weights.task_family_weights.{SAT_FAMILY_ID} must stay 0.0 for remote-weight launch"
-        )
-
-    remote = settings.remote_weight_source
-    if require_remote_weight_source and not remote.enabled:
-        errors.append("remote_weight_source.enabled must be true before mainnet SAT weight")
-
-    if remote.enabled:
-        if not remote.url.strip():
-            errors.append("remote_weight_source.url is required when remote weights are enabled")
-        if not remote.key_id.strip():
-            errors.append("remote_weight_source.key_id is required when remote weights are enabled")
-        remote_key = env.get(remote.public_key_env, "").strip()
-        if not remote_key:
-            errors.append(f"{remote.public_key_env} is required when remote weights are enabled")
-        elif not _hex_is_32_bytes(remote_key):
-            errors.append(f"{remote.public_key_env} must be a 32-byte hex public key")
-    elif sat_weight > 0.0:
-        warnings.append(
-            f"{SAT_FAMILY_ID} has local nonzero weight while remote weights are disabled"
+            f"weights.task_family_weights.{SAT_FAMILY_ID} must stay 0.0 under the strict guard"
         )
 
     if settings.weights.disabled:

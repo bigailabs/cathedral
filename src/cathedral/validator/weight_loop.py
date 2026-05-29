@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable
 
 import aiosqlite
 import structlog
@@ -97,7 +96,6 @@ async def run_weight_loop(
     stop: asyncio.Event | None = None,
     initial_backfill_complete: asyncio.Event | None = None,
     initial_backfill_timeout_secs: float = 120.0,
-    remote_weight_apply: Callable[[], Awaitable[object]] | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
     # Track whether the initial backfill ever signalled completion.
@@ -157,17 +155,6 @@ async def run_weight_loop(
             backfill_ready = True
             logger.info("weight_loop_backfill_signal_received_late")
         try:
-            if remote_weight_apply is not None:
-                # Remote mode must not fall back to locally computed weights while
-                # waiting for a signed publisher vector; the callback owns all
-                # apply/no-op decisions for this cadence tick.
-                await remote_weight_apply()
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=interval_secs)
-                except TimeoutError:
-                    pass
-                continue
-
             metagraph = await chain.metagraph()
             registered = await chain.is_registered()
             await health.update(
@@ -287,12 +274,11 @@ async def run_weight_loop(
                 # local DB (timeout fallback path or no pull loop wired).
                 backfill_ready=backfill_ready,
             )
-            # Canonical event name for a Path A chain.set_weights completion.
-            # The `status` field is authoritative - HEALTHY means the extrinsic
+            # Canonical event name for a chain.set_weights completion. The
+            # `status` field is authoritative - HEALTHY means the extrinsic
             # landed, DISABLED means dry-run completed, BLOCKED_BY_* means the
-            # chain rejected or never accepted it. Pairs with
-            # `chain_weights_set_remote` in remote_weight_loop.py for Path B.
-            # Dual-emitted with the legacy `weights_set` event for one release.
+            # chain rejected or never accepted it. Dual-emitted with the legacy
+            # `weights_set` event for one release.
             logger.info(
                 "chain_weights_set_local",
                 count=len(final_vector),

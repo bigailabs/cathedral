@@ -23,11 +23,11 @@ class HealthSnapshot(BaseModel):
     claims_verifying: int = 0
     claims_verified: int = 0
     claims_rejected: int = 0
-    # Which weight path the validator is running: "A" = local aggregation
-    # (pull_loop + weight_loop, hardcoded burn); "B" = signed publisher
-    # vector (remote_weight_loop + apply_cached_remote_vector_once, publisher-
-    # controlled burn). None = uninitialised (set during lifespan startup).
-    # See AGENTS.md "Two weight paths" for the full description.
+    # Weight path indicator. The validator now runs a single local path:
+    # "A" = local aggregation (pull_loop + weight_loop, hardcoded burn).
+    # The signed-publisher-vector relay (Path B) was removed. The field is
+    # retained as a stable /health key (always "A" once startup sets it;
+    # None = uninitialised).
     weight_path: str | None = None
 
 
