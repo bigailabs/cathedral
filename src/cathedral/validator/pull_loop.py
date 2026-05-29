@@ -188,7 +188,11 @@ async def latest_pulled_score_per_hotkey(
             schema_version = int(row[3])
         except (TypeError, ValueError):
             schema_version = 1
-        if schema_version == 5:
+        if schema_version in (5, 6):
+            # v6 (PAR-2 facts) routes to the same SAT lane bucket as v5.
+            # The mean-of-weighted_score blend below is the legacy path; the
+            # PAR-2 aggregation (solve_rank/challenge_value/operator) replaces
+            # it once open-window scoring is live (no v6 rows exist until then).
             if task_type not in lane_weights:
                 continue
             score_bucket = task_type
@@ -827,6 +831,20 @@ _SIGNED_EVAL_OUTPUT_KEYS_V5 = frozenset(
     }
 )
 
+# v6, PAR-2 facts. v5 + challenge_value / solve_rank / solved / operator(coldkey)
+# for the open-window scoring. Must stay byte-identical to
+# src/cathedral/eval/v2_payload.py:_SIGNED_KEYS_BY_VERSION[6] and
+# src/cathedral/lanes/sign.py:TASK_FAMILY_SIGNED_KEYS_V6. Validators verify v6
+# (forward-compatible) before the publisher emits it.
+_SIGNED_EVAL_OUTPUT_KEYS_V6 = _SIGNED_EVAL_OUTPUT_KEYS_V5 | frozenset(
+    {
+        "challenge_value",
+        "solve_rank",
+        "solved",
+        "operator",
+    }
+)
+
 # Version-keyed dispatcher. A record's signed payload schema is selected
 # by ``eval_output_schema_version`` (defaulting to 1 when the field is
 # absent — the v1.0.x wire shape).
@@ -835,6 +853,7 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
     2: _SIGNED_EVAL_OUTPUT_KEYS_V2,
     3: _SIGNED_EVAL_OUTPUT_KEYS_V3,
     5: _SIGNED_EVAL_OUTPUT_KEYS_V5,
+    6: _SIGNED_EVAL_OUTPUT_KEYS_V6,
 }
 
 # Back-compat alias — the prior constant name. Tests and downstream code
