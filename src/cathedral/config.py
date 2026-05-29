@@ -436,22 +436,3 @@ def _same_path(left: Path, right: Path) -> bool:
 def _toml_string(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
-
-
-# --------------------------------------------------------------------------
-# Miner
-# --------------------------------------------------------------------------
-
-
-class MinerSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CATHEDRAL_MINER_", env_nested_delimiter="__")
-
-    miner_hotkey: str
-    owner_wallet: str
-    validator_url: str
-    validator_bearer_env: str = "CATHEDRAL_VALIDATOR_BEARER"
-
-    @classmethod
-    def from_toml(cls, path: str | Path) -> MinerSettings:
-        data = _load_toml(Path(path))
-        return cls.model_validate(data)

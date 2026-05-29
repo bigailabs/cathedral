@@ -1,1 +1,1 @@
-"""Cathedral CLIs — `cathedral`, `cathedral-validator`, `cathedral-miner`."""
+"""Cathedral CLIs — `cathedral`, `cathedral-validator`, `cathedral-publisher`."""

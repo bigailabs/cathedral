@@ -1,4 +1,0 @@
-miner_hotkey = "REPLACE_ME"
-owner_wallet = "REPLACE_ME"
-validator_url = "https://validator.cathedral.computer"
-validator_bearer_env = "CATHEDRAL_VALIDATOR_BEARER"
