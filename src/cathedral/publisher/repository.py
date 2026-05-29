@@ -1705,6 +1705,114 @@ async def atomic_claim_winner(
         raise
 
 
+async def insert_ranked_eval_run(
+    conn: aiosqlite.Connection,
+    *,
+    family_id: str,
+    challenge_id: str,
+    miner_hotkey: str,
+    submission_id: str,
+    cnf_sha256: str,
+    dimacs_solution_sha256: str,
+    ran_at_iso: str,
+    signed_row: dict[str, Any],
+    epoch: int,
+    round_index: int,
+    time_limit_seconds: int,
+    dimacs_solution: str | None = None,
+    attestation_status: str = "pending",
+) -> str:
+    """Insert an open-window ranked-solve eval_run artifact + DIMACS sidecar.
+
+    Open-window analogue of :func:`atomic_claim_winner`: unlike the single-winner
+    path it does NOT take the ``lane_challenge_winners`` CAS lock and does NOT
+    flip the challenge to ``locked`` — every valid solver gets an eval_run and
+    the challenge stays active for the rest of the window. The operator's rank is
+    carried in the schema-6 ``signed_row`` (``solve_rank``) and recorded in
+    ``lane_challenge_solves`` separately via :func:`record_ranked_solve`.
+
+    Caller MUST hold ``ctx.db_write_lock`` (same contract as atomic_claim_winner).
+    """
+    eval_run_id = str(signed_row["id"])
+    task_json, output_card_json, output_card_hash = _task_family_storage_from_signed_row(
+        signed_row,
+        family_id=family_id,
+        challenge_id=challenge_id,
+        cnf_sha256=cnf_sha256,
+        dimacs_solution_sha256=dimacs_solution_sha256,
+        time_limit_seconds=time_limit_seconds,
+        miner_hotkey=miner_hotkey,
+    )
+
+    if conn.in_transaction:
+        await conn.commit()
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        await conn.execute(
+            """
+            INSERT INTO eval_runs (
+                id, submission_id, epoch, round_index, polaris_agent_id,
+                polaris_run_id, task_json, output_card_json, output_card_hash,
+                score_parts, weighted_score, ran_at, duration_ms, errors,
+                cathedral_signature, polaris_verified, polaris_attestation,
+                trace_json, polaris_manifest,
+                eval_card_excerpt, eval_artifact_manifest_hash,
+                eval_artifact_bundle_url, eval_artifact_manifest_url,
+                eval_output_schema_version, attestation_status
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                eval_run_id,
+                submission_id,
+                int(epoch),
+                int(round_index),
+                f"direct-submit:{miner_hotkey[:12]}",
+                f"{family_id}:{eval_run_id}",
+                json.dumps(task_json, sort_keys=True),
+                json.dumps(output_card_json, sort_keys=True),
+                output_card_hash,
+                json.dumps(dict(signed_row["score_parts"])),
+                float(signed_row["weighted_score"]),
+                ran_at_iso,
+                0,
+                None,
+                str(signed_row["cathedral_signature"]),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                int(signed_row.get("eval_output_schema_version") or 6),
+                attestation_status,
+            ),
+        )
+        await conn.execute(
+            "UPDATE agent_submissions "
+            "SET status = 'ranked', current_score = ?, rejection_reason = NULL "
+            "WHERE id = ?",
+            (float(signed_row["weighted_score"]), submission_id),
+        )
+        if dimacs_solution is not None:
+            await conn.execute(
+                "INSERT INTO eval_run_solutions ("
+                "eval_run_id, dimacs_solution, body_sha256, stored_at"
+                ") VALUES (?, ?, ?, ?)",
+                (eval_run_id, dimacs_solution, dimacs_solution_sha256, ran_at_iso),
+            )
+        await conn.commit()
+        return eval_run_id
+    except Exception:
+        with suppress(Exception):
+            await conn.rollback()
+        raise
+
+
 async def _existing_winner(
     conn: aiosqlite.Connection, family_id: str, challenge_id: str
 ) -> tuple[str, str] | None:
