@@ -2131,7 +2131,15 @@ def _task_family_storage_from_signed_row(
     time_limit_seconds: int,
     miner_hotkey: str,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
-    """Build eval_runs storage JSON from a signed schema-5 row."""
+    """Build eval_runs storage JSON from a signed schema-5 or schema-6 row.
+
+    Schema-6 (open-window PAR-2) rows additionally carry
+    ``challenge_value`` / ``solve_rank`` / ``solved`` / ``operator``. These
+    are persisted into ``task_json`` so the ``/v1/leaderboard/recent`` feed
+    projection (``reads._eval_run_to_output``) can reproduce the exact signed
+    v6 shape — without them the validator can neither verify the v6 signature
+    nor compute per-operator PAR-2 merit.
+    """
     import blake3
 
     from cathedral.v1_types import canonical_json
@@ -2157,6 +2165,12 @@ def _task_family_storage_from_signed_row(
         "cnf_sha256": cnf_sha256,
         "miner_solution_sha256": dimacs_solution_sha256,
     }
+    # Schema-6 PAR-2 facts: persist the signed open-window scoring inputs so
+    # the feed projection can rebuild the byte-exact v6 signed shape. Absent
+    # on schema-5 rows (single-winner / legacy), so this is a no-op there.
+    for _v6_key in ("challenge_value", "solve_rank", "solved", "operator"):
+        if _v6_key in signed_row:
+            task_json[_v6_key] = signed_row[_v6_key]
     return task_json, output_card_json, output_card_hash
 
 

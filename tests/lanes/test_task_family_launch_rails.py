@@ -181,6 +181,71 @@ def test_task_family_v5_default_is_unchanged() -> None:
     pull_loop.verify_eval_output_signature(row, sk.public_key())
 
 
+def test_task_family_v6_survives_storage_and_feed_projection() -> None:
+    """Regression: a signed v6 row must still verify (and carry its PAR-2
+    facts) after the publisher's storage round-trip + leaderboard feed
+    projection.
+
+    The live e2e found that the publisher stored the signed row via
+    ``_task_family_storage_from_signed_row`` (which dropped
+    challenge_value/solve_rank/solved/operator) and projected it via
+    ``_eval_run_to_output`` (which had no schema-6 branch -> legacy shape with
+    no version marker). The validator then mis-verified it as v1 and silently
+    discarded every open-window solve, so PAR-2 merit was always empty. This
+    guards the full publisher -> feed -> validator round-trip.
+    """
+    from cathedral.publisher.reads import _eval_run_to_output
+    from cathedral.publisher.repository import _task_family_storage_from_signed_row
+
+    row, sk = _signed_row_v6()
+    task_json, output_card_json, output_card_hash = _task_family_storage_from_signed_row(
+        row,
+        family_id="synthetic_boolean_v1",
+        challenge_id="chal-1",
+        cnf_sha256="cnf-sha",
+        dimacs_solution_sha256="sol-sha",
+        time_limit_seconds=60,
+        miner_hotkey=str(row["miner_hotkey"]),
+    )
+    # (1) storage must keep the v6 PAR-2 facts.
+    assert task_json["challenge_value"] == 3.0
+    assert task_json["solve_rank"] == 2
+    assert task_json["solved"] is True
+    assert task_json["operator"] == "5ColdkeyOperator"
+
+    run = {
+        "id": row["id"],
+        "submission_id": row["agent_id"],
+        "eval_output_schema_version": 6,
+        "weighted_score": row["weighted_score"],
+        "score_parts": row["score_parts"],
+        "task_json": task_json,
+        "output_card_json": output_card_json,
+        "output_card_hash": output_card_hash,
+        "cathedral_signature": row["cathedral_signature"],
+        "ran_at": row["ran_at"],
+        "merkle_epoch": None,
+    }
+    sub = {
+        "id": row["agent_id"],
+        "display_name": row["agent_display_name"],
+        "miner_hotkey": row["miner_hotkey"],
+        "card_id": "synthetic_boolean_v1",
+    }
+    projected = _eval_run_to_output(run, sub)
+
+    # (2) the feed projection must carry the v6 marker + PAR-2 facts.
+    assert projected["eval_output_schema_version"] == 6
+    assert projected["solve_rank"] == 2
+    assert projected["challenge_value"] == 3.0
+    assert projected["solved"] is True
+    assert projected["operator"] == "5ColdkeyOperator"
+    # (3) the validator must verify the projected row (the bug: it could not)...
+    pull_loop.verify_eval_output_signature(projected, sk.public_key())
+    # ...and resolve the hotkey for ingestion (the _hotkey_for v6 gap).
+    assert pull_loop._hotkey_for(projected) == "5Miner"
+
+
 def test_task_family_signed_row_rejects_tampered_score() -> None:
     row, sk = _signed_row()
     row["weighted_score"] = 0.0

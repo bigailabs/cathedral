@@ -790,7 +790,7 @@ def _hotkey_for(eval_output: dict[str, Any]) -> str | None:
         version = int(version_raw)
     except (TypeError, ValueError):
         version = 1
-    if version in {3, 5}:
+    if version in {3, 5, 6}:
         hk = eval_output.get("miner_hotkey")
         return hk if isinstance(hk, str) and hk else None
 

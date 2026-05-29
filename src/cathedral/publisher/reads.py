@@ -266,10 +266,10 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             "failure_reason": output.get("failure_reason"),
             "merkle_epoch": run.get("merkle_epoch"),
         }
-    if schema_version == 5:
+    if schema_version in (5, 6):
         task_json = run.get("task_json") or {}
         output = run.get("output_card_json") or {}
-        return {
+        projection = {
             "id": run["id"],
             "agent_id": sub["id"],
             "agent_display_name": sub["display_name"],
@@ -287,10 +287,20 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             or output.get("verifier_details_hash"),
             "rejection_reason": output.get("rejection_reason"),
             "ran_at": run["ran_at"],
-            "eval_output_schema_version": 5,
+            "eval_output_schema_version": schema_version,
             "cathedral_signature": run["cathedral_signature"],
             "merkle_epoch": run.get("merkle_epoch"),
         }
+        if schema_version == 6:
+            # Open-window PAR-2 facts. MUST be present so the validator can
+            # verify against TASK_FAMILY_SIGNED_KEYS_V6 AND read the per-operator
+            # merit inputs. Persisted in task_json by
+            # repository._task_family_storage_from_signed_row.
+            projection["challenge_value"] = task_json.get("challenge_value")
+            projection["solve_rank"] = task_json.get("solve_rank")
+            projection["solved"] = task_json.get("solved")
+            projection["operator"] = task_json.get("operator")
+        return projection
     if schema_version == 2:
         excerpt_raw = run.get("eval_card_excerpt")
         if isinstance(excerpt_raw, str):
