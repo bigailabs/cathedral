@@ -30,7 +30,6 @@ from typing import Any
 import aiosqlite
 import structlog
 
-from cathedral.cards.registry import CardRegistry
 from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.runner_types import PolarisRunner
 from cathedral.lanes.challenge_lock import ChallengeLock, SqliteChallengeLock
@@ -122,7 +121,7 @@ class EvalOrchestrator:
         hippius: HippiusClient,
         polaris: PolarisRunner | None = None,
         signer: EvalSigner,
-        registry: CardRegistry,
+        registry: object | None = None,
         runner_for: Callable[[dict[str, Any]], PolarisRunner] | None = None,
         task_family_challenge_source: ChallengeSource | None = None,
         task_family_challenge_lock: ChallengeLock | None = None,
@@ -519,7 +518,7 @@ async def run_eval_loop(
     polaris: PolarisRunner | None = None,
     runner_for: Callable[[dict[str, Any]], PolarisRunner] | None = None,
     signer: EvalSigner,
-    registry: CardRegistry,
+    registry: object | None = None,
     poll_interval_secs: float = 10.0,
     max_concurrent: int = 2,
     stop: asyncio.Event | None = None,
@@ -883,7 +882,6 @@ async def _run_once_async() -> int:
         hippius=ctx.hippius,
         runner_for=runner_for,
         signer=ctx.signer,
-        registry=ctx.registry,
         task_family_challenge_source=SqliteChallengeSource(ctx.db),
         task_family_challenge_lock=SqliteChallengeLock(ctx.db),
         task_family_fetch_token_store=SqliteFetchTokenStore(ctx.db),

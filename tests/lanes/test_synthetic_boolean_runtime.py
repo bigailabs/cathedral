@@ -435,7 +435,6 @@ async def test_run_once_wires_cnf_url_token_store(
             hippius=StubHippiusClient(),
             polaris=StubPolarisRunner(),
             signer=EvalSigner(Ed25519PrivateKey.generate()),
-            registry=_Registry(),  # type: ignore[arg-type]
         )
         monkeypatch.setattr(publisher_app, "_LATEST_CTX", ctx)
 

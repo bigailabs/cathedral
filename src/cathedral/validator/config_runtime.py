@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from cathedral.cards.registry import CardRegistry
 from cathedral.chain import Chain
 from cathedral.config import ValidatorSettings
 from cathedral.evidence import EvidenceCollector
@@ -24,7 +23,6 @@ class RuntimeContext:
     bearer: str
     chain: Chain
     collector: EvidenceCollector
-    registry: CardRegistry
     health: Health
     cathedral_public_key: Ed25519PublicKey | None = None
     publisher_api_token: str | None = None

@@ -33,7 +33,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from cathedral.cards.registry import CardRegistry
 from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.orchestrator import run_eval_loop
 from cathedral.eval.runner_types import (
@@ -128,7 +127,6 @@ class PublisherContext:
     hippius: HippiusClient
     polaris: PolarisRunner
     signer: EvalSigner
-    registry: CardRegistry
     submissions_paused: bool = False
     # One aiosqlite connection is shared by HTTP routes and the evaluator.
     # SAT finalization opens explicit transactions on that connection, so
@@ -418,7 +416,6 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     hippius=ctx.hippius,
                     runner_for=_runner_for,
                     signer=ctx.signer,
-                    registry=ctx.registry,
                     poll_interval_secs=10.0,
                     max_concurrent=_env_int("CATHEDRAL_EVAL_MAX_CONCURRENT", 2),
                     stop=stop,
@@ -1012,7 +1009,6 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
             hippius=hippius,
             polaris=polaris,
             signer=signer,
-            registry=CardRegistry.baseline(),
         )
 
     return build_publisher_app(_factory)
@@ -1162,7 +1158,6 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
             hippius=hippius,
             polaris=polaris,
             signer=signer,
-            registry=CardRegistry.baseline(),
         )
         global _LATEST_CTX
         _LATEST_CTX = ctx

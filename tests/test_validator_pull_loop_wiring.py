@@ -8,7 +8,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from cathedral.cards.registry import CardRegistry
 from cathedral.chain.client import Metagraph, MinerNode
 from cathedral.chain.mock import MockChain
 from cathedral.config import (
@@ -73,7 +72,6 @@ def test_pull_loop_scheduled_when_public_key_present(deps) -> None:
         bearer="t",
         chain=chain,
         collector=collector,
-        registry=CardRegistry.baseline(),
         health=Health(),
         cathedral_public_key=pk,
     )
@@ -97,7 +95,6 @@ def test_pull_loop_skipped_when_public_key_absent(deps) -> None:
         bearer="t",
         chain=chain,
         collector=collector,
-        registry=CardRegistry.baseline(),
         health=Health(),
         cathedral_public_key=None,
     )

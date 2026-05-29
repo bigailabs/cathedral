@@ -11,7 +11,6 @@ import structlog
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import FastAPI
 
-from cathedral.cards.registry import CardRegistry
 from cathedral.chain import BittensorChain, Chain
 from cathedral.evidence import EvidenceCollector, HttpPolarisFetcher
 from cathedral.validator import pull_loop, weight_loop
@@ -158,7 +157,6 @@ def from_settings(settings_path: str) -> FastAPI:
         bearer=bearer,
         chain=chain,
         collector=collector,
-        registry=CardRegistry.baseline(),
         health=Health(),
         cathedral_public_key=cathedral_pubkey,
         publisher_api_token=publisher_api_token,

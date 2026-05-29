@@ -4,7 +4,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from cathedral.cards.registry import CardRegistry
 from cathedral.chain.client import Metagraph, MinerNode
 from cathedral.chain.mock import MockChain
 from cathedral.config import (
@@ -59,7 +58,6 @@ def app_and_client(tmp_path):
         bearer="testtoken",
         chain=chain,
         collector=collector,
-        registry=CardRegistry.baseline(),
         health=Health(),
     )
     app = build_app(ctx)
