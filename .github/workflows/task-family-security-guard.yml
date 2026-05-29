@@ -9,6 +9,7 @@ on:
       - .github/workflows/task-family-security-guard.yml
       - pyproject.toml
       - src/cathedral/eval/ssh_hermes_runner.py
+      - src/cathedral/eval/eval_signer.py
       - src/cathedral/lanes/**
       - src/cathedral/publisher/challenge_cnf.py
       - src/cathedral/publisher/reads.py
@@ -22,6 +23,7 @@ on:
       - .github/workflows/task-family-security-guard.yml
       - pyproject.toml
       - src/cathedral/eval/ssh_hermes_runner.py
+      - src/cathedral/eval/eval_signer.py
       - src/cathedral/lanes/**
       - src/cathedral/publisher/challenge_cnf.py
       - src/cathedral/publisher/reads.py
@@ -50,6 +52,7 @@ jobs:
         run: |
           python -m ruff check \
             src/cathedral/eval/ssh_hermes_runner.py \
+            src/cathedral/eval/eval_signer.py \
             src/cathedral/lanes/contract.py \
             src/cathedral/lanes/registry.py \
             src/cathedral/publisher/challenge_cnf.py \
