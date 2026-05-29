@@ -271,12 +271,15 @@ async def par2_merit_per_operator(
     orders operators by that rank, and splits each challenge's
     ``challenge_value`` (w_c) budget via the Sybil-resistant ``par2`` engine.
 
-    ``coldkey_of`` optionally maps the signed ``operator`` (hotkey) to its
-    coldkey for the authoritative per-operator dedup (resolved from the
-    validator's metagraph); defaults to identity (operator == hotkey).
+    ``coldkey_of`` maps the signed ``operator`` (hotkey) to its coldkey for the
+    authoritative per-operator dedup (resolved from the validator's metagraph);
+    defaults to identity (operator == hotkey). Ranking is over distinct
+    *operators* (coldkeys), but each challenge's share is attributed to the
+    hotkey that achieved that operator's best (lowest) rank — so the result is
+    keyed by HOTKEY (directly uid-mappable for set_weights) and the operator's
+    other (Sybil) hotkeys earn nothing.
 
-    SHADOW: the result is computed/diffed alongside the live scoring, not yet
-    driving ``set_weights``. Returns ``{operator: M}``.
+    SHADOW until the flip flag is on. Returns ``{hotkey: M}``.
     """
     await _ensure_pulled_eval_runs_table(conn)
     since = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
@@ -293,24 +296,31 @@ async def par2_merit_per_operator(
     rows = await cur.fetchall()
 
     resolver = coldkey_of or {}
-    # challenge_key -> (challenge_value, {operator: best_rank})
-    challenges: dict[tuple[str, str], tuple[float, dict[str, int]]] = {}
+    # challenge_key -> (w_c, {operator_identity: (best_rank, best_hotkey)})
+    challenges: dict[tuple[str, str], tuple[float, dict[str, tuple[int, str]]]] = {}
     for epoch_salt, task_id_public, operator, solve_rank, challenge_value in rows:
-        op = resolver.get(str(operator), str(operator))
+        hotkey = str(operator)
+        identity = resolver.get(hotkey, hotkey)
         key = (str(epoch_salt), str(task_id_public))
         w_c = float(challenge_value if challenge_value is not None else 1.0)
         if key not in challenges:
             challenges[key] = (w_c, {})
-        ops = challenges[key][1]
+        info = challenges[key][1]
         rank = int(solve_rank)
-        if op not in ops or rank < ops[op]:
-            ops[op] = rank
+        prev = info.get(identity)
+        if prev is None or rank < prev[0]:
+            info[identity] = (rank, hotkey)
 
-    par2_input: list[tuple[float, list[str]]] = []
-    for w_c, ops in challenges.values():
-        ordered = [op for op, _ in sorted(ops.items(), key=lambda kv: kv[1])]
-        par2_input.append((w_c, ordered))
-    return par2.aggregate_merit(par2_input, alpha=alpha)
+    merit: dict[str, float] = {}
+    for w_c, info in challenges.values():
+        # Rank distinct operators by their best rank, split the w_c budget,
+        # then attribute each operator's share to its best-ranked hotkey.
+        ordered = [ident for ident, _ in sorted(info.items(), key=lambda kv: kv[1][0])]
+        shares = par2.challenge_shares(ordered, challenge_value=w_c, alpha=alpha)
+        for identity, share in shares.items():
+            best_hotkey = info[identity][1]
+            merit[best_hotkey] = merit.get(best_hotkey, 0.0) + share
+    return merit
 
 
 def _normalized_task_family_weights(

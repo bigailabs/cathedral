@@ -29,6 +29,7 @@ class MinerNode:
     last_update_block: int
     validator_permit: bool | None = None
     stake: float | None = None
+    coldkey: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,16 @@ class Metagraph:
 
     def hotkey_to_uid(self) -> dict[str, int]:
         return {m.hotkey: m.uid for m in self.miners}
+
+    def hotkey_to_coldkey(self) -> dict[str, str]:
+        """Map each hotkey to its owning coldkey (the operator identity).
+
+        Feeds the PAR-2 per-operator Sybil cap: hotkeys sharing a coldkey are
+        one operator, so splitting into many hotkeys cannot multiply merit.
+        Hotkeys whose coldkey is unknown are omitted (treated as their own
+        operator by the caller's fallback).
+        """
+        return {m.hotkey: m.coldkey for m in self.miners if m.coldkey}
 
 
 class Chain(Protocol):
@@ -119,6 +130,7 @@ class BittensorChain:
             mg = self._subtensor.metagraph(netuid=self.netuid, lite=True)
             uids = _as_list(mg.uids)
             hotkeys = list(mg.hotkeys)
+            coldkeys = list(getattr(mg, "coldkeys", []) or [])
             last_update = _as_list(getattr(mg, "last_update", None))
             permits = _as_list(getattr(mg, "validator_permit", None))
             stakes = _as_list(
@@ -133,6 +145,7 @@ class BittensorChain:
                     last_update_block=int(lu) if i < len(last_update) else 0,
                     validator_permit=_optional_bool_at(permits, i),
                     stake=_optional_float_at(stakes, i),
+                    coldkey=str(coldkeys[i]) if i < len(coldkeys) else None,
                 )
                 for i, (uid, hk, lu) in enumerate(
                     zip(uids, hotkeys, last_update + [0] * len(uids), strict=False)

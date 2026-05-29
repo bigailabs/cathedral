@@ -219,7 +219,12 @@ async def run_weight_loop(
             final_vector = normalized
             try:
                 par2_merit = await par2_merit_per_operator(
-                    conn, since_days=7, alpha=_par2_alpha()
+                    conn,
+                    since_days=7,
+                    alpha=_par2_alpha(),
+                    # Coldkey from the metagraph = the operator identity, so the
+                    # per-operator Sybil cap binds across a coldkey's hotkeys.
+                    coldkey_of=metagraph.hotkey_to_coldkey(),
                 )
                 par2_raw = [
                     (uid_by_hotkey[hk], m)

@@ -63,15 +63,17 @@ async def test_coldkey_dedup_defeats_sybil(tmp_path) -> None:
         per_hotkey = await par2_merit_per_operator(conn, since_days=3650, alpha=0.5)
         assert set(per_hotkey) == {"h1", "h2", "h9"}
 
-        # With coldkey resolution: h1,h2 collapse to C1 at its best rank (1); the
-        # budget splits between just C1 and h9 — the extra sybil slot earns nothing.
+        # With coldkey resolution: h1,h2 collapse to operator C1 at its best
+        # rank (1); the budget splits between just C1 and h9. C1's share is
+        # attributed to its best-ranked hotkey h1, and the extra sybil hotkey
+        # h2 earns NOTHING (not in the result).
         resolved = await par2_merit_per_operator(
             conn, since_days=3650, alpha=0.5, coldkey_of={"h1": "C1", "h2": "C1"}
         )
-        assert set(resolved) == {"C1", "h9"}
+        assert set(resolved) == {"h1", "h9"}  # h2 (the sybil slot) earns zero
         assert math.isclose(sum(resolved.values()), 10.0, rel_tol=1e-9)
-        assert resolved["C1"] > resolved["h9"]
-        assert math.isclose(resolved["C1"], 10.0 * 1.0 / (1.0 + 2 ** -0.5), rel_tol=1e-9)
+        assert resolved["h1"] > resolved["h9"]
+        assert math.isclose(resolved["h1"], 10.0 * 1.0 / (1.0 + 2 ** -0.5), rel_tol=1e-9)
     finally:
         await conn.close()
 
