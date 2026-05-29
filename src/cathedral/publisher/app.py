@@ -36,11 +36,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from cathedral.cards.registry import CardRegistry
 from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.orchestrator import run_eval_loop
-from cathedral.eval.polaris_runner import (
-    BundleCardRunner,
-    HttpPolarisRunner,
-    HttpPolarisRunnerConfig,
-)
 from cathedral.eval.runner_types import (
     PolarisRunner,
     StubPolarisRunner,
@@ -391,46 +386,30 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             )
 
         if start_eval_loop:
-            # Per-submission runner dispatch: polaris-tier rows go to
-            # PolarisRuntimeRunner (Tier A), TEE-tier rows are pre-verified
-            # at submit and only need the bundled card scored, everything
-            # else falls back to CATHEDRAL_EVAL_MODE.
+            # Per-submission runner dispatch. After the card-core strip the
+            # only live runners are the stub family (smoke tests / dev) and
+            # the SAT prober (attestation_mode='ssh-probe' -> SshHermesRunner
+            # via CATHEDRAL_PROBER_VERSION=v2). The legacy card runners
+            # (polaris/polaris-deploy/bundle/tee) were removed with the card
+            # eval branch; everything else falls back to CATHEDRAL_EVAL_MODE
+            # (a stub runner).
             from cathedral.eval.orchestrator import (
                 _resolve_polaris_runner_for_mode,
                 _resolve_polaris_runner_from_env,
             )
 
             def _runner_for(submission: dict[str, Any]) -> Any:
-                # Per-submission runner dispatch - the production wiring
-                # that mirrors the test-friendly `runner_for` in
-                # orchestrator.run_eval_loop. Order matters:
+                # Order matters:
                 #   1. env-mode stub overrides (tests + dev)
-                #   2. attestation_mode='polaris-deploy' (v2 paid) - real
-                #      Hermes via Polaris's native deploy pipeline
-                #   3. attestation_mode='ssh-probe' (v2 free) - Cathedral
-                #      SSHs into the miner's box
-                #   4. attestation_mode='polaris' (legacy v1) - the
-                #      cathedral-runtime LLM shim path, kept as backup
-                #   5. attestation_mode='tee' - bundled card, pre-verified
-                #   6. anything else falls back to CATHEDRAL_EVAL_MODE
+                #   2. attestation_mode='ssh-probe' (SAT prober) - Cathedral
+                #      SSHs into the miner's box and runs Hermes
+                #   3. anything else falls back to CATHEDRAL_EVAL_MODE
                 mode = (submission.get("attestation_mode") or "").strip().lower()
                 env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").strip().lower()
-                has_key = bool(os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"))
                 if env_mode.startswith("stub"):
                     return _resolve_polaris_runner_from_env()
-                if mode == "polaris-deploy" and has_key:
-                    return _resolve_polaris_runner_for_mode("polaris-deploy")
                 if mode == "ssh-probe":
                     return _resolve_polaris_runner_for_mode("ssh-probe")
-                if mode == "polaris" and has_key:
-                    return _resolve_polaris_runner_for_mode("polaris")
-                if mode == "tee":
-                    return _resolve_polaris_runner_for_mode("bundle")
-                if mode == "bundle":
-                    # BYO-compute: miner baked the produced card into the
-                    # bundle at artifacts/last-card.json. Publisher reads
-                    # and scores without re-running the agent.
-                    return _resolve_polaris_runner_for_mode("bundle")
                 return _resolve_polaris_runner_from_env()
 
             eval_task = asyncio.create_task(
@@ -982,14 +961,13 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
       CATHEDRAL_KEK_HEX or CATHEDRAL_MASTER_ENCRYPTION_KEY (32-byte hex)
       CATHEDRAL_EVAL_SIGNING_KEY (32-byte hex Ed25519 private key)
       CATHEDRAL_EVAL_MODE (optional):
-        "stub"   -> StubPolarisRunner (placeholder card for smoke tests)
-        "bundle" -> BundleCardRunner  (BYO-compute; score miner's pre-baked
-                                       artifacts/last-card.json directly)
-        unset / other -> HttpPolarisRunner (talks to Polaris compute)
+        "ssh-probe" + CATHEDRAL_PROBER_VERSION=v2 -> SshHermesRunner
+                  (the LIVE SAT prober)
+        "stub" / unset / other -> StubPolarisRunner (placeholder for smoke
+                  tests; the legacy card runners were removed with the
+                  card-core strip)
       HIPPIUS_S3_ACCESS_KEY / HIPPIUS_S3_SECRET_KEY / HIPPIUS_S3_ENDPOINT
         / HIPPIUS_S3_REGION / HIPPIUS_S3_BUCKET
-      POLARIS_BASE_URL + POLARIS_API_TOKEN (when CATHEDRAL_EVAL_MODE is
-        unset or points at the HTTP runner)
     """
 
     async def _factory() -> PublisherContext:
@@ -1020,19 +998,14 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
             raise RuntimeError("CATHEDRAL_EVAL_SIGNING_KEY env var required (32-byte hex)")
         signer = EvalSigner.from_env_hex(signing_hex)
 
-        polaris: PolarisRunner
-        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").strip().lower()
-        if eval_mode == "stub":
-            polaris = StubPolarisRunner()
-        elif eval_mode == "bundle":
-            polaris = BundleCardRunner()
-        else:
-            polaris = HttpPolarisRunner(
-                HttpPolarisRunnerConfig(
-                    base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
-                    api_token=os.environ.get("POLARIS_API_TOKEN", ""),
-                )
-            )
+        # Back-compat default runner. The eval loop dispatches per
+        # submission via `_runner_for`; this field is only the fallback.
+        # After the card-core strip the only live runners are the stub
+        # family and the SAT prober (ssh-probe/v2 -> SshHermesRunner),
+        # both resolved from CATHEDRAL_EVAL_MODE.
+        from cathedral.eval.orchestrator import _resolve_polaris_runner_from_env
+
+        polaris: PolarisRunner = _resolve_polaris_runner_from_env()
 
         return PublisherContext(
             db=conn,
@@ -1168,19 +1141,19 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
         signer = EvalSigner.from_env_hex(signing_hex)
 
         # Polaris runner - stub mode unless explicitly configured.
+        # After the card-core strip the only runners are the stub family
+        # and the SAT prober (ssh-probe/v2). Non-stub, non-ssh-probe modes
+        # fall back to the happy-path stub rather than a card runner.
         eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").strip().lower()
         polaris: PolarisRunner
         if eval_mode.startswith("stub"):
             polaris = _build_stub_polaris(eval_mode)
-        elif eval_mode == "bundle":
-            polaris = BundleCardRunner()
+        elif eval_mode == "ssh-probe":
+            from cathedral.eval.orchestrator import _resolve_polaris_runner_from_env
+
+            polaris = _resolve_polaris_runner_from_env()
         else:
-            polaris = HttpPolarisRunner(
-                HttpPolarisRunnerConfig(
-                    base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
-                    api_token=os.environ.get("POLARIS_API_TOKEN", ""),
-                )
-            )
+            polaris = StubPolarisRunner()
 
         await _seed_default_card_definitions(conn)
 

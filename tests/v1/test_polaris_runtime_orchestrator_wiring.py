@@ -38,83 +38,20 @@ import cathedral.publisher.app  # noqa: F401  pre-warm
 # --------------------------------------------------------------------------
 
 
-def test_resolve_polaris_runner_from_env_polaris_mode(
+def test_resolve_polaris_runner_from_env_stub_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`CATHEDRAL_EVAL_MODE=polaris` -> `PolarisRuntimeRunner` is returned."""
+    """After the card-core strip, stub* and any unrecognized mode resolve
+    to ``StubPolarisRunner`` (the legacy card runners were removed)."""
     from cathedral.eval.orchestrator import _resolve_polaris_runner_from_env
-    from cathedral.eval.polaris_runner import (
-        PolarisRunnerError,
-        PolarisRuntimeRunner,
-    )
-
-    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "polaris")
-    monkeypatch.setenv("POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID", "sub_cathedral_runtime_v1")
-    monkeypatch.setenv("POLARIS_API_TOKEN", "test-token")
-    # Provide a 32-byte hex Ed25519 public key.
-    public_key_hex = "11" * 32
-    monkeypatch.setenv("POLARIS_ATTESTATION_PUBLIC_KEY", public_key_hex)
-
-    # The Polaris-mode resolver needs the publisher ctx for the HippiusClient.
-    # Stub one with the minimum surface used by HippiusPresignedUrlResolver.
-    class _StubCtx:
-        def __init__(self) -> None:
-            class _StubHippius:
-                def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str:
-                    return f"https://r2.example.invalid/{key}?exp={expires_in}"
-
-            self.hippius = _StubHippius()
-            self.db = None  # not used by dispatch
-            self.signer = None
-            self.registry = None
-
-    monkeypatch.setattr(
-        "cathedral.publisher.app.latest_ctx",
-        lambda: _StubCtx(),
-    )
-
-    runner = _resolve_polaris_runner_from_env()
-    assert isinstance(runner, PolarisRuntimeRunner)
-
-    # `polaris-runtime` is also accepted as an alias.
-    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "polaris-runtime")
-    runner2 = _resolve_polaris_runner_from_env()
-    assert isinstance(runner2, PolarisRuntimeRunner)
-
-    # Missing attestation key -> hard failure (no silent fallback).
-    monkeypatch.delenv("POLARIS_ATTESTATION_PUBLIC_KEY")
-    with pytest.raises(PolarisRunnerError):
-        _resolve_polaris_runner_from_env()
-
-
-def test_resolve_polaris_runner_other_modes_still_work(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Adding the `polaris` mode must not break existing dispatch."""
-    from cathedral.eval.orchestrator import _resolve_polaris_runner_from_env
-    from cathedral.eval.polaris_runner import (
-        BundleCardRunner,
-        FailingStubPolarisRunner,
-        HttpPolarisRunner,
-        MalformedStubPolarisRunner,
-        StubPolarisRunner,
-    )
+    from cathedral.eval.runner_types import StubPolarisRunner
 
     monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "stub")
     assert isinstance(_resolve_polaris_runner_from_env(), StubPolarisRunner)
 
-    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "stub-fail-polaris")
-    assert isinstance(_resolve_polaris_runner_from_env(), FailingStubPolarisRunner)
-
-    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "stub-bad-card")
-    assert isinstance(_resolve_polaris_runner_from_env(), MalformedStubPolarisRunner)
-
-    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "bundle")
-    assert isinstance(_resolve_polaris_runner_from_env(), BundleCardRunner)
-
-    # Default / legacy: HttpPolarisRunner.
+    # Unknown modes fall back to the stub runner rather than a card runner.
     monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "http-polaris")
-    assert isinstance(_resolve_polaris_runner_from_env(), HttpPolarisRunner)
+    assert isinstance(_resolve_polaris_runner_from_env(), StubPolarisRunner)
 
 
 def test_ssh_probe_v2_invalid_stdout_cap_env_falls_back(

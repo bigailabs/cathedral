@@ -21,22 +21,18 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
-import tempfile
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import aiosqlite
 import structlog
 
 from cathedral.cards.registry import CardRegistry
-from cathedral.eval.runner_types import PolarisRunner, PolarisRunnerError
-from cathedral.eval.scoring_pipeline import EvalSigner, score_and_sign
-from cathedral.eval.task_generator import generate_task
+from cathedral.eval.runner_types import PolarisRunner
+from cathedral.eval.scoring_pipeline import EvalSigner
 from cathedral.lanes.challenge_lock import ChallengeLock, SqliteChallengeLock
 from cathedral.lanes.challenge_receipts import (
     ChallengeReceiptStore,
@@ -59,22 +55,11 @@ from cathedral.publisher import repository
 from cathedral.publisher.merkle import epoch_for
 from cathedral.publisher.sat_serving import SatServing
 from cathedral.storage import (
-    DecryptionError,
     HippiusClient,
-    HippiusError,
-    decrypt_bundle,
-    safe_extract_zip,
 )
-from cathedral.storage.bundle_extractor import BundleStructureError
-from cathedral.v3.corpus.private_loader import load_private_corpus
-from cathedral.v3.corpus.sampler import sample_challenge_id_for_hotkey
 from cathedral.v3.publisher import (
-    persist_bug_isolation_result,
-    publish_score_sidecar,
-    score_and_sign_bug_isolation_stdout,
     v3_feed_enabled,
 )
-from cathedral.v3.score_sidecar import build_score_record
 
 logger = structlog.get_logger(__name__)
 
@@ -333,338 +318,6 @@ class EvalOrchestrator:
                         self.db, submission["id"], status="pending_check"
                     )
             return
-
-        card_def = await repository.get_card_definition(self.db, submission["card_id"])
-        if card_def is None:
-            await self._fail_terminal(
-                submission,
-                log,
-                reason="card definition missing",
-                is_cadence_refresh=is_cadence_refresh,
-                event="eval_card_def_missing",
-            )
-            return
-
-        # Only first-time rows get flipped to 'evaluating'. Cadence
-        # refresh rows stay 'ranked' until score_and_sign commits a fresh
-        # score (which sets status='ranked' again via update_submission_score),
-        # so public leaderboard surfaces never see the row in an
-        # in-flight 'evaluating' state.
-        if not is_cadence_refresh:
-            async with self._db_write_lock:
-                await repository.update_submission_status(
-                    self.db, submission["id"], status="evaluating"
-                )
-
-        # Generate deterministic task for this round
-        epoch = epoch_for(datetime.now(UTC))
-        round_index = self._round_counter.next_index(submission["card_id"], epoch)
-        task = generate_task(
-            card_id=submission["card_id"],
-            epoch=epoch,
-            round_index=round_index,
-            card_definition=card_def,
-        )
-
-        # Fetch + decrypt bundle
-        try:
-            ciphertext = await self.hippius.get_bundle(submission["bundle_blob_key"])
-        except HippiusError as e:
-            await self._on_retryable_failure(
-                submission, log, f"hippius get: {e}", is_cadence_refresh=is_cadence_refresh
-            )
-            return
-
-        try:
-            plaintext = decrypt_bundle(ciphertext, submission["encryption_key_id"])
-        except DecryptionError as e:
-            await self._fail_terminal(
-                submission,
-                log,
-                reason="bundle decryption failed",
-                is_cadence_refresh=is_cadence_refresh,
-                event="eval_bundle_decrypt_failed",
-                error=str(e),
-            )
-            return
-
-        # Extract to ephemeral dir, then immediately drop the path —
-        # Polaris will get the bundle bytes directly via the runner API
-        # (we keep the extraction step here so adversarial-zip checks
-        # still run). Wipe the dir afterwards regardless of outcome.
-        tmp_root = Path(tempfile.mkdtemp(prefix="cathedral-eval-"))
-        try:
-            try:
-                safe_extract_zip(plaintext, tmp_root)
-            except BundleStructureError as e:
-                await self._fail_terminal(
-                    submission,
-                    log,
-                    reason=f"bundle structure: {e}",
-                    is_cadence_refresh=is_cadence_refresh,
-                    event="eval_bundle_structure_invalid",
-                    error=str(e),
-                )
-                return
-
-            polaris_errors: list[str] = []
-            polaris_result = None
-            backoffs = _retry_backoffs()
-            # Per-submission dispatch: Tier A polaris-hosted miners
-            # route to PolarisRuntimeRunner, BYO miners route to
-            # BundleCardRunner. Discovery-mode rows are filtered out
-            # before they reach the queue (publisher/submit.py).
-            runner = self._resolve_runner(submission)
-            for attempt, backoff in enumerate(backoffs, start=1):
-                try:
-                    polaris_result = await runner.run(
-                        bundle_bytes=plaintext,
-                        bundle_hash=submission["bundle_hash"],
-                        task=task,
-                        miner_hotkey=submission["miner_hotkey"],
-                        submission=submission,
-                    )
-                    break
-                except PolarisRunnerError as e:
-                    polaris_errors.append(f"attempt {attempt}: {e}")
-                    log.warning(
-                        "eval_polaris_attempt_failed",
-                        attempt=attempt,
-                        error=str(e),
-                    )
-                    if attempt < len(backoffs) and backoff > 0:
-                        await asyncio.sleep(backoff)
-
-            if polaris_result is None:
-                # Persist a zero-score eval_run with errors so the public
-                # API surfaces the failure (CONTRACTS.md §6 step 3-4 — the
-                # contract test asserts on either weighted_score=0 OR
-                # errors!=None). Status moves to 'rejected' to match the
-                # 'evaluating -> rejected' state machine arrow.
-                self._failure_counts[submission["id"]] += 1
-                log.error(
-                    "eval_polaris_exhausted_retries",
-                    errors=polaris_errors,
-                )
-                async with self._db_write_lock:
-                    await score_and_sign(
-                        self.db,
-                        submission=submission,
-                        epoch=epoch,
-                        round_index=round_index,
-                        polaris_agent_id="polaris-unavailable",
-                        polaris_run_id=f"failed-{submission['id'][:8]}",
-                        task_json=task.model_dump(mode="json"),
-                        output_card_json={
-                            "id": submission["card_id"],
-                            "_polaris_unreachable": True,
-                        },
-                        duration_ms=0,
-                        polaris_errors=polaris_errors or ["polaris exhausted retries"],
-                        registry=self.registry,
-                        signer=self.signer,
-                    )
-                # First-eval rows that exhaust retries get rejected. A
-                # cadence refresh that exhausts retries leaves status as
-                # 'ranked' — score_and_sign above already folded the 0
-                # into the 30-day rolling avg, so the score itself
-                # signals degradation without stripping the row off the
-                # leaderboard.
-                if not is_cadence_refresh:
-                    async with self._db_write_lock:
-                        await repository.update_submission_status(
-                            self.db,
-                            submission["id"],
-                            status="rejected",
-                            rejection_reason="polaris exhausted retries",
-                        )
-                return
-
-            attestation_dict = (
-                polaris_result.attestation.to_storage_dict()
-                if polaris_result.attestation is not None
-                else None
-            )
-
-            # v1.1.0 PR 5: when the runner produced a TraceBundle on disk
-            # (currently only SshHermesRunner does this), upload it to
-            # Hippius and sign the manifest. score_and_sign uses the
-            # returned PublishedArtifact to emit a v2 signed payload
-            # when CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true; until that flag
-            # flips, the artifact is published but the v1 wire shape is
-            # still emitted (dual-publish window).
-            published_artifact = await self._maybe_publish_bundle(polaris_result.trace_bundle, log)
-
-            async with self._db_write_lock:
-                await score_and_sign(
-                    self.db,
-                    submission=submission,
-                    epoch=epoch,
-                    round_index=round_index,
-                    polaris_agent_id=polaris_result.polaris_agent_id,
-                    polaris_run_id=polaris_result.polaris_run_id,
-                    task_json=task.model_dump(mode="json"),
-                    output_card_json=polaris_result.output_card_json,
-                    duration_ms=polaris_result.duration_ms,
-                    polaris_errors=polaris_errors + polaris_result.errors,
-                    registry=self.registry,
-                    signer=self.signer,
-                    polaris_attestation=attestation_dict,
-                    # v2 additions — None for every runner except
-                    # PolarisDeployRunner, which always populates them.
-                    trace_json=polaris_result.trace,
-                    polaris_manifest=polaris_result.manifest,
-                    published_artifact=published_artifact,
-                )
-            try:
-                await self._maybe_run_v3_bug_isolation(
-                    submission=submission,
-                    runner=runner,
-                    epoch=epoch,
-                    round_index=round_index,
-                    log=log,
-                    active_hotkeys=v3_active_hotkeys,
-                )
-            except Exception as exc:
-                log.exception("v3_bug_isolation_failed", error=str(exc))
-            try:
-                await self._maybe_run_task_family_lanes(
-                    submission=submission,
-                    runner=runner,
-                    epoch=epoch,
-                    round_index=round_index,
-                    log=log,
-                    problem_overrides=task_family_problem_overrides,
-                )
-            except Exception as exc:
-                log.exception("task_family_eval_failed", error=str(exc))
-            log.info("eval_run_complete", epoch=epoch, round_index=round_index)
-        finally:
-            shutil.rmtree(tmp_root, ignore_errors=True)
-            # Drop the plaintext binding so GC can reclaim it on the next
-            # collector pass. Best-effort — Python doesn't guarantee
-            # zeroing, but losing the only reference is the closest we
-            # get without ctypes-level memzero.
-            plaintext = b""
-
-    async def _maybe_run_v3_bug_isolation(
-        self,
-        *,
-        submission: dict[str, Any],
-        runner: Any,
-        epoch: int,
-        round_index: int,
-        log: structlog.stdlib.BoundLogger,
-        active_hotkeys: list[str] | None = None,
-    ) -> None:
-        if not v3_feed_enabled():
-            return
-
-        run_challenge = getattr(runner, "run_bug_isolation_challenge", None)
-        if run_challenge is None:
-            log.info("v3_bug_isolation_skipped", reason="runner_unsupported")
-            return
-
-        corpus = load_private_corpus()
-        if not corpus:
-            log.info("v3_bug_isolation_skipped", reason="empty_corpus")
-            return
-
-        if active_hotkeys is None:
-            active_hotkeys = await _v3_active_hotkeys_snapshot(self.db)
-        miner_hotkey = str(submission["miner_hotkey"])
-        if miner_hotkey not in active_hotkeys:
-            active_hotkeys = [*active_hotkeys, miner_hotkey]
-
-        corpus_by_id = {row.id: row for row in corpus}
-        challenge_row_id = sample_challenge_id_for_hotkey(
-            hotkey=miner_hotkey,
-            active_hotkeys=active_hotkeys,
-            corpus_ids=list(corpus_by_id),
-            epoch_number=epoch,
-        )
-        challenge = corpus_by_id[challenge_row_id]
-        hermes_run = await run_challenge(
-            challenge=challenge,
-            miner_hotkey=miner_hotkey,
-            submission=submission,
-        )
-        signed = score_and_sign_bug_isolation_stdout(
-            challenge=challenge,
-            submission=submission,
-            stdout=hermes_run.stdout,
-            ran_at_iso=_ms_iso(datetime.now(UTC)),
-            signer=self.signer,
-            repair_stdout=getattr(hermes_run, "repair_stdout", None),
-            epoch_salt=f"epoch_{epoch}:bug_isolation_v1",
-        )
-
-        # Publish the trace bundle + private score sidecar.
-        # Both are best-effort: a sidecar upload failure must not crash
-        # the eval. The score row + signed payload still land in the
-        # publisher DB; the sidecar is data substrate for later training,
-        # not a precondition for emitting the v3 row.
-        trace_bundle = getattr(hermes_run, "trace_bundle", None)
-        published_artifact = await self._maybe_publish_bundle(trace_bundle, log)
-        score_sidecar_url: str | None = None
-        if trace_bundle is not None and published_artifact is not None:
-            try:
-                score_record = build_score_record(
-                    signed_row=signed.row,
-                    challenge=challenge,
-                    submission=submission,
-                    duration_ms=int(hermes_run.duration_ms),
-                    repair_was_attempted=signed.dispatch.repair_was_attempted,
-                    package_blake3=trace_bundle.bundle_blake3,
-                    manifest_hash=published_artifact.manifest_hash,
-                )
-                score_sidecar_url = await publish_score_sidecar(
-                    hippius=self.hippius,
-                    eval_id=trace_bundle.eval_id,
-                    score_record=score_record,
-                )
-                log.info(
-                    "v3_score_sidecar_published",
-                    eval_id=trace_bundle.eval_id,
-                    url=score_sidecar_url,
-                )
-            except Exception as exc:
-                log.warning(
-                    "v3_score_sidecar_publish_failed",
-                    eval_id=getattr(trace_bundle, "eval_id", None),
-                    error=str(exc),
-                )
-
-        # Enrich trace_json with bundle/manifest/sidecar handles so the
-        # operator-only export and catalog can locate the package later.
-        # These fields stay out of output_card_json (public feed firewall).
-        trace_json: dict[str, Any] = dict(hermes_run.trace or {})
-        if trace_bundle is not None:
-            trace_json["bundle_blake3"] = trace_bundle.bundle_blake3
-            trace_json["cathedral_eval_round"] = trace_bundle.cathedral_eval_round
-        if published_artifact is not None:
-            trace_json["bundle_url"] = published_artifact.bundle_url
-            trace_json["manifest_url"] = published_artifact.manifest_url
-            trace_json["manifest_hash"] = published_artifact.manifest_hash
-        if score_sidecar_url is not None:
-            trace_json["score_record_url"] = score_sidecar_url
-
-        async with self._db_write_lock:
-            await persist_bug_isolation_result(
-                self.db,
-                submission=submission,
-                challenge=challenge,
-                signed=signed,
-                epoch=epoch,
-                round_index=round_index,
-                duration_ms=int(hermes_run.duration_ms),
-                trace_json=trace_json,
-            )
-        log.info(
-            "v3_bug_isolation_eval_complete",
-            challenge_id_public=signed.row.get("challenge_id_public"),
-            weighted_score=signed.row.get("weighted_score"),
-        )
 
     # ------------------------------------------------------------------
     # SAT (synthetic_boolean_v1) serving — delegated to SatServing.
@@ -1065,60 +718,27 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
     """Re-build a Polaris runner from the current env so monkeypatched
     `CATHEDRAL_EVAL_MODE` mid-test takes effect on the next tick.
 
-    Mode dispatch (CONTRACTS.md §6 + Tier A Polaris-runtime addendum +
-    v2 Polaris-native deploy):
+    After the card-core strip the only live runners are the stub family
+    (smoke tests) and the SAT prober:
 
-      stub*                -> StubPolarisRunner family (smoke tests)
-      stub-fail-polaris    -> FailingStubPolarisRunner
-      stub-bad-card        -> MalformedStubPolarisRunner
-      bundle               -> BundleCardRunner (BYO-compute path)
-      polaris              -> PolarisRuntimeRunner (legacy Tier A —
-                              cathedral-runtime shim; kept as backup
-                              during v2 migration per POLARIS_NATIVE_V2.md)
-      polaris-deploy       -> PolarisDeployRunner (v2 paid — real Hermes
-                              via Polaris's native deploy pipeline)
-      ssh-probe            -> SshProbeRunner (v2 free — Cathedral SSHs
-                              into the miner's box, no Polaris attestation,
-                              no verified-runtime multiplier)
-      http-polaris (legacy)-> HttpPolarisRunner
-      anything else        -> HttpPolarisRunner (legacy default)
+      stub*                -> StubPolarisRunner (smoke tests / default)
+      ssh-probe + v2       -> SshHermesRunner (LIVE SAT prober — native
+                              `hermes chat -q` over SSH; returns the
+                              TraceBundle that is the data moat)
+
+    The legacy card runners (Bundle/Polaris-runtime/Polaris-deploy/HTTP/
+    ssh-probe v1) were removed with the card eval branch. Any unrecognized
+    mode falls back to the stub runner rather than a card runner.
     """
     import os
 
-    from cathedral.eval.polaris_deploy_runner import (
-        PolarisDeployRunner,
-        PolarisDeployRunnerConfig,
-    )
-    from cathedral.eval.polaris_runner import (
-        BundleCardRunner,
-        FailingStubPolarisRunner,
-        HippiusPresignedUrlResolver,
-        HttpPolarisRunner,
-        HttpPolarisRunnerConfig,
-        MalformedStubPolarisRunner,
-        PolarisRunnerError,
-        PolarisRuntimeRunner,
-        PolarisRuntimeRunnerConfig,
-        StubPolarisRunner,
-    )
+    from cathedral.eval.runner_types import StubPolarisRunner
 
     # Normalize operator env values the same way SAT preflight does so a
     # launch-ready check selects the same runtime path.
     mode = os.environ.get("CATHEDRAL_EVAL_MODE", "stub").strip().lower()
-    if mode == "stub-fail-polaris":
-        return FailingStubPolarisRunner()
-    if mode == "stub-bad-card":
-        return MalformedStubPolarisRunner()
-    if mode.startswith("stub"):
-        return StubPolarisRunner()
-    if mode == "bundle":
-        return BundleCardRunner()
     if mode == "ssh-probe":
-        # Tier B free tier — Cathedral SSHs into the miner's box.
-        #
-        # v1 (legacy, default): SshProbeRunner. Assumes the miner runs
-        # an HTTP server exposing /healthz + /chat. Built on the wrong
-        # premise that Hermes is HTTP-shaped (cathedralai/cathedral#75).
+        # SAT prober — Cathedral SSHs into the miner's box and runs Hermes.
         #
         # v2 (CATHEDRAL_PROBER_VERSION=v2): SshHermesRunner. Native
         # `hermes chat -q` invocation over SSH (v1.1.7; previously
@@ -1127,147 +747,46 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         # trail (state.db slice, sessions JSON, request dumps,
         # memories, skills, logs) — the data moat.
         #
-        # Default is v1 while we smoke-test v2 on the rented Polaris
-        # box. Flip via env var when ready to cut over.
-        prober_version = os.environ.get("CATHEDRAL_PROBER_VERSION", "v1").strip().lower()
-
+        # The legacy v1 HTTP-shaped SshProbeRunner was removed with the
+        # card-core strip; only v2 is supported now.
         ssh_key_path = os.environ.get("CATHEDRAL_SSH_KEY_PATH") or os.path.expanduser(
             "~/.ssh/cathedral_probe_ed25519"
         )
 
-        if prober_version == "v2":
-            from cathedral.eval.ssh_hermes_runner import (
-                DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
-                SshHermesRunner,
-                SshHermesRunnerConfig,
-            )
-
-            bundle_dir = (
-                os.environ.get("CATHEDRAL_BUNDLE_OUTPUT_DIR") or "/var/lib/cathedral/eval-bundles"
-            )
-            # ``CATHEDRAL_HERMES_MAX_TURNS`` was removed in v1.1.7 along
-            # with the ``eval_max_turns`` config field: ``hermes chat -q``
-            # has no equivalent CLI flag, and we want the full agentic
-            # loop now rather than a single-turn cap.
-
-            return SshHermesRunner(
-                SshHermesRunnerConfig(
-                    ssh_private_key_path=ssh_key_path,
-                    bundle_output_dir=bundle_dir,
-                    connect_timeout_secs=float(
-                        os.environ.get("CATHEDRAL_SSH_CONNECT_TIMEOUT", "10")
-                    ),
-                    eval_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_EVAL_TIMEOUT", "300")),
-                    transfer_timeout_secs=float(
-                        os.environ.get("CATHEDRAL_SSH_TRANSFER_TIMEOUT", "120")
-                    ),
-                    pinned_model=os.environ.get("CATHEDRAL_HERMES_PINNED_MODEL"),
-                    pinned_provider=os.environ.get("CATHEDRAL_HERMES_PINNED_PROVIDER"),
-                    task_family_stdout_limit_bytes=_positive_int_env(
-                        "CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES",
-                        DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
-                    ),
-                )
-            )
-
-        # v1 (default — legacy HTTP-shaped path)
-        from cathedral.eval.ssh_probe_runner import (
-            SshProbeRunner,
-            SshProbeRunnerConfig,
+        from cathedral.eval.ssh_hermes_runner import (
+            DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
+            SshHermesRunner,
+            SshHermesRunnerConfig,
         )
 
-        return SshProbeRunner(
-            SshProbeRunnerConfig(
+        bundle_dir = (
+            os.environ.get("CATHEDRAL_BUNDLE_OUTPUT_DIR") or "/var/lib/cathedral/eval-bundles"
+        )
+        # ``CATHEDRAL_HERMES_MAX_TURNS`` was removed in v1.1.7 along
+        # with the ``eval_max_turns`` config field: ``hermes chat -q``
+        # has no equivalent CLI flag, and we want the full agentic
+        # loop now rather than a single-turn cap.
+
+        return SshHermesRunner(
+            SshHermesRunnerConfig(
                 ssh_private_key_path=ssh_key_path,
+                bundle_output_dir=bundle_dir,
                 connect_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_CONNECT_TIMEOUT", "10")),
-                prompt_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_PROMPT_TIMEOUT", "60")),
-                visit_budget_secs=float(os.environ.get("CATHEDRAL_SSH_VISIT_BUDGET", "300")),
-            )
-        )
-    if mode == "polaris-deploy":
-        # v2 — Polaris-native Hermes deploy. Skips the cathedral-runtime
-        # image entirely; uses the standard marketplace-eval pipeline
-        # against `ghcr.io/bigailabs/polaris-hermes`. Requires the
-        # publisher app for the Hippius client (presigned URLs).
-        from cathedral.publisher.app import latest_ctx
-
-        ctx = latest_ctx()
-        if ctx is None:
-            raise PolarisRunnerError(
-                "CATHEDRAL_EVAL_MODE=polaris-deploy requires the publisher "
-                "app to be running so the HippiusClient is available for "
-                "presigned bundle URLs"
-            )
-        attestation_key = os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY", "").strip()
-        if not attestation_key:
-            raise PolarisRunnerError(
-                "CATHEDRAL_EVAL_MODE=polaris-deploy requires POLARIS_ATTESTATION_PUBLIC_KEY"
-            )
-        kek_hex = (
-            os.environ.get("CATHEDRAL_BUNDLE_KEK")
-            or os.environ.get("CATHEDRAL_KEK_HEX")
-            or os.environ.get("CATHEDRAL_MASTER_ENCRYPTION_KEY")
-            or ""
-        )
-        if not kek_hex:
-            raise PolarisRunnerError(
-                "CATHEDRAL_EVAL_MODE=polaris-deploy requires CATHEDRAL_BUNDLE_KEK"
-            )
-        chutes_pin = (os.environ.get("CATHEDRAL_PIN_CHUTES_KEY") or "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        return PolarisDeployRunner(
-            PolarisDeployRunnerConfig(
-                base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
-                api_token=os.environ.get("POLARIS_API_TOKEN", ""),
-                bundle_url_resolver=HippiusPresignedUrlResolver(ctx.hippius),
-                attestation_public_key_hex=attestation_key,
-                bundle_encryption_key_hex=kek_hex,
-                ttl_minutes=int(os.environ.get("POLARIS_DEPLOY_TTL_MINUTES", "30")),
-                pin_chutes_key=chutes_pin,
-                chutes_api_key=os.environ.get("CHUTES_API_KEY", "") if chutes_pin else "",
-            )
-        )
-    if mode in {"polaris", "polaris-runtime"}:
-        # Tier A — Polaris-hosted miners. Polaris fetches the bundle via
-        # presigned URL, runs Cathedral's runtime image, signs an
-        # attestation over the result.
-        from cathedral.publisher.app import latest_ctx
-
-        ctx = latest_ctx()
-        if ctx is None:
-            raise PolarisRunnerError(
-                "CATHEDRAL_EVAL_MODE=polaris requires the publisher app to be "
-                "running so the HippiusClient is available for presigned URLs"
-            )
-        attestation_key = os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY", "").strip()
-        if not attestation_key:
-            raise PolarisRunnerError(
-                "CATHEDRAL_EVAL_MODE=polaris requires POLARIS_ATTESTATION_PUBLIC_KEY"
-            )
-        return PolarisRuntimeRunner(
-            PolarisRuntimeRunnerConfig(
-                base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
-                api_token=os.environ.get("POLARIS_API_TOKEN", ""),
-                submission_id=os.environ.get("POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID", ""),
-                attestation_public_key_hex=attestation_key,
-                bundle_url_resolver=HippiusPresignedUrlResolver(ctx.hippius),
-                bundle_encryption_key_hex=(
-                    os.environ.get("CATHEDRAL_BUNDLE_KEK")
-                    or os.environ.get("CATHEDRAL_KEK_HEX")
-                    or os.environ.get("CATHEDRAL_MASTER_ENCRYPTION_KEY")
-                    or ""
+                eval_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_EVAL_TIMEOUT", "300")),
+                transfer_timeout_secs=float(
+                    os.environ.get("CATHEDRAL_SSH_TRANSFER_TIMEOUT", "120")
+                ),
+                pinned_model=os.environ.get("CATHEDRAL_HERMES_PINNED_MODEL"),
+                pinned_provider=os.environ.get("CATHEDRAL_HERMES_PINNED_PROVIDER"),
+                task_family_stdout_limit_bytes=_positive_int_env(
+                    "CATHEDRAL_TASK_FAMILY_STDOUT_MAX_BYTES",
+                    DEFAULT_TASK_FAMILY_STDOUT_LIMIT_BYTES,
                 ),
             )
         )
-    return HttpPolarisRunner(
-        HttpPolarisRunnerConfig(
-            base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
-            api_token=os.environ.get("POLARIS_API_TOKEN", ""),
-        )
-    )
+    # stub* and any unrecognized mode -> stub runner. The card runners that
+    # previously backed bundle/polaris/polaris-deploy/http-polaris are gone.
+    return StubPolarisRunner()
 
 
 async def _run_once_async() -> int:
@@ -1322,44 +841,10 @@ async def _run_once_async() -> int:
                 reason="stub-env-wins",
             )
             return r
-        if mode == "polaris-deploy" and has_polaris_key:
-            # v2 — opted into the Polaris-native Hermes flow.
-            r = _resolve_polaris_runner_for_mode("polaris-deploy")
-            logger.info(
-                "runner_dispatch",
-                submission_id=submission.get("id"),
-                attestation_mode=mode,
-                env_mode=env_mode,
-                chosen=type(r).__name__,
-                reason="polaris-deploy-tier-v2",
-            )
-            return r
-        if mode == "polaris" and has_polaris_key:
-            r = _resolve_polaris_runner_for_mode("polaris")
-            logger.info(
-                "runner_dispatch",
-                submission_id=submission.get("id"),
-                attestation_mode=mode,
-                env_mode=env_mode,
-                chosen=type(r).__name__,
-                reason="polaris-tier",
-            )
-            return r
-        if mode == "tee":
-            r = _resolve_polaris_runner_for_mode("bundle")
-            logger.info(
-                "runner_dispatch",
-                submission_id=submission.get("id"),
-                attestation_mode=mode,
-                env_mode=env_mode,
-                chosen=type(r).__name__,
-                reason="tee-pre-verified",
-            )
-            return r
         if mode == "ssh-probe":
-            # v2 free tier — Cathedral SSHs into the miner's box. No
-            # Polaris attestation chain (manifest will be None on the
-            # PolarisRunResult), so the verified-runtime 1.10x multiplier
+            # SAT prober — Cathedral SSHs into the miner's box and runs
+            # Hermes. No Polaris attestation chain (manifest will be None
+            # on the PolarisRunResult), so the verified-runtime multiplier
             # is not applied at scoring.
             r = _resolve_polaris_runner_for_mode("ssh-probe")
             logger.info(
