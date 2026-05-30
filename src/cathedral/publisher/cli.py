@@ -251,6 +251,13 @@ def promote_pending(
         "--family-id",
         help="Task Family identifier; defaults to SAT.",
     ),
+    multi: bool = typer.Option(
+        False,
+        "--multi/--no-multi",
+        help="When set, promote up to --max rows concurrently in the same tier "
+        "(uses active_scope='tier_multi'). Default False preserves the legacy "
+        "one-active-per-tier invariant.",
+    ),
 ) -> None:
     """Promote up to N pending challenges into the active set in one call.
 
@@ -259,8 +266,10 @@ def promote_pending(
     ``active_scope='tier_difficulty'`` so labeled rows can share a tier
     slot; otherwise it falls back to ``active_scope='tier'`` which
     preserves the legacy one-active-per-(family, tier) invariant for
-    unlabeled rows. Prints the promoted ids plus the resulting active
-    set for the filter so the operator can audit the outcome.
+    unlabeled rows. Pass ``--multi`` to promote N concurrent actives in
+    the same tier without retiring earlier ones (``active_scope='tier_multi'``).
+    Prints the promoted ids plus the resulting active set for the filter
+    so the operator can audit the outcome.
     """
     configure()
 
@@ -287,6 +296,7 @@ def promote_pending(
                 difficulty_label=difficulty_label,
                 now_iso=now_iso,
                 max_count=max_count,
+                multi=multi,
             )
             actives = [
                 rec
