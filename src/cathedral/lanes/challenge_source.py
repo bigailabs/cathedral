@@ -182,6 +182,26 @@ class ChallengeSource(Protocol):
         """Durably mark locked-challenge loser publication complete."""
         ...
 
+    async def promote_to_target(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        target: int,
+        now_iso: str,
+        kind: str | None = None,
+    ) -> list[str]:
+        """Top up the active set for (family_id, tier) to ``target`` concurrent actives.
+
+        Counts currently-active rows for the (family_id, tier) pair. If
+        ``kind`` is given, only counts actives whose
+        ``audit_metadata["kind"] == kind``. Computes the deficit and
+        promotes exactly that many pending rows (or fewer if not enough
+        are available). Returns the list of newly-promoted challenge ids.
+        Idempotent: returns ``[]`` when already at or above ``target``.
+        """
+        ...
+
 
 # --------------------------------------------------------------------------
 # In-memory fake (tests + dry-runs)
@@ -493,6 +513,34 @@ class InMemoryChallengeSource:
                 break
             promoted.append(cand.challenge_id)
         return promoted
+
+    async def promote_to_target(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        target: int,
+        now_iso: str,
+        kind: str | None = None,
+    ) -> list[str]:
+        actives = await self.list_active(family_id)
+        current_count = sum(
+            1
+            for rec in actives
+            if rec.tier == int(tier)
+            and (kind is None or (rec.audit_metadata or {}).get("kind") == kind)
+        )
+        deficit = max(0, int(target) - current_count)
+        if deficit == 0:
+            return []
+        return await self.promote_pending_batch(
+            family_id,
+            tier=tier,
+            now_iso=now_iso,
+            max_count=deficit,
+            kind=kind,
+            multi=True,
+        )
 
     async def list_locked_needing_loser_reconciliation(
         self, family_id: str, *, limit: int = 32
@@ -1242,6 +1290,34 @@ class SqliteChallengeSource:
                 break
             promoted.append(cand.challenge_id)
         return promoted
+
+    async def promote_to_target(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        target: int,
+        now_iso: str,
+        kind: str | None = None,
+    ) -> list[str]:
+        actives = await self.list_active(family_id)
+        current_count = sum(
+            1
+            for rec in actives
+            if rec.tier == int(tier)
+            and (kind is None or (rec.audit_metadata or {}).get("kind") == kind)
+        )
+        deficit = max(0, int(target) - current_count)
+        if deficit == 0:
+            return []
+        return await self.promote_pending_batch(
+            family_id,
+            tier=tier,
+            now_iso=now_iso,
+            max_count=deficit,
+            kind=kind,
+            multi=True,
+        )
 
     async def _fetch_one_for_update(
         self, family_id: str, challenge_id: str

@@ -341,3 +341,189 @@ async def test_sqlite_schema_idempotent_after_tier_multi_migration(tmp_path) -> 
         assert rows[0].challenge_id == "idempotent-check"
     finally:
         await conn.close()
+
+
+# --------------------------------------------------------------------------
+# (e) promote_to_target — fills tier to N active, idempotent, deficit-aware
+# --------------------------------------------------------------------------
+
+
+def _pending_with_kind(
+    challenge_id: str, *, tier: int = 1, kind: str | None = None
+) -> ChallengeRecord:
+    audit: dict[str, object] = {"note": "toy"}
+    if kind is not None:
+        audit["kind"] = kind
+    return ChallengeRecord(
+        challenge_id=challenge_id,
+        family_id=_FAMILY,
+        tier=tier,
+        cnf_text=_TOY_CNF,
+        status=CHALLENGE_STATUS_PENDING,
+        audit_metadata=audit,
+    )
+
+
+async def _case_promote_to_target_zero_active_promotes_n(source) -> None:
+    """With 0 active and target=5, promotes all 5 pending rows."""
+    ids = [f"t5-{i}" for i in range(7)]
+    for cid in ids:
+        await source.upsert(_pending(cid, tier=11))
+
+    promoted = await source.promote_to_target(_FAMILY, tier=11, target=5, now_iso=_NOW)
+
+    assert len(promoted) == 5
+    assert set(promoted) <= set(ids)
+    actives = await source.list_active(_FAMILY)
+    assert len([r for r in actives if r.tier == 11]) == 5
+
+
+async def test_in_memory_promote_to_target_zero_active() -> None:
+    src = InMemoryChallengeSource()
+    await _case_promote_to_target_zero_active_promotes_n(src)
+
+
+async def test_sqlite_promote_to_target_zero_active(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        await _case_promote_to_target_zero_active_promotes_n(src)
+    finally:
+        await conn.close()
+
+
+async def _case_promote_to_target_idempotent(source) -> None:
+    """Calling promote_to_target again when already at target promotes 0."""
+    ids = [f"idem-{i}" for i in range(7)]
+    for cid in ids:
+        await source.upsert(_pending(cid, tier=12))
+
+    first = await source.promote_to_target(_FAMILY, tier=12, target=5, now_iso=_NOW)
+    assert len(first) == 5
+
+    second = await source.promote_to_target(_FAMILY, tier=12, target=5, now_iso=_NOW)
+    assert second == []
+
+    actives = await source.list_active(_FAMILY)
+    assert len([r for r in actives if r.tier == 12]) == 5
+
+
+async def test_in_memory_promote_to_target_idempotent() -> None:
+    src = InMemoryChallengeSource()
+    await _case_promote_to_target_idempotent(src)
+
+
+async def test_sqlite_promote_to_target_idempotent(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        await _case_promote_to_target_idempotent(src)
+    finally:
+        await conn.close()
+
+
+async def _case_promote_to_target_deficit(source) -> None:
+    """With 2 already active and target=5, promotes exactly 3 more."""
+    all_ids = [f"def-{i}" for i in range(8)]
+    for cid in all_ids:
+        await source.upsert(_pending(cid, tier=13))
+
+    # Pre-activate 2
+    first_two = all_ids[:2]
+    await source.promote_pending_batch(
+        _FAMILY, tier=13, now_iso=_NOW, max_count=2, multi=True
+    )
+    actives_before = [r for r in await source.list_active(_FAMILY) if r.tier == 13]
+    assert len(actives_before) == 2
+
+    promoted = await source.promote_to_target(_FAMILY, tier=13, target=5, now_iso=_NOW)
+    assert len(promoted) == 3
+
+    actives_after = [r for r in await source.list_active(_FAMILY) if r.tier == 13]
+    assert len(actives_after) == 5
+    # The 2 that were already active remain active
+    pre_ids = {r.challenge_id for r in actives_before}
+    post_ids = {r.challenge_id for r in actives_after}
+    assert pre_ids <= post_ids
+
+
+async def test_in_memory_promote_to_target_deficit() -> None:
+    src = InMemoryChallengeSource()
+    await _case_promote_to_target_deficit(src)
+
+
+async def test_sqlite_promote_to_target_deficit(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        await _case_promote_to_target_deficit(src)
+    finally:
+        await conn.close()
+
+
+async def _case_promote_to_target_kind_filter(source) -> None:
+    """kind filter: only counts/produces the requested kind."""
+    # Seed 3 with kind="hard" and 4 with kind="easy" in same tier
+    for i in range(3):
+        await source.upsert(_pending_with_kind(f"hard-{i}", tier=14, kind="hard"))
+    for i in range(4):
+        await source.upsert(_pending_with_kind(f"easy-{i}", tier=14, kind="easy"))
+
+    # Ask for target=2 of kind="hard"
+    promoted = await source.promote_to_target(
+        _FAMILY, tier=14, target=2, now_iso=_NOW, kind="hard"
+    )
+    assert len(promoted) == 2
+    assert all(p.startswith("hard-") for p in promoted)
+
+    # Total actives in tier: 2 hard only
+    actives = [r for r in await source.list_active(_FAMILY) if r.tier == 14]
+    assert len(actives) == 2
+    assert all((r.audit_metadata or {}).get("kind") == "hard" for r in actives)
+
+    # Calling again with target=2 kind="hard" is idempotent
+    second = await source.promote_to_target(
+        _FAMILY, tier=14, target=2, now_iso=_NOW, kind="hard"
+    )
+    assert second == []
+
+
+async def test_in_memory_promote_to_target_kind_filter() -> None:
+    src = InMemoryChallengeSource()
+    await _case_promote_to_target_kind_filter(src)
+
+
+async def test_sqlite_promote_to_target_kind_filter(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        await _case_promote_to_target_kind_filter(src)
+    finally:
+        await conn.close()
+
+
+async def _case_promote_to_target_default_one(source) -> None:
+    """target=1 with 0 active promotes exactly 1 (default-config case)."""
+    ids = [f"one-{i}" for i in range(3)]
+    for cid in ids:
+        await source.upsert(_pending(cid, tier=15))
+
+    promoted = await source.promote_to_target(_FAMILY, tier=15, target=1, now_iso=_NOW)
+    assert len(promoted) == 1
+
+    actives = [r for r in await source.list_active(_FAMILY) if r.tier == 15]
+    assert len(actives) == 1
+
+
+async def test_in_memory_promote_to_target_default_one() -> None:
+    src = InMemoryChallengeSource()
+    await _case_promote_to_target_default_one(src)
+
+
+async def test_sqlite_promote_to_target_default_one(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        await _case_promote_to_target_default_one(src)
+    finally:
+        await conn.close()

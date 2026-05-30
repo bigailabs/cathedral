@@ -319,6 +319,108 @@ def promote_pending(
         raise typer.Exit(code)
 
 
+def _active_per_tier_default() -> int:
+    """Read CATHEDRAL_SAT_ACTIVE_PER_TIER from the environment (default 1)."""
+    raw = os.environ.get("CATHEDRAL_SAT_ACTIVE_PER_TIER", "")
+    try:
+        return max(1, int(raw))
+    except (ValueError, TypeError):
+        return 1
+
+
+@app.command("fill-active-slots")
+def fill_active_slots(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    family_id: str = typer.Option(
+        "synthetic_boolean_v1",
+        "--family-id",
+        help="Task Family identifier; defaults to SAT.",
+    ),
+    tiers: str = typer.Option(
+        ...,
+        "--tiers",
+        help="Comma-separated tier ints to fill, e.g. '1,2,3'.",
+    ),
+    target: int | None = typer.Option(
+        None,
+        "--target",
+        help="Target number of concurrent actives per tier. "
+        "Defaults to CATHEDRAL_SAT_ACTIVE_PER_TIER env var (fallback 1).",
+    ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Optional: narrow to rows whose audit_metadata.kind matches.",
+    ),
+) -> None:
+    """Top up each requested tier to the target number of concurrent active challenges.
+
+    Reads the current active count per tier and promotes only the
+    deficit from pending rows, using ``active_scope='tier_multi'``.
+    Idempotent: tiers already at or above ``--target`` are skipped.
+    The effective target defaults to ``CATHEDRAL_SAT_ACTIVE_PER_TIER``
+    (env var) with a hard fallback of 1, preserving the default
+    one-active-per-tier behaviour when the env var is absent.
+    """
+    configure()
+
+    effective_target = target if target is not None else _active_per_tier_default()
+
+    try:
+        tier_list = [int(t.strip()) for t in tiers.split(",") if t.strip()]
+    except ValueError:
+        typer.echo("ERROR: --tiers must be a comma-separated list of integers", err=True)
+        raise typer.Exit(1)
+
+    if not tier_list:
+        typer.echo("ERROR: --tiers is empty", err=True)
+        raise typer.Exit(1)
+
+    async def _run() -> int:
+        from cathedral.lanes.challenge_source import (
+            SqliteChallengeSource,
+            init_sqlite_challenge_source,
+        )
+
+        conn = await init_sqlite_challenge_source(database_path)
+        try:
+            source = SqliteChallengeSource(conn)
+            from datetime import UTC, datetime
+
+            now_iso = (
+                datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.")
+                + f"{datetime.now(UTC).microsecond // 1000:03d}"
+                + "Z"
+            )
+            for tier in tier_list:
+                promoted = await source.promote_to_target(
+                    family_id,
+                    tier=tier,
+                    target=effective_target,
+                    now_iso=now_iso,
+                    kind=kind,
+                )
+                actives = [
+                    rec
+                    for rec in await source.list_active(family_id)
+                    if rec.tier == tier
+                    and (kind is None or (rec.audit_metadata or {}).get("kind") == kind)
+                ]
+                typer.echo(f"tier={tier} promoted_count={len(promoted)}")
+                typer.echo(f"tier={tier} promoted_ids=" + ",".join(promoted))
+                typer.echo(
+                    f"tier={tier} active_count={len(actives)} "
+                    "active_ids=" + ",".join(rec.challenge_id for rec in actives)
+                )
+            return 0
+        finally:
+            await conn.close()
+
+    code = asyncio.run(_run())
+    if code != 0:
+        raise typer.Exit(code)
+
+
 @app.callback()
 def _callback() -> None:
     """Common config (no-op; lets typer build subcommand help cleanly)."""
