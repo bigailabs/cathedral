@@ -109,6 +109,31 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
             "ran_at",
         }
     ),
+    # v6 — PAR-2 facts (open-window scoring). v5 + challenge_value / solve_rank
+    # / solved / operator(coldkey). Byte-identical to TASK_FAMILY_SIGNED_KEYS_V6
+    # in lanes/sign.py and _SIGNED_EVAL_OUTPUT_KEYS_V6 in validator/pull_loop.py.
+    6: frozenset(
+        {
+            "id",
+            "agent_id",
+            "agent_display_name",
+            "miner_hotkey",
+            "task_type",
+            "task_id_public",
+            "epoch_salt",
+            "difficulty_tier",
+            "weighted_score",
+            "score_parts",
+            "answer_hash",
+            "verifier_details_hash",
+            "rejection_reason",
+            "ran_at",
+            "challenge_value",
+            "solve_rank",
+            "solved",
+            "operator",
+        }
+    ),
 }
 
 

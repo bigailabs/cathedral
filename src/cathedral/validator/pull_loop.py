@@ -29,6 +29,7 @@ import structlog
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from cathedral.lanes import par2
 from cathedral.v1_types import canonical_json
 from cathedral.validator.health import Health
 
@@ -122,21 +123,42 @@ async def upsert_pulled_eval(
 
     synth_id = -(zlib.crc32(eval_run_id.encode("utf-8")) & 0x7FFFFFFF) - 1
 
+    # v6 (PAR-2) facts — present only on schema-6 signed rows, else None.
+    solve_rank_raw = eval_run.get("solve_rank")
+    try:
+        solve_rank = int(solve_rank_raw) if solve_rank_raw is not None else None
+    except (TypeError, ValueError):
+        solve_rank = None
+    challenge_value_raw = eval_run.get("challenge_value")
+    try:
+        challenge_value = float(challenge_value_raw) if challenge_value_raw is not None else None
+    except (TypeError, ValueError):
+        challenge_value = None
+    operator = eval_run.get("operator")
+    task_id_public = eval_run.get("task_id_public")
+    epoch_salt = eval_run.get("epoch_salt")
+
     # Insert into a new pull-side table to avoid FK violations against `claims`.
     await _ensure_pulled_eval_runs_table(conn)
     await conn.execute(
         """
         INSERT INTO pulled_eval_runs (
             eval_run_id, miner_hotkey, weighted_score,
-            ran_at, pulled_at, synth_claim_id, task_type, schema_version
+            ran_at, pulled_at, synth_claim_id, task_type, schema_version,
+            solve_rank, challenge_value, operator, task_id_public, epoch_salt
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(eval_run_id) DO UPDATE SET
             weighted_score=excluded.weighted_score,
             ran_at=excluded.ran_at,
             pulled_at=excluded.pulled_at,
             task_type=excluded.task_type,
-            schema_version=excluded.schema_version
+            schema_version=excluded.schema_version,
+            solve_rank=excluded.solve_rank,
+            challenge_value=excluded.challenge_value,
+            operator=excluded.operator,
+            task_id_public=excluded.task_id_public,
+            epoch_salt=excluded.epoch_salt
         """,
         (
             eval_run_id,
@@ -147,6 +169,11 @@ async def upsert_pulled_eval(
             synth_id,
             task_type,
             schema_version,
+            solve_rank,
+            challenge_value,
+            operator,
+            task_id_public,
+            epoch_salt,
         ),
     )
     await conn.commit()
@@ -188,7 +215,11 @@ async def latest_pulled_score_per_hotkey(
             schema_version = int(row[3])
         except (TypeError, ValueError):
             schema_version = 1
-        if schema_version == 5:
+        if schema_version in (5, 6):
+            # v6 (PAR-2 facts) routes to the same SAT lane bucket as v5.
+            # The mean-of-weighted_score blend below is the legacy path; the
+            # PAR-2 aggregation (solve_rank/challenge_value/operator) replaces
+            # it once open-window scoring is live (no v6 rows exist until then).
             if task_type not in lane_weights:
                 continue
             score_bucket = task_type
@@ -232,6 +263,63 @@ async def latest_pulled_score_per_hotkey(
     return out
 
 
+async def par2_merit_per_operator(
+    conn: aiosqlite.Connection,
+    *,
+    since_days: int = 30,
+    alpha: float = 0.5,
+    coldkey_of: dict[str, str] | None = None,
+) -> dict[str, float]:
+    """Shadow PAR-2 merit per operator from pulled schema-6 rows.
+
+    Groups v6 rows by challenge ``(epoch_salt, task_id_public)`` — the per-
+    challenge key the validator legitimately has (raw challenge_id stays
+    publisher-private) — keeps each operator's best (lowest) ``solve_rank``,
+    orders operators by that rank, and splits each challenge's
+    ``challenge_value`` (w_c) budget via the Sybil-resistant ``par2`` engine.
+
+    ``coldkey_of`` optionally maps the signed ``operator`` (hotkey) to its
+    coldkey for the authoritative per-operator dedup (resolved from the
+    validator's metagraph); defaults to identity (operator == hotkey).
+
+    SHADOW: the result is computed/diffed alongside the live scoring, not yet
+    driving ``set_weights``. Returns ``{operator: M}``.
+    """
+    await _ensure_pulled_eval_runs_table(conn)
+    since = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
+    cur = await conn.execute(
+        """
+        SELECT epoch_salt, task_id_public, operator, solve_rank, challenge_value
+        FROM pulled_eval_runs
+        WHERE schema_version = 6 AND solve_rank IS NOT NULL
+          AND operator IS NOT NULL AND task_id_public IS NOT NULL
+          AND ran_at >= ?
+        """,
+        (since,),
+    )
+    rows = await cur.fetchall()
+
+    resolver = coldkey_of or {}
+    # challenge_key -> (challenge_value, {operator: best_rank})
+    challenges: dict[tuple[str, str], tuple[float, dict[str, int]]] = {}
+    for epoch_salt, task_id_public, operator, solve_rank, challenge_value in rows:
+        op = resolver.get(str(operator), str(operator))
+        key = (str(epoch_salt), str(task_id_public))
+        w_c = float(challenge_value if challenge_value is not None else 1.0)
+        if key not in challenges:
+            challenges[key] = (w_c, {})
+        ops = challenges[key][1]
+        rank = int(solve_rank)
+        if op not in ops or rank < ops[op]:
+            ops[op] = rank
+
+    par2_input: list[tuple[float, list[str]]] = []
+    for w_c, ops in challenges.values():
+        ordered = [op for op, _ in sorted(ops.items(), key=lambda kv: kv[1])]
+        par2_input.append((w_c, ordered))
+    return par2.aggregate_merit(par2_input, alpha=alpha)
+
+
 def _normalized_task_family_weights(
     configured: dict[str, float] | None,
 ) -> dict[str, float]:
@@ -255,25 +343,33 @@ async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
             pulled_at TEXT NOT NULL,
             synth_claim_id INTEGER NOT NULL,
             task_type TEXT NOT NULL DEFAULT 'unknown',
-            schema_version INTEGER NOT NULL DEFAULT 1
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            -- v6 (PAR-2) facts. Nullable: v1/v3/v5 rows leave them NULL.
+            solve_rank INTEGER,
+            challenge_value REAL,
+            operator TEXT,
+            task_id_public TEXT,
+            epoch_salt TEXT
         )
         """
     )
     cur = await conn.execute("PRAGMA table_info(pulled_eval_runs)")
     cols = {str(row[1]) for row in await cur.fetchall()}
-    if "task_type" not in cols:
+    # Additive, idempotent migrations for DBs created before each column.
+    _migrations = [
+        ("task_type", "ADD COLUMN task_type TEXT NOT NULL DEFAULT 'unknown'"),
+        ("schema_version", "ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"),
+        ("solve_rank", "ADD COLUMN solve_rank INTEGER"),
+        ("challenge_value", "ADD COLUMN challenge_value REAL"),
+        ("operator", "ADD COLUMN operator TEXT"),
+        ("task_id_public", "ADD COLUMN task_id_public TEXT"),
+        ("epoch_salt", "ADD COLUMN epoch_salt TEXT"),
+    ]
+    for col, ddl in _migrations:
+        if col in cols:
+            continue
         try:
-            await conn.execute(
-                "ALTER TABLE pulled_eval_runs ADD COLUMN task_type TEXT NOT NULL DEFAULT 'unknown'"
-            )
-        except aiosqlite.OperationalError as exc:
-            if "duplicate column name" not in str(exc).lower():
-                raise
-    if "schema_version" not in cols:
-        try:
-            await conn.execute(
-                "ALTER TABLE pulled_eval_runs ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
-            )
+            await conn.execute(f"ALTER TABLE pulled_eval_runs {ddl}")
         except aiosqlite.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
@@ -827,6 +923,20 @@ _SIGNED_EVAL_OUTPUT_KEYS_V5 = frozenset(
     }
 )
 
+# v6, PAR-2 facts. v5 + challenge_value / solve_rank / solved / operator(coldkey)
+# for the open-window scoring. Must stay byte-identical to
+# src/cathedral/eval/v2_payload.py:_SIGNED_KEYS_BY_VERSION[6] and
+# src/cathedral/lanes/sign.py:TASK_FAMILY_SIGNED_KEYS_V6. Validators verify v6
+# (forward-compatible) before the publisher emits it.
+_SIGNED_EVAL_OUTPUT_KEYS_V6 = _SIGNED_EVAL_OUTPUT_KEYS_V5 | frozenset(
+    {
+        "challenge_value",
+        "solve_rank",
+        "solved",
+        "operator",
+    }
+)
+
 # Version-keyed dispatcher. A record's signed payload schema is selected
 # by ``eval_output_schema_version`` (defaulting to 1 when the field is
 # absent — the v1.0.x wire shape).
@@ -835,6 +945,7 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
     2: _SIGNED_EVAL_OUTPUT_KEYS_V2,
     3: _SIGNED_EVAL_OUTPUT_KEYS_V3,
     5: _SIGNED_EVAL_OUTPUT_KEYS_V5,
+    6: _SIGNED_EVAL_OUTPUT_KEYS_V6,
 }
 
 # Back-compat alias — the prior constant name. Tests and downstream code

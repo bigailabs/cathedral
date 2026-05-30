@@ -40,7 +40,7 @@ from typing import Any
 import aiosqlite
 import structlog
 
-from cathedral.eval.scoring_pipeline import EvalSigner
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.publisher import repository
 
 logger = structlog.get_logger(__name__)

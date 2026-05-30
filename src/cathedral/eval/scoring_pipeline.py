@@ -17,7 +17,6 @@ First-mover delta logic (Section 7.2):
 
 from __future__ import annotations
 
-import base64
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -27,11 +26,11 @@ from uuid import uuid4
 import aiosqlite
 import blake3
 import structlog
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.cards import preflight, score_card
 from cathedral.cards.preflight import PreflightError
 from cathedral.cards.registry import CardRegistry, RegistryEntry
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.scoring import (
     FIRST_MOVER_DELTA,
     FIRST_MOVER_PENALTY_MULTIPLIER,
@@ -41,7 +40,6 @@ from cathedral.eval.scoring import (
 from cathedral.eval.v2_payload import _SIGNED_KEYS_BY_VERSION  # noqa: F401
 from cathedral.eval.v2_payload import card_excerpt as _card_excerpt
 from cathedral.types import Card
-from cathedral.v1_types import canonical_json
 
 logger = structlog.get_logger(__name__)
 
@@ -74,29 +72,9 @@ class ScoredEval:
     polaris_attestation: dict[str, Any] | None = None
 
 
-class EvalSigner:
-    """Wraps `Ed25519PrivateKey` for signing eval-run records.
-
-    Loaded from `CATHEDRAL_EVAL_SIGNING_KEY` (32-byte raw private key in
-    hex), matching the Polaris convention (`POLARIS_CATHEDRAL_SIGNING_KEY`).
-    """
-
-    def __init__(self, private_key: Ed25519PrivateKey) -> None:
-        self._sk = private_key
-
-    @classmethod
-    def from_env_hex(cls, hex_str: str) -> EvalSigner:
-        try:
-            raw = bytes.fromhex(hex_str.strip())
-        except ValueError as e:
-            raise ValueError("CATHEDRAL_EVAL_SIGNING_KEY must be hex") from e
-        if len(raw) != 32:
-            raise ValueError(f"signing key must be 32 bytes, got {len(raw)}")
-        return cls(Ed25519PrivateKey.from_private_bytes(raw))
-
-    def sign(self, eval_run_dict: dict[str, Any]) -> str:
-        payload = canonical_json(eval_run_dict)
-        return base64.b64encode(self._sk.sign(payload)).decode("ascii")
+# EvalSigner moved to cathedral.eval.eval_signer (WS7) so the live SAT signing
+# path does not depend on this card-scoring module. Re-exported above for
+# back-compat with card-era importers that are being removed.
 
 
 def card_hash(card: Card | dict[str, Any]) -> str:

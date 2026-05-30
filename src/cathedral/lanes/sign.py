@@ -39,6 +39,28 @@ TASK_FAMILY_SIGNED_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# v6 — PAR-2 facts. Adds the open-window scoring inputs:
+#   challenge_value — per-challenge budget w_c (from lane_challenges.score_multiplier)
+#   solve_rank      — operator's rank among valid solvers (publisher receipt order)
+#   solved          — whether this row is a valid solve (vs a rejection/loss)
+#   operator        — operator identity (coldkey ss58) for the Sybil-resistant
+#                     per-operator merit; weighted_score stays in [0,1].
+# Validators verify v6 (forward-compatible); the publisher only EMITS v6 when a
+# caller passes schema_version=6 (gated cutover) — v5 remains the default so
+# live behavior and existing signatures are byte-identical until the flip.
+# MUST stay byte-identical to _SIGNED_KEYS_BY_VERSION[6] in
+# eval/v2_payload.py and validator/pull_loop.py (cross-module contract).
+TASK_FAMILY_SCHEMA_VERSION_V6 = 6
+
+TASK_FAMILY_SIGNED_KEYS_V6: frozenset[str] = TASK_FAMILY_SIGNED_KEYS | frozenset(
+    {
+        "challenge_value",
+        "solve_rank",
+        "solved",
+        "operator",
+    }
+)
+
 _TASK_ID_HASH_PREFIX_LEN = 16
 
 
@@ -66,12 +88,23 @@ def build_signed_task_family_row(
     ran_at_iso: str,
     signer: Any,
     epoch_salt: str,
+    schema_version: int = TASK_FAMILY_SCHEMA_VERSION,
+    challenge_value: float | None = None,
+    solve_rank: int | None = None,
+    solved: bool | None = None,
+    operator: str | None = None,
 ) -> dict[str, Any]:
     """Build and sign a generic Task Family row.
 
     The signed subset is enough for validators to authenticate the score
     and assign weight. It is not enough for miners to recover the original
     formula or another miner's solution.
+
+    ``schema_version`` defaults to 5 (the live wire shape, byte-identical to
+    existing signatures). Pass ``schema_version=6`` to emit the PAR-2 fact row,
+    which additionally signs ``challenge_value`` / ``solve_rank`` / ``solved`` /
+    ``operator``. This is gated by the caller (the publisher emits v6 only after
+    the open-window cutover); validators are v6-verify-capable regardless.
     """
     rejection_reason = score.rejection_reason or verifier.rejection_reason
     signed_subset: dict[str, Any] = {
@@ -91,11 +124,24 @@ def build_signed_task_family_row(
         "ran_at": ran_at_iso,
     }
 
-    extra = set(signed_subset) - set(TASK_FAMILY_SIGNED_KEYS)
-    missing = set(TASK_FAMILY_SIGNED_KEYS) - set(signed_subset)
+    if schema_version >= TASK_FAMILY_SCHEMA_VERSION_V6:
+        keyset = TASK_FAMILY_SIGNED_KEYS_V6
+        signed_subset["challenge_value"] = float(
+            challenge_value if challenge_value is not None else 0.0
+        )
+        signed_subset["solve_rank"] = int(solve_rank) if solve_rank is not None else 0
+        signed_subset["solved"] = (
+            bool(solved) if solved is not None else float(score.weighted_score) > 0.0
+        )
+        signed_subset["operator"] = operator or ""
+    else:
+        keyset = TASK_FAMILY_SIGNED_KEYS
+
+    extra = set(signed_subset) - set(keyset)
+    missing = set(keyset) - set(signed_subset)
     if extra or missing:
         raise RuntimeError(
-            f"task family signed subset diverged from keyset: "
+            f"task family signed subset diverged from keyset (v{schema_version}): "
             f"extra={sorted(extra)} missing={sorted(missing)}"
         )
 
@@ -105,7 +151,7 @@ def build_signed_task_family_row(
     sig_b64 = str(sign(signed_subset))
     row = dict(signed_subset)
     row["cathedral_signature"] = sig_b64
-    row["eval_output_schema_version"] = TASK_FAMILY_SCHEMA_VERSION
+    row["eval_output_schema_version"] = int(schema_version)
     return row
 
 
@@ -142,7 +188,9 @@ def resign_task_family_score(
 
 __all__ = [
     "TASK_FAMILY_SCHEMA_VERSION",
+    "TASK_FAMILY_SCHEMA_VERSION_V6",
     "TASK_FAMILY_SIGNED_KEYS",
+    "TASK_FAMILY_SIGNED_KEYS_V6",
     "build_signed_task_family_row",
     "canonical_hash",
     "public_task_id",

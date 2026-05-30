@@ -1,5 +1,6 @@
 """Eval orchestration: pick queued submissions, spawn Polaris, score, sign."""
 
+from cathedral.eval.eval_signer import EvalSigner
 from cathedral.eval.orchestrator import EvalOrchestrator, run_eval_loop
 from cathedral.eval.polaris_runner import (
     BundleCardRunner,
@@ -8,7 +9,7 @@ from cathedral.eval.polaris_runner import (
     PolarisRunResult,
     StubPolarisRunner,
 )
-from cathedral.eval.scoring_pipeline import EvalSigner, score_and_sign
+from cathedral.eval.scoring_pipeline import score_and_sign
 from cathedral.eval.task_generator import generate_task
 
 __all__ = [

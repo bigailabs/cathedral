@@ -27,7 +27,9 @@ from cathedral.lanes.publisher import (
 )
 from cathedral.lanes.sign import (
     TASK_FAMILY_SCHEMA_VERSION,
+    TASK_FAMILY_SCHEMA_VERSION_V6,
     TASK_FAMILY_SIGNED_KEYS,
+    TASK_FAMILY_SIGNED_KEYS_V6,
     build_signed_task_family_row,
     public_task_id,
 )
@@ -116,6 +118,67 @@ def test_task_family_keysets_match_publisher_and_validator() -> None:
     assert pull_loop._SIGNED_KEYS_BY_VERSION[TASK_FAMILY_SCHEMA_VERSION] == (
         TASK_FAMILY_SIGNED_KEYS
     )
+
+
+def _signed_row_v6() -> tuple[dict[str, object], Ed25519PrivateKey]:
+    sk = Ed25519PrivateKey.generate()
+    problem = _problem()
+    submission = Submission(
+        task_id=problem.task_id,
+        miner_hotkey="5Miner",
+        answer={"dimacs_solution": "s SATISFIABLE\nv 1 0\n"},
+    )
+    verifier = VerifierResult(
+        parsed_ok=True, raw_metric=1.0, details={"clauses_satisfied": 1, "clause_count": 1}
+    )
+    score = ScoreResult(weighted_score=1.0, score_parts={"binary_correct": 1.0})
+    row = build_signed_task_family_row(
+        eval_run_id="run-v6-1",
+        submission_id="submission-1",
+        agent_display_name="Boolean Miner",
+        miner_hotkey="5Miner",
+        problem=problem,
+        submission=submission,
+        verifier=verifier,
+        score=score,
+        ran_at_iso="2026-05-29T20:00:00.000Z",
+        signer=EvalSigner(sk),
+        epoch_salt="epoch_123:synthetic_boolean_v1",
+        schema_version=TASK_FAMILY_SCHEMA_VERSION_V6,
+        challenge_value=3.0,
+        solve_rank=2,
+        solved=True,
+        operator="5ColdkeyOperator",
+    )
+    return row, sk
+
+
+def test_task_family_v6_keysets_match_across_modules() -> None:
+    pub = _load_v2_payload_module()._SIGNED_KEYS_BY_VERSION
+    assert pub[TASK_FAMILY_SCHEMA_VERSION_V6] == TASK_FAMILY_SIGNED_KEYS_V6
+    assert pull_loop._SIGNED_KEYS_BY_VERSION[TASK_FAMILY_SCHEMA_VERSION_V6] == (
+        TASK_FAMILY_SIGNED_KEYS_V6
+    )
+
+
+def test_task_family_v6_row_verifies_and_carries_par2_facts() -> None:
+    row, sk = _signed_row_v6()
+    assert row["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION_V6
+    assert row["challenge_value"] == 3.0
+    assert row["solve_rank"] == 2
+    assert row["solved"] is True
+    assert row["operator"] == "5ColdkeyOperator"
+    assert 0.0 <= float(row["weighted_score"]) <= 1.0  # magnitude stays in [0,1]
+    pull_loop.verify_eval_output_signature(row, sk.public_key())
+
+
+def test_task_family_v5_default_is_unchanged() -> None:
+    # No schema_version arg -> v5, byte-identical legacy shape; v6 fields absent.
+    row, sk = _signed_row()
+    assert row["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION
+    assert "challenge_value" not in row
+    assert "operator" not in row
+    pull_loop.verify_eval_output_signature(row, sk.public_key())
 
 
 def test_task_family_signed_row_rejects_tampered_score() -> None:
