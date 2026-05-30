@@ -1,6 +1,6 @@
 [project]
 name = "cathedral-subnet"
-version = "2.0.1"
+version = "2.1.0"
 description = "Decentralized formal verification built on SAT"
 readme = "README.md"
 license = { text = "Apache-2.0" }
