@@ -193,6 +193,89 @@ async def get_leaderboard_recent(
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# GET /v1/miners/{hotkey}/submissions  — miner-facing status feed
+# --------------------------------------------------------------------------
+
+
+@router.get("/v1/miners/{hotkey}/submissions")
+async def get_miner_submissions(
+    hotkey: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Return the most recent submissions for a miner hotkey, enriched with
+    eval-run status where available.
+
+    Unknown hotkeys return ``count: 0`` with an empty ``items`` list —
+    never a 4xx, because miners poll this before their first submission
+    lands and an error would be confusing.
+
+    Each item exposes:
+    - ``challenge_id``       — from the eval-run task_json when present
+    - ``tier``               — difficulty_tier from task_json, or null
+    - ``status``             — the submission's current status string
+    - ``rejection_reason``   — from the submission row, or null
+    - ``weighted_score``     — from the most-recent eval run, or null
+    - ``solve_rank``         — from the eval-run task_json, or null
+    - ``ran_at``             — timestamp of the most-recent eval run, or null
+    - ``created_at``         — submission's submitted_at timestamp
+    """
+    ctx: PublisherContext = request.app.state.ctx
+
+    # Fetch all submissions for this hotkey then slice to `limit`.
+    # list_submissions_by_hotkey returns newest-first (ORDER BY submitted_at DESC).
+    all_subs = await repository.list_submissions_by_hotkey(ctx.db, hotkey)
+    subs = all_subs[:limit]
+
+    items: list[dict[str, Any]] = []
+    for sub in subs:
+        # Fetch the most recent eval run for this submission (limit=1).
+        runs = await repository.list_eval_runs_for_submission(ctx.db, sub["id"], limit=1)
+        latest_run = runs[0] if runs else None
+
+        # Extract fields from the eval run's task_json when present.
+        task_json: dict[str, Any] = {}
+        output_json: dict[str, Any] = {}
+        if latest_run:
+            raw_task = latest_run.get("task_json")
+            task_json = raw_task if isinstance(raw_task, dict) else {}
+            raw_output = latest_run.get("output_card_json")
+            output_json = raw_output if isinstance(raw_output, dict) else {}
+
+        # Derive challenge_id: prefer eval task_json, fall back to
+        # card_id (the task-family discriminator on the submission itself).
+        challenge_id = (
+            task_json.get("challenge_id")
+            or task_json.get("task_id")
+            or output_json.get("challenge_id")
+            or sub.get("card_id")
+        )
+
+        tier = task_json.get("difficulty_tier") if task_json else None
+
+        rejection_reason = (
+            sub.get("rejection_reason")
+            or (output_json.get("rejection_reason") if output_json else None)
+        )
+
+        items.append(
+            {
+                "submission_id": sub["id"],
+                "challenge_id": challenge_id,
+                "tier": tier,
+                "status": sub.get("status"),
+                "rejection_reason": rejection_reason,
+                "weighted_score": latest_run["weighted_score"] if latest_run else None,
+                "solve_rank": task_json.get("solve_rank") if task_json else None,
+                "ran_at": latest_run["ran_at"] if latest_run else None,
+                "created_at": sub.get("submitted_at"),
+            }
+        )
+
+    return {"hotkey": hotkey, "count": len(items), "items": items}
+
+
 @router.get("/health")
 async def get_health(request: Request) -> dict[str, Any]:
     ctx: PublisherContext = request.app.state.ctx
