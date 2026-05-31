@@ -294,7 +294,9 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             else 0.0,
             "solve_rank": int(task_json["solve_rank"]) if "solve_rank" in task_json else 0,
             "solved": bool(task_json["solved"]) if "solved" in task_json else False,
-            "operator": str(task_json["operator"]) if "operator" in task_json else sub["miner_hotkey"],
+            "operator": str(task_json["operator"])
+            if "operator" in task_json
+            else sub["miner_hotkey"],
             # --- routing / non-signed metadata ---
             "eval_output_schema_version": 6,
             "cathedral_signature": run["cathedral_signature"],
@@ -358,14 +360,11 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             f"_eval_run_to_output: no branch for SAT-era schema_version={schema_version}; "
             "add a handler before deploying a new schema version"
         )
-        try:
-            logger.error(
-                "eval_run_to_output_unknown_sat_schema",
-                eval_run_id=run.get("id"),
-                schema_version=schema_version,
-            )
-        except Exception:  # noqa: BLE001 — never suppress the real error
-            pass
+        logger.error(
+            "eval_run_to_output_unknown_sat_schema",
+            eval_run_id=run.get("id"),
+            schema_version=schema_version,
+        )
         raise exc
     return {
         "id": run["id"],
