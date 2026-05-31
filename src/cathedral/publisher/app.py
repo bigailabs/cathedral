@@ -486,6 +486,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                             source=task_family_challenge_source,
                             config=_autopilot_config,
                             stop=stop,
+                            db_write_lock=ctx.db_write_lock,
                         )
                     )
                 )
@@ -495,6 +496,37 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     target_pending=_autopilot_config.default_target_pending,
                     max_imports_per_tick=_autopilot_config.max_imports_per_tick,
                 )
+
+        # SAT fill loop: promote pending->active so a target number of
+        # challenges stay live concurrently per tier (the "flood"). Opt-in
+        # via CATHEDRAL_SAT_FILL_ENABLED; reuses the same challenge source.
+        # Where the autopilot widens the bench, this keeps the board full.
+        from cathedral.publisher.sat_fill import (
+            config_from_env as _fill_config_from_env,
+        )
+        from cathedral.publisher.sat_fill import (
+            fill_enabled,
+            run_fill_loop,
+        )
+
+        if fill_enabled():
+            _fill_config = _fill_config_from_env()
+            ctx.background_tasks.append(
+                asyncio.create_task(
+                    run_fill_loop(
+                        source=task_family_challenge_source,
+                        config=_fill_config,
+                        stop=stop,
+                        db_write_lock=ctx.db_write_lock,
+                    )
+                )
+            )
+            logger.info(
+                "sat_fill_scheduled",
+                interval_seconds=_fill_config.interval_seconds,
+                tiers=list(_fill_config.tiers),
+                default_target=_fill_config.default_target,
+            )
 
         try:
             yield

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -327,6 +328,7 @@ async def run_one_tick(
     source: SqliteChallengeSource,
     config: AutopilotConfig,
     stop: asyncio.Event | None = None,
+    db_write_lock: AbstractAsyncContextManager | None = None,
 ) -> dict[str, Any]:
     """Run a single autopilot tick. Returns a small summary dict.
 
@@ -376,6 +378,12 @@ async def run_one_tick(
                 return summary
             summary["imports_attempted"] += 1
             try:
+                # Pass the write gate INTO the import so it serializes only the
+                # shared-connection writes (upsert/activate) against the
+                # winner-write path and the fill loop — NOT the lease/fetch/
+                # confirm network I/O. Holding the process-wide lock across the
+                # generator round-trips would block winner writes for the HTTP
+                # timeout; gating only the DB write avoids that.
                 result = await import_challenge_from_generator(
                     client=client,
                     source=source,
@@ -383,6 +391,7 @@ async def run_one_tick(
                     tier=need.tier,
                     kind=need.kind,
                     activate=False,
+                    db_write_lock=db_write_lock,
                 )
             except SatGeneratorError as exc:
                 # Generator-side issue (empty pool, 409, etc). Log and
@@ -423,6 +432,7 @@ async def run_autopilot_supervisor(
     source: SqliteChallengeSource,
     config: AutopilotConfig,
     stop: asyncio.Event,
+    db_write_lock: AbstractAsyncContextManager | None = None,
 ) -> None:
     """Lifespan-friendly wrapper that owns the client's aclose.
 
@@ -435,7 +445,11 @@ async def run_autopilot_supervisor(
     """
     async with client:
         await run_autopilot_loop(
-            client=client, source=source, config=config, stop=stop
+            client=client,
+            source=source,
+            config=config,
+            stop=stop,
+            db_write_lock=db_write_lock,
         )
 
 
@@ -445,6 +459,7 @@ async def run_autopilot_loop(
     source: SqliteChallengeSource,
     config: AutopilotConfig,
     stop: asyncio.Event,
+    db_write_lock: AbstractAsyncContextManager | None = None,
 ) -> None:
     """Cooperative loop. Exits cleanly when ``stop`` is set.
 
@@ -462,7 +477,11 @@ async def run_autopilot_loop(
     while not stop.is_set():
         try:
             await run_one_tick(
-                client=client, source=source, config=config, stop=stop
+                client=client,
+                source=source,
+                config=config,
+                stop=stop,
+                db_write_lock=db_write_lock,
             )
         except asyncio.CancelledError:
             raise

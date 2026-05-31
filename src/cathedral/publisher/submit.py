@@ -1020,30 +1020,76 @@ async def _handle_solve_post(
     # behave exactly as before.
     from typing import Literal, cast
 
+    from cathedral.publisher.sat_fill import fill_kind, target_for_tier
+
     promote_scope: Literal["tier", "tier_difficulty"] = (
         "tier_difficulty" if active.difficulty_label is not None else "tier"
     )
-    try:
-        promoted = await source.mark_locked_and_promote_next(
-            family_id=SAT_FAMILY_ID,
-            challenge_id=challenge_id,
-            now_iso=now_iso,
-            manage_transaction=True,
-            active_scope=cast("Literal['family', 'tier', 'tier_difficulty']", promote_scope),
-        )
-        if promoted is not None:
-            logger.info(
-                "solve_post_promoted_next",
-                locked_challenge_id=challenge_id,
-                promoted_challenge_id=promoted.challenge_id,
-                tier=promoted.tier,
+    # Serialize promotion against the winner-write path and the fill loop.
+    # The challenge source shares ONE aiosqlite connection with
+    # atomic_claim_winner and uses BEGIN IMMEDIATE windows, so every
+    # concurrent writer must hold ctx.db_write_lock or they interleave on the
+    # connection. Holding it across the count-and-promote also stops this
+    # refill and the fill loop from both seeing the same deficit and
+    # overshooting the target. Target + kind come from sat_fill so the
+    # zero-lag refill and the polling loop converge on the SAME board.
+    target_active = target_for_tier(active.tier)
+    refill_kind = fill_kind()
+    async with ctx.db_write_lock:
+        try:
+            promoted = await source.mark_locked_and_promote_next(
+                family_id=SAT_FAMILY_ID,
+                challenge_id=challenge_id,
+                now_iso=now_iso,
+                manage_transaction=True,
+                active_scope=cast(
+                    "Literal['family', 'tier', 'tier_difficulty']", promote_scope
+                ),
             )
-    except Exception as exc:
-        logger.exception(
-            "solve_post_promote_failed",
-            locked_challenge_id=challenge_id,
-            error=str(exc),
-        )
+            if promoted is not None:
+                logger.info(
+                    "solve_post_promoted_next",
+                    locked_challenge_id=challenge_id,
+                    promoted_challenge_id=promoted.challenge_id,
+                    tier=promoted.tier,
+                )
+        except Exception as exc:
+            logger.exception(
+                "solve_post_promote_failed",
+                locked_challenge_id=challenge_id,
+                error=str(exc),
+            )
+
+        # Event-driven refill to the flood target. A win is the exact moment
+        # a slot opens, so this is the zero-lag trigger to top the board back
+        # to the same N the polling fill loop converges to. The one-for-one
+        # mark_locked_and_promote_next above keeps a single lane warm; this
+        # restores the *flood* (N>1). Idempotent: a no-op at target (the
+        # default N=1 case), so it stays inert unless a wider board is set.
+        if target_active > 1:
+            try:
+                refilled = await source.promote_to_target(
+                    SAT_FAMILY_ID,
+                    tier=active.tier,
+                    target=target_active,
+                    now_iso=now_iso,
+                    kind=refill_kind,
+                )
+                if refilled:
+                    logger.info(
+                        "solve_post_refilled_board",
+                        locked_challenge_id=challenge_id,
+                        tier=active.tier,
+                        target=target_active,
+                        refilled_count=len(refilled),
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "solve_post_refill_failed",
+                    locked_challenge_id=challenge_id,
+                    tier=active.tier,
+                    error=str(exc),
+                )
 
     return {
         "id": submission_id,
