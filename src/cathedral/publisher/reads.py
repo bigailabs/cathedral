@@ -266,6 +266,42 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             "failure_reason": output.get("failure_reason"),
             "merkle_epoch": run.get("merkle_epoch"),
         }
+    if schema_version == 6:
+        task_json = run.get("task_json") or {}
+        output = run.get("output_card_json") or {}
+        return {
+            # --- 14 keys shared with v5 ---
+            "id": run["id"],
+            "agent_id": sub["id"],
+            "agent_display_name": sub["display_name"],
+            "miner_hotkey": sub["miner_hotkey"],
+            "task_type": task_json.get("task_type") or output.get("task_type"),
+            "task_id_public": task_json.get("task_id_public") or output.get("task_id_public"),
+            "epoch_salt": task_json.get("epoch_salt"),
+            "difficulty_tier": task_json.get("difficulty_tier")
+            if "difficulty_tier" in task_json
+            else output.get("difficulty_tier"),
+            "weighted_score": run["weighted_score"],
+            "score_parts": run["score_parts"],
+            "answer_hash": task_json.get("answer_hash") or output.get("answer_hash"),
+            "verifier_details_hash": task_json.get("verifier_details_hash")
+            or output.get("verifier_details_hash"),
+            "rejection_reason": output.get("rejection_reason"),
+            "ran_at": run["ran_at"],
+            # --- 4 v6-only PAR-2 fields (must preserve exact types signed over) ---
+            "challenge_value": float(task_json["challenge_value"])
+            if "challenge_value" in task_json
+            else 0.0,
+            "solve_rank": int(task_json["solve_rank"]) if "solve_rank" in task_json else 0,
+            "solved": bool(task_json["solved"]) if "solved" in task_json else False,
+            "operator": str(task_json["operator"])
+            if "operator" in task_json
+            else sub["miner_hotkey"],
+            # --- routing / non-signed metadata ---
+            "eval_output_schema_version": 6,
+            "cathedral_signature": run["cathedral_signature"],
+            "merkle_epoch": run.get("merkle_epoch"),
+        }
     if schema_version == 5:
         task_json = run.get("task_json") or {}
         output = run.get("output_card_json") or {}
@@ -315,6 +351,21 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             "eval_artifact_manifest_url": run.get("eval_artifact_manifest_url"),
             "merkle_epoch": run.get("merkle_epoch"),
         }
+    # SAT-era rows (schema_version >= 5) with no matching branch are a hard
+    # error: silently falling through to the v1 card shape hid the v6 bug for
+    # months (every v6 row was served wrong; the validator then saw
+    # InvalidSignature and dropped the row from scoring).
+    if schema_version >= 5:
+        exc = ValueError(
+            f"_eval_run_to_output: no branch for SAT-era schema_version={schema_version}; "
+            "add a handler before deploying a new schema version"
+        )
+        logger.error(
+            "eval_run_to_output_unknown_sat_schema",
+            eval_run_id=run.get("id"),
+            schema_version=schema_version,
+        )
+        raise exc
     return {
         "id": run["id"],
         "agent_id": sub["id"],

@@ -2131,7 +2131,19 @@ def _task_family_storage_from_signed_row(
     time_limit_seconds: int,
     miner_hotkey: str,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
-    """Build eval_runs storage JSON from a signed schema-5 row."""
+    """Build eval_runs storage JSON from a signed schema-5/6 row.
+
+    Schema-6 (PAR-2) rows carry four additional signed fields that must be
+    round-tripped through ``task_json`` so the feed serializer can emit the
+    correct v6 projection (``_eval_run_to_output`` schema-6 branch).  The
+    fields are stored verbatim with exact types so ``canonical_json`` of the
+    served projection is byte-identical to the signed payload:
+
+    * ``challenge_value`` — float
+    * ``solve_rank``      — int
+    * ``solved``          — bool
+    * ``operator``        — str (miner_hotkey currently)
+    """
     import blake3
 
     from cathedral.v1_types import canonical_json
@@ -2145,7 +2157,7 @@ def _task_family_storage_from_signed_row(
         "worker_owner_hotkey": miner_hotkey,
     }
     output_card_hash = blake3.blake3(canonical_json(output_card_json)).hexdigest()
-    task_json = {
+    task_json: dict[str, Any] = {
         "task_type": family_id,
         "task_id_public": signed_row["task_id_public"],
         "epoch_salt": signed_row["epoch_salt"],
@@ -2157,6 +2169,14 @@ def _task_family_storage_from_signed_row(
         "cnf_sha256": cnf_sha256,
         "miner_solution_sha256": dimacs_solution_sha256,
     }
+    # Persist the 4 v6-only signed fields when present so the feed serializer
+    # can reconstruct the exact signed projection.  Absent on v5 rows.
+    schema_version = int(signed_row.get("eval_output_schema_version") or 5)
+    if schema_version >= 6:
+        task_json["challenge_value"] = float(signed_row["challenge_value"])
+        task_json["solve_rank"] = int(signed_row["solve_rank"])
+        task_json["solved"] = bool(signed_row["solved"])
+        task_json["operator"] = str(signed_row["operator"])
     return task_json, output_card_json, output_card_hash
 
 
