@@ -19,9 +19,10 @@ same DB the publisher reads from).
 
 from __future__ import annotations
 
-import json
+import contextlib
 import os
 import secrets
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,6 +76,7 @@ async def import_challenge_from_generator(
     retire_current: bool = False,
     time_limit_seconds: int = _DEFAULT_TIME_LIMIT_SECONDS,
     idempotency_key: str | None = None,
+    db_write_lock: AbstractAsyncContextManager | None = None,
 ) -> ImportResult:
     """Lease one CNF and durably import it as a Cathedral challenge.
 
@@ -149,20 +151,27 @@ async def import_challenge_from_generator(
             audit_metadata=audit,
         )
         now_iso = _now_iso()
-        await source.upsert(record, now_iso=now_iso)
-        db_committed = True
-
-        # --- 7. Activate if requested ---
+        # Serialize ONLY the shared-connection writes (upsert + activate) under
+        # the publisher write gate — NOT the lease/fetch/confirm network I/O
+        # above and below. The gate is a process-wide non-reentrant lock; if it
+        # wrapped the whole import, a slow generator request would block winner
+        # writes for the duration of the HTTP round-trips. Default nullcontext
+        # keeps direct/test callers lock-free.
         activated = False
-        if activate:
-            await source.activate(
-                family_id=family,
-                challenge_id=challenge_id,
-                now_iso=now_iso,
-                retire_current=retire_current,
-                active_scope=active_scope,
-            )
-            activated = True
+        async with (db_write_lock or contextlib.nullcontext()):
+            await source.upsert(record, now_iso=now_iso)
+            db_committed = True
+
+            # --- 7. Activate if requested ---
+            if activate:
+                await source.activate(
+                    family_id=family,
+                    challenge_id=challenge_id,
+                    now_iso=now_iso,
+                    retire_current=retire_current,
+                    active_scope=active_scope,
+                )
+                activated = True
 
         # --- 8. Confirm lease (only after durable commit succeeds) ---
         await client.confirm(
