@@ -54,8 +54,8 @@ _ALLOWED_STATUSES = frozenset(
     }
 )
 
-ActiveChallengeScope = Literal["family", "tier", "tier_difficulty"]
-_ALLOWED_ACTIVE_SCOPES = frozenset({"family", "tier", "tier_difficulty"})
+ActiveChallengeScope = Literal["family", "tier", "tier_difficulty", "tier_multi"]
+_ALLOWED_ACTIVE_SCOPES = frozenset({"family", "tier", "tier_difficulty", "tier_multi"})
 
 
 class ChallengeSourceError(Exception):
@@ -161,6 +161,7 @@ class ChallengeSource(Protocol):
         max_count: int,
         kind: str | None = None,
         difficulty_label: str | None = None,
+        multi: bool = False,
     ) -> list[str]:
         """Promote up to ``max_count`` pending rows in one operation."""
         ...
@@ -179,6 +180,26 @@ class ChallengeSource(Protocol):
         now_iso: str,
     ) -> None:
         """Durably mark locked-challenge loser publication complete."""
+        ...
+
+    async def promote_to_target(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        target: int,
+        now_iso: str,
+        kind: str | None = None,
+    ) -> list[str]:
+        """Top up the active set for (family_id, tier) to ``target`` concurrent actives.
+
+        Counts currently-active rows for the (family_id, tier) pair. If
+        ``kind`` is given, only counts actives whose
+        ``audit_metadata["kind"] == kind``. Computes the deficit and
+        promotes exactly that many pending rows (or fewer if not enough
+        are available). Returns the list of newly-promoted challenge ids.
+        Idempotent: returns ``[]`` when already at or above ``target``.
+        """
         ...
 
 
@@ -273,8 +294,26 @@ class InMemoryChallengeSource:
             raise ChallengeSourceError("challenge is not activatable")
         if active_scope not in _ALLOWED_ACTIVE_SCOPES:
             raise ChallengeSourceError(
-                "active_scope must be 'family', 'tier', or 'tier_difficulty'"
+                "active_scope must be 'family', 'tier', 'tier_difficulty', or 'tier_multi'"
             )
+
+        # 'tier_multi' allows many concurrent actives in the same tier —
+        # skip conflict detection and retirement entirely.
+        if active_scope == "tier_multi":
+            activated = ChallengeRecord(
+                challenge_id=target.challenge_id,
+                family_id=target.family_id,
+                tier=target.tier,
+                cnf_text=target.cnf_text,
+                status=CHALLENGE_STATUS_ACTIVE,
+                audit_metadata=target.audit_metadata,
+                cnf_path=target.cnf_path,
+                losers_published_at_iso=target.losers_published_at_iso,
+                score_multiplier=target.score_multiplier,
+                difficulty_label=target.difficulty_label,
+            )
+            self._rows[challenge_id] = activated
+            return activated
 
         # 'tier_difficulty' on an unlabeled target degrades to 'tier'
         # so legacy data retains the one-active-per-tier invariant.
@@ -417,6 +456,7 @@ class InMemoryChallengeSource:
         max_count: int,
         kind: str | None = None,
         difficulty_label: str | None = None,
+        multi: bool = False,
     ) -> list[str]:
         """Match :meth:`SqliteChallengeSource.promote_pending_batch` exactly.
 
@@ -425,22 +465,30 @@ class InMemoryChallengeSource:
         Stops iterating on the first ``ChallengeSourceError`` so the
         unlabeled "tier" scope yields at most one promotion per call
         — same as the SQLite path.
+
+        When ``multi=True`` the scope becomes ``'tier_multi'`` so
+        multiple candidates can be promoted concurrently in the same
+        tier without retiring earlier actives. The loop does NOT stop
+        on ``ChallengeSourceError`` because ``tier_multi`` never raises
+        the "another active challenge exists" guard.
         """
         max_count = max(0, int(max_count))
         if max_count == 0:
             return []
-        scope: ActiveChallengeScope = (
-            "tier_difficulty" if difficulty_label is not None else "tier"
-        )
+        if multi:
+            scope: ActiveChallengeScope = "tier_multi"
+        else:
+            scope = "tier_difficulty" if difficulty_label is not None else "tier"
         candidates: list[ChallengeRecord] = []
         for rec in await self.list_for_family(family_id, status=CHALLENGE_STATUS_PENDING):
             if rec.tier != int(tier):
                 continue
-            if difficulty_label is None:
-                if rec.difficulty_label is not None:
+            if not multi:
+                if difficulty_label is None:
+                    if rec.difficulty_label is not None:
+                        continue
+                elif rec.difficulty_label != difficulty_label:
                     continue
-            elif rec.difficulty_label != difficulty_label:
-                continue
             if kind is not None:
                 audit_kind = (rec.audit_metadata or {}).get("kind")
                 if audit_kind != kind:
@@ -459,9 +507,40 @@ class InMemoryChallengeSource:
                     active_scope=scope,
                 )
             except ChallengeSourceError:
+                if multi:
+                    # tier_multi should never raise; if it does, skip and continue
+                    continue
                 break
             promoted.append(cand.challenge_id)
         return promoted
+
+    async def promote_to_target(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        target: int,
+        now_iso: str,
+        kind: str | None = None,
+    ) -> list[str]:
+        actives = await self.list_active(family_id)
+        current_count = sum(
+            1
+            for rec in actives
+            if rec.tier == int(tier)
+            and (kind is None or (rec.audit_metadata or {}).get("kind") == kind)
+        )
+        deficit = max(0, int(target) - current_count)
+        if deficit == 0:
+            return []
+        return await self.promote_pending_batch(
+            family_id,
+            tier=tier,
+            now_iso=now_iso,
+            max_count=deficit,
+            kind=kind,
+            multi=True,
+        )
 
     async def list_locked_needing_loser_reconciliation(
         self, family_id: str, *, limit: int = 32
@@ -576,15 +655,18 @@ async def ensure_sqlite_challenge_source_schema(conn: aiosqlite.Connection) -> N
     if "difficulty_label" not in columns:
         await conn.execute("ALTER TABLE lane_challenges ADD COLUMN difficulty_label TEXT")
     await conn.execute("DROP INDEX IF EXISTS idx_lane_challenges_one_active_per_family")
-    # The legacy tier-only unique active index is being narrowed to apply
-    # only to unlabeled rows so labeled rows can share a tier slot. Drop
-    # any pre-existing (unconditional) version first so the rebuild picks
-    # up the partial-index predicate even on already-migrated DBs.
+    # The legacy tier-only unique active index is being converted from UNIQUE
+    # to a plain index so multiple unlabeled actives can co-exist in the same
+    # tier when the caller uses active_scope='tier_multi'. Drop any pre-existing
+    # version first (idempotent) so the rebuild picks up the new non-unique
+    # definition even on already-migrated DBs. The one-active-per-tier
+    # guarantee for the 'tier' scope now rests on app logic (activate()
+    # retires existing rows when scope != 'tier_multi').
     await conn.execute(
         "DROP INDEX IF EXISTS idx_lane_challenges_one_active_per_family_tier"
     )
     await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_challenges_one_active_per_family_tier "
+        "CREATE INDEX IF NOT EXISTS idx_lane_challenges_one_active_per_family_tier "
         "ON lane_challenges(family_id, tier) "
         "WHERE status = 'active' AND difficulty_label IS NULL"
     )
@@ -868,7 +950,7 @@ class SqliteChallengeSource:
         try:
             if active_scope not in _ALLOWED_ACTIVE_SCOPES:
                 raise ChallengeSourceError(
-                    "active_scope must be 'family', 'tier', or 'tier_difficulty'"
+                    "active_scope must be 'family', 'tier', 'tier_difficulty', or 'tier_multi'"
                 )
             await self._conn.execute("BEGIN IMMEDIATE")
             target = await self._fetch_one_for_update(family_id, challenge_id)
@@ -877,44 +959,48 @@ class SqliteChallengeSource:
             if target.status not in {CHALLENGE_STATUS_PENDING, CHALLENGE_STATUS_ACTIVE}:
                 raise ChallengeSourceError("challenge is not activatable")
 
-            # 'tier_difficulty' on an unlabeled target degrades to 'tier'
-            # so legacy data retains the one-active-per-tier invariant.
-            effective_scope: str = active_scope
-            if effective_scope == "tier_difficulty" and target.difficulty_label is None:
-                effective_scope = "tier"
+            # 'tier_multi' allows concurrent actives in the same tier — skip
+            # conflict detection and retirement entirely. Jump straight to the
+            # UPDATE that flips this row to active.
+            if active_scope != "tier_multi":
+                # 'tier_difficulty' on an unlabeled target degrades to 'tier'
+                # so legacy data retains the one-active-per-tier invariant.
+                effective_scope: str = active_scope
+                if effective_scope == "tier_difficulty" and target.difficulty_label is None:
+                    effective_scope = "tier"
 
-            active_rows = [
-                row
-                for row in await self._fetch_active_rows_for_update(
-                    family_id,
-                    tier=(
-                        target.tier
-                        if effective_scope in {"tier", "tier_difficulty"}
-                        else None
-                    ),
-                    difficulty_label=(
-                        target.difficulty_label
-                        if effective_scope == "tier_difficulty"
-                        else None
-                    ),
-                    match_difficulty=effective_scope == "tier_difficulty",
-                )
-                if row.challenge_id != challenge_id
-            ]
-            if active_rows:
-                if not retire_current:
-                    raise ChallengeSourceError("another active challenge exists")
-                for active in active_rows:
-                    await self._conn.execute(
-                        "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
-                        "WHERE family_id = ? AND challenge_id = ?",
-                        (
-                            CHALLENGE_STATUS_RETIRED,
-                            now_iso,
-                            family_id,
-                            active.challenge_id,
+                active_rows = [
+                    row
+                    for row in await self._fetch_active_rows_for_update(
+                        family_id,
+                        tier=(
+                            target.tier
+                            if effective_scope in {"tier", "tier_difficulty"}
+                            else None
                         ),
+                        difficulty_label=(
+                            target.difficulty_label
+                            if effective_scope == "tier_difficulty"
+                            else None
+                        ),
+                        match_difficulty=effective_scope == "tier_difficulty",
                     )
+                    if row.challenge_id != challenge_id
+                ]
+                if active_rows:
+                    if not retire_current:
+                        raise ChallengeSourceError("another active challenge exists")
+                    for active in active_rows:
+                        await self._conn.execute(
+                            "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
+                            "WHERE family_id = ? AND challenge_id = ?",
+                            (
+                                CHALLENGE_STATUS_RETIRED,
+                                now_iso,
+                                family_id,
+                                active.challenge_id,
+                            ),
+                        )
 
             await self._conn.execute(
                 "UPDATE lane_challenges SET status = ?, updated_at_iso = ? "
@@ -1079,6 +1165,7 @@ class SqliteChallengeSource:
         max_count: int,
         kind: str | None = None,
         difficulty_label: str | None = None,
+        multi: bool = False,
     ) -> list[str]:
         """Promote up to ``max_count`` pending rows in one transaction.
 
@@ -1093,6 +1180,14 @@ class SqliteChallengeSource:
         without that filter we could promote a labeled row under
         tier-scope and leave the unlabeled-active invariant violated.
         (Codex review P0, 2026-05-28.)
+
+        When ``multi=True`` the scope becomes ``'tier_multi'`` so
+        multiple candidates can be promoted concurrently in the same
+        tier without retiring earlier actives. The candidate query does
+        NOT apply the ``difficulty_label IS NULL`` filter so all pending
+        rows in the tier are eligible. The activation loop does NOT stop
+        on ``ChallengeSourceError`` because ``tier_multi`` never raises
+        the conflict guard.
 
         After candidate selection the batch falls through to
         :meth:`activate` per row so the *same* scope-guard runs as it
@@ -1109,8 +1204,23 @@ class SqliteChallengeSource:
         # matches the requested invariant. ``None`` means "unlabeled
         # only" so the legacy one-active-per-tier rule continues to
         # hold; an explicit label means "exact match" so labeled rows
-        # share the tier without colliding.
-        if difficulty_label is not None:
+        # share the tier without colliding. When multi=True we pull all
+        # pending rows for the tier regardless of difficulty_label.
+        if multi:
+            cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "audit_metadata, score_multiplier, difficulty_label "
+                "FROM lane_challenges "
+                "WHERE family_id = ? AND status = ? AND tier = ? "
+                "ORDER BY created_at_iso ASC, challenge_id ASC LIMIT ?",
+                (
+                    family_id,
+                    CHALLENGE_STATUS_PENDING,
+                    int(tier),
+                    max_count * 4,
+                ),
+            )
+        elif difficulty_label is not None:
             cur = await self._conn.execute(
                 "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
                 "audit_metadata, score_multiplier, difficulty_label "
@@ -1156,7 +1266,9 @@ class SqliteChallengeSource:
                 break
 
         scope: ActiveChallengeScope = (
-            "tier_difficulty" if difficulty_label is not None else "tier"
+            "tier_multi"
+            if multi
+            else ("tier_difficulty" if difficulty_label is not None else "tier")
         )
         promoted: list[str] = []
         for cand in candidates:
@@ -1168,6 +1280,9 @@ class SqliteChallengeSource:
                     active_scope=scope,
                 )
             except ChallengeSourceError:
+                if multi:
+                    # tier_multi should never raise; if it does, skip and continue
+                    continue
                 # Most likely "another active challenge exists" — under
                 # ``'tier'`` scope only one unlabeled row can occupy a
                 # slot at a time. We stop iterating because subsequent
@@ -1175,6 +1290,34 @@ class SqliteChallengeSource:
                 break
             promoted.append(cand.challenge_id)
         return promoted
+
+    async def promote_to_target(
+        self,
+        family_id: str,
+        *,
+        tier: int,
+        target: int,
+        now_iso: str,
+        kind: str | None = None,
+    ) -> list[str]:
+        actives = await self.list_active(family_id)
+        current_count = sum(
+            1
+            for rec in actives
+            if rec.tier == int(tier)
+            and (kind is None or (rec.audit_metadata or {}).get("kind") == kind)
+        )
+        deficit = max(0, int(target) - current_count)
+        if deficit == 0:
+            return []
+        return await self.promote_pending_batch(
+            family_id,
+            tier=tier,
+            now_iso=now_iso,
+            max_count=deficit,
+            kind=kind,
+            multi=True,
+        )
 
     async def _fetch_one_for_update(
         self, family_id: str, challenge_id: str

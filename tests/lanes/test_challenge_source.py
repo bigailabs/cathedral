@@ -124,12 +124,33 @@ async def test_sqlite_only_active_returned_by_get_active(tmp_path) -> None:
 
 
 async def test_sqlite_rejects_second_active_for_same_tier(tmp_path) -> None:
+    """One-active-per-tier is enforced by activate() app logic, not the DB index.
+
+    The UNIQUE index on (family_id, tier) WHERE status='active' was
+    replaced with a plain index in the tier_multi migration so that
+    multiple unlabeled actives can co-exist under 'tier_multi' scope.
+    The one-per-tier guarantee for the legacy 'tier' scope now lives
+    entirely in activate(): calling it without retire_current=True raises
+    ChallengeSourceError when another active already occupies the slot.
+    """
     conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
     try:
         src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
-        await src.upsert(_record("c1", CHALLENGE_STATUS_ACTIVE))
+        await src.upsert(_record("c1", CHALLENGE_STATUS_PENDING))
+        await src.upsert(_record("c2", CHALLENGE_STATUS_PENDING))
+        await src.activate(
+            family_id=_FAMILY,
+            challenge_id="c1",
+            now_iso="2026-05-19T00:00:01.000Z",
+            active_scope="tier",
+        )
         with pytest.raises(ChallengeSourceError):
-            await src.upsert(_record("c2", CHALLENGE_STATUS_ACTIVE))
+            await src.activate(
+                family_id=_FAMILY,
+                challenge_id="c2",
+                now_iso="2026-05-19T00:00:02.000Z",
+                active_scope="tier",
+            )
     finally:
         await conn.close()
 
