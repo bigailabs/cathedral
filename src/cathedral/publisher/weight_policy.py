@@ -309,7 +309,7 @@ async def latest_policy_scores_by_hotkey(
             JOIN agent_submissions sub ON sub.id = er.submission_id
             LEFT JOIN lane_challenges lc
                 ON lc.challenge_id = json_extract(er.task_json, '$.challenge_id')
-            WHERE er.eval_output_schema_version = 5
+            WHERE er.eval_output_schema_version IN (5, 6)
               AND er.ran_at >= ?
               AND sub.status = 'ranked'
               AND sub.discovery_only = 0
@@ -332,7 +332,7 @@ async def latest_policy_scores_by_hotkey(
                    1.0 AS score_multiplier
             FROM eval_runs er
             JOIN agent_submissions sub ON sub.id = er.submission_id
-            WHERE er.eval_output_schema_version = 5
+            WHERE er.eval_output_schema_version IN (5, 6)
               AND er.ran_at >= ?
               AND sub.status = 'ranked'
               AND sub.discovery_only = 0

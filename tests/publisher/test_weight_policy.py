@@ -565,3 +565,41 @@ async def test_missing_challenge_id_in_lane_table_defaults_to_unit_multiplier(
         assert scores["hk-orphan"] == pytest.approx(1.0)
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_schema6_open_window_rows_feed_policy(tmp_path) -> None:
+    """Open-window (schema-6) ranked solves now contribute to the signed
+    weight vector, exactly like schema-5 — the `IN (5, 6)` policy change.
+    Without it, v6 open-window solvers earn nothing from the published vector."""
+    conn = await connect(str(tmp_path / "publisher.db"))
+    try:
+        await _seed_ranked_submission(conn, "agent-v6", "hk-open-window")
+        await repository.insert_eval_run(
+            conn,
+            id="v6-run-1",
+            submission_id="agent-v6",
+            epoch=1,
+            round_index=0,
+            polaris_agent_id="direct-submit:hk-open-window",
+            polaris_run_id="synthetic_boolean_v1:v6-run-1",
+            task_json={"task_type": "synthetic_boolean_v1", "challenge_id": "c-v6"},
+            output_card_json={},
+            output_card_hash="hash-v6-run-1",
+            score_parts={"binary_correct": 1.0},
+            weighted_score=1.0,
+            ran_at=datetime.now(UTC),
+            duration_ms=0,
+            errors=None,
+            cathedral_signature="sig",
+            eval_output_schema_version=6,
+        )
+        scores = await latest_policy_scores_by_hotkey(
+            conn,
+            limit=10,
+            task_family_weights={"synthetic_boolean_v1": 1.0},
+            disable_legacy_base_scores=True,
+        )
+        assert scores == {"hk-open-window": 1.0}
+    finally:
+        await conn.close()
