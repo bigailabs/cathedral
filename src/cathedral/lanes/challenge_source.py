@@ -1037,6 +1037,7 @@ class SqliteChallengeSource:
         now_iso: str,
         manage_transaction: bool = True,
         active_scope: ActiveChallengeScope = "family",
+        promote: bool = True,
     ) -> ChallengeRecord | None:
         try:
             if active_scope not in _ALLOWED_ACTIVE_SCOPES:
@@ -1066,6 +1067,15 @@ class SqliteChallengeSource:
                     CHALLENGE_STATUS_ACTIVE,
                 ),
             )
+
+            # Lock-only mode: caller will refill via a kind-aware
+            # promote_to_target, so don't promote a (possibly wrong-kind)
+            # pending row here. Used by the winner-take-all submit path so the
+            # refill respects FILL_KIND.
+            if not promote:
+                if manage_transaction:
+                    await self._conn.commit()
+                return None
 
             active = await self._fetch_active_for_update(
                 family_id,

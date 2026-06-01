@@ -502,6 +502,38 @@ async def test_seed_does_not_reactivate_locked_challenge_on_restart(tmp_path) ->
         await conn.close()
 
 
+async def test_mark_locked_promote_false_locks_only(tmp_path) -> None:
+    # promote=False (winner-take-all submit path): lock the won challenge but
+    # do NOT auto-promote a pending one — the caller refills kind-aware.
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        won = await seed_synthetic_boolean_challenge(
+            src, cnf_text="p cnf 2 1\n1 2 0\n", tier=1,
+            now_iso="2026-05-19T00:00:00.000Z", activate=True,
+        )
+        pend = await seed_synthetic_boolean_challenge(
+            src, cnf_text="p cnf 2 1\n-1 -2 0\n", tier=1,
+            now_iso="2026-05-19T00:00:00.500Z", activate=False,
+        )
+        assert won.challenge_id != pend.challenge_id
+        result = await src.mark_locked_and_promote_next(
+            family_id=_FAMILY,
+            challenge_id=won.challenge_id,
+            now_iso="2026-05-19T00:00:01.000Z",
+            active_scope="tier",
+            promote=False,
+        )
+        assert result is None
+        rows = {r.challenge_id: r.status for r in await src.list_for_family(_FAMILY)}
+        assert rows[won.challenge_id] == CHALLENGE_STATUS_LOCKED
+        # pending stays pending — not auto-promoted
+        assert rows[pend.challenge_id] == CHALLENGE_STATUS_PENDING
+        assert await src.get_active(_FAMILY) is None
+    finally:
+        await conn.close()
+
+
 async def test_env_seed_skips_locked_seed_after_restart_with_promoted_active(
     tmp_path,
     monkeypatch,

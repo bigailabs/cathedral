@@ -1033,11 +1033,18 @@ async def _handle_solve_post(
     # refill and the fill loop from both seeing the same deficit and
     # overshooting the target. Target + kind come from sat_fill so the
     # zero-lag refill and the polling loop converge on the SAME board.
-    target_active = target_for_tier(active.tier)
+    # Target is at least 1 so the locked slot is always replaced. Both target
+    # and kind come from sat_fill so this zero-lag refill and the polling loop
+    # converge on the SAME board.
+    target_active = max(1, target_for_tier(active.tier))
     refill_kind = fill_kind()
     async with ctx.db_write_lock:
+        # Lock the won challenge ONLY (promote=False). The refill below is
+        # kind-aware (promote_to_target with FILL_KIND); letting
+        # mark_locked_and_promote_next promote here would ignore the kind
+        # filter and could surface a wrong-kind/stale pending row.
         try:
-            promoted = await source.mark_locked_and_promote_next(
+            await source.mark_locked_and_promote_next(
                 family_id=SAT_FAMILY_ID,
                 challenge_id=challenge_id,
                 now_iso=now_iso,
@@ -1045,51 +1052,41 @@ async def _handle_solve_post(
                 active_scope=cast(
                     "Literal['family', 'tier', 'tier_difficulty']", promote_scope
                 ),
+                promote=False,
             )
-            if promoted is not None:
-                logger.info(
-                    "solve_post_promoted_next",
-                    locked_challenge_id=challenge_id,
-                    promoted_challenge_id=promoted.challenge_id,
-                    tier=promoted.tier,
-                )
         except Exception as exc:
             logger.exception(
-                "solve_post_promote_failed",
+                "solve_post_lock_failed",
                 locked_challenge_id=challenge_id,
                 error=str(exc),
             )
 
-        # Event-driven refill to the flood target. A win is the exact moment
-        # a slot opens, so this is the zero-lag trigger to top the board back
-        # to the same N the polling fill loop converges to. The one-for-one
-        # mark_locked_and_promote_next above keeps a single lane warm; this
-        # restores the *flood* (N>1). Idempotent: a no-op at target (the
-        # default N=1 case), so it stays inert unless a wider board is set.
-        if target_active > 1:
-            try:
-                refilled = await source.promote_to_target(
-                    SAT_FAMILY_ID,
-                    tier=active.tier,
-                    target=target_active,
-                    now_iso=now_iso,
-                    kind=refill_kind,
-                )
-                if refilled:
-                    logger.info(
-                        "solve_post_refilled_board",
-                        locked_challenge_id=challenge_id,
-                        tier=active.tier,
-                        target=target_active,
-                        refilled_count=len(refilled),
-                    )
-            except Exception as exc:
-                logger.exception(
-                    "solve_post_refill_failed",
+        # Kind-aware refill to target: replaces the locked slot (target>=1) and
+        # maintains the flood (target>1). promote_to_target counts/promotes
+        # only matching-kind rows, so it never activates a wrong-kind pending.
+        try:
+            refilled = await source.promote_to_target(
+                SAT_FAMILY_ID,
+                tier=active.tier,
+                target=target_active,
+                now_iso=now_iso,
+                kind=refill_kind,
+            )
+            if refilled:
+                logger.info(
+                    "solve_post_refilled_board",
                     locked_challenge_id=challenge_id,
                     tier=active.tier,
-                    error=str(exc),
+                    target=target_active,
+                    refilled_count=len(refilled),
                 )
+        except Exception as exc:
+            logger.exception(
+                "solve_post_refill_failed",
+                locked_challenge_id=challenge_id,
+                tier=active.tier,
+                error=str(exc),
+            )
 
     return {
         "id": submission_id,
