@@ -230,6 +230,23 @@ async def test_active_with_correct_token_returns_cnf(wired_app: dict[str, Any]) 
 
 
 @pytest.mark.asyncio
+async def test_cnf_fetch_ip_rate_limit(
+    wired_app: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_CNF_FETCH_IP_LIMIT_PER_MIN", "1")
+    await _seed_active_with_token(wired_app)
+    client = TestClient(wired_app["app"])
+
+    first = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+    second = client.get(f"/v1/challenges/{CHALLENGE_ID}/cnf", params={"t": FAKE_TOKEN})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 429, second.text
+    assert second.json()["detail"].startswith("rate limited:")
+
+
+@pytest.mark.asyncio
 async def test_active_file_backed_with_correct_token_returns_cnf(
     wired_app: dict[str, Any],
     tmp_path: Any,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from cathedral.publisher.rate_limit import RateLimitError, SubmitRateGuard
+from cathedral.publisher.security import RequestRateLimitError, SlidingWindowRateLimiter
 
 
 def test_rate_limit_blocks_second_submit_within_interval() -> None:
@@ -55,3 +56,20 @@ def test_zero_interval_disables_guard() -> None:
     g = SubmitRateGuard(min_interval_secs=0.0)
     g.check(hotkey="hkA", signature="dup", now=1000.0)
     g.check(hotkey="hkA", signature="dup", now=1000.0)  # no rate limit, no replay block
+
+
+def test_sliding_window_limiter_blocks_until_oldest_hit_expires() -> None:
+    limiter = SlidingWindowRateLimiter(max_requests=2, window_secs=10.0)
+    limiter.check("ip:1", now=100.0)
+    limiter.check("ip:1", now=101.0)
+    with pytest.raises(RequestRateLimitError) as exc:
+        limiter.check("ip:1", now=102.0)
+    assert exc.value.retry_after_secs == pytest.approx(8.0)
+
+    limiter.check("ip:1", now=111.0)
+
+
+def test_sliding_window_limiter_is_keyed() -> None:
+    limiter = SlidingWindowRateLimiter(max_requests=1, window_secs=10.0)
+    limiter.check("ip:1", now=100.0)
+    limiter.check("ip:2", now=100.0)

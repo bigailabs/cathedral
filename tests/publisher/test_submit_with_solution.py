@@ -65,6 +65,19 @@ def bob() -> Keypair:
     return Keypair.create_from_uri("//Bob")
 
 
+class _FakeRegistrationGate:
+    network = "finney"
+    netuid = 39
+
+    def __init__(self, registered: bool) -> None:
+        self.registered = registered
+        self.calls: list[str] = []
+
+    async def is_registered(self, hotkey: str) -> bool:
+        self.calls.append(hotkey)
+        return self.registered
+
+
 def _insert_challenge_sync(
     conn: Any,
     *,
@@ -296,6 +309,39 @@ def test_active_cnf_rejects_stale_signed_timestamp(
     assert "outside acceptable clock-skew window" in resp.json()["detail"]
 
 
+def test_active_cnf_rejects_unregistered_hotkey(
+    client: TestClient,
+    alice: Keypair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_REQUIRE_SN39_REGISTERED_HOTKEY", "true")
+    gate = _FakeRegistrationGate(registered=False)
+    client.app.state.registered_hotkey_gate = gate
+
+    resp = client.get("/v1/synthetic-boolean/active-cnf", headers=_active_cnf_headers(alice))
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "hotkey is not registered on the configured subnet"
+    assert gate.calls == [alice.ss58_address]
+
+
+def test_active_cnf_ip_rate_limit(
+    client: TestClient,
+    alice: Keypair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_ACTIVE_CNF_IP_LIMIT_PER_MIN", "1")
+    monkeypatch.setenv("CATHEDRAL_ACTIVE_CNF_HOTKEY_LIMIT_PER_MIN", "0")
+    monkeypatch.setenv("CATHEDRAL_REQUIRE_SN39_REGISTERED_HOTKEY", "false")
+
+    first = client.get("/v1/synthetic-boolean/active-cnf", headers=_active_cnf_headers(alice))
+    second = client.get("/v1/synthetic-boolean/active-cnf", headers=_active_cnf_headers(alice))
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 429, second.text
+    assert second.json()["detail"].startswith("rate limited:")
+
+
 def test_current_challenge_returns_public_metadata_without_cnf_url(
     client: TestClient,
 ) -> None:
@@ -389,6 +435,27 @@ def test_recent_wins_endpoint_returns_winners_and_leaks_nothing(
     assert bad_lo.status_code in {400, 422}
     bad_hi = client.get("/v1/synthetic-boolean/recent-wins?limit=200")
     assert bad_hi.status_code in {400, 422}
+
+
+def test_solve_post_rejects_unregistered_hotkey(
+    client: TestClient,
+    alice: Keypair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_REQUIRE_SN39_REGISTERED_HOTKEY", "true")
+    gate = _FakeRegistrationGate(registered=False)
+    client.app.state.registered_hotkey_gate = gate
+    data, headers = _solve_post_form(
+        kp=alice,
+        challenge_id=_CHALLENGE,
+        dimacs_solution=_VALID_SOL,
+    )
+
+    resp = client.post("/v1/agents/submit", data=data, headers=headers)
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "hotkey is not registered on the configured subnet"
+    assert gate.calls == [alice.ss58_address]
 
 
 def test_active_cnf_can_select_active_challenge_by_tier_or_id(

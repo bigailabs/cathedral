@@ -97,6 +97,11 @@ from cathedral.lanes.synthetic_boolean_v1.verify_submission import (
 from cathedral.publisher.auth_signature import HotkeyAuth, hotkey_auth_header
 from cathedral.publisher.merkle import epoch_for
 from cathedral.publisher.rate_limit import RateLimitError, SubmitRateGuard
+from cathedral.publisher.security import (
+    client_ip_from_request,
+    enforce_request_rate_limit,
+    require_registered_hotkey,
+)
 
 if TYPE_CHECKING:
     from cathedral.lanes.challenge_source import ChallengeRecord, SqliteChallengeSource
@@ -213,6 +218,18 @@ async def submit_agent(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="submissions paused",
         )
+
+    client_ip = client_ip_from_request(request)
+    enforce_request_rate_limit(
+        request,
+        state_attr="submit_ip_rate_limiter",
+        key=client_ip,
+        route="agents_submit",
+        key_kind="ip",
+        limit_env="CATHEDRAL_SUBMIT_IP_LIMIT_PER_MIN",
+        window_env="CATHEDRAL_SUBMIT_IP_WINDOW_SECS",
+        default_limit=60,
+    )
 
     # ----- rate limit + signature-replay dedup (WS2) -------------------------
     # Per-hotkey min-interval blunts the tight-poll/proximity advantage; the
@@ -418,6 +435,12 @@ async def submit_agent(
         else:
             logger.info("submission_sig_failed", hotkey=auth.hotkey_ss58)
             raise HTTPException(status_code=401, detail="invalid hotkey signature") from e
+
+    await require_registered_hotkey(
+        request,
+        hotkey=auth.hotkey_ss58,
+        route="agents_submit",
+    )
 
     submitted_at_iso = server_submitted_at_iso
     solve_challenge_id = (challenge_id or "").strip()
@@ -1229,6 +1252,27 @@ async def get_active_cnf(
     :class:`SqliteFetchTokenStore`).
     """
     ctx: PublisherContext = request.app.state.ctx
+    client_ip = client_ip_from_request(request)
+    enforce_request_rate_limit(
+        request,
+        state_attr="active_cnf_ip_rate_limiter",
+        key=client_ip,
+        route="active_cnf",
+        key_kind="ip",
+        limit_env="CATHEDRAL_ACTIVE_CNF_IP_LIMIT_PER_MIN",
+        window_env="CATHEDRAL_ACTIVE_CNF_IP_WINDOW_SECS",
+        default_limit=120,
+    )
+    enforce_request_rate_limit(
+        request,
+        state_attr="active_cnf_hotkey_rate_limiter",
+        key=auth.hotkey_ss58,
+        route="active_cnf",
+        key_kind="hotkey",
+        limit_env="CATHEDRAL_ACTIVE_CNF_HOTKEY_LIMIT_PER_MIN",
+        window_env="CATHEDRAL_ACTIVE_CNF_HOTKEY_WINDOW_SECS",
+        default_limit=60,
+    )
 
     signed_submitted_at_iso = x_cathedral_submitted_at.strip()
     if not signed_submitted_at_iso:
@@ -1270,6 +1314,12 @@ async def get_active_cnf(
     except InvalidSignatureError as e:
         logger.info("active_cnf_sig_failed", hotkey=auth.hotkey_ss58)
         raise HTTPException(status_code=401, detail="invalid hotkey signature") from e
+
+    await require_registered_hotkey(
+        request,
+        hotkey=auth.hotkey_ss58,
+        route="active_cnf",
+    )
 
     source = getattr(request.app.state, "task_family_challenge_source", None)
     tokens = getattr(request.app.state, "task_family_fetch_token_store", None)
@@ -1336,6 +1386,7 @@ async def get_active_cnf(
     logger.info(
         "active_cnf_fetch",
         hotkey=auth.hotkey_ss58,
+        client_ip=client_ip,
         challenge_id=active.challenge_id,
     )
 

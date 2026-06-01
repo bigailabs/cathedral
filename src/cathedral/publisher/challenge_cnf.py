@@ -39,6 +39,7 @@ from cathedral.lanes.challenge_source import (
     SqliteChallengeSource,
     SqliteFetchTokenStore,
 )
+from cathedral.publisher.security import client_ip_from_request, enforce_request_rate_limit
 
 logger = structlog.get_logger(__name__)
 
@@ -340,6 +341,18 @@ async def get_challenge_cnf(
         # "challenge does not exist".
         raise _not_found()
 
+    client_ip = client_ip_from_request(request)
+    enforce_request_rate_limit(
+        request,
+        state_attr="challenge_cnf_ip_rate_limiter",
+        key=client_ip,
+        route="challenge_cnf",
+        key_kind="ip",
+        limit_env="CATHEDRAL_CNF_FETCH_IP_LIMIT_PER_MIN",
+        window_env="CATHEDRAL_CNF_FETCH_IP_WINDOW_SECS",
+        default_limit=240,
+    )
+
     if not t:
         raise _not_found()
 
@@ -373,6 +386,13 @@ async def get_challenge_cnf(
         servable = False
     if not servable:
         raise _not_found()
+
+    logger.info(
+        "challenge_cnf_fetch",
+        challenge_id=challenge_id,
+        client_ip=client_ip,
+        storage="file" if lookup.cnf_path else "sqlite_text",
+    )
 
     if lookup.cnf_path:
         path = Path(lookup.cnf_path)

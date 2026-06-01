@@ -29,6 +29,11 @@ def _disable_submit_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     disable it for tests (which fire many rapid submits per hotkey). Tests
     that specifically exercise rate limiting set their own interval."""
     monkeypatch.setenv("CATHEDRAL_SUBMIT_MIN_INTERVAL_SECS", "0")
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_IP_LIMIT_PER_MIN", "0")
+    monkeypatch.setenv("CATHEDRAL_ACTIVE_CNF_IP_LIMIT_PER_MIN", "0")
+    monkeypatch.setenv("CATHEDRAL_ACTIVE_CNF_HOTKEY_LIMIT_PER_MIN", "0")
+    monkeypatch.setenv("CATHEDRAL_CNF_FETCH_IP_LIMIT_PER_MIN", "0")
+    monkeypatch.setenv("CATHEDRAL_REQUIRE_SN39_REGISTERED_HOTKEY", "false")
 
 
 @pytest.fixture
