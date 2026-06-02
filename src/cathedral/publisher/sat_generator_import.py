@@ -136,17 +136,26 @@ async def import_challenge_from_generator(
             "cnf_sha256": lease.cnf_sha256,
             "num_vars": lease.num_vars,
             "num_clauses": lease.num_clauses,
-            "storage": "file",
+            "storage": "sqlite_text",
             "kind": lease.kind,
             "cnf_class": lease.cnf_class,
             "time_limit_seconds": time_limit_seconds,
         }
+        # Serve the CNF inline (cnf_text) with NO cnf_path. The file-backed
+        # serve path routes through _CnfSnapshotCache, whose single global
+        # asyncio.Lock (prune on every fetch + copy/fsync under the lock)
+        # wedged the /challenges/{id}/cnf endpoint under miner load and hung
+        # all fetches. Inline text serves via PlainTextResponse, bypassing the
+        # cache/lock/fsync/disk entirely. The solve verifier (submit.py) and
+        # the active-cnf response both already prefer cnf_text over cnf_path.
+        # The file is still written above as an audit/debug artifact; nothing
+        # reads it now that cnf_path is empty.
         record = ChallengeRecord(
             challenge_id=challenge_id,
             family_id=family,
             tier=lease.tier,
-            cnf_text="",
-            cnf_path=str(cnf_path),
+            cnf_text=cnf_bytes.decode("utf-8"),
+            cnf_path="",
             status="pending",
             audit_metadata=audit,
         )
