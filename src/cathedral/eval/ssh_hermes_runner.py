@@ -771,13 +771,27 @@ class SshHermesRunner:
     """
 
     def __init__(self, config: SshHermesRunnerConfig) -> None:
+        # Construction must be pure: NO filesystem IO here. The SSH-Hermes
+        # eval path is dormant by default (lanes.publisher.ssh_hermes_eval_enabled)
+        # and this runner is resolved per-submission every eval tick. If the
+        # local probe key / bundle dir checks ran at __init__, a SAT-only box
+        # with no probe key would raise during _resolve_runner() — which is
+        # OUTSIDE eval_one's PolarisRunnerError handler — and crash-loop as
+        # eval_one_crashed. Deferred into _ensure_local_runtime_ready() so the
+        # failure surfaces from run()/run_task_family_challenge() as a
+        # SshHermesError (a PolarisRunnerError), which the loop handles as a
+        # clean rejected eval instead of a crash.
         self.config = config
-        if not os.path.isfile(config.ssh_private_key_path):
+
+    def _ensure_local_runtime_ready(self) -> None:
+        """Validate local probe prerequisites. Raises SshHermesError (a
+        PolarisRunnerError) on the caught/graceful path; never at construction."""
+        if not os.path.isfile(self.config.ssh_private_key_path):
             raise SshHermesError(
                 "config_invalid",
-                f"ssh_private_key_path does not exist: {config.ssh_private_key_path}",
+                f"ssh_private_key_path does not exist: {self.config.ssh_private_key_path}",
             )
-        out_dir = Path(config.bundle_output_dir).expanduser()
+        out_dir = Path(self.config.bundle_output_dir).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
         if not os.access(out_dir, os.W_OK):
             raise SshHermesError(
@@ -795,6 +809,7 @@ class SshHermesRunner:
         submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_bytes  # quiet linter
+        self._ensure_local_runtime_ready()
         if submission is None:
             raise SshHermesError("config_invalid", "submission required for ssh-hermes")
 
@@ -1115,6 +1130,7 @@ class SshHermesRunner:
         extraction, deterministic verification, scoring, signing, and
         persistence.
         """
+        self._ensure_local_runtime_ready()
         ssh_host = submission.get("ssh_host")
         ssh_port = submission.get("ssh_port") or 22
         ssh_user = submission.get("ssh_user")
