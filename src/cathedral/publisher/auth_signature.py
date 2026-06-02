@@ -40,7 +40,22 @@ async def hotkey_auth_header(
     if not x_cathedral_hotkey or not x_cathedral_signature:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="missing X-Cathedral-Hotkey or X-Cathedral-Signature",
+            detail={
+                "error": "missing_signature_headers",
+                "message": (
+                    "This endpoint requires a signed request. Add the three headers "
+                    "below and sign the canonical claim JSON with your SN39 sr25519 "
+                    "hotkey, then retry."
+                ),
+                "required_headers": {
+                    "X-Cathedral-Hotkey": "<your SN39 ss58 hotkey>",
+                    "X-Cathedral-Submitted-At": "<ISO-8601 UTC timestamp>",
+                    "X-Cathedral-Signature": (
+                        "<base64 sr25519 signature over the canonical claim JSON>"
+                    ),
+                },
+                "docs": "https://api.cathedral.computer/skill.md",
+            },
         )
     hk = x_cathedral_hotkey.strip()
     sig = x_cathedral_signature.strip()
