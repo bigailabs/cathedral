@@ -66,25 +66,6 @@ def task_family_feed_enabled(env: Mapping[str, str] | None = None) -> bool:
     return values.get("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "").strip().lower() == "true"
 
 
-def ssh_hermes_eval_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Gate the legacy SSH-Hermes task-family eval invocation.
-
-    Off by default. The SSH-Hermes path (SSH into a miner box and run
-    ``hermes chat``) is redundant for SAT (``synthetic_boolean_v1``): PR5
-    solve-on-submit already verifies SAT answers via the API. Left enabled
-    against SAT it crash-loops (connection refused / "Hermes isn't
-    configured yet" -> eval_one_crashed) and burns event-loop/DB capacity.
-
-    Kept dormant rather than deleted: a future RL / generative lane will
-    re-enable it by setting ``CATHEDRAL_SSH_HERMES_EVAL_ENABLED=true``.
-    Gates ONLY the SSH-Hermes eval invocation; leaderboard feed
-    (``task_family_feed_enabled``), solve-on-submit, active-challenge
-    serving, and the signed weight vector path are unaffected.
-    """
-    values = os.environ if env is None else env
-    return values.get("CATHEDRAL_SSH_HERMES_EVAL_ENABLED", "").strip().lower() == "true"
-
-
 def enabled_task_family_ids(env: Mapping[str, str] | None = None) -> list[str]:
     values = os.environ if env is None else env
     raw = values.get("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")

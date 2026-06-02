@@ -61,16 +61,6 @@ from cathedral.validator.pull_loop import (
 _TEST_PUBLIC_BASE_URL = "https://api.cathedral.test"
 
 
-@pytest.fixture(autouse=True)
-def _enable_ssh_hermes_eval(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These tests exercise the legacy SSH-Hermes task-family eval invocation
-    (via stub runners). That path is dormant by default
-    (``CATHEDRAL_SSH_HERMES_EVAL_ENABLED`` unset/false); opt it in here so the
-    invocation actually runs. The off-by-default behaviour is asserted
-    separately in ``test_task_family_launch_rails.py``."""
-    monkeypatch.setenv("CATHEDRAL_SSH_HERMES_EVAL_ENABLED", "true")
-
-
 class _Registry:
     pass
 

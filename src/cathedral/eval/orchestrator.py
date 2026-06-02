@@ -70,7 +70,6 @@ from cathedral.lanes.publisher import (
     enabled_task_family_ids,
     persist_task_family_result,
     score_and_sign_task_family_stdout,
-    ssh_hermes_eval_enabled,
     task_family_feed_enabled,
     task_family_prober_version_warning,
     task_family_runner_skip_reason,
@@ -754,21 +753,6 @@ class EvalOrchestrator:
         problem_overrides: dict[str, tuple[PublicProblem, HiddenMetadata]] | None = None,
     ) -> bool:
         if not task_family_feed_enabled():
-            return False
-
-        # Legacy SSH-Hermes eval is dormant by default. For SAT
-        # (synthetic_boolean_v1) it is redundant with PR5 solve-on-submit
-        # (API-verified) and crash-loops against miner boxes that do not run
-        # Hermes (connection refused -> eval_one_crashed). No-op cleanly so
-        # the caller marks the row pending_check without any SSH attempt.
-        # Re-enable for a future RL / generative lane with
-        # CATHEDRAL_SSH_HERMES_EVAL_ENABLED=true.
-        if not ssh_hermes_eval_enabled():
-            log.debug(
-                "task_family_skipped",
-                reason="ssh_hermes_eval_disabled",
-                submission_id=str(submission["id"]),
-            )
             return False
 
         warning = task_family_prober_version_warning()

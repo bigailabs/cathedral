@@ -22,7 +22,6 @@ from cathedral.lanes.publisher import (
     build_task_family_prompt,
     extract_answer,
     score_and_sign_task_family_stdout,
-    ssh_hermes_eval_enabled,
     task_family_prober_version_warning,
     task_family_runner_skip_reason,
 )
@@ -381,52 +380,6 @@ def test_task_family_runner_guard_names_required_transport_interface() -> None:
     assert skip["reason"] == "runner_unsupported"
     assert skip["required_runner_interface"] == "SshHermesRunner.run_task_family_challenge"
     assert "CATHEDRAL_PROBER_VERSION=v2" in skip["recommended_env"]
-
-
-def test_ssh_hermes_eval_disabled_by_default() -> None:
-    # Dormant by default: a future RL / generative lane re-enables with
-    # CATHEDRAL_SSH_HERMES_EVAL_ENABLED=true. Unset, blank, and falsey all
-    # stay off; only a normalized "true" turns it on.
-    assert ssh_hermes_eval_enabled({}) is False
-    assert ssh_hermes_eval_enabled({"CATHEDRAL_SSH_HERMES_EVAL_ENABLED": ""}) is False
-    assert ssh_hermes_eval_enabled({"CATHEDRAL_SSH_HERMES_EVAL_ENABLED": "false"}) is False
-    assert ssh_hermes_eval_enabled({"CATHEDRAL_SSH_HERMES_EVAL_ENABLED": "0"}) is False
-    assert ssh_hermes_eval_enabled({"CATHEDRAL_SSH_HERMES_EVAL_ENABLED": "true"}) is True
-    assert ssh_hermes_eval_enabled({"CATHEDRAL_SSH_HERMES_EVAL_ENABLED": " True "}) is True
-
-
-@pytest.mark.asyncio
-async def test_ssh_hermes_eval_off_by_default_skips_runner_invocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With the feed enabled but the SSH-Hermes flag off (the production
-    default), ``_maybe_run_task_family_lanes`` no-ops cleanly for SAT: it
-    must NOT touch the runner (no SSH attempt -> no eval_one_crashed loop)."""
-    from cathedral.eval.orchestrator import EvalOrchestrator
-
-    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_FEED_ENABLED", "true")
-    monkeypatch.setenv("CATHEDRAL_TASK_FAMILY_IDS", "synthetic_boolean_v1")
-    monkeypatch.delenv("CATHEDRAL_SSH_HERMES_EVAL_ENABLED", raising=False)
-
-    class _ExplodingRunner:
-        async def run_task_family_challenge(self, **_kwargs: object) -> object:
-            raise AssertionError("SSH-Hermes runner must not be invoked when gated off")
-
-    orch = EvalOrchestrator.__new__(EvalOrchestrator)
-    log = __import__("structlog").get_logger()
-    submission = {
-        "id": "sub-gated-off",
-        "miner_hotkey": "5HotKey",
-        "card_id": "synthetic_boolean_v1",
-    }
-    ran = await orch._maybe_run_task_family_lanes(
-        submission=submission,
-        runner=_ExplodingRunner(),
-        epoch=0,
-        round_index=0,
-        log=log,
-    )
-    assert ran is False
 
 
 def test_task_family_prober_version_warning_is_explicit() -> None:
