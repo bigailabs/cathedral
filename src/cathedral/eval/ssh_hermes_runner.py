@@ -792,7 +792,16 @@ class SshHermesRunner:
                 f"ssh_private_key_path does not exist: {self.config.ssh_private_key_path}",
             )
         out_dir = Path(self.config.bundle_output_dir).expanduser()
-        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # Wrap as SshHermesError (a PolarisRunnerError) so a bundle-dir
+            # creation failure (permission/disk) is caught by the eval loop's
+            # PolarisRunnerError handler instead of bubbling to eval_one_crashed.
+            raise SshHermesError(
+                "config_invalid",
+                f"bundle_output_dir not creatable: {out_dir}: {exc}",
+            ) from exc
         if not os.access(out_dir, os.W_OK):
             raise SshHermesError(
                 "config_invalid",
