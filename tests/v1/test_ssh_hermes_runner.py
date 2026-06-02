@@ -208,13 +208,19 @@ def _install_streaming_hermes(
 
 
 def test_config_invalid_when_ssh_key_missing(tmp_path: Path, bundle_output_dir: str):
-    with pytest.raises(SshHermesError) as exc:
-        SshHermesRunner(
-            SshHermesRunnerConfig(
-                ssh_private_key_path=str(tmp_path / "does-not-exist"),
-                bundle_output_dir=bundle_output_dir,
-            )
+    # Construction is pure (no filesystem IO) so a SAT-only box with no probe
+    # key never crashes at _resolve_runner() — the missing-key check is
+    # deferred to the run entry points and surfaces as a caught,
+    # gracefully-handled SshHermesError. Constructing must NOT raise:
+    runner = SshHermesRunner(
+        SshHermesRunnerConfig(
+            ssh_private_key_path=str(tmp_path / "does-not-exist"),
+            bundle_output_dir=bundle_output_dir,
         )
+    )
+    # ...but the lazy runtime check still enforces the same invariant.
+    with pytest.raises(SshHermesError) as exc:
+        runner._ensure_local_runtime_ready()
     assert exc.value.code == "config_invalid"
 
 
