@@ -919,6 +919,23 @@ class EvalOrchestrator:
                 hermes_run = await run_challenge(
                     **run_kwargs,
                 )
+            except PolarisRunnerError as exc:
+                # SSH-Hermes eval failure (missing probe key, connection
+                # refused, "Hermes isn't configured") must NOT crash the eval
+                # loop. Only reachable when SSH-Hermes eval is enabled; mirrors
+                # eval_one's PolarisRunnerError handling on the main runner
+                # path. Stop the heartbeat, log, and skip this family so the
+                # row stays pending_check rather than bubbling to
+                # eval_one_crashed.
+                await _stop_receipt_heartbeat()
+                log.warning(
+                    "task_family_run_failed",
+                    family_id=family_id,
+                    submission_id=str(submission["id"]),
+                    miner_hotkey=miner_hotkey,
+                    error=str(exc),
+                )
+                continue
             except Exception:
                 await _stop_receipt_heartbeat()
                 raise
