@@ -740,6 +740,18 @@ class SqliteChallengeSource:
         rows = await cur.fetchall()
         return [_row_to_record(r) for r in rows]
 
+    async def list_active_metadata(self, family_id: str) -> list[ChallengeRecord]:
+        """Return active challenge metadata without loading inline CNF bodies."""
+        cur = await self._conn.execute(
+            "SELECT challenge_id, family_id, tier, '' AS cnf_text, cnf_path, status, "
+            "audit_metadata, score_multiplier, difficulty_label "
+            "FROM lane_challenges WHERE family_id = ? AND status = ? "
+            "ORDER BY tier ASC, challenge_id ASC",
+            (family_id, CHALLENGE_STATUS_ACTIVE),
+        )
+        rows = await cur.fetchall()
+        return [_row_to_record(r) for r in rows]
+
     async def get_for_endpoint(self, challenge_id: str) -> EndpointLookup | None:
         """Single-row read for the public CNF endpoint.
 

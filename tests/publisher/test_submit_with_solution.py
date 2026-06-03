@@ -92,6 +92,7 @@ def _insert_challenge_sync(
             json.dumps(
                 {
                     "cnf_sha256": cnf_sha256,
+                    "cnf_bytes": len(cnf_text.encode("utf-8")),
                     "num_vars": int(num_vars),
                     "num_clauses": int(num_clauses),
                 },
@@ -783,6 +784,7 @@ def _insert_labeled_challenge_sync(
             json.dumps(
                 {
                     "cnf_sha256": cnf_sha256,
+                    "cnf_bytes": len(cnf_text.encode("utf-8")),
                     "num_vars": int(num_vars),
                     "num_clauses": int(num_clauses),
                     "kind": "sha256_preimage",

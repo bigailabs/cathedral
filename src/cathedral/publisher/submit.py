@@ -538,13 +538,22 @@ async def _select_active_sat_challenge(
     if tier is not None:
         if tier < 0:
             raise HTTPException(status_code=400, detail="tier must be >= 0")
-        return await source.get_active_for_tier(SAT_FAMILY_ID, int(tier))
+        actives = await _list_active_sat_challenge_metadata(source)
+        return next((rec for rec in actives if rec.tier == int(tier)), None)
     if selected_challenge_id:
-        for rec in await source.list_active(SAT_FAMILY_ID):
+        for rec in await _list_active_sat_challenge_metadata(source):
             if rec.challenge_id == selected_challenge_id:
                 return rec
         return None
-    return await source.get_active(SAT_FAMILY_ID)
+    actives = await _list_active_sat_challenge_metadata(source)
+    return actives[0] if actives else None
+
+
+async def _list_active_sat_challenge_metadata(source) -> list[ChallengeRecord]:
+    list_metadata = getattr(source, "list_active_metadata", None)
+    if callable(list_metadata):
+        return await list_metadata(SAT_FAMILY_ID)
+    return await source.list_active(SAT_FAMILY_ID)
 
 
 async def _preflight_solve_post_challenge(
@@ -578,7 +587,7 @@ async def _preflight_solve_post_challenge(
             detail="solve-on-submit not configured: challenge source missing",
         )
 
-    active_rows = await source.list_active(SAT_FAMILY_ID)
+    active_rows = await _list_active_sat_challenge_metadata(source)
     active = next((rec for rec in active_rows if rec.challenge_id == challenge_id), None)
     if active is not None:
         return source, active
@@ -659,7 +668,11 @@ async def _handle_solve_post(
         )
 
     active = active_challenge
-    active_rows = [] if active is not None else await source.list_active(SAT_FAMILY_ID)
+    active_rows = (
+        []
+        if active is not None
+        else await _list_active_sat_challenge_metadata(source)
+    )
     if active is None:
         active = next((rec for rec in active_rows if rec.challenge_id == challenge_id), None)
     if active is None:
@@ -743,25 +756,29 @@ async def _handle_solve_post(
             },
         )
 
-    # Load the CNF body. SqliteChallengeSource.get_active() returns the
-    # cnf_text inline for text-backed rows; for file-backed rows we read
-    # the path on disk. Keep this synchronous-light: the CNF can be many
-    # megabytes for tier-3.
+    # Load only the requested challenge's CNF body. Metadata paths above avoid
+    # reading the whole active board's inline CNFs from SQLite.
     cnf_text = active.cnf_text
-    if not cnf_text and active.cnf_path:
+    cnf_path = active.cnf_path
+    if not cnf_text and not cnf_path:
+        lookup = await source.get_for_endpoint(active.challenge_id)
+        if lookup is not None:
+            cnf_text = lookup.cnf_text
+            cnf_path = lookup.cnf_path
+    if not cnf_text and cnf_path:
         try:
             import asyncio
             from pathlib import Path
 
             cnf_text = await asyncio.to_thread(
-                Path(active.cnf_path).read_text,
+                Path(cnf_path).read_text,
                 encoding="utf-8",
             )
         except OSError as e:
             logger.error(
                 "solve_post_cnf_unreadable",
                 challenge_id=challenge_id,
-                path=active.cnf_path,
+                path=cnf_path,
                 error=str(e),
             )
             raise HTTPException(
@@ -1464,18 +1481,19 @@ async def get_current_sat_challenge(
                 status_code=400,
                 detail="difficulty requires tier",
             )
-        active = await source.get_active(SAT_FAMILY_ID)
+        actives = await _list_active_sat_challenge_metadata(source)
+        active = actives[0] if actives else None
     else:
         if tier < 0:
             raise HTTPException(status_code=400, detail="tier must be >= 0")
+        actives = await _list_active_sat_challenge_metadata(source)
         if difficulty is None:
-            active = await source.get_active_for_tier(SAT_FAMILY_ID, tier)
+            active = next((rec for rec in actives if rec.tier == tier), None)
         else:
             # Difficulty-scoped lookup: prefer an exact-label match, then
             # fall back to the unlabeled tier active so the legacy
             # ``?tier=N`` semantic remains intact while the operator
             # rolls out labeled rows.
-            actives = await source.list_active(SAT_FAMILY_ID)
             matches = [
                 rec
                 for rec in actives
@@ -1484,7 +1502,7 @@ async def get_current_sat_challenge(
             if matches:
                 active = matches[0]
             else:
-                active = await source.get_active_for_tier(SAT_FAMILY_ID, tier)
+                active = next((rec for rec in actives if rec.tier == tier), None)
 
     if active is None:
         raise HTTPException(status_code=404, detail="no_active_challenge")
@@ -1507,7 +1525,7 @@ async def list_active_sat_challenges(request: Request) -> dict[str, object]:
             status_code=503,
             detail="challenge surface not configured",
         )
-    actives = await source.list_active(SAT_FAMILY_ID)
+    actives = await _list_active_sat_challenge_metadata(source)
     return {
         "family_id": SAT_FAMILY_ID,
         "count": len(actives),
@@ -1550,7 +1568,7 @@ async def list_recent_sat_wins(
         )
     cur = await db.execute(
         "SELECT w.challenge_id, w.miner_hotkey, w.weighted_score, w.won_at_iso, "
-        "       c.tier, c.cnf_text, c.cnf_path, c.status, c.audit_metadata, "
+        "       c.tier, '' AS cnf_text, c.cnf_path, c.status, c.audit_metadata, "
         "       c.score_multiplier, c.difficulty_label "
         "FROM lane_challenge_winners w "
         "JOIN lane_challenges c ON c.challenge_id = w.challenge_id "

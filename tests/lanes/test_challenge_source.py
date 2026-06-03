@@ -107,6 +107,37 @@ async def test_sqlite_upsert_and_get_active(tmp_path) -> None:
         await conn.close()
 
 
+async def test_sqlite_list_active_metadata_omits_inline_cnf_text(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(
+            _record(
+                "c1",
+                audit_metadata={
+                    "note": "toy",
+                    "cnf_bytes": len(_TOY_CNF.encode("utf-8")),
+                },
+            )
+        )
+
+        full = await src.list_active(_FAMILY)
+        metadata = await src.list_active_metadata(_FAMILY)
+        lookup = await src.get_for_endpoint("c1")
+
+        assert full[0].cnf_text == _TOY_CNF
+        assert metadata[0].challenge_id == "c1"
+        assert metadata[0].cnf_text == ""
+        assert metadata[0].audit_metadata == {
+            "note": "toy",
+            "cnf_bytes": len(_TOY_CNF.encode("utf-8")),
+        }
+        assert lookup is not None
+        assert lookup.cnf_text == _TOY_CNF
+    finally:
+        await conn.close()
+
+
 async def test_sqlite_only_active_returned_by_get_active(tmp_path) -> None:
     conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
     try:
