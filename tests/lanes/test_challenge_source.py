@@ -138,6 +138,27 @@ async def test_sqlite_list_active_metadata_omits_inline_cnf_text(tmp_path) -> No
         await conn.close()
 
 
+async def test_sqlite_list_for_family_metadata_omits_inline_cnf_text(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso="2026-05-19T00:00:00.000Z")
+        await src.upsert(_record("active", CHALLENGE_STATUS_ACTIVE))
+        await src.upsert(_record("pending", CHALLENGE_STATUS_PENDING))
+
+        rows = await src.list_for_family_metadata(_FAMILY)
+        pending = await src.list_for_family_metadata(
+            _FAMILY,
+            status=CHALLENGE_STATUS_PENDING,
+        )
+
+        assert [row.challenge_id for row in rows] == ["active", "pending"]
+        assert all(row.cnf_text == "" for row in rows)
+        assert [row.challenge_id for row in pending] == ["pending"]
+        assert pending[0].cnf_text == ""
+    finally:
+        await conn.close()
+
+
 async def test_sqlite_only_active_returned_by_get_active(tmp_path) -> None:
     conn = await init_sqlite_challenge_source(str(tmp_path / "challenges.db"))
     try:

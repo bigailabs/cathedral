@@ -213,7 +213,11 @@ async def _count_cathedral_pending_per_combo(
     ``kind`` are bucketed under an empty string so they are visible
     in logs but never match a generator-advertised combo.
     """
-    rows = await source.list_for_family(family)
+    list_metadata = getattr(source, "list_for_family_metadata", None)
+    if callable(list_metadata):
+        rows = await list_metadata(family)
+    else:
+        rows = await source.list_for_family(family)
     counts: dict[tuple[int, str], list[int]] = {}
     for row in rows:
         if row.status not in {_PENDING, _ACTIVE}:

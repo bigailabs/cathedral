@@ -814,6 +814,28 @@ class SqliteChallengeSource:
         rows = await cur.fetchall()
         return [_row_to_record(r) for r in rows]
 
+    async def list_for_family_metadata(
+        self, family_id: str, *, status: str | None = None
+    ) -> list[ChallengeRecord]:
+        """Return family rows without loading inline CNF bodies."""
+        if status is None:
+            cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, '' AS cnf_text, cnf_path, "
+                "status, audit_metadata, score_multiplier, difficulty_label "
+                "FROM lane_challenges WHERE family_id = ? ORDER BY challenge_id",
+                (family_id,),
+            )
+        else:
+            cur = await self._conn.execute(
+                "SELECT challenge_id, family_id, tier, '' AS cnf_text, cnf_path, "
+                "status, audit_metadata, score_multiplier, difficulty_label "
+                "FROM lane_challenges WHERE family_id = ? AND status = ? "
+                "ORDER BY challenge_id",
+                (family_id, status),
+            )
+        rows = await cur.fetchall()
+        return [_row_to_record(r) for r in rows]
+
     async def list_locked_needing_loser_reconciliation(
         self, family_id: str, *, limit: int = 32
     ) -> list[ChallengeRecord]:
@@ -1230,7 +1252,7 @@ class SqliteChallengeSource:
         # pending rows for the tier regardless of difficulty_label.
         if multi:
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "SELECT challenge_id, family_id, tier, '' AS cnf_text, cnf_path, status, "
                 "audit_metadata, score_multiplier, difficulty_label "
                 "FROM lane_challenges "
                 "WHERE family_id = ? AND status = ? AND tier = ? "
@@ -1244,7 +1266,7 @@ class SqliteChallengeSource:
             )
         elif difficulty_label is not None:
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "SELECT challenge_id, family_id, tier, '' AS cnf_text, cnf_path, status, "
                 "audit_metadata, score_multiplier, difficulty_label "
                 "FROM lane_challenges "
                 "WHERE family_id = ? AND status = ? AND tier = ? "
@@ -1262,7 +1284,7 @@ class SqliteChallengeSource:
             )
         else:
             cur = await self._conn.execute(
-                "SELECT challenge_id, family_id, tier, cnf_text, cnf_path, status, "
+                "SELECT challenge_id, family_id, tier, '' AS cnf_text, cnf_path, status, "
                 "audit_metadata, score_multiplier, difficulty_label "
                 "FROM lane_challenges "
                 "WHERE family_id = ? AND status = ? AND tier = ? "
@@ -1293,6 +1315,25 @@ class SqliteChallengeSource:
             else ("tier_difficulty" if difficulty_label is not None else "tier")
         )
         promoted: list[str] = []
+        if multi:
+            for cand in candidates:
+                cur = await self._conn.execute(
+                    "UPDATE lane_challenges "
+                    "SET status = ?, updated_at_iso = ? "
+                    "WHERE family_id = ? AND challenge_id = ? AND status = ?",
+                    (
+                        CHALLENGE_STATUS_ACTIVE,
+                        now_iso,
+                        family_id,
+                        cand.challenge_id,
+                        CHALLENGE_STATUS_PENDING,
+                    ),
+                )
+                await self._conn.commit()
+                if int(cur.rowcount or 0) == 1:
+                    promoted.append(cand.challenge_id)
+            return promoted
+
         for cand in candidates:
             try:
                 await self.activate(
@@ -1322,13 +1363,29 @@ class SqliteChallengeSource:
         now_iso: str,
         kind: str | None = None,
     ) -> list[str]:
-        actives = await self.list_active(family_id)
-        current_count = sum(
-            1
-            for rec in actives
-            if rec.tier == int(tier)
-            and (kind is None or (rec.audit_metadata or {}).get("kind") == kind)
-        )
+        if kind is None:
+            cur = await self._conn.execute(
+                "SELECT COUNT(*) FROM lane_challenges "
+                "WHERE family_id = ? AND status = ? AND tier = ?",
+                (family_id, CHALLENGE_STATUS_ACTIVE, int(tier)),
+            )
+            row = await cur.fetchone()
+            current_count = int(row[0] or 0) if row is not None else 0
+        else:
+            cur = await self._conn.execute(
+                "SELECT audit_metadata FROM lane_challenges "
+                "WHERE family_id = ? AND status = ? AND tier = ?",
+                (family_id, CHALLENGE_STATUS_ACTIVE, int(tier)),
+            )
+            rows = await cur.fetchall()
+            current_count = 0
+            for row in rows:
+                try:
+                    audit = json.loads(row[0]) if row[0] else {}
+                except json.JSONDecodeError:
+                    audit = {}
+                if isinstance(audit, dict) and audit.get("kind") == kind:
+                    current_count += 1
         deficit = max(0, int(target) - current_count)
         if deficit == 0:
             return []
