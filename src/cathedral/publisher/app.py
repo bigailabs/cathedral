@@ -153,6 +153,24 @@ def _pr5_solve_on_submit_loop_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _sat_attest_loop_enabled() -> bool:
+    """True iff the async SAT SSH-attest audit loop should run.
+
+    Solve-on-submit verification stays independent: valid SAT solves are
+    mathematically verified and ranked synchronously in submit.py. The attest
+    loop is only a post-rank audit path and can be kept off when stale poison
+    rows would churn the shared publisher DB connection.
+    """
+    raw = os.environ.get("CATHEDRAL_SAT_ATTEST_LOOP_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _background_eval_loop_enabled() -> bool:
+    """True iff the legacy cadence eval loop should start in this process."""
+    raw = os.environ.get("CATHEDRAL_BACKGROUND_EVAL_LOOP_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _write_private_key_file_0600(target: Path, content: str) -> None:
     """Atomically publish private-key content with owner-only permissions."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -371,12 +389,10 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                 )
             )
 
-        # PR5 (solve-on-submit): drain pending SAT-attest rows in the
-        # background. Same lifespan as the eval loop so it stops cleanly
-        # on shutdown. Gated by the same flag as the submit handler so
-        # an operator flipping it off disables both the new write path
-        # and the new background worker.
-        if _pr5_solve_on_submit_loop_enabled():
+        # PR5 solve verification stays gated by CATHEDRAL_PR5_SOLVE_ON_SUBMIT_ENABLED.
+        # The async SSH-attest worker is a separate post-rank audit path and is
+        # opt-in because stale poison rows can churn the shared DB connection.
+        if _pr5_solve_on_submit_loop_enabled() and _sat_attest_loop_enabled():
             ctx.background_tasks.append(
                 asyncio.create_task(
                     run_sat_attest_loop(
@@ -387,8 +403,10 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     )
                 )
             )
+        elif _pr5_solve_on_submit_loop_enabled():
+            logger.warning("sat_attest_loop_disabled")
 
-        if start_eval_loop:
+        if start_eval_loop and _background_eval_loop_enabled():
             # Per-submission runner dispatch: polaris-tier rows go to
             # PolarisRuntimeRunner (Tier A), TEE-tier rows are pre-verified
             # at submit and only need the bundled card scored, everything
@@ -450,6 +468,8 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                 )
             )
             ctx.background_tasks.append(eval_task)
+        elif start_eval_loop:
+            logger.warning("background_eval_loop_disabled")
 
         # SAT autopilot: keep the pending pool topped up from the
         # private generator. Opt-in via CATHEDRAL_SAT_AUTOPILOT_ENABLED;
