@@ -173,13 +173,17 @@ def _background_eval_loop_enabled() -> bool:
 
 def _sat_autopilot_worker_enabled() -> bool:
     """True iff the in-process SAT generator importer should run."""
-    raw = os.environ.get("CATHEDRAL_SAT_AUTOPILOT_WORKER_ENABLED", "").strip().lower()
+    raw = (
+        os.environ.get("CATHEDRAL_SAT_AUTOPILOT_WORKER_ENABLED", "true")
+        .strip()
+        .lower()
+    )
     return raw in {"1", "true", "yes", "on"}
 
 
 def _sat_fill_loop_enabled() -> bool:
     """True iff the in-process active-board fill loop should run."""
-    raw = os.environ.get("CATHEDRAL_SAT_FILL_LOOP_ENABLED", "").strip().lower()
+    raw = os.environ.get("CATHEDRAL_SAT_FILL_LOOP_ENABLED", "true").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
