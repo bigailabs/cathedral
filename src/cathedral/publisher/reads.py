@@ -286,16 +286,9 @@ async def get_health(request: Request) -> dict[str, Any]:
     except Exception:
         checks["db"] = "fail"
 
-    # Storage check: weak by design. We probe whether the client is
-    # constructed (== env vars are set), not whether HeadBucket succeeds.
-    if ctx.hippius is not None:
-        try:
-            healthy = await ctx.hippius.healthcheck()
-            checks["hippius"] = "ok" if healthy else "degraded"
-        except Exception:
-            checks["hippius"] = "degraded"
-    else:
-        checks["hippius"] = "skipped"
+    # Liveness must not depend on external storage. The process is healthy
+    # when the DB answers; Hippius reachability is checked by write paths.
+    checks["hippius"] = "ok" if ctx.hippius is not None else "skipped"
 
     checks["polaris"] = "ok"  # publisher does not poll Polaris directly
 

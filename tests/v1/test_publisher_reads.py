@@ -728,6 +728,19 @@ def test_health_endpoint_shape(publisher_client):
     assert "checks" in body and isinstance(body["checks"], dict)
 
 
+def test_health_endpoint_does_not_call_hippius_network_check(publisher_client):
+    class ExplodingHippius:
+        async def healthcheck(self) -> bool:
+            raise AssertionError("healthcheck should not run from /health")
+
+    publisher_client.app.state.ctx.hippius = ExplodingHippius()
+
+    resp = publisher_client.get("/health")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["checks"]["hippius"] == "ok"
+
+
 # --------------------------------------------------------------------------
 # Scored-surface state correctness — cadence/refresh + stale-state defense
 # --------------------------------------------------------------------------
