@@ -61,11 +61,27 @@ class SubmitRateGuard:
         self._last_seen: dict[str, float] = {}
         self._seen_sigs: dict[str, float] = {}
 
-    def check(self, *, hotkey: str, signature: str, now: float) -> None:
+    def check(
+        self,
+        *,
+        hotkey: str,
+        signature: str,
+        now: float,
+        throttle_key: str | None = None,
+    ) -> None:
         """Record this submission or raise ``RateLimitError``.
 
         Replay is checked before the rate limit so a replayed signature is
         reported as a replay regardless of timing.
+
+        ``throttle_key`` selects the min-interval bucket. It defaults to
+        ``hotkey`` — the coarse anti-spam/anti-proximity limiter used for
+        registration POSTs. Solve-on-submit POSTs pass a ``(hotkey,
+        challenge_id)`` composite so a miner can submit solves for *different*
+        active challenges back-to-back (winner-take-all wants speed) while
+        still being blocked from spamming the *same* challenge. The
+        signature-replay dedup below is ALWAYS global on the signature,
+        independent of ``throttle_key``.
 
         ``min_interval <= 0`` disables the guard entirely (both the rate limit
         and the replay dedup) — used by the test suite, which fires many rapid
@@ -79,15 +95,17 @@ class SubmitRateGuard:
         if signature and signature in self._seen_sigs:
             raise RateLimitError("duplicate signature (replay)", replay=True)
 
-        last = self._last_seen.get(hotkey)
+        key = throttle_key or hotkey
+        scope = "challenge" if throttle_key else "hotkey"
+        last = self._last_seen.get(key)
         if last is not None and (now - last) < self.min_interval:
             wait = self.min_interval - (now - last)
             raise RateLimitError(
-                f"rate limited: {self.min_interval:.0f}s between submits per hotkey; "
+                f"rate limited: {self.min_interval:.0f}s between submits per {scope}; "
                 f"retry in {wait:.1f}s"
             )
 
-        self._last_seen[hotkey] = now
+        self._last_seen[key] = now
         if signature:
             self._seen_sigs[signature] = now
 

@@ -214,32 +214,13 @@ async def submit_agent(
             detail="submissions paused",
         )
 
-    # ----- rate limit + signature-replay dedup (WS2) -------------------------
-    # Per-hotkey min-interval blunts the tight-poll/proximity advantage; the
-    # replay guard closes the ±300s skew-window replay hole. Single-instance
-    # publisher, so an app.state-scoped in-memory guard is sufficient.
-    guard = getattr(request.app.state, "submit_guard", None)
-    if guard is None:
-        guard = SubmitRateGuard()
-        request.app.state.submit_guard = guard
-    try:
-        guard.check(
-            hotkey=auth.hotkey_ss58,
-            signature=request.headers.get("X-Cathedral-Signature", ""),
-            now=datetime.now(UTC).timestamp(),
-        )
-    except RateLimitError as exc:
-        logger.info(
-            "submit_rate_limited",
-            hotkey=auth.hotkey_ss58,
-            replay=exc.replay,
-        )
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
-
     # ----- card_id gate (Decision 1, Option A) -------------------------------
     # ``card_id`` is no longer a card; it's the task-family lane marker.
     # Only ``synthetic_boolean_v1`` is accepted. Anything else 400s and
-    # points the caller at the live skill manifest.
+    # points the caller at the live skill manifest. This MUST run before the
+    # rate-limit guard so a stale-config miner spraying the dead ``eu-ai-act``
+    # lane cannot consume its own hotkey's rate-limit slot and starve a real
+    # SAT solve from the same hotkey.
     if card_id != SAT_CARD_ID:
         logger.info(
             "submit_rejected_card_id",
@@ -253,6 +234,45 @@ async def submit_agent(
                 f"removed in PR2. {_MIGRATION_HINT}"
             ),
         )
+
+    # ----- rate limit + signature-replay dedup (WS2) -------------------------
+    # Replay guard closes the ±300s skew-window replay hole (always global on
+    # the signature). The min-interval throttle is scoped: solve-on-submit
+    # POSTs throttle per (hotkey, challenge_id) so one miner can submit solves
+    # for DIFFERENT active challenges back-to-back (winner-take-all rewards
+    # speed) while still being blocked from spamming the SAME challenge;
+    # registration-only POSTs keep the coarse per-hotkey anti-proximity limit.
+    # Single-instance publisher, so an app.state-scoped in-memory guard is
+    # sufficient.
+    pr5_enabled = _pr5_solve_on_submit_enabled()
+    is_solve_post = bool(
+        pr5_enabled and dimacs_solution is not None and dimacs_solution.strip()
+    )
+    throttle_key: str | None = None
+    if is_solve_post and challenge_id and challenge_id.strip():
+        throttle_key = f"{auth.hotkey_ss58}\x1f{challenge_id.strip()}"
+
+    guard = getattr(request.app.state, "submit_guard", None)
+    if guard is None:
+        guard = SubmitRateGuard()
+        request.app.state.submit_guard = guard
+    try:
+        guard.check(
+            hotkey=auth.hotkey_ss58,
+            signature=request.headers.get("X-Cathedral-Signature", ""),
+            now=datetime.now(UTC).timestamp(),
+            throttle_key=throttle_key,
+        )
+    except RateLimitError as exc:
+        logger.info(
+            "submit_rate_limited",
+            hotkey=auth.hotkey_ss58,
+            replay=exc.replay,
+            card_id=card_id,
+            challenge_id=(challenge_id or None),
+            is_solve_post=is_solve_post,
+        )
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     # ----- attestation_mode gate --------------------------------------------
     if attestation_mode != SSH_PROBE_MODE:
@@ -348,16 +368,11 @@ async def submit_agent(
     else:
         signed_submitted_at_iso = server_submitted_at_iso
 
-    # PR5: decide whether this is a solve-POST. If the flag is off,
-    # both new fields are ignored entirely — even reading them off the
-    # form is fine because we treat them as None for downstream logic.
-    pr5_enabled = _pr5_solve_on_submit_enabled()
-    is_solve_post = bool(
-        pr5_enabled
-        and dimacs_solution is not None
-        and dimacs_solution.strip()
-    )
-
+    # PR5: ``pr5_enabled`` and ``is_solve_post`` were computed above (they
+    # select the rate-limit throttle scope). If the flag is off, both new
+    # fields are ignored entirely — even reading them off the form is fine
+    # because we treat them as None for downstream logic.
+    #
     # When the flag is on, we ALWAYS expect the 6-field signed shape so
     # registration-only POSTs (under the new flag) still bind the
     # canonical payload to the empty-string challenge_id / solution hash.

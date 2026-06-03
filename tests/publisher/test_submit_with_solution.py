@@ -939,3 +939,116 @@ def test_solve_post_locking_labeled_row_keeps_other_labeled_active(
     # (its slot is empty until a 3b-labeled pending is promoted).
     assert "t1-6b" in ids
     assert "t1-3b" not in ids
+
+
+# --------------------------------------------------------------------------
+# fix/sat-board-rotation: submit-gate ordering + per-(hotkey, challenge)
+# throttle scope. These run with a REAL 60s interval (the suite default is 0,
+# set in conftest) so they actually exercise the limiter.
+# --------------------------------------------------------------------------
+
+
+def test_wrong_card_id_does_not_consume_rate_limit_slot(
+    client: TestClient,
+    alice: Keypair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale-config miner spraying the dead ``eu-ai-act`` lane must not burn
+    its own hotkey's rate-limit slot — the wrong-card 400 happens before the
+    guard, so a real SAT solve from the same hotkey immediately after wins."""
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_MIN_INTERVAL_SECS", "60")
+
+    # Wrong card_id: rejected at the card gate (before the guard, before sig
+    # verify) — a dummy signature is fine because it is never reached.
+    bad = client.post(
+        "/v1/agents/submit",
+        data={
+            "card_id": "eu-ai-act",
+            "display_name": "alice-stale-config",
+            "attestation_mode": "ssh-probe",
+            "ssh_host": "miner.example.com",
+            "ssh_user": "cathedral",
+            "ssh_port": "22",
+        },
+        headers={
+            "X-Cathedral-Hotkey": alice.ss58_address,
+            "X-Cathedral-Signature": base64.b64encode(b"dummy").decode("ascii"),
+        },
+    )
+    assert bad.status_code == 400, bad.text
+
+    # Real SAT solve from the SAME hotkey, immediately after: must NOT be 429.
+    data, headers = _solve_post_form(
+        kp=alice, challenge_id=_CHALLENGE, dimacs_solution=_VALID_SOL
+    )
+    good = client.post("/v1/agents/submit", data=data, headers=headers)
+    assert good.status_code == 200, good.text
+    assert good.json()["status"] == "ranked"
+
+
+def test_one_hotkey_solves_two_actives_back_to_back_under_real_interval(
+    multi_tier_client: TestClient,
+    alice: Keypair,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under a real 60s interval, one hotkey can solve TWO different active
+    challenges back-to-back and BOTH reach the winner path (both lock).
+
+    With the old per-hotkey throttle the second would 429; the per-(hotkey,
+    challenge) scope is what lets winner-take-all reward speed across the board.
+    """
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_MIN_INTERVAL_SECS", "60")
+
+    d1, h1 = _solve_post_form(
+        kp=alice, challenge_id=_CHALLENGE, dimacs_solution=_VALID_SOL
+    )
+    r1 = multi_tier_client.post("/v1/agents/submit", data=d1, headers=h1)
+    assert r1.status_code == 200, r1.text
+
+    d2, h2 = _solve_post_form(
+        kp=alice, challenge_id=_TIER2_CHALLENGE, dimacs_solution=_TIER2_VALID_SOL
+    )
+    r2 = multi_tier_client.post("/v1/agents/submit", data=d2, headers=h2)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["id"] != r1.json()["id"]
+
+    import sqlite3
+
+    with sqlite3.connect(str(tmp_path / "publisher-multi-tier.db")) as raw:
+        rows = dict(
+            raw.execute(
+                "SELECT challenge_id, status FROM lane_challenges "
+                "WHERE challenge_id IN (?, ?)",
+                (_CHALLENGE, _TIER2_CHALLENGE),
+            ).fetchall()
+        )
+    # Both reached atomic_claim_winner → both locked.
+    assert rows[_CHALLENGE] == "locked"
+    assert rows[_TIER2_CHALLENGE] == "locked"
+
+
+def test_one_hotkey_cannot_spam_same_challenge_under_real_interval(
+    client: TestClient,
+    alice: Keypair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same hotkey hammering the SAME challenge inside the interval is 429 —
+    the per-(hotkey, challenge) throttle still blocks same-challenge spam,
+    and the rate limit fires before the lock check."""
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_MIN_INTERVAL_SECS", "60")
+
+    d1, h1 = _solve_post_form(
+        kp=alice, challenge_id=_CHALLENGE, dimacs_solution=_VALID_SOL
+    )
+    r1 = client.post("/v1/agents/submit", data=d1, headers=h1)
+    assert r1.status_code == 200, r1.text
+
+    # Different solution body (distinct signature, so not a replay) but SAME
+    # hotkey + SAME challenge, within the interval → rate-limited.
+    retry_sol = "s SATISFIABLE\nv 1 2 3 0\nc retry\n"
+    d2, h2 = _solve_post_form(
+        kp=alice, challenge_id=_CHALLENGE, dimacs_solution=retry_sol
+    )
+    r2 = client.post("/v1/agents/submit", data=d2, headers=h2)
+    assert r2.status_code == 429, r2.text

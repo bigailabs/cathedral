@@ -55,3 +55,39 @@ def test_zero_interval_disables_guard() -> None:
     g = SubmitRateGuard(min_interval_secs=0.0)
     g.check(hotkey="hkA", signature="dup", now=1000.0)
     g.check(hotkey="hkA", signature="dup", now=1000.0)  # no rate limit, no replay block
+
+
+# --- throttle_key scoping (solve-on-submit per (hotkey, challenge_id)) -------
+
+
+def test_throttle_key_lets_one_hotkey_solve_distinct_challenges_back_to_back() -> None:
+    g = SubmitRateGuard(min_interval_secs=60.0)
+    g.check(hotkey="hkA", signature="s1", now=1000.0, throttle_key="hkA\x1fchalA")
+    # Same hotkey, DIFFERENT challenge, within the interval: allowed.
+    g.check(hotkey="hkA", signature="s2", now=1001.0, throttle_key="hkA\x1fchalB")
+
+
+def test_throttle_key_blocks_spamming_the_same_challenge() -> None:
+    g = SubmitRateGuard(min_interval_secs=60.0)
+    g.check(hotkey="hkA", signature="s1", now=1000.0, throttle_key="hkA\x1fchalA")
+    with pytest.raises(RateLimitError) as ei:
+        g.check(hotkey="hkA", signature="s2", now=1001.0, throttle_key="hkA\x1fchalA")
+    assert ei.value.replay is False
+
+
+def test_default_throttle_key_preserves_coarse_per_hotkey_limit() -> None:
+    # Registration POSTs (no throttle_key) still get the coarse per-hotkey limit.
+    g = SubmitRateGuard(min_interval_secs=60.0)
+    g.check(hotkey="hkA", signature="s1", now=1000.0)
+    with pytest.raises(RateLimitError):
+        g.check(hotkey="hkA", signature="s2", now=1030.0)
+
+
+def test_replay_is_global_regardless_of_throttle_key() -> None:
+    # The signature-replay guard ignores throttle_key: a replayed signature is
+    # rejected even across different challenge scopes.
+    g = SubmitRateGuard(min_interval_secs=60.0, replay_window_secs=300.0)
+    g.check(hotkey="hkA", signature="dup", now=1000.0, throttle_key="hkA\x1fchalA")
+    with pytest.raises(RateLimitError) as ei:
+        g.check(hotkey="hkA", signature="dup", now=1001.0, throttle_key="hkA\x1fchalB")
+    assert ei.value.replay is True
