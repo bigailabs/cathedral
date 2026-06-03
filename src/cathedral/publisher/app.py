@@ -171,6 +171,18 @@ def _background_eval_loop_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _sat_autopilot_worker_enabled() -> bool:
+    """True iff the in-process SAT generator importer should run."""
+    raw = os.environ.get("CATHEDRAL_SAT_AUTOPILOT_WORKER_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _sat_fill_loop_enabled() -> bool:
+    """True iff the in-process active-board fill loop should run."""
+    raw = os.environ.get("CATHEDRAL_SAT_FILL_LOOP_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _write_private_key_file_0600(target: Path, content: str) -> None:
     """Atomically publish private-key content with owner-only permissions."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -488,7 +500,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             client_from_env as _sat_generator_client_from_env,
         )
 
-        if autopilot_enabled():
+        if autopilot_enabled() and _sat_autopilot_worker_enabled():
             _autopilot_client = _sat_generator_client_from_env()
             if _autopilot_client is None:
                 logger.warning(
@@ -516,6 +528,8 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                     target_pending=_autopilot_config.default_target_pending,
                     max_imports_per_tick=_autopilot_config.max_imports_per_tick,
                 )
+        elif autopilot_enabled():
+            logger.warning("sat_autopilot_worker_disabled")
 
         # SAT fill loop: promote pending->active so a target number of
         # challenges stay live concurrently per tier (the "flood"). Opt-in
@@ -529,7 +543,7 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
             run_fill_loop,
         )
 
-        if fill_enabled():
+        if fill_enabled() and _sat_fill_loop_enabled():
             _fill_config = _fill_config_from_env()
             ctx.background_tasks.append(
                 asyncio.create_task(
@@ -547,6 +561,8 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
                 tiers=list(_fill_config.tiers),
                 default_target=_fill_config.default_target,
             )
+        elif fill_enabled():
+            logger.warning("sat_fill_loop_disabled")
 
         try:
             yield
