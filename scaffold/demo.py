@@ -98,7 +98,8 @@ def _print_report(report: validator.RoundReport) -> None:
                 extra += "  [TRAP]"
             print(f"  {tag}{r.miner_hotkey:18s} {r.outcome:7s} "
                   f"score={r.weighted_score:.4f}{reason}{extra}")
-    print("\n=== normalized UID weights (what the validator sets on-chain) ===")
+    print("\n=== normalized UID weights (DRY-RUN vector — what the validator WOULD set;")
+    print("    in-memory only, NOT submitted on-chain by this scaffold) ===")
     for hk, w in sorted(report.weights.items(), key=lambda kv: -kv[1]):
         print(f"  {hk:18s} {w:.4f}")
 

@@ -85,13 +85,16 @@ class SolverDockerLane:
             reason = "unsat_cert_unverified_stub" if chk.stub else chk.reason
             return VerifierResult(True, Outcome.INVALID, 0.0, reason, det)
 
-        # timeout: vouch via attestation that the pinned image really ran out
+        # timeout: vouch via attestation that THIS image produced this result in
+        # a genuine TDX box. Binding rides on report_data (image||result), not
+        # MRTD (which measures the base VM, proven invariant 2026-06-04).
         att_ok, res = verify_attestation(
             self.polaris, nonce=ans.get("nonce", problem.task_id),
-            pubkey_b64=ans.get("pubkey_b64", ""), expected_mrtd=image_digest,
+            pubkey_b64=ans.get("pubkey_b64", ""), expected_image=image_digest,
             workload=f"solve {problem.task_id} to {problem.time_limit_seconds}s",
         )
-        det.update({"attested": att_ok, "attest_stub": res.stub, "mrtd": res.mrtd})
+        det.update({"attested": att_ok, "attest_stub": res.stub,
+                    "bound_image": res.image_digest})
         return VerifierResult(True, Outcome.TIMEOUT, 0.0,
                               None if att_ok else "attestation_failed", det)
 

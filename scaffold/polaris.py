@@ -16,6 +16,7 @@ The httpx path is intentionally tiny — the value is the SEAM, not the transpor
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import dataclass
@@ -24,9 +25,10 @@ from dataclasses import dataclass
 @dataclass
 class AttestResult:
     intel_verified: bool
-    report_data_match: bool
-    mrtd: str                 # measurement of the launched image (== pinned digest)
-    quote_size: int
+    report_data: bytes        # 64B from the TDX quote (lo[0:32]=nonce|pubkey bind,
+                              #                          hi[32:64]=image|result bind)
+    image_digest: str         # resolved image content digest ("sha256:...") run in the box
+    stdout: str               # the workload's output (its sha256 is bound into report_data)
     cost_usd: float
     stub: bool                # True when produced offline (not a real quote)
 
@@ -45,32 +47,45 @@ class PolarisClient:
         return self._get("/api/keys/whoami").get("ok", False)
 
     # ---- POST /v1/attest -------------------------------------------------
-    def attest(self, *, nonce: str, e2e_pubkey_b64: str, expected_mrtd: str,
+    def attest(self, *, nonce: str, e2e_pubkey_b64: str, image: str,
                workload: str) -> AttestResult:
-        """Run `workload` in an attested TDX box and verify the quote.
+        """Run `image` (a Docker image) in an attested TDX box; the box pulls it,
+        runs `workload`, and binds BOTH bindings into the hardware quote's
+        report_data (verified against Intel's chain, measured 2026-06-04):
 
-        The MRTD (image measurement) must equal `expected_mrtd` — that is how
-        a solver-Docker image is pinned + precomputable (the Entrius pattern):
-        the buyer/validator knows the digest in advance, so a matching MRTD
-        proves *that exact image* ran. report_data binds nonce+pubkey.
+            report_data[0:32]  = sha256(nonce_hex || e2e_pubkey_b64)
+            report_data[32:64] = sha256(image_digest || sha256hex(stdout))
+
+        So the quote proves *this image produced this result* in a genuine TDX
+        box. The MRTD measures the base VM (invariant across workloads — proven),
+        so it is NOT the image identity and is not checked. Image pinning rides
+        on report_data[32:64], not MRTD.
         """
         if not self.live:
-            # deterministic offline quote. report_data binds nonce+pubkey, so an
-            # empty pubkey (a miner that can't actually attest) fails the bind —
-            # this is what separates an honest attested timeout from a fraud.
-            bound = bool(nonce and e2e_pubkey_b64)
-            return AttestResult(
-                intel_verified=bound, report_data_match=bound,
-                mrtd=expected_mrtd if bound else "", quote_size=8000 if bound else 0,
-                cost_usd=0.0005, stub=True,
-            )
-        body = {"nonce": nonce, "e2e_pubkey_b64": e2e_pubkey_b64, "workload": workload}
+            # synthesize a quote-consistent report_data under the SAME recipe so
+            # the offline path exercises the real verification. A miner that
+            # can't actually attest (no pubkey, or an un-pullable image) yields
+            # intel_verified=False — separating an honest timeout from a fraud.
+            pullable = bool(image) and "unattestable" not in image
+            ok = bool(nonce and e2e_pubkey_b64) and pullable
+            # resolve the ref to a realistic content digest (sha256:<64hex>),
+            # mirroring what the box returns, so the SAME digest-aware checks run
+            resolved = "sha256:" + hashlib.sha256((image or "?").encode()).hexdigest()
+            stdout = "[offline-stub] " + (workload or "")
+            lo = hashlib.sha256((nonce + e2e_pubkey_b64).encode()).digest()
+            hi = hashlib.sha256(
+                (resolved + hashlib.sha256(stdout.encode()).hexdigest()).encode()).digest()
+            return AttestResult(intel_verified=ok, report_data=lo + hi,
+                                image_digest=resolved, stdout=stdout,
+                                cost_usd=0.0, stub=True)
+        body = {"nonce": nonce, "e2e_pubkey_b64": e2e_pubkey_b64,
+                "image": image, "workload": workload}
         r = self._post("/v1/attest", body)
+        quote = base64.b64decode(r["tee_attestation"]["quote_b64"])
         return AttestResult(
-            intel_verified=r.get("intel_verified", False),
-            report_data_match=r.get("report_data_match", False),
-            mrtd=r.get("mrtd", ""), quote_size=r.get("quote_size", 0),
-            cost_usd=r.get("cost_usd", 0.0), stub=False,
+            intel_verified=r.get("verification", {}).get("intel_verified", False),
+            report_data=quote[568:632], image_digest=r.get("image_digest", ""),
+            stdout=r.get("stdout", ""), cost_usd=r.get("cost_usd", 0.0), stub=False,
         )
 
     # ---- /api/billing ledger --------------------------------------------
@@ -86,19 +101,20 @@ class PolarisClient:
             return {"ok": True, "entry": entry, "stub": True}
         return self._post("/api/billing/ledger", entry)
 
-    # ---- tiny transport (only used when live) ---------------------------
+    # ---- tiny transport (stdlib only; used when live) -------------------
     def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self.api_key}", "content-type": "application/json"}
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
+                "User-Agent": "curl/8.5.0", "Accept": "*/*"}
 
     def _post(self, path: str, body: dict) -> dict:
-        import httpx  # local import: offline path never needs it
-        resp = httpx.post(self.base_url + path, headers=self._headers(),
-                          content=json.dumps(body), timeout=120.0)
-        resp.raise_for_status()
-        return resp.json()
+        import urllib.request  # stdlib — keeps the offline scaffold dep-free
+        req = urllib.request.Request(self.base_url + path, method="POST",
+                                     data=json.dumps(body).encode(), headers=self._headers())
+        with urllib.request.urlopen(req, timeout=240.0) as r:
+            return json.loads(r.read().decode())
 
     def _get(self, path: str) -> dict:
-        import httpx
-        resp = httpx.get(self.base_url + path, headers=self._headers(), timeout=30.0)
-        resp.raise_for_status()
-        return resp.json()
+        import urllib.request
+        req = urllib.request.Request(self.base_url + path, headers=self._headers())
+        with urllib.request.urlopen(req, timeout=30.0) as r:
+            return json.loads(r.read().decode())

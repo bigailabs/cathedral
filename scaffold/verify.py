@@ -13,6 +13,7 @@ one place.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from .dimacs import verify_witness
@@ -48,13 +49,36 @@ def verify_unsat_cert(cnf_text: str, drat_text: str) -> UnsatCheck:
 
 def verify_attestation(
     client: PolarisClient, *, nonce: str, pubkey_b64: str,
-    expected_mrtd: str, workload: str,
+    expected_image: str, workload: str,
 ) -> tuple[bool, AttestResult]:
-    """An attested run is valid iff Intel verified the quote, report_data binds
-    our nonce+pubkey, AND the launched image's MRTD equals the pinned digest."""
-    res = client.attest(
-        nonce=nonce, e2e_pubkey_b64=pubkey_b64,
-        expected_mrtd=expected_mrtd, workload=workload,
-    )
-    ok = res.intel_verified and res.report_data_match and res.mrtd == expected_mrtd
+    """An attested run is valid iff (verified against the real /v1/attest recipe,
+    measured 2026-06-04):
+
+        intel_verified                                                    AND
+        report_data[0:32]  == sha256(nonce || pubkey)                     AND
+        report_data[32:64] == sha256(image_digest || sha256hex(stdout))   AND
+        the image the box ran is the one Lane B pinned.
+
+    The MRTD is NOT checked — it measures the base VM (invariant across
+    workloads, proven), not the image. Image identity rides on report_data[32:64].
+    """
+    res = client.attest(nonce=nonce, e2e_pubkey_b64=pubkey_b64,
+                         image=expected_image, workload=workload)
+    rd = res.report_data
+    if len(rd) != 64:
+        return False, res
+    lo_ok = rd[0:32] == hashlib.sha256((nonce + pubkey_b64).encode()).digest()
+    res_hex = hashlib.sha256(res.stdout.encode()).hexdigest()
+    hi_ok = rd[32:64] == hashlib.sha256((res.image_digest + res_hex).encode()).digest()
+    # the box ran the image Lane B pinned. Pinning is by CONTENT DIGEST (a tag is
+    # mutable): if the miner committed a ref carrying a 64-hex digest it MUST
+    # equal the bound one; a bare tag is accepted and the resolved digest is
+    # recorded (the box must have run some image -> got_hex non-empty).
+    import re
+    def _hex(s: str) -> str:
+        m = re.search(r"[a-f0-9]{64}", s or "")
+        return m.group(0) if m else ""
+    exp_hex, got_hex = _hex(expected_image), _hex(res.image_digest)
+    img_ok = bool(got_hex) and (exp_hex == "" or exp_hex == got_hex)
+    ok = res.intel_verified and lo_ok and hi_ok and img_ok
     return ok, res
