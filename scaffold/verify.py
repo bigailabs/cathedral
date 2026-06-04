@@ -31,20 +31,19 @@ class UnsatCheck:
 
 
 def verify_unsat_cert(cnf_text: str, drat_text: str) -> UnsatCheck:
-    """Check an UNSAT proof certificate against the CNF.
+    """Check an UNSAT proof certificate against the CNF with drat-trim (REAL).
 
-    STUB: a real validator runs `drat-trim <cnf> <drat>` (or lrat-check) and
-    trusts the verified UNSAT verdict. Wiring a vendored drat-trim here is the
-    only thing standing between this and a real check; we do a conservative
-    shape check and flag stub=True so nothing pretends a proof was verified.
+    Shells to the trusted community checker (proven on Stitch: returns
+    's VERIFIED'). If drat-trim isn't installed in this env we say so and mark
+    stub=True so nothing is credited as verified without a real check.
     """
+    from .solve_real import verify_drat, have_drat_trim
     if not drat_text.strip():
         return UnsatCheck(False, stub=False, reason="empty_cert")
-    # shape: a DRAT proof is lines of integers, clause additions/deletions
-    has_terminator = any(line.strip().endswith("0") for line in drat_text.splitlines())
-    if not has_terminator:
-        return UnsatCheck(False, stub=False, reason="malformed_drat")
-    return UnsatCheck(True, stub=True, reason="shape_ok_drat_trim_not_run")
+    if not have_drat_trim():
+        return UnsatCheck(False, stub=True, reason="drat-trim_not_installed")
+    ok, detail = verify_drat(cnf_text, drat_text)
+    return UnsatCheck(ok, stub=False, reason=f"drat-trim:{detail}")
 
 
 def verify_attestation(

@@ -144,15 +144,52 @@ class ChainClient:
         if not bt:
             return {"submitted": False, "reason": "bittensor not importable"}
         try:
-            sub = bt.subtensor(network=self.network)
-            wallet = bt.wallet(name=self.wallet_name, hotkey=self.hotkey)
+            sub = self._subtensor(bt)
+            wallet = self._wallet(bt)
+            if sub is None or wallet is None:
+                return {"submitted": False, "reason": "no compatible subtensor/wallet ctor"}
             uids = list(wv.by_uid.keys())
             weights = [wv.by_uid[u] for u in uids]
-            ok, msg = sub.set_weights(wallet=wallet, netuid=self.netuid,
-                                      uids=uids, weights=weights, wait_for_inclusion=False)
+            res = sub.set_weights(wallet=wallet, netuid=self.netuid, uids=uids,
+                                  weights=weights, wait_for_inclusion=False)
+            ok, msg = res if isinstance(res, tuple) else (bool(res), "")
             return {"submitted": bool(ok), "msg": str(msg), "uids": uids}
         except Exception as e:
             return {"submitted": False, "reason": f"set_weights failed: {e}"}
+
+    def _wallet(self, bt):
+        """Construct a Wallet across bittensor API variants (10.x: bt.Wallet /
+        bittensor_wallet.Wallet; 8.x: bt.wallet)."""
+        for ctor in ("Wallet", "wallet"):
+            if hasattr(bt, ctor):
+                try:
+                    return getattr(bt, ctor)(name=self.wallet_name, hotkey=self.hotkey)
+                except Exception:
+                    pass
+        try:
+            from bittensor_wallet import Wallet
+            return Wallet(name=self.wallet_name, hotkey=self.hotkey)
+        except Exception:
+            return None
+
+    def registration_status(self, hotkey_ss58: str) -> dict:
+        """Read-only readiness check: is `hotkey_ss58` registered + permitted on
+        this netuid yet? Use to poll while a validator registration is pending."""
+        bt = self._bittensor()
+        if not bt:
+            return {"ok": False, "reason": "bittensor not importable"}
+        try:
+            sub = self._subtensor(bt)
+            uid = sub.get_uid_for_hotkey_on_subnet(hotkey_ss58=hotkey_ss58, netuid=self.netuid)
+            if uid is None:
+                return {"registered": False, "permit": False, "uid": None,
+                        "ready_to_validate": False}
+            mg = sub.metagraph(netuid=self.netuid)
+            permit = bool(mg.validator_permit[uid])
+            return {"registered": True, "uid": int(uid), "permit": permit,
+                    "stake": float(mg.S[uid]), "ready_to_validate": permit}
+        except Exception as e:
+            return {"ok": False, "reason": f"status check failed: {e}"}
 
 
 def make_provenance(*, validator_label: str, hotkey: str, netuid: int,

@@ -25,7 +25,18 @@ from pathlib import Path
 
 from .contract import PublicProblem, Submission
 from .dimacs import solve_cnf
+from .solve_real import solve_cnf_real, have_solver
 from .lanes.encoding import _find_counterexample
+
+
+def _solve(cnf: str) -> list[int]:
+    """Sim miners solve with the real solver (cryptominisat5) when present,
+    falling back to the toy DPLL only where no real solver is installed."""
+    if have_solver():
+        r = solve_cnf_real(cnf)
+        if r.get("status") == "SAT":
+            return r["model"]
+    return solve_cnf(cnf) or []
 from .lanes.solver_docker import SolverDockerLane
 from .polaris import AttestResult, PolarisClient
 from . import chain, registry, validator
@@ -86,7 +97,7 @@ def _submission(worker, problem: PublicProblem) -> Submission | None:
     tid, pi = problem.task_id, problem.public_input
     fam = problem.task_family
     if fam == "sat_challenge_v1":
-        sol = solve_cnf(pi["cnf"]) or []
+        sol = _solve(pi["cnf"])
         if beh == "honest":
             return Submission(tid, wid, {"assignment": sol, "wall_ms": 40})
         if beh == "slow":
@@ -94,7 +105,7 @@ def _submission(worker, problem: PublicProblem) -> Submission | None:
         if beh == "liar":
             return Submission(tid, wid, {"assignment": [1] * pi["n_vars"], "wall_ms": 1})
     if fam == "solver_docker_v1":
-        sol = solve_cnf(pi["cnf"]) or []
+        sol = _solve(pi["cnf"])
         if beh == "runner":
             return Submission(tid, wid, {"image_digest": PULLABLE_IMAGE, "outcome": "sat",
                                          "assignment": sol, "wall_ms": 60, "solver_owner": wid})
