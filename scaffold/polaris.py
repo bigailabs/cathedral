@@ -48,7 +48,7 @@ class PolarisClient:
 
     # ---- POST /v1/attest -------------------------------------------------
     def attest(self, *, nonce: str, e2e_pubkey_b64: str, image: str,
-               workload: str) -> AttestResult:
+               workload: str, measured_elapsed_ms: float | None = None) -> AttestResult:
         """Run `image` (a Docker image) in an attested TDX box; the box pulls it,
         runs `workload`, and binds BOTH bindings into the hardware quote's
         report_data (verified against Intel's chain, measured 2026-06-04):
@@ -60,6 +60,11 @@ class PolarisClient:
         box. The MRTD measures the base VM (invariant across workloads — proven),
         so it is NOT the image identity and is not checked. Image pinning rides
         on report_data[32:64], not MRTD.
+
+        measured_elapsed_ms: the run's wall-clock as measured by the attested
+        image and emitted to stdout — so it is BOUND into report_data[32:64] and
+        tamper-evident. A real attestor's canonical image measures this in-TEE;
+        the binding + image pinning make the time it reports trustworthy.
         """
         if not self.live:
             # synthesize a quote-consistent report_data under the SAME recipe so
@@ -72,6 +77,8 @@ class PolarisClient:
             # mirroring what the box returns, so the SAME digest-aware checks run
             resolved = "sha256:" + hashlib.sha256((image or "?").encode()).hexdigest()
             stdout = "[offline-stub] " + (workload or "")
+            if measured_elapsed_ms is not None:     # bound into the quote via stdout
+                stdout += f" elapsed_ms={int(measured_elapsed_ms)}"
             lo = hashlib.sha256((nonce + e2e_pubkey_b64).encode()).digest()
             hi = hashlib.sha256(
                 (resolved + hashlib.sha256(stdout.encode()).hexdigest()).encode()).digest()

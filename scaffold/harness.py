@@ -107,8 +107,13 @@ def _submission(worker, problem: PublicProblem) -> Submission | None:
     if fam == "solver_docker_v1":
         sol = _solve(pi["cnf"])
         if beh == "runner":
-            return Submission(tid, wid, {"image_digest": PULLABLE_IMAGE, "outcome": "sat",
-                                         "assignment": sol, "wall_ms": 60, "solver_owner": wid})
+            sub = {"image_digest": PULLABLE_IMAGE, "outcome": "sat",
+                   "assignment": sol, "solver_owner": wid}
+            if wid.endswith("1"):       # runner-1 attests its solve -> trustworthy speed bonus
+                sub.update({"attest_solve": True, "nonce": os.urandom(8).hex(),
+                            "pubkey_b64": base64.b64encode(os.urandom(32)).decode(),
+                            "solve_elapsed_ms": pi.get("n_clauses", 200) * 1.5})
+            return Submission(tid, wid, sub)
         if beh == "honest_timeout":
             return Submission(tid, wid, {"image_digest": PULLABLE_IMAGE, "outcome": "timeout",
                                          "nonce": os.urandom(16).hex(),

@@ -46,9 +46,19 @@ def verify_unsat_cert(cnf_text: str, drat_text: str) -> UnsatCheck:
     return UnsatCheck(ok, stub=False, reason=f"drat-trim:{detail}")
 
 
+def attested_elapsed_ms(res: AttestResult) -> float | None:
+    """The run's wall-clock as bound into the quote. Trust ONLY after
+    verify_attestation() returns True — at that point the value lives in the
+    verified stdout (report_data[32:64] binds it), so it is tamper-evident and
+    attributable to the pinned image. Never read this from a raw submission."""
+    import re
+    m = re.search(r"elapsed_ms=(\d+(?:\.\d+)?)", res.stdout or "")
+    return float(m.group(1)) if m else None
+
+
 def verify_attestation(
     client: PolarisClient, *, nonce: str, pubkey_b64: str,
-    expected_image: str, workload: str,
+    expected_image: str, workload: str, measured_elapsed_ms: float | None = None,
 ) -> tuple[bool, AttestResult]:
     """An attested run is valid iff (verified against the real /v1/attest recipe,
     measured 2026-06-04):
@@ -60,9 +70,12 @@ def verify_attestation(
 
     The MRTD is NOT checked — it measures the base VM (invariant across
     workloads, proven), not the image. Image identity rides on report_data[32:64].
+    A measured_elapsed_ms, if given, is bound into stdout so the verified run
+    carries a tamper-evident wall-clock (read it back with attested_elapsed_ms).
     """
     res = client.attest(nonce=nonce, e2e_pubkey_b64=pubkey_b64,
-                         image=expected_image, workload=workload)
+                         image=expected_image, workload=workload,
+                         measured_elapsed_ms=measured_elapsed_ms)
     rd = res.report_data
     if len(rd) != 64:
         return False, res

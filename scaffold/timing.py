@@ -21,14 +21,25 @@ import hashlib
 from .contract import PublicProblem
 
 
+def _size(problem: PublicProblem) -> float:
+    pi = problem.public_input
+    return float(pi.get("n_clauses") or pi.get("width") or 32)
+
+
+def reference_ms(problem: PublicProblem) -> float:
+    """The challenge's expected (average-rig) solve time — the half-credit point
+    of the speed curve. A solve faster than this scores >0.5, slower <0.5, so
+    speed reward spreads across the field instead of saturating near the hard
+    time limit. Scales with problem size."""
+    return _size(problem) * 4.0
+
+
 def observed_wall_ms(hotkey: str, problem: PublicProblem) -> float:
     """The validator's measured wall-clock for this worker's submission. In
     production this is the receipt clock or the attested elapsed; here it is
     derived from the worker's rig + problem size, server-side and untamperable."""
-    pi = problem.public_input
-    size = float(pi.get("n_clauses") or pi.get("width") or 32)
     h = int(hashlib.sha256(hotkey.encode()).hexdigest()[:8], 16)
     rig = 0.4 + (h % 1000) / 1000.0           # per-rig speed factor in [0.4, 1.4)
     if "slow" in hotkey:                       # a genuinely slow rig, as observed
         rig *= 25.0
-    return round(size * 4.0 * rig, 1)          # ms the validator clock observed
+    return round(_size(problem) * 4.0 * rig, 1)   # ms the validator clock observed

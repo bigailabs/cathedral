@@ -17,7 +17,7 @@ from ..contract import (
     Submission, VerifierResult,
 )
 from ..dimacs import gen_planted_3sat, verify_witness
-from .. import grading
+from .. import grading, timing
 
 FAMILY_ID = "sat_challenge_v1"
 SCHEMA_VERSION = 1
@@ -70,4 +70,5 @@ class SatChallengeLane:
         # self-report. Absent it, fall back to the limit -> no speed credit.
         wm = wall_ms if wall_ms is not None else problem.time_limit_seconds * 1000
         return grading.grade(verifier, wall_ms=wm,
-                             time_limit_ms=problem.time_limit_seconds * 1000)
+                             time_limit_ms=problem.time_limit_seconds * 1000,
+                             reference_ms=timing.reference_ms(problem))

@@ -43,7 +43,7 @@ from ..contract import (
     GenerateCtx, HiddenMetadata, Outcome, PublicProblem, ScoreResult,
     Submission, VerifierResult,
 )
-from .. import grading
+from .. import grading, timing
 
 FAMILY_ID = "encoding_v1"
 SCHEMA_VERSION = 1
@@ -293,7 +293,7 @@ class EncodingLane:
         if verifier.parsed_ok and verifier.outcome == Outcome.SAT \
                 and math.isfinite(verifier.raw_metric) and verifier.raw_metric > 0:
             wm = wall_ms if wall_ms is not None else problem.time_limit_seconds * 1000
-            speed = grading.speed_bonus(wm, problem.time_limit_seconds * 1000)
+            speed = grading.speed_bonus(wm, timing.reference_ms(problem))
             rarity = max(0.0, min(1.0, float(d.get("rarity", 0.0))))
             score = round(min(1.0, 0.4 + 0.3 * speed + 0.3 * rarity), 6)
             return ScoreResult(score, None,
