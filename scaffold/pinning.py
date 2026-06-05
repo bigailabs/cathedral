@@ -30,13 +30,6 @@ class Difficulty:
     width: int             # bit-width / n_vars / tier-scale knob
     pin: SolverPin
 
-    def describe(self) -> dict[str, object]:
-        return {
-            "property_id": self.property_id,
-            "width": self.width,
-            "solver_pin": self.pin.key(),
-        }
-
 
 # Reference pins the scaffold calibrates against. Real deployment reads these
 # from the generator's self-test metadata (sat-generator-contract.md).

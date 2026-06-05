@@ -174,25 +174,6 @@ class ChainClient:
         except Exception:
             return None
 
-    def registration_status(self, hotkey_ss58: str) -> dict:
-        """Read-only readiness check: is `hotkey_ss58` registered + permitted on
-        this netuid yet? Use to poll while a validator registration is pending."""
-        bt = self._bittensor()
-        if not bt:
-            return {"ok": False, "reason": "bittensor not importable"}
-        try:
-            sub = self._subtensor(bt)
-            uid = sub.get_uid_for_hotkey_on_subnet(hotkey_ss58=hotkey_ss58, netuid=self.netuid)
-            if uid is None:
-                return {"registered": False, "permit": False, "uid": None,
-                        "ready_to_validate": False}
-            mg = sub.metagraph(netuid=self.netuid)
-            permit = bool(mg.validator_permit[uid])
-            return {"registered": True, "uid": int(uid), "permit": permit,
-                    "stake": float(mg.S[uid]), "ready_to_validate": permit}
-        except Exception as e:
-            return {"ok": False, "reason": f"status check failed: {e}"}
-
 
 def make_provenance(*, validator_label: str, hotkey: str, netuid: int,
                     network: str, started_at_iso: str, broadcast: bool,
