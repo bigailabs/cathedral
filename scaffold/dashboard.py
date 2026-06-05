@@ -231,27 +231,57 @@ def render_html(s: dict) -> str:
     rails = s.get("rails", {})
     rail_cards = _rail_cards(rails)
 
-    # system target — the one thing the whole thing is doing, with the live tally
+    # the outcome — what this changes in the world, with the live tally
     tot_find = sum(int(r.get("finds", 0)) for r in rails.values())
     tot_block = sum(int(r.get("blocked", 0)) for r in rails.values())
     bypass = int(s.get("learnings", {}).get("cheat", {}).get("bypass", 0))
     bcls = "ok" if bypass == 0 else "bad"
     target = (
         "<div class=target>"
-        "<div class=tk>SYSTEM TARGET</div>"
-        "<div class=tt>Pay weight <b>only</b> for work it can independently verify.</div>"
-        "<div class=td>Three rails each turn a different kind of compute into a "
-        "<b>checkable artifact</b> — a SAT witness, an attested run, a triggering "
-        "counterexample. Adversarial miners attack every round; weight flows to "
-        "verified artifacts and to nothing else.</div>"
+        "<div class=tk>WHAT THIS CHANGES</div>"
+        "<div class=tt>Hard problems get <b>proven answers</b> — and the solvers "
+        "that crack them keep getting faster.</div>"
+        "<div class=td>A real property becomes a SAT/SMT problem, an open field "
+        "races to crack it, and every answer is checked or hardware-attested "
+        "before it earns. Reward flows to the fastest <b>proven</b> result — the "
+        "selection pressure that drives the field's solvers to improve.</div>"
         f"<div class=tmetrics>"
-        f"<span class=tm><b style='color:{GREEN}'>{tot_find}</b> verified artifacts paid</span>"
-        f"<span class=tm><b style='color:{RED}'>{tot_block}</b> bad-faith attempts caught</span>"
+        f"<span class=tm><b style='color:{GREEN}'>{tot_find}</b> proven answers shipped</span>"
+        f"<span class=tm><b style='color:{RED}'>{tot_block}</b> false claims rejected</span>"
         f"<span class='tm {bcls}'>cheated through: <b>{bypass}</b></span>"
         "</div></div>")
 
+    # what we're encoding — the kinds of planted faults turned into problems
+    muts = s.get("learnings", {}).get("mutations_encoded", {})
+    mut_label = {"none": "faithful (prove safe)", "off_by_one": "off-by-one bug",
+                 "wrong_const": "wrong-inverse bug", "truncate_low": "low-bit-truncation bug"}
+    mut_bars = _hbars(sorted(((mut_label.get(k, k), v) for k, v in muts.items()),
+                             key=lambda kv: -kv[1]),
+                      color=lambda k, v: (GREY if "faithful" in k else AMBER),
+                      fmt=lambda v: str(int(v)), lblw=190)
+
     def card(title, body):
         return f"<div class=card><h3>{title}</h3>{body}</div>"
+
+    def section(num, name, blurb, body):
+        return (f"<div class=storyhead><span class=snum>{num}</span>"
+                f"<span class=sname>{name}</span><span class=sblurb>{blurb}</span></div>{body}")
+
+    legend = (f"<span class=legend><span class=dot style='background:{GREEN}'></span>earning"
+              f"<span class=dot style='background:{RED}'></span>false claim caught"
+              f"<span class=dot style='background:{GREY}'></span>zero</span>")
+    sec_encode = section("1", "ENCODE",
+        "turn a real property into a problem you can only answer by solving",
+        f"<div class=grid>{card('What we are encoding — planted faults turned into problems', mut_bars)}"
+        f"{card('Lane throughput — problems posed per rail', lane_bars)}</div>")
+    sec_solve = section("2", "SOLVE",
+        "an open field races to a proven answer; speed wins, timeouts are attested",
+        f"<div class=grid>{card('Who is solving — per-worker score ' + legend, worker_bars)}"
+        f"{card('Movement — answers + active solvers per round', line_active + line_graded)}</div>")
+    sec_improve = section("3", "IMPROVE",
+        "reward concentrates on the fastest proven solver — the pressure that makes solvers better; integrity holds",
+        f"<div class=grid>{card('Where reward flows — on-chain weight vector', wv_bars)}"
+        f"{card('Integrity — false claims caught (gates) + cross-miner refutations', gate_bars + cons_bars)}</div>")
 
     return f"""<!doctype html><meta charset=utf-8><title>Cathedral tripartite</title>
 <meta http-equiv=refresh content=2>
@@ -302,22 +332,22 @@ def render_html(s: dict) -> str:
  .tag.warn{{background:#3d3417;color:{AMBER}}} .tag.b{{background:#15294d;color:#7aa2f7}}
  .tag.n{{background:#22262e;color:#9aa5b1}}
  .sec{{font-size:11px;color:#8e8e93;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 6px}}
+ .storyhead{{display:flex;align-items:baseline;gap:10px;margin:24px 0 8px}}
+ .snum{{background:{BLUE};color:#fff;font-weight:700;border-radius:50%;width:22px;height:22px;
+        display:inline-flex;align-items:center;justify-content:center;font-size:12px;flex:none}}
+ .sname{{font-size:16px;font-weight:700;letter-spacing:.02em}}
+ .sblurb{{font-size:12px;color:#8e8e93}}
 </style>
 <div class=wrap>
 <h2>Cathedral tripartite — live</h2>
-<p class=sub>three rails · pay only for verified artifacts · auto-refresh 2s</p>
+<p class=sub>encode → solve → improve · every answer proven before it earns · auto-refresh 2s</p>
 {target}
 <div class=sec>The three rails — what each is, what it optimizes for, and what's happening inside it now</div>
 <div class=rails>{rail_cards}</div>
-{card("🟢 Live activity — every mint · post · validation · consensus call · weight update", feed)}
-<div class=grid>
-{card("Movement — activity per round (not cumulative)", line_active + line_graded)}
-{card("Per-worker score <span class=legend><span class=dot style='background:{GREEN}'></span>earning<span class=dot style='background:{RED}'></span>exploit caught<span class=dot style='background:{GREY}'></span>zero</span>", worker_bars)}
-{card("On-chain weight vector", wv_bars)}
-{card("Gates fired (bad-faith caught)", gate_bars)}
-{card("Lane throughput", lane_bars)}
-{card("Consensus flags", cons_bars)}
-</div>
+{card("🟢 Live pulse — every mint · post · validation · consensus call · weight update", feed)}
+{sec_encode}
+{sec_solve}
+{sec_improve}
 {guard}{tn_html}{ln_html}
 </div>"""
 
