@@ -1,31 +1,36 @@
-"""Lane C — REAL encoding (z3), with NON-TRIVIAL planted witnesses.
+"""Lane C — REAL encoding (z3), with SOLVE-HARD planted witnesses.
 
 Encodes a bridge round-trip property as QF_BV and checks it with z3. We use a
 CLEAN MODULAR round-trip so the property is faithful over the ENTIRE 2^W input
 domain (the earlier `*10^9`-with-overflow model left only a handful of valid
 in-band inputs — e.g. s < 4 at W=32 — which made s=0 a trivial universal
-witness and left no room for a rarity knob). The faithful map:
+witness and left no room for a difficulty knob). The faithful map:
 
     intoEvm(s)        = s * K            (mod 2^W),  K odd  -> a bijection
     intoSubstrate(e)  = e * Kinv         (mod 2^W),  Kinv = K^-1 mod 2^W
     property:  intoSubstrate(intoEvm(s)) == s        holds for ALL s
 
-WHY THE TRIGGER PREDICATE. A globally-on mutation ("always add 1") has a
-trivial universal witness (s=0 breaks it everywhere), so a miner that blindly
-submits a constant earns full credit with no work. The fault is therefore GATED
-behind a per-instance modular predicate on s:
+WHY A SOLVE-HARD TRIGGER. A globally-on mutation ("always add 1") has a trivial
+universal witness (s=0 breaks it everywhere). Gating the fault behind a *linear*
+predicate (low_k(s*C)==T) fixes the constant exploit but is algebraically
+invertible: a miner computes s = T*C^-1 mod 2^k by hand and never runs a solver.
+For a LIVE subnet the witness must require an actual solve. So the fault is
+gated behind a BIT-MIXING predicate:
 
-    trigger(s)  :=  low_k_bits( s * C )  ==  T          (C odd, T,k per-instance)
+    trigger(s)  :=  low_k_bits( mix(s) )  ==  T
 
-C odd => s -> (s*C mod 2^k) is a bijection on the low k bits, so EXACTLY
-2^(W-k) values of s satisfy the trigger, spread unpredictably across the FULL
-domain. The whole contract (K, C, T, k) is PUBLIC — a miner encodes it and
-SOLVES for a satisfying s. There is no universal constant: a guesser submitting
-0/1 almost never satisfies the trigger, while z3 finds a witness instantly.
-Rarity = 2^-k is the difficulty knob (bigger k -> rarer witness -> worth more,
-see lane.score). Production should harden `trigger` to a non-invertible
-predicate (hash) so it resists hand-solving too; the modular form here is fast
-and already defeats the constant-witness exploit.
+    mix(x) = let x = (x ^ (x >> r1)) * M1        (mod 2^W)
+                 x = (x ^ (x >> r2)) * M2        (mod 2^W)
+             in  x ^ (x >> r1)
+
+a splitmix/murmur-style finalizer (M1,M2 odd -> bijection, so a unique-per-bits
+preimage set of size 2^(W-k) exists). The xorshifts break the linearity and
+multiplicativity that a modular inverse would exploit, so there is no closed
+form for the preimage: the only general way to find s with low_k(mix(s))==T is
+to give the published encoding to a solver. The whole contract (K, M1, M2, T, k,
+shifts) is PUBLIC — finding the witness is the work, and it is genuine solve
+work. Rarity = 2^-k is the difficulty knob (bigger k -> rarer preimage -> harder
+-> worth more, see lane.score).
 
 Mutations (all gated by the trigger, all with an in-trigger witness):
     none           faithful everywhere                       -> UNSAT (safe)
@@ -40,9 +45,10 @@ from __future__ import annotations
 from functools import lru_cache
 
 MUTATIONS = ("off_by_one", "wrong_const", "truncate_low")
-# native-width modular multiplies stay tractable well past this; <= 52 keeps it
-# clearly below the bit-blast cliff. Widths outside this are rejected.
-MIN_WIDTH, MAX_WIDTH = 30, 48
+# native-width modular multiplies (4 of them: 2 round-trip + 2 mix) stay
+# tractable here; <= 44 keeps z3 comfortably fast for the live loop. Widths
+# outside this are rejected.
+MIN_WIDTH, MAX_WIDTH = 30, 44
 
 
 def round_const(width: int) -> int:
@@ -51,15 +57,43 @@ def round_const(width: int) -> int:
     return (0x9E3779B1 | 1) & ((1 << width) - 1) | 1
 
 
-def _build(width: int, mutation: str, trig_c: int, trig_k: int, trig_t: int):
+def _shifts(width: int) -> tuple[int, int]:
+    return max(1, width // 2), max(1, width // 3)
+
+
+def mix_ref(s: int, width: int, m1: int, m2: int) -> int:
+    """Pure-python reference for the z3 `mix` (for anchoring T at mint time and
+    for tests). Must stay bit-identical to `_mix` below."""
+    mod = (1 << width) - 1 + 1
+    mask = mod - 1
+    r1, r2 = _shifts(width)
+    x = s & mask
+    x = ((x ^ (x >> r1)) * m1) & mask
+    x = ((x ^ (x >> r2)) * m2) & mask
+    x = (x ^ (x >> r1)) & mask
+    return x
+
+
+def _mix(x, width: int, m1: int, m2: int):
+    from z3 import BitVecVal, LShR
+    W = width
+    r1, r2 = _shifts(W)
+    x = (x ^ LShR(x, r1)) * BitVecVal(m1, W)
+    x = (x ^ LShR(x, r2)) * BitVecVal(m2, W)
+    return x ^ LShR(x, r1)
+
+
+def _build(width: int, mutation: str, m1: int, m2: int, trig_k: int, trig_t: int):
     if not isinstance(width, int) or not (MIN_WIDTH <= width <= MAX_WIDTH):
         raise ValueError(f"width {width} out of in-band range [{MIN_WIDTH},{MAX_WIDTH}]")
     if mutation not in ("none",) + MUTATIONS:
         raise ValueError(f"unknown mutation {mutation!r}")
     if not (isinstance(trig_k, int) and 0 <= trig_k <= width):
         raise ValueError(f"trig_k {trig_k} out of range [0,{width}]")
-    if not (isinstance(trig_c, int) and isinstance(trig_t, int)):
-        raise ValueError("trig_c / trig_t must be ints")
+    if not all(isinstance(v, int) for v in (m1, m2, trig_t)):
+        raise ValueError("m1 / m2 / trig_t must be ints")
+    if not (m1 & 1 and m2 & 1):
+        raise ValueError("mix multipliers must be odd (bijection)")
     if trig_k and not (0 <= trig_t < (1 << trig_k)):
         raise ValueError(f"trig_t {trig_t} out of range [0,2^{trig_k})")
     from z3 import BitVec, BitVecVal, Extract, Solver
@@ -81,7 +115,7 @@ def _build(width: int, mutation: str, trig_c: int, trig_k: int, trig_t: int):
         else:  # truncate_low
             mut = back & BitVecVal((~1) & (mod - 1), W)
         if trig_k:
-            tval = Extract(trig_k - 1, 0, s * BitVecVal(trig_c, W))
+            tval = Extract(trig_k - 1, 0, _mix(s, W, m1, m2))
             from z3 import If
             s2 = If(tval == BitVecVal(trig_t, trig_k), mut, back)
         else:
@@ -91,22 +125,22 @@ def _build(width: int, mutation: str, trig_c: int, trig_k: int, trig_t: int):
 
 
 @lru_cache(maxsize=8192)
-def check(width: int, mutation: str, trig_c: int, trig_k: int, trig_t: int) -> dict:
-    """z3 on the real BV encoding with the trigger gate. Returns
-    {status: sat|unsat, ...}; sat -> a witness s exists (a real, non-trivial
-    counterexample). Deterministic in the inputs -> memoized (one solve per
-    instance, reused across all miners + verification)."""
-    sol, s = _build(width, mutation, trig_c, trig_k, trig_t)
+def check(width: int, mutation: str, m1: int, m2: int, trig_k: int, trig_t: int) -> dict:
+    """z3 on the real BV encoding with the solve-hard trigger gate. Returns
+    {status: sat|unsat, ...}; sat -> a witness s exists (a real counterexample
+    that required solving the mixing to find). Deterministic in the inputs ->
+    memoized (one solve per instance, reused across all miners + verification)."""
+    sol, s = _build(width, mutation, m1, m2, trig_k, trig_t)
     status = str(sol.check())
     out = {"status": status, "width": width, "mutation": mutation,
-           "trig_c": trig_c, "trig_k": trig_k, "trig_t": trig_t}
+           "m1": m1, "m2": m2, "trig_k": trig_k, "trig_t": trig_t}
     if status == "sat":
         out["counterexample"] = sol.model()[s].as_long()
     return out
 
 
-def verify_counterexample(width: int, mutation: str, trig_c: int, trig_k: int,
-                          trig_t: int, s_value) -> bool:
+def verify_counterexample(width: int, mutation: str, m1: int, m2: int,
+                          trig_k: int, trig_t: int, s_value) -> bool:
     """Independently confirm a submitted s really triggers the fault AND breaks
     the property under the real encoding — the Lane C correctness gate. A value
     that misses the trigger (e.g. a guessed constant) pins to an unsatisfiable
@@ -119,13 +153,13 @@ def verify_counterexample(width: int, mutation: str, trig_c: int, trig_k: int,
     if isinstance(s_value, bool) or not isinstance(s_value, int) \
             or not (0 <= s_value < (1 << width)):
         return False
-    return _verify_cached(width, mutation, trig_c, trig_k, trig_t, s_value)
+    return _verify_cached(width, mutation, m1, m2, trig_k, trig_t, s_value)
 
 
 @lru_cache(maxsize=8192)
-def _verify_cached(width: int, mutation: str, trig_c: int, trig_k: int,
-                   trig_t: int, s_value: int) -> bool:
+def _verify_cached(width: int, mutation: str, m1: int, m2: int,
+                   trig_k: int, trig_t: int, s_value: int) -> bool:
     from z3 import BitVecVal
-    sol, s = _build(width, mutation, trig_c, trig_k, trig_t)
+    sol, s = _build(width, mutation, m1, m2, trig_k, trig_t)
     sol.add(s == BitVecVal(s_value, width))
     return str(sol.check()) == "sat"

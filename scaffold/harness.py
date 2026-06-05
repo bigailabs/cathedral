@@ -122,7 +122,7 @@ def _submission(worker, problem: PublicProblem) -> Submission | None:
         tg = pi["trigger"]
         # honest miner encodes the PUBLIC contract (incl. the trigger gate) and
         # SOLVES it with z3 — the witness is computed, never guessed.
-        cexr = ER.check(width, mutation, tg["c"], tg["k"], tg["t"]).get("counterexample")
+        cexr = ER.check(width, mutation, tg["m1"], tg["m2"], tg["k"], tg["t"]).get("counterexample")
         if beh == "sharp":
             # sharp-2 reports a slower solve than sharp-1 so the speed term
             # actually separates two correct finders.

@@ -132,10 +132,13 @@ class EncodingLane:
         roll = rng.random()
         is_trap = roll < 0.15
         mutation = "none" if (roll < 0.45 and not is_trap) else rng.choice(ER.MUTATIONS)
-        # Trigger predicate: the fault fires only when low_k(s*C) == T (C odd ->
-        # bijection -> exactly 2^(W-k) spread witnesses, none guessable). k grows
-        # with tier -> rarer witness -> harder to stumble onto -> worth more.
-        trig_c = rng.randrange(3, 1 << min(width, 31)) | 1        # odd constant
+        # Solve-hard trigger: the fault fires only when low_k(mix(s)) == T, where
+        # mix is a splitmix/murmur finalizer (odd multipliers M1,M2). The
+        # xorshifts make the preimage have no closed form -> the only general way
+        # to find a witness is to run a solver. k grows with tier -> rarer
+        # preimage -> harder -> worth more.
+        m1 = rng.randrange(3, 1 << min(width, 31)) | 1            # odd mix mult
+        m2 = rng.randrange(3, 1 << min(width, 31)) | 1           # odd mix mult
         trig_k = min(width - 2, 8 + 2 * ctx.tier)                 # difficulty knob
         if mutation == "none":
             trig_t = 0
@@ -144,8 +147,8 @@ class EncodingLane:
             # in-trigger witness is guaranteed to EXIST for off_by_one (and very
             # likely for the others); z3 is the final arbiter of is_buggy below.
             s0 = rng.randrange(0, 1 << width)
-            trig_t = (s0 * trig_c) % (1 << trig_k)
-        r = ER.check(width, mutation, trig_c, trig_k, trig_t)     # z3: ground truth
+            trig_t = ER.mix_ref(s0, width, m1, m2) % (1 << trig_k)
+        r = ER.check(width, mutation, m1, m2, trig_k, trig_t)     # z3: ground truth
         is_buggy = r["status"] == "sat"
         rarity = round(trig_k / width, 4)                         # 0..1 hardness
         task_id = hashlib.sha256(f"{FAMILY_ID}:z3:{ctx.seed}:{ctx.tier}".encode()).hexdigest()[:32]
@@ -155,16 +158,16 @@ class EncodingLane:
             public_input={"property_id": "modular_roundtrip", "backend": "z3",
                           "width": width, "mutation": mutation,
                           "round_const": ER.round_const(width),
-                          # full contract is PUBLIC: the trigger gate is part of
-                          # the code the miner audits + solves (no hidden range).
-                          "trigger": {"kind": "mod_linear", "c": trig_c,
+                          # full contract is PUBLIC: the mixing trigger gate is
+                          # part of the code the miner audits + solves.
+                          "trigger": {"kind": "mix", "m1": m1, "m2": m2,
                                       "k": trig_k, "t": trig_t},
                           "task": "find_counterexample_or_prove_inband_safe"},
             time_limit_seconds=300)
         hidden = HiddenMetadata(
             task_id=task_id, generator_version="roundtrip-z3/2",
             hidden_payload={"backend": "z3", "mutation": mutation, "width": width,
-                            "trig_c": trig_c, "trig_k": trig_k, "trig_t": trig_t,
+                            "m1": m1, "m2": m2, "trig_k": trig_k, "trig_t": trig_t,
                             "is_buggy": is_buggy, "witness": r.get("counterexample"),
                             "rarity": rarity, "is_trap": is_trap})
         return problem, hidden
@@ -185,7 +188,7 @@ class EncodingLane:
         if verdict == "bug":
             # REAL z3 check: the counterexample must trigger the fault AND break
             # the property (a guessed constant almost never satisfies the trigger)
-            if not ER.verify_counterexample(h["width"], h["mutation"], h["trig_c"],
+            if not ER.verify_counterexample(h["width"], h["mutation"], h["m1"], h["m2"],
                                             h["trig_k"], h["trig_t"], ans.get("counterexample")):
                 return VerifierResult(True, Outcome.INVALID, 0.0, "bad_counterexample", det)
             return VerifierResult(True, Outcome.SAT, 1.0, None, {**det, "cex": ans.get("counterexample")})
