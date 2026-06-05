@@ -30,11 +30,11 @@ TOWERS = [
 
 
 def _tower(x, y, label, name, role, stat, accent):
-    merlons = "".join(f'<rect x={x-26+i*13:.0f} y={y-34:.0f} width=8 height=10 fill="{accent}"/>'
+    merlons = "".join(f'<rect x="{x-26+i*13:.0f}" y="{y-34:.0f}" width="8" height="10" fill="{accent}" />'
                       for i in range(5))
     return (
         f'{merlons}'
-        f'<rect x={x-28:.0f} y={y-26:.0f} width=56 height=52 rx=5 fill="{INK}" stroke="{accent}" stroke-width=2/>'
+        f'<rect x="{x-28:.0f}" y="{y-26:.0f}" width="56" height="52" rx="5" fill="{INK}" stroke="{accent}" stroke-width="2" />'
         f'<text x={x:.0f} y={y+2:.0f} font-size=20 font-weight=700 fill="{accent}" text-anchor=middle>{label}</text>'
         f'<text x={x:.0f} y={y+44:.0f} font-size=13 font-weight=700 fill="#e7ecf3" text-anchor=middle>{name}</text>'
         f'<text x={x:.0f} y={y+60:.0f} font-size=10.5 fill="#8a93a0" text-anchor=middle>{role}</text>'
@@ -44,7 +44,7 @@ def _tower(x, y, label, name, role, stat, accent):
 def _fortress(rails: dict, paid: int, attempts: int, escaped: int) -> str:
     pts = " ".join(f"{x},{y}" for _, _, _, _, x, y, _ in TOWERS)
     walls = (f'<polygon points="{pts}" fill="rgba(11,15,20,0.04)" '
-             f'stroke="{INK}" stroke-width=2 stroke-linejoin=round/>')
+             f'stroke="{INK}" stroke-width="2" stroke-linejoin="round" />')
     # wall labels = the checks/balances that keep cheaters in
     guards = [
         (240, 250, "verify the artifact"),      # C–A edge
@@ -62,21 +62,21 @@ def _fortress(rails: dict, paid: int, attempts: int, escaped: int) -> str:
         for fam, lbl, nm, role, x, y, acc in TOWERS)
     # central vault
     vault = (
-        f'<rect x=300 y=250 width=120 height=70 rx=8 fill="{INK}" stroke="{GOLD}" stroke-width=2/>'
+        f'<rect x="300" y="250" width="120" height="70" rx="8" fill="{INK}" stroke="{GOLD}" stroke-width="2" />'
         f'<text x=360 y=276 font-size=11 fill="{GOLD}" text-anchor=middle font-weight=700>VAULT</text>'
         f'<text x=360 y=296 font-size=18 fill="#fff" text-anchor=middle font-weight=700>{paid}</text>'
         f'<text x=360 y=311 font-size=9.5 fill="#8a93a0" text-anchor=middle>verified artifacts paid</text>')
     breached = escaped > 0
     seal_c = RED if breached else GREEN
     seal = (
-        f'<circle cx=360 cy=388 r=30 fill="none" stroke="{seal_c}" stroke-width=3/>'
+        f'<circle cx="360" cy="388" r="30" fill="none" stroke="{seal_c}" stroke-width="3" />'
         f'<text x=360 y=384 font-size=9 fill="{seal_c}" text-anchor=middle font-weight=700>'
         f'{"BREACH" if breached else "SEALED"}</text>'
         f'<text x=360 y=398 font-size=15 fill="{seal_c}" text-anchor=middle font-weight=700>{escaped}</text>'
         f'<text x=360 y=410 font-size=8 fill="#8a93a0" text-anchor=middle>escaped</text>')
-    cap = (f'<text x=360 y=505 font-size=11 fill="#6b7480" text-anchor=middle>'
+    cap = (f'<text x="360" y="548" font-size="11" fill="#6b7480" text-anchor="middle">'
            f'{attempts} cheat attempts tried the walls · {escaped} got out</text>')
-    return (f'<svg viewBox="0 0 720 520" width="100%" style="max-width:720px">'
+    return (f'<svg viewBox="0 0 720 565" width="100%" style="max-width:720px">'
             f'{walls}{gtxt}{vault}{seal}{towers}{cap}</svg>')
 
 

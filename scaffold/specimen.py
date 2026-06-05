@@ -106,7 +106,8 @@ def improve_specimen(rail_stat: dict) -> dict:
                 "verify: report_data matches  AND  image == pinned solver",
                 "ASSERT  tampering elapsed ⇒ binding breaks ⇒ rejected",
             ],
-            "params": "speed credited ONLY from the attested elapsed · never self-reported",
+            "params": "this run: offline-stub attestor — binding + verification are REAL, "
+                      "the in-TEE measurement is simulated (live /v1/attest is the prod step)",
             "verdict": "verified solve earns a correctness floor; attested speed unlocks the rest",
-            "proof": [f"attested finds so far: {int(rail_stat.get('finds', 0))} · "
+            "proof": [f"verified solves so far: {int(rail_stat.get('finds', 0))} · "
                       f"correctness floor 0.70 + up to 0.30 from proven speed"]}
