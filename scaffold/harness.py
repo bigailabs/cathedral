@@ -119,13 +119,22 @@ def _submission(worker, problem: PublicProblem) -> Submission | None:
     if fam == "encoding_v1" and pi.get("backend") == "z3":
         from scaffold.lanes import encoding_real as ER
         width, mutation = pi["width"], pi["mutation"]
-        cexr = ER.check(width, mutation).get("counterexample")   # honest miner solves with z3
+        tg = pi["trigger"]
+        # honest miner encodes the PUBLIC contract (incl. the trigger gate) and
+        # SOLVES it with z3 — the witness is computed, never guessed.
+        cexr = ER.check(width, mutation, tg["c"], tg["k"], tg["t"]).get("counterexample")
         if beh == "sharp":
-            return (Submission(tid, wid, {"verdict": "bug", "counterexample": cexr, "encode": "faithful"})
+            # sharp-2 reports a slower solve than sharp-1 so the speed term
+            # actually separates two correct finders.
+            wall = 25.0 if wid.endswith("1") else 110.0
+            return (Submission(tid, wid, {"verdict": "bug", "counterexample": cexr,
+                                          "encode": "faithful", "wall_ms": wall})
                     if cexr is not None else
                     Submission(tid, wid, {"verdict": "safe", "encode": "faithful", "solved": True}))
         if beh == "crier":
-            return Submission(tid, wid, {"verdict": "bug", "counterexample": 0, "encode": "faithful"})
+            # blind guess: a constant witness no longer satisfies the trigger.
+            return Submission(tid, wid, {"verdict": "bug", "counterexample": 0,
+                                         "encode": "faithful", "wall_ms": 1.0})
         if beh == "vacuous":
             return Submission(tid, wid, {"verdict": "safe", "encode": "vacuous", "solved": True})
         if beh == "missed":

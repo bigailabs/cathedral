@@ -50,6 +50,7 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
     cflags: dict[str, int] = {}
     growth: list[dict] = []
     mutations: dict[str, int] = {}
+    rails: dict[str, dict] = {}            # per-rail lifetime stats for the board
     cheat = {"attempts": 0, "blocked": 0, "legit_find": 0, "bypass": 0}
     EXPLOITS = ("liar", "fraud", "vacuous", "crier", "missed")
     started = time.time()
@@ -62,6 +63,8 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
         try:
             ts = time.strftime("%H:%M:%S")
             evs: list[dict] = [{"ts": ts, "type": "round", "msg": f"round {rnd}"}]
+            round_earners: set[str] = set()        # distinct workers earning THIS round
+            round_graded = 0                        # validations THIS round
             for lane in lanes:
                 short = lane.family_id.replace("_v1", "")
                 wants_consensus = bool(getattr(lane, "supports_consensus", False))
@@ -121,10 +124,54 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
                     if cheat["bypass"]:
                         evs.append({"ts": ts, "type": "cheat", "lane": short,
                                     "msg": "!!! BYPASS — exploit earned without a verified artifact"})
+                    # ---- per-rail live stats (what's happening inside each rail) ----
+                    fam = lane.family_id
+                    pi = problem.public_input
+                    if fam == "encoding_v1":
+                        m, w = pi.get("mutation", "?"), pi.get("width", "?")
+                        tg = pi.get("trigger", {})
+                        desc = ("prove in-band safe (faithful round-trip)" if m == "none"
+                                else f"find bug · {m} @ width {w} · trigger rarity k={tg.get('k')}/{w}")
+                    elif fam == "sat_challenge_v1":
+                        desc = f"solve CNF {pi.get('n_vars','?')}v/{pi.get('n_clauses','?')}c — fastest valid witness wins"
+                    elif fam == "solver_docker_v1":
+                        desc = "attested solve in a TDX container — runner+solver split"
+                    else:
+                        desc = pi.get("task", "")
+                    rb = rails.setdefault(fam, {"name": short, "desc": "", "mints": 0,
+                                                "posts": 0, "finds": 0, "blocked": 0,
+                                                "safe": 0, "timeout": 0, "refuted": 0,
+                                                "earn_round": 0, "top": 0.0})
+                    rb["desc"] = desc
+                    rb["mints"] += 1
+                    rb["posts"] += len(graded)
+                    round_top = 0.0
+                    round_earn = 0
+                    round_graded += len(graded)
+                    for hk, vr, sr in graded:
+                        oc = outcome_of[hk]
+                        if oc == "sat":
+                            rb["finds"] += 1
+                        elif oc == "unsat":
+                            rb["safe"] += 1
+                        elif oc == "timeout":
+                            rb["timeout"] += 1
+                        if final[hk] <= 0.0 and final_reason[hk] and oc == "invalid":
+                            rb["blocked"] += 1
+                        if final_reason[hk] == "refuted_by_peer_counterexample":
+                            rb["refuted"] += 1
+                        if final[hk] > 0.0:
+                            round_earn += 1
+                            round_top = max(round_top, final[hk])
+                            round_earners.add(hk)
+                    rb["earn_round"] = round_earn
+                    rb["top"] = round(round_top, 3)
             earners = sum(1 for v in cum.values() if v > 0)
             evs.append({"ts": ts, "type": "weights", "msg": f"weight vector updated · {earners} earners"})
             growth.append({"round": rnd, "graded_total": sum(lane_counts.values()),
-                           "earning_workers": earners})
+                           "earning_workers": earners,
+                           "graded_round": round_graded,            # movement: per-round
+                           "active_round": len(round_earners)})
             _append(evs)
 
             tot = sum(cum.values()) or 1.0
@@ -143,6 +190,7 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
                 "rounds": rnd, "workers": len(H.ROSTER),
                 "per_worker_score": dict(sorted(cum.items(), key=lambda kv: -kv[1])),
                 "lane_throughput": lane_counts, "gates_fired": gates, "consensus_flags": cflags,
+                "rails": rails,
                 "attest": {"cap": 0, "live_calls": 0, "live_verified": 0, "cost_usd": 0.0},
                 "weight_vector_by_worker": {k: round(v / tot, 4) for k, v in
                                             sorted(cum.items(), key=lambda kv: -kv[1])[:8] if v > 0},

@@ -112,6 +112,60 @@ def _worker_color(name, v):
     return RED if any(e in name.lower() for e in _EXPLOIT) else GREY
 
 
+# Static identity of each rail: what it IS, what it OPTIMIZES FOR, its CORE WORK.
+# Merged with the live per-rail counters the runner emits in state["rails"].
+RAILS = [
+    ("sat_challenge_v1", "A", "SAT race", "fastest valid witness wins",
+     "Miner solves a planted-SAT CNF and submits the assignment. The validator "
+     "checks the witness against the formula — self-verifying, zero trust. Speed "
+     "is the whole game: the bonus curve pays the fastest correct solve."),
+    ("solver_docker_v1", "B", "Attested solve", "verifiable compute — vouch the unfalsifiable",
+     "Miner runs a solver in a TDX container. SAT/UNSAT self-verify cheaply, but "
+     "a TIMEOUT (\"I ran to the limit and it didn't close\") can't be checked "
+     "offline — so that claim, and only that claim, is vouched by a hardware "
+     "attestation of the actual run."),
+    ("encoding_v1", "C", "Encoding · bug-finding", "witness quality — correct, fast, rare",
+     "Miner encodes a public contract property to SMT and SOLVES for a triggering "
+     "input — a real counterexample, which z3 independently re-checks. The fault "
+     "only fires on a per-instance trigger, so a guessed constant earns nothing; "
+     "you have to actually solve. Score = correctness + speed + trigger rarity."),
+]
+
+
+def _pill(label, value, color):
+    return (f"<span class=pill style='border-color:{color}'>"
+            f"<b style='color:{color}'>{value}</b> {label}</span>")
+
+
+def _rail_cards(rails: dict) -> str:
+    cards = []
+    for fam, chip, name, optimizes, core in RAILS:
+        r = rails.get(fam, {})
+        finds = int(r.get("finds", 0))
+        blocked = int(r.get("blocked", 0))
+        safe = int(r.get("safe", 0))
+        refuted = int(r.get("refuted", 0))
+        mints = int(r.get("mints", 0))
+        top = r.get("top", 0.0)
+        desc = r.get("desc", "—")
+        pills = (_pill("verified finds", finds, GREEN)
+                 + _pill("caught / blocked", blocked, RED)
+                 + _pill("safe·unrewarded", safe, GREY)
+                 + (_pill("peer-refuted", refuted, AMBER) if refuted else "")
+                 + _pill("challenges", mints, BLUE))
+        cards.append(
+            f"<div class=rail>"
+            f"<div class=railhead><span class=chip>{chip}</span>"
+            f"<span class=rname>{name}</span>"
+            f"<span class=opt>optimizes for: <b>{optimizes}</b></span></div>"
+            f"<div class=work>{core}</div>"
+            f"<div class=now><span class=nowk>▶ live now</span> {desc}"
+            f"<span class=top>top score this round: <b>{top}</b></span></div>"
+            f"<div class=pills>{pills}</div>"
+            f"</div>")
+    return "".join(cards)
+
+
 def render_html(s: dict) -> str:
     prov = s.get("provenance", {})
     mode = "BROADCAST" if prov.get("broadcast_enabled") else "DRY-RUN"
@@ -128,12 +182,12 @@ def render_html(s: dict) -> str:
                    f"{tn.get('validator')} · uids {tn.get('uids')}<br>"
                    f"<b>{tn.get('landed')}</b></div>")
 
-    # growth line
+    # movement = per-round activity (not cumulative — those saturate and look flat)
     growth = s.get("growth", [])
-    line_earn = _line([(g["round"], g["earning_workers"]) for g in growth],
-                      color=GREEN, label="earning workers / round")
-    line_total = _line([(g["round"], g["graded_total"]) for g in growth],
-                       color=BLUE, label="graded total / round")
+    line_active = _line([(g["round"], g.get("active_round", 0)) for g in growth],
+                        color=GREEN, label="workers earning THIS round")
+    line_graded = _line([(g["round"], g.get("graded_round", 0)) for g in growth],
+                        color=BLUE, label="validations THIS round")
 
     # per-worker score bars
     pw = sorted(s.get("per_worker_score", {}).items(), key=lambda kv: -kv[1])
@@ -174,6 +228,27 @@ def render_html(s: dict) -> str:
                    f"<br>encoded so far: <code>{ln.get('mutations_encoded',{})}</code></div>")
 
     feed = _feed()
+    rails = s.get("rails", {})
+    rail_cards = _rail_cards(rails)
+
+    # system target — the one thing the whole thing is doing, with the live tally
+    tot_find = sum(int(r.get("finds", 0)) for r in rails.values())
+    tot_block = sum(int(r.get("blocked", 0)) for r in rails.values())
+    bypass = int(s.get("learnings", {}).get("cheat", {}).get("bypass", 0))
+    bcls = "ok" if bypass == 0 else "bad"
+    target = (
+        "<div class=target>"
+        "<div class=tk>SYSTEM TARGET</div>"
+        "<div class=tt>Pay weight <b>only</b> for work it can independently verify.</div>"
+        "<div class=td>Three rails each turn a different kind of compute into a "
+        "<b>checkable artifact</b> — a SAT witness, an attested run, a triggering "
+        "counterexample. Adversarial miners attack every round; weight flows to "
+        "verified artifacts and to nothing else.</div>"
+        f"<div class=tmetrics>"
+        f"<span class=tm><b style='color:{GREEN}'>{tot_find}</b> verified artifacts paid</span>"
+        f"<span class=tm><b style='color:{RED}'>{tot_block}</b> bad-faith attempts caught</span>"
+        f"<span class='tm {bcls}'>cheated through: <b>{bypass}</b></span>"
+        "</div></div>")
 
     def card(title, body):
         return f"<div class=card><h3>{title}</h3>{body}</div>"
@@ -188,6 +263,27 @@ def render_html(s: dict) -> str:
  .badge .k{{font-weight:700;margin-right:8px}}
  .guard{{background:#fff8e1;border:1px solid #ffd54f}}
  .ok{{background:#e7f8ee;border:1px solid {GREEN}}}
+ .bad{{background:#fdeceb;border:1px solid {RED}}}
+ .target{{background:#0b0f14;color:#e7ecf3;border-radius:12px;padding:16px 18px;margin-bottom:14px}}
+ .target .tk{{font-size:11px;letter-spacing:.12em;color:#7aa2f7;font-weight:700}}
+ .target .tt{{font-size:18px;margin:4px 0 6px}}
+ .target .td{{font-size:13px;color:#aab4c2;max-width:760px}}
+ .tmetrics{{margin-top:12px;display:flex;gap:10px;flex-wrap:wrap}}
+ .tm{{background:#161b22;border:1px solid #2a313b;border-radius:8px;padding:6px 12px;font-size:13px}}
+ .tm.bad{{border-color:{RED}}}
+ .rails{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:14px}}
+ .rail{{background:#fff;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06);border-top:3px solid {BLUE}}}
+ .railhead{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
+ .chip{{background:{BLUE};color:#fff;font-weight:700;border-radius:6px;width:24px;height:24px;
+        display:inline-flex;align-items:center;justify-content:center;font-size:13px}}
+ .rname{{font-weight:700;font-size:15px}}
+ .opt{{margin-left:auto;font-size:11px;color:#8e8e93;text-align:right;max-width:140px}}
+ .work{{font-size:12px;color:#48484a;line-height:1.4;margin-bottom:8px}}
+ .now{{font-size:12px;background:#f2f7ff;border-radius:8px;padding:7px 9px;margin-bottom:8px;color:#1c3a5e}}
+ .now .nowk{{font-weight:700;color:{BLUE};margin-right:6px}}
+ .now .top{{display:block;color:#5a6573;margin-top:3px}}
+ .pills{{display:flex;flex-wrap:wrap;gap:5px}}
+ .pill{{border:1px solid;border-radius:20px;padding:2px 9px;font-size:11px;color:#48484a}}
  .stats{{display:flex;gap:12px;margin:14px 0}}
  .stat{{background:#fff;border-radius:10px;padding:12px 18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.06);flex:1}}
  .stat .num{{font-size:22px;font-weight:700;color:{BLUE}}} .stat .lbl{{font-size:11px;color:#8e8e93}}
@@ -205,21 +301,25 @@ def render_html(s: dict) -> str:
  .tag.ok{{background:#173d2a;color:{GREEN}}} .tag.bad{{background:#3d1717;color:#ff6b60}}
  .tag.warn{{background:#3d3417;color:{AMBER}}} .tag.b{{background:#15294d;color:#7aa2f7}}
  .tag.n{{background:#22262e;color:#9aa5b1}}
+ .sec{{font-size:11px;color:#8e8e93;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 6px}}
 </style>
 <div class=wrap>
 <h2>Cathedral tripartite — live</h2>
-<p class=sub>3-lane subnet · verify-don't-solve · auto-refresh 10s</p>
-{guard}{tn_html}{ln_html}
-<div class=stats>{att_html}</div>
-{card("🟢 Live activity — mints · posts · validations · consensus · weights", feed)}
+<p class=sub>three rails · pay only for verified artifacts · auto-refresh 2s</p>
+{target}
+<div class=sec>The three rails — what each is, what it optimizes for, and what's happening inside it now</div>
+<div class=rails>{rail_cards}</div>
+{card("🟢 Live activity — every mint · post · validation · consensus call · weight update", feed)}
 <div class=grid>
-{card("Growth — movement over rounds", line_earn + line_total)}
+{card("Movement — activity per round (not cumulative)", line_active + line_graded)}
 {card("Per-worker score <span class=legend><span class=dot style='background:{GREEN}'></span>earning<span class=dot style='background:{RED}'></span>exploit caught<span class=dot style='background:{GREY}'></span>zero</span>", worker_bars)}
 {card("On-chain weight vector", wv_bars)}
-{card("Gates fired (caught)", gate_bars)}
+{card("Gates fired (bad-faith caught)", gate_bars)}
 {card("Lane throughput", lane_bars)}
 {card("Consensus flags", cons_bars)}
-</div></div>"""
+</div>
+{guard}{tn_html}{ln_html}
+</div>"""
 
 
 def write_html() -> Path:

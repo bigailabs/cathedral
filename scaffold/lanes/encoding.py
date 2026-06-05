@@ -36,6 +36,7 @@ they catch DIFFERENT attacks, neither alone sufficient:
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 
 from ..contract import (
@@ -127,25 +128,45 @@ class EncodingLane:
     def _mint_z3(self, ctx: GenerateCtx) -> tuple[PublicProblem, HiddenMetadata]:
         from . import encoding_real as ER
         rng = random.Random(ctx.seed)
-        width = min(ER.MAX_WIDTH, max(ER.MIN_WIDTH, 32 + 2 * ctx.tier))  # in-band [30,52]
+        width = min(ER.MAX_WIDTH, max(ER.MIN_WIDTH, 32 + 2 * ctx.tier))  # in-band [30,48]
         roll = rng.random()
         is_trap = roll < 0.15
         mutation = "none" if (roll < 0.45 and not is_trap) else rng.choice(ER.MUTATIONS)
-        r = ER.check(width, mutation)                       # z3: ground truth
+        # Trigger predicate: the fault fires only when low_k(s*C) == T (C odd ->
+        # bijection -> exactly 2^(W-k) spread witnesses, none guessable). k grows
+        # with tier -> rarer witness -> harder to stumble onto -> worth more.
+        trig_c = rng.randrange(3, 1 << min(width, 31)) | 1        # odd constant
+        trig_k = min(width - 2, 8 + 2 * ctx.tier)                 # difficulty knob
+        if mutation == "none":
+            trig_t = 0
+        else:
+            # anchor T on a real seed s0 (anywhere in the full 2^W domain) so an
+            # in-trigger witness is guaranteed to EXIST for off_by_one (and very
+            # likely for the others); z3 is the final arbiter of is_buggy below.
+            s0 = rng.randrange(0, 1 << width)
+            trig_t = (s0 * trig_c) % (1 << trig_k)
+        r = ER.check(width, mutation, trig_c, trig_k, trig_t)     # z3: ground truth
         is_buggy = r["status"] == "sat"
+        rarity = round(trig_k / width, 4)                         # 0..1 hardness
         task_id = hashlib.sha256(f"{FAMILY_ID}:z3:{ctx.seed}:{ctx.tier}".encode()).hexdigest()[:32]
         problem = PublicProblem(
             task_family=FAMILY_ID, schema_version=SCHEMA_VERSION, task_id=task_id,
             difficulty_tier=ctx.tier,
-            public_input={"property_id": "substrate_evm_roundtrip", "backend": "z3",
-                          "width": width, "mutation": mutation, "scale": ER.DEC,
+            public_input={"property_id": "modular_roundtrip", "backend": "z3",
+                          "width": width, "mutation": mutation,
+                          "round_const": ER.round_const(width),
+                          # full contract is PUBLIC: the trigger gate is part of
+                          # the code the miner audits + solves (no hidden range).
+                          "trigger": {"kind": "mod_linear", "c": trig_c,
+                                      "k": trig_k, "t": trig_t},
                           "task": "find_counterexample_or_prove_inband_safe"},
             time_limit_seconds=300)
         hidden = HiddenMetadata(
-            task_id=task_id, generator_version="roundtrip-z3/1",
+            task_id=task_id, generator_version="roundtrip-z3/2",
             hidden_payload={"backend": "z3", "mutation": mutation, "width": width,
+                            "trig_c": trig_c, "trig_k": trig_k, "trig_t": trig_t,
                             "is_buggy": is_buggy, "witness": r.get("counterexample"),
-                            "is_trap": is_trap})
+                            "rarity": rarity, "is_trap": is_trap})
         return problem, hidden
 
     def _validate_z3(self, problem, hidden, submission) -> VerifierResult:
@@ -154,18 +175,25 @@ class EncodingLane:
         ans = submission.answer
         verdict = ans.get("verdict")
         encode = ans.get("encode", "faithful")
+        # wall_ms + rarity ride along in details so score() can fold witness
+        # quality (speed + difficulty) into the weight.
         det = {"is_trap": h["is_trap"], "mutation": h["mutation"], "verdict": verdict,
-               "encode": encode, "backend": "z3"}
+               "encode": encode, "backend": "z3", "rarity": h.get("rarity", 0.0),
+               "wall_ms": ans.get("wall_ms", 0.0)}
         if verdict not in ("bug", "safe"):
             return VerifierResult(False, Outcome.INVALID, 0.0, "no_verdict", det)
         if verdict == "bug":
-            # REAL z3 check: the counterexample must break the property
-            if not ER.verify_counterexample(h["width"], h["mutation"], ans.get("counterexample")):
+            # REAL z3 check: the counterexample must trigger the fault AND break
+            # the property (a guessed constant almost never satisfies the trigger)
+            if not ER.verify_counterexample(h["width"], h["mutation"], h["trig_c"],
+                                            h["trig_k"], h["trig_t"], ans.get("counterexample")):
                 return VerifierResult(True, Outcome.INVALID, 0.0, "bad_counterexample", det)
             return VerifierResult(True, Outcome.SAT, 1.0, None, {**det, "cex": ans.get("counterexample")})
         if encode == "vacuous":
             return VerifierResult(True, Outcome.INVALID, 0.0, "unsound_encode", det)
-        if h["is_trap"]:
+        # a trap punishes a "safe" claim ONLY when a real in-trigger witness
+        # actually exists (z3-confirmed) — never false-nuke an honestly-safe one.
+        if h["is_trap"] and h.get("is_buggy"):
             return VerifierResult(True, Outcome.INVALID, 0.0, "failed_windowed_trap", det)
         if not ans.get("solved"):
             return VerifierResult(True, Outcome.TIMEOUT, 0.0, "unproven_safe", det)
@@ -253,9 +281,23 @@ class EncodingLane:
         return VerifierResult(True, Outcome.UNSAT, 0.0, "no_bug_unrewarded", det)
 
     def score(self, problem: PublicProblem, verifier: VerifierResult) -> ScoreResult:
-        # encoding quality is correctness-gated, not speed-raced
+        d = verifier.details
+        # A VERIFIED find is rewarded on WITNESS QUALITY: every real find earns a
+        # correctness floor (0.4), plus speed (faster verified solve wins) and
+        # rarity (a witness in a rarer trigger band is worth more — a guesser
+        # can't stumble onto it). Bounded to [0.4, 1.0]; non-finds score 0.
+        if verifier.parsed_ok and verifier.outcome == Outcome.SAT \
+                and math.isfinite(verifier.raw_metric) and verifier.raw_metric > 0:
+            speed = grading.speed_bonus(float(d.get("wall_ms", 0.0)),
+                                        problem.time_limit_seconds * 1000)
+            rarity = max(0.0, min(1.0, float(d.get("rarity", 0.0))))
+            score = round(min(1.0, 0.4 + 0.3 * speed + 0.3 * rarity), 6)
+            return ScoreResult(score, None,
+                               {"base": 1.0, "speed": speed, "rarity": rarity,
+                                "trap": float(d.get("is_trap", False))})
+        # everything else (unproven-safe, trap miss, unsound, bad cex) -> 0
         sr = grading.grade(verifier, wall_ms=0.0,
                            time_limit_ms=problem.time_limit_seconds * 1000,
                            speed_aware=False)
         return ScoreResult(sr.weighted_score, sr.rejection_reason,
-                           {"trap": float(verifier.details.get("is_trap", False))})
+                           {"trap": float(d.get("is_trap", False))})
