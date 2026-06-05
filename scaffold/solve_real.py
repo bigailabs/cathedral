@@ -80,5 +80,7 @@ def verify_drat(cnf_text: str, drat_text: str, *, timeout: int = 120) -> tuple[b
                                capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return False, "drat_trim_timeout"
-        ok = "s VERIFIED" in r.stdout
+        # require clean exit AND an exact 's VERIFIED' status line (not a substring)
+        ok = r.returncode == 0 and any(
+            line.strip() == "s VERIFIED" for line in r.stdout.splitlines())
         return ok, ("VERIFIED" if ok else r.stdout.strip()[-160:])

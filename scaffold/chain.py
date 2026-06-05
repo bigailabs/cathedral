@@ -64,7 +64,7 @@ class WeightVector:
 class ChainClient:
     def __init__(self, *, netuid: int, network: str = "finney",
                  wallet_name: str = "", hotkey: str = "", broadcast: bool = False):
-        self.netuid = netuid
+        self.netuid = int(netuid)   # coerce: the PROTECTED_NETUIDS check is by int
         self.network = network
         self.wallet_name = wallet_name
         self.hotkey = hotkey
@@ -123,11 +123,11 @@ class ChainClient:
         dashboard (by_label). This is exactly why broadcasting sim grading to a
         real production metagraph is incoherent — recorded here, not hidden.
         """
-        total = sum(label_scores.values()) or 1.0
-        by_label = {k: round(v / total, 6) for k, v in label_scores.items()}
+        total = sum(label_scores.values())
+        by_label = {k: round(v / (total or 1.0), 6) for k, v in label_scores.items()}
         by_uid: dict[int, float] = {}
-        if our_uid is not None:
-            by_uid[our_uid] = 1.0       # one shared HK == one UID
+        if our_uid is not None and total > 0:   # don't self-deal a vector of zeros
+            by_uid[our_uid] = 1.0               # one shared HK == one UID
         return WeightVector(by_uid=by_uid, by_label=by_label)
 
     def set_weights(self, wv: WeightVector) -> dict:
@@ -149,6 +149,8 @@ class ChainClient:
             if sub is None or wallet is None:
                 return {"submitted": False, "reason": "no compatible subtensor/wallet ctor"}
             uids = list(wv.by_uid.keys())
+            if not uids:
+                return {"submitted": False, "reason": "empty weight vector (nothing to set)"}
             weights = [wv.by_uid[u] for u in uids]
             res = sub.set_weights(wallet=wallet, netuid=self.netuid, uids=uids,
                                   weights=weights, wait_for_inclusion=False)
