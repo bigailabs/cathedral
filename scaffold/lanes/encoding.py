@@ -103,12 +103,77 @@ def _encode_passes_equivalence(encode: str, width: int) -> bool:
     return True
 
 
+_Z3_OK = None
+
+
+def have_z3() -> bool:
+    """True if the real z3 encoder is usable (z3 importable). Cached."""
+    global _Z3_OK
+    if _Z3_OK is None:
+        try:
+            import z3  # noqa: F401
+            _Z3_OK = True
+        except Exception:
+            _Z3_OK = False
+    return _Z3_OK
+
+
 class EncodingLane:
     family_id = FAMILY_ID
     schema_version = SCHEMA_VERSION
     supports_consensus = True              # the validator runs a cross-miner pass
 
+    # ---- REAL z3 backend (used when z3 is present, e.g. on Stitch) ----------
+    def _mint_z3(self, ctx: GenerateCtx) -> tuple[PublicProblem, HiddenMetadata]:
+        from . import encoding_real as ER
+        rng = random.Random(ctx.seed)
+        width = min(ER.MAX_WIDTH, max(ER.MIN_WIDTH, 32 + 2 * ctx.tier))  # in-band [30,52]
+        roll = rng.random()
+        is_trap = roll < 0.15
+        mutation = "none" if (roll < 0.45 and not is_trap) else rng.choice(ER.MUTATIONS)
+        r = ER.check(width, mutation)                       # z3: ground truth
+        is_buggy = r["status"] == "sat"
+        task_id = hashlib.sha256(f"{FAMILY_ID}:z3:{ctx.seed}:{ctx.tier}".encode()).hexdigest()[:32]
+        problem = PublicProblem(
+            task_family=FAMILY_ID, schema_version=SCHEMA_VERSION, task_id=task_id,
+            difficulty_tier=ctx.tier,
+            public_input={"property_id": "substrate_evm_roundtrip", "backend": "z3",
+                          "width": width, "mutation": mutation, "scale": ER.DEC,
+                          "task": "find_counterexample_or_prove_inband_safe"},
+            time_limit_seconds=300)
+        hidden = HiddenMetadata(
+            task_id=task_id, generator_version="roundtrip-z3/1",
+            hidden_payload={"backend": "z3", "mutation": mutation, "width": width,
+                            "is_buggy": is_buggy, "witness": r.get("counterexample"),
+                            "is_trap": is_trap})
+        return problem, hidden
+
+    def _validate_z3(self, problem, hidden, submission) -> VerifierResult:
+        from . import encoding_real as ER
+        h = hidden.hidden_payload
+        ans = submission.answer
+        verdict = ans.get("verdict")
+        encode = ans.get("encode", "faithful")
+        det = {"is_trap": h["is_trap"], "mutation": h["mutation"], "verdict": verdict,
+               "encode": encode, "backend": "z3"}
+        if verdict not in ("bug", "safe"):
+            return VerifierResult(False, Outcome.INVALID, 0.0, "no_verdict", det)
+        if verdict == "bug":
+            # REAL z3 check: the counterexample must break the property
+            if not ER.verify_counterexample(h["width"], h["mutation"], ans.get("counterexample")):
+                return VerifierResult(True, Outcome.INVALID, 0.0, "bad_counterexample", det)
+            return VerifierResult(True, Outcome.SAT, 1.0, None, {**det, "cex": ans.get("counterexample")})
+        if encode == "vacuous":
+            return VerifierResult(True, Outcome.INVALID, 0.0, "unsound_encode", det)
+        if h["is_trap"]:
+            return VerifierResult(True, Outcome.INVALID, 0.0, "failed_windowed_trap", det)
+        if not ans.get("solved"):
+            return VerifierResult(True, Outcome.TIMEOUT, 0.0, "unproven_safe", det)
+        return VerifierResult(True, Outcome.UNSAT, 0.0, "no_bug_unrewarded", det)
+
     def mint_challenge(self, ctx: GenerateCtx) -> tuple[PublicProblem, HiddenMetadata]:
+        if have_z3():
+            return self._mint_z3(ctx)
         rng = random.Random(ctx.seed)
         width = min(MAX_INBAND_WIDTH, 6 + ctx.tier)        # in-band, never near cliff
         # ~1/3 safe base, ~1/6 trap, rest random mutants
@@ -146,6 +211,8 @@ class EncodingLane:
     def validate_submission(
         self, problem: PublicProblem, hidden: HiddenMetadata, submission: Submission
     ) -> VerifierResult:
+        if hidden.hidden_payload.get("backend") == "z3":
+            return self._validate_z3(problem, hidden, submission)
         h = hidden.hidden_payload
         ans = submission.answer
         verdict = ans.get("verdict")                       # "bug" | "safe"

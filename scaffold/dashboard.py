@@ -99,6 +99,10 @@ def _feed(n=48) -> str:
                         f"<b>{w}</b> {e.get('msg')}</div>")
         elif t == "weights":
             rows.append(f"<div class=ev>{ts}<span class='tag b'>WEIGHTS</span> {e.get('msg')}</div>")
+        elif t == "cheat":
+            rows.append(f"<div class=ev>{ts}<span class='tag bad'>CHEAT</span>{lane} {e.get('msg')}</div>")
+        elif t == "error":
+            rows.append(f"<div class=ev>{ts}<span class='tag warn'>ERROR</span> {e.get('msg')}</div>")
     return f"<div class=feed>{''.join(rows)}</div>"
 
 
@@ -155,6 +159,20 @@ def render_html(s: dict) -> str:
                 f"<div class=stat><div class=num>{s.get('rounds', 0)}</div><div class=lbl>rounds</div></div>"
                 f"<div class=stat><div class=num>{s.get('workers', 0)}</div><div class=lbl>workers</div></div>")
 
+    ln = s.get("learnings", {})
+    ln_html = ""
+    if ln:
+        ch = ln.get("cheat", {})
+        verdict = ln.get("cheat_verdict", "")
+        cls = "ok" if "NO CHEAT" in verdict else "bad"
+        ln_html = (f"<div class='badge {cls}'><span class=k>OVERNIGHT</span> "
+                   f"{ln.get('uptime_rounds',0)} rounds / {ln.get('uptime_minutes',0)} min · "
+                   f"{ln.get('total_validations',0)} validations · "
+                   f"<b>cheat: {verdict}</b> "
+                   f"(attempts {ch.get('attempts',0)} · blocked {ch.get('blocked',0)} · "
+                   f"legit-finds {ch.get('legit_find',0)} · <b>bypass {ch.get('bypass',0)}</b>)"
+                   f"<br>encoded so far: <code>{ln.get('mutations_encoded',{})}</code></div>")
+
     feed = _feed()
 
     def card(title, body):
@@ -191,7 +209,7 @@ def render_html(s: dict) -> str:
 <div class=wrap>
 <h2>Cathedral tripartite — live</h2>
 <p class=sub>3-lane subnet · verify-don't-solve · auto-refresh 10s</p>
-{guard}{tn_html}
+{guard}{tn_html}{ln_html}
 <div class=stats>{att_html}</div>
 {card("🟢 Live activity — mints · posts · validations · consensus · weights", feed)}
 <div class=grid>

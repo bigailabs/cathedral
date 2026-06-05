@@ -116,6 +116,21 @@ def _submission(worker, problem: PublicProblem) -> Submission | None:
         if beh == "timeout_fraud":
             return Submission(tid, wid, {"image_digest": "sha256:unattestable", "outcome": "timeout",
                                          "nonce": tid, "pubkey_b64": ""})
+    if fam == "encoding_v1" and pi.get("backend") == "z3":
+        from scaffold.lanes import encoding_real as ER
+        width, mutation = pi["width"], pi["mutation"]
+        cexr = ER.check(width, mutation).get("counterexample")   # honest miner solves with z3
+        if beh == "sharp":
+            return (Submission(tid, wid, {"verdict": "bug", "counterexample": cexr, "encode": "faithful"})
+                    if cexr is not None else
+                    Submission(tid, wid, {"verdict": "safe", "encode": "faithful", "solved": True}))
+        if beh == "crier":
+            return Submission(tid, wid, {"verdict": "bug", "counterexample": 0, "encode": "faithful"})
+        if beh == "vacuous":
+            return Submission(tid, wid, {"verdict": "safe", "encode": "vacuous", "solved": True})
+        if beh == "missed":
+            return Submission(tid, wid, {"verdict": "safe", "encode": "faithful", "solved": True})
+        return None
     if fam == "encoding_v1":
         c, w = pi["contract"], pi["width"]
         cex = _find_counterexample(c["mutation"], w, c["bugx"])

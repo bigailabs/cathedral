@@ -21,6 +21,7 @@ import scaffold.harness as H
 
 EVENTS = Path("data/events.jsonl")
 STATE = Path("data/harness_state.json")
+LEARN = Path("data/learnings.json")
 MAX_EVENTS = 500
 
 
@@ -48,83 +49,110 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
     gates: dict[str, int] = {}
     cflags: dict[str, int] = {}
     growth: list[dict] = []
+    mutations: dict[str, int] = {}
+    cheat = {"attempts": 0, "blocked": 0, "legit_find": 0, "bypass": 0}
+    EXPLOITS = ("liar", "fraud", "vacuous", "crier", "missed")
+    started = time.time()
     seed = 5000
     rnd = 0
     iso = "2026-06-05T00:00:00Z"
-    print("live runner started; writing data/events.jsonl", flush=True)
+    print("live runner started; writing events.jsonl + learnings.json", flush=True)
     while True:
         rnd += 1
-        ts = time.strftime("%H:%M:%S")
-        evs: list[dict] = [{"ts": ts, "type": "round", "msg": f"round {rnd}"}]
-        for lane in lanes:
-            short = lane.family_id.replace("_v1", "")
-            wants_consensus = bool(getattr(lane, "supports_consensus", False))
-            for _ in range(per_lane):
-                ctx = GenerateCtx(seed=seed, tier=0, issued_at_iso=iso)
-                problem, hidden = lane.mint_challenge(ctx)
-                seed += 1
-                evs.append({"ts": ts, "type": "mint", "lane": short,
-                            "msg": f"minted {problem.task_id[:10]}"})
-                graded = []
-                seen: set[str] = set()
-                for sub in pool(problem):
-                    if sub.task_id != problem.task_id or sub.miner_hotkey in seen:
-                        continue            # task-id gate + one submission per hotkey
-                    seen.add(sub.miner_hotkey)
-                    evs.append({"ts": ts, "type": "post", "lane": short,
-                                "worker": sub.miner_hotkey, "msg": "submitted"})
-                    vr = lane.validate_submission(problem, hidden, sub)
-                    sr = lane.score(problem, vr)
-                    evs.append({"ts": ts, "type": "verify", "lane": short,
-                                "worker": sub.miner_hotkey, "outcome": vr.outcome.value,
-                                "score": round(sr.weighted_score, 3),
-                                "reason": sr.rejection_reason or ""})
-                    graded.append((sub.miner_hotkey, vr, sr))
-                    lane_counts[lane.family_id] = lane_counts.get(lane.family_id, 0) + 1
-                # consensus pass
-                final = {hk: sr.weighted_score for hk, vr, sr in graded}
-                final_reason = {hk: sr.rejection_reason for hk, vr, sr in graded}
-                if wants_consensus and graded:
-                    classes = [consensus.classify(vr.outcome.value) for _, vr, _ in graded]
-                    for (hk, vr, sr), cv in zip(graded, consensus.resolve(classes)):
-                        if cv.flag and cv.flag != "n/a":
-                            cflags[cv.flag] = cflags.get(cv.flag, 0) + 1
-                        if cv.override_score is not None:
-                            final[hk] = cv.override_score
-                            final_reason[hk] = cv.reason or final_reason[hk]
-                            evs.append({"ts": ts, "type": "consensus", "lane": short,
-                                        "worker": hk, "flag": cv.flag,
-                                        "msg": cv.reason or cv.flag})
-                        elif cv.flag == "verified_find":
-                            evs.append({"ts": ts, "type": "consensus", "lane": short,
-                                        "worker": hk, "flag": cv.flag, "msg": "verified find"})
-                for hk, vr, sr in graded:
-                    cum[hk] = cum.get(hk, 0.0) + final[hk]
-                    if final[hk] == 0.0 and final_reason[hk]:
-                        gates[final_reason[hk]] = gates.get(final_reason[hk], 0) + 1
-        # weight update event
-        earners = sum(1 for v in cum.values() if v > 0)
-        evs.append({"ts": ts, "type": "weights", "msg": f"weight vector updated · {earners} earners"})
-        growth.append({"round": rnd, "graded_total": sum(lane_counts.values()),
-                       "earning_workers": earners})
-        _append(evs)
+        try:
+            ts = time.strftime("%H:%M:%S")
+            evs: list[dict] = [{"ts": ts, "type": "round", "msg": f"round {rnd}"}]
+            for lane in lanes:
+                short = lane.family_id.replace("_v1", "")
+                wants_consensus = bool(getattr(lane, "supports_consensus", False))
+                for _ in range(per_lane):
+                    ctx = GenerateCtx(seed=seed, tier=rnd % 5, issued_at_iso=iso)  # vary width
+                    problem, hidden = lane.mint_challenge(ctx)
+                    seed += 1
+                    mut = problem.public_input.get("mutation")
+                    if mut:
+                        mutations[mut] = mutations.get(mut, 0) + 1
+                    evs.append({"ts": ts, "type": "mint", "lane": short,
+                                "msg": f"minted {problem.task_id[:10]}" + (f" [{mut}]" if mut else "")})
+                    graded = []
+                    seen: set[str] = set()
+                    for sub in pool(problem):
+                        if sub.task_id != problem.task_id or sub.miner_hotkey in seen:
+                            continue            # task-id gate + one submission per hotkey
+                        seen.add(sub.miner_hotkey)
+                        evs.append({"ts": ts, "type": "post", "lane": short,
+                                    "worker": sub.miner_hotkey, "msg": "submitted"})
+                        vr = lane.validate_submission(problem, hidden, sub)
+                        sr = lane.score(problem, vr)
+                        evs.append({"ts": ts, "type": "verify", "lane": short,
+                                    "worker": sub.miner_hotkey, "outcome": vr.outcome.value,
+                                    "score": round(sr.weighted_score, 3),
+                                    "reason": sr.rejection_reason or ""})
+                        graded.append((sub.miner_hotkey, vr, sr))
+                        lane_counts[lane.family_id] = lane_counts.get(lane.family_id, 0) + 1
+                    final = {hk: sr.weighted_score for hk, vr, sr in graded}
+                    final_reason = {hk: sr.rejection_reason for hk, vr, sr in graded}
+                    outcome_of = {hk: vr.outcome.value for hk, vr, sr in graded}
+                    if wants_consensus and graded:
+                        classes = [consensus.classify(vr.outcome.value) for _, vr, _ in graded]
+                        for (hk, vr, sr), cv in zip(graded, consensus.resolve(classes)):
+                            if cv.flag and cv.flag != "n/a":
+                                cflags[cv.flag] = cflags.get(cv.flag, 0) + 1
+                            if cv.override_score is not None:
+                                final[hk] = cv.override_score
+                                final_reason[hk] = cv.reason or final_reason[hk]
+                                evs.append({"ts": ts, "type": "consensus", "lane": short,
+                                            "worker": hk, "flag": cv.flag, "msg": cv.reason or cv.flag})
+                            elif cv.flag == "verified_find":
+                                evs.append({"ts": ts, "type": "consensus", "lane": short,
+                                            "worker": hk, "flag": cv.flag, "msg": "verified find"})
+                    for hk, vr, sr in graded:
+                        cum[hk] = cum.get(hk, 0.0) + final[hk]
+                        if final[hk] == 0.0 and final_reason[hk]:
+                            gates[final_reason[hk]] = gates.get(final_reason[hk], 0) + 1
+                        if any(e in hk.lower() for e in EXPLOITS):   # cheat instrumentation
+                            cheat["attempts"] += 1
+                            if final[hk] <= 0.0:
+                                cheat["blocked"] += 1
+                            elif outcome_of[hk] == "sat":
+                                cheat["legit_find"] += 1   # earned via a VERIFIED counterexample (not cheating)
+                            else:
+                                cheat["bypass"] += 1       # earned with NO verified artifact -> must stay 0
+                    if cheat["bypass"]:
+                        evs.append({"ts": ts, "type": "cheat", "lane": short,
+                                    "msg": "!!! BYPASS — exploit earned without a verified artifact"})
+            earners = sum(1 for v in cum.values() if v > 0)
+            evs.append({"ts": ts, "type": "weights", "msg": f"weight vector updated · {earners} earners"})
+            growth.append({"round": rnd, "graded_total": sum(lane_counts.values()),
+                           "earning_workers": earners})
+            _append(evs)
 
-        tot = sum(cum.values()) or 1.0
-        state = {
-            "provenance": {"validator_label": "tripartite-vali", "repo": "cathedral-scaffold",
-                           "commit": "live", "hotkey": "sim-shared-hk", "netuid": "—",
-                           "network": "local-live", "broadcast_enabled": False},
-            "metagraph": {"available": False, "reason": "live local feed"},
-            "rounds": rnd, "workers": len(H.ROSTER),
-            "per_worker_score": dict(sorted(cum.items(), key=lambda kv: -kv[1])),
-            "lane_throughput": lane_counts, "gates_fired": gates, "consensus_flags": cflags,
-            "attest": {"cap": 0, "live_calls": 0, "live_verified": 0, "cost_usd": 0.0},
-            "weight_vector_by_worker": {k: round(v / tot, 4) for k, v in
-                                        sorted(cum.items(), key=lambda kv: -kv[1])[:8] if v > 0},
-            "weight_vector_on_chain_uids": {}, "submit_result": {"dry_run": True},
-            "growth": growth[-30:],
-        }
-        STATE.write_text(json.dumps(state, indent=2))
+            tot = sum(cum.values()) or 1.0
+            learnings = {
+                "uptime_rounds": rnd, "uptime_minutes": round((time.time() - started) / 60, 1),
+                "total_validations": sum(lane_counts.values()),
+                "mutations_encoded": mutations, "cheat": cheat,
+                "cheat_verdict": "NO CHEAT (0 bypass earnings)" if cheat["bypass"] == 0
+                                 else "!!! BYPASS DETECTED",
+            }
+            state = {
+                "provenance": {"validator_label": "tripartite-vali", "repo": "cathedral-scaffold",
+                               "commit": "live", "hotkey": "sim-shared-hk", "netuid": "—",
+                               "network": "stitch-live", "broadcast_enabled": False},
+                "metagraph": {"available": False, "reason": "live local feed"},
+                "rounds": rnd, "workers": len(H.ROSTER),
+                "per_worker_score": dict(sorted(cum.items(), key=lambda kv: -kv[1])),
+                "lane_throughput": lane_counts, "gates_fired": gates, "consensus_flags": cflags,
+                "attest": {"cap": 0, "live_calls": 0, "live_verified": 0, "cost_usd": 0.0},
+                "weight_vector_by_worker": {k: round(v / tot, 4) for k, v in
+                                            sorted(cum.items(), key=lambda kv: -kv[1])[:8] if v > 0},
+                "weight_vector_on_chain_uids": {}, "submit_result": {"dry_run": True},
+                "growth": growth[-30:], "learnings": learnings,
+            }
+            STATE.write_text(json.dumps(state, indent=2))
+            LEARN.write_text(json.dumps(learnings, indent=2))
+        except Exception as e:
+            _append([{"ts": time.strftime("%H:%M:%S"), "type": "error", "msg": repr(e)[:140]}])
         time.sleep(period)
 
 

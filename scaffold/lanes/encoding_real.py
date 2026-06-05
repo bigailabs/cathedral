@@ -21,6 +21,8 @@ z3 is imported lazily (present on Stitch; absent elsewhere -> raises clearly).
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 DEC = 1_000_000_000
 MUTATIONS = ("wrong_const", "off_by_one", "no_overflow_check")
 # DEC = 10^9 needs >= 30 bits to represent; <= 52 keeps it below the bit-blast
@@ -55,9 +57,12 @@ def _build(width: int, mutation: str):
     return sol, s
 
 
+@lru_cache(maxsize=8192)
 def check(width: int, mutation: str = "none") -> dict:
     """Run z3 on the real BV encoding. Returns {status: sat|unsat, ...}.
-    sat -> a counterexample 's' exists (a real bug); unsat -> safe in-band."""
+    sat -> a counterexample 's' exists (a real bug); unsat -> safe in-band.
+    Deterministic in (width, mutation) -> memoized (one z3 solve per instance,
+    reused across all miners + verification)."""
     sol, s = _build(width, mutation)
     status = str(sol.check())
     out = {"status": status, "width": width, "mutation": mutation}
@@ -66,6 +71,7 @@ def check(width: int, mutation: str = "none") -> dict:
     return out
 
 
+@lru_cache(maxsize=8192)
 def verify_counterexample(width: int, mutation: str, s_value: int) -> bool:
     """Independently confirm a submitted counterexample really breaks the
     (mutated) property under the real encoding — the Lane C correctness gate."""
