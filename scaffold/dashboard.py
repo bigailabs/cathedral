@@ -116,12 +116,15 @@ def _worker_color(name, v):
 # (family, lane-letter, step, stage, optimizes-for, core-work). Ordered by step.
 # Merged with the live per-rail counters the runner emits in state["rails"].
 RAILS = [
-    ("encoding_v1", "C", "1", "Encode", "a real property into a must-solve problem",
-     "Miner encodes a public contract property to SMT and SOLVES for a triggering "
-     "input — a real counterexample z3 re-checks. The fault fires only on a "
-     "per-instance mixing trigger, so a guessed constant earns nothing: you have "
-     "to solve. This is where a real-world property BECOMES a problem the field "
-     "can race on. Score = correctness + speed + rarity."),
+    ("encoding_v1", "C", "1", "Encode", "a verified bug — found by solving, not guessing",
+     "The property is a balance round-trip: convert a token amount to another "
+     "representation and back, and it must equal the original — the value-"
+     "conservation check at the heart of every cross-chain bridge and decimals "
+     "rescale. Miners encode it to SMT and SOLVE for an amount where it breaks "
+     "(off-by-one, wrong divisor, a dropped low bit — the arithmetic that makes "
+     "real bridges silently lose or mint funds). The fault fires only on a per-"
+     "instance mixing trigger, so a guessed constant earns nothing: you must "
+     "solve. Score = correctness + speed + rarity."),
     ("sat_challenge_v1", "A", "2", "Solve", "the fastest proven answer",
      "Miner solves a planted-SAT CNF and submits the assignment; the validator "
      "checks the witness against the formula — self-verifying, zero trust. This "
@@ -258,8 +261,8 @@ def render_html(s: dict) -> str:
 
     # what we're encoding — the kinds of planted faults turned into problems
     muts = s.get("learnings", {}).get("mutations_encoded", {})
-    mut_label = {"none": "faithful (prove safe)", "off_by_one": "off-by-one bug",
-                 "wrong_const": "wrong-inverse bug", "truncate_low": "low-bit-truncation bug"}
+    mut_label = {"none": "faithful — no bug (prove safe)", "off_by_one": "off-by-one (rounds wrong)",
+                 "wrong_const": "wrong divisor (mis-scales)", "truncate_low": "dropped low bit (truncates)"}
     mut_bars = _hbars(sorted(((mut_label.get(k, k), v) for k, v in muts.items()),
                              key=lambda kv: -kv[1]),
                       color=lambda k, v: (GREY if "faithful" in k else AMBER),
