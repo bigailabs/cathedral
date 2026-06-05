@@ -117,14 +117,13 @@ def _worker_color(name, v):
 # Merged with the live per-rail counters the runner emits in state["rails"].
 RAILS = [
     ("encoding_v1", "C", "1", "Encode", "a verified bug — found by solving, not guessing",
-     "The property is a balance round-trip: convert a token amount to another "
-     "representation and back, and it must equal the original — the value-"
-     "conservation check at the heart of every cross-chain bridge and decimals "
-     "rescale. Miners encode it to SMT and SOLVE for an amount where it breaks "
-     "(off-by-one, wrong divisor, a dropped low bit — the arithmetic that makes "
-     "real bridges silently lose or mint funds). The fault fires only on a per-"
-     "instance mixing trigger, so a guessed constant earns nothing: you must "
-     "solve. Score = correctness + speed + rarity."),
+     "The property is the Bittensor Substrate↔EVM balance round-trip: convert "
+     "TAO from 9-decimal RAO to the 18-decimal EVM side and back — it must equal "
+     "the original balance, or the bridge mints/burns funds. Miners encode it to "
+     "SMT and SOLVE for an amount where it breaks (off-by-one, wrong divisor, a "
+     "dropped low bit — the scaling bugs that drain real bridges). The fault "
+     "fires only on a per-instance mixing trigger, so a guessed constant earns "
+     "nothing: you must solve. Score = correctness + speed + rarity."),
     ("sat_challenge_v1", "A", "2", "Solve", "the fastest proven answer",
      "Miner solves a planted-SAT CNF and submits the assignment; the validator "
      "checks the witness against the formula — self-verifying, zero trust. This "
@@ -247,12 +246,15 @@ def render_html(s: dict) -> str:
     target = (
         "<div class=target>"
         "<div class=tk>WHAT THIS CHANGES</div>"
-        "<div class=tt>Hard problems get <b>proven answers</b> — and the solvers "
-        "that crack them keep getting faster.</div>"
-        "<div class=td>A real property becomes a SAT/SMT problem, an open field "
-        "races to crack it, and every answer is checked or hardware-attested "
-        "before it earns. Reward flows to the fastest <b>proven</b> result — the "
-        "selection pressure that drives the field's solvers to improve.</div>"
+        "<div class=tt>Bittensor's own Substrate↔EVM balance bridge gets "
+        "<b>proven correct</b> — and the solvers that prove it keep getting faster.</div>"
+        "<div class=td>When TAO crosses between the Substrate chain (9-decimal "
+        "RAO) and the EVM (18-decimal), the bridge must conserve value: convert "
+        "and convert back = the same balance. We encode that invariant to SMT, an "
+        "open field races to find any amount that breaks it (a mint/burn bug), "
+        "and every answer is proven or hardware-attested before it earns. Reward "
+        "flows to the fastest <b>proven</b> solver — the pressure that makes them "
+        "faster. Same machinery extends to any contract invariant.</div>"
         f"<div class=tmetrics>"
         f"<span class=tm><b style='color:{GREEN}'>{tot_find}</b> proven answers shipped</span>"
         f"<span class=tm><b style='color:{RED}'>{tot_block}</b> false claims rejected</span>"
