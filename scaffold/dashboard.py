@@ -1,14 +1,13 @@
-"""Provenance + growth dashboard — GRAPHICAL. Stdlib only (hand-rolled SVG, no
-deps, no CDN). Shows movement and progress with clear affordances:
+"""Cathedral tripartite — the one-page wonder. Stdlib only (hand-rolled SVG).
 
-  * big status badges (GUARD provenance, LIVE TESTNET weight-set)
-  * growth line chart over rounds
-  * per-worker score bars (green = earning, red = exploit caught, grey = zero)
-  * lane-throughput, gates-fired, and on-chain weight-vector bar charts
+Not a chart wall. It shows intelligence in practice: a real smart-contract
+property compiled to logic and validated with SAT, inside a three-cornered
+fortress (the three lanes) whose walls are the checks that keep cheaters in —
+"no escapees". Then the live worked specimen: the actual conditionals + the
+witness as proof.
 
-    python -m scaffold.harness 8       # produce data/harness_state.json
-    python -m scaffold.dashboard       # serve on :8099 (re-reads state each refresh)
-    python -m scaffold.dashboard --html
+    python -m scaffold.live          # runner (writes data/harness_state.json + events)
+    python -m scaffold.dashboard     # serve http://127.0.0.1:8099
 """
 from __future__ import annotations
 
@@ -19,347 +18,186 @@ STATE = Path("data/harness_state.json")
 EVENTS = Path("data/events.jsonl")
 OUT = Path("data/dashboard.html")
 
-GREEN, RED, GREY, BLUE, AMBER = "#34c759", "#ff3b30", "#c7c7cc", "#0a84ff", "#ff9f0a"
-_EXPLOIT = ("liar", "fraud", "vacuous", "crier", "missed", "unattest")
+GREEN, RED, GREY, BLUE, AMBER, GOLD = "#34c759", "#ff3b30", "#8e8e93", "#0a84ff", "#ff9f0a", "#e8b923"
+INK = "#0b0f14"
+
+# (family, corner-label, lane-name, one-line role, vertex x,y, accent)
+TOWERS = [
+    ("encoding_v1", "C", "ENCODE", "contract → logic", 360, 70, AMBER),
+    ("sat_challenge_v1", "A", "SOLVE", "race to a proven answer", 120, 430, BLUE),
+    ("solver_docker_v1", "B", "IMPROVE", "attested, faster", 600, 430, GREEN),
+]
 
 
-def _hbars(items, *, width=460, bar_h=20, gap=6, color=lambda k, v: GREEN,
-           vmax=None, fmt=lambda v: f"{v:.3f}", lblw=150) -> str:
-    items = list(items)
-    if not items:
-        return "<p style='color:#999'>(none)</p>"
-    vmax = vmax or max((v for _, v in items), default=1) or 1
-    H = len(items) * (bar_h + gap) + gap
-    rows = []
-    for i, (k, v) in enumerate(items):
-        y = gap + i * (bar_h + gap)
-        w = max(2.0, (v / vmax) * (width - lblw - 70)) if v > 0 else 2.0
-        rows.append(
-            f'<text x=0 y={y + bar_h * 0.72:.0f} font-size=12 fill="#222">{k}</text>'
-            f'<rect x={lblw} y={y} width={w:.1f} height={bar_h} rx=3 fill="{color(k, v)}"/>'
-            f'<text x={lblw + w + 6:.1f} y={y + bar_h * 0.72:.0f} font-size=11 fill="#666">{fmt(v)}</text>')
-    return f'<svg width={width} height={H}>{"".join(rows)}</svg>'
+def _tower(x, y, label, name, role, stat, accent):
+    merlons = "".join(f'<rect x={x-26+i*13:.0f} y={y-34:.0f} width=8 height=10 fill="{accent}"/>'
+                      for i in range(5))
+    return (
+        f'{merlons}'
+        f'<rect x={x-28:.0f} y={y-26:.0f} width=56 height=52 rx=5 fill="{INK}" stroke="{accent}" stroke-width=2/>'
+        f'<text x={x:.0f} y={y+2:.0f} font-size=20 font-weight=700 fill="{accent}" text-anchor=middle>{label}</text>'
+        f'<text x={x:.0f} y={y+44:.0f} font-size=13 font-weight=700 fill="#e7ecf3" text-anchor=middle>{name}</text>'
+        f'<text x={x:.0f} y={y+60:.0f} font-size=10.5 fill="#8a93a0" text-anchor=middle>{role}</text>'
+        f'<text x={x:.0f} y={y+77:.0f} font-size=11 fill="{accent}" text-anchor=middle>{stat}</text>')
 
 
-def _line(points, *, width=460, height=150, color=BLUE, label="") -> str:
-    if not points:
-        return "<p style='color:#999'>(no rounds yet)</p>"
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    xmin, xmax = min(xs), (max(xs) or 1)
-    ymax = max(ys) or 1
+def _fortress(rails: dict, paid: int, attempts: int, escaped: int) -> str:
+    pts = " ".join(f"{x},{y}" for _, _, _, _, x, y, _ in TOWERS)
+    walls = (f'<polygon points="{pts}" fill="rgba(11,15,20,0.04)" '
+             f'stroke="{INK}" stroke-width=2 stroke-linejoin=round/>')
+    # wall labels = the checks/balances that keep cheaters in
+    guards = [
+        (240, 250, "verify the artifact"),      # C–A edge
+        (480, 250, "attest the run"),            # C–B edge
+        (360, 442, "cross-miner consensus"),     # A–B edge
+    ]
+    gtxt = "".join(
+        f'<text x={x} y={y} font-size=10 fill="#6b7480" text-anchor=middle '
+        f'transform="rotate({ -56 if x<360 else (56 if x>360 else 0) } {x} {y})">⛓ {t}</text>'
+        for x, y, t in guards)
+    towers = "".join(
+        _tower(x, y, lbl, nm, role,
+               f"{int(rails.get(fam,{}).get('finds',0))} solved · {int(rails.get(fam,{}).get('blocked',0))} blocked",
+               acc)
+        for fam, lbl, nm, role, x, y, acc in TOWERS)
+    # central vault
+    vault = (
+        f'<rect x=300 y=250 width=120 height=70 rx=8 fill="{INK}" stroke="{GOLD}" stroke-width=2/>'
+        f'<text x=360 y=276 font-size=11 fill="{GOLD}" text-anchor=middle font-weight=700>VAULT</text>'
+        f'<text x=360 y=296 font-size=18 fill="#fff" text-anchor=middle font-weight=700>{paid}</text>'
+        f'<text x=360 y=311 font-size=9.5 fill="#8a93a0" text-anchor=middle>verified artifacts paid</text>')
+    breached = escaped > 0
+    seal_c = RED if breached else GREEN
+    seal = (
+        f'<circle cx=360 cy=388 r=30 fill="none" stroke="{seal_c}" stroke-width=3/>'
+        f'<text x=360 y=384 font-size=9 fill="{seal_c}" text-anchor=middle font-weight=700>'
+        f'{"BREACH" if breached else "SEALED"}</text>'
+        f'<text x=360 y=398 font-size=15 fill="{seal_c}" text-anchor=middle font-weight=700>{escaped}</text>'
+        f'<text x=360 y=410 font-size=8 fill="#8a93a0" text-anchor=middle>escaped</text>')
+    cap = (f'<text x=360 y=505 font-size=11 fill="#6b7480" text-anchor=middle>'
+           f'{attempts} cheat attempts tried the walls · {escaped} got out</text>')
+    return (f'<svg viewBox="0 0 720 520" width="100%" style="max-width:720px">'
+            f'{walls}{gtxt}{vault}{seal}{towers}{cap}</svg>')
 
-    def sx(x):
-        return 34 + (x - xmin) / ((xmax - xmin) or 1) * (width - 50)
 
-    def sy(y):
-        return height - 22 - (y / ymax) * (height - 40)
+def _specimen(sp: dict, accent: str) -> str:
+    if not sp:
+        return ""
+    logic = "".join(f"<div class=ln>{l}</div>" for l in sp.get("logic", []))
+    proof = "".join(f"<div class=pf>{p}</div>" for p in sp.get("proof", []))
+    sat = "sat" in sp.get("verdict", "").lower() and "unsat" not in sp.get("verdict", "").lower()
+    vcls = "v-ok" if sat else "v-neutral"
+    proof_block = f"<div class=proof><div class=ph>proof</div>{proof}</div>" if proof else ""
+    return (
+        f'<div class=spec style="border-top:3px solid {accent}">'
+        f'<div class=sh><span class=sr style="color:{accent}">{sp.get("rail","")}</span>'
+        f'<span class=sc>{sp.get("contract","")}</span></div>'
+        f'<div class=sp>{sp.get("property","")}</div>'
+        f'<div class=code>{logic}</div>'
+        f'<div class="verdict {vcls}">{sp.get("verdict","")}</div>'
+        f'{proof_block}'
+        f'<div class=params>{sp.get("params","")}</div>'
+        f'</div>')
 
-    pts = " ".join(f"{sx(x):.1f},{sy(y):.1f}" for x, y in points)
-    dots = "".join(f'<circle cx={sx(x):.1f} cy={sy(y):.1f} r=3.5 fill="{color}"/>'
-                   f'<text x={sx(x):.1f} y={sy(y) - 7:.1f} font-size=10 fill="#888" text-anchor=middle>{int(y)}</text>'
-                   for x, y in points)
-    xlbls = "".join(f'<text x={sx(x):.1f} y={height - 6:.0f} font-size=10 fill="#999" text-anchor=middle>{int(x)}</text>'
-                    for x, _ in points)
-    return (f'<svg width={width} height={height}>'
-            f'<polyline points="{pts}" fill=none stroke="{color}" stroke-width=2.5/>{dots}{xlbls}'
-            f'<text x=2 y=12 font-size=11 fill="#666">{label}</text></svg>')
 
-
-def _feed(n=48) -> str:
+def _feed(n=22) -> str:
     if not EVENTS.exists():
-        return "<p style='color:#999'>(no events yet — run: <code>python -m scaffold.live</code>)</p>"
-    lines = EVENTS.read_text().splitlines()[-n:]
+        return "<p style='color:#6b7480'>(no events yet)</p>"
     rows = []
-    for ln in reversed(lines):
+    for ln in reversed(EVENTS.read_text().splitlines()[-n:]):
         try:
             e = json.loads(ln)
         except Exception:
             continue
-        t = e.get("type")
-        ts = f"<span class=ts>{e.get('ts','')}</span>"
-        lane = f"<span class=ln>{e.get('lane','')}</span>" if e.get("lane") else ""
+        t = e.get("type"); ts = f"<span class=ts>{e.get('ts','')}</span>"
+        lane = f"<span class=ln2>{e.get('lane','')}</span>" if e.get("lane") else ""
         w = e.get("worker", "")
-        if t == "round":
-            rows.append(f"<div class='ev sep'>── {e.get('msg')} ──</div>")
-        elif t == "mint":
-            rows.append(f"<div class=ev>{ts}<span class='tag b'>MINT</span>{lane} {e.get('msg')}</div>")
-        elif t == "post":
-            rows.append(f"<div class=ev>{ts}<span class='tag n'>POST</span>{lane} <b>{w}</b> submitted</div>")
+        if t == "mint":
+            rows.append(f"<div class=ev>{ts}<span class='tg b'>MINT</span>{lane} {e.get('msg')}</div>")
         elif t == "verify":
-            oc, sc, rs = e.get("outcome", "?"), e.get("score", 0), e.get("reason", "")
+            oc, sc = e.get("outcome", "?"), e.get("score", 0)
             cls = "ok" if sc and sc > 0 else ("bad" if oc == "invalid" else "warn")
-            extra = f" · {rs}" if rs else ""
-            rows.append(f"<div class=ev>{ts}<span class='tag {cls}'>{oc.upper()}</span>{lane} "
-                        f"<b>{w}</b> → {sc}{extra}</div>")
+            rows.append(f"<div class=ev>{ts}<span class='tg {cls}'>{oc.upper()}</span>{lane} <b>{w}</b> → {sc}</div>")
         elif t == "consensus":
-            fl = e.get("flag", "")
-            cls = "bad" if fl == "outlier" else "ok"
-            rows.append(f"<div class=ev>{ts}<span class='tag {cls}'>CONSENSUS</span>{lane} "
-                        f"<b>{w}</b> {e.get('msg')}</div>")
-        elif t == "weights":
-            rows.append(f"<div class=ev>{ts}<span class='tag b'>WEIGHTS</span> {e.get('msg')}</div>")
+            cls = "bad" if e.get("flag") == "outlier" else "ok"
+            rows.append(f"<div class=ev>{ts}<span class='tg {cls}'>JUDGE</span>{lane} <b>{w}</b> {e.get('msg')}</div>")
         elif t == "cheat":
-            rows.append(f"<div class=ev>{ts}<span class='tag bad'>CHEAT</span>{lane} {e.get('msg')}</div>")
-        elif t == "error":
-            rows.append(f"<div class=ev>{ts}<span class='tag warn'>ERROR</span> {e.get('msg')}</div>")
+            rows.append(f"<div class=ev>{ts}<span class='tg bad'>ESCAPE</span>{lane} {e.get('msg')}</div>")
     return f"<div class=feed>{''.join(rows)}</div>"
 
 
-def _worker_color(name, v):
-    if v > 0:
-        return GREEN
-    return RED if any(e in name.lower() for e in _EXPLOIT) else GREY
-
-
-# The three rails ARE the encode -> solve -> improve flow. Each tuple:
-# (family, lane-letter, step, stage, optimizes-for, core-work). Ordered by step.
-# Merged with the live per-rail counters the runner emits in state["rails"].
-RAILS = [
-    ("encoding_v1", "C", "1", "Encode", "a verified bug — found by solving, not guessing",
-     "The property is the Bittensor Substrate↔EVM balance round-trip: convert "
-     "TAO from 9-decimal RAO to the 18-decimal EVM side and back — it must equal "
-     "the original balance, or the bridge mints/burns funds. Miners encode it to "
-     "SMT and SOLVE for an amount where it breaks (off-by-one, wrong divisor, a "
-     "dropped low bit — the scaling bugs that drain real bridges). The fault "
-     "fires only on a per-instance mixing trigger, so a guessed constant earns "
-     "nothing: you must solve. Score = correctness + speed + rarity."),
-    ("sat_challenge_v1", "A", "2", "Solve", "the fastest proven answer",
-     "Miner solves a planted-SAT CNF and submits the assignment; the validator "
-     "checks the witness against the formula — self-verifying, zero trust. This "
-     "is the open race to crack the problem: speed is the whole game, the bonus "
-     "curve pays the fastest correct solve."),
-    ("solver_docker_v1", "B", "3", "Improve", "trustworthy wall-clock — make “faster” provable",
-     "Miner runs a solver in a TDX container; the one claim that can't be checked "
-     "offline — a timeout — is vouched by a hardware attestation of the actual "
-     "run. Attested runtime is what makes a solver's SPEED a trustworthy, "
-     "measurable number — the basis for rewarding genuine improvement, not just "
-     "self-reported wins."),
-]
-
-
-def _pill(label, value, color):
-    return (f"<span class=pill style='border-color:{color}'>"
-            f"<b style='color:{color}'>{value}</b> {label}</span>")
-
-
-def _rail_cards(rails: dict) -> str:
-    cards = []
-    for fam, letter, step, stage, optimizes, core in RAILS:
-        r = rails.get(fam, {})
-        finds = int(r.get("finds", 0))
-        blocked = int(r.get("blocked", 0))
-        safe = int(r.get("safe", 0))
-        refuted = int(r.get("refuted", 0))
-        mints = int(r.get("mints", 0))
-        top = r.get("top", 0.0)
-        desc = r.get("desc", "—")
-        pills = (_pill("verified finds", finds, GREEN)
-                 + _pill("caught / blocked", blocked, RED)
-                 + _pill("safe·unrewarded", safe, GREY)
-                 + (_pill("peer-refuted", refuted, AMBER) if refuted else "")
-                 + _pill("challenges", mints, BLUE))
-        cards.append(
-            f"<div class=rail>"
-            f"<div class=railhead><span class=chip>{step}</span>"
-            f"<span class=rname>{stage}</span>"
-            f"<span class=lane>rail {letter}</span></div>"
-            f"<div class=optline>optimizes for: <b>{optimizes}</b></div>"
-            f"<div class=work>{core}</div>"
-            f"<div class=now><span class=nowk>▶ live now</span> {desc}"
-            f"<span class=top>top score this round: <b>{top}</b></span></div>"
-            f"<div class=pills>{pills}</div>"
-            f"</div>")
-    return "".join(cards)
-
-
 def render_html(s: dict) -> str:
-    prov = s.get("provenance", {})
-    mode = "BROADCAST" if prov.get("broadcast_enabled") else "DRY-RUN"
-    guard = (f"<div class='badge guard'><span class=k>GUARD</span> "
-             f"<b>{prov.get('validator_label')}</b> · {prov.get('repo')}@{prov.get('commit')} · "
-             f"hotkey <code>{(prov.get('hotkey') or '')[:22]}</code> · netuid {prov.get('netuid')} "
-             f"/ {prov.get('network')} · <b>{mode}</b></div>")
-
-    tn = s.get("testnet_result")
-    tn_html = ""
-    if tn:
-        tn_html = (f"<div class='badge ok'><span class=k>✅ LIVE ON-CHAIN</span> "
-                   f"weights set · {tn.get('network')} netuid {tn.get('netuid')} · "
-                   f"{tn.get('validator')} · uids {tn.get('uids')}<br>"
-                   f"<b>{tn.get('landed')}</b></div>")
-
-    # movement = per-round activity (not cumulative — those saturate and look flat)
-    growth = s.get("growth", [])
-    line_active = _line([(g["round"], g.get("active_round", 0)) for g in growth],
-                        color=GREEN, label="workers earning THIS round")
-    line_graded = _line([(g["round"], g.get("graded_round", 0)) for g in growth],
-                        color=BLUE, label="validations THIS round")
-
-    # per-worker score bars
-    pw = sorted(s.get("per_worker_score", {}).items(), key=lambda kv: -kv[1])
-    worker_bars = _hbars(pw, color=_worker_color, lblw=120)
-
-    # weight vector (on-chain) bars
-    wv = list(s.get("weight_vector_by_worker", {}).items())
-    wv_bars = _hbars(wv, color=lambda k, v: BLUE, lblw=120, fmt=lambda v: f"{v:.3f}")
-
-    # lane throughput + gates
-    lane_bars = _hbars(s.get("lane_throughput", {}).items(),
-                       color=lambda k, v: BLUE, fmt=lambda v: str(int(v)), lblw=160)
-    gate_bars = _hbars(sorted(s.get("gates_fired", {}).items(), key=lambda kv: -kv[1]),
-                       color=lambda k, v: AMBER, fmt=lambda v: str(int(v)), lblw=210)
-    cons_bars = _hbars(s.get("consensus_flags", {}).items(),
-                       color=lambda k, v: (GREEN if "find" in k else RED if "outlier" in k else GREY),
-                       fmt=lambda v: str(int(v)), lblw=140)
-
-    att = s.get("attest", {})
-    att_html = (f"<div class=stat><div class=num>{att.get('live_verified', 0)}/{att.get('live_calls', 0)}</div>"
-                f"<div class=lbl>attest verified</div></div>"
-                f"<div class=stat><div class=num>${att.get('cost_usd', 0)}</div><div class=lbl>attest cost</div></div>"
-                f"<div class=stat><div class=num>{s.get('rounds', 0)}</div><div class=lbl>rounds</div></div>"
-                f"<div class=stat><div class=num>{s.get('workers', 0)}</div><div class=lbl>workers</div></div>")
-
-    ln = s.get("learnings", {})
-    ln_html = ""
-    if ln:
-        ch = ln.get("cheat", {})
-        verdict = ln.get("cheat_verdict", "")
-        cls = "ok" if "NO CHEAT" in verdict else "bad"
-        ln_html = (f"<div class='badge {cls}'><span class=k>OVERNIGHT</span> "
-                   f"{ln.get('uptime_rounds',0)} rounds / {ln.get('uptime_minutes',0)} min · "
-                   f"{ln.get('total_validations',0)} validations · "
-                   f"<b>cheat: {verdict}</b> "
-                   f"(attempts {ch.get('attempts',0)} · blocked {ch.get('blocked',0)} · "
-                   f"legit-finds {ch.get('legit_find',0)} · <b>bypass {ch.get('bypass',0)}</b>)"
-                   f"<br>encoded so far: <code>{ln.get('mutations_encoded',{})}</code></div>")
-
-    feed = _feed()
     rails = s.get("rails", {})
-    rail_cards = _rail_cards(rails)
-
-    # the outcome — what this changes in the world, with the live tally
-    tot_find = sum(int(r.get("finds", 0)) for r in rails.values())
-    tot_block = sum(int(r.get("blocked", 0)) for r in rails.values())
-    bypass = int(s.get("learnings", {}).get("cheat", {}).get("bypass", 0))
-    bcls = "ok" if bypass == 0 else "bad"
-    target = (
-        "<div class=target>"
-        "<div class=tk>WHAT THIS CHANGES</div>"
-        "<div class=tt>Bittensor's own Substrate↔EVM balance bridge gets "
-        "<b>proven correct</b> — and the solvers that prove it keep getting faster.</div>"
-        "<div class=td>When TAO crosses between the Substrate chain (9-decimal "
-        "RAO) and the EVM (18-decimal), the bridge must conserve value: convert "
-        "and convert back = the same balance. We encode that invariant to SMT, an "
-        "open field races to find any amount that breaks it (a mint/burn bug), "
-        "and every answer is proven or hardware-attested before it earns. Reward "
-        "flows to the fastest <b>proven</b> solver — the pressure that makes them "
-        "faster. Same machinery extends to any contract invariant.</div>"
-        f"<div class=tmetrics>"
-        f"<span class=tm><b style='color:{GREEN}'>{tot_find}</b> proven answers shipped</span>"
-        f"<span class=tm><b style='color:{RED}'>{tot_block}</b> false claims rejected</span>"
-        f"<span class='tm {bcls}'>cheated through: <b>{bypass}</b></span>"
-        "</div></div>")
-
-    # what we're encoding — the kinds of planted faults turned into problems
-    muts = s.get("learnings", {}).get("mutations_encoded", {})
-    mut_label = {"none": "faithful — no bug (prove safe)", "off_by_one": "off-by-one (rounds wrong)",
-                 "wrong_const": "wrong divisor (mis-scales)", "truncate_low": "dropped low bit (truncates)"}
-    mut_bars = _hbars(sorted(((mut_label.get(k, k), v) for k, v in muts.items()),
-                             key=lambda kv: -kv[1]),
-                      color=lambda k, v: (GREY if "faithful" in k else AMBER),
-                      fmt=lambda v: str(int(v)), lblw=190)
-
-    def card(title, body):
-        return f"<div class=card><h3>{title}</h3>{body}</div>"
-
-    def section(num, name, blurb, body):
-        return (f"<div class=storyhead><span class=snum>{num}</span>"
-                f"<span class=sname>{name}</span><span class=sblurb>{blurb}</span></div>{body}")
-
-    legend = (f"<span class=legend><span class=dot style='background:{GREEN}'></span>earning"
-              f"<span class=dot style='background:{RED}'></span>false claim caught"
-              f"<span class=dot style='background:{GREY}'></span>zero</span>")
-    sec_encode = section("1", "ENCODE",
-        "turn a real property into a problem you can only answer by solving",
-        f"<div class=grid>{card('What we are encoding — planted faults turned into problems', mut_bars)}"
-        f"{card('Lane throughput — problems posed per rail', lane_bars)}</div>")
-    sec_solve = section("2", "SOLVE",
-        "an open field races to a proven answer; speed wins, timeouts are attested",
-        f"<div class=grid>{card('Who is solving — per-worker score ' + legend, worker_bars)}"
-        f"{card('Movement — answers + active solvers per round', line_active + line_graded)}</div>")
-    sec_improve = section("3", "IMPROVE",
-        "reward concentrates on the fastest proven solver — the pressure that makes solvers better; integrity holds",
-        f"<div class=grid>{card('Where reward flows — on-chain weight vector', wv_bars)}"
-        f"{card('Integrity — false claims caught (gates) + cross-miner refutations', gate_bars + cons_bars)}</div>")
-
-    return f"""<!doctype html><meta charset=utf-8><title>Cathedral tripartite</title>
-<meta http-equiv=refresh content=2>
+    paid = sum(int(r.get("finds", 0)) for r in rails.values())
+    attempts = int(s.get("learnings", {}).get("cheat", {}).get("attempts", 0))
+    escaped = int(s.get("learnings", {}).get("cheat", {}).get("bypass", 0))
+    fortress = _fortress(rails, paid, attempts, escaped)
+    sp = s.get("specimens", {})
+    accent = {"encode": AMBER, "solve": BLUE, "improve": GREEN}
+    specs = "".join(_specimen(sp.get(k), accent[k]) for k in ("encode", "solve", "improve") if sp.get(k))
+    prov = s.get("provenance", {})
+    foot = (f"validator {prov.get('validator_label','—')} · {prov.get('network','—')} · "
+            f"{s.get('rounds',0)} rounds · pays only independently-verified artifacts")
+    return f"""<!doctype html><meta charset=utf-8><title>Cathedral — intelligence in practice</title>
+<meta http-equiv=refresh content=3>
 <style>
- body{{font:14px/1.45 system-ui,-apple-system,sans-serif;margin:0;background:#f2f2f7;color:#1c1c1e}}
- .wrap{{max-width:1040px;margin:0 auto;padding:20px}}
- h2{{margin:0 0 4px}} .sub{{color:#8e8e93;margin:0 0 16px;font-size:13px}}
- .badge{{padding:10px 14px;border-radius:10px;margin-bottom:10px;font-size:13px}}
- .badge .k{{font-weight:700;margin-right:8px}}
- .guard{{background:#fff8e1;border:1px solid #ffd54f}}
- .ok{{background:#e7f8ee;border:1px solid {GREEN}}}
- .bad{{background:#fdeceb;border:1px solid {RED}}}
- .target{{background:#0b0f14;color:#e7ecf3;border-radius:12px;padding:16px 18px;margin-bottom:14px}}
- .target .tk{{font-size:11px;letter-spacing:.12em;color:#7aa2f7;font-weight:700}}
- .target .tt{{font-size:18px;margin:4px 0 6px}}
- .target .td{{font-size:13px;color:#aab4c2;max-width:760px}}
- .tmetrics{{margin-top:12px;display:flex;gap:10px;flex-wrap:wrap}}
- .tm{{background:#161b22;border:1px solid #2a313b;border-radius:8px;padding:6px 12px;font-size:13px}}
- .tm.bad{{border-color:{RED}}}
- .rails{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:14px}}
- .rail{{background:#fff;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06);border-top:3px solid {BLUE}}}
- .railhead{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
- .chip{{background:{BLUE};color:#fff;font-weight:700;border-radius:6px;width:24px;height:24px;
-        display:inline-flex;align-items:center;justify-content:center;font-size:13px}}
- .rname{{font-weight:700;font-size:16px}}
- .lane{{margin-left:auto;font-size:10px;color:#8e8e93;background:#f2f2f7;border-radius:4px;padding:2px 6px;letter-spacing:.04em}}
- .optline{{font-size:11px;color:{BLUE};font-weight:600;margin-bottom:8px}}
- .work{{font-size:12px;color:#48484a;line-height:1.4;margin-bottom:8px}}
- .now{{font-size:12px;background:#f2f7ff;border-radius:8px;padding:7px 9px;margin-bottom:8px;color:#1c3a5e}}
- .now .nowk{{font-weight:700;color:{BLUE};margin-right:6px}}
- .now .top{{display:block;color:#5a6573;margin-top:3px}}
- .pills{{display:flex;flex-wrap:wrap;gap:5px}}
- .pill{{border:1px solid;border-radius:20px;padding:2px 9px;font-size:11px;color:#48484a}}
- .stats{{display:flex;gap:12px;margin:14px 0}}
- .stat{{background:#fff;border-radius:10px;padding:12px 18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.06);flex:1}}
- .stat .num{{font-size:22px;font-weight:700;color:{BLUE}}} .stat .lbl{{font-size:11px;color:#8e8e93}}
- .grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}
- .card{{background:#fff;border-radius:12px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}}
- .card h3{{margin:0 0 8px;font-size:13px;color:#3a3a3c;text-transform:uppercase;letter-spacing:.04em}}
- code{{background:#f2f2f7;padding:1px 4px;border-radius:3px;font-size:12px}}
- .legend{{font-size:11px;color:#8e8e93;margin-top:4px}}
- .dot{{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 3px 0 8px;vertical-align:middle}}
- .feed{{font:12px/1.55 ui-monospace,Menlo,monospace;max-height:300px;overflow-y:auto;background:#0b0f14;color:#cdd6e0;border-radius:10px;padding:10px 12px}}
+ body{{font:14px/1.5 system-ui,-apple-system,sans-serif;margin:0;background:#eef0f4;color:#1c1c1e}}
+ .wrap{{max-width:1080px;margin:0 auto;padding:22px}}
+ h1{{font-size:21px;margin:0 0 2px}} .sub{{color:#6b7480;margin:0 0 16px;font-size:13px}}
+ .hero{{display:grid;grid-template-columns:minmax(360px,1.1fr) 1fr;gap:18px;align-items:center;
+        background:#fff;border-radius:16px;padding:18px 20px;box-shadow:0 1px 4px rgba(0,0,0,.07)}}
+ .pitch .big{{font-size:17px;font-weight:700;line-height:1.35}}
+ .pitch p{{font-size:13px;color:#48484a;margin:10px 0 0}}
+ .pitch .kpis{{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap}}
+ .kpi{{background:#f4f6fa;border-radius:9px;padding:7px 12px}}
+ .kpi b{{font-size:17px}} .kpi span{{display:block;font-size:10.5px;color:#6b7480}}
+ h2{{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:#8e8e93;margin:24px 0 10px}}
+ .specs{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}}
+ .spec{{background:#fff;border-radius:13px;padding:14px 15px;box-shadow:0 1px 4px rgba(0,0,0,.07)}}
+ .sh{{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}}
+ .sr{{font-weight:700;font-size:14px;letter-spacing:.03em}} .sc{{font-size:11px;color:#6b7480}}
+ .sp{{font-size:12px;color:#3a3a3c;margin-bottom:9px;line-height:1.4}}
+ .code{{background:{INK};border-radius:9px;padding:10px 11px;font:11px/1.6 ui-monospace,Menlo,monospace;
+        color:#cdd6e0;overflow-x:auto;white-space:pre}}
+ .code .ln{{white-space:pre}}
+ .verdict{{margin-top:9px;font-size:12px;font-weight:700;padding:6px 9px;border-radius:7px}}
+ .v-ok{{background:#e7f8ee;color:#1a8a44}} .v-neutral{{background:#f4f6fa;color:#48484a}}
+ .proof{{margin-top:8px;background:#fbf7ec;border:1px solid #ecd9a6;border-radius:8px;padding:8px 10px}}
+ .proof .ph{{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:#a9851f;font-weight:700}}
+ .proof .pf{{font:11px/1.6 ui-monospace,Menlo,monospace;color:#5a4a1a;white-space:pre-wrap;word-break:break-all}}
+ .params{{margin-top:8px;font-size:10.5px;color:#8e8e93}}
+ .feedwrap{{background:#fff;border-radius:13px;padding:12px 14px;box-shadow:0 1px 4px rgba(0,0,0,.07)}}
+ .feed{{font:11.5px/1.7 ui-monospace,Menlo,monospace;max-height:200px;overflow-y:auto;
+        background:{INK};color:#cdd6e0;border-radius:9px;padding:9px 11px}}
  .ev{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
- .ev .ts{{color:#5b6677;margin-right:8px}} .ev .ln{{color:#7aa2f7;margin:0 6px}}
- .ev.sep{{color:#5b6677;text-align:center;margin:5px 0}}
- .tag{{display:inline-block;min-width:74px;text-align:center;padding:0 6px;border-radius:4px;margin-right:8px;font-weight:700;font-size:10px}}
- .tag.ok{{background:#173d2a;color:{GREEN}}} .tag.bad{{background:#3d1717;color:#ff6b60}}
- .tag.warn{{background:#3d3417;color:{AMBER}}} .tag.b{{background:#15294d;color:#7aa2f7}}
- .tag.n{{background:#22262e;color:#9aa5b1}}
- .sec{{font-size:11px;color:#8e8e93;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 6px}}
- .storyhead{{display:flex;align-items:baseline;gap:10px;margin:24px 0 8px}}
- .snum{{background:{BLUE};color:#fff;font-weight:700;border-radius:50%;width:22px;height:22px;
-        display:inline-flex;align-items:center;justify-content:center;font-size:12px;flex:none}}
- .sname{{font-size:16px;font-weight:700;letter-spacing:.02em}}
- .sblurb{{font-size:12px;color:#8e8e93}}
+ .ev .ts{{color:#566;margin-right:7px}} .ev .ln2{{color:#7aa2f7;margin:0 6px}}
+ .tg{{display:inline-block;min-width:62px;text-align:center;padding:0 6px;border-radius:4px;margin-right:7px;font-weight:700;font-size:9.5px}}
+ .tg.ok{{background:#173d2a;color:{GREEN}}} .tg.bad{{background:#3d1717;color:#ff6b60}}
+ .tg.warn{{background:#3d3417;color:{AMBER}}} .tg.b{{background:#15294d;color:#7aa2f7}}
+ .foot{{margin-top:16px;font-size:11px;color:#8e8e93;text-align:center}}
 </style>
 <div class=wrap>
-<h2>Cathedral tripartite — live</h2>
-<p class=sub>encode → solve → improve · every answer proven before it earns · auto-refresh 2s</p>
-{target}
-<div class=sec>The three rails ARE the flow — encode → solve → improve · what each optimizes for + what's happening inside it now</div>
-<div class=rails>{rail_cards}</div>
-{card("🟢 Live pulse — every mint · post · validation · consensus call · weight update", feed)}
-{sec_encode}
-{sec_solve}
-{sec_improve}
-{guard}{tn_html}{ln_html}
+<h1>Cathedral — intelligence in practice</h1>
+<p class=sub>a real smart contract, compiled to logic, validated with SAT — inside a fortress no cheat escapes</p>
+<div class=hero>
+  <div class=fortress>{fortress}</div>
+  <div class=pitch>
+    <div class=big>We take a live smart-contract property, turn it into logic, and <b>prove</b> it with a solver.</div>
+    <p>Three corners, three lanes — <b>Encode</b> a property into a problem, <b>Solve</b> it in an open race,
+       <b>Improve</b> with attested speed. The walls are the checks (verify · attest · consensus); the vault
+       pays only artifacts that survive them. Nothing unverified gets out.</p>
+    <div class=kpis>
+      <div class=kpi><b style="color:{GREEN}">{paid}</b><span>verified & paid</span></div>
+      <div class=kpi><b style="color:{RED}">{attempts}</b><span>cheats attempted</span></div>
+      <div class=kpi><b style="color:{GREEN if escaped==0 else RED}">{escaped}</b><span>escaped</span></div>
+    </div>
+  </div>
+</div>
+<h2>Intelligence in practice — live worked examples (real challenges, this minute)</h2>
+<div class=specs>{specs}</div>
+<h2>Live pulse</h2>
+<div class=feedwrap>{_feed()}</div>
+<div class=foot>{foot}</div>
 </div>"""
 
 

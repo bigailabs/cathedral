@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from .contract import GenerateCtx
-from . import consensus, registry, timing
+from . import consensus, registry, timing, specimen
 import scaffold.harness as H
 
 EVENTS = Path("data/events.jsonl")
@@ -51,6 +51,7 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
     growth: list[dict] = []
     mutations: dict[str, int] = {}
     rails: dict[str, dict] = {}            # per-rail lifetime stats for the board
+    specimens: dict[str, dict] = {}        # latest worked example per rail (the showpiece)
     cheat = {"attempts": 0, "blocked": 0, "legit_find": 0, "bypass": 0}
     EXPLOITS = ("liar", "fraud", "vacuous", "crier", "missed")
     started = time.time()
@@ -79,6 +80,7 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
                                 "msg": f"minted {problem.task_id[:10]}" + (f" [{mut}]" if mut else "")})
                     graded = []
                     seen: set[str] = set()
+                    sat_answer = None           # an honest winning answer, for the specimen
                     for sub in pool(problem):
                         if sub.task_id != problem.task_id or sub.miner_hotkey in seen:
                             continue            # task-id gate + one submission per hotkey
@@ -88,6 +90,8 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
                         vr = lane.validate_submission(problem, hidden, sub)
                         sr = lane.score(problem, vr,
                                         wall_ms=timing.observed_wall_ms(sub.miner_hotkey, problem))
+                        if vr.outcome.value == "sat" and sat_answer is None:
+                            sat_answer = sub.answer
                         evs.append({"ts": ts, "type": "verify", "lane": short,
                                     "worker": sub.miner_hotkey, "outcome": vr.outcome.value,
                                     "score": round(sr.weighted_score, 3),
@@ -167,6 +171,18 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
                             round_earners.add(hk)
                     rb["earn_round"] = round_earn
                     rb["top"] = round(round_top, 3)
+                    # ---- worked specimen: one real solved example per rail ----
+                    try:
+                        if fam == "encoding_v1" and hidden.hidden_payload.get("witness"):
+                            # only showcase a FOUND bug (real counterexample + proof),
+                            # not a safe round — that's the wow.
+                            specimens["encode"] = specimen.encode_specimen(pi, hidden.hidden_payload.get("witness"))
+                        elif fam == "sat_challenge_v1" and sat_answer:
+                            specimens["solve"] = specimen.solve_specimen(pi, sat_answer.get("assignment"))
+                        elif fam == "solver_docker_v1":
+                            specimens["improve"] = specimen.improve_specimen(rb)
+                    except Exception:
+                        pass
             earners = sum(1 for v in cum.values() if v > 0)
             evs.append({"ts": ts, "type": "weights", "msg": f"weight vector updated · {earners} earners"})
             growth.append({"round": rnd, "graded_total": sum(lane_counts.values()),
@@ -191,7 +207,7 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
                 "rounds": rnd, "workers": len(H.ROSTER),
                 "per_worker_score": dict(sorted(cum.items(), key=lambda kv: -kv[1])),
                 "lane_throughput": lane_counts, "gates_fired": gates, "consensus_flags": cflags,
-                "rails": rails,
+                "rails": rails, "specimens": specimens,
                 "attest": {"cap": 0, "live_calls": 0, "live_verified": 0, "cost_usd": 0.0},
                 "weight_vector_by_worker": {k: round(v / tot, 4) for k, v in
                                             sorted(cum.items(), key=lambda kv: -kv[1])[:8] if v > 0},
