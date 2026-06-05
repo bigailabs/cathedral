@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from .contract import GenerateCtx
-from . import consensus, registry
+from . import consensus, registry, timing
 import scaffold.harness as H
 
 EVENTS = Path("data/events.jsonl")
@@ -86,7 +86,8 @@ def run_forever(period: float = 3.0, per_lane: int = 1) -> None:
                         evs.append({"ts": ts, "type": "post", "lane": short,
                                     "worker": sub.miner_hotkey, "msg": "submitted"})
                         vr = lane.validate_submission(problem, hidden, sub)
-                        sr = lane.score(problem, vr)
+                        sr = lane.score(problem, vr,
+                                        wall_ms=timing.observed_wall_ms(sub.miner_hotkey, problem))
                         evs.append({"ts": ts, "type": "verify", "lane": short,
                                     "worker": sub.miner_hotkey, "outcome": vr.outcome.value,
                                     "score": round(sr.weighted_score, 3),

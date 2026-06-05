@@ -60,10 +60,14 @@ class SatChallengeLane:
         ok = verify_witness(problem.public_input["cnf"], assignment)
         if not ok:
             return VerifierResult(True, Outcome.INVALID, 0.0, "assignment_does_not_satisfy")
-        wall_ms = float(ans.get("wall_ms", problem.time_limit_seconds * 1000))
-        return VerifierResult(True, Outcome.SAT, 1.0, None, {"wall_ms": wall_ms})
+        # NOTE: no wall_ms read from the submission — speed is the validator's to
+        # measure, not the miner's to claim (see scaffold.timing).
+        return VerifierResult(True, Outcome.SAT, 1.0, None, {})
 
-    def score(self, problem: PublicProblem, verifier: VerifierResult) -> ScoreResult:
-        wall_ms = float(verifier.details.get("wall_ms", 0.0))
-        return grading.grade(verifier, wall_ms=wall_ms,
+    def score(self, problem: PublicProblem, verifier: VerifierResult,
+              *, wall_ms: float | None = None) -> ScoreResult:
+        # wall_ms is SERVER-MEASURED (passed by the validator); never the miner's
+        # self-report. Absent it, fall back to the limit -> no speed credit.
+        wm = wall_ms if wall_ms is not None else problem.time_limit_seconds * 1000
+        return grading.grade(verifier, wall_ms=wm,
                              time_limit_ms=problem.time_limit_seconds * 1000)

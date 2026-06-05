@@ -98,12 +98,14 @@ class SolverDockerLane:
         return VerifierResult(True, Outcome.TIMEOUT, 0.0,
                               None if att_ok else "attestation_failed", det)
 
-    def score(self, problem: PublicProblem, verifier: VerifierResult) -> ScoreResult:
+    def score(self, problem: PublicProblem, verifier: VerifierResult,
+              *, wall_ms: float | None = None) -> ScoreResult:
         # NOT speed-aware: a SAT witness self-verifies but its TIMING does not,
         # and we attest timeouts only — so we cannot reward self-reported speed
         # here without attesting every run. Credit is the verified-witness base.
+        # (wall_ms accepted for a uniform validator call; inert while speed-off.)
         sr = grading.grade(
-            verifier, wall_ms=float(verifier.details.get("wall_ms", 0.0)),
+            verifier, wall_ms=wall_ms if wall_ms is not None else 0.0,
             time_limit_ms=problem.time_limit_seconds * 1000,
             attested_ok=verifier.details.get("attested"), speed_aware=False,
         )

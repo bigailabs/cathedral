@@ -178,11 +178,10 @@ class EncodingLane:
         ans = submission.answer
         verdict = ans.get("verdict")
         encode = ans.get("encode", "faithful")
-        # wall_ms + rarity ride along in details so score() can fold witness
-        # quality (speed + difficulty) into the weight.
+        # rarity rides along for score(); wall_ms does NOT come from the miner —
+        # speed is server-measured and passed into score() (see scaffold.timing).
         det = {"is_trap": h["is_trap"], "mutation": h["mutation"], "verdict": verdict,
-               "encode": encode, "backend": "z3", "rarity": h.get("rarity", 0.0),
-               "wall_ms": ans.get("wall_ms", 0.0)}
+               "encode": encode, "backend": "z3", "rarity": h.get("rarity", 0.0)}
         if verdict not in ("bug", "safe"):
             return VerifierResult(False, Outcome.INVALID, 0.0, "no_verdict", det)
         if verdict == "bug":
@@ -283,19 +282,18 @@ class EncodingLane:
         # flags it as an outlier if a peer exhibits a real counterexample.
         return VerifierResult(True, Outcome.UNSAT, 0.0, "no_bug_unrewarded", det)
 
-    def score(self, problem: PublicProblem, verifier: VerifierResult) -> ScoreResult:
+    def score(self, problem: PublicProblem, verifier: VerifierResult,
+              *, wall_ms: float | None = None) -> ScoreResult:
         d = verifier.details
         # A VERIFIED find is rewarded on WITNESS QUALITY: every real find earns a
         # correctness floor (0.4), plus speed (faster verified solve wins) and
         # rarity (a witness in a rarer trigger band is worth more — a guesser
         # can't stumble onto it). Bounded to [0.4, 1.0]; non-finds score 0.
+        # speed uses SERVER-MEASURED wall_ms (scaffold.timing), never a miner field.
         if verifier.parsed_ok and verifier.outcome == Outcome.SAT \
                 and math.isfinite(verifier.raw_metric) and verifier.raw_metric > 0:
-            try:                                     # wall_ms is miner-supplied
-                wall_ms = float(d.get("wall_ms", 0.0))
-            except (TypeError, ValueError):
-                wall_ms = 0.0
-            speed = grading.speed_bonus(wall_ms, problem.time_limit_seconds * 1000)
+            wm = wall_ms if wall_ms is not None else problem.time_limit_seconds * 1000
+            speed = grading.speed_bonus(wm, problem.time_limit_seconds * 1000)
             rarity = max(0.0, min(1.0, float(d.get("rarity", 0.0))))
             score = round(min(1.0, 0.4 + 0.3 * speed + 0.3 * rarity), 6)
             return ScoreResult(score, None,

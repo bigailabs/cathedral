@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .contract import GenerateCtx, Lane, PublicProblem, Submission
-from . import consensus, registry
+from . import consensus, registry, timing
 
 # A miner pool: given a public problem, return zero or more submissions.
 MinerPool = Callable[[PublicProblem], list[Submission]]
@@ -89,7 +89,8 @@ def run_round(
                     continue
                 seen.add(sub.miner_hotkey)
                 vr = lane.validate_submission(problem, hidden, sub)
-                sr = lane.score(problem, vr)
+                sr = lane.score(problem, vr,
+                                wall_ms=timing.observed_wall_ms(sub.miner_hotkey, problem))
                 group.append(GradedSubmission(
                     family_id=lane.family_id, task_id=problem.task_id,
                     miner_hotkey=sub.miner_hotkey, weighted_score=sr.weighted_score,
