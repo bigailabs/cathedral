@@ -153,7 +153,7 @@ def render_html(s: dict) -> str:
  .kpi b{{font-size:17px}} .kpi span{{display:block;font-size:10.5px;color:#6b7480}}
  h2{{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:#8e8e93;margin:24px 0 10px}}
  .specs{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}}
- .spec{{background:#fff;border-radius:13px;padding:14px 15px;box-shadow:0 1px 4px rgba(0,0,0,.07)}}
+ .spec{{background:#fff;border-radius:13px;padding:14px 15px;box-shadow:0 1px 4px rgba(0,0,0,.07);min-width:0}}
  .sh{{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}}
  .sr{{font-weight:700;font-size:14px;letter-spacing:.03em}} .sc{{font-size:11px;color:#6b7480}}
  .sp{{font-size:12px;color:#3a3a3c;margin-bottom:9px;line-height:1.4}}
