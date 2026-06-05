@@ -251,14 +251,14 @@ class EncodingLane:
             return VerifierResult(False, Outcome.INVALID, 0.0, "no_verdict", det)
 
         if verdict == "bug":
-            cex = ans.get("counterexample")
-            # the counterexample must INDEPENDENTLY violate the property — cheap,
-            # legitimate self-verification (this is the only place hidden truth
-            # is used to *accept*; it never used to *deny* a safe claim).
-            if not isinstance(cex, int) or not (0 <= cex < (1 << h["width"])) \
-                    or _property_holds(h["mutation"], cex, h["width"], h["bugx"]):
-                return VerifierResult(True, Outcome.INVALID, 0.0, "bad_counterexample", det)
-            return VerifierResult(True, Outcome.SAT, 1.0, None, {**det, "cex": cex})
+            # NO positive weight on the non-z3 fallback. The verified-artifact
+            # invariant requires an INDEPENDENT z3 re-check (ER.verify_counter-
+            # example); the toy `_property_holds` model isn't that, and its bug
+            # is at a PUBLIC bugx (trivially submittable). So without z3 a "bug"
+            # claim can't be confirmed -> it earns nothing and is not a FIND
+            # (so it can't refute peers via consensus either). z3 is REQUIRED to
+            # earn in Lane C; this path exists only for offline dev/smoke runs.
+            return VerifierResult(True, Outcome.INVALID, 0.0, "z3_required_for_verified_find", det)
 
         # verdict == "safe": NOT oracle-adjudicated from hidden is_buggy on
         # ordinary instances (proving safety at width is the cliff). Three checks:
@@ -288,8 +288,11 @@ class EncodingLane:
         # can't stumble onto it). Bounded to [0.4, 1.0]; non-finds score 0.
         if verifier.parsed_ok and verifier.outcome == Outcome.SAT \
                 and math.isfinite(verifier.raw_metric) and verifier.raw_metric > 0:
-            speed = grading.speed_bonus(float(d.get("wall_ms", 0.0)),
-                                        problem.time_limit_seconds * 1000)
+            try:                                     # wall_ms is miner-supplied
+                wall_ms = float(d.get("wall_ms", 0.0))
+            except (TypeError, ValueError):
+                wall_ms = 0.0
+            speed = grading.speed_bonus(wall_ms, problem.time_limit_seconds * 1000)
             rarity = max(0.0, min(1.0, float(d.get("rarity", 0.0))))
             score = round(min(1.0, 0.4 + 0.3 * speed + 0.3 * rarity), 6)
             return ScoreResult(score, None,

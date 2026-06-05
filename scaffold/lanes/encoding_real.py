@@ -105,15 +105,26 @@ def check(width: int, mutation: str, trig_c: int, trig_k: int, trig_t: int) -> d
     return out
 
 
-@lru_cache(maxsize=8192)
 def verify_counterexample(width: int, mutation: str, trig_c: int, trig_k: int,
-                          trig_t: int, s_value: int) -> bool:
+                          trig_t: int, s_value) -> bool:
     """Independently confirm a submitted s really triggers the fault AND breaks
     the property under the real encoding — the Lane C correctness gate. A value
     that misses the trigger (e.g. a guessed constant) pins to an unsatisfiable
-    system and returns False."""
-    if not isinstance(s_value, int) or not (0 <= s_value < (1 << width)):
+    system and returns False.
+
+    The public type/range check runs BEFORE the cached solve so a miner-supplied
+    non-int (e.g. an unhashable list) can never reach @lru_cache and raise — a
+    malformed submission is just an invalid counterexample, not a validator DoS.
+    `bool` is excluded so True/False can't alias 1/0."""
+    if isinstance(s_value, bool) or not isinstance(s_value, int) \
+            or not (0 <= s_value < (1 << width)):
         return False
+    return _verify_cached(width, mutation, trig_c, trig_k, trig_t, s_value)
+
+
+@lru_cache(maxsize=8192)
+def _verify_cached(width: int, mutation: str, trig_c: int, trig_k: int,
+                   trig_t: int, s_value: int) -> bool:
     from z3 import BitVecVal
     sol, s = _build(width, mutation, trig_c, trig_k, trig_t)
     sol.add(s == BitVecVal(s_value, width))
