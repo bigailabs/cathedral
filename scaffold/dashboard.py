@@ -112,23 +112,27 @@ def _worker_color(name, v):
     return RED if any(e in name.lower() for e in _EXPLOIT) else GREY
 
 
-# Static identity of each rail: what it IS, what it OPTIMIZES FOR, its CORE WORK.
+# The three rails ARE the encode -> solve -> improve flow. Each tuple:
+# (family, lane-letter, step, stage, optimizes-for, core-work). Ordered by step.
 # Merged with the live per-rail counters the runner emits in state["rails"].
 RAILS = [
-    ("sat_challenge_v1", "A", "SAT race", "fastest valid witness wins",
-     "Miner solves a planted-SAT CNF and submits the assignment. The validator "
-     "checks the witness against the formula — self-verifying, zero trust. Speed "
-     "is the whole game: the bonus curve pays the fastest correct solve."),
-    ("solver_docker_v1", "B", "Attested solve", "verifiable compute — vouch the unfalsifiable",
-     "Miner runs a solver in a TDX container. SAT/UNSAT self-verify cheaply, but "
-     "a TIMEOUT (\"I ran to the limit and it didn't close\") can't be checked "
-     "offline — so that claim, and only that claim, is vouched by a hardware "
-     "attestation of the actual run."),
-    ("encoding_v1", "C", "Encoding · bug-finding", "witness quality — correct, fast, rare",
+    ("encoding_v1", "C", "1", "Encode", "a real property into a must-solve problem",
      "Miner encodes a public contract property to SMT and SOLVES for a triggering "
-     "input — a real counterexample, which z3 independently re-checks. The fault "
-     "only fires on a per-instance trigger, so a guessed constant earns nothing; "
-     "you have to actually solve. Score = correctness + speed + trigger rarity."),
+     "input — a real counterexample z3 re-checks. The fault fires only on a "
+     "per-instance mixing trigger, so a guessed constant earns nothing: you have "
+     "to solve. This is where a real-world property BECOMES a problem the field "
+     "can race on. Score = correctness + speed + rarity."),
+    ("sat_challenge_v1", "A", "2", "Solve", "the fastest proven answer",
+     "Miner solves a planted-SAT CNF and submits the assignment; the validator "
+     "checks the witness against the formula — self-verifying, zero trust. This "
+     "is the open race to crack the problem: speed is the whole game, the bonus "
+     "curve pays the fastest correct solve."),
+    ("solver_docker_v1", "B", "3", "Improve", "trustworthy wall-clock — make “faster” provable",
+     "Miner runs a solver in a TDX container; the one claim that can't be checked "
+     "offline — a timeout — is vouched by a hardware attestation of the actual "
+     "run. Attested runtime is what makes a solver's SPEED a trustworthy, "
+     "measurable number — the basis for rewarding genuine improvement, not just "
+     "self-reported wins."),
 ]
 
 
@@ -139,7 +143,7 @@ def _pill(label, value, color):
 
 def _rail_cards(rails: dict) -> str:
     cards = []
-    for fam, chip, name, optimizes, core in RAILS:
+    for fam, letter, step, stage, optimizes, core in RAILS:
         r = rails.get(fam, {})
         finds = int(r.get("finds", 0))
         blocked = int(r.get("blocked", 0))
@@ -155,9 +159,10 @@ def _rail_cards(rails: dict) -> str:
                  + _pill("challenges", mints, BLUE))
         cards.append(
             f"<div class=rail>"
-            f"<div class=railhead><span class=chip>{chip}</span>"
-            f"<span class=rname>{name}</span>"
-            f"<span class=opt>optimizes for: <b>{optimizes}</b></span></div>"
+            f"<div class=railhead><span class=chip>{step}</span>"
+            f"<span class=rname>{stage}</span>"
+            f"<span class=lane>rail {letter}</span></div>"
+            f"<div class=optline>optimizes for: <b>{optimizes}</b></div>"
             f"<div class=work>{core}</div>"
             f"<div class=now><span class=nowk>▶ live now</span> {desc}"
             f"<span class=top>top score this round: <b>{top}</b></span></div>"
@@ -306,8 +311,9 @@ def render_html(s: dict) -> str:
  .railhead{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
  .chip{{background:{BLUE};color:#fff;font-weight:700;border-radius:6px;width:24px;height:24px;
         display:inline-flex;align-items:center;justify-content:center;font-size:13px}}
- .rname{{font-weight:700;font-size:15px}}
- .opt{{margin-left:auto;font-size:11px;color:#8e8e93;text-align:right;max-width:140px}}
+ .rname{{font-weight:700;font-size:16px}}
+ .lane{{margin-left:auto;font-size:10px;color:#8e8e93;background:#f2f2f7;border-radius:4px;padding:2px 6px;letter-spacing:.04em}}
+ .optline{{font-size:11px;color:{BLUE};font-weight:600;margin-bottom:8px}}
  .work{{font-size:12px;color:#48484a;line-height:1.4;margin-bottom:8px}}
  .now{{font-size:12px;background:#f2f7ff;border-radius:8px;padding:7px 9px;margin-bottom:8px;color:#1c3a5e}}
  .now .nowk{{font-weight:700;color:{BLUE};margin-right:6px}}
@@ -342,7 +348,7 @@ def render_html(s: dict) -> str:
 <h2>Cathedral tripartite — live</h2>
 <p class=sub>encode → solve → improve · every answer proven before it earns · auto-refresh 2s</p>
 {target}
-<div class=sec>The three rails — what each is, what it optimizes for, and what's happening inside it now</div>
+<div class=sec>The three rails ARE the flow — encode → solve → improve · what each optimizes for + what's happening inside it now</div>
 <div class=rails>{rail_cards}</div>
 {card("🟢 Live pulse — every mint · post · validation · consensus call · weight update", feed)}
 {sec_encode}
