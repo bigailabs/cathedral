@@ -316,3 +316,95 @@ def test_target_for_tier_shared_resolution() -> None:
         assert cfg.target_for(1) == 15
         assert cfg.target_for(3) == 4
         assert cfg.kind == "random_3sat"
+
+
+async def _retired_with_file(source, challenge_id, *, tier, tmp_path, updated_at):
+    """Upsert an active row with a real CNF file, then mark it retired at a
+    chosen updated_at_iso (mirrors how _retire_open_window_ready transitions)."""
+    cnf_file = tmp_path / f"{challenge_id}.cnf"
+    cnf_file.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+    rec = dataclasses.replace(
+        _active(challenge_id, tier=tier, idx=0),
+        cnf_text="",
+        cnf_path=str(cnf_file),
+    )
+    await source.upsert(rec)
+    await source._conn.execute(
+        "UPDATE lane_challenges SET status='retired', updated_at_iso=? WHERE challenge_id=?",
+        (updated_at, challenge_id),
+    )
+    await source._conn.commit()
+    return cnf_file
+
+
+async def test_gc_unlinks_retired_cnf_past_grace_and_keeps_recent(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "c.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        old = await _retired_with_file(
+            src, "old", tier=1, tmp_path=tmp_path, updated_at="2026-05-31T00:00:00.000Z"
+        )
+        recent = await _retired_with_file(
+            src, "recent", tier=1, tmp_path=tmp_path, updated_at="2026-05-31T00:59:50.000Z"
+        )
+
+        removed = await sat_fill.gc_retired_cnf_files(
+            source=src,
+            now_iso="2026-05-31T01:00:00.000Z",  # 1h after _NOW
+            grace_seconds=300,  # cutoff 00:55:00
+        )
+
+        assert removed == 1
+        assert not old.exists()  # past grace -> unlinked
+        assert recent.exists()  # within grace -> kept
+        # cnf_path cleared on the GC'd row so it isn't reprocessed.
+        cur = await src._conn.execute(
+            "SELECT cnf_path FROM lane_challenges WHERE challenge_id='old'"
+        )
+        assert (await cur.fetchone())[0] == ""
+    finally:
+        await conn.close()
+
+
+async def test_gc_ignores_active_and_pending_files(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "c.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        # Active row with a file (e.g. an in-flight import is 'pending'; an
+        # active challenge is still servable) must never be GC'd.
+        cnf_file = tmp_path / "active.cnf"
+        cnf_file.write_text("p cnf 1 1\n1 0\n", encoding="utf-8")
+        await src.upsert(
+            dataclasses.replace(
+                _active("live", tier=1, idx=0), cnf_text="", cnf_path=str(cnf_file)
+            )
+        )
+
+        removed = await sat_fill.gc_retired_cnf_files(
+            source=src, now_iso="2026-06-30T00:00:00.000Z", grace_seconds=1
+        )
+
+        assert removed == 0
+        assert cnf_file.exists()
+    finally:
+        await conn.close()
+
+
+def test_retirement_thresholds_env_tunable(monkeypatch) -> None:
+    monkeypatch.delenv("CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_SECONDS", raising=False)
+    monkeypatch.delenv("CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS", raising=False)
+    monkeypatch.delenv("CATHEDRAL_OPEN_WINDOW_CNF_GC_GRACE_SECONDS", raising=False)
+    assert sat_fill.retire_after_seconds() == 3600
+    assert sat_fill.retire_after_distinct_solvers() == 64
+    assert sat_fill.cnf_gc_grace_seconds() == 300
+
+    monkeypatch.setenv("CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_SECONDS", "7200")
+    monkeypatch.setenv("CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS", "128")
+    monkeypatch.setenv("CATHEDRAL_OPEN_WINDOW_CNF_GC_GRACE_SECONDS", "900")
+    assert sat_fill.retire_after_seconds() == 7200
+    assert sat_fill.retire_after_distinct_solvers() == 128
+    assert sat_fill.cnf_gc_grace_seconds() == 900
+
+    # Garbage values fall back to defaults (never crash the fill loop).
+    monkeypatch.setenv("CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_SECONDS", "not-an-int")
+    assert sat_fill.retire_after_seconds() == 3600

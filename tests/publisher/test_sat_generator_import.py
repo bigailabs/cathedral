@@ -102,7 +102,7 @@ async def db_source(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_happy_path_import_and_activate(tmp_path: Path, db_source) -> None:
-    source, conn = db_source
+    source, _conn = db_source
     handler, calls = _record_handler()
     async with SatGeneratorClient(
         base_url=_BASE, token=_TOKEN, transport=httpx.MockTransport(handler)
@@ -136,6 +136,15 @@ async def test_happy_path_import_and_activate(tmp_path: Path, db_source) -> None
     assert audit["source"] == "generator_lease"
     assert audit["generator_run_id"] == "gen_xyz"
     assert audit["cnf_sha256"] == _CNF_SHA
+
+    # File-backed storage: the row points at the on-disk CNF and carries NO
+    # inline cnf_text, so the db_write_lock insert stays tiny (throughput).
+    assert audit["storage"] == "file"
+    assert active.cnf_path == str(cnf_path)
+    assert active.cnf_text == ""
+    # 64-bit suffix to avoid same-day id collisions at high import volume.
+    suffix = result.cathedral_challenge_id.rsplit("-", 1)[-1]
+    assert len(suffix) == 16
 
     # Lease was confirmed, NOT released.
     paths = [p for _, p in calls]
