@@ -61,6 +61,8 @@ def render(records):
     fwd = [r for r in records if r.get("mode") == "forward"]
     bt = [r for r in records if r.get("mode") == "backtest"]
     bugs = [r for r in fwd if r.get("class") == "real-new"]
+    verified = [b for b in bugs if b.get("status") == "VERIFIED"]
+    proposed = [b for b in bugs if b.get("status") != "VERIFIED"]
     checks = len(fwd)
     clean_n = sum(1 for r in fwd if r.get("result") == "clean")
     cand = [r for r in fwd if r.get("result") == "candidate"]
@@ -110,7 +112,7 @@ def render(records):
                      f'<span class=cb>{_bar(1.0 if seen else 0.0, 120, GREEN if seen else "#e6e9ef")}</span>'
                      f'<span class=cn>{n} checks</span></div>')
 
-    score = f"{realnew} new bug / {checks} checks ({rate:.3f}/check) · {len(areas_seen & set(SURFACE))}/{len(SURFACE)} areas"
+    score = f"{len(verified)} verified · {len(proposed)} pending · {checks} checks · {len(areas_seen & set(SURFACE))}/{len(SURFACE)} subtensor areas"
 
     # --- supply pipeline (from the target corpus) ---
     tg = _targets()
@@ -154,7 +156,7 @@ def render(records):
 <p class=sub>generic invariants × SAT/SMT over real subtensor arithmetic · auto-refresh 4s · {score}</p>
 
 <div class=kpis>
-  <div class=kpi><div class=n style="color:{RED}">{realnew}</div><div class=l>NEW bugs found (verified)</div></div>
+  <div class=kpi><div class=n style="color:{RED}">{len(verified)}</div><div class=l>NEW bugs VERIFIED{(" · +"+str(len(proposed))+" pending") if proposed else ""}</div></div>
   <div class=kpi><div class=n style="color:{BLUE}">{checks}</div><div class=l>invariant-checks run · {candidates} SAT candidates</div></div>
   <div class=kpi><div class=n style="color:{GREEN}">{bt_caught}/6</div><div class=l>known bugs caught (validation)</div></div>
   <div class=kpi><div class=n style="color:{GOLD}">{int(cov*100)}%</div><div class=l>money-math surface scanned</div></div>
