@@ -190,10 +190,73 @@ Real code has `ensure!(Order::ReserveOut::reserve(netuid) >= T::MinimumReserve::
 
 ---
 
+---
+
+## CANDIDATE 5 — REAL-NEW (VERIFIED) — FP Refactor Preserves Bug
+
+### Name
+`get_parent_child_dividends_distribution_fp_refactor`
+
+### What It Is
+The function from Candidate 1 was refactored from integer u64 arithmetic to U96F32 floating-point arithmetic. The structural bug **persists unchanged**.
+
+### Source File + Lines
+`pallets/subtensor/src/coinbase/run_coinbase.rs`, lines 940–1000  
+Function: `get_parent_child_dividends_distribution` (same function, FP version)
+
+### Relevant Code (Current)
+```rust
+let burn_take: U96F32 = burn_take_proportion.saturating_mul(parent_emission);
+let child_take: U96F32 = child_take_proportion.saturating_mul(parent_emission);  // same base!
+parent_emission = parent_emission.saturating_sub(burn_take);   // may go to 0
+parent_emission = parent_emission.saturating_sub(child_take);  // stays at 0 if already 0
+total_child_take = total_child_take.saturating_add(child_take);  // ALWAYS added
+// ...
+let child_emission = remaining_emission.saturating_add(total_child_take)...
+```
+
+### The Difference from Candidate 1
+The ORIGINAL code (integer) had an additional integer truncation subtlety (floor division on u64). The NEW code (U96F32 FP) uses saturating floating-point arithmetic — but the structural bug is identical:
+- `burn_take` and `child_take` are BOTH computed on the same `parent_emission`
+- If `burn_take_proportion + child_take_proportion > 1.0`, `parent_emission` saturates to 0 after subtracting `burn_take`
+- `child_take` (computed before burn) is still added to `total_child_take`
+- `child_emission = remaining + total_child_take` → inflated by `child_take`
+
+### Python FP Verification
+```python
+def check_fp(V, factor, burn_rate, child_rate):
+    pe = V * factor
+    remaining = V - pe
+    burn_take = burn_rate * pe
+    child_take = child_rate * pe
+    after_burn = max(0, pe - burn_take)      # saturating_sub
+    parent_final = max(0, after_burn - child_take)  # saturating_sub
+    total_child_take = child_take            # ALWAYS added
+    child_em = remaining + total_child_take
+    total_out = parent_final + child_em
+    total_burned = burn_take
+    return total_out + total_burned - V      # excess
+
+# With burn=90%, child_take=18%, V=1000, factor=1.0:
+# pe=1000, burn_take=900, child_take=180, parent_final=0
+# child_em = 0 + 180 = 180, total_out=180, burned=900
+# excess = 1080 - 1000 = 80 alpha CREATED
+assert check_fp(1000, 1.0, 0.90, 0.18) == 80.0  # confirmed
+```
+
+### Trigger Unchanged
+Same as Candidate 1: `CKBurn + childkey_take > 100%`. Default CKBurn = 0.
+
+### Classification
+**REAL-NEW, VERIFIED** — this is the same bug surviving a refactor. It should be reported alongside or as an update to Candidate 1. The FP arithmetic makes the trigger slightly different (exact float comparisons) but the economics are identical.
+
+---
+
 ## Hunt Methodology Notes
 
 1. All source pulled from `opentensor/subtensor@main` via `gh api repos/opentensor/subtensor/contents/...`
-2. z3 queries run with `z3venv/bin/python hunt.py` (z3 4.x)
+2. z3 queries run with `/home/frede/experiments/evm-smt/z3venv/bin/python` (z3 4.x) on Stitch
 3. Every SAT witness was re-derived in plain Python against the ACTUAL Rust code logic
 4. Issue/PR search confirmed no existing reports of Candidate 1
-5. The `ctrl_sat` result for Candidate 1 is expected — the control constraint `Not(value_creation)` allows the SAFE case where burn+take <= 1, which IS satisfiable; this does not indicate a false alarm in the primary check
+5. Hunt v2 (2026-06-06): 33 (function × invariant) checks across staking, dividends, bonds, swap, emission, conversion, accounting, childkey
+6. Score rate: 1 real-new per 33 checks (0.030); all other AMM/bonds/dividend checks pass clean
