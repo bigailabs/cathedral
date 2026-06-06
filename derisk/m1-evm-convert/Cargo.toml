@@ -1,0 +1,9 @@
+[package]
+name = "m1-evm-convert"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[profile.dev]
+overflow-checks = true
