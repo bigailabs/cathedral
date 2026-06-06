@@ -54,9 +54,10 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 from uuid import uuid4
@@ -82,6 +83,7 @@ from cathedral.lanes.sign import (
     TASK_FAMILY_SCHEMA_VERSION,
     TASK_FAMILY_SCHEMA_VERSION_V6,
     build_signed_task_family_row,
+    resign_task_family_score,
 )
 from cathedral.lanes.synthetic_boolean_v1 import FAMILY_ID as SAT_FAMILY_ID
 from cathedral.lanes.synthetic_boolean_v1 import SCHEMA_VERSION as SAT_SCHEMA_VERSION
@@ -913,6 +915,28 @@ async def _handle_solve_post(
                     time_limit_seconds=time_limit_seconds,
                     dimacs_solution=dimacs_solution,
                 )
+                compat_ranked = _build_open_window_schema5_compat_row(
+                    signed_ranked,
+                    eval_run_id=f"{open_eval_run_id}-v5compat",
+                    ran_at_iso=_ms_iso(datetime.now(UTC) + timedelta(milliseconds=1)),
+                    signer=ctx.signer,
+                )
+                await repository.insert_ranked_eval_run(
+                    ctx.db,
+                    family_id=SAT_FAMILY_ID,
+                    challenge_id=challenge_id,
+                    miner_hotkey=miner_hotkey,
+                    submission_id=submission_id,
+                    cnf_sha256=cnf_sha256,
+                    dimacs_solution_sha256=dimacs_solution_sha256,
+                    ran_at_iso=str(compat_ranked["ran_at"]),
+                    signed_row=compat_ranked,
+                    epoch=epoch,
+                    round_index=0,
+                    time_limit_seconds=time_limit_seconds,
+                    dimacs_solution=dimacs_solution,
+                    attestation_status="attested",
+                )
         logger.info(
             "solve_post_ranked",
             submission_id=submission_id,
@@ -1228,6 +1252,160 @@ def _build_direct_solve_signed_row(
         solved=solved,
         operator=operator,
     )
+
+
+def _build_open_window_schema5_compat_row(
+    signed_ranked: dict[str, object],
+    *,
+    eval_run_id: str,
+    ran_at_iso: str,
+    signer: object,
+) -> dict[str, object]:
+    """Re-sign a v6 open-window solve as a v5 row for old Path-A validators.
+
+    Some registered validators score locally from ``/v1/leaderboard/recent`` and
+    already understand schema 5, but either reject or fail to map schema 6. The
+    v5 mirror carries the same authenticated score/hash fields with a fresh id
+    and cursor-visible ``ran_at``; it does not carry rank facts.
+    """
+    row = dict(signed_ranked)
+    row["id"] = eval_run_id
+    row["ran_at"] = ran_at_iso
+    return resign_task_family_score(
+        row,
+        signer=signer,
+        weighted_score=float(row["weighted_score"]),
+        score_parts=dict(row["score_parts"]),
+        rejection_reason=row.get("rejection_reason")
+        if row.get("rejection_reason") is None
+        else str(row.get("rejection_reason")),
+    )
+
+
+async def backfill_open_window_schema5_compat_rows(
+    conn,
+    *,
+    signer: object,
+    since_hours: int = 24,
+    limit: int = 2000,
+) -> int:
+    """Backfill v5 mirror rows for recent v6 open-window solves.
+
+    Existing Path-A validators may have advanced their cursors past v6 rows they
+    could not persist. Backfilled rows use fresh ``ran_at`` timestamps so those
+    validators can pull the compatibility rows without a local cursor reset.
+    """
+    from cathedral.publisher import repository
+
+    since = _ms_iso(datetime.now(UTC) - timedelta(hours=max(1, int(since_hours))))
+    cur = await conn.execute(
+        """
+        SELECT
+            er.id, er.submission_id, er.epoch, er.round_index, er.task_json,
+            er.score_parts, er.weighted_score, er.ran_at, er.cathedral_signature,
+            sub.display_name, sub.miner_hotkey
+        FROM eval_runs er
+        JOIN agent_submissions sub ON sub.id = er.submission_id
+        WHERE er.eval_output_schema_version = 6
+          AND er.weighted_score > 0
+          AND er.ran_at >= ?
+          AND NOT EXISTS (
+              SELECT 1 FROM eval_runs mirror
+              WHERE mirror.id = er.id || '-v5compat'
+          )
+        ORDER BY er.ran_at ASC, er.id ASC
+        LIMIT ?
+        """,
+        (since, max(1, int(limit))),
+    )
+    rows = await cur.fetchall()
+    inserted = 0
+    base_now = datetime.now(UTC)
+    for index, row in enumerate(rows):
+        (
+            source_eval_run_id,
+            submission_id,
+            epoch,
+            round_index,
+            task_json_raw,
+            score_parts_raw,
+            weighted_score,
+            ran_at,
+            cathedral_signature,
+            display_name,
+            miner_hotkey,
+        ) = row
+        task_json = json.loads(task_json_raw or "{}")
+        challenge_id = str(task_json.get("challenge_id") or "")
+        cnf_sha256 = str(task_json.get("cnf_sha256") or "")
+        dimacs_solution_sha256 = str(task_json.get("miner_solution_sha256") or "")
+        if not challenge_id or not cnf_sha256 or not dimacs_solution_sha256:
+            logger.warning(
+                "open_window_v5_compat_backfill_skip_missing_task_fields",
+                eval_run_id=source_eval_run_id,
+            )
+            continue
+        score_parts = json.loads(score_parts_raw or "{}")
+        try:
+            signed_ranked: dict[str, object] = {
+                "id": str(source_eval_run_id),
+                "agent_id": str(submission_id),
+                "agent_display_name": str(display_name or ""),
+                "miner_hotkey": str(miner_hotkey),
+                "task_type": str(task_json.get("task_type") or SAT_FAMILY_ID),
+                "task_id_public": str(task_json["task_id_public"]),
+                "epoch_salt": str(task_json["epoch_salt"]),
+                "difficulty_tier": int(task_json["difficulty_tier"]),
+                "weighted_score": float(weighted_score),
+                "score_parts": dict(score_parts),
+                "answer_hash": str(task_json["answer_hash"]),
+                "verifier_details_hash": str(task_json["verifier_details_hash"]),
+                "rejection_reason": None,
+                "ran_at": str(ran_at),
+                "challenge_value": float(task_json.get("challenge_value") or 0.0),
+                "solve_rank": int(task_json.get("solve_rank") or 0),
+                "solved": bool(task_json.get("solved", True)),
+                "operator": str(task_json.get("operator") or miner_hotkey),
+                "cathedral_signature": str(cathedral_signature),
+                "eval_output_schema_version": TASK_FAMILY_SCHEMA_VERSION_V6,
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "open_window_v5_compat_backfill_skip_malformed_signed_fields",
+                eval_run_id=source_eval_run_id,
+                error=str(exc),
+            )
+            continue
+        compat_eval_run_id = f"{source_eval_run_id}-v5compat"
+        compat_ran_at = _ms_iso(base_now + timedelta(milliseconds=index + 1))
+        compat_ranked = _build_open_window_schema5_compat_row(
+            signed_ranked,
+            eval_run_id=compat_eval_run_id,
+            ran_at_iso=compat_ran_at,
+            signer=signer,
+        )
+        try:
+            await repository.insert_ranked_eval_run(
+                conn,
+                family_id=SAT_FAMILY_ID,
+                challenge_id=challenge_id,
+                miner_hotkey=str(miner_hotkey),
+                submission_id=str(submission_id),
+                cnf_sha256=cnf_sha256,
+                dimacs_solution_sha256=dimacs_solution_sha256,
+                ran_at_iso=compat_ran_at,
+                signed_row=compat_ranked,
+                epoch=int(epoch or 0),
+                round_index=int(round_index or 0),
+                time_limit_seconds=int(task_json.get("time_limit_seconds") or 0),
+                attestation_status="attested",
+            )
+        except Exception as exc:
+            if "UNIQUE constraint failed" in str(exc):
+                continue
+            raise
+        inserted += 1
+    return inserted
 
 
 @router.get("/v1/synthetic-boolean/active-cnf")

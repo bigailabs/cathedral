@@ -374,6 +374,20 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         # `cathedral-publisher seed-cards` bootstrap step removed in PR2.
         await _ensure_sat_lane_card_definition(ctx.db)
 
+        # Publisher-only compatibility for registered Path-A validators that
+        # are still scoring local pulled rows. They already understand signed
+        # schema-5 task-family rows, so mirror recent schema-6 open-window
+        # solves as fresh v5 rows on startup. This is idempotent by deterministic
+        # mirror id (`<v6_eval_run_id>-v5compat`).
+        from cathedral.publisher.submit import backfill_open_window_schema5_compat_rows
+
+        async with ctx.db_write_lock:
+            compat_count = await backfill_open_window_schema5_compat_rows(
+                ctx.db,
+                signer=ctx.signer,
+            )
+        logger.info("open_window_schema5_compat_backfill_complete", count=compat_count)
+
         # Preload the v3 bug-isolation private corpus so the operator can
         # confirm a non-empty corpus from boot logs BEFORE flipping
         # CATHEDRAL_V3_FEED_ENABLED. Without this, the loader is only

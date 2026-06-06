@@ -14,12 +14,15 @@ from unittest import mock
 import pytest
 
 from cathedral.lanes.challenge_source import (
+    CHALLENGE_STATUS_ACTIVE,
     CHALLENGE_STATUS_LOCKED,
     CHALLENGE_STATUS_PENDING,
+    CHALLENGE_STATUS_RETIRED,
     ChallengeRecord,
     SqliteChallengeSource,
     init_sqlite_challenge_source,
 )
+from cathedral.publisher import repository as repo
 from cathedral.publisher import sat_fill
 from cathedral.publisher.app import AsyncDbWriteLock
 
@@ -41,6 +44,13 @@ def _pending(challenge_id: str, *, tier: int, idx: int) -> ChallengeRecord:
     )
 
 
+def _active(challenge_id: str, *, tier: int, idx: int) -> ChallengeRecord:
+    return dataclasses.replace(
+        _pending(challenge_id, tier=tier, idx=idx),
+        status=CHALLENGE_STATUS_ACTIVE,
+    )
+
+
 async def _seed_pending(source, ids: list[str], *, tier: int) -> None:
     for i, cid in enumerate(ids):
         await source.upsert(_pending(cid, tier=tier, idx=i))
@@ -48,6 +58,16 @@ async def _seed_pending(source, ids: list[str], *, tier: int) -> None:
 
 async def _active_count(source, *, tier: int) -> int:
     return sum(1 for rec in await source.list_active(_FAMILY) if rec.tier == tier)
+
+
+async def _status(source, challenge_id: str) -> str:
+    cur = await source._conn.execute(
+        "SELECT status FROM lane_challenges WHERE challenge_id = ?",
+        (challenge_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
 
 
 async def test_fill_promotes_up_to_target(tmp_path) -> None:
@@ -102,6 +122,85 @@ async def test_fill_refills_after_a_slot_drains(tmp_path) -> None:
         summary = await sat_fill.run_one_tick(source=src, config=cfg, db_write_lock=_LOCK)
         assert summary["promoted"] == 1
         assert await _active_count(src, tier=1) == 3
+    finally:
+        await conn.close()
+
+
+async def test_open_window_retirement_ages_out_active_then_refills(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "c.db"))
+    try:
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        await src.upsert(
+            _active("old-active", tier=1, idx=0),
+            now_iso="2026-05-30T22:59:59.000Z",
+            overwrite_status=True,
+        )
+        await _seed_pending(src, ["fresh-1", "fresh-2"], tier=1)
+        cfg = sat_fill.FillConfig(tiers=(1,), default_target=1, target_overrides={})
+
+        with mock.patch.dict(os.environ, {"CATHEDRAL_OPEN_WINDOW_ENABLED": "true"}):
+            with mock.patch.object(sat_fill, "_now_iso", return_value=_NOW):
+                summary = await sat_fill.run_one_tick(
+                    source=src,
+                    config=cfg,
+                    db_write_lock=_LOCK,
+                )
+
+        assert summary["retired"] == 1
+        assert summary["promoted"] == 1
+        assert await _status(src, "old-active") == CHALLENGE_STATUS_RETIRED
+        assert await _active_count(src, tier=1) == 1
+    finally:
+        await conn.close()
+
+
+async def test_open_window_retirement_saturates_by_distinct_solvers(tmp_path) -> None:
+    conn = await init_sqlite_challenge_source(str(tmp_path / "c.db"))
+    try:
+        await conn.executescript(repo.LANE_CHALLENGE_SOLVES_SCHEMA)
+        await conn.commit()
+        src = SqliteChallengeSource(conn, now_iso=_NOW)
+        await src.upsert(
+            _active("saturated-active", tier=1, idx=0),
+            now_iso="2026-05-30T23:30:00.000Z",
+            overwrite_status=True,
+        )
+        await _seed_pending(src, ["fresh-1", "fresh-2"], tier=1)
+        await conn.executemany(
+            """
+            INSERT INTO lane_challenge_solves (
+                family_id, challenge_id, miner_hotkey, eval_run_id,
+                solve_rank, weighted_score, solved_at_iso
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    _FAMILY,
+                    "saturated-active",
+                    f"5Solver{i:02d}",
+                    f"eval-{i:02d}",
+                    i + 1,
+                    1.0,
+                    _NOW,
+                )
+                for i in range(64)
+            ],
+        )
+        await conn.commit()
+        cfg = sat_fill.FillConfig(tiers=(1,), default_target=1, target_overrides={})
+
+        with mock.patch.dict(os.environ, {"CATHEDRAL_OPEN_WINDOW_ENABLED": "true"}):
+            with mock.patch.object(sat_fill, "_now_iso", return_value=_NOW):
+                summary = await sat_fill.run_one_tick(
+                    source=src,
+                    config=cfg,
+                    db_write_lock=_LOCK,
+                )
+
+        assert summary["retired"] == 1
+        assert summary["promoted"] == 1
+        assert await _status(src, "saturated-active") == CHALLENGE_STATUS_RETIRED
+        assert await _active_count(src, tier=1) == 1
     finally:
         await conn.close()
 

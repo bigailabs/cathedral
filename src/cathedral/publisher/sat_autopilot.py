@@ -295,19 +295,35 @@ def _plan_imports(
             )
             if capped.deficit > 0:
                 needs.append(capped)
-    # Largest deficit first. Stable ordering by (tier, kind) on ties.
-    needs.sort(key=lambda n: (-n.deficit, n.tier, n.kind))
     # Total budget across all combos: never lease more than
     # max_imports_per_tick in one cycle, so a misconfiguration can't
-    # stampede the generator.
-    selected: list[_ComboNeed] = []
+    # stampede the generator. Allocate one lease at a time by remaining
+    # deficit instead of exhausting the first tied combo; this keeps tier
+    # inventories refilling together after a board rotation.
+    allocations: dict[_ComboNeed, int] = {need: 0 for need in needs}
     budget = config.max_imports_per_tick
-    for need in needs:
-        if budget <= 0:
+    while budget > 0:
+        made_progress = False
+        ordered = sorted(
+            needs,
+            key=lambda n: (-(n.deficit - allocations[n]), n.tier, n.kind),
+        )
+        for need in ordered:
+            if budget <= 0:
+                break
+            if allocations[need] >= need.deficit:
+                continue
+            allocations[need] += 1
+            budget -= 1
+            made_progress = True
+        if not made_progress:
             break
-        take = min(need.deficit, budget)
-        # Re-express as a single-import need OR keep multi-import?
-        # Keep multi: caller loops `for _ in range(take)`.
+
+    selected: list[_ComboNeed] = []
+    for need in sorted(needs, key=lambda n: (n.tier, n.kind)):
+        take = allocations[need]
+        if take <= 0:
+            continue
         selected.append(
             _ComboNeed(
                 tier=need.tier,
@@ -317,7 +333,6 @@ def _plan_imports(
                 target=need.pending + take,
             )
         )
-        budget -= take
     return selected
 
 

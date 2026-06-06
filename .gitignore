@@ -30,3 +30,5 @@ secrets/
 .venv-byo/
 .venv-fix/
 .venv-prefix/
+# Added by code-review-graph
+.code-review-graph/

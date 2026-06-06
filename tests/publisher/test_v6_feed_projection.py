@@ -21,11 +21,24 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cathedral.eval.eval_signer import EvalSigner
 from cathedral.lanes.challenge_lock import SQLITE_SCHEMA as CHALLENGE_LOCK_SCHEMA
 from cathedral.lanes.contract import PublicProblem, ScoreResult, Submission, VerifierResult
-from cathedral.lanes.sign import TASK_FAMILY_SCHEMA_VERSION_V6, build_signed_task_family_row
+from cathedral.lanes.sign import (
+    TASK_FAMILY_SCHEMA_VERSION,
+    TASK_FAMILY_SCHEMA_VERSION_V6,
+    build_signed_task_family_row,
+)
 from cathedral.publisher import repository as repo
 from cathedral.publisher.reads import _eval_run_to_output
+from cathedral.publisher.submit import (
+    _build_open_window_schema5_compat_row,
+    backfill_open_window_schema5_compat_rows,
+)
 from cathedral.validator.db import connect
-from cathedral.validator.pull_loop import verify_eval_output_signature
+from cathedral.validator.pull_loop import (
+    _hotkey_for,
+    latest_pulled_score_per_hotkey,
+    upsert_pulled_eval,
+    verify_eval_output_signature,
+)
 
 FAMILY = "synthetic_boolean_v1"
 CHALLENGE = "sat-t1-gold-sig-001"
@@ -314,6 +327,11 @@ async def test_eval_run_to_output_v6_shape(tmp_path) -> None:
         assert isinstance(served["solve_rank"], int), "solve_rank must be int"
         assert isinstance(served["challenge_value"], float), "challenge_value must be float"
         assert isinstance(served["operator"], str), "operator must be str"
+
+        # Compatibility field for already-deployed Path-A validators whose
+        # schema-6 hotkey extractor falls back to output_card.worker_owner_hotkey.
+        assert served["output_card"]["worker_owner_hotkey"] == hotkey
+        assert _hotkey_for(served) == hotkey
     finally:
         await conn.close()
 
@@ -405,11 +423,189 @@ async def test_v6_signature_round_trip(tmp_path) -> None:
         # This is the gold assertion: the validator's verifier must accept.
         # PullVerificationError is raised on any mismatch.
         verify_eval_output_signature(served, pk)
+        assert _hotkey_for(served) == hotkey
 
         # Belt-and-suspenders: confirm schema_version is 6 in the served item.
         assert served["eval_output_schema_version"] == 6
         missing = _V6_REQUIRED_KEYS - set(served)
         assert not missing, f"served item missing v6 keys: {sorted(missing)}"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_open_window_v5_compat_mirror_verifies_and_scores_locally(tmp_path) -> None:
+    """A v6 open-window solve can be mirrored as a signed v5 row.
+
+    This is the publisher-only compatibility path for Path-A validators that
+    already score schema 5 locally but cannot persist schema 6 rows.
+    """
+    conn = await _conn(tmp_path)
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+    signer = EvalSigner(sk)
+
+    sub_id = "sub-v5-compat-1"
+    hotkey = "5V5CompatMiner"
+    eval_run_id = "v6-compat-source-001"
+    compat_eval_run_id = "v5-compat-mirror-001"
+    try:
+        await _seed_submission(conn, sub_id=sub_id, hotkey=hotkey)
+        ledger = await repo.record_ranked_solve(
+            conn,
+            family_id=FAMILY,
+            challenge_id=CHALLENGE,
+            miner_hotkey=hotkey,
+            eval_run_id=eval_run_id,
+            weighted_score=1.0,
+            solved_at_iso="2026-05-29T20:00:00.000Z",
+        )
+        v6_row = _build_v6_row(
+            eval_run_id=eval_run_id,
+            submission_id=sub_id,
+            hotkey=hotkey,
+            solve_rank=ledger.solve_rank,
+            w_c=4.0,
+            signer=signer,
+        )
+        await repo.insert_ranked_eval_run(
+            conn,
+            family_id=FAMILY,
+            challenge_id=CHALLENGE,
+            miner_hotkey=hotkey,
+            submission_id=sub_id,
+            cnf_sha256="ab" * 32,
+            dimacs_solution_sha256="cd" * 32,
+            ran_at_iso="2026-05-29T20:00:00.000Z",
+            signed_row=v6_row,
+            epoch=1,
+            round_index=0,
+            time_limit_seconds=300,
+        )
+
+        compat_row = _build_open_window_schema5_compat_row(
+            v6_row,
+            eval_run_id=compat_eval_run_id,
+            ran_at_iso="2026-05-29T20:00:00.001Z",
+            signer=signer,
+        )
+        assert compat_row["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION
+        await repo.insert_ranked_eval_run(
+            conn,
+            family_id=FAMILY,
+            challenge_id=CHALLENGE,
+            miner_hotkey=hotkey,
+            submission_id=sub_id,
+            cnf_sha256="ab" * 32,
+            dimacs_solution_sha256="cd" * 32,
+            ran_at_iso=str(compat_row["ran_at"]),
+            signed_row=compat_row,
+            epoch=1,
+            round_index=0,
+            time_limit_seconds=300,
+        )
+
+        runs = await repo.list_eval_runs_recent(
+            conn,
+            since=datetime(2026, 5, 1, tzinfo=UTC),
+            include_v3=True,
+            include_task_families=True,
+        )
+        compat_run = next(r for r in runs if r["id"] == compat_eval_run_id)
+        sub = {
+            "id": sub_id,
+            "display_name": "V6 Gold Miner",
+            "miner_hotkey": hotkey,
+            "card_id": FAMILY,
+            "logo_url": None,
+        }
+        served = _eval_run_to_output(compat_run, sub)
+
+        assert served["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION
+        assert "solve_rank" not in served
+        verify_eval_output_signature(served, pk)
+        assert _hotkey_for(served) == hotkey
+
+        await upsert_pulled_eval(conn, eval_run=served, miner_hotkey=hotkey)
+        scores = await latest_pulled_score_per_hotkey(
+            conn,
+            since_days=3650,
+            task_family_weights={FAMILY: 1.0},
+        )
+        assert scores[hotkey] == pytest.approx(1.0)
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_open_window_v5_compat_backfill_is_idempotent(tmp_path) -> None:
+    conn = await _conn(tmp_path)
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+    signer = EvalSigner(sk)
+
+    sub_id = "sub-v5-backfill-1"
+    hotkey = "5V5BackfillMiner"
+    eval_run_id = "v6-backfill-source-001"
+    try:
+        await _seed_submission(conn, sub_id=sub_id, hotkey=hotkey)
+        ledger = await repo.record_ranked_solve(
+            conn,
+            family_id=FAMILY,
+            challenge_id=CHALLENGE,
+            miner_hotkey=hotkey,
+            eval_run_id=eval_run_id,
+            weighted_score=1.0,
+            solved_at_iso=datetime.now(UTC).isoformat(),
+        )
+        v6_row = _build_v6_row(
+            eval_run_id=eval_run_id,
+            submission_id=sub_id,
+            hotkey=hotkey,
+            solve_rank=ledger.solve_rank,
+            w_c=4.0,
+            signer=signer,
+        )
+        # Make the row recent enough for the default 24h backfill window.
+        v6_row["ran_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        await repo.insert_ranked_eval_run(
+            conn,
+            family_id=FAMILY,
+            challenge_id=CHALLENGE,
+            miner_hotkey=hotkey,
+            submission_id=sub_id,
+            cnf_sha256="ab" * 32,
+            dimacs_solution_sha256="cd" * 32,
+            ran_at_iso=str(v6_row["ran_at"]),
+            signed_row=v6_row,
+            epoch=1,
+            round_index=0,
+            time_limit_seconds=300,
+        )
+
+        assert await backfill_open_window_schema5_compat_rows(conn, signer=signer) == 1
+        assert await backfill_open_window_schema5_compat_rows(conn, signer=signer) == 0
+
+        compat_id = f"{eval_run_id}-v5compat"
+        runs = await repo.list_eval_runs_recent(
+            conn,
+            since=datetime(2026, 5, 1, tzinfo=UTC),
+            include_v3=True,
+            include_task_families=True,
+        )
+        compat_run = next(r for r in runs if r["id"] == compat_id)
+        sub = {
+            "id": sub_id,
+            "display_name": "V6 Gold Miner",
+            "miner_hotkey": hotkey,
+            "card_id": FAMILY,
+            "logo_url": None,
+        }
+        served = _eval_run_to_output(compat_run, sub)
+
+        assert served["eval_output_schema_version"] == TASK_FAMILY_SCHEMA_VERSION
+        verify_eval_output_signature(served, pk)
+        assert _hotkey_for(served) == hotkey
     finally:
         await conn.close()
 
@@ -465,7 +661,6 @@ def test_eval_run_to_output_schema_4_raises() -> None:
         "eval_artifact_manifest_hash": None,
         "eval_artifact_bundle_url": None,
         "eval_artifact_manifest_url": None,
-        "output_card_hash": "a" * 64,
         "polaris_verified": 0,
         "polaris_attestation": None,
     }

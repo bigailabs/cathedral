@@ -373,6 +373,13 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             "operator": str(task_json["operator"])
             if "operator" in task_json
             else sub["miner_hotkey"],
+            # Compatibility for Path-A validators already deployed with v6
+            # signature support but a hotkey extractor that only reads
+            # `miner_hotkey` for schema 3/5 and otherwise falls back to
+            # `output_card.worker_owner_hotkey`. This field is server-built
+            # from the stored row and is not part of the v6 signed subset, so
+            # it does not change signature verification.
+            "output_card": output,
             # --- routing / non-signed metadata ---
             "eval_output_schema_version": 6,
             "cathedral_signature": run["cathedral_signature"],

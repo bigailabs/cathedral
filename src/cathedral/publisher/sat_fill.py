@@ -32,9 +32,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
@@ -46,12 +47,25 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_INTERVAL_SECONDS = 60
 _DEFAULT_TIERS = "1,2,3"
+_OPEN_WINDOW_RETIRE_AFTER_SECONDS = 60 * 60
+_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS = 64
 
 
 def _now_iso() -> str:
     """Millisecond-precision UTC timestamp, matching the CLI's format."""
     now = datetime.now(UTC)
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}" + "Z"
+
+
+def _iso_seconds_before(now_iso: str, seconds: int) -> str:
+    """Return canonical UTC ISO milliseconds for ``now_iso - seconds``."""
+    now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    cutoff = now - timedelta(seconds=int(seconds))
+    return (
+        cutoff.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.")
+        + f"{cutoff.microsecond // 1000:03d}"
+        + "Z"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +94,12 @@ class FillConfig:
 def fill_enabled() -> bool:
     """True iff CATHEDRAL_SAT_FILL_ENABLED is set to a truthy value."""
     raw = os.environ.get("CATHEDRAL_SAT_FILL_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def open_window_retirement_enabled() -> bool:
+    """True iff active open-window SAT challenges should age/solver retire."""
+    raw = os.environ.get("CATHEDRAL_OPEN_WINDOW_ENABLED", "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -186,6 +206,60 @@ def config_from_env() -> FillConfig:
 # ---------------------------------------------------------------------------
 
 
+async def _retire_open_window_ready(
+    *,
+    source: SqliteChallengeSource,
+    tier: int,
+    now_iso: str,
+) -> int:
+    """Retire active open-window challenges that are old enough or saturated."""
+    retired = 0
+    cutoff_iso = _iso_seconds_before(now_iso, _OPEN_WINDOW_RETIRE_AFTER_SECONDS)
+    cur = await source._conn.execute(
+        """
+        UPDATE lane_challenges
+        SET status = 'retired', updated_at_iso = ?
+        WHERE family_id = ?
+          AND status = 'active'
+          AND tier = ?
+          AND updated_at_iso <= ?
+        """,
+        (now_iso, SAT_FAMILY_ID, int(tier), cutoff_iso),
+    )
+    retired += int(cur.rowcount or 0)
+
+    try:
+        cur = await source._conn.execute(
+            """
+            UPDATE lane_challenges
+            SET status = 'retired', updated_at_iso = ?
+            WHERE family_id = ?
+              AND status = 'active'
+              AND tier = ?
+              AND challenge_id IN (
+                  SELECT challenge_id
+                  FROM lane_challenge_solves
+                  WHERE family_id = ?
+                  GROUP BY challenge_id
+                  HAVING COUNT(DISTINCT miner_hotkey) >= ?
+              )
+            """,
+            (
+                now_iso,
+                SAT_FAMILY_ID,
+                int(tier),
+                SAT_FAMILY_ID,
+                _OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS,
+            ),
+        )
+        retired += int(cur.rowcount or 0)
+    except sqlite3.OperationalError as exc:
+        if "lane_challenge_solves" not in str(exc):
+            raise
+    await source._conn.commit()
+    return retired
+
+
 async def run_one_tick(
     *,
     source: SqliteChallengeSource,
@@ -206,12 +280,19 @@ async def run_one_tick(
     read-count-then-promote atomic, so this loop and the win-site refill
     can't both observe the same deficit and overshoot the target.
     """
-    summary = {"tiers_filled": 0, "promoted": 0, "errors": 0}
+    summary = {"tiers_filled": 0, "promoted": 0, "retired": 0, "errors": 0}
     now_iso = _now_iso()
     for tier in config.tiers:
         target = config.target_for(tier)
         try:
             async with db_write_lock:
+                retired = 0
+                if open_window_retirement_enabled():
+                    retired = await _retire_open_window_ready(
+                        source=source,
+                        tier=tier,
+                        now_iso=now_iso,
+                    )
                 promoted = await source.promote_to_target(
                     SAT_FAMILY_ID,
                     tier=tier,
@@ -225,6 +306,15 @@ async def run_one_tick(
             )
             summary["errors"] += 1
             continue
+        if retired:
+            summary["retired"] += retired
+            logger.info(
+                "sat_fill_retired_open_window",
+                tier=tier,
+                retired_count=retired,
+                retire_after_seconds=_OPEN_WINDOW_RETIRE_AFTER_SECONDS,
+                retire_after_distinct_solvers=_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS,
+            )
         if promoted:
             summary["tiers_filled"] += 1
             summary["promoted"] += len(promoted)

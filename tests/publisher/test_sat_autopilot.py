@@ -250,6 +250,29 @@ def test_plan_imports_respects_global_max_per_tick() -> None:
     assert total == 3
 
 
+def test_plan_imports_splits_budget_across_equal_deficits() -> None:
+    plan = _plan_imports(
+        pool_families=[
+            {"family": _FAMILY, "tier": 1, "kind": "random_3sat", "ready_depth": 31},
+            {"family": _FAMILY, "tier": 2, "kind": "random_3sat", "ready_depth": 30},
+        ],
+        cathedral_counts={
+            (1, "random_3sat"): (15, 25),
+            (2, "random_3sat"): (15, 25),
+        },
+        config=AutopilotConfig(
+            default_target_pending=40,
+            max_imports_per_tick=20,
+            target_overrides={},
+        ),
+    )
+    allocations = {(n.tier, n.kind): n.target - n.pending for n in plan}
+    assert allocations == {
+        (1, "random_3sat"): 10,
+        (2, "random_3sat"): 10,
+    }
+
+
 def test_plan_imports_no_deficit_returns_empty() -> None:
     plan = _plan_imports(
         pool_families=[
