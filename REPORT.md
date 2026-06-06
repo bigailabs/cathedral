@@ -17,7 +17,7 @@ This report summarises an automated arithmetic invariant audit of on-chain money
 - Ran a **blind backtest** of generic invariants against 6 known subtensor bugs: **6/6 caught, 0 missed, 0 false alarms**
 - Ran **37 forward checks** across subtensor money-math (staking, dividends, bonds, swap, emission, conversion, accounting, childkey)
 - Found **1 real-new PROPOSED/VERIFIED bug** (conservation violation in `get_parent_child_dividends_distribution`); confirmed by plain-Python re-derivation and z3 witness
-- Proved **22 negative results** (invariants UNSAT — hold over the bounded domain)
+- **22 negative results** (invariants UNSAT — *no violation found* over the bounded domain on a hand model; NOT a proof the code holds — SAT is sound but incomplete: not-found ≠ safe)
 - De-risked the auto-lift path: Kani GREEN on real `substrate-fixed` arithmetic (PR #808), confirming the approach works on the actual Rust fixed-point library used by the chain
 - Scored the supply pipeline at 100 targets across 3 tiers, representing ~$80–100B net value-at-risk
 
@@ -331,7 +331,7 @@ At ~3–5 function-checks per hour per agent: 37 functions per session. Full cor
 
 ### Caveats and Limitations
 
-1. **Model-level only.** Invariants hold over bounded integer abstractions. Extrinsic ordering, storage iteration, cross-pallet side effects, and gas bugs are out of scope.
+1. **Model-level only.** Checks run over bounded integer abstractions on hand-transcribed models — a clean result is "no violation found," not a proof the code holds (the model could be wrong, the bounds too narrow, or the asserted invariant set incomplete). Extrinsic ordering, storage iteration, cross-pallet side effects, and gas bugs are out of scope.
 2. **Bounded-incomplete.** z3 checks finite domains (e.g., stake ≤ 10^15 rao). Values outside these bounds are not covered. Very large values may reveal additional bugs.
 3. **Stateless arithmetic only.** Multi-step exploits requiring specific chain state or ordering are out of scope.
 4. **Witnesses are not exploits.** A witness shows invariant violability at some parameter combination. On-chain impact depends on whether those parameters are reachable. BUG-001 requires `CKBurn > 82%`, which requires sudo action (not currently active on mainnet).
