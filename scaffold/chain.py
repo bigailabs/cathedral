@@ -1,27 +1,25 @@
-"""Chain layer — subtensor connect, metagraph read, gated set_weights, and THE
-GUARD (validator provenance).
+"""Chain layer — subtensor connect, metagraph read, set_weights, and validator
+provenance.
 
-Two safety interlocks are baked into the artifact, not just policy:
+  * PROVENANCE. Every run records which repo/binary/commit is acting as the
+    validator, on which hotkey, on which netuid, since when. The dashboard
+    surfaces it so a tripartite vali is never confused with a production vali.
 
-  1. THE GUARD. Every run records which repo/binary/commit is acting as the
-     validator, on which hotkey, on which netuid, since when. The dashboard
-     surfaces it so a tripartite vali is never confused with a production vali.
-
-  2. PRODUCTION INTERLOCK. set_weights only broadcasts when broadcast=True AND
-     the netuid is not a protected production netuid (39 = SN39). Broadcasting to
-     39 is refused in code — exercise the real extrinsic on TESTNET instead.
-     Default is DRY-RUN: compute + log the weight vector, do not broadcast.
+  * set_weights is DRY-RUN by default (compute + log the vector); pass
+    broadcast=True to actually submit. There is NO per-netuid block: under Yuma,
+    a low-stake validator's vector is stake-weighted and consensus-clipped, so
+    deviating weights or downtime mostly cost our own vtrust, not miner
+    emissions — the decentralized consensus is the safety mechanism, not a code
+    interlock. Broadcasting is the operator's call.
 
 bittensor is imported lazily; if it's absent (it isn't installed in every env)
-the layer still computes weights and runs the guard — it just can't read a live
-metagraph or broadcast, which it reports honestly.
+the layer still computes weights and records provenance — it just can't read a
+live metagraph or broadcast, which it reports honestly.
 """
 from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass, field
-
-PROTECTED_NETUIDS = {39}        # SN39 production — never broadcast here
 
 
 @dataclass(frozen=True)
@@ -64,7 +62,7 @@ class WeightVector:
 class ChainClient:
     def __init__(self, *, netuid: int, network: str = "finney",
                  wallet_name: str = "", hotkey: str = "", broadcast: bool = False):
-        self.netuid = int(netuid)   # coerce: the PROTECTED_NETUIDS check is by int
+        self.netuid = int(netuid)
         self.network = network
         self.wallet_name = wallet_name
         self.hotkey = hotkey
@@ -131,12 +129,10 @@ class ChainClient:
         return WeightVector(by_uid=by_uid, by_label=by_label)
 
     def set_weights(self, wv: WeightVector) -> dict:
-        """Gated submit. DRY-RUN unless broadcast=True; HARD-REFUSED on protected
-        production netuids regardless of the flag."""
-        if self.netuid in PROTECTED_NETUIDS and self.broadcast:
-            return {"submitted": False, "refused": True,
-                    "reason": f"netuid {self.netuid} is production (SN39); broadcast "
-                              f"refused in code. Use testnet to exercise set_weights."}
+        """Submit weights. DRY-RUN unless broadcast=True (explicit opt-in); no
+        per-netuid block — a low-stake validator's vector is stake-weighted and
+        consensus-clipped under Yuma, so deviating or going dark mostly costs our
+        own vtrust, not miner emissions. That's decentralization doing its job."""
         if not self.broadcast:
             return {"submitted": False, "dry_run": True,
                     "weight_vector": wv.nonzero(), "uids": wv.by_uid}

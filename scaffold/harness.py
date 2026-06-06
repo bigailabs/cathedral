@@ -7,13 +7,13 @@ hotkey — no per-HK registration cost).
 
 Runs R rounds against the (read-only) live netuid metagraph, grading honest +
 exploit workers across all 3 lanes, accumulating growth, and computing the
-weight vector each round. Broadcast is GATED (chain.ChainClient) and hard-refused
-on production netuid 39 — DRY-RUN by default. Lane B routes a CAPPED number of
+weight vector each round. Broadcast is DRY-RUN by default (pass broadcast=True to
+submit); no per-netuid block — see chain.py. Lane B routes a CAPPED number of
 real /v1/attest calls (cost tracked), then falls back to the offline stub.
 
-Run:  python -m scaffold.harness            # dry-run vs live 39 metagraph
+Run:  python -m scaffold.harness            # dry-run vs live metagraph
 Env:  ATTEST_KEY=...    -> enables capped real /v1/attest for Lane B
-      TRIPARTITE_NETUID -> default 39 (read-only); broadcast still refused on 39
+      TRIPARTITE_NETUID -> default 39 (read-only metagraph)
 """
 from __future__ import annotations
 
