@@ -96,7 +96,7 @@ def render(records):
     def pill(label, n, color):
         return f'<span class=pill style="border-color:{color}"><b style="color:{color}">{n}</b> {label}</span>'
     funnel = (pill("checks run", checks, GREY)
-              + pill("clean · invariant held (UNSAT)", clean_n, GREEN)
+              + pill("no violation found · bounded (UNSAT)", clean_n, GREEN)
               + pill("candidates (SAT)", candidates, BLUE)
               + pill("REAL-NEW", cls.get("real-new", 0), GREEN)
               + pill("negligible", cls.get("negligible", 0), AMBER)

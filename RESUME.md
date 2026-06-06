@@ -33,8 +33,12 @@ counterexamples.
    opentensor/subtensor@main character-by-character. Receipt: `forward-hunt/CANDIDATES.md`.
    **NOT yet disclosed to OpenTensor — that's Fred's call.**
 4. **Score rate (honest):** first full subtensor sweep = 1 verified new bug / 37 invariant-checks
-   (~25 functions). 30 clean (invariant provably holds in-band) — valuable negatives. n is small;
-   more catches come from BREADTH (the corpus), not from re-scanning subtensor.
+   (~25 functions). The other ~30 were "no violation found" — bounded + only-the-invariants-we-
+   asserted + on a hand model, so they are NOT proof the code holds (SAT bug-finding is SOUND:
+   a found bug is real; INCOMPLETE: not-found != safe). "Holds" is only earned by a COMPLETE
+   full-domain Kani proof, not a bounded z3 clean. Clean results are weak negatives, not safety
+   claims, and are NOT evidence the method works — only verified catches are. n is small; more
+   catches come from BREADTH (the corpus), not from re-scanning subtensor.
 5. **Supply / breadth:** `targets/` = 100 auditable protocols catalogued (targets.jsonl +
    CATALOGUE.md), ~$80-100B net value-at-risk, 32 Kani-ready Substrate/Rust, 5 fixed-point libs
    covering ~$20B downstream. ~30k solvable instances/full-pass ≈ 3.6 days of full-fleet feed,
