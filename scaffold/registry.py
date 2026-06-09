@@ -33,7 +33,11 @@ def install_default_lanes() -> None:
     from .lanes.sat_challenge import SatChallengeLane
     from .lanes.solver_docker import SolverDockerLane
     from .lanes.encoding import EncodingLane
+    from .lanes.solver_arena import SolverArenaLane
 
-    for lane in (SatChallengeLane(), SolverDockerLane(), EncodingLane()):
+    # SolverArenaLane (Lane S) is STATEFUL — its champion + registry persist
+    # across rounds, so the core holds one instance for the validator's lifetime.
+    for lane in (SatChallengeLane(), SolverDockerLane(), EncodingLane(),
+                 SolverArenaLane()):
         if lane.family_id not in _REGISTRY:
             register(lane)

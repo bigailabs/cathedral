@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cathedral v4 — The Always-On, Paid SAT Competition</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --ink:#e8e6e1; --dim:#9a978f;
+    --red:#e06c5b; --green:#7fb878; --gold:#d9a441; --blue:#6ea3d8; --line:#2a2f3a;
+    --mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:16px/1.65 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;padding:0 0 80px}
+  .wrap{max-width:880px;margin:0 auto;padding:0 24px}
+  header{padding:64px 0 32px;border-bottom:1px solid var(--line);margin-bottom:40px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin-bottom:14px}
+  h1{font-size:38px;line-height:1.15;font-weight:800;letter-spacing:-.02em}
+  h1 .sub{display:block;font-size:19px;font-weight:400;color:var(--dim);margin-top:12px;letter-spacing:0}
+  h2{font-size:24px;font-weight:750;margin:56px 0 8px;letter-spacing:-.01em}
+  h2 .num{color:var(--gold);font-family:var(--mono);font-size:16px;margin-right:10px}
+  h3{font-size:17px;font-weight:700;margin:26px 0 6px}
+  p{margin:12px 0;color:var(--ink)}
+  p.lead{font-size:18.5px;color:var(--ink)}
+  .dim{color:var(--dim)}
+  .small{font-size:13.5px}
+  em{color:var(--gold);font-style:normal;font-weight:600}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px;margin:18px 0}
+  .verdict{border-left:4px solid var(--gold);background:linear-gradient(90deg,rgba(217,164,65,.07),transparent 60%)}
+  .dead{border-left:4px solid var(--red)}
+  .dead h3{color:var(--red)}
+  .alive{border-left:4px solid var(--green)}
+  .alive h3{color:var(--green)}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:3px 9px;border-radius:99px;margin-bottom:10px}
+  .tag.kill{background:rgba(224,108,91,.14);color:var(--red)}
+  .tag.keep{background:rgba(127,184,120,.14);color:var(--green)}
+  .tag.info{background:rgba(110,163,216,.14);color:var(--blue)}
+  .why{background:var(--panel2);border-radius:8px;padding:12px 16px;margin-top:12px;font-size:14.5px}
+  .why b{color:var(--blue)}
+  .num-big{font-family:var(--mono);font-size:30px;font-weight:700;color:var(--gold)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;text-align:center}
+  .stat .lab{font-size:13px;color:var(--dim);margin-top:6px}
+  .flow{display:flex;flex-direction:column;gap:0;margin:20px 0}
+  .fbox{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+  .fbox b{color:var(--gold)}
+  .farrow{text-align:center;color:var(--dim);font-size:20px;padding:2px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.5px}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  td.r{color:var(--red);font-weight:600} td.g{color:var(--green);font-weight:600}
+  .quote{border-left:3px solid var(--blue);padding:8px 18px;margin:16px 0;color:var(--dim);font-style:italic}
+  .quote .who{display:block;font-style:normal;font-family:var(--mono);font-size:12px;margin-top:6px;color:var(--blue)}
+  .lane{border-radius:12px;padding:22px 24px;margin:16px 0;border:1px solid var(--line)}
+  .laneS{background:linear-gradient(135deg,rgba(110,163,216,.08),var(--panel))}
+  .laneI{background:linear-gradient(135deg,rgba(217,164,65,.08),var(--panel))}
+  .lane h3{margin-top:0}
+  .pill{font-family:var(--mono);font-size:12px;color:var(--dim)}
+  code{font-family:var(--mono);font-size:13.5px;background:var(--panel2);padding:2px 6px;border-radius:5px}
+  .footer{margin-top:70px;padding-top:24px;border-top:1px solid var(--line);font-size:13px;color:var(--dim)}
+  .toc{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
+  .toc a{font-family:var(--mono);font-size:12.5px;color:var(--blue);text-decoration:none;border:1px solid var(--line);border-radius:99px;padding:5px 13px}
+  .toc a:hover{border-color:var(--blue)}
+  a{color:var(--blue)}
+  ul{margin:10px 0 10px 22px}
+  li{margin:7px 0}
+  .big-idea{background:linear-gradient(135deg,rgba(217,164,65,.12),rgba(110,163,216,.06));border:1px solid rgba(217,164,65,.35);border-radius:14px;padding:28px 30px;margin:28px 0}
+  .big-idea p:first-child{font-size:21px;font-weight:700;line-height:1.4}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">Cathedral v4 · SN39 · Design — from the primary papers, 2026-06-09</div>
+  <h1>The Always-On, Paid SAT Competition
+    <span class="sub">What the subnet should be, in plain English — and why every other candidate design failed when we read the actual papers instead of the summaries.</span>
+  </h1>
+  <div class="toc">
+    <a href="#tldr">TL;DR</a>
+    <a href="#what">The 60-second backgrounder</a>
+    <a href="#dead">4 designs that died</a>
+    <a href="#alive">What survived</a>
+    <a href="#design">The v4 design</a>
+    <a href="#money">Where the money flows</a>
+    <a href="#honest">The honest caveats</a>
+  </div>
+</header>
+
+<!-- ===================== TLDR ===================== -->
+<section id="tldr">
+  <div class="big-idea">
+    <p>Cathedral v4 is a standing world-record bounty for making logic solvers better. Miners win money only by publishing an open-source solver that provably beats the reigning world champion — or by finding a puzzle that provably breaks it.</p>
+    <p class="dim" style="margin-top:14px">Every claim is checked by math (certificates), not opinions. No progress&nbsp;→&nbsp;the money burns. A record falls&nbsp;→&nbsp;the bounty pays out. The world's SAT Competition runs once a year and pays nothing; Cathedral runs it every day and pays.</p>
+  </div>
+</section>
+
+<!-- ===================== BACKGROUNDER ===================== -->
+<section id="what">
+  <h2><span class="num">①</span>The 60-second backgrounder (skip if you know SAT)</h2>
+  <p><b>What's a SAT solver?</b> A program that answers questions of the form <i>"here are thousands of interlocking logical conditions — is there any way to satisfy all of them at once?"</i> These questions secretly run the modern world: chip design verification, cloud security checks (AWS runs <em>a billion</em> of them per day), software package managers, scheduling.</p>
+  <p><b>The magic property:</b> when a solver answers, the answer can carry a <em>certificate</em> — a receipt that anyone can check in milliseconds, with mathematical certainty. A "yes" comes with the solution itself (plug it in, see it works). A "no" comes with a proof file (a standard checker validates it). <b>You never have to trust the solver — or the person who ran it.</b></p>
+  <p><b>The weird economics:</b> the best solvers in the world (kissat, CaDiCaL, Z3) are free and open-source. Companies take them, deploy in-house, and capture billions in downstream value. Nobody pays per-solve. The only thing the whole industry actually consumes from this field is <em>better solvers</em> — and the institution that produces them, the annual SAT Competition, pays its winners nothing and gives feedback once a year.</p>
+</section>
+
+<!-- ===================== WHAT DIED ===================== -->
+<section id="dead">
+  <h2><span class="num">②</span>Four designs that died when we read the actual papers</h2>
+  <p class="lead">We had four candidate designs for v4. We pulled the primary papers (not summaries, not abstracts) and read them. Three of our own earlier favorites — including the one in the previous draft — did not survive.</p>
+
+  <div class="card dead">
+    <span class="tag kill">Killed</span>
+    <h3>Design A — "Pay miners to submit answers" (what SN39 does today)</h3>
+    <p>Miners run a free solver on a big machine and race to submit solutions to puzzles we generated ourselves.</p>
+    <div class="why"><b>Why it's dead:</b> the subnet ends each day owning… answers to its own puzzles, which are worth nothing to anyone. The contest measures who owns the biggest server, not who improved anything. All capability stays private and leaves with the miners. Three separate market studies (ours, 2026) found <b>zero documented buyers anywhere on Earth</b> who pay per-solve — chip companies and AWS all solve in-house with free tools.</div>
+  </div>
+
+  <div class="card dead">
+    <span class="tag kill">Killed</span>
+    <h3>Design B — "A gym that trains AI models to reason" (the previous v4 draft)</h3>
+    <p>Miners submit neural models; we grade them on logic puzzles; the bet was that models get better at "reasoning in general."</p>
+    <div class="why"><b>Why it's dead:</b> eight years of published research says the transfer doesn't happen. The landmark paper's own authors (NeuroSAT, ICLR 2019): <i>"we see no obvious path to beating existing SAT solvers."</i> The 2024 benchmark study across the whole field (G4SATBench): neural nets trained on these puzzles learn <b>local pattern-matching tricks, not reasoning</b>, and <i>"struggle to generalize to datasets distinct from their training data in most cases."</i> We'd be paying miners to overfit a puzzle generator and calling it intelligence.</div>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--gold)">
+    <span class="tag info">Deferred — revived as Lane F (frontier research track)</span>
+    <h3>Design C — "A trustless fleet that solves giant problems together" (the research-brief favorite)</h3>
+    <p>Split an impossibly hard problem into independent chunks ("cubes"), let thousands of anonymous miners each solve one, stitch the proof together.</p>
+    <div class="why"><b>Dead for general use, alive for the frontier:</b> MallobSat (JAIR 2024, 3,072 cores) shows that for <i>normal</i> problems the winning approach needs workers sharing information over datacenter-speed links — not a fit for anonymous strangers. But for decade-class open math problems (Kochen-Specker, Schur 6, Ramsey), chunk-solving is the proven method, the conquer phase is embarrassingly parallel and miner-shaped (cubing is only ~11–13% of CPU time), and exactly <b>two gaps</b> stand between the papers and a trustless fleet: <b>(1) WAN data transfer</b> — our decentralized-training transfer analysis (compression, async scheduling) may close the cube-dispatch/clause-sharing envelope; <b>(2) proof custody</b> — per-cube proofs reach terabytes <i>if stored</i>, but on-the-fly LRAT checking runs at solving speed (2024 result), so <b>attested check-then-discard</b> (a TDX runner verifies each cube's proof as it's produced and signs the verdict; only signed verdicts + the cube-cover proof persist) may make storage unnecessary. Both gaps are the standing research brief. When they close, Lane F's cubes become the community challenge stream — real open problems instead of synthetic puzzles.</div>
+  </div>
+
+  <div class="card dead">
+    <span class="tag kill">Killed</span>
+    <h3>Design D — "Our secret puzzle generator is the moat"</h3>
+    <p>Every prior design leaned on one belief: we can generate unlimited puzzles that are provably hard, with hidden answers, forever.</p>
+    <div class="why"><b>Why it's dead as a foundation:</b> the "hard planted puzzle" papers (2002, 2005) tested tiny instances (50–300 variables) against solvers from two decades ago, and called their own hardness claims <i>conjectures</i>. The kill shot is a 2019 paper: a <b>~100-line script</b> called PUPPER, with none of a modern solver's machinery, took <b>2nd place in the SAT Competition's random track</b> — by cracking essentially every instance from <i>exactly the generator families our research briefs were citing</i>. The competition cancelled that track afterward. History's pattern: every "hard generator" stayed hard only until someone looked at it with the right cheap trick. You don't build a money machine on an unproven conjecture with that track record.</div>
+  </div>
+</section>
+
+<!-- ===================== WHAT SURVIVED ===================== -->
+<section id="alive">
+  <h2><span class="num">③</span>The two facts that survived — and point at one design</h2>
+
+  <div class="card alive">
+    <span class="tag keep">Survived & got stronger</span>
+    <h3>Fact 1 — Improving world-class solvers is now cheap. The bottleneck is trusted evaluation.</h3>
+    <p>The SATLUTION paper (NVIDIA, 2025) let AI coding agents evolve SAT solver code in a loop. Starting from the 2024 competition codebases, after 70 iterations the evolved solvers <b>beat the human winners of SAT Competition 2025</b>.</p>
+    <div class="grid2" style="margin-top:14px">
+      <div class="stat"><div class="num-big">&lt; $20,000</div><div class="lab">total cost to beat the world (≈$1.9k of AI tokens + ≈$10k of compute)</div></div>
+      <div class="stat"><div class="num-big">90,000</div><div class="lab">CPU-hours of <b>evaluation</b> — the actual scarce ingredient: an 800-node, certificate-checked testing engine</div></div>
+    </div>
+    <div class="why"><b>The authors' own words:</b> a robust verifier is <i>"not optional but foundational — the anchor that allows agent-driven evolution to proceed."</i> Translation: the intelligence is now nearly free. What's rare is a <b>permanent, honest, massively-parallel referee</b>. That is, almost word for word, what a Bittensor subnet natively is.</div>
+  </div>
+
+  <div class="card alive">
+    <span class="tag keep">Survived</span>
+    <h3>Fact 2 — The world consumes exactly one artifact from this field: better open solvers.</h3>
+    <p>Reading AWS's own papers in full: their billion daily queries run <b>in-house</b> on a portfolio of free solvers, with sub-second latency needs. They don't want to outsource solving — they explicitly say they fund <em>solver R&amp;D</em> and are <i>"willing to evaluate new solvers."</i> Chip companies: same — they license tools and want better engines. Nobody buys solves. <b>Everybody takes better solvers.</b></p>
+    <div class="why"><b>So the right product is the artifact, not the service.</b> Today's SN39 answer-race can't produce that artifact: a miner with a better solver keeps it private and just wins races with it. To make the subnet's output something the world uses, the solver itself must be what gets submitted, judged, and published.</div>
+  </div>
+</section>
+
+<!-- ===================== THE DESIGN ===================== -->
+<section id="design">
+  <h2><span class="num">④</span>The v4 design: a record-bounty arena with two lanes</h2>
+
+  <p class="lead">Put fact 1 and fact 2 together: the world wants better solvers; producing them now requires only a trusted always-on evaluation engine plus prize pressure. Cathedral v4 <b>is</b> that engine.</p>
+
+  <div class="lane laneS">
+    <h3>🔵 Lane S — Submit a better solver</h3>
+    <p><b>Who plays:</b> anyone — a human expert, or (more likely) a miner running SATLUTION-style AI agents that evolve solver code around the clock.</p>
+    <p><b>What you submit:</b> an open-source solver — source code plus a container image pinned by digest. Submitting is publishing: <b>open-sourcing is the price of getting paid.</b></p>
+    <p><b>How you're judged:</b> the evaluation engine runs your solver, under identical competition conditions, on a fresh hidden batch of diverse puzzles. Every single answer must carry its certificate — a solution that checks, or a proof file that validates. No certificate, no credit. Scoring is PAR-2, the SAT Competition's own metric — <span class="pill">which Cathedral production already ships (v6 open-window scoring)</span>.</p>
+    <p><b>How you win:</b> beat the reigning champion's score past a fixed margin → you take the throne and the bounty. Plus a standing <b>diversity bonus</b>: extra pay for every puzzle that <i>only your solver</i> closes — so being different pays, and the field doesn't collapse into a thousand kissat clones. (Copying is pointless anyway: source hashes are deduplicated, and a copy of the champion beats the champion by definition never.)</p>
+  </div>
+
+  <div class="lane laneI">
+    <h3>🟡 Lane I — Break the champion</h3>
+    <p><b>Who plays:</b> anyone who can craft or find a puzzle the champion is bad at.</p>
+    <p><b>What you submit:</b> a puzzle instance. Talk is cheap, so hardness must be <b>proven, not claimed</b>: your instance pays only if the champion times out on it <i>while some other submitted solver closes it with a valid certificate</i>. That disagreement — one solver proves it solvable, the champion fails — is mathematical proof the champion has a real weakness there.</p>
+    <p><b>Why this lane exists:</b> it makes the benchmark <em>self-healing</em>. This is the direct fix for the PUPPER disaster (Design D): if a puzzle family secretly falls to a cheap trick, some miner's solver embodying the trick will close those instances, they stop separating solvers, and their reward dries up — automatically. No hardness conjectures required, ever. The benchmark is hard <i>by construction</i>, refreshed by adversaries, forever.</p>
+  </div>
+
+  <div class="lane" style="background:linear-gradient(135deg,rgba(127,184,120,.08),var(--panel))">
+    <h3>🟢 Lane A — community challenges (today's SN39, evolved — nobody gets rug-pulled)</h3>
+    <p>The community keeps receiving SAT challenges, exactly as now: solve, submit, get certificate-checked, earn a PAR-2 budget share. What's new: challenge batches can name a <b>designated solver</b> — typically the reigning Lane S champion — so anyone can play with zero solver expertise (<i>"docker pull the champion, point it at the board"</i>). That turns community solve-work into distributed replication of the arena's results, and when Lane F matures, these same challenges become cubes of real open math problems instead of synthetic puzzles.</p>
+  </div>
+
+  <div class="lane" style="background:linear-gradient(135deg,rgba(224,108,91,.07),var(--panel))">
+    <h3>🔴 Lane F — frontier fleet (research track, not in launch scope)</h3>
+    <p>The revived Design C: point the whole ecosystem at decade-class open math problems. Blocked on two named research gaps — WAN data transfer (our decentralized-training transfer analysis is the starting corpus) and proof custody (attested check-then-discard instead of terabyte storage). The day they close, Lane A's challenge stream switches from synthetic to historic.</p>
+  </div>
+
+  <h3>The loop, end to end</h3>
+  <div class="flow">
+    <div class="fbox">🟡 <b>Lane I miners</b> hunt for puzzles that expose the champion's weaknesses → the benchmark gets harder exactly where solvers are weakest</div>
+    <div class="farrow">↓</div>
+    <div class="fbox">🔵 <b>Lane S miners</b> evolve solvers against that living benchmark (this is the SATLUTION loop, run by the market instead of one NVIDIA team)</div>
+    <div class="farrow">↓</div>
+    <div class="fbox">⚖️ <b>The evaluation engine</b> referees with certificates — every claim checked by math, runtimes measured on standardized attested hardware, never self-reported</div>
+    <div class="farrow">↓</div>
+    <div class="fbox">👑 <b>A record falls</b> → bounty pays, burn steps down one notch, the new champion becomes the target → both lanes re-aim</div>
+    <div class="farrow">↓</div>
+    <div class="fbox">🌍 <b>The world receives</b>: a stream of state-of-the-art open solvers + a living, ungameable benchmark — the two things AWS and the field say they actually want</div>
+  </div>
+
+  <h3>Who runs the 90,000 CPU-hours? The community does. We run nothing.</h3>
+  <p>We operate <b>zero</b> eval infrastructure — no cluster, no hosted referee. The community benchmarks the solvers, in three trust tiers:</p>
+  <ul>
+    <li><b>Base tier (anyone, any hardware):</b> solve challenges with your block-hash-assigned designated solver. Correctness is checked by certificates. The coverage signal ("can solver X close this instance at all?") is <b>unfakeable by construction</b> — faking it requires solving the instance anyway, so lying costs more than honesty. Relative speed comes from cohort racing by receipt order (the same trick production scoring already uses to neutralize hardware differences).</li>
+    <li><b>Attested tier (opt-in, higher multiplier):</b> run inside a TDX-attested runner — verified via the working Polaris <code>/v1/attest</code> flow — and your submissions cryptographically bind <i>which solver, which instance, what time</i>. Attested work earns a <b>multiplier</b> over unattested work. The multiplier is the infrastructure budget: it buys trusted referee capacity from the market instead of from us.</li>
+    <li><b>Title matches &amp; audits (attested quorum):</b> when a challenger's community numbers cross the nomination threshold, a quorum of independent attested runners plays the title match (median verdict). The same attested population earns fees for spot-check audits of base-tier claims — a claim that doesn't reproduce gets the claimant slashed. Optimistic benchmarking with fraud proofs.</li>
+  </ul>
+  <p class="small dim">Neat consequence: the scaffold's existing grading policy — "only TIMEOUT claims need attestation; correct answers self-verify for free" — turns out to be exactly right for this. The only thing attestation ever has to vouch for is "this solver <i>failed</i> here," which is precisely the champion-breaking hardness proof and the timeout half of a title match.</p>
+</section>
+
+<!-- ===================== MONEY ===================== -->
+<section id="money">
+  <h2><span class="num">⑤</span>Where the money flows (the burn, made literal)</h2>
+  <p>SN39 currently burns ~85% of emissions. v4 turns the burn dial into a <b>scoreboard</b>:</p>
+  <table>
+    <tr><th>Event</th><th>What happens to emissions</th></tr>
+    <tr><td>Nobody beats the champion, nobody breaks it</td><td class="r">Burn stays high. The subnet pays almost nothing — honestly — because nothing was achieved.</td></tr>
+    <tr><td>A solver record falls (certificate-verified)</td><td class="g">Jackpot to the new champion; burn steps down a notch. This <b>is</b> the public tier-jackpot commitment, now triggered by verified world-record progress instead of by our own difficulty ladder.</td></tr>
+    <tr><td>A champion-breaking instance is proven (Lane I)</td><td class="g">Steady payment to the instance author while the weakness stays open — decaying as solvers adapt.</td></tr>
+    <tr><td>Attested eval work performed</td><td class="g">Per-eval payment to attested runners.</td></tr>
+  </table>
+  <p>One sentence: <em>emission buys exactly one thing — mathematically verified algorithmic progress beyond the current world frontier — and when there is none, it buys nothing.</em> No other subnet can say that, and no judge, vote, or opinion appears anywhere in the payout path.</p>
+</section>
+
+<!-- ===================== HONEST ===================== -->
+<section id="honest">
+  <h2><span class="num">⑥</span>The honest caveats (carried, not hidden)</h2>
+  <div class="card">
+    <ul>
+      <li><b>Still emission-funded.</b> Solvers are free goods; nobody will pay us cash for them. The difference from before: the output is now a real artifact the industry demonstrably consumes (AWS portfolios, EDA engines, every Z3 deployment), produced by a mechanism with no fake-progress leak. It's a public-good engine, priced in burn — say that, never "revenue."</li>
+      <li><b>Running strangers' code is real engineering.</b> Mitigations: the SAT Competition has safely run untrusted submissions for 20+ years (StarExec); our monolith already contains a never-deployed sandbox jail (network-isolated, resource-limited) built for exactly this; containers are pinned by digest; and a solver's <i>outputs</i> are certificate-checked regardless of what its code does.</li>
+      <li><b>The adversarial surface moves to benchmark gaming.</b> A champion could try to overfit the instance pool. That's what Lane I is for — adversaries are paid to find what the champion can't do — plus hidden fresh batches and family rotation. The arms race isn't a bug; it's the product.</li>
+      <li><b>Cold-start question:</b> can SATLUTION-style miners actually keep beating records, or does progress plateau? Unknown. But the failure mode is graceful and honest: plateau → burn stays high → we've lost nothing and paid for nothing. Compare Design B's failure mode: paying out forever for overfitting.</li>
+      <li><b>Migration is unchanged from the prior plan:</b> the thin scaffold core, the production non-regression inventory (PAR-2/v6, certificates, signed-vector Path B, preflight rails, burn enforcement, sybil dedup) all carry over. Shadow-compute v4 weights through the existing <code>shadow_weight_diffs</code> machinery, blend in via the existing lane-weight knob, ramp, retire the monolith.</li>
+    </ul>
+  </div>
+
+  <div class="card verdict">
+    <span class="tag info">The one-sentence pitch</span>
+    <p style="font-size:19px;font-weight:650;line-height:1.5">The SAT Competition proved the institution creates the world's best solvers — once a year, for free. SATLUTION proved AI agents can now win it for under $20k — bottlenecked only on a trusted referee. Bittensor is the only structure that can run that referee permanently, permissionlessly, and with real prize money. Cathedral v4 is that referee.</p>
+  </div>
+
+  <div class="quote">
+    "Cathedral is the always-on, paid SAT Competition."
+    <span class="who">— our own research notes, two weeks before we read the papers that proved it was the only design left standing</span>
+  </div>
+</section>
+
+<div class="footer">
+  <p><b>Primary sources read in full for this page:</b> SATLUTION (arXiv:2509.07367) · MallobSat (JAIR 2024) · Cube&amp;Conquer lineage (Heule et al. 2011/2016, Paracooba 2020) · AlphaMapleSAT (arXiv:2401.13770) · Proofix (SAT 2025) · Interactive UNSAT proofs (arXiv:2401.14996) · NeuroSAT (arXiv:1802.03685) · NeuroBack (arXiv:2110.14053) · RLAF (arXiv:2505.16053) · G4SATBench (arXiv:2309.16941) · A Billion SMT Queries a Day (CAV 2022) · Zelkova (FMCAD 2018) · Barthel et al. (cond-mat/0111153) · Jia–Moore–Strain (cs/0503044) · Feldman–Perkins–Vempala (arXiv:1311.4821) · PUPPER (arXiv:1912.05906) · quiet planting (arXiv:1203.5521).</p>
+  <p style="margin-top:8px">Cathedral v4 design · SN39 · 2026-06-09 · companion to <code>V4-DESIGN.md</code> (the current engineering design: four lanes — S solver arena, A community challenges with designated solvers, I breaker instances, F frontier fleet research).</p>
+</div>
+
+</div>
+</body>
+</html>

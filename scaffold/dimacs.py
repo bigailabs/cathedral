@@ -66,7 +66,15 @@ def solve_cnf(cnf_text: str) -> list[int] | None:
     """Tiny DPLL with unit propagation — enough for an honest miner to solve the
     scaffold's small planted instances. Returns a complete signed-literal
     assignment, or None if UNSAT. Not a competitive solver; a real miner brings
-    cadical/kissat. Deterministic (picks the lowest unassigned var)."""
+    cadical/kissat.
+
+    Branching uses a deterministic literal-frequency heuristic over the
+    CURRENTLY-UNSATISFIED clauses (a Jeroslow-Wang-style most-occurring-literal
+    pick), trying the more-common polarity first. This stays a COMPLETE,
+    deterministic DPLL (both polarities are explored on backtrack) but finds the
+    planted assignment without the deep blind backtracking that made the naive
+    lowest-var/True-first order exponential on the tier-2 instances. Correctness
+    is unchanged — only the search order improved."""
     n_vars, clauses = parse_cnf(cnf_text)
 
     def dpll(assign: dict[int, bool]) -> dict[int, bool] | None:
@@ -92,11 +100,24 @@ def solve_cnf(cnf_text: str) -> list[int] | None:
                     u = unassigned[0]
                     a[abs(u)] = u > 0
                     changed = True
-        nxt = next((v for v in range(1, n_vars + 1) if v not in a), None)
-        if nxt is None:
+        # pick the literal occurring most in still-unsatisfied clauses; branch on
+        # its variable, trying the more-frequent polarity first (deterministic).
+        score: dict[int, int] = {}
+        for cl in clauses:
+            if any(a.get(abs(lit)) == (lit > 0) for lit in cl):
+                continue                         # clause already satisfied
+            for lit in cl:
+                if abs(lit) not in a:
+                    score[lit] = score.get(lit, 0) + 1
+        if not score:
+            # no unsatisfied clause has an unassigned literal; fill any free vars.
+            for v in range(1, n_vars + 1):
+                a.setdefault(v, True)
             return a
-        for guess in (True, False):
-            res = dpll({**a, nxt: guess})
+        best_lit = max(score, key=lambda lit: (score[lit], -abs(lit), -lit))
+        var = abs(best_lit)
+        for guess in (best_lit > 0, best_lit <= 0):
+            res = dpll({**a, var: guess})
             if res is not None:
                 return res
         return None

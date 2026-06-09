@@ -35,14 +35,29 @@ class SatChallengeLane:
     family_id = FAMILY_ID
     schema_version = SCHEMA_VERSION
 
+    def __init__(self, designated_solver_digest: str | None = None) -> None:
+        # DESIGNATED SOLVER (v4 Lane A evolution): a challenge batch may NAME a
+        # published Lane S solver (typically the champion) for the community to
+        # run — turning Lane A into distributed evaluation/replication of Lane S
+        # results and a zero-expertise on-ramp ("docker pull the champion, point
+        # it at the board"). It is ADVISORY metadata on the public problem only:
+        # the witness check is unchanged, so a community miner is free to use any
+        # solver and is still graded purely on a certificate-checked, server-timed
+        # assignment. Naming a solver never gates who may submit.
+        self.designated_solver_digest = designated_solver_digest
+
     def mint_challenge(self, ctx: GenerateCtx) -> tuple[PublicProblem, HiddenMetadata]:
         n_vars, n_clauses, tl = _TIERS.get(ctx.tier, _TIERS[1])
         cnf, _planted = gen_planted_3sat(ctx.seed, n_vars, n_clauses)
         task_id = hashlib.sha256(f"{FAMILY_ID}:{ctx.seed}:{ctx.tier}".encode()).hexdigest()[:32]
+        public_input = {"cnf": cnf, "n_vars": n_vars, "n_clauses": n_clauses}
+        if self.designated_solver_digest:
+            # advisory only — does not change verify/score (see __init__).
+            public_input["designated_solver_digest"] = self.designated_solver_digest
         problem = PublicProblem(
             task_family=FAMILY_ID, schema_version=SCHEMA_VERSION, task_id=task_id,
             difficulty_tier=ctx.tier,
-            public_input={"cnf": cnf, "n_vars": n_vars, "n_clauses": n_clauses},
+            public_input=public_input,
             time_limit_seconds=tl,
         )
         # witness discarded; hidden carries only audit shape (no secret needed)
