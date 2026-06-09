@@ -119,6 +119,31 @@ def test_etag_response_200_when_etag_mismatch() -> None:
     assert resp.status_code == 200
 
 
+def test_etag_response_304_on_list_form_our_etag_second() -> None:
+    """If-None-Match list where our ETag is the second member → 304."""
+    payload = {"items": [1, 2, 3]}
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    etag = _compute_etag(body)
+
+    req = _make_request(if_none_match=f'"deadbeef00000000", "{etag}"')
+    resp = etag_response(req, payload)
+    assert resp.status_code == 304
+
+
+def test_etag_response_304_on_star() -> None:
+    """If-None-Match: * → 304 (resource exists)."""
+    req = _make_request(if_none_match="*")
+    resp = etag_response(req, {"items": []})
+    assert resp.status_code == 304
+
+
+def test_etag_response_200_on_list_form_no_match() -> None:
+    """If-None-Match list with no matching member → 200."""
+    req = _make_request(if_none_match='"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"')
+    resp = etag_response(req, {"key": "val"})
+    assert resp.status_code == 200
+
+
 def test_etag_304_still_sends_etag_and_cache_control_headers() -> None:
     """RFC 9110 §15.4.5 — 304 MUST include the same headers as 200."""
     payload = {"items": []}
@@ -208,6 +233,77 @@ async def test_ttl_cache_propagates_builder_error() -> None:
 
     with pytest.raises(RuntimeError, match="db error"):
         await cache.get_or_refresh(failing_builder)
+
+
+@pytest.mark.asyncio
+async def test_ttl_cache_expired_builder_failure_returns_stale() -> None:
+    """Expired cache + raising builder must return the stale body, not raise."""
+    cache = TtlResponseCache(ttl_seconds=0.01)  # 10 ms TTL
+
+    call_count = 0
+
+    async def builder() -> dict:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"version": 1}
+        raise RuntimeError("transient db error")
+
+    # Populate the cache.
+    body1 = await cache.get_or_refresh(builder)
+    assert json.loads(body1) == {"version": 1}
+
+    # Expire the cache entry.
+    await asyncio.sleep(0.02)
+
+    # The second call hits an expired cache with a stale body; builder raises.
+    # Must return the stale body, not propagate the exception.
+    body2 = await cache.get_or_refresh(builder)
+    assert json.loads(body2) == {"version": 1}, "expected stale body on builder failure"
+
+
+@pytest.mark.asyncio
+async def test_ttl_cache_cold_builder_failure_propagates() -> None:
+    """Cold cache (no stale body) + raising builder must propagate the exception."""
+    cache = TtlResponseCache(ttl_seconds=60.0)
+
+    async def failing_builder() -> dict:
+        raise RuntimeError("cold db error")
+
+    with pytest.raises(RuntimeError, match="cold db error"):
+        await cache.get_or_refresh(failing_builder)
+
+    # No body must be cached after a cold failure.
+    assert not cache._body
+
+
+@pytest.mark.asyncio
+async def test_ttl_cache_failed_refresh_then_success_refreshes() -> None:
+    """After a failed refresh (stale served), a subsequent successful builder
+    updates the cache with fresh data."""
+    cache = TtlResponseCache(ttl_seconds=0.01)
+
+    call_count = 0
+
+    async def builder() -> dict:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("transient")
+        return {"version": call_count}
+
+    # Call 1: populate (version=1).
+    await cache.get_or_refresh(builder)
+
+    # Expire and trigger a failing refresh — stale body returned.
+    await asyncio.sleep(0.02)
+    stale = await cache.get_or_refresh(builder)
+    assert json.loads(stale) == {"version": 1}
+
+    # Expire again; this time the builder succeeds (call_count=3).
+    await asyncio.sleep(0.02)
+    fresh = await cache.get_or_refresh(builder)
+    assert json.loads(fresh) == {"version": 3}, "expected refreshed body on recovery"
 
 
 @pytest.mark.asyncio

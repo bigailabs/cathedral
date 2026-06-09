@@ -84,6 +84,12 @@ class TtlResponseCache:
         than queuing behind the lock.  On a cold start the first caller
         waits for the lock and all subsequent callers wait too (no stale
         copy exists yet).
+
+        Builder failure handling:
+        - If a stale body exists when the builder raises, log a warning and
+          return the stale body.  The next caller will retry the refresh.
+        - If no cached body exists at all (cold start), the exception
+          propagates to the caller.
         """
         if self._is_fresh():
             return self._body
@@ -117,8 +123,16 @@ class TtlResponseCache:
             self._body = json.dumps(result, separators=(",", ":")).encode()
             self._expires_at = time.monotonic() + self._ttl
             logger.debug("ttl_cache_refreshed", ttl=self._ttl)
-        except Exception:
-            logger.exception("ttl_cache_refresh_error")
+        except Exception as exc:
+            if self._body:
+                # Stale copy exists — serve it; next caller will retry.
+                logger.warning(
+                    "ttl_cache_refresh_error_serving_stale",
+                    error=str(exc),
+                )
+                return
+            # Cold start — no body to fall back on; propagate to the caller.
+            logger.exception("ttl_cache_refresh_error_cold")
             raise
 
 
@@ -168,11 +182,18 @@ def etag_response(
         "ETag": f'"{etag}"',
     }
 
-    # Check If-None-Match (strip surrounding quotes + W/ prefix per RFC 9110)
-    client_etag = request.headers.get("if-none-match", "")
-    normalised = client_etag.strip().lstrip("W/").strip('"')
-    if normalised == etag:
-        return Response(status_code=304, headers=headers)
+    # Check If-None-Match per RFC 9110:
+    # - "*" means any stored representation matches.
+    # - List form: "etag1", "etag2" — 304 if ANY member matches.
+    # - Each member may carry a weak prefix W/"..." which must be stripped.
+    client_inm = request.headers.get("if-none-match", "").strip()
+    if client_inm:
+        if client_inm == "*":
+            return Response(status_code=304, headers=headers)
+        for member in client_inm.split(","):
+            normalised = member.strip().removeprefix("W/").strip('"')
+            if normalised == etag:
+                return Response(status_code=304, headers=headers)
 
     return Response(
         content=body,
