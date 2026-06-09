@@ -47,8 +47,46 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_INTERVAL_SECONDS = 60
 _DEFAULT_TIERS = "1,2,3"
-_OPEN_WINDOW_RETIRE_AFTER_SECONDS = 60 * 60
-_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS = 64
+# Open-window retirement thresholds. Env-tunable so turnover can be balanced
+# against import throughput without a redeploy (feeding up to ~8k challenges/day
+# needs ~9-min average challenge lifetime against a ~50-slot board).
+_DEFAULT_RETIRE_AFTER_SECONDS = 60 * 60
+_DEFAULT_RETIRE_AFTER_DISTINCT_SOLVERS = 64
+# Grace before a retired challenge's CNF file is unlinked. Retired rows are no
+# longer servable (the /cnf endpoint serves only active or locked-in-grace), so
+# this only needs to outlast an in-flight fetch. DB-driven GC over status=
+# 'retired' rows never touches in-flight imports (those are status='pending').
+_DEFAULT_CNF_GC_GRACE_SECONDS = 5 * 60
+_DEFAULT_CNF_GC_LIMIT = 500
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def retire_after_seconds() -> int:
+    return _env_int(
+        "CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_SECONDS", _DEFAULT_RETIRE_AFTER_SECONDS
+    )
+
+
+def retire_after_distinct_solvers() -> int:
+    return _env_int(
+        "CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS",
+        _DEFAULT_RETIRE_AFTER_DISTINCT_SOLVERS,
+    )
+
+
+def cnf_gc_grace_seconds() -> int:
+    return _env_int(
+        "CATHEDRAL_OPEN_WINDOW_CNF_GC_GRACE_SECONDS", _DEFAULT_CNF_GC_GRACE_SECONDS
+    )
 
 
 def _now_iso() -> str:
@@ -214,7 +252,7 @@ async def _retire_open_window_ready(
 ) -> int:
     """Retire active open-window challenges that are old enough or saturated."""
     retired = 0
-    cutoff_iso = _iso_seconds_before(now_iso, _OPEN_WINDOW_RETIRE_AFTER_SECONDS)
+    cutoff_iso = _iso_seconds_before(now_iso, retire_after_seconds())
     cur = await source._conn.execute(
         """
         UPDATE lane_challenges
@@ -249,7 +287,7 @@ async def _retire_open_window_ready(
                 SAT_FAMILY_ID,
                 int(tier),
                 SAT_FAMILY_ID,
-                _OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS,
+                retire_after_distinct_solvers(),
             ),
         )
         retired += int(cur.rowcount or 0)
@@ -258,6 +296,62 @@ async def _retire_open_window_ready(
             raise
     await source._conn.commit()
     return retired
+
+
+async def gc_retired_cnf_files(
+    *,
+    source: SqliteChallengeSource,
+    now_iso: str,
+    grace_seconds: int,
+    limit: int = _DEFAULT_CNF_GC_LIMIT,
+) -> int:
+    """Unlink CNF files for retired challenges, bounding disk under high churn.
+
+    DB-driven on purpose (never a filesystem scan): it only targets rows whose
+    status is ``retired`` and whose ``updated_at_iso`` is older than the grace
+    window. In-flight imports write their ``.cnf`` BEFORE committing the row and
+    are status ``pending``/uncommitted, so they can never be selected here — this
+    closes the orphan-GC-deletes-an-in-flight-import race. After unlinking, the
+    row's ``cnf_path`` is cleared so it is not reprocessed; the row itself is
+    retained for history. Must run under the publisher ``db_write_lock``.
+    """
+    cutoff_iso = _iso_seconds_before(now_iso, grace_seconds)
+    cur = await source._conn.execute(
+        """
+        SELECT challenge_id, cnf_path
+        FROM lane_challenges
+        WHERE family_id = ?
+          AND status = 'retired'
+          AND cnf_path != ''
+          AND updated_at_iso <= ?
+        ORDER BY updated_at_iso ASC
+        LIMIT ?
+        """,
+        (SAT_FAMILY_ID, cutoff_iso, int(limit)),
+    )
+    rows = await cur.fetchall()
+    removed = 0
+    for challenge_id, cnf_path in rows:
+        if cnf_path:
+            try:
+                os.unlink(cnf_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:  # pragma: no cover - best-effort cleanup
+                logger.warning(
+                    "sat_fill_cnf_unlink_failed",
+                    challenge_id=challenge_id,
+                    error=str(exc),
+                )
+                continue
+        await source._conn.execute(
+            "UPDATE lane_challenges SET cnf_path = '' WHERE challenge_id = ?",
+            (challenge_id,),
+        )
+        removed += 1
+    if removed:
+        await source._conn.commit()
+    return removed
 
 
 async def run_one_tick(
@@ -312,8 +406,8 @@ async def run_one_tick(
                 "sat_fill_retired_open_window",
                 tier=tier,
                 retired_count=retired,
-                retire_after_seconds=_OPEN_WINDOW_RETIRE_AFTER_SECONDS,
-                retire_after_distinct_solvers=_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS,
+                retire_after_seconds=retire_after_seconds(),
+                retire_after_distinct_solvers=retire_after_distinct_solvers(),
             )
         if promoted:
             summary["tiers_filled"] += 1
@@ -324,6 +418,24 @@ async def run_one_tick(
                 target=target,
                 promoted_count=len(promoted),
             )
+
+    # Disk GC for retired file-backed CNFs (once per tick, not per tier). Only
+    # runs when open-window retirement is on, since that is what produces the
+    # 'retired' rows this reclaims.
+    if open_window_retirement_enabled():
+        try:
+            async with db_write_lock:
+                gc_removed = await gc_retired_cnf_files(
+                    source=source,
+                    now_iso=now_iso,
+                    grace_seconds=cnf_gc_grace_seconds(),
+                )
+        except Exception as exc:  # pragma: no cover - safety net
+            logger.exception("sat_fill_cnf_gc_failed", error=str(exc))
+        else:
+            if gc_removed:
+                summary["cnf_files_gc"] = gc_removed
+                logger.info("sat_fill_cnf_gc", removed_count=gc_removed)
     return summary
 
 
