@@ -214,18 +214,42 @@ transition) — preserved as-is from production.
   rlimit-bounded subprocess) → Lane S solver sandbox.
 - v3 receipt-signing/export if Lane F needs signed cube-verdict trails.
 
-## Migration (shadow-first, unchanged shape)
+## Migration to live — ZERO validator updates (verified 2026-06-09)
 
-1. **Prototype Lane S** in `scaffold/lanes/`: solver registry + eval batch
-   runner + champion state machine, stub solvers first, then kissat/cadical
-   real. Lane A designated-solver field. Offline end-to-end via `run_round`.
-2. **Shadow on production rails**: compute v4 weights alongside live ones into
-   `shadow_weight_diffs`; scaffold validator on Stitch in dry-run as clean-room
-   cross-check. ~2 weeks green.
-3. **Blend, don't flip**: Lane S enters at small lane weight via the existing
-   blend path; ramp as confidence grows. Env-gated, reversible.
-4. **Retire the monolith** once v4 lanes carry 100% of non-burn weight for one
-   settlement period.
+Two production facts make the whole swap publisher-side:
+- Validators are REQUIRED to run remote signed-vector mode
+  (`launch_preflight.py:143` — preflight errors without it). They fetch a
+  vector we sign, verify the pinned Ed25519 key, and apply it.
+- The applied burn percentage comes FROM the signed vector
+  (`remote_weight_loop.py:353-360`, `BurnSnapshot.forced_burn_percentage`,
+  range-validated only). **Jackpot burn steps are a vector policy change,
+  not a validator release.**
+
+Therefore the wire contract to live validators is exactly: same vector URL,
+same signing key + key_id, same vector schema, monotonic policy_version /
+unique vector_id (seeded from the live publisher's watermark — a regression
+there gets vectors rejected as replays). Hold those four and validators never
+know the publisher changed underneath them.
+
+Plan (10x-less-code target: scaffold+arena ~3.3k lines + thin publisher
+~1.5k ≈ <5k vs the 46.5k monolith):
+1. **Done:** Lane S arena real on Stitch (kissat dethrone, 38/38 gate).
+2. **Port the vector schema** (`policy/signing.py` shapes + signer) into the
+   scaffold byte-compatible; sign with the SAME production key.
+3. **Thin publisher** (~1.5k lines): signed-vector endpoint + Lane A board /
+   submit + Lane S registry + Lane I intake. Miner-facing API may simplify —
+   miners update readily (incentives); validators are the surface we freeze.
+4. **Shadow:** thin publisher runs beside live, signing candidate vectors
+   never served; diff into `shadow_weight_diffs` (0.10/0.01 thresholds),
+   ~2 weeks green. Publisher-side blend (α·live + (1−α)·v4) since we sign.
+5. **Flip = same-URL deploy swap** (Railway), v4 at small α, ramp to 100%.
+   Failure rail is built-in: validators keep last-known-good on 503 — a
+   botched deploy can't zero anyone.
+6. **Retire the monolith** after one settlement period at 100%.
+7. **Bank the one worth-it validator release** for later, tied to the first
+   jackpot: validators independently re-verify certificates + attestations
+   (the decentralization upgrade — today they trust our key, same as the
+   status quo; no regression, but say it honestly).
 
 ## Open questions
 
