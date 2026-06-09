@@ -72,31 +72,46 @@ produce headlines instead of answers to our own puzzles.
 - Self-healing benchmark: a family that falls to a cheap trick stops separating
   solvers and its reward dries up automatically — the structural fix for the
   PUPPER failure mode.
+- **Pricing + anti-gaming (resolved 2026-06-09):** payment per round =
+  `base × max(0, (champion_par2 − best_closer_par2)/TIMEOUT) × 0.97^r`
+  (half-life ~23 rounds; reaches zero the round the champion closes it).
+  Two required parameters: `QUARANTINE_ROUNDS = 3` (a solver registered in
+  round R can only serve as closing evidence for instances submitted ≤ R−3 —
+  kills the submit-and-farm-same-round loop) and `MIN_BATCH_SCORE = 0.5`
+  (the closing solver must solve ≥50% of the standard Lane S batch — kills
+  trivially-specialized closers). Residual attack requires pre-registering a
+  broadly competitive solver, which is aligned behavior.
 - The encoding lane's faithfulness gates (equivalence probes, traps,
   counterexample verification) generalize into the breaker-verification
   toolkit; `consensus.py` (counterexample-beats-majority) is load-bearing here
   and in Lane A.
 
-### Lane F — frontier fleet (research track; Design C revived, eyes open)
+### Lane F — frontier fleet (research RESOLVED 2026-06-09; build when Lanes S/A/I are live)
 Trustless cube-and-conquer on decade-class open problems (Kochen-Specker
-minimum, Schur 6, van der Waerden, Ramsey). The published record says: conquer
-is embarrassingly parallel and miner-shaped (cubing is ~11–13% of CPU time);
-what's missing is exactly two things, and both look closable from our side:
-1. **Data transfer** — clause sharing/cube dispatch over WAN. Fred's
-   decentralized-training session analyzed transfer techniques (gradient
-   compression, async topologies) that may map onto clause/cube traffic.
-   Concrete question: what bandwidth × latency envelope does useful cube
-   dispatch + selective clause sharing actually need, and do DT-style
-   compression/scheduling tricks fit it?
-2. **Proof custody** — per-cube UNSAT proofs reach terabytes if stored.
-   Candidate concise answer: **check-then-discard with attested checkers** —
-   an attested runner (TDX, our `/v1/attest`) verifies each cube's LRAT
-   on-the-fly at generation (the 2024 literature shows on-the-fly LRAT checking
-   runs at solving speed) and signs the verdict; only the signed verdict +
-   cube-partition cover proof persist. Trust moves from "store and reship
-   terabytes" to "attest verification at the edge."
-Status: NOT in the launch scope. Gaps 1–2 are the Sonnet research brief. When
-they close, Lane F's cubes dispatch through Lane A as premium challenges.
+minimum, Schur 6, van der Waerden, Ramsey). Both blocking gaps closed by the
+research pass (full reports: `~/code/sat-research-center/analysis/v4/`):
+1. **Data transfer — RESOLVED: zero-sharing design.** Cube dispatch is
+   WAN-trivial (~bytes/cube); per-cube LRAT upload fits a 10 Mbps home link
+   (~5 MB per 30s solve, FRAT-era sizes). Clause sharing is dropped entirely —
+   not just infeasible over WAN, but Streamlining 2025 shows it's actively
+   detrimental even on LAN at 3072 cores. Cube cover proof + per-cube LRAT
+   certificates = a complete verifiable proof with no sharing. (Note: the
+   decentralized-training session notes were NOT found on disk — conclusion
+   was re-derived from primary literature; locate/export that session if its
+   techniques should still be mined.)
+   Remaining ops item: re-split-on-timeout policy (a few cubes per thousand
+   are exponentially hard).
+2. **Proof custody — RESOLVED: check-then-HOLD, then discard.** On-the-fly
+   LRAT checking is verified from primaries (Pollitt/Fleury/Biere 2023:
+   checking faster than solving; Lammich 2024: formally verified streaming
+   checker; Schreiber 2024: integrated in distributed C&C). Protocol: TDX
+   runner solves with LRAT streaming into the verified checker → signed
+   verdict (cube-ID, CNF hash, proof-stream hash) → proof to cold storage for
+   a 90-day re-check window (~$80/mo for 20 TB on Glacier — the math
+   community requires re-checkability; no landmark result has been accepted
+   on verdicts alone), then discard. True immediate-discard waits on a
+   production interactive-proof implementation.
+When built, Lane F's cubes dispatch through Lane A as premium challenges.
 
 ## Eval trust — the community is the referee (we run NO eval infrastructure)
 
@@ -212,19 +227,22 @@ transition) — preserved as-is from production.
 4. **Retire the monolith** once v4 lanes carry 100% of non-burn weight for one
    settlement period.
 
-## Open questions (owned by the research track)
+## Open questions
 
-1. Lane F gap 1: WAN clause/cube transfer envelope vs decentralized-training
-   transfer techniques (Fred's DT session analysis is the starting corpus).
-2. Lane F gap 2: check-then-discard proof custody — attested on-the-fly LRAT;
-   what exactly must persist for a publishable mathematical result to be
-   credible (cube cover proof + signed verdicts vs full DRAT)?
-3. Lane S eval variance, reframed for community benchmarking: how many
-   qualifier observations (cohort races, coverage points) for a stable
-   nomination signal, and what quorum size k makes an attested title match
-   decisive?
-4. Lane I pricing: decay curve for breaker payments as solvers adapt.
+Resolved 2026-06-09 (reports in `~/code/sat-research-center/analysis/v4/`):
+1. ~~Lane F transfer~~ → zero-sharing C&C design (see Lane F section).
+2. ~~Proof custody~~ → check-then-hold 90 days, attested streaming LRAT.
+3. ~~Eval variance~~ → first numbers from a local kissat-vs-cadical
+   experiment (220 instances, 2000 bootstraps): batch = 100 minimum, 200
+   preferred (rank-flip 14.8% → 7.0%); dethrone margin >5% of mean-PAR2
+   drives false dethronement below ~3%. Production numbers need the Stitch
+   run: 5 solvers, real SC2024/25 instances, 500 instances, 300s timeouts.
+4. ~~Lane I pricing~~ → share-of-separation decay + quarantine + min-batch
+   score (see Lane I section).
+
+Still open:
 5. Multiplier calibration: how large must the attested multiplier m be to
    draw enough TDX-capable supply for quorums and audits, without making
-   unattested participation worthless? (Onboarding depends on the base tier
-   staying viable.)
+   unattested participation worthless? (Not covered by the research pass.)
+6. Quorum size k for attested title matches (depends on the Stitch variance
+   run).
