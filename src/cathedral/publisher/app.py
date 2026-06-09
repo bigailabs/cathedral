@@ -337,6 +337,12 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         # the connection or re-wiring through dependency injection.
         app.state.task_family_challenge_source = task_family_challenge_source
         app.state.task_family_fetch_token_store = task_family_fetch_token_store
+        # Per-app TTL cache for the hot active-challenges endpoint.  Seeded
+        # here so each app instance (including test fixtures) gets an isolated
+        # TtlResponseCache with no shared state across runs.
+        from cathedral.publisher.response_cache import TtlResponseCache as _TtlResponseCache
+
+        app.state.active_challenges_cache = _TtlResponseCache(ttl_seconds=30.0)
         # Keep the signed-weight route and its backing store wired together.
         # The endpoint is mounted even without a signing key so validators get
         # a deterministic 503 "not configured yet" instead of app construction

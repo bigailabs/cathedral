@@ -29,6 +29,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from cathedral.lanes.publisher import task_family_feed_enabled
 from cathedral.publisher import repository
+from cathedral.publisher.response_cache import etag_response
 from cathedral.v3.publisher import v3_feed_enabled
 
 if TYPE_CHECKING:
@@ -177,7 +178,7 @@ async def get_leaderboard_recent(
         next_since_legacy = None
 
     latest_epoch = await repository.latest_merkle_epoch(ctx.db)
-    return {
+    payload = {
         "items": items,
         # Legacy cursor for v1.0.x validators.
         "next_since": next_since_legacy,
@@ -186,6 +187,12 @@ async def get_leaderboard_recent(
         "next_since_id": next_since_id,
         "merkle_epoch_latest": latest_epoch,
     }
+    # Serve Cache-Control + ETag so validators skip body decode when their
+    # polling window has no new rows (304 Not Modified).  The response body
+    # changes every time new eval runs land, so per-response ETags are correct
+    # — we do not apply an in-process TTL cache here because the cursor params
+    # (since_ran_at, since_id, limit) vary per validator.
+    return etag_response(request, payload)  # type: ignore[return-value]
 
 
 # --------------------------------------------------------------------------

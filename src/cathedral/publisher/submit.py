@@ -99,6 +99,7 @@ from cathedral.lanes.synthetic_boolean_v1.verify_submission import (
 from cathedral.publisher.auth_signature import HotkeyAuth, hotkey_auth_header
 from cathedral.publisher.merkle import epoch_for
 from cathedral.publisher.rate_limit import RateLimitError, SubmitRateGuard
+from cathedral.publisher.response_cache import TtlResponseCache, etag_response
 
 if TYPE_CHECKING:
     from cathedral.lanes.challenge_source import ChallengeRecord, SqliteChallengeSource
@@ -1688,6 +1689,46 @@ async def get_current_sat_challenge(
     return _public_challenge_view(active)
 
 
+# ---------------------------------------------------------------------------
+# 30-second TTL in-process cache for the active-challenges endpoint.
+#
+# Rationale: the endpoint is hit ~11 req/sec; the ~32 KB JSON payload is
+# rebuilt from SQLite on every request.  Reads queue behind AsyncDbWriteLock
+# held by eval writes, producing a measured median 748 ms and an average
+# 16.7 s (max 200 s).  15-20 % of requests die as client-timeout 499s and
+# retry immediately (thundering herd).
+#
+# The response embeds only absolute timestamps (cnf_sha256, challenge_id,
+# tier, score_multiplier, etc.) — no relative "seconds remaining" counters —
+# so a 30-second stale copy is semantically safe.  Challenge open/close state
+# changes at most once every few minutes in normal operation, and the 30 s
+# window is well inside any miner polling loop.
+#
+# A new challenge becoming active will be visible within ≤30 s.  Rollback:
+# revert this file; the endpoint is purely stateless without the cache.
+#
+# Implementation note: the cache lives on ``app.state`` (not as a module-level
+# global) so each test's fresh FastAPI app gets its own clean cache instance.
+# The lifespan in ``cathedral.publisher.app`` seeds it via
+# ``app.state.active_challenges_cache = TtlResponseCache(ttl_seconds=30.0)``.
+# ---------------------------------------------------------------------------
+
+
+def _active_challenges_cache(request: Request) -> TtlResponseCache:
+    """Retrieve the per-app active-challenges cache from ``app.state``.
+
+    Falls back to creating a fresh cache on the request when the lifespan
+    has not yet seeded ``app.state.active_challenges_cache`` (e.g. in
+    unit tests that don't boot a full lifespan).
+    """
+    cache = getattr(request.app.state, "active_challenges_cache", None)
+    if cache is None:
+        # Safety net: construct a fresh cache rather than raise.
+        cache = TtlResponseCache(ttl_seconds=30.0)
+        request.app.state.active_challenges_cache = cache
+    return cache  # type: ignore[return-value]
+
+
 @router.get("/v1/synthetic-boolean/active-challenges")
 async def list_active_sat_challenges(request: Request) -> dict[str, object]:
     """Return public metadata for every currently active SAT challenge.
@@ -1696,6 +1737,10 @@ async def list_active_sat_challenges(request: Request) -> dict[str, object]:
     miners can see all available challenges and pick the tier that suits
     their solver. Each entry is the same shape as ``current-challenge``;
     ordered by tier ascending then ``challenge_id`` ascending.
+
+    Response is cached in-process for 30 seconds (TTL, no invalidation).
+    Serves ``Cache-Control: public, max-age=15`` + ``ETag``; returns 304
+    when ``If-None-Match`` matches so polling miners skip the body decode.
     """
     source = getattr(request.app.state, "task_family_challenge_source", None)
     if source is None:
@@ -1703,12 +1748,18 @@ async def list_active_sat_challenges(request: Request) -> dict[str, object]:
             status_code=503,
             detail="challenge surface not configured",
         )
-    actives = await _list_active_sat_challenge_metadata(source)
-    return {
-        "family_id": SAT_FAMILY_ID,
-        "count": len(actives),
-        "items": [_public_challenge_view(rec) for rec in actives],
-    }
+
+    async def _build() -> dict[str, object]:
+        actives = await _list_active_sat_challenge_metadata(source)
+        return {
+            "family_id": SAT_FAMILY_ID,
+            "count": len(actives),
+            "items": [_public_challenge_view(rec) for rec in actives],
+        }
+
+    cache = _active_challenges_cache(request)
+    body_bytes = await cache.get_or_refresh(_build)
+    return etag_response(request, None, pre_serialised=body_bytes)  # type: ignore[return-value]
 
 
 @router.get("/v1/synthetic-boolean/recent-wins")
