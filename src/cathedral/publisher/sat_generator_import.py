@@ -136,26 +136,25 @@ async def import_challenge_from_generator(
             "cnf_sha256": lease.cnf_sha256,
             "num_vars": lease.num_vars,
             "num_clauses": lease.num_clauses,
-            "storage": "sqlite_text",
+            "storage": "file",
             "kind": lease.kind,
             "cnf_class": lease.cnf_class,
             "time_limit_seconds": time_limit_seconds,
         }
-        # Serve the CNF inline (cnf_text) with NO cnf_path. The file-backed
-        # serve path routes through _CnfSnapshotCache, whose single global
-        # asyncio.Lock (prune on every fetch + copy/fsync under the lock)
-        # wedged the /challenges/{id}/cnf endpoint under miner load and hung
-        # all fetches. Inline text serves via PlainTextResponse, bypassing the
-        # cache/lock/fsync/disk entirely. The solve verifier (submit.py) and
-        # the active-cnf response both already prefer cnf_text over cnf_path.
-        # The file is still written above as an audit/debug artifact; nothing
-        # reads it now that cnf_path is empty.
+        # File-backed storage: the ~0.5-1.8 MB DIMACS body lives in the file
+        # written above; the row carries only ``cnf_path`` + metadata. This
+        # keeps the ``db_write_lock`` insert tiny (it previously held the lock
+        # while writing the whole CNF as inline ``cnf_text``, which serialized
+        # against the open-window solve flood and capped import throughput).
+        # The serve path (challenge_cnf.py) now reads file-backed CNFs lock-free
+        # per request, and the solve verifier (submit.py) already reads
+        # ``cnf_path``. Inline ``cnf_text`` rows still serve for backward compat.
         record = ChallengeRecord(
             challenge_id=challenge_id,
             family_id=family,
             tier=lease.tier,
-            cnf_text=cnf_bytes.decode("utf-8"),
-            cnf_path="",
+            cnf_text="",
+            cnf_path=str(cnf_path),
             status="pending",
             audit_metadata=audit,
         )
@@ -265,16 +264,20 @@ def _now_iso() -> str:
 def _mint_challenge_id(*, tier: int, kind: str) -> str:
     """Mint a Cathedral-owned public ``challenge_id``.
 
-    Format: ``sat-t{tier}-{kind}-{YYYYMMDD}-{8hex}``.
+    Format: ``sat-t{tier}-{kind}-{YYYYMMDD}-{16hex}``.
 
     Deliberately does NOT include the generator_run_id or any token —
     a public ID derived from a generator-private value would leak the
-    mapping. We use ``secrets.token_hex(4)`` for the suffix so the IDs
-    are unpredictable and operationally distinct.
+    mapping. We use ``secrets.token_hex(8)`` (64 bits) for the suffix: at
+    8k challenges/day the old 32-bit suffix had a non-negligible per-(tier,
+    kind,day) birthday-collision chance, and an id collision can silently
+    overwrite a still-``pending`` row (immutability is only enforced after a
+    row leaves ``pending``). 64 bits makes a same-day collision astronomically
+    unlikely, and the CNF file path is tied to this unique id.
     """
     today = datetime.now(UTC).strftime("%Y%m%d")
     short_kind = kind.replace("_", "-")
-    rand = secrets.token_hex(4)
+    rand = secrets.token_hex(8)
     return f"sat-t{int(tier)}-{short_kind}-{today}-{rand}"
 
 
