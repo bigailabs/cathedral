@@ -617,6 +617,26 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         max_age=600,
     )
 
+    # Per-IP rate limiting (anti-flood). Added AFTER CORS so it sits OUTERMOST
+    # in the Starlette stack and sheds abusive load before any route handler,
+    # CORS, or DB access runs — an abusive IP gets a cheap 429 instead of
+    # wedging a worker on the db_write_lock / a file-backed CNF read. Disabled
+    # unless CATHEDRAL_IP_RATE_LIMIT_ENABLED is set, so tests/local are
+    # unaffected; production sets it (plus optional RPS/BURST/ALLOWLIST tuning).
+    from cathedral.publisher.ip_rate_limit import (
+        IpRateLimitMiddleware,
+    )
+    from cathedral.publisher.ip_rate_limit import (
+        env_kwargs as _ip_rate_limit_kwargs,
+    )
+    from cathedral.publisher.ip_rate_limit import (
+        ip_rate_limit_enabled as _ip_rate_limit_enabled,
+    )
+
+    if _ip_rate_limit_enabled():
+        app.add_middleware(IpRateLimitMiddleware, **_ip_rate_limit_kwargs())
+        logger.info("ip_rate_limit_enabled", **_ip_rate_limit_kwargs())
+
     # Always render `{"detail": "<string>"}` per CONTRACTS.md Section 9 lock #3.
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
