@@ -73,7 +73,7 @@ from scaffold.lanes import sandbox as _sbx
 from scaffold.lanes.solver_arena import (SolverRegistry, SolverSpec, ChampionMachine,
     par2_ms, marginal_vbs_count, InstanceResult)
 from scaffold.contract import Outcome as _O
-arun = run_arena_round(seed=4242, tier=0, batch_size=6)
+arun = run_arena_round(seed=4242, tier=0, batch_size=6, include_real=False)
 by = {r[0]: r for r in arun.rows}
 # the honest fast solver beats the seeded SC2025 champion -> record falls + earns.
 ck("honest solver beats champion (record falls)", by["honest_fast"][2] > 0 and by["honest_fast"][4]["record_fell"])
@@ -86,6 +86,18 @@ ck("copied champion dedups -> 0 (copy can't beat champion)",
    by["champion_copy"][2] == 0 and by["champion_copy"][3] == "already_evaluated_or_duplicate")
 ck("every certified solve has a verified certificate",
    all(d[4].get("all_certified", True) for d in arun.rows))
+# opportunistic: when a real solver is installed, it must earn certified credit
+# and dethrone the stub champion (runs on Stitch; SKIPs where no binary).
+from scaffold.lanes.arena_e2e import have_real_solver as _hrs
+_real = _hrs()
+if _real:
+    arun2 = run_arena_round(seed=4242, tier=0, batch_size=6, include_real=True)
+    by2 = {r[0]: r for r in arun2.rows}
+    _row = by2[f"real_{_real[0]}"]
+    ck(f"real solver ({_real[0]}) certified + dethrones stub champion",
+       _row[2] > 0 and _row[4]["record_fell"] and _row[4].get("all_certified", True))
+else:
+    print("  SKIP real-solver dethrone (no kissat/cadical installed)")
 # Sybil: k identities publishing ONE solver -> one commitment, zero marginal merit.
 reg = SolverRegistry()
 acc = [reg.register(SolverSpec(f"url{i}", f"sha256:{'c'*64}", "same_source_hash", f"hk{i}"))[0] for i in range(5)]

@@ -70,8 +70,15 @@ class ArenaRun:
     record_falls: list
 
 
-def run_arena_round(seed: int = 4242, tier: int = 0, batch_size: int = 6) -> ArenaRun:
-    """One full Lane S round against honest + adversarial solvers. Offline."""
+def run_arena_round(seed: int = 4242, tier: int = 0, batch_size: int = 6,
+                    include_real: bool = True) -> ArenaRun:
+    """One full Lane S round against honest + adversarial solvers. Offline.
+
+    include_real=False pins the roster to deterministic stubs regardless of
+    what's installed — the rc gate uses this so its expectations (WHICH solver
+    dethrones) don't depend on the host. A real kissat/cadical, when included,
+    dethrones first and the stub honest_fast then rightly fails to dethrone it.
+    """
     lane = SolverArenaLane(batch_size=batch_size)
     ctx = GenerateCtx(seed=seed, tier=tier, issued_at_iso="x")
     problem, hidden = lane.mint_challenge(ctx)
@@ -85,7 +92,7 @@ def run_arena_round(seed: int = 4242, tier: int = 0, batch_size: int = 6) -> Are
     lane.seed_launch_champion(champ_spec, champ_results, timeouts)
 
     # 2. wire the challenger adapters by commitment id.
-    real = have_real_solver()
+    real = have_real_solver() if include_real else None
     challengers = [
         ("honest_fast", "fast_open_solver", "honest_fast"),
         ("liar_solver", "liar_src", "liar"),
