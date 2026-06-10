@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -229,6 +230,9 @@ with TestClient(app) as client:
                              "challenge_id": "sat-e2e-1", "dimacs_solution": blob})
     ck("submit accepted as ranked", resp.status_code == 200 and resp.json()["status"] == "ranked")
 
+    ck("first solve gets open-window rank 1", resp.json().get("solve_rank") == 1)
+    ck("flat policy emits weighted_score 1.0", resp.json().get("weighted_score") == 1.0)
+
     # replay the exact same signature -> rejected
     replay = client.post("/v1/agents/submit",
                         headers={"X-Cathedral-Hotkey": miner.ss58_address,
@@ -237,10 +241,58 @@ with TestClient(app) as client:
                               "challenge_id": "sat-e2e-1", "dimacs_solution": blob})
     ck("replayed signature rejected", replay.status_code == 409)
 
+    # OPEN WINDOW (live since 2026-06-04): a SECOND distinct miner solves the
+    # same challenge and is ranked 2 — the challenge does NOT lock.
+    miner2 = Keypair.create_from_uri("//E2EMiner2")
+    sa3 = now_iso()
+    claim2 = canonical_claim_bytes(
+        bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+        miner_hotkey=miner2.ss58_address, submitted_at=sa3,
+        challenge_id="sat-e2e-1", dimacs_solution_sha256=sol_sha)
+    sig2 = base64.b64encode(miner2.sign(claim2)).decode()
+    resp2 = client.post("/v1/agents/submit",
+                        headers={"X-Cathedral-Hotkey": miner2.ss58_address,
+                                 "X-Cathedral-Signature": sig2},
+                        data={"card_id": "synthetic_boolean_v1", "submitted_at": sa3,
+                              "challenge_id": "sat-e2e-1", "dimacs_solution": blob})
+    ck("open window: second distinct miner also ranked (no lock)",
+       resp2.status_code == 200 and resp2.json()["status"] == "ranked")
+    ck("open window: second miner gets solve_rank 2", resp2.json().get("solve_rank") == 2)
+
+    # the same miner re-solving the same challenge (fresh signature) -> 409
+    sa4 = now_iso()
+    claim3 = canonical_claim_bytes(
+        bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+        miner_hotkey=miner2.ss58_address, submitted_at=sa4,
+        challenge_id="sat-e2e-1", dimacs_solution_sha256=sol_sha)
+    sig3 = base64.b64encode(miner2.sign(claim3)).decode()
+    resp3 = client.post("/v1/agents/submit",
+                        headers={"X-Cathedral-Hotkey": miner2.ss58_address,
+                                 "X-Cathedral-Signature": sig3},
+                        data={"card_id": "synthetic_boolean_v1", "submitted_at": sa4,
+                              "challenge_id": "sat-e2e-1", "dimacs_solution": blob})
+    ck("open window: same miner re-solve rejected (already_solved)",
+       resp3.status_code == 409)
+
+    # COVERAGE POLICY (flag-gated; flat stays the default for the cutover):
+    # weighted_score = solved/available in the trailing window, clamped.
+    from scaffold.publisher import scoring as _scoring
+    os.environ[_scoring.SCORING_POLICY_ENV] = "coverage"
+    try:
+        ws1 = _scoring.weighted_score_for(store, miner.ss58_address)
+        # miner solved 1 of the 1 challenge minted in-window -> full score
+        ck("coverage: full-coverage miner scores 1.0", ws1 == 1.0)
+        ws_idle = _scoring.weighted_score_for(store, "5IdleHotkeyNeverSolved")
+        ck("coverage: idle miner floors at the configured minimum",
+           ws_idle == _scoring.coverage_floor())
+    finally:
+        os.environ.pop(_scoring.SCORING_POLICY_ENV, None)
+    ck("flat policy restored as default", _scoring.scoring_policy() == "flat")
+
     # validator-style pull loop: tuple cursor, verify EVERY signature.
     pulled = []
     cur_ra = cur_id = None
-    for _ in range(10):
+    for _ in range(12):
         params = {"limit": 1}
         if cur_ra:
             params["since_ran_at"] = cur_ra
@@ -250,7 +302,7 @@ with TestClient(app) as client:
             break
         pulled += page["items"]
         cur_ra, cur_id = page["next_since_ran_at"], page["next_since_id"]
-    ck("validator pull retrieved the emitted v6 + v5compat rows", len(pulled) == 2)
+    ck("validator pull retrieved v6 + v5compat rows for BOTH solves", len(pulled) == 4)
     all_verify = all(wire.verify_row(r, pub_hex) for r in pulled)
     ck("every pulled row signature verifies (validator would score it)", all_verify)
     ck("cursor fields present on feed response",

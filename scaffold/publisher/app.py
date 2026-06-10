@@ -31,7 +31,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
-from . import keys, rows
+from . import keys, rows, scoring
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .sat_solution import verify_dimacs_solution
 from .store import Store, new_uuid
@@ -333,22 +333,41 @@ def build_app(
             store.write(_rej)
             raise HTTPException(400, {"detail": check.rejection_reason, "challenge_id": challenge_id})
 
-        # atomic winner claim: lock the challenge, write the ranked submission, emit rows.
-        def _win(conn):
-            cur = conn.execute(
-                "UPDATE lane_challenges SET status='locked' "
-                "WHERE challenge_id=? AND status='active'", (challenge_id,))
-            if cur.rowcount != 1:
-                return None  # someone else won the race
+        # accept the solve. Default = open-window (live since 2026-06-04): a
+        # challenge takes one solve per distinct hotkey while active, each with
+        # its true first-seen rank; saturation/age retirement is the refill
+        # loop's job. lock_wins preserves the legacy winner-take-all.
+        now_iso = _now_iso_ms()
+        if scoring.submit_mode() == "lock_wins":
+            def _claim(conn):
+                cur = conn.execute(
+                    "UPDATE lane_challenges SET status='locked' "
+                    "WHERE challenge_id=? AND status='active'", (challenge_id,))
+                if cur.rowcount != 1:
+                    return None  # someone else won the race
+                return scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso) or 1
+            rank = store.write(_claim)
+            if rank is None:
+                raise HTTPException(409, "challenge_already_locked")
+        else:
+            def _claim(conn):
+                return scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso)
+            rank = store.write(_claim)
+            if rank is None:
+                raise HTTPException(409, "already_solved")
+
+        # row value = the scoring policy (flat 1.0 by default; coverage pays
+        # work share — computed after the claim so this solve counts).
+        ws = scoring.weighted_score_for(store, x_cathedral_hotkey)
+
+        def _sub(conn):
             conn.execute(
                 "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
                 "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
-                "VALUES (?, ?, ?, 'ranked', NULL, 1.0, 1, ?, ?)",
-                (sub_id, x_cathedral_hotkey, challenge_id, submitted_at, x_cathedral_signature))
-            return True
-        won = store.write(_win)
-        if not won:
-            raise HTTPException(409, "challenge_already_locked")
+                "VALUES (?, ?, ?, 'ranked', NULL, ?, ?, ?, ?)",
+                (sub_id, x_cathedral_hotkey, challenge_id, ws, rank,
+                 submitted_at, x_cathedral_signature))
+        store.write(_sub)
 
         row_uuid = new_uuid()
         answer_hash = sha256_hex(",".join(str(x) for x in check.assignment))
@@ -356,19 +375,16 @@ def build_app(
         emitted = rows.build_solve_rows(
             row_uuid=row_uuid, miner_hotkey=x_cathedral_hotkey,
             agent_id=new_uuid(), challenge_id=challenge_id, tier=chal["tier"],
-            weighted_score=1.0, answer_hash=answer_hash,
-            verifier_details_hash=verifier_details_hash, ran_at=_now_iso_ms(),
-            epoch_salt=epoch_salt, solve_rank=1, solved=True, private_key_hex=key_hex,
+            weighted_score=ws, answer_hash=answer_hash,
+            verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+            epoch_salt=epoch_salt, solve_rank=rank, solved=True, private_key_hex=key_hex,
         )
         for r in emitted:
             store.insert_row(r)
-        # record the distinct solve for G2 solved-based retirement (idempotent).
-        from .refill import record_solve
-        record_solve(store, challenge_id, x_cathedral_hotkey)
         return {
             "status": "ranked", "id": sub_id, "eval_run_id": row_uuid,
-            "challenge_id": challenge_id, "weighted_score": 1.0,
-            "attestation_status": "pending",
+            "challenge_id": challenge_id, "weighted_score": ws,
+            "solve_rank": rank, "attestation_status": "pending",
         }
 
     # ---- M3: Lane S registry ----------------------------------------------
