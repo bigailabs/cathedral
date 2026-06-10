@@ -117,9 +117,10 @@ def _iso_before(seconds: int) -> str:
 
 
 def record_solve(store: Store, challenge_id: str, miner_hotkey: str) -> None:
-    """Record a distinct (challenge, hotkey) solve for solved-based retirement.
-    Idempotent — re-solves by the same hotkey don't inflate the distinct count.
-    Call this from the submit path when a solve is accepted."""
+    """DEPRECATED — the live submit path claims solves atomically via
+    scoring.claim_solve (same table, same idempotency) inside the submit
+    transaction. Kept only for ad-hoc tooling; do NOT wire into submit or
+    solves would double-insert."""
     def _do(conn):
         conn.execute(
             "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "

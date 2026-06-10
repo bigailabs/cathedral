@@ -191,16 +191,20 @@ class Store:
             self._conn.close()
 
     # ---- feed rows --------------------------------------------------------
-    def insert_row(self, row: dict[str, Any]) -> None:
+    def insert_row(self, row: dict[str, Any]) -> int:
+        """Insert one feed row (OR IGNORE). Returns 1 if newly inserted, 0 if
+        it already existed — callers count insertions from rowcount instead of
+        bracketing every row with COUNT(*) table scans."""
         def _do(conn):
-            conn.execute(
+            cur = conn.execute(
                 "INSERT OR IGNORE INTO eval_runs "
                 "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (row["id"], row["ran_at"], int(row["eval_output_schema_version"]),
                  row["miner_hotkey"], row["task_type"], json.dumps(row)),
             )
-        self.write(_do)
+            return int(cur.rowcount or 0)
+        return self.write(_do)
 
     # ---- seed watermark (G1) ---------------------------------------------
     def get_seed_state(self, key: str) -> str | None:

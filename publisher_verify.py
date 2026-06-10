@@ -285,6 +285,19 @@ with TestClient(app) as client:
         ws_idle = _scoring.weighted_score_for(store, "5IdleHotkeyNeverSolved")
         ck("coverage: idle miner floors at the configured minimum",
            ws_idle == _scoring.coverage_floor())
+        # seeded EXTERNAL board mirrors (unsolvable through this publisher)
+        # must NOT inflate the coverage denominator and crater every score.
+        def _ext(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO lane_challenges(challenge_id, family_id, "
+                "tier, cnf_text, cnf_sha256, cnf_bytes, num_vars, num_clauses, "
+                "status, cnf_source, created_at_iso) "
+                "VALUES ('sat-external-mirror', 'synthetic_boolean_v1', 1, '', "
+                "'external-mirror-no-cnf', 0, 0, 0, 'active', 'external', ?)", (now_iso(),))
+        store.write(_ext)
+        ws_after = _scoring.weighted_score_for(store, miner.ss58_address)
+        ck("coverage: external mirror challenges do not dilute the denominator",
+           ws_after == 1.0)
     finally:
         os.environ.pop(_scoring.SCORING_POLICY_ENV, None)
     ck("flat policy restored as default", _scoring.scoring_policy() == "flat")

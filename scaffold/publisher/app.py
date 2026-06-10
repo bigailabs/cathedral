@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import time
@@ -301,15 +302,6 @@ def build_app(
             challenge_id=challenge_id, dimacs_solution_sha256=sol_sha,
         )
 
-        # replay dedup: a signature seen before is rejected.
-        def _dedup(conn):
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
-                (x_cathedral_signature, _now_iso_ms()))
-            return cur.rowcount == 1
-        if not store.write(_dedup):
-            raise HTTPException(409, "replayed_signature")
-
         rows_ = store.query(
             "SELECT * FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
         if not rows_:
@@ -319,68 +311,99 @@ def build_app(
             raise HTTPException(409, "challenge_already_locked")
 
         last_submit[rl_key] = now  # consume the slot only past the gates
+        # bound the rate-limit map (long-lived single process): prune stale slots.
+        if len(last_submit) > 50_000:
+            horizon = now - max(min_interval, 3600.0)
+            for k in [k for k, t in last_submit.items() if t < horizon]:
+                last_submit.pop(k, None)
 
         check = verify_dimacs_solution(chal["cnf_text"], dimacs_solution)
         sub_id = new_uuid()
         if not check.ok:
+            # one txn: burn the signature + record the rejection together.
             def _rej(conn):
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                    (x_cathedral_signature, _now_iso_ms()))
+                if not cur.rowcount:
+                    return False
                 conn.execute(
                     "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
                     "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
                     "VALUES (?, ?, ?, 'rejected', ?, 0.0, 1, ?, ?)",
                     (sub_id, x_cathedral_hotkey, challenge_id, check.rejection_reason,
                      submitted_at, x_cathedral_signature))
-            store.write(_rej)
+                return True
+            if not store.write(_rej):
+                raise HTTPException(409, "replayed_signature")
             raise HTTPException(400, {"detail": check.rejection_reason, "challenge_id": challenge_id})
 
         # accept the solve. Default = open-window (live since 2026-06-04): a
         # challenge takes one solve per distinct hotkey while active, each with
         # its true first-seen rank; saturation/age retirement is the refill
         # loop's job. lock_wins preserves the legacy winner-take-all.
+        #
+        # ATOMICITY: dedup + claim + scoring + submission + signed feed rows all
+        # commit in ONE transaction. A crash anywhere rolls back everything —
+        # no burned-signature-without-rows lockout, no claimed-but-unrewarded
+        # solve. (Store's RLock is reentrant, so scoring may read via the store
+        # from inside this txn and sees the just-inserted claim.)
         now_iso = _now_iso_ms()
-        if scoring.submit_mode() == "lock_wins":
-            def _claim(conn):
-                cur = conn.execute(
+        row_uuid = new_uuid()
+        answer_hash = sha256_hex(",".join(str(x) for x in check.assignment))
+        verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
+        lock_wins = scoring.submit_mode() == "lock_wins"
+
+        def _accept(conn):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                (x_cathedral_signature, now_iso))
+            if not cur.rowcount:
+                return ("replayed_signature", None, None)
+            if lock_wins:
+                locked = conn.execute(
                     "UPDATE lane_challenges SET status='locked' "
                     "WHERE challenge_id=? AND status='active'", (challenge_id,))
-                if cur.rowcount != 1:
-                    return None  # someone else won the race
-                return scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso) or 1
-            rank = store.write(_claim)
-            if rank is None:
-                raise HTTPException(409, "challenge_already_locked")
-        else:
-            def _claim(conn):
-                return scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso)
-            rank = store.write(_claim)
-            if rank is None:
-                raise HTTPException(409, "already_solved")
-
-        # row value = the scoring policy (flat 1.0 by default; coverage pays
-        # work share — computed after the claim so this solve counts).
-        ws = scoring.weighted_score_for(store, x_cathedral_hotkey)
-
-        def _sub(conn):
+                if locked.rowcount != 1:
+                    return ("challenge_already_locked", None, None)
+                rank = scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso) or 1
+            else:
+                rank = scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso)
+                if rank is None:
+                    return ("already_solved", None, None)
+            # row value = the scoring policy (flat 1.0 default; coverage pays
+            # work share — computed after the claim so this solve counts).
+            ws = scoring.weighted_score_for(store, x_cathedral_hotkey)
             conn.execute(
                 "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
                 "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
                 "VALUES (?, ?, ?, 'ranked', NULL, ?, ?, ?, ?)",
                 (sub_id, x_cathedral_hotkey, challenge_id, ws, rank,
                  submitted_at, x_cathedral_signature))
-        store.write(_sub)
+            emitted = rows.build_solve_rows(
+                row_uuid=row_uuid, miner_hotkey=x_cathedral_hotkey,
+                agent_id=new_uuid(), challenge_id=challenge_id, tier=chal["tier"],
+                weighted_score=ws, answer_hash=answer_hash,
+                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                epoch_salt=epoch_salt, solve_rank=rank, solved=True,
+                private_key_hex=key_hex,
+            )
+            for r in emitted:
+                conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
+                     r["miner_hotkey"], r["task_type"], json.dumps(r)))
+            return (None, rank, ws)
 
-        row_uuid = new_uuid()
-        answer_hash = sha256_hex(",".join(str(x) for x in check.assignment))
-        verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
-        emitted = rows.build_solve_rows(
-            row_uuid=row_uuid, miner_hotkey=x_cathedral_hotkey,
-            agent_id=new_uuid(), challenge_id=challenge_id, tier=chal["tier"],
-            weighted_score=ws, answer_hash=answer_hash,
-            verifier_details_hash=verifier_details_hash, ran_at=now_iso,
-            epoch_salt=epoch_salt, solve_rank=rank, solved=True, private_key_hex=key_hex,
-        )
-        for r in emitted:
-            store.insert_row(r)
+        err, rank, ws = store.write(_accept)
+        if err == "replayed_signature":
+            raise HTTPException(409, "replayed_signature")
+        if err == "challenge_already_locked":
+            raise HTTPException(409, "challenge_already_locked")
+        if err == "already_solved":
+            raise HTTPException(409, "already_solved")
         return {
             "status": "ranked", "id": sub_id, "eval_run_id": row_uuid,
             "challenge_id": challenge_id, "weighted_score": ws,

@@ -119,9 +119,9 @@ def seed_rows(
             if dry_run:
                 inserted += 1  # would insert (OR IGNORE makes this an upper bound)
             else:
-                before = store.count_rows()
-                store.insert_row(row)  # verbatim incl. cathedral_signature, OR IGNORE
-                inserted += store.count_rows() - before
+                # verbatim incl. cathedral_signature; rowcount = new-vs-dupe
+                # (no COUNT(*) bracketing — that was O(rows) full scans)
+                inserted += store.insert_row(row)
             if _tuple_gt(ran_at, rid, newest_ran_at, newest_id):
                 newest_ran_at, newest_id = ran_at, rid
         # advance the page cursor to the feed's reported next position

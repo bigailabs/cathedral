@@ -98,13 +98,19 @@ def coverage_score(store: Store, miner_hotkey: str) -> float:
     Solve everything the board offered → 1.0. Solve half → ~0.5. The
     denominator is what was actually mintable supply, so the score is a real
     work share, not an unbounded count. Falls back to 1.0 when the window has
-    no minted challenges (fresh deploys, seeded-only stores)."""
+    no minted challenges (fresh deploys, seeded-only stores).
+
+    The denominator counts LOCAL challenges only: seed_live mirrors the live
+    board as cnf_source='external' metadata rows stamped with the seed time —
+    those are unsolvable through this publisher and must never inflate the
+    supply, or every honest score collapses toward the floor."""
     since = _iso_before(coverage_window_hours())
     solved = store.query(
         "SELECT COUNT(DISTINCT challenge_id) AS n FROM lane_challenge_solves "
         "WHERE miner_hotkey=? AND solved_at_iso > ?", (miner_hotkey, since))[0]["n"]
     available = store.query(
-        "SELECT COUNT(*) AS n FROM lane_challenges WHERE created_at_iso > ?",
+        "SELECT COUNT(*) AS n FROM lane_challenges "
+        "WHERE created_at_iso > ? AND cnf_source='local'",
         (since,))[0]["n"]
     if available <= 0:
         return 1.0

@@ -323,6 +323,10 @@ def run(args: argparse.Namespace, log=print) -> int:
     band = "OK" if md < WARN_THRESHOLD else ("WARN" if md < FAIL_THRESHOLD else "FAIL")
     log(f"  7d score divergence: max_abs={md:.4f} ({band}) "
         f"common_hotkeys={div['common_hotkeys']} worst={div['worst_hotkey']}")
+    # an empty intersection makes the divergence check vacuously true — require
+    # real overlap before low divergence counts as a pass.
+    ck("divergence computed over a non-empty hotkey intersection",
+       div["common_hotkeys"] > 0)
     ck(f"7d score divergence < fail threshold {FAIL_THRESHOLD}", md < FAIL_THRESHOLD)
 
     # (c) miner smoke (only with a thin publisher)
