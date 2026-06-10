@@ -106,18 +106,45 @@ generates the honest, small version of attestation demand.)
 Live validators run **Path-A local weights**: they pull our Ed25519-signed rows
 and aggregate per-hotkey over a 7-day window **in validator code**. Therefore:
 
-- **Possible without any validator update:** make row values carry the policy.
-  `weighted_score` = volume-with-recency (e.g. coverage of available challenges
-  in a trailing window, capped at 1.0). Validators average what we sign → solve
-  more earns more; slowing down decays your new rows; the natural cap (you can
-  only solve each board challenge once) prevents a volume arms race.
-- **Not possible without one validator release:** removing the 7-day window
-  itself. A miner who stops cold keeps a *frozen, decaying* tail for ≤7 days.
-  Accepted. The window dies in the already-planned single bundled release
-  (burn step-down + remote-vector default ON), never separately.
+- **Effective immediately, no validator involvement:** make row values carry
+  the policy. `weighted_score` = volume-with-recency (e.g. coverage of
+  available challenges in a trailing window, capped at 1.0). Validators
+  average what we sign → solve more earns more; slowing down decays your new
+  rows; the natural cap (you can only solve each board challenge once)
+  prevents a volume arms race.
+- **The validator-update model (corrected 2026-06-10):** we CAN ship validator
+  code changes whenever warranted — the constraint is *adoption lag*, not
+  impossibility. A release takes effect per-validator as each operator pulls
+  it; we can request updates when there's a high-value reason (major release,
+  jackpot), but must never depend on the timing. So: the 7-day window CAN be
+  killed (→ instant/spot payment) via a validator release; until adoption
+  completes, a stopped miner keeps a frozen tail of ≤7 days on each
+  not-yet-updated validator. Bundle window-kill into the planned major
+  release; design every publisher-side policy to be correct under MIXED
+  validator versions.
 - Policy ships **flag-gated** in the thin publisher (`flat` default for the
   byte-faithful cutover; flip to `coverage` after the swap). Cutover first with
   divergence 0, then ramp policy — per `deploy/RUNBOOK.md` abort criteria.
+
+### Remote weight vector & burn rate (verified against deployed validator code)
+
+- **v4 does NOT reintroduce remote weight setting.** The thin publisher serves
+  the row feed only — there is no `/v1/validator/weights/next` endpoint in the
+  scaffold. Validators aggregate locally, exactly as today.
+- **Remote burn rate is supported by the existing validator schema** if/when we
+  want it: the signed vector's `BurnSnapshot` is Pydantic-validated with
+  `forced_burn_percentage: float, ge=0.0, le=100.0` and `burn_uid: int|None,
+  ge=0`, with `extra="forbid"` (`policy/signing.py:63-70`). The remote loop
+  applies the vector's burn directly (`remote_weight_loop.py:353-360`).
+  Flags a vector CAN throw (all verified): out-of-range / non-numeric burn,
+  any unexpected field (extra=forbid), wrong `key_id` (pinned), wrong
+  network/netuid, expired `expires_at`, or a non-increasing `policy_version`
+  (rollback protection). Send a float in [0,100], bump policy_version
+  monotonically, and none fire.
+- **Reach caveat:** remote mode is opt-in and default OFF on deployed
+  validators — they apply the HARDCODED 85% locally. Remote burn control only
+  reaches validators that update to (or opt into) remote mode → same adoption-
+  lag model as above. This is why burn changes ride the bundled release.
 
 ## Sequenced plan
 
