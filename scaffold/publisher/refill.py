@@ -143,9 +143,13 @@ def retire_ready(store: Store, tier: int) -> int:
     age_cutoff = _iso_before(retire_after_seconds())
     retired = 0
 
+    # RETENTION: null cnf_text on retire so retired CNFs (~0.46MB each) don't
+    # accumulate forever — the bug that filled the monolith volume to 96%. The
+    # CNF is immutable and only served while a challenge is active, so a retired
+    # challenge never needs its body again.
     def _age(conn):
         cur = conn.execute(
-            "UPDATE lane_challenges SET status='retired', updated_at_iso=? "
+            "UPDATE lane_challenges SET status='retired', cnf_text='', updated_at_iso=? "
             "WHERE family_id=? AND tier=? AND status='active' AND cnf_source='local' "
             "AND COALESCE(updated_at_iso, created_at_iso) <= ?",
             (now, _FAMILY, tier, age_cutoff))
@@ -156,7 +160,7 @@ def retire_ready(store: Store, tier: int) -> int:
 
     def _solved(conn):
         cur = conn.execute(
-            "UPDATE lane_challenges SET status='retired', updated_at_iso=? "
+            "UPDATE lane_challenges SET status='retired', cnf_text='', updated_at_iso=? "
             "WHERE family_id=? AND tier=? AND status='active' AND cnf_source='local' "
             "AND challenge_id IN ("
             "  SELECT challenge_id FROM lane_challenge_solves "
@@ -165,6 +169,17 @@ def retire_ready(store: Store, tier: int) -> int:
         return int(cur.rowcount or 0)
     retired += store.write(_solved)
     return retired
+
+
+def reclaim_retired_cnf(store: Store) -> int:
+    """One-shot: null cnf_text on already-retired challenges (back-fills the
+    retention fix for rows retired before it shipped). Returns rows cleared."""
+    def _do(conn):
+        cur = conn.execute(
+            "UPDATE lane_challenges SET cnf_text='' "
+            "WHERE status='retired' AND cnf_source='local' AND length(cnf_text)>0")
+        return int(cur.rowcount or 0)
+    return store.write(_do)
 
 
 def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
