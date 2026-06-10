@@ -1,84 +1,96 @@
-# Cathedral v4 — the always-on, paid SAT Competition
+<h2 align="center">Decentralized&nbsp;formal&nbsp;verification.&nbsp;Built&nbsp;on&nbsp;SAT.</h2>
 
-> A standing world-record bounty machine for solver progress. Emission buys
-> exactly one thing: **mathematically verified algorithmic progress beyond the
-> current world frontier.** When there is none, it buys nothing.
+<p align="center">
+  <b>Cathedral v4</b> — the thin publisher. ~5k lines replacing the 46k-line monolith,
+  byte-identical on the signed wire surface validators verify.
+</p>
 
-Cathedral is a Bittensor subnet (SN39) rebuilt thin on this scaffold (~3k lines)
-in place of the 46k-line monolith. Every payout path is closed by a **certificate**
-— a SAT witness re-checked against the formula, or a DRAT/LRAT proof checked by
-`drat-trim`. No judge, no opinion, no self-reported numbers. No progress → burn.
+<p align="center">
+  Documentation:
+  <a href="V4-DESIGN.md">Design</a> |
+  <a href="COMPAT.md">Wire Compatibility</a> |
+  <a href="ATTESTATION.md">Attestation</a> |
+  <a href="deploy/RUNBOOK.md">Deploy Runbook</a> |
+  <a href="RELEASE_STATUS.md">Release Status</a>
+</p>
 
-See [`V4-DESIGN.md`](V4-DESIGN.md) for the full design and the primary-source
-evidence ([`V4-DESIGN.html`](V4-DESIGN.html) is the dummy-proof walkthrough).
+<p align="center">
+  <a href="https://cathedral.computer"><img src="https://img.shields.io/badge/Site-cathedral.computer-1a1814" alt="Site"></a>
+  <a href="https://api.cathedral.computer"><img src="https://img.shields.io/badge/API-api.cathedral.computer-5a6f9a" alt="Publisher API"></a>
+  <a href="https://api.cathedral.computer/skill.md"><img src="https://img.shields.io/badge/Live-Miner_Brief-2d5a3d" alt="Live Miner Brief"></a>
+</p>
 
-## The four lanes
+## Why v4
 
-| Lane | What it pays for | How it's proven |
-|---|---|---|
-| **S — solver arena** (flagship) | An open-source solver that beats the reigning champion on a fresh hidden batch | PAR-2 + marginal-VBS, every result carries its certificate; dethrone only past a fixed margin → jackpot + burn steps down |
-| **A — community challenges** | Certificate-checked solve-work, open to anyone with a box | Witness self-verifies; speed is **server-measured**, never miner-reported; champion solvers handed out as *designated solvers* |
-| **I — breaker instances** | An instance that beats the champion | Pays only on **disagreement-proven hardness** (champion times out, another solver closes it with a valid cert); decaying payment + quarantine + min-batch-score anti-gaming |
-| **F — frontier fleet** (research, built after S/A/I) | Trustless cube-and-conquer on open math problems (Kochen-Specker, Schur, Ramsey) | Per-cube LRAT, zero clause-sharing, check-then-hold proof custody |
+Cathedral pays weight for exactly one thing: **work it can independently
+verify.** Miners race certificate-checked SAT challenges; every accepted
+answer is re-verified against the formula before a score row is signed.
+v4 rebuilds the publisher thin:
 
-## Trust model — the community is the referee (we run NO eval infrastructure)
+- **Byte-identical wire surface.** Validators consume Ed25519-signed eval
+  rows. v4 emits the same v5/v6 row schema, canonical JSON, cursor semantics,
+  and signing key as production — proven against live rows (`wire_compat.py`,
+  8/8 on sampled production data). Validators require no update.
+- **Open window, real ranks.** A challenge accepts one solve per distinct
+  hotkey while active; each solve carries its true first-seen rank. Re-solves
+  are rejected. One scored solve per (challenge, hotkey), ever — enforced by
+  schema.
+- **Work-proportional scoring.** Row values can carry a coverage policy:
+  miners who solve more of the board earn more; idle miners decay. Policy is
+  publisher-side configuration — no validator involvement.
 
-No first-party eval fleet, no hosted inference. Three tiers:
+## How It Works
 
-1. **Unattested community work** — certificates make correctness free to verify;
-   coverage is unfakeable (faking "solver X closed instance i" requires solving
-   i anyway). Cohort racing via block-hash-assigned designated solvers gives
-   relative speed signal.
-2. **Attested work (opt-in multiplier)** — a miner inside a TDX runner (Polaris
-   `/v1/attest`) binds (solver digest, instance, wall time). Attested
-   submissions earn ×m. *The multiplier is the infrastructure budget.*
-3. **Title matches & audits** — k-of-n attested quorum (median); the same
-   population earns fees for fraud-proof spot-checks (rollup pattern for eval).
+1. The publisher mints calibrated CNF challenges and serves a public board.
+2. A miner fetches the tokenized CNF through the signed `active-cnf` flow.
+3. The miner solves locally and submits one DIMACS satisfying assignment.
+4. The publisher verifies every clause against the private formula.
+5. An accepted solve is claimed atomically with its first-seen rank.
+6. The publisher signs a v6 score row (plus a v5-compat mirror) and serves
+   both on the leaderboard feed.
+7. Validators pull rows with a tuple cursor, verify each signature against
+   the pinned key, aggregate per hotkey, and set weights.
 
-Validators stay thin: verify certificates + attestation signatures + compute
-weights from public data (or consume the Path B signed vector during transition).
+## Proofs and Protections
 
-## How it reaches chain — near-zero validator updates
+| Claim | Mechanism |
+|---|---|
+| **Answers verified, not trusted** | Every DIMACS assignment is checked clause-by-clause before scoring; 9 adversarial fixtures guard the parser |
+| **Rows publisher-signed** | Ed25519 over the canonical v5/v6 subset; validators pin the public key |
+| **One solve per miner per challenge** | `UNIQUE(family_id, challenge_id, miner_hotkey)` — the claim is the dedup |
+| **No duplicate challenges** | Challenge id and CNF content derive from the same `(seed, tier, sequence)` triple — identical content cannot appear under two ids |
+| **Replay rejected** | Submission signatures are single-use; clock-skew bounded |
+| **CNF access gated** | HMAC-tokenized, constant-time fetch; hash-only public rows |
+| **Self-reported timing ignored** | Speed claims require server measurement or hardware attestation (see [ATTESTATION.md](ATTESTATION.md)) |
 
-Live validators run **local weights**: they pull Ed25519-signed eval rows from
-the publisher feed, aggregate 7-day, then apply the hardcoded 85% burn. So the
-frozen surface is the **signed-row feed** — same URL, cursor, v5/v6 row schema,
-signing key, and task-type vocabulary. v4's lane economics ride in the *row
-values* we control. The one thing that needs a validator release is the burn
-step-down, bundled into the first record-fall jackpot. See `V4-DESIGN.md` →
-*Migration*, and [`COMPAT.md`](COMPAT.md) for the do-not-break freeze surface.
-
-## Run it
+## Run It
 
 ```bash
-python -m scaffold.live          # validator runner (real cryptominisat / drat-trim / z3 when present)
-python -m scaffold.dashboard     # one-page board → http://127.0.0.1:8099
-python -m scaffold.publisher.app # the thin publisher (row feed + Lane A board/submit + arena intake)
+python -m scaffold.live          # validator runner (real solvers when present)
+python -m scaffold.dashboard     # one-page board -> http://127.0.0.1:8099
+python -m scaffold.publisher.app # the thin publisher
 ```
 
-Release-candidate gates (all must be green before shipping the wire surface):
+Release gates — all must pass before the wire surface ships:
 
 ```bash
 python rc_verify.py          # scoring invariants across all lanes
-python wire_compat.py        # byte-compat of our signing vs live production rows (8/8)
-python publisher_verify.py   # end-to-end miner sign → fetch → solve → submit → validator-pull
+python wire_compat.py        # byte-compat vs live production rows
+python publisher_verify.py   # end-to-end miner sign -> fetch -> solve -> submit -> validator pull
 ```
 
-## Deploy / go-live
+## Deploy
 
-The thin publisher takes over `api.cathedral.computer` with **zero validator
-updates** via a same-URL Railway swap. Full step-by-step (stage → seed → soak →
-swap → rollback/abort criteria) in [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md).
-Current status and the gates to a miners-paid deployment: [`RELEASE_STATUS.md`](RELEASE_STATUS.md).
+The thin publisher takes over the live API with zero validator updates via a
+same-URL swap; the previous backend stays warm for instant rollback. Full
+sequence — stage, seed from the live feed, soak, swap, abort criteria — in
+[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md).
 
 ## Layout
 
-- `scaffold/lanes/` — the lanes (`solver_arena`, `sat_challenge`, `encoding`) + the z3 encoder
-- `scaffold/contract.py` — the Lane contract (pure generate / verify / score)
-- `scaffold/grading.py`, `timing.py` — shared scoring + server-measured speed
-- `scaffold/consensus.py` — cross-miner counterexample-beats-majority refutation
-- `scaffold/verify.py`, `polaris.py` — witness/DRAT-cert + TDX attestation checks
-- `scaffold/wire.py` — byte-faithful v5/v6 signed-row port (the frozen feed surface)
-- `scaffold/publisher/` — thin publisher (app, feed, board/submit, arena intake, seed_live, refill, soak)
-- `deploy/` — Dockerfile, railway.toml, RUNBOOK
-- `fixtures/live-20260609/` — golden vectors from the live network
+- `scaffold/wire.py` — the frozen signed-row surface (v5/v6 key sets, canonical JSON)
+- `scaffold/publisher/` — app, store, scoring policy, seed/refill/soak
+- `scaffold/lanes/` — lane implementations (SAT challenge, solver arena, encoding)
+- `scaffold/contract.py` — the lane contract (pure generate / verify / score)
+- `deploy/` — Dockerfile, railway.toml, runbook
+- `fixtures/live-20260609/` — golden vectors sampled from the live network
