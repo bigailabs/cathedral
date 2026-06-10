@@ -1,0 +1,23 @@
+# Railway service config for the Cathedral v4 thin publisher.
+# Deploy from the repo root; the Dockerfile lives in deploy/.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "deploy/Dockerfile"
+
+[deploy]
+# Railway injects $PORT; the image's CMD binds it.
+startCommand = "uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT}"
+
+# Health gate: Railway holds traffic on the new deploy until /health is 200, so
+# the same-URL swap only cuts over once the thin publisher is actually serving.
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+
+# Roll back automatically if the new deploy never goes healthy.
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+# Single instance: the SQLite store uses one write lock (winner-take-all atomic
+# claim). Do NOT scale replicas without moving to a shared DB first.
+numReplicas = 1

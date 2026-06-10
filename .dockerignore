@@ -1,0 +1,19 @@
+# Keep the build context tiny: only deploy/ + scaffold/ are needed.
+.git
+__pycache__
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.code-review-graph
+backtest
+derisk
+forward-hunt
+hunt-board
+parallel-domains
+targets
+data
+fixtures
+*.html
+*.md
+!deploy/RUNBOOK.md

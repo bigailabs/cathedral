@@ -1,0 +1,26 @@
+# Thin publisher runtime deps — pinned to the versions proven by the gates
+# (rc_verify / wire_compat 8-8 / publisher_verify) in the cathedral venv on
+# 2026-06-09. Keep in lockstep with that venv; bump only with a green re-run.
+
+# --- web server ---
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+# fastapi pulls these, pinned for reproducibility:
+starlette==1.2.1
+pydantic==2.13.4
+# REQUIRED: the miner surface uses Form(...) (multipart) — FastAPI raises at
+# request time without it, crashing /v1/agents/submit + the arena endpoints.
+python-multipart==0.0.29
+
+# --- signing (Ed25519 row signing + JWKS derivation) ---
+cryptography==48.0.0
+
+# --- sr25519 hotkey verification backend (auth.py imports `bittensor_wallet`) ---
+# This is THE package publisher_verify's //Alice golden vectors require; without
+# it the verifier is StubVerifier (fail-closed) and every miner submit is
+# rejected. Ships a compiled rust extension — needs a manylinux wheel (the slim
+# image below is glibc/Debian, which the published wheels target).
+bittensor-wallet==4.1.0
+
+# --- canonical claim bundle_hash (blake3 of empty bytes) ---
+blake3==1.0.8
