@@ -20,13 +20,14 @@ RUN pip install --no-cache-dir -r /app/deploy/requirements.txt
 # Copy only what the publisher runtime needs (scaffold package).
 COPY scaffold /app/scaffold
 
-# Non-root runtime user; owns the working dir so the SQLite DB is writable.
+# Non-root runtime user. Railway mounts the persistent volume over /app/data
+# OWNED BY ROOT at runtime (build-time chown does not survive the mount), so
+# the entrypoint starts as root, chowns the mount, then drops to `cathedral`.
 RUN useradd --create-home --uid 10001 cathedral && chown -R cathedral:cathedral /app
-USER cathedral
 
 # DB lives in the working dir by default; mount a volume here for persistence.
 ENV CATHEDRAL_DB_PATH=/app/data/publisher.db
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data && chown cathedral:cathedral /app/data
 
 # Railway provides $PORT; default 8000 for local runs.
 ENV PORT=8000
@@ -37,6 +38,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os,urllib.request,sys; \
 url=f\"http://127.0.0.1:{os.environ.get('PORT','8000')}/health\"; \
 sys.exit(0 if urllib.request.urlopen(url,timeout=4).status==200 else 1)"
+
+# Entrypoint: fix volume ownership as root, then drop to the runtime user.
+# setpriv (util-linux, in slim base) execs with clean uid/gid — no su/gosu dep.
+COPY deploy/entrypoint.sh /app/deploy/entrypoint.sh
+RUN chmod +x /app/deploy/entrypoint.sh
+ENTRYPOINT ["/app/deploy/entrypoint.sh"]
 
 # Shell form so $PORT expands at runtime.
 CMD uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT}
