@@ -82,6 +82,27 @@ def build_app(
     app.state.store = store
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
+    app.state.refill_task = None
+
+    # ---- G2: challenge refill loop (env-gated) ----------------------------
+    @app.on_event("startup")
+    async def _start_refill():
+        from . import refill
+        if refill.refill_enabled():
+            import asyncio
+            loop_log = lambda evt, **kw: print(f"[refill] {evt} {kw}")  # noqa: E731
+            app.state.refill_task = asyncio.create_task(
+                refill.refill_loop(store, log=loop_log))
+
+    @app.on_event("shutdown")
+    async def _stop_refill():
+        task = app.state.refill_task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except Exception:
+                pass
 
     # ---- helpers ----------------------------------------------------------
     def _challenge_public(r: Any) -> dict[str, Any]:
@@ -341,6 +362,9 @@ def build_app(
         )
         for r in emitted:
             store.insert_row(r)
+        # record the distinct solve for G2 solved-based retirement (idempotent).
+        from .refill import record_solve
+        record_solve(store, challenge_id, x_cathedral_hotkey)
         return {
             "status": "ranked", "id": sub_id, "eval_run_id": row_uuid,
             "challenge_id": challenge_id, "weighted_score": 1.0,

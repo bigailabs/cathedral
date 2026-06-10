@@ -96,6 +96,44 @@ _MIGRATIONS: list[tuple[str, str]] = [
             seen_at TEXT NOT NULL
         );
     """),
+    ("0007_seed_state", """
+        -- Durable key/value watermark for the live-state seeder (G1): the
+        -- newest live (ran_at, id) cursor consumed, so re-runs resume instead
+        -- of re-pulling. Idempotency marker, never destructive.
+        CREATE TABLE IF NOT EXISTS seed_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """),
+    ("0008_lane_challenges_source", """
+        -- Challenge provenance for the seeder's mirrored board (G1): a mirrored
+        -- live challenge has cnf_source='external' (CNF body lives on the live
+        -- publisher / fetched lazily), while a locally-minted challenge (G2)
+        -- has cnf_source='local' with the CNF held in cnf_text. cnf_url records
+        -- the external active-cnf path for lazy fetch. Both default to a value
+        -- that preserves pre-migration rows ('local').
+        ALTER TABLE lane_challenges ADD COLUMN cnf_source TEXT NOT NULL DEFAULT 'local';
+    """),
+    ("0009_lane_challenges_cnf_url", """
+        ALTER TABLE lane_challenges ADD COLUMN cnf_url TEXT;
+    """),
+    ("0010_lane_challenge_solves", """
+        -- Distinct-solver ledger powering G2 solved-based retirement (live v6:
+        -- retire after >=64 distinct solvers). One row per (challenge, hotkey)
+        -- solve; COUNT(DISTINCT miner_hotkey) drives retirement.
+        CREATE TABLE IF NOT EXISTS lane_challenge_solves (
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            solved_at_iso TEXT NOT NULL,
+            PRIMARY KEY (challenge_id, miner_hotkey)
+        );
+    """),
+    ("0011_lane_challenges_updated_at", """
+        -- Age-based retirement (G2) needs a mutable timestamp distinct from
+        -- created_at_iso; default to a sentinel and backfill on write.
+        ALTER TABLE lane_challenges ADD COLUMN updated_at_iso TEXT;
+    """),
 ]
 
 
@@ -163,6 +201,23 @@ class Store:
                  row["miner_hotkey"], row["task_type"], json.dumps(row)),
             )
         self.write(_do)
+
+    # ---- seed watermark (G1) ---------------------------------------------
+    def get_seed_state(self, key: str) -> str | None:
+        rows = self.query("SELECT value FROM seed_state WHERE key=?", (key,))
+        return rows[0]["value"] if rows else None
+
+    def set_seed_state(self, key: str, value: str) -> None:
+        def _do(conn):
+            conn.execute(
+                "INSERT INTO seed_state(key, value, updated_at) VALUES (?, ?, datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, value),
+            )
+        self.write(_do)
+
+    def count_rows(self) -> int:
+        return self.query("SELECT COUNT(*) AS n FROM eval_runs")[0]["n"]
 
     def recent_rows(
         self, since_ran_at: str | None, since_id: str | None, limit: int
