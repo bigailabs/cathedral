@@ -127,6 +127,13 @@ def seed_rows(
         # advance the page cursor to the feed's reported next position
         cur_ran_at = page.get("next_since_ran_at") or page.get("next_since") or cur_ran_at
         cur_id = page.get("next_since_id")
+        # CHECKPOINT THE WATERMARK EVERY PAGE so a killed/dropped seed resumes
+        # from here instead of restarting from days-ago. Idempotent (OR IGNORE
+        # on rows), so an over-conservative watermark just re-pulls a page.
+        if not dry_run and newest_ran_at:
+            store.set_seed_state(WATERMARK_RAN_AT, newest_ran_at)
+            if newest_id:
+                store.set_seed_state(WATERMARK_ID, newest_id)
         if len(items) < page_limit:
             break
         if pace_secs:
