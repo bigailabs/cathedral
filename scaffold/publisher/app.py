@@ -84,6 +84,7 @@ def build_app(
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
     app.state.refill_task = None
+    app.state.seed_task = None
 
     # ---- G2: challenge refill loop (env-gated) ----------------------------
     @app.on_event("startup")
@@ -95,15 +96,51 @@ def build_app(
             app.state.refill_task = asyncio.create_task(
                 refill.refill_loop(store, log=loop_log))
 
+    # ---- G1b: self-seed from the live feed (env-gated) --------------------
+    # Runs the backfill INSIDE the app process — survives as long as the
+    # container does, checkpoints the watermark per page, and resumes after any
+    # redeploy. No external ssh/cron. Gated by CATHEDRAL_SEED_ON_BOOT so it
+    # only runs on the staging service during cutover prep.
+    @app.on_event("startup")
+    async def _start_seed():
+        if os.environ.get("CATHEDRAL_SEED_ON_BOOT", "").lower() not in ("1", "true", "yes"):
+            return
+        import asyncio
+        from . import seed_live
+
+        base = os.environ.get("CATHEDRAL_SEED_BASE_URL", "https://api.cathedral.computer")
+        days = int(os.environ.get("CATHEDRAL_SEED_DAYS", "7"))
+
+        async def _seed_runner():
+            import argparse
+            # Catch up, then top up periodically so the staging store tracks
+            # live until the swap. Each pass resumes from the durable watermark.
+            while True:
+                try:
+                    args = argparse.Namespace(
+                        db=None, base_url=base, days=days, page_limit=500,
+                        pace=0.0, timeout=90, max_pages=100_000, dry_run=False)
+                    # run the blocking HTTP/SQLite seed off the event loop
+                    summary = await asyncio.to_thread(
+                        seed_live.run_with_store, store, args,
+                        lambda *m: print(f"[seed] {' '.join(str(x) for x in m)}"))
+                    print(f"[seed] pass done: {summary}")
+                except Exception as e:  # never let a transient feed error kill the loop
+                    print(f"[seed] pass error (will retry): {e!r}")
+                await asyncio.sleep(int(os.environ.get("CATHEDRAL_SEED_TOPUP_SECS", "120")))
+
+        app.state.seed_task = asyncio.create_task(_seed_runner())
+
     @app.on_event("shutdown")
     async def _stop_refill():
-        task = app.state.refill_task
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except Exception:
-                pass
+        for attr in ("refill_task", "seed_task"):
+            task = getattr(app.state, attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except Exception:
+                    pass
 
     # ---- helpers ----------------------------------------------------------
     def _challenge_public(r: Any) -> dict[str, Any]:

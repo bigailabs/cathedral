@@ -207,6 +207,18 @@ def seed_board(
             "board_count": board.get("count", len(items))}
 
 
+def run_with_store(store: Store, args: argparse.Namespace, log=print) -> dict[str, Any]:
+    """Seed one pass into an ALREADY-OPEN store (does not open or close it).
+    Used by the in-app boot seeder so the long-lived publisher process owns the
+    connection. Returns the rows + board summary."""
+    base = args.base_url.rstrip("/")
+    rs = seed_rows(store, base_url=base, days=args.days, page_limit=args.page_limit,
+                   pace_secs=args.pace, dry_run=args.dry_run, timeout=args.timeout,
+                   max_pages=args.max_pages, log=log)
+    bs = seed_board(store, base_url=base, dry_run=args.dry_run, log=log)
+    return {"rows": rs, "board": bs, "total_rows": store.count_rows()}
+
+
 def run(args: argparse.Namespace, log=print) -> int:
     base = args.base_url.rstrip("/")
     store = Store(args.db)
