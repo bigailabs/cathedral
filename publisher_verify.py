@@ -302,6 +302,70 @@ with TestClient(app) as client:
         os.environ.pop(_scoring.SCORING_POLICY_ENV, None)
     ck("flat policy restored as default", _scoring.scoring_policy() == "flat")
 
+    # COVERAGE DENOMINATOR = relative-to-top (TASK 0). In prod the publisher
+    # mints far more challenges than any miner solves (92% expire), so the old
+    # solved/minted denominator floored EVERYONE. The denominator is now the
+    # MAX distinct-challenges solved by any single miner in the window, so the
+    # top solver ≈1.0 and a half-as-active one ≈0.5 — independent of mint rate.
+    os.environ[_scoring.SCORING_POLICY_ENV] = "coverage"
+    try:
+        cov_store = build_app(database_path=":memory:", signing_key_hex=key_hex).state.store
+        # Seed 3 hotkeys with different distinct-solve counts: top=10, mid=5,
+        # low=2 — into a SINGLE challenge-solve ledger. Mint MANY more
+        # challenges than anyone solved so the old denominator would floor all.
+        def _seed_cov(conn):
+            cn = now_iso()
+            for i in range(40):  # 40 minted challenges; nobody solves them all
+                conn.execute(
+                    "INSERT OR REPLACE INTO lane_challenges(challenge_id, family_id, "
+                    "tier, cnf_text, cnf_sha256, cnf_bytes, num_vars, num_clauses, "
+                    "status, cnf_source, created_at_iso) VALUES "
+                    f"('cov-{i}', 'synthetic_boolean_v1', 1, '', 'h{i}', 0, 0, 0, "
+                    "'active', 'local', ?)", (cn,))
+            for hk, k in (("5TopSolver", 10), ("5MidSolver", 5), ("5LowSolver", 2)):
+                for i in range(k):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, "
+                        "miner_hotkey, solved_at_iso) VALUES (?, ?, ?)",
+                        (f"cov-{i}", hk, cn))
+        cov_store.write(_seed_cov)
+        _scoring._reset_coverage_denom_cache()
+        top = _scoring.weighted_score_for(cov_store, "5TopSolver")
+        mid = _scoring.weighted_score_for(cov_store, "5MidSolver")
+        low = _scoring.weighted_score_for(cov_store, "5LowSolver")
+        ck("coverage denom: top solver scores ~1.0 (not floored by mint rate)",
+           abs(top - 1.0) < 1e-9)
+        ck("coverage denom: half-as-active solver scores ~0.5 (relative-to-top)",
+           abs(mid - 0.5) < 1e-9)
+        ck("coverage denom: low solver scales proportionally (2/10=0.2)",
+           abs(low - 0.2) < 1e-9)
+        # denominator is cached (one GROUP-BY-MAX, not per-submit table scan).
+        # reset first: the weighted_score_for calls above populated the cache at
+        # real wall-clock time, which would mask the synthetic-now TTL test.
+        _scoring._reset_coverage_denom_cache()
+        d1 = _scoring.coverage_denominator(cov_store, now=1000.0)
+        # a new top-beating solver appears, but the cache must hold the old denom
+        # until the TTL elapses.
+        def _seed_more(conn):
+            cn = now_iso()
+            for i in range(20):
+                conn.execute(
+                    "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, "
+                    "miner_hotkey, solved_at_iso) VALUES (?, ?, ?)",
+                    (f"cov-{i}", "5MegaSolver", cn))
+        cov_store.write(_seed_more)
+        d_cached = _scoring.coverage_denominator(cov_store, now=1000.0 + 30.0)
+        ck("coverage denom: cached within TTL (no per-submit GROUP-BY-MAX)",
+           d_cached == d1 == 10)
+        d_fresh = _scoring.coverage_denominator(
+            cov_store, now=1000.0 + _scoring._COVERAGE_DENOM_TTL_SECS + 1.0)
+        ck("coverage denom: recomputes after TTL elapses (now sees 20)",
+           d_fresh == 20)
+        cov_store.close()
+    finally:
+        os.environ.pop(_scoring.SCORING_POLICY_ENV, None)
+        _scoring._reset_coverage_denom_cache()
+
     # validator-style pull loop: tuple cursor, verify EVERY signature.
     pulled = []
     cur_ra = cur_id = None

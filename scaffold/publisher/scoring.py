@@ -27,9 +27,19 @@ policy flips AFTER the swap, per deploy/RUNBOOK.md abort criteria.
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 from .store import Store
+
+# In-process cache for the coverage denominator (the max distinct-challenges
+# solved by any single miner in the trailing window). Recomputing a
+# GROUP-BY-MAX over the solves table on EVERY submit hammers the single
+# SQLite connection (the bottleneck that wedged prod), so we memoize it and
+# recompute at most every _COVERAGE_DENOM_TTL_SECS. Module-level so it is
+# shared across requests in the single-process publisher.
+_COVERAGE_DENOM_TTL_SECS = 60.0
+_coverage_denom_cache: dict[str, tuple[float, int]] = {}  # window_key -> (computed_at, denom)
 
 # -- env knobs ---------------------------------------------------------------
 
@@ -90,31 +100,64 @@ def _iso_before(hours: float) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def coverage_score(store: Store, miner_hotkey: str) -> float:
+def coverage_denominator(store: Store, *, now: float | None = None) -> int:
+    """The relative-to-top denominator: the MAX distinct-challenges solved by any
+    single miner in the trailing window. The top solver therefore scores ≈1.0 and
+    everyone else scales proportionally — independent of how many challenges the
+    publisher minted (in prod ~92% expire untouched, so a mint-based denominator
+    floored EVERYONE at the coverage floor and gave zero differentiation).
+
+    Cached in-process for ≥_COVERAGE_DENOM_TTL_SECS: this is a GROUP-BY-MAX over
+    the whole solves table, far too expensive to run on every submit against the
+    one SQLite connection. `now` is injectable for tests; defaults to time.time().
+    """
+    now = time.time() if now is None else now
+    window = coverage_window_hours()
+    key = f"{window}"
+    cached = _coverage_denom_cache.get(key)
+    if cached is not None and (now - cached[0]) < _COVERAGE_DENOM_TTL_SECS:
+        return cached[1]
+    since = _iso_before(window)
+    # max distinct challenges any single hotkey solved in the window.
+    row = store.query(
+        "SELECT MAX(c) AS m FROM ("
+        "  SELECT COUNT(DISTINCT challenge_id) AS c FROM lane_challenge_solves "
+        "  WHERE solved_at_iso > ? GROUP BY miner_hotkey)",
+        (since,))
+    denom = int(row[0]["m"] or 0)
+    _coverage_denom_cache[key] = (now, denom)
+    return denom
+
+
+def _reset_coverage_denom_cache() -> None:
+    """Test hook: drop the memoized denominator so a freshly-seeded store
+    recomputes instead of serving a stale value."""
+    _coverage_denom_cache.clear()
+
+
+def coverage_score(store: Store, miner_hotkey: str, *, now: float | None = None) -> float:
     """weighted_score = (distinct challenges this hotkey solved in the trailing
-    window, INCLUDING the solve being scored) / (challenges created in the same
-    window), clamped to [floor, 1.0].
+    window, INCLUDING the solve being scored) / (max distinct challenges solved
+    by ANY single miner in the same window), clamped to [floor, 1.0].
 
-    Solve everything the board offered → 1.0. Solve half → ~0.5. The
-    denominator is what was actually mintable supply, so the score is a real
-    work share, not an unbounded count. Falls back to 1.0 when the window has
-    no minted challenges (fresh deploys, seeded-only stores).
+    Relative-to-top, NOT relative-to-mint: the busiest solver ≈ 1.0, a
+    half-as-active one ≈ 0.5, independent of mint rate. In prod the publisher
+    mints far more challenges than any miner can solve (92% expire untouched), so
+    the old `solved / challenges_minted` denominator floored EVERYONE at the
+    coverage floor and erased all differentiation — this fixes that.
 
-    The denominator counts LOCAL challenges only: seed_live mirrors the live
-    board as cnf_source='external' metadata rows stamped with the seed time —
-    those are unsolvable through this publisher and must never inflate the
-    supply, or every honest score collapses toward the floor."""
+    Falls back to 1.0 when no miner has solved anything in the window (fresh
+    deploys, seeded-only stores) — a lone first solver is the top, score 1.0."""
     since = _iso_before(coverage_window_hours())
     solved = store.query(
         "SELECT COUNT(DISTINCT challenge_id) AS n FROM lane_challenge_solves "
         "WHERE miner_hotkey=? AND solved_at_iso > ?", (miner_hotkey, since))[0]["n"]
-    available = store.query(
-        "SELECT COUNT(*) AS n FROM lane_challenges "
-        "WHERE created_at_iso > ? AND cnf_source='local'",
-        (since,))[0]["n"]
-    if available <= 0:
-        return 1.0
-    return min(1.0, max(coverage_floor(), solved / available))
+    denom = coverage_denominator(store, now=now)
+    if denom <= 0:
+        # No solves recorded in-window at all: the scoring miner (if any) is the
+        # top by definition. An idle hotkey with 0 solves still floors below.
+        return 1.0 if solved > 0 else coverage_floor()
+    return min(1.0, max(coverage_floor(), solved / denom))
 
 
 def weighted_score_for(store: Store, miner_hotkey: str) -> float:
