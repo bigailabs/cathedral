@@ -85,6 +85,11 @@ def build_app(
     app.state.signing_key_hex = key_hex
     app.state.refill_task = None
     app.state.seed_task = None
+    app.state.arena_eval_task = None
+    # Lane S champion machine + registry persist across eval ticks on app.state
+    # (the validator constructs ONE lane and reuses it so the champion survives).
+    from ..lanes.solver_arena import SolverArenaLane
+    app.state.arena_lane = SolverArenaLane(registry=arena_registry)
 
     # ---- G2: challenge refill loop (env-gated) ----------------------------
     @app.on_event("startup")
@@ -95,6 +100,33 @@ def build_app(
             loop_log = lambda evt, **kw: print(f"[refill] {evt} {kw}")  # noqa: E731
             app.state.refill_task = asyncio.create_task(
                 refill.refill_loop(store, log=loop_log))
+
+    # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
+    # Periodically scores registered pending solvers and, on a record-fall,
+    # emits a signed v6 row crediting the new champion's owner. Default OFF.
+    # In prod the adapter resolver must plug a real attested container runner;
+    # until that is wired it returns None (every solver stays pending — no false
+    # record-falls, the safe default). The gate exercises arena_eval_tick
+    # directly with deterministic stub adapters.
+    @app.on_event("startup")
+    async def _start_arena_eval():
+        from . import arena_eval
+        if not arena_eval.arena_eval_enabled():
+            return
+        import asyncio
+        salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
+
+        def _prod_adapter_for(spec):
+            # No real container runner is wired into the thin publisher yet; a
+            # solver stays pending until one is. Flagged for Fred — turning the
+            # loop on without a runner is a no-op, never a crash or false payout.
+            return None
+
+        app.state.arena_eval_task = asyncio.create_task(
+            arena_eval.arena_eval_loop(
+                store, app.state.arena_lane,
+                adapter_for=_prod_adapter_for, private_key_hex=key_hex,
+                epoch_salt=salt, log=lambda evt, **kw: print(f"[arena] {evt} {kw}")))
 
     # ---- G1b: self-seed from the live feed (env-gated) --------------------
     # Runs the backfill INSIDE the app process — survives as long as the
@@ -133,7 +165,7 @@ def build_app(
 
     @app.on_event("shutdown")
     async def _stop_refill():
-        for attr in ("refill_task", "seed_task"):
+        for attr in ("refill_task", "seed_task", "arena_eval_task"):
             task = getattr(app.state, attr, None)
             if task is not None:
                 task.cancel()

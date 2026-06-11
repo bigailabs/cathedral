@@ -422,6 +422,92 @@ with TestClient(app) as client:
     ck("Lane I instance min_batch_score = 0.5", ib["min_batch_score"] == 0.5)
 
 # --------------------------------------------------------------------------
+# 5. LANE S — arena eval loop turns a record-fall into a signed feed row (TASK 1).
+# --------------------------------------------------------------------------
+print("LANE S — arena eval tick + record-fall -> signed row")
+from scaffold.publisher import arena_eval  # noqa: E402
+from scaffold.lanes.solver_arena import SolverArenaLane, SolverSpec, run_batch  # noqa: E402
+from scaffold.lanes.arena_e2e import stub_adapter, run_arena_round  # noqa: E402
+
+_arena_app = build_app(database_path=":memory:", signing_key_hex=key_hex)
+_arena_store = _arena_app.state.store
+_arena_lane: SolverArenaLane = _arena_app.state.arena_lane
+_arena_lane.batch_size = 6
+
+# seed the launch champion (an honest-but-unhurried solver), registered + marked
+# evaluated so a copy of it dedups — exactly arena_e2e's seeding.
+_ctx = arena_eval.GenerateCtx(seed=4242, tier=0, issued_at_iso="x")
+_prob, _hidden = _arena_lane.mint_challenge(_ctx)
+_insts = _arena_lane._batch_from_hidden(_hidden)
+_timeouts = {i.task_id: i.timeout_ms for i in _insts}
+_champ_spec = SolverSpec("https://x/champ", "sha256:" + "cc" * 32, "sc2025champion",
+                         owner_hotkey="5LaunchChampOwner")
+_champ_results = run_batch(stub_adapter("honest_slow"), _insts)
+_arena_lane.seed_launch_champion(_champ_spec, _champ_results, _timeouts)
+
+# register a fresh challenger solver in the DB (as the /v1/arena/solvers route does).
+def _reg(conn):
+    conn.execute(
+        "INSERT OR IGNORE INTO arena_solvers(source_sha256, source_url, "
+        "container_digest, owner_hotkey, registered_round, status, created_at_iso) "
+        "VALUES ('fastchallenger', 'https://x/fast', ?, '5FastChallengerOwner', 0, "
+        "'pending', ?)", ("sha256:" + "ff" * 32, "2026-06-10T00:00:00.000Z"))
+_arena_store.write(_reg)
+
+# adapter resolver: a fast honest solver for the challenger, None otherwise.
+def _adapter_for(spec):
+    if spec.commitment_id == "fastchallenger":
+        return stub_adapter("honest_fast")
+    return None
+
+_summary = arena_eval.arena_eval_tick(
+    _arena_store, _arena_lane, adapter_for=_adapter_for,
+    private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1",
+    seed=4242, tier=0)
+ck("arena tick evaluated the pending challenger", _summary["evaluated"] == 1)
+ck("arena tick recorded a record-fall (fast beat the slow champion)",
+   _summary["record_falls"] == 1)
+ck("arena tick set the new champion to the challenger commitment",
+   _arena_lane.champion.champion.commitment_id == "fastchallenger")
+
+# the new champion is promoted in the DB + the old one retired.
+_champ_row = _arena_store.query(
+    "SELECT source_sha256, owner_hotkey FROM arena_solvers WHERE status='champion'")
+ck("DB champion row is the new challenger",
+   len(_champ_row) == 1 and _champ_row[0]["source_sha256"] == "fastchallenger")
+
+# the emitted signed rows are in the feed and VERIFY under the loaded key.
+_feed = _arena_store.recent_rows(None, None, 50)
+_arena_rows = [r for r in _feed if str(r.get("id", "")).startswith("arena") or
+               r.get("operator") == "5FastChallengerOwner" or
+               r.get("miner_hotkey") == "5FastChallengerOwner"]
+ck("arena record-fall emitted v6 + v5compat rows (2 rows)", len(_arena_rows) == 2)
+ck("every emitted arena row verifies under the loaded key (validator would score it)",
+   len(_arena_rows) == 2 and all(wire.verify_row(r, pub_hex) for r in _arena_rows))
+ck("emitted arena row credits the new champion's owner hotkey",
+   all(r["miner_hotkey"] == "5FastChallengerOwner" for r in _arena_rows))
+ck("emitted arena row carries a positive weighted_score (a paid record-fall)",
+   all(float(r["weighted_score"]) > 0.0 for r in _arena_rows))
+
+# a SECOND tick with no new pending solver emits nothing (one-eval-per-commitment).
+_summary2 = arena_eval.arena_eval_tick(
+    _arena_store, _arena_lane, adapter_for=_adapter_for,
+    private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1",
+    seed=4243, tier=0)
+ck("arena re-tick with no new pending solver emits no rows",
+   _summary2["rows_emitted"] == 0 and _summary2["evaluated"] == 0)
+
+# ADVERSARIAL BATTERY (reuse arena_e2e): liar / forged-DRAT / copied-champion /
+# timeout-fraud all score 0 — so none can ever be the source of a paid row.
+_adv = run_arena_round(include_real=False)
+_adv_by_label = {label: (score, reason) for label, _o, score, reason, _d in _adv.rows}
+for _bad in ("liar_solver", "forged_unsat", "timeout_solver", "champion_copy"):
+    sc_bad, _ = _adv_by_label[_bad]
+    ck(f"adversarial {_bad} scores 0 (never a record-fall, never a paid row)",
+       sc_bad == 0.0)
+_arena_store.close()
+
+# --------------------------------------------------------------------------
 fails = [n for n, c in checks if not c]
 print(f"\nPUBLISHER VERIFY: "
       f"{'PASS all ' + str(len(checks)) + ' checks' if not fails else 'FAIL ' + str(fails)}")
