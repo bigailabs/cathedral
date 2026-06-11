@@ -508,6 +508,138 @@ for _bad in ("liar_solver", "forged_unsat", "timeout_solver", "champion_copy"):
 _arena_store.close()
 
 # --------------------------------------------------------------------------
+# 6. LANE I — pay-on-disagreement-proven-hardness payout (TASK 2).
+# --------------------------------------------------------------------------
+print("LANE I — payout on disagreement-proven hardness + anti-gaming gates")
+from scaffold.publisher import arena_payout  # noqa: E402
+from scaffold.lanes.solver_arena import AdapterOutput, Outcome as _O  # noqa: E402
+from scaffold.lanes.arena_e2e import _rr  # noqa: E402
+
+_li_app = build_app(database_path=":memory:", signing_key_hex=key_hex)
+_li_store = _li_app.state.store
+_li_lane: SolverArenaLane = _li_app.state.arena_lane
+_li_lane.batch_size = 6
+
+# A breaker instance: a real planted-3SAT CNF (so honest solvers CAN close it,
+# proving the champion's timeout is the hard part, not unsolvability).
+_brk_cnf, _ = gen_planted_3sat(99, 12, 36)
+_brk_sol = solve_cnf(_brk_cnf)
+
+# champion adapter: TIMES OUT on the breaker CNF, but solves standard batch CNFs
+# (it is the champion — broadly competent, just not on this instance).
+def _champ_adapter(cnf, timeout_ms):
+    if cnf == _brk_cnf:
+        return AdapterOutput(_O.TIMEOUT, [], "", _rr(timeout_ms, True))
+    return AdapterOutput(_O.SAT, solve_cnf(cnf) or [], "", _rr(120.0))
+_champ_spec = SolverSpec("https://x/champ", "sha256:" + "cc" * 32, "li-champion",
+                         owner_hotkey="5ChampOwner")
+
+# a broadly-competitive CLOSER: solves the breaker AND the standard batch.
+def _closer_adapter(cnf, timeout_ms):
+    return AdapterOutput(_O.SAT, solve_cnf(cnf) or [], "", _rr(80.0))
+_closer_spec = SolverSpec("https://x/closer", "sha256:" + "dd" * 32, "li-closer",
+                          owner_hotkey="5CloserOwner")
+
+# register an instance via the route, submitted at round 5 (quarantine cutoff = 2).
+sd_li = now_iso()
+_li_sha = __import__("hashlib").sha256(_brk_cnf.encode()).hexdigest()
+_iclaim = canonical_claim_bytes(
+    bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+    miner_hotkey="placeholder", submitted_at=sd_li,
+    challenge_id="arena-instance", dimacs_solution_sha256=_li_sha)
+# insert the instance directly (the route requires a real signature; we test the
+# PAYOUT engine, which the route already feeds — quarantine/min-batch are gated here).
+def _ins_inst(conn):
+    conn.execute(
+        "INSERT INTO arena_instances(instance_id, owner_hotkey, cnf_sha256, cnf_text, "
+        "submitted_round, quarantine_until_round, min_batch_score, status, created_at_iso) "
+        "VALUES ('brk-1', '5InstanceOwner', ?, ?, 5, 8, 0.5, 'pending', ?)",
+        (_li_sha, _brk_cnf, now_iso()))
+_li_store.write(_ins_inst)
+
+# HAPPY PATH: closer registered at round 1 (≤ 5−3=2, quarantine-clear), broadly
+# competitive (solves the whole batch). Champion times out -> instance pays.
+v = arena_payout.settle_instance(
+    _li_store, _li_lane, dict(_li_store.query("SELECT * FROM arena_instances WHERE instance_id='brk-1'")[0]),
+    champion_spec=_champ_spec, champion_adapter=_champ_adapter,
+    closers=[(_closer_spec, _closer_adapter, 1)], current_round=6,
+    private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1")
+ck("Lane I happy path: instance pays on disagreement-proven hardness", v["paid"] is True)
+ck("Lane I price is positive and <= base (separation factor clamped)",
+   0.0 < v["price"] <= 1.0)
+# emitted row credits the INSTANCE owner + verifies.
+_li_feed = _li_store.recent_rows(None, None, 50)
+_li_rows = [r for r in _li_feed if r.get("miner_hotkey") == "5InstanceOwner"]
+ck("Lane I emitted v6 + v5compat rows to the instance owner", len(_li_rows) == 2)
+ck("every Lane I payout row verifies under the loaded key",
+   len(_li_rows) == 2 and all(wire.verify_row(r, pub_hex) for r in _li_rows))
+
+# price decays with the round (0.97^r): a later round pays strictly less.
+p_r6 = arena_payout.lane_i_price(2 * 5000.0, 80.0, 5000.0, 6)
+p_r30 = arena_payout.lane_i_price(2 * 5000.0, 80.0, 5000.0, 30)
+ck("Lane I price decays 0.97^round (later round pays less)", p_r30 < p_r6 < 1.0001)
+
+# ANTI-GAMING 1 — QUARANTINE: a closer registered at round 5 (> cutoff 2) cannot
+# serve as closing evidence for a round-5 instance (submit-and-farm-same-round).
+def _ins_inst2(conn):
+    conn.execute(
+        "INSERT INTO arena_instances(instance_id, owner_hotkey, cnf_sha256, cnf_text, "
+        "submitted_round, quarantine_until_round, min_batch_score, status, created_at_iso) "
+        "VALUES ('brk-q', '5InstanceOwner2', ?, ?, 5, 8, 0.5, 'pending', ?)",
+        (_li_sha, _brk_cnf, now_iso()))
+_li_store.write(_ins_inst2)
+vq = arena_payout.settle_instance(
+    _li_store, _li_lane, dict(_li_store.query("SELECT * FROM arena_instances WHERE instance_id='brk-q'")[0]),
+    champion_spec=_champ_spec, champion_adapter=_champ_adapter,
+    closers=[(_closer_spec, _closer_adapter, 5)], current_round=6,   # reg round 5 > cutoff 2
+    private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1")
+ck("Lane I quarantine: same-round closer is rejected (no payout)",
+   vq["paid"] is False and vq["reason"] == "no_valid_closer")
+
+# ANTI-GAMING 2 — MIN_BATCH_SCORE: a closer that solves the breaker but <50% of
+# the standard batch (trivially specialized) cannot close it.
+def _specialized_closer(cnf, timeout_ms):
+    if cnf == _brk_cnf:
+        return AdapterOutput(_O.SAT, _brk_sol or [], "", _rr(70.0))
+    return AdapterOutput(_O.TIMEOUT, [], "", _rr(timeout_ms, True))  # fails the batch
+_spec_spec = SolverSpec("https://x/spec", "sha256:" + "ee" * 32, "li-specialist",
+                        owner_hotkey="5SpecOwner")
+def _ins_inst3(conn):
+    conn.execute(
+        "INSERT INTO arena_instances(instance_id, owner_hotkey, cnf_sha256, cnf_text, "
+        "submitted_round, quarantine_until_round, min_batch_score, status, created_at_iso) "
+        "VALUES ('brk-s', '5InstanceOwner3', ?, ?, 5, 8, 0.5, 'pending', ?)",
+        (_li_sha, _brk_cnf, now_iso()))
+_li_store.write(_ins_inst3)
+vs = arena_payout.settle_instance(
+    _li_store, _li_lane, dict(_li_store.query("SELECT * FROM arena_instances WHERE instance_id='brk-s'")[0]),
+    champion_spec=_champ_spec, champion_adapter=_champ_adapter,
+    closers=[(_spec_spec, _specialized_closer, 1)], current_round=6,
+    private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1")
+ck("Lane I min-batch-score: trivially-specialized closer rejected (no payout)",
+   vs["paid"] is False and vs["reason"] == "no_valid_closer")
+
+# ANTI-GAMING 3 — CHAMPION DOESN'T TIME OUT: if the champion closes the instance,
+# there is no proven hardness, so it never pays (reward dries up — PUPPER fix).
+def _champ_solves_all(cnf, timeout_ms):
+    return AdapterOutput(_O.SAT, solve_cnf(cnf) or [], "", _rr(50.0))
+def _ins_inst4(conn):
+    conn.execute(
+        "INSERT INTO arena_instances(instance_id, owner_hotkey, cnf_sha256, cnf_text, "
+        "submitted_round, quarantine_until_round, min_batch_score, status, created_at_iso) "
+        "VALUES ('brk-easy', '5InstanceOwner4', ?, ?, 5, 8, 0.5, 'pending', ?)",
+        (_li_sha, _brk_cnf, now_iso()))
+_li_store.write(_ins_inst4)
+ve = arena_payout.settle_instance(
+    _li_store, _li_lane, dict(_li_store.query("SELECT * FROM arena_instances WHERE instance_id='brk-easy'")[0]),
+    champion_spec=_champ_spec, champion_adapter=_champ_solves_all,
+    closers=[(_closer_spec, _closer_adapter, 1)], current_round=6,
+    private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1")
+ck("Lane I no-hardness: champion closes it -> never pays (self-healing benchmark)",
+   ve["paid"] is False and ve["reason"] == "champion_did_not_time_out")
+_li_store.close()
+
+# --------------------------------------------------------------------------
 fails = [n for n, c in checks if not c]
 print(f"\nPUBLISHER VERIFY: "
       f"{'PASS all ' + str(len(checks)) + ' checks' if not fails else 'FAIL ' + str(fails)}")

@@ -86,6 +86,7 @@ def build_app(
     app.state.refill_task = None
     app.state.seed_task = None
     app.state.arena_eval_task = None
+    app.state.arena_payout_task = None
     # Lane S champion machine + registry persist across eval ticks on app.state
     # (the validator constructs ONE lane and reuses it so the champion survives).
     from ..lanes.solver_arena import SolverArenaLane
@@ -128,6 +129,28 @@ def build_app(
                 adapter_for=_prod_adapter_for, private_key_hex=key_hex,
                 epoch_salt=salt, log=lambda evt, **kw: print(f"[arena] {evt} {kw}")))
 
+    # ---- Lane I: payout loop (env-gated, TASK 2) --------------------------
+    # Settles breaker instances on pay-on-disagreement-proven-hardness. Default
+    # OFF. Like the arena eval loop, the champion/closers providers return the
+    # real attested run capability in prod; until that runner is wired the
+    # champion provider returns None (no settlement runs — the safe default).
+    @app.on_event("startup")
+    async def _start_arena_payout():
+        from . import arena_payout
+        if not arena_payout.arena_payout_enabled():
+            return
+        import asyncio
+        salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
+
+        app.state.arena_payout_task = asyncio.create_task(
+            arena_payout.arena_payout_loop(
+                store, app.state.arena_lane,
+                round_source=lambda: int(os.environ.get("CATHEDRAL_ARENA_ROUND", "0")),
+                champion_provider=lambda: None,   # no real runner wired yet
+                closers_provider=lambda: [],
+                private_key_hex=key_hex, epoch_salt=salt,
+                log=lambda evt, **kw: print(f"[lane-i] {evt} {kw}")))
+
     # ---- G1b: self-seed from the live feed (env-gated) --------------------
     # Runs the backfill INSIDE the app process — survives as long as the
     # container does, checkpoints the watermark per page, and resumes after any
@@ -165,7 +188,7 @@ def build_app(
 
     @app.on_event("shutdown")
     async def _stop_refill():
-        for attr in ("refill_task", "seed_task", "arena_eval_task"):
+        for attr in ("refill_task", "seed_task", "arena_eval_task", "arena_payout_task"):
             task = getattr(app.state, attr, None)
             if task is not None:
                 task.cancel()
@@ -542,10 +565,11 @@ def build_app(
         def _store(conn):
             conn.execute(
                 "INSERT INTO arena_instances(instance_id, owner_hotkey, cnf_sha256, "
-                "submitted_round, quarantine_until_round, min_batch_score, status, created_at_iso) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
-                (instance_id, x_cathedral_hotkey, cnf_sha, round_no, quarantine_until,
-                 _MIN_BATCH_SCORE, _now_iso_ms()))
+                "cnf_text, submitted_round, quarantine_until_round, min_batch_score, "
+                "status, created_at_iso) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (instance_id, x_cathedral_hotkey, cnf_sha, cnf_text, round_no,
+                 quarantine_until, _MIN_BATCH_SCORE, _now_iso_ms()))
         store.write(_store)
         return {
             "instance_id": instance_id, "submitted_round": round_no,

@@ -134,6 +134,16 @@ _MIGRATIONS: list[tuple[str, str]] = [
         -- created_at_iso; default to a sentinel and backfill on write.
         ALTER TABLE lane_challenges ADD COLUMN updated_at_iso TEXT;
     """),
+    ("0012_arena_instances_payout", """
+        -- Lane I payout (TASK 2): the disagreement check must RE-RUN the
+        -- champion + closers on the instance's CNF, so the body must be stored
+        -- (intake previously kept only the sha). paid_round/paid_at_iso mark a
+        -- settled instance so a round isn't paid twice; closed_round records the
+        -- round the champion finally closed it (payment reaches zero there).
+        ALTER TABLE arena_instances ADD COLUMN cnf_text TEXT NOT NULL DEFAULT '';
+        ALTER TABLE arena_instances ADD COLUMN last_paid_round INTEGER;
+        ALTER TABLE arena_instances ADD COLUMN paid_at_iso TEXT;
+    """),
 ]
 
 
