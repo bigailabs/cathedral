@@ -168,6 +168,10 @@ def retire_ready(store: Store, tier: int) -> int:
             (now, _FAMILY, tier, threshold))
         return int(cur.rowcount or 0)
     retired += store.write(_solved)
+    if retired:
+        # broadcast tier: the active set shrank — drop the cached board snapshot.
+        from . import board_cache as _bc
+        _bc.invalidate_all()
     return retired
 
 

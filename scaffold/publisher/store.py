@@ -1,14 +1,39 @@
-"""SQLite storage for the thin publisher — additive idempotent migrations, a
-single write lock (the production DB discipline: issue #109 tuple cursor, durable
-backfill marker, no destructive migrations).
+"""Storage for the thin publisher — dual backend (SQLite | Postgres) behind ONE
+interface so app.py and the loops are dialect-agnostic.
 
-Tables:
-  eval_runs        — the signed feed rows validators pull (the frozen surface).
-  lane_challenges  — Lane A SAT challenges (CNF held server-side).
-  agent_submissions— Lane A submit ledger (dedup, rate-limit, per-challenge lock).
-  arena_solvers    — Lane S solver registry.
-  arena_instances  — Lane I breaker instances.
-  schema_migrations— applied migration ids (idempotency marker).
+Backends
+--------
+* **SQLite** (default, offline, all gates): a single connection behind one write
+  lock — the production DB discipline (issue #109 tuple cursor, durable backfill
+  marker, no destructive migrations). `write()` opens BEGIN IMMEDIATE.
+* **Postgres** (set DATABASE_URL=postgres[ql]://… or pass that as database_path):
+  a psycopg2 connection pool. MVCC means readers never block writers and the
+  wedge class dies, so NO global write lock — each `write()` takes a pooled
+  connection and runs a normal transaction. This is the keystone fix.
+
+The trick that keeps the rest of the codebase untouched: app.py / scoring.py /
+refill.py / seed_live.py all write SQLite-flavoured SQL inline through
+`conn.execute(sql, params)` (cursor with .rowcount / .fetchone(), rows indexable
+by name and position). In Postgres mode the pooled connection is wrapped by
+`_PgConn`, which translates that SQLite SQL to Postgres on the fly:
+  *  ?            -> %s             (paramstyle)
+  *  INSERT OR IGNORE INTO t(...)   -> INSERT INTO t(...) ... ON CONFLICT DO NOTHING
+  *  INSERT OR REPLACE INTO t(cols) -> INSERT ... ON CONFLICT (pk) DO UPDATE SET …
+  *  datetime('now')               -> now()
+The translation is intentionally narrow — only the forms this codebase actually
+emits — and is unit-pinned by postgres_verify.py against a real database.
+
+Tables
+------
+  eval_runs          — the signed feed rows validators pull (the frozen surface).
+  lane_challenges    — Lane A SAT challenges (CNF held server-side).
+  agent_submissions  — Lane A submit ledger (dedup, rate-limit, per-challenge lock).
+  arena_solvers      — Lane S solver registry.
+  arena_instances    — Lane I breaker instances.
+  lane_challenge_solves — distinct-solver ledger (retirement + coverage scoring).
+  submit_signatures  — replay dedup.
+  seed_state         — durable live-seed watermark.
+  schema_migrations  — applied migration ids (idempotency marker).
 
 Cursor: rows are pulled by the strict tuple (ran_at, id) > (since_ran_at,
 since_id) ordering — the exact semantics released validators use.
@@ -16,13 +41,22 @@ since_id) ordering — the exact semantics released validators use.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 import threading
 import uuid
 from typing import Any
 
-# Each migration is (id, SQL). Migrations are ADDITIVE and idempotent (CREATE IF
-# NOT EXISTS / ALTER guarded by a try). Never edit an applied migration — append.
+# ---------------------------------------------------------------------------
+# Migrations.
+#
+# SQLite migrations stay exactly as released (additive, idempotent). Postgres
+# needs the same logical schema with portable DDL — kept as a parallel list so a
+# faithful SQLite migration is never mutated. The two produce equivalent tables;
+# both are CREATE … IF NOT EXISTS / ADD COLUMN IF NOT EXISTS so re-runs are no-ops.
+# Never edit an applied migration — append.
+# ---------------------------------------------------------------------------
 _MIGRATIONS: list[tuple[str, str]] = [
     ("0001_eval_runs", """
         CREATE TABLE IF NOT EXISTS eval_runs (
@@ -97,9 +131,6 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
     """),
     ("0007_seed_state", """
-        -- Durable key/value watermark for the live-state seeder (G1): the
-        -- newest live (ran_at, id) cursor consumed, so re-runs resume instead
-        -- of re-pulling. Idempotency marker, never destructive.
         CREATE TABLE IF NOT EXISTS seed_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -107,21 +138,12 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
     """),
     ("0008_lane_challenges_source", """
-        -- Challenge provenance for the seeder's mirrored board (G1): a mirrored
-        -- live challenge has cnf_source='external' (CNF body lives on the live
-        -- publisher / fetched lazily), while a locally-minted challenge (G2)
-        -- has cnf_source='local' with the CNF held in cnf_text. cnf_url records
-        -- the external active-cnf path for lazy fetch. Both default to a value
-        -- that preserves pre-migration rows ('local').
         ALTER TABLE lane_challenges ADD COLUMN cnf_source TEXT NOT NULL DEFAULT 'local';
     """),
     ("0009_lane_challenges_cnf_url", """
         ALTER TABLE lane_challenges ADD COLUMN cnf_url TEXT;
     """),
     ("0010_lane_challenge_solves", """
-        -- Distinct-solver ledger powering G2 solved-based retirement (live v6:
-        -- retire after >=64 distinct solvers). One row per (challenge, hotkey)
-        -- solve; COUNT(DISTINCT miner_hotkey) drives retirement.
         CREATE TABLE IF NOT EXISTS lane_challenge_solves (
             challenge_id TEXT NOT NULL,
             miner_hotkey TEXT NOT NULL,
@@ -130,38 +152,273 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
     """),
     ("0011_lane_challenges_updated_at", """
-        -- Age-based retirement (G2) needs a mutable timestamp distinct from
-        -- created_at_iso; default to a sentinel and backfill on write.
         ALTER TABLE lane_challenges ADD COLUMN updated_at_iso TEXT;
     """),
     ("0012_arena_instances_payout", """
-        -- Lane I payout (TASK 2): the disagreement check must RE-RUN the
-        -- champion + closers on the instance's CNF, so the body must be stored
-        -- (intake previously kept only the sha). paid_round/paid_at_iso mark a
-        -- settled instance so a round isn't paid twice; closed_round records the
-        -- round the champion finally closed it (payment reaches zero there).
         ALTER TABLE arena_instances ADD COLUMN cnf_text TEXT NOT NULL DEFAULT '';
         ALTER TABLE arena_instances ADD COLUMN last_paid_round INTEGER;
         ALTER TABLE arena_instances ADD COLUMN paid_at_iso TEXT;
     """),
 ]
 
+# Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
+# ADD COLUMN guarded by IF NOT EXISTS (Postgres supports it), executescript-style
+# multi-statement blocks split on ';'. Indexes IF NOT EXISTS.
+_MIGRATIONS_PG: list[tuple[str, str]] = [
+    ("0001_eval_runs", """
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id TEXT PRIMARY KEY,
+            ran_at TEXT NOT NULL,
+            eval_output_schema_version INTEGER NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            row_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
+    """),
+    ("0002_lane_challenges", """
+        CREATE TABLE IF NOT EXISTS lane_challenges (
+            challenge_id TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            tier INTEGER NOT NULL,
+            cnf_text TEXT NOT NULL,
+            cnf_sha256 TEXT NOT NULL,
+            cnf_bytes INTEGER NOT NULL,
+            num_vars INTEGER NOT NULL,
+            num_clauses INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            score_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+            difficulty_label TEXT,
+            designated_solver_digest TEXT,
+            created_at_iso TEXT NOT NULL
+        );
+    """),
+    ("0003_agent_submissions", """
+        CREATE TABLE IF NOT EXISTS agent_submissions (
+            id TEXT PRIMARY KEY,
+            miner_hotkey TEXT NOT NULL,
+            sat_challenge_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            rejection_reason TEXT,
+            current_score DOUBLE PRECISION,
+            seq_no INTEGER NOT NULL,
+            submitted_at TEXT NOT NULL,
+            signature TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sub_hotkey_chal
+            ON agent_submissions(miner_hotkey, sat_challenge_id);
+    """),
+    ("0004_arena_solvers", """
+        CREATE TABLE IF NOT EXISTS arena_solvers (
+            source_sha256 TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            container_digest TEXT NOT NULL,
+            owner_hotkey TEXT NOT NULL,
+            registered_round INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at_iso TEXT NOT NULL
+        );
+    """),
+    ("0005_arena_instances", """
+        CREATE TABLE IF NOT EXISTS arena_instances (
+            instance_id TEXT PRIMARY KEY,
+            owner_hotkey TEXT NOT NULL,
+            cnf_sha256 TEXT NOT NULL,
+            submitted_round INTEGER NOT NULL,
+            quarantine_until_round INTEGER NOT NULL,
+            min_batch_score DOUBLE PRECISION NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at_iso TEXT NOT NULL
+        );
+    """),
+    ("0006_replay_dedup", """
+        CREATE TABLE IF NOT EXISTS submit_signatures (
+            signature TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+        );
+    """),
+    ("0007_seed_state", """
+        CREATE TABLE IF NOT EXISTS seed_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """),
+    ("0008_lane_challenges_source", """
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_source TEXT NOT NULL DEFAULT 'local';
+    """),
+    ("0009_lane_challenges_cnf_url", """
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_url TEXT;
+    """),
+    ("0010_lane_challenge_solves", """
+        CREATE TABLE IF NOT EXISTS lane_challenge_solves (
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            solved_at_iso TEXT NOT NULL,
+            PRIMARY KEY (challenge_id, miner_hotkey)
+        );
+    """),
+    ("0011_lane_challenges_updated_at", """
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS updated_at_iso TEXT;
+    """),
+    ("0012_arena_instances_payout", """
+        ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS cnf_text TEXT NOT NULL DEFAULT '';
+        ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS last_paid_round INTEGER;
+        ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS paid_at_iso TEXT;
+    """),
+]
+
+# Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
+# explicit ON CONFLICT clause. SQLite resolves OR REPLACE / OR IGNORE against the
+# table's primary key; Postgres needs the column(s) named.
+_PK_BY_TABLE: dict[str, str] = {
+    "eval_runs": "id",
+    "lane_challenges": "challenge_id",
+    "agent_submissions": "id",
+    "arena_solvers": "source_sha256",
+    "arena_instances": "instance_id",
+    "submit_signatures": "signature",
+    "seed_state": "key",
+    "lane_challenge_solves": "challenge_id, miner_hotkey",
+    "schema_migrations": "id",
+}
+
+
+def _is_postgres_dsn(s: str | None) -> bool:
+    return bool(s) and s.split("://", 1)[0] in ("postgres", "postgresql")
+
+
+# ===========================================================================
+# Postgres dialect translation
+# ===========================================================================
+_INSERT_OR_IGNORE_RE = re.compile(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+(\w+)", re.IGNORECASE)
+_INSERT_OR_REPLACE_RE = re.compile(r"^\s*INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\(([^)]*)\)", re.IGNORECASE)
+
+
+def _translate_sql(sql: str) -> str:
+    """Translate the narrow set of SQLite SQL forms this codebase emits into
+    Postgres. Pure string rewrite; deterministic; pinned by postgres_verify.py."""
+    s = sql
+
+    # datetime('now') -> now()   (only literal used in this codebase)
+    s = re.sub(r"datetime\(\s*'now'\s*\)", "now()", s, flags=re.IGNORECASE)
+
+    # INSERT OR REPLACE INTO t(cols) VALUES(...) -> upsert on the table PK.
+    m = _INSERT_OR_REPLACE_RE.search(s)
+    if m:
+        table = m.group(1)
+        cols = [c.strip() for c in m.group(2).split(",")]
+        pk = _PK_BY_TABLE.get(table, "")
+        pk_cols = {c.strip() for c in pk.split(",")} if pk else set()
+        set_cols = [c for c in cols if c not in pk_cols]
+        body = s[m.end():]  # everything after the column list — the VALUES(...) part
+        assignments = ", ".join(f"{c}=excluded.{c}" for c in set_cols)
+        head = f"INSERT INTO {table}({m.group(2)})"
+        if pk and assignments:
+            s = f"{head}{body} ON CONFLICT ({pk}) DO UPDATE SET {assignments}"
+        else:
+            s = f"{head}{body} ON CONFLICT DO NOTHING"
+
+    # INSERT OR IGNORE INTO t(...) -> INSERT INTO t(...) ... ON CONFLICT DO NOTHING.
+    # Only add the clause if the statement does not already name ON CONFLICT.
+    m = _INSERT_OR_IGNORE_RE.search(s)
+    if m:
+        s = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", s, count=1, flags=re.IGNORECASE)
+        if "ON CONFLICT" not in s.upper():
+            s = s.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+
+    # ?-style placeholders -> %s. Safe because none of this codebase's SQL
+    # contains a literal '?' inside a string literal.
+    s = s.replace("?", "%s")
+    return s
+
+
+class _PgCursorWrapper:
+    """Wraps a psycopg2 cursor so callers see a sqlite3-style cursor: rowcount,
+    fetchone()/fetchall() returning name-AND-position-indexable rows, and
+    iteration. psycopg2 DictRow already supports both row[0] and row['col']."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    @property
+    def rowcount(self) -> int:
+        return self._cur.rowcount
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def __iter__(self):
+        return iter(self._cur)
+
+
+class _PgConn:
+    """A dialect-translating wrapper around a pooled psycopg2 connection. Exposes
+    the sqlite3 `conn.execute(sql, params)` surface the codebase uses so the inline
+    SQLite SQL in app.py / scoring.py / refill.py / seed_live.py runs unchanged."""
+
+    def __init__(self, raw):
+        self._raw = raw  # psycopg2 connection (DictCursor factory)
+
+    def execute(self, sql: str, params: tuple = ()):
+        cur = self._raw.cursor()
+        cur.execute(_translate_sql(sql), params)
+        return _PgCursorWrapper(cur)
+
+    def executescript(self, sql: str):
+        # Migrations only — split on ';' and run each non-empty statement.
+        cur = self._raw.cursor()
+        for stmt in sql.split(";"):
+            if stmt.strip():
+                cur.execute(_translate_sql(stmt))
+        return _PgCursorWrapper(cur)
+
 
 class Store:
-    """A single-connection SQLite store guarded by one write lock. All writes go
-    through `write()` (BEGIN IMMEDIATE), giving the atomic claim discipline the
-    monolith relies on for winner-take-all without a separate process."""
+    """Dual-backend store. SQLite (single conn + RLock, BEGIN IMMEDIATE) or
+    Postgres (pool, MVCC, no global lock). Backend chosen by the connection
+    string: a postgres[ql]:// DSN (passed as `path` or via DATABASE_URL) selects
+    Postgres; anything else is a SQLite file path."""
 
     def __init__(self, path: str) -> None:
-        self.path = path
-        self._lock = threading.RLock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        # DATABASE_URL wins when set and looks like Postgres — that is how the
+        # deployed publisher (server.py passes CATHEDRAL_DB_PATH) flips to PG
+        # without changing app construction.
+        env_url = os.environ.get("DATABASE_URL")
+        dsn = path if _is_postgres_dsn(path) else (env_url if _is_postgres_dsn(env_url) else None)
+        self.backend = "postgres" if dsn else "sqlite"
+        self.path = dsn or path
+
+        if self.backend == "postgres":
+            self._lock = None
+            self._init_postgres(dsn)
+        else:
+            self._lock = threading.RLock()
+            self._conn = sqlite3.connect(path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
         self.migrate()
 
+    # ---- postgres setup ---------------------------------------------------
+    def _init_postgres(self, dsn: str) -> None:
+        import psycopg2.extras
+        import psycopg2.pool
+
+        minconn = int(os.environ.get("CATHEDRAL_PG_POOL_MIN", "1"))
+        maxconn = int(os.environ.get("CATHEDRAL_PG_POOL_MAX", "10"))
+        self._pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn, maxconn, dsn, cursor_factory=psycopg2.extras.DictCursor,
+            connect_timeout=int(os.environ.get("CATHEDRAL_PG_CONNECT_TIMEOUT", "10")),
+        )
+
     def migrate(self) -> None:
+        if self.backend == "postgres":
+            self._migrate_postgres()
+            return
         with self._lock:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations "
@@ -178,14 +435,67 @@ class Store:
                 )
             self._conn.commit()
 
+    def _migrate_postgres(self) -> None:
+        raw = self._pool.getconn()
+        try:
+            cur = raw.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations "
+                "(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+            cur.execute("SELECT id FROM schema_migrations")
+            applied = {r[0] for r in cur.fetchall()}
+            for mid, sql in _MIGRATIONS_PG:
+                if mid in applied:
+                    continue
+                for stmt in sql.split(";"):
+                    if stmt.strip():
+                        cur.execute(stmt)
+                cur.execute(
+                    "INSERT INTO schema_migrations(id, applied_at) VALUES (%s, now())",
+                    (mid,))
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
+        finally:
+            self._pool.putconn(raw)
+
     # ---- low-level access -------------------------------------------------
-    def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+    def query(self, sql: str, params: tuple = ()) -> list:
+        if self.backend == "postgres":
+            raw = self._pool.getconn()
+            try:
+                cur = raw.cursor()
+                cur.execute(_translate_sql(sql), params)
+                rows = cur.fetchall()
+                raw.commit()  # release any read snapshot promptly
+                return rows
+            except Exception:
+                raw.rollback()
+                raise
+            finally:
+                self._pool.putconn(raw)
         with self._lock:
             return list(self._conn.execute(sql, params))
 
     def write(self, fn):
-        """Run fn(conn) inside BEGIN IMMEDIATE under the write lock; commit on
-        success, rollback on error. fn returns whatever it wants."""
+        """Run fn(conn) in a transaction; commit on success, rollback on error.
+
+        SQLite: under the single write lock with BEGIN IMMEDIATE (the atomic
+        winner-take-all claim discipline). Postgres: a pooled connection with a
+        normal transaction — MVCC removes the need for a global lock (the wedge
+        fix). fn returns whatever it wants; the wrapped conn translates dialect."""
+        if self.backend == "postgres":
+            raw = self._pool.getconn()
+            try:
+                result = fn(_PgConn(raw))
+                raw.commit()
+                return result
+            except Exception:
+                raw.rollback()
+                raise
+            finally:
+                self._pool.putconn(raw)
         with self._lock:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -197,13 +507,16 @@ class Store:
                 raise
 
     def close(self) -> None:
+        if self.backend == "postgres":
+            self._pool.closeall()
+            return
         with self._lock:
             self._conn.close()
 
     # ---- feed rows --------------------------------------------------------
     def insert_row(self, row: dict[str, Any]) -> int:
-        """Insert one feed row (OR IGNORE). Returns 1 if newly inserted, 0 if
-        it already existed — callers count insertions from rowcount instead of
+        """Insert one feed row (OR IGNORE). Returns 1 if newly inserted, 0 if it
+        already existed — callers count insertions from rowcount instead of
         bracketing every row with COUNT(*) table scans."""
         def _do(conn):
             cur = conn.execute(

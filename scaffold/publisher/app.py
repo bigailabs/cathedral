@@ -32,8 +32,11 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
+from . import board_cache as board_cache_mod
 from . import keys, rows, scoring
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
+from .board_cache import BoardCache, board_cache_headers
+from .cnf_store import CNFStore
 from .sat_solution import verify_dimacs_solution
 from .store import Store, new_uuid
 
@@ -79,8 +82,28 @@ def build_app(
     # in-process per-(hotkey, challenge) last-submit clock for rate limiting
     last_submit: dict[tuple[str, str], float] = {}
 
+    # ---- broadcast tier (KEYSTONE TASK 3) ---------------------------------
+    # CNF bodies → backend-switchable store (db | bucket) with immutable cache
+    # headers + the existing HMAC token gate. Board → in-process cached snapshot
+    # rebuilt only on mint/retire (+ TTL safety) so miner polls hit memory/edge,
+    # never the DB. invalidate_all() (board_cache_mod) is called on every mutation
+    # of the active set; reads serve the memoized payload with an ETag for 304s.
+    cnf_store = CNFStore(store)
+    # Register this app's CNF store so the module-level mint helper (seed_challenge)
+    # can push immutable bodies to the bucket backend without an app reference.
+    _register_cnf_store(store, cnf_store)
+
+    def _build_board() -> dict[str, Any]:
+        items = [_challenge_public(r) for r in _active_challenges()]
+        return {"family_id": _FAMILY, "count": len(items), "items": items}
+
+    board_cache = BoardCache(_build_board)
+    board_cache_mod.register(board_cache)
+
     app = FastAPI(title="cathedral-thin-publisher")
     app.state.store = store
+    app.state.cnf_store = cnf_store
+    app.state.board_cache = board_cache
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
     app.state.refill_task = None
@@ -301,9 +324,16 @@ def build_app(
 
     # ---- M2: Lane A read --------------------------------------------------
     @app.get("/v1/synthetic-boolean/active-challenges")
-    def active_challenges_list():
-        items = [_challenge_public(r) for r in _active_challenges()]
-        return {"family_id": _FAMILY, "count": len(items), "items": items}
+    def active_challenges_list(request: Request):
+        # Broadcast tier: serve the cached board snapshot (rebuilt only on
+        # mint/retire + TTL), with ETag/Cache-Control so an edge/CDN caches it
+        # and a conditional GET short-circuits to 304 — reads don't touch the DB.
+        payload, etag = board_cache.get()
+        headers = board_cache_headers(etag)
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(payload, headers=headers)
 
     @app.get("/v1/synthetic-boolean/current-challenge")
     def current_challenge(tier: int | None = Query(None), difficulty: str | None = Query(None)):
@@ -353,13 +383,20 @@ def build_app(
     @app.get("/v1/challenges/{challenge_id}/cnf")
     def fetch_cnf(challenge_id: str, t: str = Query(...)):
         # opaque 404 on bad/expired token or unknown challenge — no signal leak.
+        # HMAC token gate is preserved in BOTH cnf backends; only AFTER it passes
+        # do we resolve where the immutable body lives (db inline | bucket 302).
         if not _check_token(challenge_id, t):
             raise HTTPException(404, "not found")
-        rows_ = store.query(
-            "SELECT cnf_text FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
-        if not rows_:
+        result = cnf_store.serve(challenge_id)
+        if result.mode == "not_found":
             raise HTTPException(404, "not found")
-        return PlainTextResponse(rows_[0]["cnf_text"])
+        if result.mode == "redirect":
+            # bucket backend: 302 to a presigned URL so bytes stream from the
+            # edge/CDN, not the publisher or the DB (the flood evaporates there).
+            return Response(status_code=302,
+                            headers={"Location": result.url, **(result.headers or {})})
+        # db backend: inline body with immutable cache headers for edge caching.
+        return PlainTextResponse(result.text, headers=result.headers or {})
 
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
     @app.post("/v1/agents/submit")
@@ -490,6 +527,9 @@ def build_app(
             return (None, rank, ws)
 
         err, rank, ws = store.write(_accept)
+        if err is None and lock_wins:
+            # the challenge just flipped active -> locked: refresh the board.
+            board_cache_mod.invalidate_all()
         if err == "replayed_signature":
             raise HTTPException(409, "replayed_signature")
         if err == "challenge_already_locked":
@@ -592,6 +632,29 @@ def _empty_bundle_hash() -> str:
 
 
 # --------------------------------------------------------------------------
+# CNF-store registry — maps a Store id to its CNFStore so the module-level mint
+# helper (seed_challenge) can upload immutable bodies to the bucket backend
+# without an app reference. Keyed by id(store) because one process may build
+# several apps (the gates do). No-op for the default `db` backend.
+# --------------------------------------------------------------------------
+_CNF_STORES: dict[int, "CNFStore"] = {}
+
+
+def _register_cnf_store(store: Store, cnf_store: "CNFStore") -> None:
+    _CNF_STORES[id(store)] = cnf_store
+
+
+def _cnf_put_on_mint(store: Store, challenge_id: str, cnf_text: str) -> None:
+    cs = _CNF_STORES.get(id(store))
+    if cs is None or cs.backend != "bucket" or not cnf_text:
+        return
+    try:
+        cs.put(challenge_id, cnf_text, sha256=sha256_hex(cnf_text))
+    except Exception as e:  # never let an object-store blip fail a mint
+        print(f"[cnf] bucket put failed for {challenge_id}: {e!r}")
+
+
+# --------------------------------------------------------------------------
 # Seeding helpers (used by the e2e script + tests).
 # --------------------------------------------------------------------------
 def seed_challenge(store: Store, *, challenge_id: str, tier: int, cnf_text: str,
@@ -612,3 +675,8 @@ def seed_challenge(store: Store, *, challenge_id: str, tier: int, cnf_text: str,
              n_vars, len(clauses), status, score_multiplier, difficulty_label,
              designated_solver_digest, _now_iso_ms()))
     store.write(_do)
+    # Broadcast tier: the active set changed (mint/retire) — drop the cached
+    # board so the next poll rebuilds. If a bucket CNF backend is configured,
+    # upload the immutable body once on mint (no-op for the db backend).
+    board_cache_mod.invalidate_all()
+    _cnf_put_on_mint(store, challenge_id, cnf_text)

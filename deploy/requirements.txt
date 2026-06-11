@@ -24,3 +24,16 @@ bittensor-wallet==4.1.0
 
 # --- canonical claim bundle_hash (blake3 of empty bytes) ---
 blake3==1.0.8
+
+# --- Postgres backend (keystone: MVCC kills the single-lock wedge) ---
+# Store flips to the Postgres pool when DATABASE_URL=postgres[ql]://… is set;
+# absent it, the SQLite backend runs (so the gates stay green offline and this
+# dep is import-only-on-PG-mode). psycopg2-binary ships manylinux wheels for
+# cp311 — no libpq/build toolchain needed in the slim image.
+psycopg2-binary==2.9.10
+
+# --- broadcast tier: optional S3-compatible CNF bucket backend ---
+# Imported lazily by cnf_store ONLY when CATHEDRAL_CNF_BACKEND=bucket (Railway
+# bucket / R2 / S3). Inert under the default `db` backend; bundled so the image
+# is ready when Fred wires bucket credentials. Pure-python, no system deps.
+boto3==1.35.99
