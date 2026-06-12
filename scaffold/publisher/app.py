@@ -282,11 +282,16 @@ def build_app(
             raise HTTPException(401, "invalid hotkey signature")
 
     def _active_challenges(tier: int | None = None) -> list[Any]:
+        # local only: seeded external mirrors (feed-continuity artifacts, no
+        # CNF body) must never reach the miner-facing board — a miner that
+        # picks one gets a 404 on the CNF fetch and wastes the attempt.
         if tier is None:
             return store.query(
-                "SELECT * FROM lane_challenges WHERE status='active' ORDER BY challenge_id ASC")
+                "SELECT * FROM lane_challenges WHERE status='active' AND cnf_source='local' "
+                "ORDER BY challenge_id ASC")
         return store.query(
-            "SELECT * FROM lane_challenges WHERE status='active' AND tier=? ORDER BY challenge_id ASC",
+            "SELECT * FROM lane_challenges WHERE status='active' AND cnf_source='local' AND tier=? "
+            "ORDER BY challenge_id ASC",
             (tier,))
 
     # ---- M1: feed ---------------------------------------------------------
