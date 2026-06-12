@@ -49,19 +49,25 @@ def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
 # -- rollback fence ------------------------------------------------------------
 
 def load_fence(state_file: Path) -> int:
-    try:
-        return int(json.loads(state_file.read_text())["last_accepted_policy_version"])
-    except Exception:
+    """FAIL CLOSED: only a genuinely absent state file means 'no fence yet'.
+    A corrupt/unreadable file raises (the tick fails) instead of silently
+    resetting the fence to -1 and reopening the rollback window."""
+    if not state_file.exists():
         return -1
+    return int(json.loads(state_file.read_text())["last_accepted_policy_version"])
 
 
 def save_fence(state_file: Path, version: int, vector_id: str) -> None:
+    """Atomic write (tmp + rename) so a crash mid-write can't corrupt the
+    fence — which would brick the fail-closed load above."""
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps({
+    tmp = state_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps({
         "last_accepted_policy_version": version,
         "last_vector_id": vector_id,
         "accepted_at": _ms_iso_now(),
     }, indent=2))
+    os.replace(tmp, state_file)
 
 
 # -- burn + uid mapping ---------------------------------------------------------
@@ -71,6 +77,10 @@ def apply_burn(scores_by_uid: dict[int, float], *, burn_uid: int | None,
     """burn% of total mass to burn_uid, remainder split proportionally across
     miners; normalized to sum 1.0. Empty miner set -> everything to burn_uid."""
     burn_frac = forced_burn_percentage / 100.0
+    if burn_uid is not None:
+        # burn_uid must never double-collect (miner share + forced burn);
+        # any score that mapped onto it is dropped before allocation.
+        scores_by_uid = {u: v for u, v in scores_by_uid.items() if u != burn_uid}
     total = sum(scores_by_uid.values())
     if total <= 0 or not scores_by_uid:
         if burn_uid is None:
