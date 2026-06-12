@@ -124,19 +124,31 @@ def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid:
         print("  DRY-RUN — pass --broadcast to submit")
         return True
     import bittensor as bt
-    wallet = bt.wallet(name=wallet_name, hotkey=wallet_hotkey)
-    sub = bt.subtensor(network=network)
+    wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
+    sub = _bt_subtensor(bt)(network=network)
     uids = [u for u, _ in ordered]
     vals = [w for _, w in ordered]
-    ok = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
-                         wait_for_inclusion=True)
-    print(f"  set_weights submitted: {ok}")
-    return bool(ok)
+    resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
+                           wait_for_inclusion=True)
+    # newer bittensor returns an ExtrinsicResponse object (truthy even on
+    # failure) — judge success by the field, not truthiness.
+    ok = bool(getattr(resp, "success", resp))
+    print(f"  set_weights submitted: success={ok} ({resp})")
+    return ok
+
+
+def _bt_subtensor(bt):
+    """bittensor renamed `subtensor` -> `Subtensor` across major versions."""
+    return getattr(bt, "subtensor", None) or bt.Subtensor
+
+
+def _bt_wallet(bt):
+    return getattr(bt, "wallet", None) or bt.Wallet
 
 
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
     import bittensor as bt
-    mg = bt.subtensor(network=network).metagraph(netuid)
+    mg = _bt_subtensor(bt)(network=network).metagraph(netuid)
     return {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
 
 
