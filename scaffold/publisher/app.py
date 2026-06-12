@@ -326,6 +326,8 @@ def build_app(
         try:
             vec = weights_mod.current_vector(store, signing_key_hex=weight_key)
         except Exception:
+            import traceback
+            print("[weights] vector build failed:\n" + traceback.format_exc())
             raise HTTPException(status_code=503, detail="no vector available")
         return JSONResponse(vec)
 

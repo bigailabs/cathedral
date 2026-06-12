@@ -280,6 +280,9 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             updated_at_iso TEXT NOT NULL
         );
     """),
+    ("0014_weight_policy_version_bigint", """
+        ALTER TABLE weight_policy_state ALTER COLUMN last_policy_version TYPE BIGINT;
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
