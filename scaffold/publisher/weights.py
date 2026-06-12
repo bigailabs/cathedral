@@ -97,30 +97,47 @@ def compose_scores(store: Store, *, now: datetime | None = None) -> dict[str, fl
     This function is where multi-challenge scoring composes: community solves
     today; arena/champion payouts and future challenge types add their term
     here and the validator interface never changes.
+
+    flat_recent reads the signed feed (eval_runs) rather than the local claim
+    ledger: the feed carries seeded history from the previous orchestrator, so
+    the vector is fully populated from the first second after a cutover —
+    never a burn-only gap while the fresh store waits for new submits. (It
+    also pays arena record-falls automatically, since those emit feed rows.)
+    proportional needs per-challenge dedup, which only the claim ledger has;
+    it falls back to flat until that ledger has in-window data.
     """
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
-    rows = store.query(
-        "SELECT miner_hotkey, COUNT(DISTINCT challenge_id) AS n "
-        "FROM lane_challenge_solves WHERE solved_at_iso > ? GROUP BY miner_hotkey",
-        (since,))
-    counts = {str(r["miner_hotkey"]): int(r["n"]) for r in rows}
-    if not counts:
-        return {}
+    feed = store.query(
+        "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,))
+    hotkeys = {str(r["miner_hotkey"]) for r in feed}
     if mode() == "proportional":
-        top = max(counts.values())
-        return {hk: round(n / top, 6) for hk, n in counts.items()}
-    return {hk: 1.0 for hk in counts}
+        rows = store.query(
+            "SELECT miner_hotkey, COUNT(DISTINCT challenge_id) AS n "
+            "FROM lane_challenge_solves WHERE solved_at_iso > ? GROUP BY miner_hotkey",
+            (since,))
+        counts = {str(r["miner_hotkey"]): int(r["n"]) for r in rows}
+        if counts:
+            top = max(counts.values())
+            return {hk: round(n / top, 6) for hk, n in counts.items()}
+    return {hk: 1.0 for hk in hotkeys}
 
 
 # -- monotonic policy_version (validator rollback fence) -----------------------
 
 def next_policy_version(store: Store) -> int:
+    """Monotonic AND continuous with the live orchestrator: the deployed
+    validators' rollback fences hold the live emitter's epoch-ms versions
+    (~1.78e12), so a counter restarting at 1 would be rejected as a rollback
+    by every fence. Epoch-ms keeps any successor emitter automatically ahead;
+    max(stored+1, now_ms) keeps it strictly monotonic even within one ms."""
+    now_ms = int(time.time() * 1000)
+
     def _bump(conn):
         row = conn.execute(
             "SELECT last_policy_version FROM weight_policy_state WHERE id = 1"
         ).fetchone()
-        nxt = (int(row[0]) if row else 0) + 1
+        nxt = max((int(row[0]) if row else 0) + 1, now_ms)
         conn.execute(
             "INSERT OR REPLACE INTO weight_policy_state(id, last_policy_version, updated_at_iso) "
             "VALUES (1, ?, ?)", (nxt, _ms_iso(datetime.now(timezone.utc))))

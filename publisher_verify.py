@@ -373,6 +373,11 @@ with TestClient(app) as client:
            vec50["burn_snapshot"]["forced_burn_percentage"] == 50.0)
         ck("policy_version is monotonic (rollback fence)",
            int(vec50["policy_version"]) > int(vec["policy_version"]))
+        # CONTINUITY: deployed validators' fences hold the LIVE emitter's
+        # epoch-ms policy_versions (~1.78e12). A successor that restarts its
+        # counter at 1 would be rejected as a rollback by every fence.
+        ck("policy_version continues past the live emitter's epoch-ms fence",
+           int(vec["policy_version"]) > 1_781_232_182_941)
     finally:
         os.environ.pop(_weights.BURN_PERCENTAGE_ENV, None)
         _weights._reset_vector_cache()
