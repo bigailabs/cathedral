@@ -2,7 +2,8 @@
 publisher while keeping the frozen wire surface byte-identical.
 
 Surfaces:
-  M1 validator feed   GET /v1/leaderboard/recent  (dual cursor, signed rows)
+  M1 validator feed   GET /v1/validator/weights/next (signed final scores + burn)
+                      GET /v1/leaderboard/recent  (dual cursor, signed rows — audit trail)
                       GET /.well-known/cathedral-jwks.json
                       GET /health
   M2 Lane A miners    GET /v1/synthetic-boolean/active-challenges | current-challenge
@@ -33,7 +34,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
-from . import keys, rows, scoring
+from . import keys, rows, scoring, weights as weights_mod
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
 from .cnf_store import CNFStore
@@ -313,6 +314,21 @@ def build_app(
             "merkle_epoch_latest": None,
         }
 
+    # ---- M1b: signed final-scores vector (the v4 scoring interface) -------
+    # ONE number per miner + burn, Ed25519-signed, same wire shape deployed
+    # validators already verify. All composition (recency window, multi-lane
+    # blending, arena payouts) happens orchestrator-side in weights.py — a
+    # validator just verifies and applies. The row feed above stays as the
+    # public audit trail, not the scoring input.
+    @app.get("/v1/validator/weights/next")
+    def validator_weights_next():
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        try:
+            vec = weights_mod.current_vector(store, signing_key_hex=weight_key)
+        except Exception:
+            raise HTTPException(status_code=503, detail="no vector available")
+        return JSONResponse(vec)
+
     @app.get("/.well-known/cathedral-jwks.json")
     def jwks():
         return JSONResponse(jwks_doc)
@@ -500,8 +516,8 @@ def build_app(
                 rank = scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso)
                 if rank is None:
                     return ("already_solved", None, None)
-            # row value = the scoring policy (flat 1.0 default; coverage pays
-            # work share — computed after the claim so this solve counts).
+            # row value = flat 1.0 (the audit trail). Economics live in the
+            # signed vector (weights.py), composed from this solve ledger.
             ws = scoring.weighted_score_for(store, x_cathedral_hotkey)
             conn.execute(
                 "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "

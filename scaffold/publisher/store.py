@@ -30,7 +30,7 @@ Tables
   agent_submissions  — Lane A submit ledger (dedup, rate-limit, per-challenge lock).
   arena_solvers      — Lane S solver registry.
   arena_instances    — Lane I breaker instances.
-  lane_challenge_solves — distinct-solver ledger (retirement + coverage scoring).
+  lane_challenge_solves — distinct-solver ledger (retirement + weight composition).
   submit_signatures  — replay dedup.
   seed_state         — durable live-seed watermark.
   schema_migrations  — applied migration ids (idempotency marker).
@@ -159,6 +159,13 @@ _MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE arena_instances ADD COLUMN last_paid_round INTEGER;
         ALTER TABLE arena_instances ADD COLUMN paid_at_iso TEXT;
     """),
+    ("0013_weight_policy_state", """
+        CREATE TABLE IF NOT EXISTS weight_policy_state (
+            id INTEGER PRIMARY KEY,
+            last_policy_version INTEGER NOT NULL,
+            updated_at_iso TEXT NOT NULL
+        );
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -266,6 +273,13 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS last_paid_round INTEGER;
         ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS paid_at_iso TEXT;
     """),
+    ("0013_weight_policy_state", """
+        CREATE TABLE IF NOT EXISTS weight_policy_state (
+            id INTEGER PRIMARY KEY,
+            last_policy_version INTEGER NOT NULL,
+            updated_at_iso TEXT NOT NULL
+        );
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -280,6 +294,7 @@ _PK_BY_TABLE: dict[str, str] = {
     "submit_signatures": "signature",
     "seed_state": "key",
     "lane_challenge_solves": "challenge_id, miner_hotkey",
+    "weight_policy_state": "id",
     "schema_migrations": "id",
 }
 

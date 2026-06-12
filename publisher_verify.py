@@ -274,97 +274,134 @@ with TestClient(app) as client:
     ck("open window: same miner re-solve rejected (already_solved)",
        resp3.status_code == 409)
 
-    # COVERAGE POLICY (flag-gated; flat stays the default for the cutover):
-    # weighted_score = solved/available in the trailing window, clamped.
-    from scaffold.publisher import scoring as _scoring
-    os.environ[_scoring.SCORING_POLICY_ENV] = "coverage"
+    # SIGNED FINAL-SCORES VECTOR (the v4 scoring interface). One number per
+    # miner + burn, Ed25519-signed — validators verify and apply, no local
+    # averaging. Both e2e miners solved sat-e2e-1 above, so both appear.
+    from scaffold.publisher import weights as _weights
+    vec_resp = client.get("/v1/validator/weights/next")
+    ck("weights/next serves the signed vector", vec_resp.status_code == 200)
+    vec = vec_resp.json()
+    vec_hotkeys = {w["miner_hotkey"] for w in vec["weights"]}
+    ck("vector contains exactly the miners who solved in-window",
+       vec_hotkeys == {miner.ss58_address, miner2.ss58_address})
+    ck("flat_recent: equal weight per recent solver",
+       all(w["weight"] == 1.0 for w in vec["weights"]))
+    ck("burn rides the same signed payload (85.0 -> uid 204)",
+       vec["burn_snapshot"] == {"burn_uid": 204, "forced_burn_percentage": 85.0})
     try:
-        ws1 = _scoring.weighted_score_for(store, miner.ss58_address)
-        # miner solved 1 of the 1 challenge minted in-window -> full score
-        ck("coverage: full-coverage miner scores 1.0", ws1 == 1.0)
-        ws_idle = _scoring.weighted_score_for(store, "5IdleHotkeyNeverSolved")
-        ck("coverage: idle miner floors at the configured minimum",
-           ws_idle == _scoring.coverage_floor())
-        # seeded EXTERNAL board mirrors (unsolvable through this publisher)
-        # must NOT inflate the coverage denominator and crater every score.
-        def _ext(conn):
-            conn.execute(
-                "INSERT OR REPLACE INTO lane_challenges(challenge_id, family_id, "
-                "tier, cnf_text, cnf_sha256, cnf_bytes, num_vars, num_clauses, "
-                "status, cnf_source, created_at_iso) "
-                "VALUES ('sat-external-mirror', 'synthetic_boolean_v1', 1, '', "
-                "'external-mirror-no-cnf', 0, 0, 0, 'active', 'external', ?)", (now_iso(),))
-        store.write(_ext)
-        ws_after = _scoring.weighted_score_for(store, miner.ss58_address)
-        ck("coverage: external mirror challenges do not dilute the denominator",
-           ws_after == 1.0)
-    finally:
-        os.environ.pop(_scoring.SCORING_POLICY_ENV, None)
-    ck("flat policy restored as default", _scoring.scoring_policy() == "flat")
+        _weights.verify_signature(vec, public_key_hex=pub_hex,
+                                  expected_key_id="cathedral-weight-policy")
+        _weights.invariant_check(vec, network="finney", netuid=39, now_iso=now_iso())
+        vec_ok = True
+    except _weights.VectorError:
+        vec_ok = False
+    ck("vector signature + invariants verify (scaffold checker)", vec_ok)
+    tampered = dict(vec)
+    tampered["weights"] = [{"miner_hotkey": "5Attacker", "weight": 1.0}]
+    try:
+        _weights.verify_signature(tampered, public_key_hex=pub_hex,
+                                  expected_key_id="cathedral-weight-policy")
+        tamper_caught = False
+    except _weights.VectorError:
+        tamper_caught = True
+    ck("tampered weights rejected", tamper_caught)
 
-    # COVERAGE DENOMINATOR = relative-to-top (TASK 0). In prod the publisher
-    # mints far more challenges than any miner solves (92% expire), so the old
-    # solved/minted denominator floored EVERYONE. The denominator is now the
-    # MAX distinct-challenges solved by any single miner in the window, so the
-    # top solver ≈1.0 and a half-as-active one ≈0.5 — independent of mint rate.
-    os.environ[_scoring.SCORING_POLICY_ENV] = "coverage"
+    # DROP-IN PROOF: the DEPLOYED validator's own verifier accepts this vector.
+    import importlib.util as _ilu
+    _sig_path = next((p for p in (
+        Path.home() / "code" / "cathedral" / "src" / "cathedral" / "policy" / "signing.py",
+        Path.home() / "cathedral" / "src" / "cathedral" / "policy" / "signing.py",
+    ) if p.exists()), None)
+    if _sig_path is None:
+        print("    (monolith checkout not found — drop-in proof SKIPPED)")
+    else:
+        _spec = _ilu.spec_from_file_location("monolith_signing", _sig_path)
+        _mono = _ilu.module_from_spec(_spec)
+        sys.modules["monolith_signing"] = _mono  # pydantic forward-ref resolution
+        _spec.loader.exec_module(_mono)
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey as _PK
+        try:
+            _model = _mono.SignedWeightVector.model_validate(vec)
+            _mono.verify_vector(_model, public_key=_PK.from_public_bytes(bytes.fromhex(pub_hex)),
+                                expected_key_id="cathedral-weight-policy")
+            _model.invariant_check(network="finney", netuid=39, now_iso=now_iso())
+            mono_ok = True
+        except Exception as e:
+            print(f"    monolith verifier rejected: {e}")
+            mono_ok = False
+        ck("DEPLOYED validator's verify_vector + invariant_check accept the v4 vector", mono_ok)
+
+    # RECENCY GATE: scores compose only from solves inside the trailing window
+    # (default 24h) — an idle miner drops out when the window passes. This
+    # replaces the validator-side 7-day mean whose tail paid stopped miners.
+    from datetime import timedelta as _td
+    sc_now = _weights.compose_scores(store)
+    ck("recency: miners who just solved are in the composition", len(sc_now) == 2)
+    sc_later = _weights.compose_scores(
+        store, now=datetime.now(timezone.utc) + _td(hours=25))
+    ck("recency: 25h later with no new solves, every idle miner drops to zero",
+       sc_later == {})
+
+    # PROPORTIONAL MODE (env dial, no validator involvement): weight = distinct
+    # solves relative to the busiest solver.
+    os.environ[_weights.MODE_ENV] = "proportional"
     try:
-        cov_store = build_app(database_path=":memory:", signing_key_hex=key_hex).state.store
-        # Seed 3 hotkeys with different distinct-solve counts: top=10, mid=5,
-        # low=2 — into a SINGLE challenge-solve ledger. Mint MANY more
-        # challenges than anyone solved so the old denominator would floor all.
-        def _seed_cov(conn):
+        prop_store = build_app(database_path=":memory:", signing_key_hex=key_hex).state.store
+        def _seed_prop(conn):
             cn = now_iso()
-            for i in range(40):  # 40 minted challenges; nobody solves them all
-                conn.execute(
-                    "INSERT OR REPLACE INTO lane_challenges(challenge_id, family_id, "
-                    "tier, cnf_text, cnf_sha256, cnf_bytes, num_vars, num_clauses, "
-                    "status, cnf_source, created_at_iso) VALUES "
-                    f"('cov-{i}', 'synthetic_boolean_v1', 1, '', 'h{i}', 0, 0, 0, "
-                    "'active', 'local', ?)", (cn,))
-            for hk, k in (("5TopSolver", 10), ("5MidSolver", 5), ("5LowSolver", 2)):
+            for hk, k in (("5Busy", 4), ("5Slow", 1)):
                 for i in range(k):
                     conn.execute(
                         "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, "
                         "miner_hotkey, solved_at_iso) VALUES (?, ?, ?)",
-                        (f"cov-{i}", hk, cn))
-        cov_store.write(_seed_cov)
-        _scoring._reset_coverage_denom_cache()
-        top = _scoring.weighted_score_for(cov_store, "5TopSolver")
-        mid = _scoring.weighted_score_for(cov_store, "5MidSolver")
-        low = _scoring.weighted_score_for(cov_store, "5LowSolver")
-        ck("coverage denom: top solver scores ~1.0 (not floored by mint rate)",
-           abs(top - 1.0) < 1e-9)
-        ck("coverage denom: half-as-active solver scores ~0.5 (relative-to-top)",
-           abs(mid - 0.5) < 1e-9)
-        ck("coverage denom: low solver scales proportionally (2/10=0.2)",
-           abs(low - 0.2) < 1e-9)
-        # denominator is cached (one GROUP-BY-MAX, not per-submit table scan).
-        # reset first: the weighted_score_for calls above populated the cache at
-        # real wall-clock time, which would mask the synthetic-now TTL test.
-        _scoring._reset_coverage_denom_cache()
-        d1 = _scoring.coverage_denominator(cov_store, now=1000.0)
-        # a new top-beating solver appears, but the cache must hold the old denom
-        # until the TTL elapses.
-        def _seed_more(conn):
-            cn = now_iso()
-            for i in range(20):
-                conn.execute(
-                    "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, "
-                    "miner_hotkey, solved_at_iso) VALUES (?, ?, ?)",
-                    (f"cov-{i}", "5MegaSolver", cn))
-        cov_store.write(_seed_more)
-        d_cached = _scoring.coverage_denominator(cov_store, now=1000.0 + 30.0)
-        ck("coverage denom: cached within TTL (no per-submit GROUP-BY-MAX)",
-           d_cached == d1 == 10)
-        d_fresh = _scoring.coverage_denominator(
-            cov_store, now=1000.0 + _scoring._COVERAGE_DENOM_TTL_SECS + 1.0)
-        ck("coverage denom: recomputes after TTL elapses (now sees 20)",
-           d_fresh == 20)
-        cov_store.close()
+                        (f"prop-{i}", hk, cn))
+        prop_store.write(_seed_prop)
+        sc_prop = _weights.compose_scores(prop_store)
+        ck("proportional: busiest solver = 1.0, quarter-as-busy = 0.25",
+           sc_prop == {"5Busy": 1.0, "5Slow": 0.25})
+        prop_store.close()
     finally:
-        os.environ.pop(_scoring.SCORING_POLICY_ENV, None)
-        _scoring._reset_coverage_denom_cache()
+        os.environ.pop(_weights.MODE_ENV, None)
+    ck("flat_recent restored as default", _weights.mode() == "flat_recent")
+
+    # BURN IS REMOTE: change the env, fresh vector carries the new signed burn.
+    os.environ[_weights.BURN_PERCENTAGE_ENV] = "50.0"
+    _weights._reset_vector_cache()
+    try:
+        vec50 = client.get("/v1/validator/weights/next").json()
+        ck("burn change is one env flip, signed into the next vector",
+           vec50["burn_snapshot"]["forced_burn_percentage"] == 50.0)
+        ck("policy_version is monotonic (rollback fence)",
+           int(vec50["policy_version"]) > int(vec["policy_version"]))
+    finally:
+        os.environ.pop(_weights.BURN_PERCENTAGE_ENV, None)
+        _weights._reset_vector_cache()
+
+    # THIN VALIDATOR (scaffold/validator_thin.py): the v4 validator binary
+    # accepts the vector end-to-end — verify, burn from the signed payload,
+    # normalized uid vector; rollback fence rejects older policy versions.
+    from scaffold import validator_thin as _vthin
+    try:
+        _vthin.accept_vector(vec, public_key_hex=pub_hex,
+                             key_id="cathedral-weight-policy",
+                             network="finney", netuid=39, fence_version=-1)
+        _hk2uid = {w["miner_hotkey"]: i + 1 for i, w in enumerate(vec["weights"])}
+        _uw = _vthin.vector_to_uid_weights(vec, _hk2uid)
+        thin_ok = (abs(sum(_uw.values()) - 1.0) < 1e-9
+                   and abs(_uw.get(204, 0.0) - 0.85) < 1e-9)
+    except Exception as _e:
+        print(f"    thin validator rejected: {_e}")
+        thin_ok = False
+    ck("thin validator: verify -> burn -> normalized uid vector (85% to uid 204)", thin_ok)
+    try:
+        _vthin.accept_vector(vec, public_key_hex=pub_hex,
+                             key_id="cathedral-weight-policy",
+                             network="finney", netuid=39,
+                             fence_version=int(vec["policy_version"]) + 1)
+        fence_ok = False
+    except _weights.VectorError:
+        fence_ok = True
+    ck("thin validator: rollback fence rejects an older policy_version", fence_ok)
 
     # validator-style pull loop: tuple cursor, verify EVERY signature.
     pulled = []
