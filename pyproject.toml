@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cathedral-scaffold"
-version = "4.0.0-rc.2"
+version = "4.0.0-rc.3"
 description = "Cathedral SN39 v4 — thin orchestrator + validator for verifiable SAT compute"
 requires-python = ">=3.11"
 # Validator-runtime deps only. The thin validator fetches a signed vector,
