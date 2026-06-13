@@ -43,6 +43,11 @@ from .store import Store, new_uuid
 
 _FAMILY = "synthetic_boolean_v1"
 _SKEW_SECS = 300
+# Public, non-scored readiness probe: a tiny satisfiable toy CNF miners fetch to
+# self-test their solve pipeline before mining. Byte-identical to the monolith's
+# tier-1 toy instance so any client that pinned its sha still passes.
+_READINESS_CNF = "p cnf 3 3\n1 -2 3 0\n-1 2 3 0\n1 2 -3 0\n"
+_READINESS_SHA = hashlib.sha256(_READINESS_CNF.encode("utf-8")).hexdigest()
 _QUARANTINE_ROUNDS = 3      # Lane I (V4-DESIGN.md)
 _MIN_BATCH_SCORE = 0.5      # Lane I (V4-DESIGN.md)
 _CNF_TOKEN_TTL = 120        # active-cnf fetch token lifetime (seconds)
@@ -461,6 +466,43 @@ def build_app(
                             headers={"Location": result.url, **(result.headers or {})})
         # db backend: inline body with immutable cache headers for edge caching.
         return PlainTextResponse(result.text, headers=result.headers or {})
+
+    # ---- M2a: public readiness probe (non-scored toy self-test) -----------
+    # Miners fetch this to verify their fetch->solve->verify pipeline before
+    # mining. No auth, no token, never scored. Backend-compat with the prior
+    # publisher (clients that gate mining on this 404'd on v4 otherwise).
+    @app.get("/v1/synthetic-boolean/readiness-probe")
+    def readiness_probe():
+        base = os.environ.get("CATHEDRAL_PUBLIC_BASE_URL",
+                              "https://api.cathedral.computer").rstrip("/")
+        return {
+            "capability": _FAMILY, "purpose": "readiness_probe",
+            "emissions_eligible": False, "weighted_score": 0.0,
+            "public_input": {
+                "format": "dimacs",
+                "cnf_url": f"{base}/api/cathedral/v1/synthetic-boolean/readiness-probe/cnf",
+                "cnf_sha256": _READINESS_SHA, "num_vars": 3, "num_clauses": 3,
+            },
+            "answer_format": {"type": "FINAL_ANSWER", "json_keys": ["dimacs_solution"]},
+        }
+
+    @app.get("/v1/synthetic-boolean/readiness-probe/cnf")
+    def readiness_probe_cnf():
+        return PlainTextResponse(_READINESS_CNF, media_type="text/plain; charset=utf-8")
+
+    @app.post("/v1/synthetic-boolean/readiness-probe/verify")
+    async def readiness_probe_verify(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sol = body.get("dimacs_solution") if isinstance(body, dict) else None
+        check = verify_dimacs_solution(_READINESS_CNF, sol if isinstance(sol, str) else None)
+        return {
+            "valid": check.ok,
+            "rejection_reason": None if check.ok else check.rejection_reason,
+            "clause_count": 3, "weighted_score": 0.0, "emissions_eligible": False,
+        }
 
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
     @app.post("/v1/agents/submit")
