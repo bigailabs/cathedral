@@ -163,10 +163,10 @@ def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid:
     if not broadcast:
         print("  DRY-RUN — pass --broadcast to submit")
         return True
-    import bittensor as bt
     uids = [u for u, _ in ordered]
     vals = [w for _, w in ordered]
     with _isolated_argv():
+        import bittensor as bt   # import under blanked argv — bittensor parses
         wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
         sub = _bt_subtensor(bt)(network=network)
         resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
@@ -188,8 +188,8 @@ def _bt_wallet(bt):
 
 
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
-    import bittensor as bt
     with _isolated_argv():
+        import bittensor as bt   # import under blanked argv — bittensor parses
         mg = _bt_subtensor(bt)(network=network).metagraph(netuid)
     return {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
 
