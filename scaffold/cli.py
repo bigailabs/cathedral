@@ -61,6 +61,8 @@ _ENV_MAP = {
     "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY": "public_key_hex",
     "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY_HEX": "public_key_hex",  # legacy spelling
     "CATHEDRAL_WEIGHT_POLICY_KEY_ID": "key_id",
+    "CATHEDRAL_WEIGHT_POLICY_NETWORK": "network",
+    "CATHEDRAL_WEIGHT_POLICY_NETUID": "netuid",
     "BT_WALLET_NAME": "wallet_name",
     "BT_WALLET_HOTKEY": "wallet_hotkey",
     "CATHEDRAL_VALIDATOR_STATE": "state_file",
@@ -88,7 +90,7 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         if v:
             cfg[flat] = v
     # explicit flags win
-    for flat in ("publisher_url", "public_key_hex", "network", "netuid",
+    for flat in ("publisher_url", "public_key_hex", "key_id", "network", "netuid",
                  "wallet_name", "wallet_hotkey", "state_file", "interval_secs"):
         v = getattr(ns, flat, None)
         if v is not None:
@@ -143,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="path to a TOML config (e.g. config/validator.toml)")
     sp.add_argument("--publisher-url", dest="publisher_url", default=None)
     sp.add_argument("--public-key-hex", dest="public_key_hex", default=None)
+    sp.add_argument("--key-id", dest="key_id", default=None)
     sp.add_argument("--network", dest="network", default=None)
     sp.add_argument("--netuid", dest="netuid", type=int, default=None)
     sp.add_argument("--wallet-name", dest="wallet_name", default=None)

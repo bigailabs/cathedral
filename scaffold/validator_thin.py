@@ -172,15 +172,19 @@ def tick(args) -> bool:
     print(f"accepted vector {payload['vector_id'][:8]}… policy_version={payload['policy_version']} "
           f"miners={len(payload['weights'])} "
           f"burn={payload['burn_snapshot']['forced_burn_percentage']}%")
-    if args.broadcast or not args.offline:
-        hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
-    else:
+    # offline is authoritative: no chain read AND no broadcast, even if
+    # --broadcast was also passed (the two are contradictory; offline wins).
+    if args.offline:
         hk2uid = {w["miner_hotkey"]: i for i, w in enumerate(payload["weights"])}
-        print("  (offline: synthetic uid map, dry-run only)")
+        print("  (offline: synthetic uid map, no chain access)")
+        broadcast = False
+    else:
+        hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
+        broadcast = args.broadcast
     uid_weights = vector_to_uid_weights(payload, hk2uid)
     ok = set_weights_on_chain(uid_weights, network=args.network, netuid=args.netuid,
                               wallet_name=args.wallet_name, wallet_hotkey=args.wallet_hotkey,
-                              broadcast=args.broadcast)
+                              broadcast=broadcast)
     if ok:
         save_fence(Path(args.state_file), int(payload["policy_version"]), payload["vector_id"])
     return ok

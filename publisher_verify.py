@@ -726,6 +726,36 @@ _lean = subprocess.run(
     capture_output=True)
 ck("validator imports WITHOUT pulling in FastAPI (lean install)", _lean.returncode == 0)
 
+# offline is authoritative: --offline --broadcast together must NOT read the
+# metagraph or broadcast (the two are contradictory; offline wins). Spy on the
+# chain-touching calls.
+from scaffold import validator_thin as _vt  # noqa: E402
+_spy = {"metagraph": 0, "broadcast_arg": "unset"}
+_o_mg, _o_set, _o_fetch = (_vt.metagraph_hotkey_to_uid, _vt.set_weights_on_chain,
+                           _vt.fetch_vector)
+try:
+    _vt.fetch_vector = lambda url, timeout=30.0: vec
+    def _spy_mg(**k):
+        _spy["metagraph"] += 1
+        return {}
+    def _spy_set(uw, **k):
+        _spy["broadcast_arg"] = k.get("broadcast")
+        return True
+    _vt.metagraph_hotkey_to_uid = _spy_mg
+    _vt.set_weights_on_chain = _spy_set
+    _off = _NS(publisher_url="x", public_key_hex=pub_hex, key_id="cathedral-weight-policy",
+               network="finney", netuid=39, wallet_name="w", wallet_hotkey="h",
+               state_file=os.path.join(tempfile.mkdtemp(), "fence.json"),  # absent -> fence -1
+               offline=True, broadcast=True, once=True, interval_secs=1.0)
+    _vt.tick(_off)
+    ck("offline authoritative: --offline --broadcast does NOT read the metagraph",
+       _spy["metagraph"] == 0)
+    ck("offline authoritative: --offline --broadcast does NOT broadcast",
+       _spy["broadcast_arg"] is False)
+finally:
+    _vt.metagraph_hotkey_to_uid, _vt.set_weights_on_chain, _vt.fetch_vector = (
+        _o_mg, _o_set, _o_fetch)
+
 # --------------------------------------------------------------------------
 fails = [n for n, c in checks if not c]
 print(f"\nPUBLISHER VERIFY: "
