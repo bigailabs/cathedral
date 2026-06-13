@@ -123,6 +123,8 @@ This validator binary is **new**: its verify / burn / fence logic is covered by
 the release gates (`publisher_verify.py`), and it has been exercised end-to-end
 against the live mainnet vector. Run it in dry-run (or alongside your existing
 validator) until you've confirmed the uid vector it produces matches your
-expectation, then switch to `--broadcast`. Adoption is per-operator and
+expectation, then go live: with `cathedral-validator serve`, drop `--dry-run`
+(it writes weights by default — there is no `--broadcast` flag); with the raw
+`python -m scaffold.validator_thin` form, add `--broadcast`. Adoption is per-operator and
 incremental — the network already converges as long as stake-weighted-majority
 validators relay the same signed vector.
