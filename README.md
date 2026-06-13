@@ -8,6 +8,7 @@
 <p align="center">
   Documentation:
   <a href="V4-DESIGN.md">Design</a> |
+  <a href="VALIDATOR.md">Run a Validator</a> |
   <a href="COMPAT.md">Wire Compatibility</a> |
   <a href="ATTESTATION.md">Attestation</a> |
   <a href="deploy/RUNBOOK.md">Deploy Runbook</a> |
@@ -35,9 +36,12 @@ v4 rebuilds the publisher thin:
   hotkey while active; each solve carries its true first-seen rank. Re-solves
   are rejected. One scored solve per (challenge, hotkey), ever — enforced by
   schema.
-- **Work-proportional scoring.** Row values can carry a coverage policy:
-  miners who solve more of the board earn more; idle miners decay. Policy is
-  publisher-side configuration — no validator involvement.
+- **Scoring is one signed number per miner.** The orchestrator composes every
+  miner's final weight (recency window, multi-challenge blend, burn) and signs
+  it; validators verify the signature and apply it — no local averaging, no
+  rolling window, no row database. Recency, burn rate, and future scoring
+  changes ship orchestrator-side with **no validator release**. See
+  [VALIDATOR.md](VALIDATOR.md).
 
 ## How It Works
 
@@ -47,9 +51,11 @@ v4 rebuilds the publisher thin:
 4. The publisher verifies every clause against the private formula.
 5. An accepted solve is claimed atomically with its first-seen rank.
 6. The publisher signs a v6 score row (plus a v5-compat mirror) and serves
-   both on the leaderboard feed.
-7. Validators pull rows with a tuple cursor, verify each signature against
-   the pinned key, aggregate per hotkey, and set weights.
+   both on the leaderboard feed — the public, re-checkable audit trail.
+7. The orchestrator composes those solves into one final weight per miner and
+   signs the vector served at `/v1/validator/weights/next`.
+8. Validators fetch the signed vector, verify it against the pinned key, apply
+   the signed burn, and set weights ([VALIDATOR.md](VALIDATOR.md)).
 
 ## Proofs and Protections
 
@@ -66,9 +72,9 @@ v4 rebuilds the publisher thin:
 ## Run It
 
 ```bash
-python -m scaffold.live          # validator runner (real solvers when present)
+python -m scaffold.validator_thin --help   # the v4 validator (see VALIDATOR.md)
 python -m scaffold.dashboard     # one-page board -> http://127.0.0.1:8099
-python -m scaffold.publisher.app # the thin publisher
+python -m scaffold.publisher.app # the thin publisher (orchestrator)
 ```
 
 Release gates — all must pass before the wire surface ships:
