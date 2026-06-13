@@ -282,21 +282,40 @@ def build_app(
     def _verify_hotkey_claim(
         hotkey: str, signature_b64: str, submitted_at: str,
         *, challenge_id: str | None = None, dimacs_solution_sha256: str | None = None,
-    ) -> None:
-        """Verify an sr25519 claim or raise HTTPException. Enforces ±skew."""
-        ts = _parse_iso(submitted_at)
-        if ts is None:
+        alt_submitted_at: str | None = None,
+    ) -> str:
+        """Verify an sr25519 claim or raise HTTPException; return the timestamp
+        that actually verified.
+
+        Backend-compat: miners may have signed the timestamp they put in the
+        `submitted_at` form field OR the `X-Cathedral-Submitted-At` header, and
+        either the 6-field solve shape or the legacy 4-field shape (depending on
+        the client/era). The monolith tolerated this spread; we try the same
+        candidate (timestamp x shape) combinations and accept the first that
+        verifies, so no miner needs to re-sign.
+        """
+        ts_candidates = [t for t in (submitted_at, alt_submitted_at) if t]
+        if not ts_candidates:
             raise HTTPException(400, "invalid submitted_at")
-        if abs(time.time() - ts) > _SKEW_SECS:
+        any_in_skew = False
+        for ts_str in ts_candidates:
+            ts = _parse_iso(ts_str)
+            if ts is None or abs(time.time() - ts) > _SKEW_SECS:
+                continue
+            any_in_skew = True
+            shapes = [
+                dict(challenge_id=challenge_id, dimacs_solution_sha256=dimacs_solution_sha256),
+                dict(challenge_id=None, dimacs_solution_sha256=None),  # legacy 4-field
+            ]
+            for shape in shapes:
+                msg = canonical_claim_bytes(
+                    bundle_hash=_empty_bundle_hash(), card_id=_FAMILY,
+                    miner_hotkey=hotkey, submitted_at=ts_str, **shape)
+                if verifier.verify(hotkey, msg, signature_b64):
+                    return ts_str
+        if not any_in_skew:
             raise HTTPException(400, "submitted_at outside acceptable clock-skew window")
-        from blake3 import blake3 as _b3  # noqa
-        msg = canonical_claim_bytes(
-            bundle_hash=_empty_bundle_hash(), card_id=_FAMILY, miner_hotkey=hotkey,
-            submitted_at=submitted_at, challenge_id=challenge_id,
-            dimacs_solution_sha256=dimacs_solution_sha256,
-        )
-        if not verifier.verify(hotkey, msg, signature_b64):
-            raise HTTPException(401, "invalid hotkey signature")
+        raise HTTPException(401, "invalid hotkey signature")
 
     def _active_challenges(tier: int | None = None) -> list[Any]:
         # local only: seeded external mirrors (feed-continuity artifacts, no
@@ -449,13 +468,16 @@ def build_app(
         dimacs_solution: str = Form(None),
         x_cathedral_hotkey: str = Header(...),
         x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
     ):
         if card_id != _FAMILY:
             raise HTTPException(400, f"only card_id={_FAMILY} accepted (see skill.md)")
         if not dimacs_solution or not challenge_id:
             raise HTTPException(400, "this publisher requires solve-on-submit "
                                      "(challenge_id + dimacs_solution); see skill.md")
-        submitted_at = submitted_at or _now_iso_ms()
+        # The miner may have signed the timestamp it sent in the form field or
+        # the X-Cathedral-Submitted-At header — fall back across both.
+        submitted_at = submitted_at or x_cathedral_submitted_at or _now_iso_ms()
 
         # per-(hotkey, challenge) rate limit (fires before lock check).
         rl_key = (x_cathedral_hotkey, challenge_id)
@@ -466,9 +488,10 @@ def build_app(
                 raise HTTPException(429, "rate_limited")
 
         sol_sha = sha256_hex(dimacs_solution)
-        _verify_hotkey_claim(
+        submitted_at = _verify_hotkey_claim(
             x_cathedral_hotkey, x_cathedral_signature, submitted_at,
             challenge_id=challenge_id, dimacs_solution_sha256=sol_sha,
+            alt_submitted_at=x_cathedral_submitted_at or None,
         )
 
         rows_ = store.query(
