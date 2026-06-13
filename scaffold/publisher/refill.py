@@ -148,10 +148,14 @@ def retire_ready(store: Store, tier: int) -> int:
     # CNF is immutable and only served while a challenge is active, so a retired
     # challenge never needs its body again.
     def _age(conn):
+        # Age = time since CREATION, not last activity. updated_at_iso is bumped
+        # on every solve by the submit active-guard, so keying age off it keeps a
+        # popular challenge alive forever and starves refill — the board freezes.
+        # created_at_iso is the stable mint time.
         cur = conn.execute(
             "UPDATE lane_challenges SET status='retired', cnf_text='', updated_at_iso=? "
             "WHERE family_id=? AND tier=? AND status='active' AND cnf_source='local' "
-            "AND COALESCE(updated_at_iso, created_at_iso) <= ?",
+            "AND created_at_iso <= ?",
             (now, _FAMILY, tier, age_cutoff))
         return int(cur.rowcount or 0)
     retired += store.write(_age)
