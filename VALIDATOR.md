@@ -54,7 +54,7 @@ Updating from a prior release is the **same flow as always** — `pip install`,
 `migrate`, `serve`:
 
 ```bash
-git fetch && git checkout v4      # or: git clone -b v4 https://github.com/cathedralai/cathedral.git
+git clone https://github.com/cathedralai/cathedral.git   # or: git fetch && git checkout main
 pip install -e .                  # installs the `cathedral-validator` command
 cathedral-validator migrate       # no-op in v4 (no local database) — kept for parity
 ```
