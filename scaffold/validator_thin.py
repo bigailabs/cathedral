@@ -22,8 +22,10 @@ publisher cannot re-serve an older policy_version after a restart.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -133,6 +135,25 @@ def vector_to_uid_weights(payload: dict[str, Any],
 
 # -- chain ----------------------------------------------------------------------
 
+@contextlib.contextmanager
+def _isolated_argv():
+    """Hide sys.argv from bittensor while it builds its own config.
+
+    bittensor parses sys.argv to build a config and defines its OWN `--config`
+    flag. When this validator is launched as `cathedral-validator serve --config
+    my.toml`, that `--config` leaks into bittensor, which then tries to YAML-load
+    our TOML and aborts the tick with `Error loading config` (seen on some
+    bittensor versions, not all). Blanking argv around bittensor construction
+    keeps the two CLIs from colliding.
+    """
+    saved = sys.argv
+    sys.argv = sys.argv[:1]
+    try:
+        yield
+    finally:
+        sys.argv = saved
+
+
 def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid: int,
                          wallet_name: str, wallet_hotkey: str, broadcast: bool) -> bool:
     ordered = sorted(uid_weights.items())
@@ -143,12 +164,13 @@ def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid:
         print("  DRY-RUN — pass --broadcast to submit")
         return True
     import bittensor as bt
-    wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
-    sub = _bt_subtensor(bt)(network=network)
     uids = [u for u, _ in ordered]
     vals = [w for _, w in ordered]
-    resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
-                           wait_for_inclusion=True)
+    with _isolated_argv():
+        wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
+        sub = _bt_subtensor(bt)(network=network)
+        resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
+                               wait_for_inclusion=True)
     # newer bittensor returns an ExtrinsicResponse object (truthy even on
     # failure) — judge success by the field, not truthiness.
     ok = bool(getattr(resp, "success", resp))
@@ -167,7 +189,8 @@ def _bt_wallet(bt):
 
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
     import bittensor as bt
-    mg = _bt_subtensor(bt)(network=network).metagraph(netuid)
+    with _isolated_argv():
+        mg = _bt_subtensor(bt)(network=network).metagraph(netuid)
     return {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
 
 
