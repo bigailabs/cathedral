@@ -100,9 +100,9 @@ def accept_vector(payload: dict[str, Any], *, public_key_hex: str, key_id: str,
     wire.verify_signature(payload, public_key_hex=public_key_hex, expected_key_id=key_id)
     wire.invariant_check(payload, network=network, netuid=netuid, now_iso=_ms_iso_now())
     pv = int(payload["policy_version"])
-    if pv < fence_version:
+    if pv <= fence_version:
         raise wire.VectorError(
-            f"rollback: vector policy_version {pv} < last accepted {fence_version}")
+            f"rollback/replay: vector policy_version {pv} <= last accepted {fence_version}")
 
 
 def vector_to_uid_weights(payload: dict[str, Any],
@@ -185,7 +185,10 @@ def tick(args) -> bool:
     ok = set_weights_on_chain(uid_weights, network=args.network, netuid=args.netuid,
                               wallet_name=args.wallet_name, wallet_hotkey=args.wallet_hotkey,
                               broadcast=broadcast)
-    if ok:
+    # Advance the fence ONLY on a real broadcast — a dry-run/offline pass must
+    # not consume a version (with the pv<=fence rule that would otherwise block
+    # the subsequent live broadcast of the same vector).
+    if ok and broadcast:
         save_fence(Path(args.state_file), int(payload["policy_version"]), payload["vector_id"])
     return ok
 

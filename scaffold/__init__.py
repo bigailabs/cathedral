@@ -9,6 +9,6 @@ Run the end-to-end demo:  python -m scaffold.demo
 """
 from __future__ import annotations
 
-__version__ = "4.0.0-rc.3"
+__version__ = "4.0.0-rc.4"
 
 __all__ = ["registry", "validator", "contract"]

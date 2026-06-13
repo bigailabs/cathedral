@@ -31,6 +31,7 @@ import base64
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -62,6 +63,10 @@ MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"                       # flat_recent | propor
 
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+# Serializes the cache-miss build so concurrent misses can't each call
+# next_policy_version() and emit two different vectors with the same
+# policy_version (the orchestrator is single-instance — a process lock suffices).
+_build_lock = threading.Lock()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -202,9 +207,15 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
     hit = _vector_cache.get("v")
     if hit is not None and (now - hit[0]) < _CACHE_TTL_SECS:
         return hit[1]
-    vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
-    _vector_cache["v"] = (now, vec)
-    return vec
+    # Double-checked locking: only one thread builds per cache cycle, so
+    # next_policy_version() is never called concurrently.
+    with _build_lock:
+        hit = _vector_cache.get("v")
+        if hit is not None and (time.time() - hit[0]) < _CACHE_TTL_SECS:
+            return hit[1]
+        vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
+        _vector_cache["v"] = (time.time(), vec)
+        return vec
 
 
 def _reset_vector_cache() -> None:

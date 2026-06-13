@@ -520,6 +520,17 @@ def build_app(
                     return ("challenge_already_locked", None, None)
                 rank = scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso) or 1
             else:
+                # Re-check active INSIDE the transaction: the pre-tx status read
+                # goes stale if the refill loop retires the challenge between read
+                # and write, which would otherwise pay a solve on a dead challenge.
+                # The UPDATE also row-locks lane_challenges on Postgres, serializing
+                # concurrent distinct-hotkey solves so their first-seen ranks stay
+                # unique (SQLite already serializes writes under BEGIN IMMEDIATE).
+                active = conn.execute(
+                    "UPDATE lane_challenges SET updated_at_iso=? "
+                    "WHERE challenge_id=? AND status='active'", (now_iso, challenge_id))
+                if active.rowcount != 1:
+                    return ("challenge_not_active", None, None)
                 rank = scoring.claim_solve(conn, challenge_id, x_cathedral_hotkey, now_iso)
                 if rank is None:
                     return ("already_solved", None, None)

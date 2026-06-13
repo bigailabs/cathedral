@@ -274,6 +274,33 @@ with TestClient(app) as client:
     ck("open window: same miner re-solve rejected (already_solved)",
        resp3.status_code == 409)
 
+    # ACTIVE-GUARD: once a challenge is retired, a fresh solve on it must NOT pay
+    # — the claim is guarded by an in-transaction active check (defends the race
+    # where the refill loop retires a challenge between the pre-tx read and write).
+    def _retire(conn):
+        conn.execute("UPDATE lane_challenges SET status='retired' WHERE challenge_id=?",
+                     ("sat-e2e-1",))
+    store.write(_retire)
+    miner3 = Keypair.create_from_uri("//E2EMiner3")
+    sa5 = now_iso()
+    claim4 = canonical_claim_bytes(
+        bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+        miner_hotkey=miner3.ss58_address, submitted_at=sa5,
+        challenge_id="sat-e2e-1", dimacs_solution_sha256=sol_sha)
+    sig4 = base64.b64encode(miner3.sign(claim4)).decode()
+    resp4 = client.post("/v1/agents/submit",
+                        headers={"X-Cathedral-Hotkey": miner3.ss58_address,
+                                 "X-Cathedral-Signature": sig4},
+                        data={"card_id": "synthetic_boolean_v1", "submitted_at": sa5,
+                              "challenge_id": "sat-e2e-1", "dimacs_solution": blob})
+    ck("open window: solve on a RETIRED challenge is rejected (no pay on dead challenge)",
+       resp4.status_code >= 400)
+    # restore active so the downstream validator-pull check still sees the feed.
+    def _reactivate(conn):
+        conn.execute("UPDATE lane_challenges SET status='active' WHERE challenge_id=?",
+                     ("sat-e2e-1",))
+    store.write(_reactivate)
+
     # SIGNED FINAL-SCORES VECTOR (the v4 scoring interface). One number per
     # miner + burn, Ed25519-signed — validators verify and apply, no local
     # averaging. Both e2e miners solved sat-e2e-1 above, so both appear.
@@ -407,6 +434,15 @@ with TestClient(app) as client:
     except _weights.VectorError:
         fence_ok = True
     ck("thin validator: rollback fence rejects an older policy_version", fence_ok)
+    # fence also rejects the SAME version (replay) — pv <= fence, not just <.
+    try:
+        _vthin.accept_vector(vec, public_key_hex=pub_hex, key_id="cathedral-weight-policy",
+                             network="finney", netuid=39,
+                             fence_version=int(vec["policy_version"]))
+        replay_ok = False
+    except _weights.VectorError:
+        replay_ok = True
+    ck("thin validator: fence rejects re-applying the SAME policy_version (replay)", replay_ok)
 
     # validator-style pull loop: tuple cursor, verify EVERY signature.
     pulled = []
