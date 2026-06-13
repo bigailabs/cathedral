@@ -33,6 +33,15 @@ from typing import Any
 from . import wire_vector as wire
 
 
+# Cathedral's published weight-policy signing key (kid: cathedral-weight-policy).
+# This is a PUBLIC verification key — shipping it as the default means operators
+# don't have to pin it by hand; the validator still applies only what this key
+# signed. Verify it any time against
+# https://api.cathedral.computer/.well-known/cathedral-jwks.json
+# Override with --public-key-hex or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY.
+DEFAULT_PUBLIC_KEY_HEX = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
+
+
 def _ms_iso_now() -> str:
     dt = datetime.now(timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
@@ -215,7 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--publisher-url", default=os.environ.get(
         "CATHEDRAL_PUBLISHER_URL", "https://api.cathedral.computer"))
     p.add_argument("--public-key-hex", default=os.environ.get(
-        "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY", ""), help="pinned Ed25519 public key (hex)")
+        "CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY", DEFAULT_PUBLIC_KEY_HEX),
+        help="pinned Ed25519 public key (hex); defaults to Cathedral's published key")
     p.add_argument("--key-id", default=os.environ.get(
         "CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy"))
     p.add_argument("--network", default="finney")
