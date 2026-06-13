@@ -13,3 +13,14 @@ data/
 # OS / editor
 .DS_Store
 *.swp
+
+# Internal planning / agent working docs — keep out of the public repo
+RESUME.md
+STRATEGY.md
+SHIPPING.md
+KEYSTONE.md
+RELEASE_STATUS.md
+COMPAT.md
+V4-DESIGN.md
+V4-DESIGN.html
+ATTESTATION.md

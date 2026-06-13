@@ -1,102 +1,136 @@
 <h2 align="center">Decentralized&nbsp;formal&nbsp;verification.&nbsp;Built&nbsp;on&nbsp;SAT.</h2>
 
 <p align="center">
-  <b>Cathedral v4</b> — the thin publisher. ~5k lines replacing the 46k-line monolith,
-  byte-identical on the signed wire surface validators verify.
-</p>
-
-<p align="center">
   Documentation:
-  <a href="V4-DESIGN.md">Design</a> |
-  <a href="VALIDATOR.md">Run a Validator</a> |
-  <a href="COMPAT.md">Wire Compatibility</a> |
-  <a href="ATTESTATION.md">Attestation</a> |
-  <a href="deploy/RUNBOOK.md">Deploy Runbook</a> |
-  <a href="RELEASE_STATUS.md">Release Status</a>
+  <a href="VALIDATOR.md">Validator</a> |
+  <a href="https://api.cathedral.computer/skill.md">Live Miner Brief</a> |
+  <a href="https://github.com/cathedralai/cathedral/releases">Releases</a>
 </p>
 
 <p align="center">
+  <a href="https://github.com/cathedralai/cathedral/commits/main"><img src="https://img.shields.io/github/last-commit/cathedralai/cathedral" alt="Last Commit"></a>
+  <a href="https://deepwiki.com/cathedralai/cathedral"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <a href="https://cathedral.computer"><img src="https://img.shields.io/badge/Site-cathedral.computer-1a1814" alt="Site"></a>
   <a href="https://api.cathedral.computer"><img src="https://img.shields.io/badge/API-api.cathedral.computer-5a6f9a" alt="Publisher API"></a>
-  <a href="https://api.cathedral.computer/skill.md"><img src="https://img.shields.io/badge/Live-Miner_Brief-2d5a3d" alt="Live Miner Brief"></a>
 </p>
 
-## Why v4
+## [Why Cathedral](#why-cathedral)
 
-Cathedral pays weight for exactly one thing: **work it can independently
-verify.** Miners race certificate-checked SAT challenges; every accepted
-answer is re-verified against the formula before a score row is signed.
-v4 rebuilds the publisher thin:
+Cathedral is decentralized formal verification: compute whose answers can
+be checked deterministically and rewarded through an open miner market.
+The substrate is Boolean satisfiability, the canonical NP-complete
+problem. Any question that can be reduced to SAT can be raced by miners
+and verified by Cathedral before validators use the signed result for
+weights.
 
-- **Byte-identical wire surface.** Validators consume Ed25519-signed eval
-  rows. v4 emits the same v5/v6 row schema, canonical JSON, cursor semantics,
-  and signing key as production — proven against live rows (`wire_compat.py`,
-  8/8 on sampled production data). Validators require no update.
-- **Open window, real ranks.** A challenge accepts one solve per distinct
-  hotkey while active; each solve carries its true first-seen rank. Re-solves
-  are rejected. One scored solve per (challenge, hotkey), ever — enforced by
-  schema.
-- **Scoring is one signed number per miner.** The orchestrator composes every
-  miner's final weight (recency window, multi-challenge blend, burn) and signs
-  it; validators verify the signature and apply it — no local averaging, no
-  rolling window, no row database. Recency, burn rate, and future scoring
-  changes ship orchestrator-side with **no validator release**. See
-  [VALIDATOR.md](VALIDATOR.md).
+SAT asks whether a boolean formula can be satisfied. It is a core search
+problem behind verification, planning, scheduling, compiler optimization,
+hardware reasoning, and automated theorem proving. Better SAT solvers
+lower the cost of proving, finding, and optimizing real systems. Cathedral
+turns hard verification work into open, scored challenges that miners can
+attack with solvers, solver agents, and new search systems.
 
-## How It Works
+- **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
 
-1. The publisher mints calibrated CNF challenges and serves a public board.
-2. A miner fetches the tokenized CNF through the signed `active-cnf` flow.
-3. The miner solves locally and submits one DIMACS satisfying assignment.
-4. The publisher verifies every clause against the private formula.
-5. An accepted solve is claimed atomically with its first-seen rank.
-6. The publisher signs a v6 score row (plus a v5-compat mirror) and serves
-   both on the leaderboard feed — the public, re-checkable audit trail.
-7. The orchestrator composes those solves into one final weight per miner and
-   signs the vector served at `/v1/validator/weights/next`.
-8. Validators fetch the signed vector, verify it against the pinned key, apply
-   the signed burn, and set weights ([VALIDATOR.md](VALIDATOR.md)).
+- **Designed for solver evolution.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. Recent work such as [SATLUTION](https://arxiv.org/abs/2509.07367) points toward LLM-driven solver evolution under correctness checks; Cathedral makes that kind of work economic.
 
-## Proofs and Protections
+- **Real demand.** Hard SAT and SMT instances drive workloads at industrial scale: Amazon has described AWS automated-reasoning systems generating [a billion SMT queries a day](https://www.amazon.science/blog/a-billion-smt-queries-a-day). Chip companies depend on formal verification platforms from Cadence, Synopsys, and Siemens. Today these teams either pay enterprise EDA licenses or run reasoning workloads inside closed cloud services. Cathedral is a third path: verifiable hard-instance solving through an open mining market.
+
+## [How It Works](#how-it-works)
+
+### Incentive Mechanism
+
+1. Each miner is scored under their registered Bittensor hotkey.
+2. Miner fetches the active challenge through the signed API.
+3. Miner returns one DIMACS satisfying assignment.
+4. Cathedral checks the assignment against the private formula and records publisher-observed submit time.
+5. Cathedral signs a hash-only score row.
+6. Validator verifies the Cathedral signature and maps the hotkey to the current metagraph UID.
+7. Validator applies the signed weight policy and calls `set_weights`.
+
+Validators apply one Cathedral-signed weight vector — a final score per miner plus the signed burn snapshot — verified against a pinned key. Scoring (recency window, multi-challenge composition, burn rate) is composed on the publisher and signed, so validators relay the signed number rather than recomputing it locally. The per-solve feed (`/v1/leaderboard/recent`) stays public as an independently re-checkable audit trail.
+
+SAT scoring:
+
+- `1.0`: valid satisfying assignment that wins the active challenge.
+- `0.0`: invalid, malformed, incomplete, non-winning, locked, or verifier-error answer.
+
+Winning is selected by publisher receipt time, not first verified time.
+
+### Proofs and Protections
 
 | Claim | Mechanism |
 |---|---|
-| **Answers verified, not trusted** | Every DIMACS assignment is checked clause-by-clause before scoring; 9 adversarial fixtures guard the parser |
-| **Rows publisher-signed** | Ed25519 over the canonical v5/v6 subset; validators pin the public key |
-| **One solve per miner per challenge** | `UNIQUE(family_id, challenge_id, miner_hotkey)` — the claim is the dedup |
-| **No duplicate challenges** | Challenge id and CNF content derive from the same `(seed, tier, sequence)` triple — identical content cannot appear under two ids |
-| **Replay rejected** | Submission signatures are single-use; clock-skew bounded |
-| **CNF access gated** | HMAC-tokenized, constant-time fetch; hash-only public rows |
-| **Self-reported timing ignored** | Speed claims require server measurement or hardware attestation (see [ATTESTATION.md](ATTESTATION.md)) |
+| **Hotkey scoped** | Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped. |
+| **Publisher signed** | Eval rows are Ed25519-signed by Cathedral and verified by validators. |
+| **Signed weight policy** | Validators pin the publisher key and verify the weight vector's signature, key id, network, netuid, expiry, and burn snapshot before applying it. |
+| **Hash-only feed** | Miners receive token-gated CNF URLs. Public score rows expose hashes, not raw formulas or answers. |
+| **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
+| **Receipt ordered** | Winning SAT receipt is selected by publisher-observed submit time. |
+| **Burn configured** | Current mainnet config sets `burn_uid = 204` and `forced_burn_percentage = 85.0` during bootstrap to align emissions with active miner output. The percentage is expected to reduce as the SAT lane produces consistent positive scores. If no positive non-burn scores exist, weight falls back to the burn UID. |
 
-## Run It
+The Cathedral publisher is verifier of record for private SAT in v1. Validators verify the signed weight vector; they do not receive raw SAT formulas.
+
+---
+
+## 🚀 [Getting Started](#getting-started)
+
+Use the quick starts below to work inside the subnet.
+
+### Installation
 
 ```bash
-python -m scaffold.validator_thin --help   # the v4 validator (see VALIDATOR.md)
-python -m scaffold.dashboard     # one-page board -> http://127.0.0.1:8099
-python -m scaffold.publisher.app # the thin publisher (orchestrator)
+git clone https://github.com/cathedralai/cathedral
+cd cathedral
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
-Release gates — all must pass before the wire surface ships:
+### Miner Quick Start
+
+> **Heads up:** the `cathedral-runtime` Docker image (`ghcr.io/cathedralai/cathedral-runtime:v1.0.7`) is **deprecated**. Current miners do not need it. Run Hermes directly on a Linux SSH host. See [docker/cathedral-runtime/DEPRECATED.md](docker/cathedral-runtime/DEPRECATED.md) for context.
+
+You need:
+
+- registered Bittensor hotkey
+- private SAT solver, solver agent, or wrapper
+- SSH host with Hermes for post-win audit
+- access to the signed challenge API
+
+Live miner flow:
+
+1. Read the public challenge metadata.
+2. Fetch the tokenized CNF through signed `active-cnf`.
+3. Verify the CNF SHA-256.
+4. Solve locally.
+5. Submit `challenge_id` and `dimacs_solution` to `/v1/agents/submit`.
+
+The canonical live contract is served at [`https://api.cathedral.computer/skill.md`](https://api.cathedral.computer/skill.md).
+
+Submit a DIMACS assignment:
+
+````text
+```FINAL_ANSWER
+{
+  "dimacs_solution": "s SATISFIABLE\nv 1 -2 3 0\n"
+}
+```
+````
+
+### [Validator Quick Start](VALIDATOR.md)
+
+The v4 validator is one loop: fetch one signed score per miner from the publisher, verify the signature, set weights. Scoring lives on the publisher, so there is no re-release for scoring changes.
 
 ```bash
-python rc_verify.py          # scoring invariants across all lanes
-python wire_compat.py        # byte-compat vs live production rows
-python publisher_verify.py   # end-to-end miner sign -> fetch -> solve -> submit -> validator pull
+pip install -e .                              # installs the `cathedral-validator` command
+cp config/validator.toml my-validator.toml    # add your wallet + pin the publisher key
+
+# Preview the weights it would set, without touching the chain:
+cathedral-validator serve --config my-validator.toml --dry-run --once
+
+# Go live:
+cathedral-validator serve --config my-validator.toml
 ```
 
-## Deploy
-
-The thin publisher takes over the live API with zero validator updates via a
-same-URL swap; the previous backend stays warm for instant rollback. Full
-sequence — stage, seed from the live feed, soak, swap, abort criteria — in
-[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md).
-
-## Layout
-
-- `scaffold/wire.py` — the frozen signed-row surface (v5/v6 key sets, canonical JSON)
-- `scaffold/publisher/` — app, store, scoring policy, seed/refill/soak
-- `scaffold/lanes/` — lane implementations (SAT challenge, solver arena, encoding)
-- `scaffold/contract.py` — the lane contract (pure generate / verify / score)
-- `deploy/` — Dockerfile, railway.toml, runbook
-- `fixtures/live-20260609/` — golden vectors sampled from the live network
+Pin the publisher's signing key in your config and verify it against the live [JWKS](https://api.cathedral.computer/.well-known/cathedral-jwks.json) before going live. Full guide: [VALIDATOR.md](VALIDATOR.md).
