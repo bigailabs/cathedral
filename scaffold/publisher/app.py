@@ -102,6 +102,23 @@ def build_app(
     board_cache_mod.register(board_cache)
 
     app = FastAPI(title="cathedral-thin-publisher")
+
+    # Backend-compat: the prior backend served the API under an `/api/cathedral`
+    # path prefix, and miners are configured against that. Strip the prefix
+    # before routing so `/api/cathedral/v1/...` reaches the same handlers as
+    # `/v1/...` — both paths serve identically, no client reconfiguration needed.
+    _LEGACY_PREFIX = "/api/cathedral"
+
+    @app.middleware("http")
+    async def _strip_legacy_prefix(request: Request, call_next):
+        path = request.scope.get("path", "")
+        if path.startswith(_LEGACY_PREFIX + "/") or path == _LEGACY_PREFIX:
+            request.scope["path"] = path[len(_LEGACY_PREFIX):] or "/"
+            raw = request.scope.get("raw_path")
+            if raw:
+                request.scope["raw_path"] = raw.replace(_LEGACY_PREFIX.encode(), b"", 1)
+        return await call_next(request)
+
     app.state.store = store
     app.state.cnf_store = cnf_store
     app.state.board_cache = board_cache
