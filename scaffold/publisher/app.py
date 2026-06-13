@@ -304,8 +304,13 @@ def build_app(
                 continue
             any_in_skew = True
             shapes = [
+                # solution-bound 6-field (skill.md submit recipe)
                 dict(challenge_id=challenge_id, dimacs_solution_sha256=dimacs_solution_sha256),
-                dict(challenge_id=None, dimacs_solution_sha256=None),  # legacy 4-field
+                # empty-string 6-field — the shape clients reuse from the
+                # active-cnf/registration signing path (challenge_id/solution "")
+                dict(challenge_id="", dimacs_solution_sha256=""),
+                # legacy 4-field (no challenge/solution keys)
+                dict(challenge_id=None, dimacs_solution_sha256=None),
             ]
             for shape in shapes:
                 msg = canonical_claim_bytes(
