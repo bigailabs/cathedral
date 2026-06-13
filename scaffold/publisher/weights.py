@@ -38,6 +38,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .store import Store
+# Shared verify surface lives in the dependency-light module so a validator
+# install doesn't drag in FastAPI/store; re-exported here for the orchestrator's
+# callers and the gates (one import surface).
+from ..wire_vector import (  # noqa: F401
+    MAX_VECTOR_ENTRIES,
+    VectorError,
+    canonical_bytes,
+    invariant_check,
+    verify_signature,
+)
 
 # Env knobs — SAME names as the live publisher (config carries over).
 SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"   # falls back to app key
@@ -51,7 +61,6 @@ VALID_FOR_ENV = "CATHEDRAL_WEIGHT_POLICY_VALID_FOR_SECS"
 WINDOW_HOURS_ENV = "CATHEDRAL_WEIGHTS_WINDOW_HOURS"
 MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"                       # flat_recent | proportional
 
-MAX_VECTOR_ENTRIES = 8192
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -145,14 +154,7 @@ def next_policy_version(store: Store) -> int:
     return store.write(_bump)
 
 
-# -- canonical bytes / sign / verify -------------------------------------------
-
-def canonical_bytes(payload: dict[str, Any]) -> bytes:
-    """Drop ``signature``, sort keys, no whitespace, UTF-8 — must stay
-    byte-identical to cathedral.policy.signing.canonical_bytes."""
-    body = {k: v for k, v in payload.items() if k != "signature"}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-
+# -- sign -----------------------------------------------------------------------
 
 def build_signed_vector(store: Store, *, signing_key_hex: str,
                         now: datetime | None = None) -> dict[str, Any]:
@@ -209,61 +211,3 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
 def _reset_vector_cache() -> None:
     """Test hook."""
     _vector_cache.clear()
-
-
-# -- validator-side checks (shared by validator_thin.py and the gates) --------
-
-class VectorError(Exception):
-    pass
-
-
-def verify_signature(payload: dict[str, Any], *, public_key_hex: str,
-                     expected_key_id: str) -> None:
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-    sig_b64 = payload.get("signature") or ""
-    if not str(sig_b64).strip():
-        raise VectorError("vector is missing signature")
-    if payload.get("key_id") != expected_key_id:
-        raise VectorError(
-            f"key_id mismatch: vector={payload.get('key_id')!r}, pinned={expected_key_id!r}")
-    try:
-        sig = base64.b64decode(str(sig_b64).encode("ascii"), validate=True)
-    except Exception as e:
-        raise VectorError(f"signature is not valid base64: {e}") from e
-    pk = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex.strip()))
-    try:
-        pk.verify(sig, canonical_bytes(payload))
-    except InvalidSignature as e:
-        raise VectorError("ed25519 signature verify failed") from e
-
-
-def invariant_check(payload: dict[str, Any], *, network: str, netuid: int,
-                    now_iso: str) -> None:
-    """Structural sanity — mirrors the deployed validator's checks."""
-    weights = payload.get("weights") or []
-    snap = payload.get("burn_snapshot") or {}
-    b_uid, b_pct = snap.get("burn_uid"), float(snap.get("forced_burn_percentage", -1))
-    if len(weights) > MAX_VECTOR_ENTRIES:
-        raise VectorError(f"weights vector exceeds {MAX_VECTOR_ENTRIES}")
-    if not 0.0 <= b_pct <= 100.0:
-        raise VectorError(f"forced_burn_percentage out of range: {b_pct!r}")
-    if b_pct > 0.0 and b_uid is None:
-        raise VectorError("forced_burn_percentage requires burn_uid")
-    total = 0.0
-    for w in weights:
-        v = float(w["weight"])
-        if not math.isfinite(v) or v < 0:
-            raise VectorError(f"bad weight for {w.get('miner_hotkey')!r}: {v!r}")
-        total += v
-    if total <= 0 and b_uid is None:
-        raise VectorError("empty/zero-sum weights without burn_uid fallback")
-    if payload.get("network") != network:
-        raise VectorError(f"network mismatch: {payload.get('network')!r} != {network!r}")
-    if int(payload.get("netuid", -1)) != netuid:
-        raise VectorError(f"netuid mismatch: {payload.get('netuid')!r} != {netuid!r}")
-    if str(payload.get("expires_at", "")) <= str(payload.get("generated_at", "")):
-        raise VectorError("expires_at must be after generated_at")
-    if str(payload.get("expires_at", "")) <= now_iso:
-        raise VectorError(f"vector expired at {payload.get('expires_at')!r}")

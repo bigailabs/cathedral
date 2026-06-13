@@ -50,65 +50,70 @@ validators relay the same signed vector.
 
 Requires Python 3.11 and a registered SN39 validator wallet.
 
-```bash
-git clone -b v4 https://github.com/cathedralai/cathedral.git cathedral-v4
-cd cathedral-v4
-python -m venv .venv && . .venv/bin/activate
-pip install -r deploy/requirements.txt   # fastapi/cryptography/bittensor-wallet + bittensor
-```
-
-## Pin the key
-
-The vector is signed with Cathedral's published Ed25519 key — the same key that
-signs the eval feed, available at `https://api.cathedral.computer/.well-known/cathedral-jwks.json`.
-Pin it:
+Updating from a prior release is the **same flow as always** — `pip install`,
+`migrate`, `serve`:
 
 ```bash
-export CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY=10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26
+git fetch && git checkout v4      # or: git clone -b v4 https://github.com/cathedralai/cathedral.git
+pip install -e .                  # installs the `cathedral-validator` command
+cathedral-validator migrate       # no-op in v4 (no local database) — kept for parity
 ```
 
-Pinning is the whole point: the validator refuses any vector not signed by
-exactly this key under `key_id = cathedral-weight-policy`. Verify the value
-against the live JWKS before trusting it.
+## Configure
+
+Copy the sample config and fill in your wallet:
+
+```bash
+cp config/validator.toml my-validator.toml
+```
+
+```toml
+[network]
+name = "finney"
+netuid = 39
+wallet_name = "<your-coldkey>"
+validator_hotkey = "<your-validator-hotkey>"
+
+[weight_policy]
+# the key the orchestrator signs with — verify it against the live JWKS
+public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
+```
+
+The pinned key is the whole point: the validator refuses any vector not signed
+by exactly this key (published at `https://api.cathedral.computer/.well-known/cathedral-jwks.json`
+— verify it there first).
 
 ## Run
 
-**Dry-run first (default — computes and prints the uid vector, sets nothing):**
+**Test first** (`--dry-run` computes and prints the per-uid weights it *would*
+set, without touching the chain):
 
 ```bash
-python -m scaffold.validator_thin \
-  --publisher-url https://api.cathedral.computer \
-  --network finney --netuid 39 \
-  --wallet-name <your-coldkey> --wallet-hotkey <your-validator-hotkey> \
-  --once
+cathedral-validator serve --config my-validator.toml --dry-run --once
 ```
 
-You'll see the accepted vector, the burn share, and the normalized per-uid
-weights it *would* set. Confirm that looks right.
-
-**Then broadcast (actually sets weights):**
+Confirm the accepted vector, burn share, and weights look right. **Then go
+live** (drop `--dry-run`/`--once` — `serve` sets weights and loops):
 
 ```bash
-python -m scaffold.validator_thin \
-  --publisher-url https://api.cathedral.computer \
-  --network finney --netuid 39 \
-  --wallet-name <your-coldkey> --wallet-hotkey <your-validator-hotkey> \
-  --broadcast
+cathedral-validator serve --config my-validator.toml
 ```
 
-Without `--once` it loops on `--interval-secs` (default 1500s). The rollback
-fence persists in `--state-file` (default `~/.cathedral/thin_validator.json`), so
-a restart cannot apply an older vector than the last one you accepted.
+That's it — same `serve` command and systemd unit you already run. The rollback
+fence persists in the state file, so a restart cannot apply an older vector than
+the last one you accepted.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--publisher-url` | `https://api.cathedral.computer` | where to fetch the signed vector |
-| `--public-key-hex` | `$CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY` | the pinned signing key (required) |
-| `--network` / `--netuid` | `finney` / `39` | your chain target |
-| `--wallet-name` / `--wallet-hotkey` | — | your validator wallet |
-| `--broadcast` | off (dry-run) | actually submit `set_weights` |
+| `--config` | — | TOML config (network, wallet, pinned key) |
+| `--dry-run` | off (lives) | verify + print the weights without setting them |
 | `--once` | off | single tick then exit |
 | `--offline` | off | verify + print only, no chain access (CI / smoke) |
+
+Every config value can be overridden by a flag or env var (`--wallet-name`,
+`--netuid`, `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY`, …). The raw module form
+(`python -m scaffold.validator_thin --help`) is also available if you prefer
+flags over a config file.
 | `--state-file` | `~/.cathedral/thin_validator.json` | rollback-fence persistence |
 
 ## Maturity

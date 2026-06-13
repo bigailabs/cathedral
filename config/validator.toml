@@ -1,0 +1,23 @@
+# Cathedral SN39 validator config (v4).
+# Run:  cathedral-validator serve --config config/validator.toml
+# Anything here can be overridden by an env var or a command-line flag.
+
+[network]
+name = "finney"
+netuid = 39
+wallet_name = "validator"        # your coldkey wallet name
+validator_hotkey = "default"     # your validator hotkey
+
+[publisher]
+url = "https://api.cathedral.computer"
+
+[weight_policy]
+# The key the orchestrator signs the weight vector with — pin it and the
+# validator refuses any vector not signed by exactly this key. Verify it
+# against https://api.cathedral.computer/.well-known/cathedral-jwks.json
+public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
+key_id = "cathedral-weight-policy"
+# state_file = "~/.cathedral/thin_validator.json"   # rollback-fence persistence
+
+[weights]
+interval_secs = 1500

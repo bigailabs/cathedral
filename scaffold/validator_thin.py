@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .publisher import weights as wire
+from . import wire_vector as wire
 
 
 def _ms_iso_now() -> str:
@@ -186,7 +186,24 @@ def tick(args) -> bool:
     return ok
 
 
-def main() -> int:
+def run(args) -> int:
+    """The validator loop, shared by `python -m scaffold.validator_thin` and the
+    `cathedral-validator serve` console command. `args` is any object carrying
+    the tick attributes (an argparse Namespace or a SimpleNamespace from the
+    CLI's config loader)."""
+    while True:
+        try:
+            tick(args)
+        except Exception as e:
+            print(f"tick failed: {e}")
+            if args.once:
+                return 1
+        if args.once:
+            return 0
+        time.sleep(args.interval_secs)
+
+
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Cathedral thin validator (v4)")
     p.add_argument("--publisher-url", default=os.environ.get(
         "CATHEDRAL_PUBLISHER_URL", "https://api.cathedral.computer"))
@@ -206,21 +223,16 @@ def main() -> int:
                    help="no chain access: verify + print only (CI / smoke)")
     p.add_argument("--broadcast", action="store_true",
                    help="actually submit weights (default: dry-run)")
+    return p
+
+
+def main() -> int:
+    p = build_parser()
     args = p.parse_args()
     if not args.public_key_hex:
         p.error("--public-key-hex (or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY) is required — "
                 "validators must pin the orchestrator's signing key")
-
-    while True:
-        try:
-            tick(args)
-        except Exception as e:
-            print(f"tick failed: {e}")
-            if args.once:
-                return 1
-        if args.once:
-            return 0
-        time.sleep(args.interval_secs)
+    return run(args)
 
 
 if __name__ == "__main__":

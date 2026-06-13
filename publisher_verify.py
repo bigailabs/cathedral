@@ -682,6 +682,51 @@ ck("Lane I no-hardness: champion closes it -> never pays (self-healing benchmark
 _li_store.close()
 
 # --------------------------------------------------------------------------
+# 6. VALIDATOR CLI — `cathedral-validator serve/migrate` surface + lean import.
+# --------------------------------------------------------------------------
+print("VALIDATOR CLI — serve config resolution, migrate no-op, lean import")
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+from types import SimpleNamespace as _NS  # noqa: E402
+from scaffold import cli as _cli  # noqa: E402
+
+# migrate is a no-op that returns 0 (kept only for update-script parity).
+ck("cli migrate is a no-op returning 0", _cli._cmd_migrate(_NS()) == 0)
+
+# serve config resolves: built-in defaults < TOML < env < flags.
+with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as _tf:
+    _tf.write(
+        '[network]\nname="finney"\nnetuid=39\nwallet_name="wA"\nvalidator_hotkey="hA"\n'
+        '[publisher]\nurl="https://api.cathedral.computer"\n'
+        '[weight_policy]\npublic_key_hex="' + pub_hex + '"\nkey_id="cathedral-weight-policy"\n')
+    _cfg_path = _tf.name
+_ns = _NS(config=_cfg_path, publisher_url=None, public_key_hex=None, network=None,
+          netuid=None, wallet_name=None, wallet_hotkey=None, state_file=None,
+          interval_secs=None, dry_run=True, once=True, offline=True)
+_resolved = _cli._resolve_serve_config(_ns)
+ck("cli serve reads wallet/netuid/key from TOML",
+   _resolved.wallet_name == "wA" and _resolved.wallet_hotkey == "hA"
+   and _resolved.netuid == 39 and _resolved.public_key_hex == pub_hex)
+ck("cli serve --dry-run/--offline force broadcast off",
+   _resolved.broadcast is False and _resolved.offline is True)
+# flags override the TOML.
+_ns2 = _NS(config=_cfg_path, publisher_url=None, public_key_hex=None, network=None,
+           netuid=99, wallet_name="wB", wallet_hotkey=None, state_file=None,
+           interval_secs=None, dry_run=False, once=True, offline=False)
+_r2 = _cli._resolve_serve_config(_ns2)
+ck("cli serve flag overrides TOML (netuid 99, wallet wB)",
+   _r2.netuid == 99 and _r2.wallet_name == "wB")
+
+# LEAN INSTALL: importing the validator must NOT drag in FastAPI/the server
+# stack (run in a fresh process — this one already imported the publisher app).
+_lean = subprocess.run(
+    [sys.executable, "-c",
+     "import scaffold.validator_thin, scaffold.cli, sys; "
+     "sys.exit(0 if 'fastapi' not in sys.modules else 1)"],
+    capture_output=True)
+ck("validator imports WITHOUT pulling in FastAPI (lean install)", _lean.returncode == 0)
+
+# --------------------------------------------------------------------------
 fails = [n for n, c in checks if not c]
 print(f"\nPUBLISHER VERIFY: "
       f"{'PASS all ' + str(len(checks)) + ' checks' if not fails else 'FAIL ' + str(fails)}")
