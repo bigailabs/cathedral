@@ -83,6 +83,27 @@ The pinned key is the whole point: the validator refuses any vector not signed
 by exactly this key (published at `https://api.cathedral.computer/.well-known/cathedral-jwks.json`
 — verify it there first).
 
+### Use your own RPC node
+
+By default the validator connects to the public `finney` entrypoint resolved
+from the network name. To point it at a **self-hosted subtensor node** (or any
+RPC proxy), set:
+
+```bash
+export CATHEDRAL_CHAIN_ENDPOINT="wss://my-node.example:443"
+# or, equivalently, pass it on the command line:
+python -m scaffold.validator_thin --chain-endpoint wss://my-node.example:443 ...
+```
+
+This redirects only the *connection*. The network **label** (`finney`) is left
+untouched, so the signed weight-vector still carries `network = "finney"` and
+passes the signed-vector check — no fork, no change to the signing path. On
+startup the validator logs the active endpoint once.
+
+Requirements: the endpoint must be a bittensor-compatible `ws://`/`wss://` URL on
+the **same chain** as the label (same genesis / UID set). Unset the variable to
+fall back to the public entrypoint.
+
 ## Run
 
 **Test first** (`--dry-run` computes and prints the per-uid weights it *would*

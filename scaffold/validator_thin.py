@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import wire_vector as wire
+from .chain import CHAIN_ENDPOINT_ENV, connection_target
 
 
 # Cathedral's published weight-policy signing key (kid: cathedral-weight-policy).
@@ -168,7 +169,7 @@ def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid:
     with _isolated_argv():
         import bittensor as bt   # import under blanked argv — bittensor parses
         wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
-        sub = _bt_subtensor(bt)(network=network)
+        sub = _bt_subtensor(bt)(network=connection_target(network))
         resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
                                wait_for_inclusion=True)
     # newer bittensor returns an ExtrinsicResponse object (truthy even on
@@ -190,7 +191,7 @@ def _bt_wallet(bt):
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
     with _isolated_argv():
         import bittensor as bt   # import under blanked argv — bittensor parses
-        mg = _bt_subtensor(bt)(network=network).metagraph(netuid)
+        mg = _bt_subtensor(bt)(network=connection_target(network)).metagraph(netuid)
     return {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
 
 
@@ -252,6 +253,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--key-id", default=os.environ.get(
         "CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy"))
     p.add_argument("--network", default="finney")
+    p.add_argument("--chain-endpoint", default=os.environ.get(CHAIN_ENDPOINT_ENV, ""),
+                   help="connect to your own subtensor RPC node (ws/wss URL) instead of the "
+                        "public entrypoint; the network label is kept for signing. "
+                        f"Defaults to ${CHAIN_ENDPOINT_ENV}.")
     p.add_argument("--netuid", type=int, default=39)
     p.add_argument("--wallet-name", default=os.environ.get("BT_WALLET_NAME", "validator"))
     p.add_argument("--wallet-hotkey", default=os.environ.get("BT_WALLET_HOTKEY", "default"))
@@ -272,6 +277,10 @@ def main() -> int:
     if not args.public_key_hex:
         p.error("--public-key-hex (or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY) is required — "
                 "validators must pin the orchestrator's signing key")
+    # --chain-endpoint populates the env the resolver reads, so both the
+    # validator_thin path and the ChainClient path honor it from one source.
+    if args.chain_endpoint:
+        os.environ[CHAIN_ENDPOINT_ENV] = args.chain_endpoint
     return run(args)
 
 
