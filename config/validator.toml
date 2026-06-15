@@ -7,6 +7,11 @@ name = "finney"
 netuid = 39
 wallet_name = "validator"        # your coldkey wallet name
 validator_hotkey = "default"     # your validator hotkey
+# Connect to your own subtensor RPC node instead of the public finney
+# entrypoint. Set via env var (redirects only the connection — the "finney"
+# signing label is unchanged, so signed vectors still verify):
+#   export CATHEDRAL_CHAIN_ENDPOINT="wss://my-node.example:443"
+# Must be a bittensor-compatible ws/wss node on the same chain (genesis/UIDs).
 
 [publisher]
 url = "https://api.cathedral.computer"

@@ -18,8 +18,33 @@ live metagraph or broadcast, which it reports honestly.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
+
+CHAIN_ENDPOINT_ENV = "CATHEDRAL_CHAIN_ENDPOINT"
+_announced = False
+
+
+def connection_target(network: str) -> str:
+    """Resolve WHERE TO CONNECT, decoupled from the network LABEL used for
+    signing.
+
+    If ``CATHEDRAL_CHAIN_ENDPOINT`` is set (e.g. ``wss://my-node:443``) we connect
+    there; otherwise we fall back to the network label (``"finney"``), which
+    bittensor resolves to a public entrypoint via ``NETWORK_MAP``. Either way the
+    signed weight-vector keeps carrying the network *label* unchanged, so the
+    orchestrator's signed-vector invariant (``network`` must equal the pinned
+    value) is unaffected — this only redirects the RPC connection, e.g. to a
+    self-hosted subtensor node. The endpoint must be a bittensor-compatible
+    ws/wss URL on the SAME chain as the label (same genesis/UIDs)."""
+    global _announced
+    endpoint = os.environ.get(CHAIN_ENDPOINT_ENV, "").strip()
+    if endpoint and not _announced:
+        print(f"[chain] {CHAIN_ENDPOINT_ENV} active -> connecting to {endpoint} "
+              f"(signing label stays {network!r})")
+        _announced = True
+    return endpoint or network
 
 
 @dataclass(frozen=True)
@@ -68,6 +93,7 @@ class ChainClient:
         self.hotkey = hotkey
         self.broadcast = broadcast
         self._bt = None
+        self._connect_error: str | None = None
 
     def _bittensor(self):
         if self._bt is None:
@@ -80,18 +106,27 @@ class ChainClient:
 
     def _subtensor(self, bt):
         """Construct a subtensor across bittensor API variants (8.x bt.subtensor,
-        10.x bt.Subtensor / core.subtensor.Subtensor)."""
+        10.x bt.Subtensor / core.subtensor.Subtensor). Connects to
+        connection_target(self.network) — the CATHEDRAL_CHAIN_ENDPOINT override
+        if set, else the network label resolved via NETWORK_MAP."""
+        target = connection_target(self.network)
+        self._connect_error = None
+        last: Exception | None = None
         for ctor in ("subtensor", "Subtensor"):
             if hasattr(bt, ctor):
                 try:
-                    return getattr(bt, ctor)(network=self.network)
-                except Exception:
-                    pass
+                    return getattr(bt, ctor)(network=target)
+                except Exception as e:
+                    last = e
         try:
             from bittensor.core.subtensor import Subtensor
-            return Subtensor(network=self.network)
-        except Exception:
-            return None
+            return Subtensor(network=target)
+        except Exception as e:
+            last = e
+        # Surface the REAL failure (e.g. a wrong/unreachable CATHEDRAL_CHAIN_ENDPOINT
+        # raises ConnectionRefused here) instead of a generic "no constructor".
+        self._connect_error = f"could not connect to {target}: {last}"
+        return None
 
     def read_metagraph(self) -> dict:
         """Read-only metagraph snapshot (uids, hotkeys, stake, validator_permit).
@@ -103,7 +138,8 @@ class ChainClient:
         try:
             sub = self._subtensor(bt)
             if sub is None:
-                return {"available": False, "reason": "no compatible subtensor constructor"}
+                return {"available": False,
+                        "reason": self._connect_error or "no compatible subtensor constructor"}
             mg = sub.metagraph(netuid=self.netuid)
             return {"available": True, "n": int(mg.n),
                     "hotkeys": list(mg.hotkeys),
@@ -143,7 +179,8 @@ class ChainClient:
             sub = self._subtensor(bt)
             wallet = self._wallet(bt)
             if sub is None or wallet is None:
-                return {"submitted": False, "reason": "no compatible subtensor/wallet ctor"}
+                return {"submitted": False,
+                        "reason": self._connect_error or "no compatible subtensor/wallet ctor"}
             uids = list(wv.by_uid.keys())
             if not uids:
                 return {"submitted": False, "reason": "empty weight vector (nothing to set)"}

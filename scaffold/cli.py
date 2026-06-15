@@ -109,6 +109,11 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
 
 def _cmd_serve(ns: argparse.Namespace) -> int:
     cfg = _resolve_serve_config(ns)
+    # Mirror validator_thin.main(): a --chain-endpoint flag populates the env the
+    # resolver reads, so `serve` honors the override the same way (the env var
+    # alone already works on this path; this makes the flag work too).
+    if getattr(ns, "chain_endpoint", None):
+        os.environ[validator_thin.CHAIN_ENDPOINT_ENV] = ns.chain_endpoint
     if not cfg.public_key_hex:
         print("error: no signing key pinned. Set [weight_policy].public_key_hex in your "
               "config, or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY, or --public-key-hex.\n"
@@ -147,6 +152,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--public-key-hex", dest="public_key_hex", default=None)
     sp.add_argument("--key-id", dest="key_id", default=None)
     sp.add_argument("--network", dest="network", default=None)
+    sp.add_argument("--chain-endpoint", dest="chain_endpoint", default=None,
+                    help="connect to your own subtensor RPC node (ws/wss URL) instead of the "
+                         "public entrypoint; the network label is kept for signing")
     sp.add_argument("--netuid", dest="netuid", type=int, default=None)
     sp.add_argument("--wallet-name", dest="wallet_name", default=None)
     sp.add_argument("--wallet-hotkey", dest="wallet_hotkey", default=None)
