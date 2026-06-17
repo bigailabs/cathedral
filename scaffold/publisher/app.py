@@ -34,7 +34,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
-from . import keys, rows, scoring, weights as weights_mod
+from . import keys, rows, scoring, top_cache as top_cache_mod, weights as weights_mod
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
 from .cnf_store import CNFStore
@@ -106,6 +106,10 @@ def build_app(
     board_cache = BoardCache(_build_board)
     board_cache_mod.register(board_cache)
 
+    top_cache = top_cache_mod.TopCache()
+    top_cache.start(store)
+    top_cache_mod.register(top_cache)
+
     app = FastAPI(title="cathedral-thin-publisher")
 
     # Backend-compat: the prior backend served the API under an `/api/cathedral`
@@ -127,6 +131,7 @@ def build_app(
     app.state.store = store
     app.state.cnf_store = cnf_store
     app.state.board_cache = board_cache
+    app.state.top_cache = top_cache
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
     app.state.refill_task = None
@@ -242,6 +247,8 @@ def build_app(
                     await task
                 except Exception:
                     pass
+        if hasattr(app.state, "top_cache"):
+            app.state.top_cache.stop()
 
     # ---- helpers ----------------------------------------------------------
     def _challenge_public(r: Any) -> dict[str, Any]:
@@ -357,13 +364,34 @@ def build_app(
             nxt_ran_at, nxt_id = last["ran_at"], last["id"]
         else:
             nxt_ran_at, nxt_id = cur_ran_at, cur_id
-        return {
-            "items": items,
-            "next_since": nxt_ran_at,
-            "next_since_ran_at": nxt_ran_at,
-            "next_since_id": nxt_id,
-            "merkle_epoch_latest": None,
-        }
+        return JSONResponse(
+            {
+                "items": items,
+                "next_since": nxt_ran_at,
+                "next_since_ran_at": nxt_ran_at,
+                "next_since_id": nxt_id,
+                "merkle_epoch_latest": None,
+            },
+            headers={"Cache-Control": "public, max-age=5", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v1/leaderboard/top")
+    def leaderboard_top(window: str = Query("24h")):
+        """Fast pre-aggregated miner ranking. Cached ~45s in-process.
+        Returns top 100 miners ranked by total weighted_score over the window.
+        window=24h only for now (others fall back to 24h).
+        """
+        rows_, built_at, window_h = top_cache.get()
+        return JSONResponse(
+            {
+                "miners": rows_,
+                "window_hours": window_h,
+                "built_at": built_at,
+                "count": len(rows_),
+                "cache_ttl_secs": 45,
+            },
+            headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
+        )
 
     # ---- M1b: signed final-scores vector (the v4 scoring interface) -------
     # ONE number per miner + burn, Ed25519-signed, same wire shape deployed

@@ -166,6 +166,9 @@ _MIGRATIONS: list[tuple[str, str]] = [
             updated_at_iso TEXT NOT NULL
         );
     """),
+    ("0015_eval_runs_miner_idx", """
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -282,6 +285,9 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
     """),
     ("0014_weight_policy_version_bigint", """
         ALTER TABLE weight_policy_state ALTER COLUMN last_policy_version TYPE BIGINT;
+    """),
+    ("0015_eval_runs_miner_idx", """
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
     """),
 ]
 
