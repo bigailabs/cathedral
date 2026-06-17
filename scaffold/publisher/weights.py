@@ -104,36 +104,94 @@ def _ms_iso(dt: datetime) -> str:
 
 # -- score composition --------------------------------------------------------
 
-def compose_scores(store: Store, *, now: datetime | None = None) -> dict[str, float]:
+def coldkey_collapse_enabled() -> bool:
+    """Opt-in Sybil hardening. OFF by default so this is byte-identical to today
+    until an operator flips it AND a hotkey->coldkey map is supplied."""
+    return os.environ.get("CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def _load_coldkey_map(store: Store) -> dict[str, str] | None:
+    """hotkey->coldkey, refreshed out-of-band into the ``coldkey_map`` table by
+    a small metagraph poller (the thin publisher has no chain access of its own).
+    Returns None when the table is missing/empty so scoring stays per-hotkey
+    (fail-open: a missing or partial map can never zero an honest miner)."""
+    try:
+        rows = store.query("SELECT hotkey, coldkey FROM coldkey_map")
+    except Exception:
+        return None
+    m = {str(r["hotkey"]): str(r["coldkey"]) for r in rows}
+    return m or None
+
+
+def compose_scores(
+    store: Store, *, now: datetime | None = None,
+    coldkey_of: dict[str, str] | None = None,
+) -> dict[str, float]:
     """One final number per hotkey, from solves inside the trailing window.
 
-    This function is where multi-challenge scoring composes: community solves
-    today; arena/champion payouts and future challenge types add their term
-    here and the validator interface never changes.
+    This is where multi-challenge scoring composes: community solves today;
+    arena/champion payouts and future challenge types add their term here and
+    the validator interface never changes.
 
-    flat_recent reads the signed feed (eval_runs) rather than the local claim
-    ledger: the feed carries seeded history from the previous orchestrator, so
-    the vector is fully populated from the first second after a cutover —
-    never a burn-only gap while the fresh store waits for new submits. (It
-    also pays arena record-falls automatically, since those emit feed rows.)
-    proportional needs per-challenge dedup, which only the claim ledger has;
-    it falls back to flat until that ledger has in-window data.
+    IDENTITY-AWARE SCORING (the Sybil fix). When coldkey collapse is enabled AND
+    a hotkey->coldkey map is supplied, a distinct challenge is credited ONCE PER
+    COLDKEY -- the union of solves across all of that coldkey's hotkeys -- and
+    the coldkey's score is then split across its solving hotkeys. So:
+      * mirroring one solve onto k hotkeys adds NOTHING (same challenge_id, one
+        entry in the coldkey's set) -> cloning earns zero extra;
+      * solving MORE distinct challenges earns more, even across many hotkeys ->
+        honest volume is fully rewarded, not punished.
+    With no map (default) identity == hotkey, so this is byte-identical to the
+    prior per-hotkey proportional scoring.
+
+    flat_recent reads the signed feed (eval_runs) -- seeded history keeps the
+    vector populated from the first second after a cutover. proportional needs
+    the per-challenge claim ledger; it falls back to flat until that ledger has
+    in-window data.
     """
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
+    use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
+
+    def ident(hk: str) -> str:
+        return coldkey_of.get(hk, hk) if use_ck else hk
+
+    if mode() == "proportional":
+        rows = store.query(
+            "SELECT DISTINCT miner_hotkey, challenge_id FROM lane_challenge_solves "
+            "WHERE solved_at_iso > ?", (since,))
+        chals: dict[str, set] = {}   # identity -> set of distinct challenge_ids
+        hks: dict[str, set] = {}     # identity -> set of its solving hotkeys
+        for r in rows:
+            hk = str(r["miner_hotkey"]); idk = ident(hk)
+            chals.setdefault(idk, set()).add(r["challenge_id"])
+            hks.setdefault(idk, set()).add(hk)
+        if chals:
+            top = max(len(c) for c in chals.values())
+            base: dict[str, float] = {}
+            for idk, cs in chals.items():
+                per = round((len(cs) / top) / len(hks[idk]), 6)
+                for hk in hks[idk]:
+                    base[hk] = per
+            return base
+        # no in-window claim rows -> fall through to flat
+
     feed = store.query(
         "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,))
     hotkeys = {str(r["miner_hotkey"]) for r in feed}
-    if mode() == "proportional":
-        rows = store.query(
-            "SELECT miner_hotkey, COUNT(DISTINCT challenge_id) AS n "
-            "FROM lane_challenge_solves WHERE solved_at_iso > ? GROUP BY miner_hotkey",
-            (since,))
-        counts = {str(r["miner_hotkey"]): int(r["n"]) for r in rows}
-        if counts:
-            top = max(counts.values())
-            return {hk: round(n / top, 6) for hk, n in counts.items()}
-    return {hk: 1.0 for hk in hotkeys}
+    if not use_ck:
+        return {hk: 1.0 for hk in hotkeys}
+    # flat, identity-deduped: each coldkey's hotkeys share a single 1.0
+    groups: dict[str, list[str]] = {}
+    for hk in hotkeys:
+        groups.setdefault(ident(hk), []).append(hk)
+    out: dict[str, float] = {}
+    for members in groups.values():
+        per = round(1.0 / len(members), 6)
+        for hk in members:
+            out[hk] = per
+    return out
 
 
 # -- monotonic policy_version (validator rollback fence) -----------------------
@@ -167,7 +225,8 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     now = now or datetime.now(timezone.utc)
-    scores = compose_scores(store, now=now)
+    coldkey_of = _load_coldkey_map(store) if coldkey_collapse_enabled() else None
+    scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
     policy_inputs = {
         "mode": mode(), "window_hours": window_hours(),
