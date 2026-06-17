@@ -169,6 +169,24 @@ _MIGRATIONS: list[tuple[str, str]] = [
     ("0015_eval_runs_miner_idx", """
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
     """),
+    # 0016: per-miner unique challenges (CATHEDRAL_PERMINER_ENABLED).
+    # Safe to apply unconditionally — the table is never read/written when the
+    # flag is off (flag-off = zero behaviour change).
+    ("0016_per_miner_solves", """
+        CREATE TABLE IF NOT EXISTS per_miner_solves (
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            difficulty_weight REAL NOT NULL DEFAULT 0.0,
+            verified INTEGER NOT NULL DEFAULT 0,
+            solved_at_iso TEXT NOT NULL,
+            PRIMARY KEY (challenge_id, miner_hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_per_miner_solves_epoch_hotkey
+            ON per_miner_solves(epoch, miner_hotkey);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -289,6 +307,22 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
     ("0015_eval_runs_miner_idx", """
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
     """),
+    # 0016: per-miner unique challenges (CATHEDRAL_PERMINER_ENABLED).
+    ("0016_per_miner_solves", """
+        CREATE TABLE IF NOT EXISTS per_miner_solves (
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            difficulty_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            verified INTEGER NOT NULL DEFAULT 0,
+            solved_at_iso TEXT NOT NULL,
+            PRIMARY KEY (challenge_id, miner_hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_per_miner_solves_epoch_hotkey
+            ON per_miner_solves(epoch, miner_hotkey);
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -305,6 +339,7 @@ _PK_BY_TABLE: dict[str, str] = {
     "lane_challenge_solves": "challenge_id, miner_hotkey",
     "weight_policy_state": "id",
     "schema_migrations": "id",
+    "per_miner_solves": "challenge_id, miner_hotkey",
 }
 
 

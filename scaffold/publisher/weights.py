@@ -133,6 +133,27 @@ def coldkey_collapse_enabled() -> bool:
         "1", "true", "yes", "on"}
 
 
+def _perminer_compose_scores(store: Store) -> dict[str, float] | None:
+    """Per-miner scoring path. Returns scores when CATHEDRAL_PERMINER_ENABLED is on
+    AND not in shadow-only mode. Returns None when flag is off (caller falls
+    through to existing scoring — byte-identical to pre-flag behaviour).
+
+    Shadow mode: flag is on + CATHEDRAL_PERMINER_SHADOW=1 → compute the vector,
+    log it, but return None so the LIVE vector stays the current scoring. This
+    lets us run shadow comparisons without touching the live board.
+    """
+    from . import per_miner as pm
+    if not pm.perminer_enabled():
+        return None  # flag off: zero change
+    epoch = pm.current_epoch()
+    scores = pm.compute_perminer_scores(store, epoch)
+    if pm.perminer_shadow():
+        # Shadow: log the vector for comparison but don't serve it.
+        print(f"[per_miner] shadow_vector epoch={epoch} scores={scores}")
+        return None  # fall through to live scoring
+    return scores if scores else None
+
+
 def _load_coldkey_map(store: Store) -> dict[str, str] | None:
     """hotkey->coldkey, refreshed out-of-band into the ``coldkey_map`` table by
     a small metagraph poller (the thin publisher has no chain access of its own).
@@ -172,6 +193,12 @@ def compose_scores(
     the per-challenge claim ledger; it falls back to flat until that ledger has
     in-window data.
     """
+    # Per-miner path (flag-gated). When the flag is off this is a no-op and
+    # the rest of the function runs unchanged — byte-identical to pre-flag.
+    pm_scores = _perminer_compose_scores(store)
+    if pm_scores is not None:
+        return pm_scores
+
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     use_ck = coldkey_collapse_enabled() and bool(coldkey_of)

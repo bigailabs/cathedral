@@ -532,6 +532,87 @@ def build_app(
             "clause_count": 3, "weighted_score": 0.0, "emissions_eligible": False,
         }
 
+    # ---- M2b: Per-miner challenge endpoints (CATHEDRAL_PERMINER_ENABLED) ----
+    # These endpoints are completely new — no existing miner client calls them.
+    # Flag-off: both routes return 404 immediately, zero change to existing paths.
+    # Flag-on: miners can opt in by calling these instead of active-challenges.
+    #
+    # Authentication: same X-Cathedral-Hotkey + X-Cathedral-Signature + Submitted-At
+    # pattern as active-cnf (the 6-field claim shape, challenge_id="", solution="").
+    # The hotkey IS the identity of the challenge set — no hotkey, no set.
+
+    @app.get("/v1/synthetic-boolean/per-miner/challenges")
+    def per_miner_challenges(
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        """Return the per-miner instance set for the authenticated hotkey.
+
+        FLAG: CATHEDRAL_PERMINER_ENABLED must be on; otherwise 404.
+        Response is the miner's M unique challenge descriptors for this epoch.
+        The CNF body is not included — fetch via /per-miner/cnf.
+
+        This endpoint is the per-miner replacement for active-challenges.
+        Existing miners can continue using active-challenges (unchanged).
+        """
+        from . import per_miner as pm
+        if not pm.perminer_enabled():
+            raise HTTPException(404, "per_miner_not_enabled")
+        if x_cathedral_submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        _verify_hotkey_claim(
+            x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+            challenge_id="", dimacs_solution_sha256="",
+        )
+        epoch = pm.current_epoch()
+        items = pm.miner_instance_set(x_cathedral_hotkey, epoch)
+        return {
+            "family_id": _FAMILY,
+            "kind": "per_miner",
+            "epoch": epoch,
+            "miner_hotkey": x_cathedral_hotkey,
+            "count": len(items),
+            "items": items,
+            "submit_path": "/api/cathedral/v1/agents/submit",
+        }
+
+    @app.get("/v1/synthetic-boolean/per-miner/cnf")
+    def per_miner_cnf(
+        challenge_id: str = Query(...),
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        """Return the CNF body for a specific per-miner instance.
+
+        FLAG: CATHEDRAL_PERMINER_ENABLED must be on; otherwise 404.
+        The challenge_id must be one of the calling miner's own instances
+        for the current epoch — attempting to fetch another miner's instance
+        with your hotkey returns 404 (the id won't be in your set).
+        """
+        from . import per_miner as pm
+        if not pm.perminer_enabled():
+            raise HTTPException(404, "per_miner_not_enabled")
+        if x_cathedral_submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        _verify_hotkey_claim(
+            x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+            challenge_id="", dimacs_solution_sha256="",
+        )
+        epoch = pm.current_epoch()
+        # Scan the miner's allotment to find the matching challenge.
+        for tier in pm.TIERS:
+            for seq in range(pm.allotment_for(tier)):
+                cid = pm.instance_id(x_cathedral_hotkey, epoch, tier, seq)
+                if cid == challenge_id:
+                    _, cnf_text, _ = pm.generate_instance(x_cathedral_hotkey, epoch, tier, seq)
+                    return PlainTextResponse(cnf_text, media_type="text/plain; charset=utf-8",
+                                            headers={"X-Perminer-Challenge-Id": cid,
+                                                     "X-Perminer-Tier": str(tier),
+                                                     "X-Perminer-Epoch": str(epoch)})
+        raise HTTPException(404, "challenge_not_in_miner_set")
+
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
     @app.post("/v1/agents/submit")
     async def agents_submit(
@@ -568,6 +649,80 @@ def build_app(
             challenge_id=challenge_id, dimacs_solution_sha256=sol_sha,
             alt_submitted_at=x_cathedral_submitted_at or None,
         )
+
+        # ---- Per-miner submit path (CATHEDRAL_PERMINER_ENABLED) ----
+        # Detected by challenge_id prefix "pm-". Flag-off: this block is never
+        # entered even if a miner sends a pm- id (it won't exist in lane_challenges
+        # and will 409 — a safe hard stop, not silent misbehaviour).
+        from . import per_miner as pm
+        if challenge_id.startswith("pm-") and pm.perminer_enabled():
+            last_submit[rl_key] = now
+            if len(last_submit) > 50_000:
+                horizon = now - max(min_interval, 3600.0)
+                for k in [k for k, t in last_submit.items() if t < horizon]:
+                    last_submit.pop(k, None)
+
+            epoch = pm.current_epoch()
+            # Parse assignment from dimacs_solution (space-separated signed ints).
+            try:
+                assignment = [int(x) for x in dimacs_solution.split() if x and x != "0"]
+            except ValueError:
+                raise HTTPException(400, "malformed_dimacs_solution")
+
+            ok, reason = pm.verify_miner_submission(
+                x_cathedral_hotkey, epoch, challenge_id, assignment)
+            sub_id = new_uuid()
+
+            if not ok:
+                def _pm_rej(conn):
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                        (x_cathedral_signature, _now_iso_ms()))
+                    if not cur.rowcount:
+                        return False
+                    conn.execute(
+                        "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
+                        "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
+                        "VALUES (?, ?, ?, 'rejected', ?, 0.0, 1, ?, ?)",
+                        (sub_id, x_cathedral_hotkey, challenge_id, reason,
+                         submitted_at, x_cathedral_signature))
+                    return True
+                if not store.write(_pm_rej):
+                    raise HTTPException(409, "replayed_signature")
+                raise HTTPException(400, {"detail": reason, "challenge_id": challenge_id})
+
+            # Accepted: find tier/seq to record the solve.
+            tier_seq = pm.recover_tier_seq_for(x_cathedral_hotkey, epoch, challenge_id)
+            tier = tier_seq[0] if tier_seq else 1
+            seq = tier_seq[1] if tier_seq else 0
+
+            def _pm_accept(conn):
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                    (x_cathedral_signature, _now_iso_ms()))
+                if not cur.rowcount:
+                    return "replayed_signature"
+                pm.record_perminer_solve(
+                    store, x_cathedral_hotkey, epoch, challenge_id,
+                    tier, seq, verified=True)
+                conn.execute(
+                    "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
+                    "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
+                    "VALUES (?, ?, ?, 'ranked', NULL, ?, 1, ?, ?)",
+                    (sub_id, x_cathedral_hotkey, challenge_id, pm.weight_for(tier),
+                     submitted_at, x_cathedral_signature))
+                return None
+
+            err = store.write(_pm_accept)
+            if err == "replayed_signature":
+                raise HTTPException(409, "replayed_signature")
+            return {
+                "status": "ranked", "id": sub_id, "eval_run_id": sub_id,
+                "challenge_id": challenge_id,
+                "weighted_score": pm.weight_for(tier),
+                "solve_rank": 1, "attestation_status": "pending",
+            }
+        # ---- End per-miner submit path ----
 
         rows_ = store.query(
             "SELECT * FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
