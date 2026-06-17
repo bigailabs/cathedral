@@ -224,15 +224,99 @@ def max_mints_per_pass() -> int:
     return _env_int("CATHEDRAL_REFILL_MAX_MINTS", 3)
 
 
+def _retire_and_plan(store: Store, tier: int, seed_input: str,
+                     log=lambda *a, **k: None) -> tuple[int, list[tuple[str, int, int, int]]]:
+    """Run retire_ready + plan the mints needed this pass. Returns (retired, work_items).
+    work_items is a list of (cid, seed, n_vars, n_clauses) — one per challenge to mint.
+    Called in a thread via asyncio.to_thread so DB calls don't block the event loop."""
+    retired = retire_ready(store, tier)
+    target = target_for(tier)
+    n_vars, n_clauses = shape_for(tier)
+    planting_method = method_for(tier)
+    if (n_vars, n_clauses) != _TIER_SHAPE.get(tier) or planting_method != _TIER_METHOD.get(tier, "biased"):
+        log("refill_shape_divergence", tier=tier, n_vars=n_vars, n_clauses=n_clauses,
+            live=_TIER_SHAPE.get(tier), method=planting_method)
+
+    mint_cap = max_mints_per_pass()
+    seq = store.query(
+        "SELECT COUNT(*) AS n FROM lane_challenges WHERE family_id=? AND tier=? AND cnf_source='local'",
+        (_FAMILY, tier))[0]["n"]
+
+    work: list[tuple[str, int, int, int, str]] = []  # (cid, seed, n_vars, n_clauses, method)
+    guard = 0
+    while active_local_count(store, tier) < target and guard < target * 4 + 8:
+        guard += 1
+        if len(work) >= mint_cap:
+            break
+        cid = mint_challenge_id(seed_input, tier, seq)
+        seq += 1
+        existing = store.query(
+            "SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,))
+        if existing:
+            continue
+        seed = mint_seed(seed_input, tier, seq - 1)
+        work.append((cid, seed, n_vars, n_clauses, planting_method))
+    return retired, work
+
+
+def _commit_challenge(store: Store, cid: str, tier: int, cnf_text: str) -> None:
+    """Write one minted challenge to the store. Called in a thread."""
+    seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text, status="active")
+    def _stamp(conn, cid=cid):
+        conn.execute(
+            "UPDATE lane_challenges SET updated_at_iso=created_at_iso WHERE challenge_id=?",
+            (cid,))
+    store.write(_stamp)
+
+
+async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None = None,
+                            log=lambda *a, **k: None) -> dict:
+    """Async refill for one tier. DB work and CNF generation are each offloaded
+    to asyncio.to_thread so the event loop is free between every step.
+
+    Structure:
+      1. to_thread: retire stale challenges + plan this pass's mints (DB only, fast).
+      2. For each planned mint:
+         a. to_thread: gen_planted_3sat (CPU-bound, ~0.5-1s, one at a time).
+         b. to_thread: write the new challenge to the DB.
+         c. await asyncio.sleep(0): yield to the event loop before the next mint.
+    This keeps the GIL hold bounded to a single gen call (~1s) between yields,
+    so HTTP requests are never starved more than ~1s regardless of board size.
+    """
+    seed_input = seed_input or default_seed_input()
+    n_vars_hint, n_clauses_hint = shape_for(tier)
+
+    retired, work = await asyncio.to_thread(
+        _retire_and_plan, store, tier, seed_input, log)
+
+    minted = 0
+    for cid, seed, n_vars, n_clauses, method in work:
+        cnf_text, _planted = await asyncio.to_thread(
+            gen_planted_3sat, seed, n_vars, n_clauses, method=method)
+        await asyncio.to_thread(_commit_challenge, store, cid, tier, cnf_text)
+        minted += 1
+        # yield to the event loop between mints so HTTP requests aren't starved
+        await asyncio.sleep(0)
+
+    active = await asyncio.to_thread(active_local_count, store, tier)
+    return {"tier": tier, "retired": retired, "minted": minted,
+            "active": active, "target": target_for(tier),
+            "shape": (n_vars_hint, n_clauses_hint)}
+
+
+async def refill_once_async(store: Store, *, seed_input: str | None = None,
+                            log=lambda *a, **k: None) -> list[dict]:
+    """One full async refill+retire pass across all configured tiers."""
+    out = []
+    for tier in sorted(_DEFAULT_TARGETS):
+        out.append(await refill_tier_async(store, tier, seed_input=seed_input, log=log))
+    return out
+
+
+# Keep synchronous versions for test compatibility
 def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
                 log=lambda *a, **k: None) -> dict:
-    """Retire ready challenges, then mint up to the tier target. Returns a
-    summary. Deterministic in (seed_input, tier, sequence).
-
-    Mints are capped at max_mints_per_pass() per call to bound the GIL hold
-    per refill tick. The loop is re-entered on the next interval until the
-    board reaches target.
-    """
+    """Synchronous refill (used in tests). Production uses refill_tier_async."""
     seed_input = seed_input or default_seed_input()
     retired = retire_ready(store, tier)
     target = target_for(tier)
@@ -244,8 +328,6 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
 
     minted = 0
     mint_cap = max_mints_per_pass()
-    # sequence walks forward until target reached; mint_challenge_id collisions
-    # (already-present ids) are skipped so re-runs in the same bucket are idempotent.
     seq = store.query(
         "SELECT COUNT(*) AS n FROM lane_challenges WHERE family_id=? AND tier=? AND cnf_source='local'",
         (_FAMILY, tier))[0]["n"]
@@ -253,19 +335,16 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
     while active_local_count(store, tier) < target and guard < target * 4 + 8:
         guard += 1
         if minted >= mint_cap:
-            break  # hit per-pass cap; resume on next tick
+            break
         cid = mint_challenge_id(seed_input, tier, seq)
         seq += 1
         existing = store.query(
             "SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,))
         if existing:
-            continue  # already minted this (seed_input,tier,seq) — idempotent skip
+            continue
         seed = mint_seed(seed_input, tier, seq - 1)
         cnf_text, _planted = gen_planted_3sat(seed, n_vars, n_clauses, method=planting_method)
-        seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text,
-                       status="active")
-        # mark provenance + updated_at for age retirement (seed_challenge defaults
-        # cnf_source='local' via the column default and leaves updated_at_iso NULL).
+        seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text, status="active")
         def _stamp(conn, cid=cid):
             conn.execute(
                 "UPDATE lane_challenges SET updated_at_iso=created_at_iso WHERE challenge_id=?",
@@ -278,7 +357,7 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
 
 
 def refill_once(store: Store, *, seed_input: str | None = None, log=lambda *a, **k: None) -> list[dict]:
-    """One full refill+retire pass across all configured tiers."""
+    """Synchronous refill (used in tests). Production uses refill_once_async."""
     out = []
     for tier in sorted(_DEFAULT_TARGETS):
         out.append(refill_tier(store, tier, seed_input=seed_input, log=log))
@@ -288,15 +367,16 @@ def refill_once(store: Store, *, seed_input: str | None = None, log=lambda *a, *
 async def refill_loop(store: Store, *, interval_seconds: int | None = None,
                       log=lambda *a, **k: None, stop_event: asyncio.Event | None = None) -> None:
     """Asyncio task: periodic refill+retire. Gated by the caller (only started
-    when refill_enabled()). gen runs in a thread so the event loop is never
-    blocked by CNF minting. Cancels cleanly."""
+    when refill_enabled()). Each CNF generation runs in its own asyncio.to_thread
+    call so the GIL is held for at most one gen (~1s) between event-loop yields.
+    Cancels cleanly."""
     interval = interval_seconds or _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
                                             _DEFAULT_INTERVAL_SECONDS)
     log("refill_loop_start", interval=interval, targets=_DEFAULT_TARGETS)
     try:
         while not (stop_event and stop_event.is_set()):
             try:
-                summary = await asyncio.to_thread(refill_once, store, log=log)
+                summary = await refill_once_async(store, log=log)
                 log("refill_pass", summary=summary)
             except Exception as e:  # never let one bad pass kill the loop
                 log("refill_error", error=str(e))
