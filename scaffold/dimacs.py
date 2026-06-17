@@ -9,25 +9,43 @@ from __future__ import annotations
 import random
 
 
-def gen_planted_3sat(seed: int, n_vars: int, n_clauses: int) -> tuple[str, list[int]]:
+def gen_planted_3sat(seed: int, n_vars: int, n_clauses: int,
+                     method: str = "biased") -> tuple[str, list[int]]:
     """Generate a random 3-SAT CNF guaranteed satisfiable by a planted
     assignment. Returns (dimacs_text, planted_assignment as signed literals).
 
     Deterministic in `seed` (Rule: no unseeded randomness). The planted model
     is the publisher's hidden witness; miners never see it.
+
+    method='biased' (default, tier1): draw a clause and flip one literal
+    whenever the model fails it.  This biases clause polarities toward the
+    planted model, making any-size instance easy for heuristic solvers.
+    Kept as the default so tier1 is byte-identical to the pre-AJM board.
+
+    method='ajm' (tier2): Achlioptas–Jia–Moore "two hidden assignments"
+    (SAT 2005).  Each clause is drawn at random and KEPT only if the planted
+    model satisfies it with exactly 1 or 2 true literals (reject all-false=0
+    which breaks the planted model, and all-true=3 which breaks its bitwise
+    complement).  Because kept-clause distribution is symmetric under flipping
+    every sign there is NO literal-frequency bias for a solver to exploit,
+    making instances genuinely hard near the phase transition (m/n ≈ 4.26).
     """
     rng = random.Random(seed)
     model = {v: rng.choice((True, False)) for v in range(1, n_vars + 1)}
     clauses: list[tuple[int, int, int]] = []
     while len(clauses) < n_clauses:
         vs = rng.sample(range(1, n_vars + 1), 3)
-        lits = []
-        for v in vs:
-            lits.append(v if rng.random() < 0.5 else -v)
-        # ensure the planted model satisfies this clause; if not, flip one literal
-        if not any((lit > 0) == model[abs(lit)] for lit in lits):
-            i = rng.randrange(3)
-            lits[i] = -lits[i]
+        lits = [v if rng.random() < 0.5 else -v for v in vs]
+        if method == "ajm":
+            # keep iff 1 or 2 literals are true under the planted model
+            n_true = sum(1 for lit in lits if (lit > 0) == model[abs(lit)])
+            if n_true == 0 or n_true == 3:
+                continue
+        else:
+            # biased: ensure planted model satisfies clause; flip one lit if not
+            if not any((lit > 0) == model[abs(lit)] for lit in lits):
+                i = rng.randrange(3)
+                lits[i] = -lits[i]
         clauses.append(tuple(lits))  # type: ignore[arg-type]
     header = f"p cnf {n_vars} {n_clauses}\n"
     body = "".join(f"{a} {b} {c} 0\n" for a, b, c in clauses)

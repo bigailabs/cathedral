@@ -41,10 +41,16 @@ from .store import Store
 
 _FAMILY = "synthetic_boolean_v1"
 
-# Live shape (board.json / live active-challenges): tier1 & tier2 are identical.
+# Live shape (board.json / live active-challenges): tier1 unchanged.
+# tier2 ships at a smaller AJM size; env-overridable for emergency revert.
 _TIER_SHAPE: dict[int, tuple[int, int]] = {
     1: (6000, 25560),
-    2: (6000, 25560),
+    2: (400, 1704),   # AJM at m/n=4.26; calibrated 2026-06-17 (~1s minisat22)
+}
+# Planting method per tier: tier1 stays biased (unchanged); tier2 uses AJM.
+_TIER_METHOD: dict[int, str] = {
+    1: "biased",
+    2: "ajm",
 }
 _DEFAULT_TARGETS: dict[int, int] = {1: 25, 2: 25}
 _DEFAULT_RETIRE_AFTER_SECONDS = 60 * 60       # live default (sat_fill.py)
@@ -86,6 +92,14 @@ def shape_for(tier: int) -> tuple[int, int]:
     n = _env_int(f"CATHEDRAL_REFILL_NVARS_T{tier}", base_n)
     m = _env_int(f"CATHEDRAL_REFILL_NCLAUSES_T{tier}", base_m)
     return n, m
+
+
+def method_for(tier: int) -> str:
+    """Planting method for a tier — env CATHEDRAL_REFILL_METHOD_T{N} overrides.
+    Default: tier1='biased' (unchanged), tier2='ajm' (unbiased AJM planting).
+    Setting CATHEDRAL_REFILL_METHOD_T2=biased reverts tier2 to biased planting."""
+    default = _TIER_METHOD.get(tier, "biased")
+    return os.environ.get(f"CATHEDRAL_REFILL_METHOD_T{tier}", default).strip().lower() or default
 
 
 def default_seed_input() -> str:
@@ -198,9 +212,10 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
     retired = retire_ready(store, tier)
     target = target_for(tier)
     n_vars, n_clauses = shape_for(tier)
-    if (n_vars, n_clauses) != _TIER_SHAPE.get(tier):
+    planting_method = method_for(tier)
+    if (n_vars, n_clauses) != _TIER_SHAPE.get(tier) or planting_method != _TIER_METHOD.get(tier, "biased"):
         log("refill_shape_divergence", tier=tier, n_vars=n_vars, n_clauses=n_clauses,
-            live=_TIER_SHAPE.get(tier))
+            live=_TIER_SHAPE.get(tier), method=planting_method)
 
     minted = 0
     # sequence walks forward until target reached; mint_challenge_id collisions
@@ -218,7 +233,7 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
         if existing:
             continue  # already minted this (seed_input,tier,seq) — idempotent skip
         seed = mint_seed(seed_input, tier, seq - 1)
-        cnf_text, _planted = gen_planted_3sat(seed, n_vars, n_clauses)
+        cnf_text, _planted = gen_planted_3sat(seed, n_vars, n_clauses, method=planting_method)
         seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text,
                        status="active")
         # mark provenance + updated_at for age retirement (seed_challenge defaults

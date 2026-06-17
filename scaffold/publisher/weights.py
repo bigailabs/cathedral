@@ -60,6 +60,9 @@ VALID_FOR_ENV = "CATHEDRAL_WEIGHT_POLICY_VALID_FOR_SECS"
 # v4-only composition knobs.
 WINDOW_HOURS_ENV = "CATHEDRAL_WEIGHTS_WINDOW_HOURS"
 MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"                       # flat_recent | proportional
+# Difficulty-weighted scoring: tier2 multiplier (default 3.0).
+# Set to "1.0" to make both tiers score equally (byte-identical to pre-AJM).
+TIER2_MULT_ENV = "CATHEDRAL_WEIGHTS_TIER2_MULT"
 
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -103,6 +106,25 @@ def _ms_iso(dt: datetime) -> str:
 
 
 # -- score composition --------------------------------------------------------
+
+def tier_from_challenge_id(cid: str) -> int:
+    """Parse sat-t{N}-... → tier N (int). Defaults to 1 on any parse failure."""
+    try:
+        # expected prefix: sat-t{N}-
+        if cid.startswith("sat-t"):
+            rest = cid[len("sat-t"):]
+            return int(rest.split("-", 1)[0])
+    except (ValueError, IndexError):
+        pass
+    return 1
+
+
+def tier2_multiplier() -> float:
+    """Weight multiplier applied to tier2 challenges relative to tier1.
+    Default 3.0 — a tier2 solve counts 3× a tier1 solve in proportional mode.
+    Set CATHEDRAL_WEIGHTS_TIER2_MULT=1.0 to disable (byte-identical to pre-AJM scoring)."""
+    return _env_float(TIER2_MULT_ENV, 3.0)
+
 
 def coldkey_collapse_enabled() -> bool:
     """Opt-in Sybil hardening. OFF by default so this is byte-identical to today
@@ -161,17 +183,26 @@ def compose_scores(
         rows = store.query(
             "SELECT DISTINCT miner_hotkey, challenge_id FROM lane_challenge_solves "
             "WHERE solved_at_iso > ?", (since,))
-        chals: dict[str, set] = {}   # identity -> set of distinct challenge_ids
+        # identity -> weighted score (sum of per-challenge tier weights, deduped)
+        scores_w: dict[str, float] = {}
+        # identity -> set of distinct challenge_ids (for dedup)
+        seen: dict[str, set] = {}
         hks: dict[str, set] = {}     # identity -> set of its solving hotkeys
+        t2_mult = tier2_multiplier()
         for r in rows:
             hk = str(r["miner_hotkey"]); idk = ident(hk)
-            chals.setdefault(idk, set()).add(r["challenge_id"])
+            cid = str(r["challenge_id"])
+            if cid not in seen.get(idk, set()):
+                seen.setdefault(idk, set()).add(cid)
+                tier = tier_from_challenge_id(cid)
+                weight = t2_mult if tier == 2 else 1.0
+                scores_w[idk] = scores_w.get(idk, 0.0) + weight
             hks.setdefault(idk, set()).add(hk)
-        if chals:
-            top = max(len(c) for c in chals.values())
+        if scores_w:
+            top = max(scores_w.values())
             base: dict[str, float] = {}
-            for idk, cs in chals.items():
-                per = round((len(cs) / top) / len(hks[idk]), 6)
+            for idk, w in scores_w.items():
+                per = round((w / top) / len(hks[idk]), 6)
                 for hk in hks[idk]:
                     base[hk] = per
             return base
