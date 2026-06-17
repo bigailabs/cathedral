@@ -21,10 +21,21 @@ Backends (env CATHEDRAL_CNF_BACKEND, default `db`):
 The route keeps the existing per-request HMAC token gate (app.py `_mint_token` /
 `_check_token`) in BOTH backends — `bucket` simply hands the gate's blessing off
 to a presigned URL with a matching TTL. Immutability lets us cache hard.
+
+In-process CNF body cache (reliability fix):
+  CNF bodies are immutable per challenge_id — once fetched from Postgres they
+  NEVER change, so a bounded in-process LRU absorbs the miner flood without
+  holding a DB connection at all.  Only a cache miss goes to the pool.  The
+  cache is keyed by challenge_id; the body + sha256 are stored together so the
+  ETag is also served from memory.  Capacity default 512 entries (covers every
+  active + recently-retired challenge with room to spare); tunable via
+  CATHEDRAL_CNF_MEM_CACHE_SIZE=N (0 disables).
 """
 from __future__ import annotations
 
 import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 
 # How long an immutable CNF may be cached by an edge/CDN/browser. CNFs never
@@ -32,6 +43,43 @@ from dataclasses import dataclass
 # (short TTL) gates the FIRST fetch; once cached at the edge under its URL the
 # bytes are public-immutable for that signed URL's lifetime.
 CNF_CACHE_MAX_AGE = int(os.environ.get("CATHEDRAL_CNF_CACHE_MAX_AGE", str(60 * 60 * 24 * 30)))
+
+# In-process immutable CNF body cache.  CATHEDRAL_CNF_MEM_CACHE_SIZE=0 disables.
+_CNF_MEM_CACHE_SIZE = int(os.environ.get("CATHEDRAL_CNF_MEM_CACHE_SIZE", "512"))
+
+
+class _LRUCache:
+    """Thread-safe bounded LRU cache backed by an OrderedDict.
+
+    Stores (cnf_text, cnf_sha256) tuples keyed by challenge_id.  CNF bodies are
+    immutable so there is no invalidation path — entries live for the process
+    lifetime (or until evicted by the capacity bound).
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        self._maxsize = maxsize
+        self._data: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> tuple[str, str] | None:
+        with self._lock:
+            if key not in self._data:
+                return None
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def put(self, key: str, value: tuple[str, str]) -> None:
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+                return  # already cached — immutable, no update needed
+            self._data[key] = value
+            if len(self._data) > self._maxsize:
+                self._data.popitem(last=False)  # evict LRU
+
+
+# Module-level singleton; disabled (maxsize=0) when the env var is zero.
+_cnf_mem_cache: _LRUCache | None = _LRUCache(_CNF_MEM_CACHE_SIZE) if _CNF_MEM_CACHE_SIZE > 0 else None
 
 # Presigned-URL lifetime for the bucket backend (seconds). Matches the order of
 # the active-cnf token TTL so the access-gate window is preserved end to end.
@@ -127,32 +175,58 @@ class CNFStore:
     # ---- read side (called by the gated route, AFTER token check) ---------
     def serve(self, challenge_id: str) -> CNFServeResult:
         """Resolve how to serve a CNF the caller has already token-authorised.
-        Never leaks existence: callers map not_found -> opaque 404."""
-        # We always have the row metadata in the DB (sha for the ETag); the
-        # BODY is what may live in the bucket.
-        rows = self.store.query(
-            "SELECT cnf_text, cnf_sha256 FROM lane_challenges WHERE challenge_id=?",
-            (challenge_id,))
-        if not rows:
-            return CNFServeResult(mode="not_found")
-        sha = rows[0]["cnf_sha256"]
-        headers = cnf_cache_headers(sha)
+        Never leaks existence: callers map not_found -> opaque 404.
 
+        db backend: checks the in-process immutable CNF cache first.  A cache
+        hit returns the body without touching Postgres at all — no connection
+        held, no pool pressure.  Only a miss goes to the DB; the result is
+        stored in the cache for all subsequent requests.
+
+        bucket backend: presign path unchanged (the redirect itself is the
+        edge-cache mechanism; the in-process cache is not used for that path
+        since no bytes transit the publisher).
+        """
+        # Bucket backend: presign a short-lived GET so bytes stream from the
+        # CDN, not the publisher.  Still need the sha for the ETag — one small
+        # DB read for metadata only (no cnf_text column needed).
         if self.backend == "bucket" and self._s3 is not None:
-            # Presign a short-lived GET so the bytes stream from the edge/CDN,
-            # not the publisher. The HMAC token already gated reaching here; the
-            # presign TTL carries that authorisation to the object store.
+            meta = self.store.query(
+                "SELECT cnf_sha256 FROM lane_challenges WHERE challenge_id=?",
+                (challenge_id,))
+            if not meta:
+                return CNFServeResult(mode="not_found")
+            sha = meta[0]["cnf_sha256"]
+            headers = cnf_cache_headers(sha)
             url = self._s3.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self._bucket, "Key": self._key(challenge_id)},
                 ExpiresIn=CNF_SIGNED_URL_TTL)
             return CNFServeResult(mode="redirect", url=url, headers=headers)
 
-        # db backend: serve inline with immutable cache headers so an edge in
-        # front of the publisher absorbs repeats.
+        # db backend — consult the in-process LRU cache first.
+        if _cnf_mem_cache is not None:
+            cached = _cnf_mem_cache.get(challenge_id)
+            if cached is not None:
+                text, sha = cached
+                # Cache hit: serve from memory, no DB connection acquired.
+                return CNFServeResult(mode="inline", text=text,
+                                      headers=cnf_cache_headers(sha))
+
+        # Cache miss (or cache disabled): fetch from DB, populate cache.
+        rows = self.store.query(
+            "SELECT cnf_text, cnf_sha256 FROM lane_challenges WHERE challenge_id=?",
+            (challenge_id,))
+        if not rows:
+            return CNFServeResult(mode="not_found")
+        sha = rows[0]["cnf_sha256"]
         text = rows[0]["cnf_text"]
         if not text:
-            # metadata-only mirrored row (cnf_source='external') with no local
-            # body — nothing to serve from this tier.
+            # metadata-only mirrored row (cnf_source='external') — no body here.
             return CNFServeResult(mode="not_found")
+
+        # Populate cache so subsequent requests skip the DB entirely.
+        if _cnf_mem_cache is not None:
+            _cnf_mem_cache.put(challenge_id, (text, sha))
+
+        headers = cnf_cache_headers(sha)
         return CNFServeResult(mode="inline", text=text, headers=headers)

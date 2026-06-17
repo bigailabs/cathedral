@@ -112,6 +112,12 @@ def build_app(
 
     app = FastAPI(title="cathedral-thin-publisher")
 
+    # Per-key sliding-window rate limiter — anti-flood backpressure for miner
+    # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
+    # Default 120 req/min/key; set CATHEDRAL_RATELIMIT_RPM=0 to disable.
+    from .ratelimit import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware)
+
     # Backend-compat: the prior backend served the API under an `/api/cathedral`
     # path prefix, and miners are configured against that. Strip the prefix
     # before routing so `/api/cathedral/v1/...` reaches the same handlers as
