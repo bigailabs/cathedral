@@ -53,13 +53,18 @@ class TopCache:
             return list(self._rows), self._built_at_iso, self._window_h
 
     def start(self, store) -> None:
-        """Pre-populate synchronously, then launch the background refresh loop."""
+        """Launch the background refresh loop; first build happens in that thread.
+
+        We do NOT block here: the initial build takes ~15 seconds against 6M rows
+        and would delay process startup + Railway health checks. Instead the
+        background thread runs the first build immediately, and requests that arrive
+        before it finishes return an empty list (the page shows its loading state).
+        Subsequent requests (after the first 45 s cycle) are always fast.
+        """
         self._store = store
-        # First build is synchronous so the first request is instant.
-        self._build()
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._loop, name="top-cache-refresh", daemon=True)
+            target=self._loop_with_immediate_build, name="top-cache-refresh", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -73,7 +78,9 @@ class TopCache:
     # Internals
     # ------------------------------------------------------------------
 
-    def _loop(self) -> None:
+    def _loop_with_immediate_build(self) -> None:
+        """Thread target: build immediately, then loop every interval."""
+        self._build()
         while not self._stop_event.wait(TOP_CACHE_INTERVAL_SECS):
             self._build()
 
