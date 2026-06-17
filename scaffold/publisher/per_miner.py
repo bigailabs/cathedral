@@ -303,7 +303,7 @@ def compute_perminer_scores(store: Store, epoch: int) -> dict[str, float]:
     """
     try:
         rows = store.query(
-            "SELECT miner_hotkey, tier, SUM(difficulty_weight) AS total "
+            "SELECT miner_hotkey, SUM(difficulty_weight) AS total "
             "FROM per_miner_solves WHERE epoch=? AND verified=1 "
             "GROUP BY miner_hotkey",
             (epoch,))
