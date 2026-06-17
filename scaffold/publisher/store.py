@@ -568,10 +568,15 @@ class Store:
         self, since_ran_at: str | None, since_id: str | None, limit: int
     ) -> list[dict[str, Any]]:
         """Tuple-cursor pull: strict (ran_at, id) > (since_ran_at, since_id),
-        ordered ascending — exactly the released validator's pull semantics."""
+        ordered ascending — exactly the released validator's pull semantics.
+
+        When no cursor is provided (first call with no `since`), returns the
+        NEWEST rows ordered descending so callers see current activity rather
+        than the oldest rows from the beginning of the dataset.
+        """
         if since_ran_at is None:
             rows = self.query(
-                "SELECT row_json FROM eval_runs ORDER BY ran_at ASC, id ASC LIMIT ?",
+                "SELECT row_json FROM eval_runs ORDER BY ran_at DESC, id DESC LIMIT ?",
                 (limit,),
             )
         else:
