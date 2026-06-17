@@ -26,11 +26,20 @@ instances and retiring stale/saturated ones — the live v6 open-window lifecycl
     Locally-minted (cnf_source='local') challenges are the ones managed here;
     externally-mirrored seed challenges are left to the live publisher.
 
+  * GIL offload: gen_planted_3sat is pure-Python CPU-bound (~2s for tier1
+    6000/25560 biased). asyncio.to_thread does NOT escape the GIL — the
+    worker thread holds it during generation, freezing the event loop ~12s
+    per refill batch. To fix this, _gen_cnf_in_process submits gen_planted_3sat
+    to a module-level ProcessPoolExecutor (separate process, no GIL contention).
+    refill_tier runs in a worker thread, so blocking on .result() there is safe.
+    Falls back to direct call if the pool is unavailable.
+
 Runs as an asyncio task inside the publisher, gated by CATHEDRAL_REFILL_ENABLED.
 """
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import os
 from datetime import datetime, timedelta, timezone
@@ -38,6 +47,63 @@ from datetime import datetime, timedelta, timezone
 from ..dimacs import gen_planted_3sat
 from .app import seed_challenge
 from .store import Store
+
+# ---------------------------------------------------------------------------
+# Process pool for GIL-free CNF generation
+# ---------------------------------------------------------------------------
+# gen_planted_3sat is pure-Python CPU-bound: the worker thread that runs
+# refill_once holds the GIL during generation, starving the event loop.
+# Submitting to a ProcessPoolExecutor moves the CPU work to a separate
+# process, releasing the GIL entirely. max_workers=2: one active generation
+# at a time is the steady state (refill_loop runs serially); 2 allows one
+# tier to queue while another finishes without unbounded memory growth.
+# Created once at module level (lazy on first use) so the pool is never
+# recreated per call. Falls back to direct in-thread call if init fails.
+
+_POOL: concurrent.futures.ProcessPoolExecutor | None = None
+_POOL_BROKEN: bool = False  # set True on init failure so we don't retry each call
+
+
+def _get_pool() -> concurrent.futures.ProcessPoolExecutor | None:
+    """Return the module-level process pool, initialising it lazily.
+
+    Returns None (triggering fallback) if the pool has ever failed to init.
+    Thread-safe for the single-writer scenario (refill runs in one thread).
+    """
+    global _POOL, _POOL_BROKEN
+    if _POOL_BROKEN:
+        return None
+    if _POOL is None:
+        try:
+            _POOL = concurrent.futures.ProcessPoolExecutor(max_workers=2)
+        except Exception:  # pragma: no cover — init failure path
+            _POOL_BROKEN = True
+            return None
+    return _POOL
+
+
+def _gen_cnf_in_process(seed: int, n_vars: int, n_clauses: int,
+                         method: str) -> tuple[str, list[int]]:
+    """Generate CNF in a subprocess to avoid holding the GIL in the caller's
+    thread. Falls back to direct call if the process pool is unavailable.
+
+    Must be called from a worker thread (not the event loop), since it blocks
+    on Future.result(). refill_tier is always called via asyncio.to_thread,
+    so this contract is always satisfied.
+
+    gen_planted_3sat args are all scalars (int/str) — picklable across forks.
+    """
+    pool = _get_pool()
+    if pool is None:
+        # Pool unavailable — fall back to direct call (GIL held, but minting
+        # still works; better than breaking the refill loop entirely).
+        return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
+    try:
+        future = pool.submit(gen_planted_3sat, seed, n_vars, n_clauses, method)
+        return future.result()
+    except Exception:  # pragma: no cover — process crash / serialisation error
+        # Fallback: direct in-thread call. Log-worthy but not fatal.
+        return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
 
 _FAMILY = "synthetic_boolean_v1"
 
@@ -233,7 +299,7 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
         if existing:
             continue  # already minted this (seed_input,tier,seq) — idempotent skip
         seed = mint_seed(seed_input, tier, seq - 1)
-        cnf_text, _planted = gen_planted_3sat(seed, n_vars, n_clauses, method=planting_method)
+        cnf_text, _planted = _gen_cnf_in_process(seed, n_vars, n_clauses, method=planting_method)
         seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text,
                        status="active")
         # mark provenance + updated_at for age retirement (seed_challenge defaults
