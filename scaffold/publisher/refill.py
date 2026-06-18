@@ -34,6 +34,8 @@ import asyncio
 import hashlib
 import multiprocessing
 import os
+import queue as _queue
+import threading as _threading
 import time as _time
 from datetime import datetime, timedelta, timezone
 
@@ -140,6 +142,102 @@ def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
     cnf, _ = gen_planted_3sat(seed, n_vars, n_clauses, method=method)
     print(f"[refill] inproc_gen ok n={n_vars} elapsed={_time.monotonic()-t0:.2f}s")
     return cnf
+
+
+# ---------------------------------------------------------------------------
+# Pre-generation buffer — zero-latency refill ticks.
+#
+# A background daemon thread continuously generates CNF bodies into a small
+# per-tier queue.  The refill tick drains from the queue (instant) instead of
+# blocking the event loop on a 5-6s fork gen.
+#
+# The gen child still runs at nice(19) in a separate process; the parent
+# background thread waits in Pipe.poll() (GIL-free).  This way:
+#   • CPU is consumed by gen continuously at a low sustained level rather than
+#     in 5-6s concentrated spikes every 60s.
+#   • The refill tick itself never calls _gen_cnf — it takes from the queue
+#     (a Python queue.Queue.get(timeout=...) that returns in microseconds when
+#     the queue is non-empty).
+#   • If the queue is empty (gen can't keep up), the refill tick falls back to
+#     direct _gen_cnf (same as before) so minting never stalls.
+#
+# Queue sizing: 2 per tier is enough for a buffer against timing jitter.
+# Larger queues waste memory (each entry is ~450KB CNF text).
+# ---------------------------------------------------------------------------
+
+_PREGEN_QUEUE_SIZE = int(os.environ.get("CATHEDRAL_PREGEN_QUEUE_SIZE", "2"))
+
+# Per-tier queues: tier -> queue.Queue of (cnf_text,)
+_pregen_queues: dict[int, _queue.Queue] = {}
+_pregen_started = False
+_pregen_lock = _threading.Lock()
+
+
+def _pregen_worker(tier: int) -> None:
+    """Background daemon thread: continuously pre-generates CNF bodies.
+
+    Generates one challenge at a time into the queue.  When the queue is full
+    (size=_PREGEN_QUEUE_SIZE), sleeps until it has room.  On any error, backs
+    off 5s and retries.  Exits only when the process exits (daemon=True).
+    """
+    q = _pregen_queues[tier]
+    n_vars, n_clauses = _TIER_SHAPE.get(tier, (6000, 25560))
+    method = _TIER_METHOD.get(tier, "biased")
+    # Use a fixed seed counter per-worker (doesn't need to match refill seeds —
+    # the worker's output is consumed by seed in-order by the refill loop which
+    # assigns real challenge IDs).  Use a time-based offset per tier.
+    seed_counter = int(_time.monotonic() * 1000) + tier * 100_000
+    while True:
+        if not _FORK_OK:
+            # Fork is broken; don't spin-generate in-process (GIL hold forever).
+            _time.sleep(10)
+            continue
+        try:
+            # Wait until there's room in the queue.
+            if q.full():
+                _time.sleep(1)
+                continue
+            seed_counter += 1
+            cnf = _gen_cnf_fork(seed_counter, n_vars, n_clauses, method)
+            q.put(cnf)
+            print(f"[pregen] tier={tier} queued (queue_size={q.qsize()})")
+        except Exception as e:
+            print(f"[pregen] tier={tier} error: {e!r}; backing off 5s")
+            _time.sleep(5)
+
+
+def _ensure_pregen_started() -> None:
+    """Start pre-generation daemon threads (one per tier, idempotent)."""
+    global _pregen_started
+    if _pregen_started:
+        return
+    with _pregen_lock:
+        if _pregen_started:
+            return
+        for tier in sorted(_DEFAULT_TARGETS):
+            _pregen_queues[tier] = _queue.Queue(maxsize=_PREGEN_QUEUE_SIZE)
+            t = _threading.Thread(
+                target=_pregen_worker, args=(tier,),
+                name=f"pregen-tier{tier}", daemon=True,
+            )
+            t.start()
+            print(f"[pregen] started background gen thread for tier {tier}")
+        _pregen_started = True
+
+
+def _get_pregen_cnf(tier: int) -> str | None:
+    """Try to get a pre-generated CNF from the queue (non-blocking).
+
+    Returns None if the queue is empty (caller should fall back to _gen_cnf).
+    """
+    q = _pregen_queues.get(tier)
+    if q is None:
+        return None
+    try:
+        return q.get_nowait()
+    except _queue.Empty:
+        return None
+
 
 _FAMILY = "synthetic_boolean_v1"
 
@@ -370,15 +468,34 @@ def refill_once(store: Store, *, seed_input: str | None = None, log=lambda *a, *
             for tier in sorted(_DEFAULT_TARGETS)]
 
 
+def _mint_one(store: Store, cid: str, tier: int, seed: int,
+              n_vars: int, n_clauses: int, method: str) -> str:
+    """Generate + commit one challenge.  Called in a thread via to_thread.
+
+    Tries the pre-generation queue first (O(1), no CPU spike).  Falls back to
+    direct fork gen if the queue is empty (background gen hasn't caught up yet).
+    Returns the CNF text so the caller can log it.
+    """
+    cnf_text = _get_pregen_cnf(tier)
+    source = "pregen"
+    if cnf_text is None:
+        source = "fork" if _FORK_OK else "inproc"
+        cnf_text = _gen_cnf(seed, n_vars, n_clauses, method)
+    _commit_challenge(store, cid, tier, cnf_text)
+    print(f"[refill] minted tier={tier} cid={cid[:20]}... source={source}")
+    return cnf_text
+
+
 async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None = None,
                             log=lambda *a, **k: None) -> dict:
     """Async refill for one tier.
-    1. to_thread: retire + plan (DB calls, releases GIL via I/O).
-    2. Per mint: to_thread(_gen_cnf) — fork process if available (os.read releases
-       GIL on Pipe.recv), otherwise direct gen with hard cap=1 (bounded GIL hold).
-    3. to_thread: write challenge to DB.
+    1. Ensure background pre-gen threads are running.
+    2. to_thread: retire + plan (DB calls, releases GIL via I/O).
+    3. Per mint: to_thread(_mint_one) — takes from pre-gen queue (instant) or
+       falls back to fork gen (GIL-free via Pipe.poll). One at a time.
     4. sleep(0): yield to event loop between mints.
     """
+    _ensure_pregen_started()   # idempotent; starts bg gen threads on first call
     seed_input = seed_input or default_seed_input()
     mint_cap = MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK
     n_vars_hint, n_clauses_hint = shape_for(tier)
@@ -387,8 +504,7 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
 
     minted = 0
     for cid, seed, n_vars, n_clauses, method in work:
-        cnf_text = await asyncio.to_thread(_gen_cnf, seed, n_vars, n_clauses, method)
-        await asyncio.to_thread(_commit_challenge, store, cid, tier, cnf_text)
+        await asyncio.to_thread(_mint_one, store, cid, tier, seed, n_vars, n_clauses, method)
         minted += 1
         await asyncio.sleep(0)  # yield to the event loop between mints
 
@@ -408,10 +524,10 @@ async def refill_once_async(store: Store, *, seed_input: str | None = None,
 async def refill_loop(store: Store, *, interval_seconds: int | None = None,
                       log=lambda *a, **k: None, stop_event: asyncio.Event | None = None) -> None:
     """Asyncio task: periodic refill+retire.
-    Uses refill_once_async so each gen call is isolated in its own to_thread.
-    With fork gen: child process holds its own GIL; parent Pipe.recv releases
-    the parent GIL so the event loop stays responsive during generation.
-    Fallback: hard cap=1 mint per tier per tick (bounded GIL hold per 60s).
+    Background pre-gen threads keep a small CNF buffer so each mint is instant
+    (queue.get_nowait).  Falls back to fork gen if the buffer is empty.
+    Either way the event loop is never blocked: queue reads are instant, and
+    fork gen releases the GIL via Pipe.poll (epoll_wait).
     """
     interval = interval_seconds or _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
                                             _DEFAULT_INTERVAL_SECONDS)
