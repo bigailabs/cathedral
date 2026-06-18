@@ -250,95 +250,25 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
 
 
 def refill_once(store: Store, *, seed_input: str | None = None, log=lambda *a, **k: None) -> list[dict]:
-    """One full refill+retire pass across all configured tiers. Sync version,
-    kept for CLI / test callers. The event loop uses refill_once_async instead."""
+    """One full refill+retire pass across all configured tiers."""
     out = []
     for tier in sorted(_DEFAULT_TARGETS):
         out.append(refill_tier(store, tier, seed_input=seed_input, log=log))
     return out
 
 
-async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None = None,
-                             log=lambda *a, **k: None) -> dict:
-    """Async variant of refill_tier: yields the event loop between each CNF mint.
-
-    gen_planted_3sat is pure-Python CPU-bound (~2s for tier1 6000/25560 biased).
-    Running the entire refill pass via asyncio.to_thread holds the GIL for the
-    whole batch (~100s), freezing the event loop. Here, each gen call is dispatched
-    as its own await asyncio.to_thread(...), so the event loop can serve requests
-    between individual mints (~2s windows instead of ~100s freeze).
-
-    DB reads/writes (store.query / store.write) are fast blocking calls (~5ms each
-    for Postgres). Holding the event loop for 5ms per write is fine; it is the 2s
-    pure-Python CPU that needs the thread hand-off.
-    """
-    seed_input = seed_input or default_seed_input()
-    retired = retire_ready(store, tier)
-    target = target_for(tier)
-    n_vars, n_clauses = shape_for(tier)
-    planting_method = method_for(tier)
-    if (n_vars, n_clauses) != _TIER_SHAPE.get(tier) or planting_method != _TIER_METHOD.get(tier, "biased"):
-        log("refill_shape_divergence", tier=tier, n_vars=n_vars, n_clauses=n_clauses,
-            live=_TIER_SHAPE.get(tier), method=planting_method)
-
-    minted = 0
-    seq = store.query(
-        "SELECT COUNT(*) AS n FROM lane_challenges WHERE family_id=? AND tier=? AND cnf_source='local'",
-        (_FAMILY, tier))[0]["n"]
-    guard = 0
-    while active_local_count(store, tier) < target and guard < target * 4 + 8:
-        guard += 1
-        cid = mint_challenge_id(seed_input, tier, seq)
-        seq += 1
-        existing = store.query(
-            "SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,))
-        if existing:
-            continue  # already minted this (seed_input,tier,seq) — idempotent skip
-        seed = mint_seed(seed_input, tier, seq - 1)
-        # Offload the CPU-bound gen to a worker thread so the event loop stays
-        # free while the 2s Python compute runs. Each await here yields back to
-        # the event loop, giving it a window to serve incoming requests.
-        cnf_text, _planted = await asyncio.to_thread(
-            gen_planted_3sat, seed, n_vars, n_clauses, method=planting_method)
-        seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text,
-                       status="active")
-        def _stamp(conn, cid=cid):
-            conn.execute(
-                "UPDATE lane_challenges SET updated_at_iso=created_at_iso WHERE challenge_id=?",
-                (cid,))
-        store.write(_stamp)
-        minted += 1
-    return {"tier": tier, "retired": retired, "minted": minted,
-            "active": active_local_count(store, tier), "target": target,
-            "shape": (n_vars, n_clauses)}
-
-
-async def refill_once_async(store: Store, *, seed_input: str | None = None,
-                             log=lambda *a, **k: None) -> list[dict]:
-    """Async one-pass refill across all configured tiers. Uses refill_tier_async
-    so each CNF gen yields the event loop rather than holding it for the batch."""
-    out = []
-    for tier in sorted(_DEFAULT_TARGETS):
-        out.append(await refill_tier_async(store, tier, seed_input=seed_input, log=log))
-    return out
-
-
 async def refill_loop(store: Store, *, interval_seconds: int | None = None,
                       log=lambda *a, **k: None, stop_event: asyncio.Event | None = None) -> None:
     """Asyncio task: periodic refill+retire. Gated by the caller (only started
-    when refill_enabled()).
-
-    Each CNF is minted via await asyncio.to_thread(gen_planted_3sat, ...) inside
-    refill_tier_async, so the event loop gets a window between every ~2s mint
-    instead of being frozen for the full batch. Cancels cleanly.
-    """
+    when refill_enabled()). gen runs in a thread so the event loop is never
+    blocked by CNF minting. Cancels cleanly."""
     interval = interval_seconds or _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
                                             _DEFAULT_INTERVAL_SECONDS)
     log("refill_loop_start", interval=interval, targets=_DEFAULT_TARGETS)
     try:
         while not (stop_event and stop_event.is_set()):
             try:
-                summary = await refill_once_async(store, log=log)
+                summary = await asyncio.to_thread(refill_once, store, log=log)
                 log("refill_pass", summary=summary)
             except Exception as e:  # never let one bad pass kill the loop
                 log("refill_error", error=str(e))
