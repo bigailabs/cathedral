@@ -156,11 +156,6 @@ def build_app(
         if refill.refill_enabled():
             import asyncio
             loop_log = lambda evt, **kw: print(f"[refill] {evt} {kw}")  # noqa: E731
-            # Pre-warm the subprocess pool in a worker thread so the first
-            # refill pass doesn't incur the ~2s process-spawn cold start.
-            # This is non-blocking: the startup event is async and we await
-            # the thread, but it completes before the first refill tick.
-            await asyncio.to_thread(refill._get_pool)
             app.state.refill_task = asyncio.create_task(
                 refill.refill_loop(store, log=loop_log))
 
