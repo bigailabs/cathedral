@@ -62,10 +62,7 @@ from .store import Store
 # ---------------------------------------------------------------------------
 
 _FORK_TIMEOUT = int(os.environ.get("CATHEDRAL_GEN_FORK_TIMEOUT", "45"))
-# With concurrent fork gen (asyncio.gather across all work items), each child
-# runs in parallel — total tick time ≈ one gen duration (~5-6s), not N×5s.
-# 5 per tier fills a cold board in 5 ticks (5 min) instead of 25 min.
-MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "5"))
+MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "1"))
 MINT_CAP_FALLBACK = 1   # if fork blocked; 1 gen×~5-6s GIL hold per 60s tick
 
 
@@ -373,26 +370,14 @@ def refill_once(store: Store, *, seed_input: str | None = None, log=lambda *a, *
             for tier in sorted(_DEFAULT_TARGETS)]
 
 
-async def _gen_and_commit(store: Store, tier: int,
-                          cid: str, seed: int, n_vars: int, n_clauses: int,
-                          method: str) -> None:
-    """Generate one CNF (fork, GIL-free) and commit it to the store.
-
-    Called concurrently via asyncio.gather — all fork children start at once so
-    N mints per tick take ≈ one gen duration instead of N × one gen duration.
-    """
-    cnf_text = await asyncio.to_thread(_gen_cnf, seed, n_vars, n_clauses, method)
-    await asyncio.to_thread(_commit_challenge, store, cid, tier, cnf_text)
-
-
 async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None = None,
                             log=lambda *a, **k: None) -> dict:
     """Async refill for one tier.
     1. to_thread: retire + plan (DB calls, releases GIL via I/O).
-    2. Concurrent mints: asyncio.gather(_gen_and_commit × cap) — all fork children
-       start simultaneously; total tick time ≈ one gen duration regardless of cap.
-       Each child's Pipe.poll() releases the GIL so the event loop stays responsive.
-    3. Fallback (fork disabled): cap=1, sequential, bounded GIL hold.
+    2. Per mint: to_thread(_gen_cnf) — fork process if available (os.read releases
+       GIL on Pipe.recv), otherwise direct gen with hard cap=1 (bounded GIL hold).
+    3. to_thread: write challenge to DB.
+    4. sleep(0): yield to event loop between mints.
     """
     seed_input = seed_input or default_seed_input()
     mint_cap = MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK
@@ -400,22 +385,13 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
 
     retired, work = await asyncio.to_thread(_plan_tier, store, tier, seed_input, mint_cap, log)
 
-    if work:
-        if _FORK_OK:
-            # Concurrent: all fork children start at once; each Pipe.poll() releases
-            # GIL so the event loop handles requests while children generate.
-            await asyncio.gather(*[
-                _gen_and_commit(store, tier, cid, seed, n_vars, n_clauses, method)
-                for cid, seed, n_vars, n_clauses, method in work
-            ])
-        else:
-            # Fallback: sequential with yield between mints (bounded GIL hold).
-            for cid, seed, n_vars, n_clauses, method in work:
-                cnf_text = await asyncio.to_thread(_gen_cnf, seed, n_vars, n_clauses, method)
-                await asyncio.to_thread(_commit_challenge, store, cid, tier, cnf_text)
-                await asyncio.sleep(0)  # yield to event loop between GIL holds
+    minted = 0
+    for cid, seed, n_vars, n_clauses, method in work:
+        cnf_text = await asyncio.to_thread(_gen_cnf, seed, n_vars, n_clauses, method)
+        await asyncio.to_thread(_commit_challenge, store, cid, tier, cnf_text)
+        minted += 1
+        await asyncio.sleep(0)  # yield to the event loop between mints
 
-    minted = len(work)
     active = await asyncio.to_thread(active_local_count, store, tier)
     return {"tier": tier, "retired": retired, "minted": minted,
             "active": active, "target": target_for(tier),
@@ -424,28 +400,18 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
 
 async def refill_once_async(store: Store, *, seed_input: str | None = None,
                             log=lambda *a, **k: None) -> list[dict]:
-    """One full async refill+retire pass — both tiers run concurrently.
-
-    Running tiers in parallel halves the per-tick wall time: tier1 (~5s) and
-    tier2 (~1s) overlap, so the tick takes ~5s total instead of ~6s.  Together
-    with concurrent per-tier minting (asyncio.gather inside refill_tier_async),
-    a cold board fills in ≈1 tick wall-time instead of 25 ticks × 60s.
-    """
-    results = await asyncio.gather(*[
-        refill_tier_async(store, tier, seed_input=seed_input, log=log)
-        for tier in sorted(_DEFAULT_TARGETS)
-    ])
-    return list(results)
+    """One full async refill+retire pass across all configured tiers."""
+    return [await refill_tier_async(store, tier, seed_input=seed_input, log=log)
+            for tier in sorted(_DEFAULT_TARGETS)]
 
 
 async def refill_loop(store: Store, *, interval_seconds: int | None = None,
                       log=lambda *a, **k: None, stop_event: asyncio.Event | None = None) -> None:
     """Asyncio task: periodic refill+retire.
-    Both tiers run concurrently (asyncio.gather); within each tier all mints run
-    concurrently (asyncio.gather of fork children).  Total tick time ≈ one gen
-    duration (~5-6s) regardless of cap.  GIL is released for every fork gen via
-    Pipe.poll (epoll_wait C call); the event loop handles requests freely.
-    Fallback (fork disabled): cap=1 sequential, bounded GIL hold per 60s tick.
+    Uses refill_once_async so each gen call is isolated in its own to_thread.
+    With fork gen: child process holds its own GIL; parent Pipe.recv releases
+    the parent GIL so the event loop stays responsive during generation.
+    Fallback: hard cap=1 mint per tier per tick (bounded GIL hold per 60s).
     """
     interval = interval_seconds or _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
                                             _DEFAULT_INTERVAL_SECONDS)
