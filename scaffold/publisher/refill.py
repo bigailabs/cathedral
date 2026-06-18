@@ -32,69 +32,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
-import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 
 from ..dimacs import gen_planted_3sat
 from .app import seed_challenge
 from .store import Store
-
-# ---------------------------------------------------------------------------
-# Subprocess-based gen: run gen_planted_3sat in a fresh child process so the
-# parent event loop is never GIL-starved during generation.
-#
-# subprocess.run() waits via os.waitpid() which releases the Python GIL.
-# The child process has its own interpreter and GIL — no contention with the
-# publisher's event loop. Falls back to direct in-process gen on any failure.
-#
-# APP_ROOT is the directory containing the scaffold package (the /app WORKDIR
-# in the Railway Dockerfile, or the repo root in dev). Resolved once at import
-# time from __file__ (refill.py lives at <app_root>/scaffold/publisher/refill.py).
-# ---------------------------------------------------------------------------
-_APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-_GEN_SCRIPT = r"""
-import sys, json
-sys.path.insert(0, sys.argv[1])   # app_root
-from scaffold.dimacs import gen_planted_3sat
-seed = int(sys.argv[2])
-n    = int(sys.argv[3])
-m    = int(sys.argv[4])
-method = sys.argv[5]
-cnf, planted = gen_planted_3sat(seed, n, m, method=method)
-# write only the CNF to stdout; planted list stays in child
-sys.stdout.write(cnf)
-"""
-
-_SUBPROCESS_TIMEOUT = int(os.environ.get("CATHEDRAL_GEN_SUBPROCESS_TIMEOUT", "30"))
-
-
-def _gen_cnf_subprocess(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
-    """Generate a CNF in a subprocess to avoid GIL hold in the event loop.
-    Returns the CNF text. Raises on failure (caller falls back to direct gen)."""
-    result = subprocess.run(
-        [sys.executable, "-c", _GEN_SCRIPT,
-         _APP_ROOT, str(seed), str(n_vars), str(n_clauses), method],
-        capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"gen subprocess failed (rc={result.returncode}): {result.stderr[:200]}")
-    return result.stdout
-
-
-def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
-    """Generate a CNF, preferring subprocess (GIL-free). Falls back to direct
-    in-process gen if the subprocess fails (minting still works, just slower)."""
-    try:
-        return _gen_cnf_subprocess(seed, n_vars, n_clauses, method)
-    except Exception as e:
-        print(f"[refill] subprocess gen failed ({e!r}), falling back to in-process gen")
-        cnf, _ = gen_planted_3sat(seed, n_vars, n_clauses, method=method)
-        return cnf
 
 _FAMILY = "synthetic_boolean_v1"
 
@@ -348,14 +291,11 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
 
     minted = 0
     for cid, seed, n_vars, n_clauses, method in work:
-        # _gen_cnf runs the generator in a subprocess (os.waitpid releases GIL)
-        # so the event loop is never GIL-starved during generation.
-        # Falls back to direct in-process gen on any subprocess failure.
-        cnf_text = await asyncio.to_thread(
-            _gen_cnf, seed, n_vars, n_clauses, method)
+        cnf_text, _planted = await asyncio.to_thread(
+            gen_planted_3sat, seed, n_vars, n_clauses, method=method)
         await asyncio.to_thread(_commit_challenge, store, cid, tier, cnf_text)
         minted += 1
-        # yield to the event loop between mints
+        # yield to the event loop between mints so HTTP requests aren't starved
         await asyncio.sleep(0)
 
     active = await asyncio.to_thread(active_local_count, store, tier)
