@@ -420,7 +420,12 @@ def build_app(
     # validator just verifies and applies. The row feed above stays as the
     # public audit trail, not the scoring input.
     @app.get("/v1/validator/weights/next")
-    def validator_weights_next():
+    async def validator_weights_next():
+        # async def: never uses the thread pool.  current_vector returns from the
+        # in-memory cache (populated by the background refresh thread) in
+        # microseconds — a plain dict lookup + brief lock acquire.  Making the
+        # handler async means concurrent refill fork-gen threads never starve it
+        # even when the thread pool is saturated (fork poll holds pool slots).
         weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
             vec = weights_mod.current_vector(store, signing_key_hex=weight_key)
