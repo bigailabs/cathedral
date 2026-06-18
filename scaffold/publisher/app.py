@@ -112,27 +112,41 @@ def build_app(
 
     app = FastAPI(title="cathedral-thin-publisher")
 
-    # Per-key sliding-window rate limiter — anti-flood backpressure for miner
-    # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
-    # Default 120 req/min/key; set CATHEDRAL_RATELIMIT_RPM=0 to disable.
-    from .ratelimit import RateLimitMiddleware
-    app.add_middleware(RateLimitMiddleware)
-
     # Backend-compat: the prior backend served the API under an `/api/cathedral`
     # path prefix, and miners are configured against that. Strip the prefix
     # before routing so `/api/cathedral/v1/...` reaches the same handlers as
     # `/v1/...` — both paths serve identically, no client reconfiguration needed.
+    #
+    # Pure ASGI middleware (no BaseHTTPMiddleware): avoids the response-body
+    # buffering that BaseHTTPMiddleware adds, which serializes concurrent
+    # requests and causes 20-30s stalls under real validator load.
     _LEGACY_PREFIX = "/api/cathedral"
+    _LEGACY_PREFIX_BYTES = _LEGACY_PREFIX.encode()
 
-    @app.middleware("http")
-    async def _strip_legacy_prefix(request: Request, call_next):
-        path = request.scope.get("path", "")
-        if path.startswith(_LEGACY_PREFIX + "/") or path == _LEGACY_PREFIX:
-            request.scope["path"] = path[len(_LEGACY_PREFIX):] or "/"
-            raw = request.scope.get("raw_path")
-            if raw:
-                request.scope["raw_path"] = raw.replace(_LEGACY_PREFIX.encode(), b"", 1)
-        return await call_next(request)
+    class _StripLegacyPrefixMiddleware:
+        """Pure ASGI middleware: strips /api/cathedral prefix before routing."""
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") == "http":
+                path = scope.get("path", "")
+                if path.startswith(_LEGACY_PREFIX + "/") or path == _LEGACY_PREFIX:
+                    scope = dict(scope)  # shallow copy so we don't mutate shared state
+                    scope["path"] = path[len(_LEGACY_PREFIX):] or "/"
+                    raw = scope.get("raw_path")
+                    if raw:
+                        scope["raw_path"] = raw.replace(_LEGACY_PREFIX_BYTES, b"", 1)
+            await self._app(scope, receive, send)
+
+    app.add_middleware(_StripLegacyPrefixMiddleware)
+
+    # Per-key sliding-window rate limiter — anti-flood backpressure for miner
+    # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
+    # Default 120 req/min/key; set CATHEDRAL_RATELIMIT_RPM=0 to disable.
+    # Also pure ASGI (no BaseHTTPMiddleware) for the same buffering reason.
+    from .ratelimit import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware)
 
     app.state.store = store
     app.state.cnf_store = cnf_store

@@ -362,6 +362,15 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
     every _CACHE_TTL_SECS without ever blocking the request path.  Only the
     very first call (empty cache) waits for a build — after that every request
     returns in microseconds.
+
+    IMPORTANT: the synchronous first-build path does NOT hold _build_lock
+    during the DB query.  Holding the lock during a slow (5-30s) DB build
+    would block every concurrent request handler that tries to read the cache,
+    causing a cascading stall.  Instead we build outside the lock and acquire
+    only briefly to write the result.  If two threads both hit an empty cache
+    simultaneously, both build (at most twice at startup), and the first writer
+    wins; the second's result is discarded.  This wastes one extra build at
+    most once at startup and is far better than starving all callers.
     """
     # Ensure the background thread is running so the cache stays fresh.
     _ensure_bg_started(store, signing_key_hex)
@@ -371,15 +380,19 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
     if hit is not None:
         return hit[1]
 
-    # First call with an empty cache: build synchronously once so the endpoint
-    # is not 503 on startup. Subsequent requests always hit the cache.
+    # First call with an empty cache: build synchronously WITHOUT holding the
+    # lock (a slow build inside the lock starves every concurrent request).
+    vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
     with _build_lock:
-        hit = _vector_cache.get("v")
-        if hit is not None:
-            return hit[1]
-        vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
-        _vector_cache["v"] = (time.time(), vec)
-        return vec
+        # Another thread may have written the cache while we built.
+        # Prefer the existing entry (avoids a duplicate policy_version bump),
+        # but if it is still empty write ours.
+        existing = _vector_cache.get("v")
+        if existing is None:
+            _vector_cache["v"] = (time.time(), vec)
+        else:
+            vec = existing[1]
+    return vec
 
 
 def _reset_vector_cache() -> None:

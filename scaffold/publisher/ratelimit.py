@@ -19,6 +19,12 @@ Design:
   * Cleanup: keys not seen in > WINDOW_SECS * 2 are pruned at a low rate to
     bound memory.  At 300 miners each with one key entry that is trivial.
 
+Implementation: pure ASGI middleware (NOT BaseHTTPMiddleware).
+BaseHTTPMiddleware buffers the full response body before forwarding it, which
+serializes concurrent requests and causes 20-30s stalls under load.  A pure
+ASGI middleware calls the downstream app directly with the original send
+callable — zero buffering, zero concurrency overhead.
+
 Usage (in build_app):
     from .ratelimit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
@@ -29,9 +35,7 @@ import os
 import time
 import threading
 
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 # Default: 120 req/min/key.  Set env to 0 to disable.
 _DEFAULT_RPM = 120
@@ -49,7 +53,7 @@ _LEGACY_PREFIX = "/api/cathedral"
 
 
 def _is_exempt(path: str) -> bool:
-    # Strip legacy prefix if present (middleware runs after strip, but be safe).
+    # Strip legacy prefix if present (middleware runs before strip, so check both).
     p = path.removeprefix(_LEGACY_PREFIX)
     return any(p == s or p.endswith(s) for s in _EXEMPT_SUFFIXES)
 
@@ -121,48 +125,83 @@ class _RateLimiterState:
 _state = _RateLimiterState()
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Starlette/FastAPI middleware that enforces per-key RPM limits."""
+def _get_header(headers: list, name: bytes) -> str | None:
+    """Extract a header value from raw ASGI headers list."""
+    name_lower = name.lower()
+    for k, v in headers:
+        if k.lower() == name_lower:
+            return v.decode("latin-1", errors="replace")
+    return None
+
+
+def _client_ip_from_scope(scope: Scope) -> str:
+    """Best-effort client IP from ASGI scope headers or direct connection."""
+    headers = scope.get("headers", [])
+    xff = _get_header(headers, b"x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    client = scope.get("client")
+    if client:
+        return client[0]
+    return "unknown"
+
+
+class RateLimitMiddleware:
+    """Pure ASGI rate-limit middleware — no BaseHTTPMiddleware buffering.
+
+    Passes the original scope/receive/send straight to the downstream app
+    for allowed requests (zero overhead).  For 429 responses, sends the
+    rejection directly using ASGI primitives without touching the downstream
+    app at all.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
+        self.app = app
 
-    async def dispatch(self, request: Request, call_next):
-        path = request.scope.get("path", "")
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            # Pass websocket / lifespan scopes straight through.
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
         if _is_exempt(path):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         limit = _ratelimit_rpm()
         if limit <= 0:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
+        headers = scope.get("headers", [])
         # Key preference: hotkey header (identifies a miner) > client IP.
         key = (
-            request.headers.get("x-cathedral-hotkey")
-            or request.headers.get("X-Cathedral-Hotkey")
-            or _client_ip(request)
+            _get_header(headers, b"x-cathedral-hotkey")
+            or _client_ip_from_scope(scope)
         )
 
         if not _state.check(key, limit):
-            return Response(
-                content="rate_limited",
-                status_code=429,
-                headers={
-                    "Retry-After": str(_WINDOW_SECS),
-                    "X-RateLimit-Limit": str(limit),
-                    "X-RateLimit-Window": f"{_WINDOW_SECS}s",
-                },
-            )
+            body = b"rate_limited"
+            retry_after = str(_WINDOW_SECS).encode()
+            limit_str = str(limit).encode()
+            window_str = f"{_WINDOW_SECS}s".encode()
+            await send({
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"retry-after", retry_after),
+                    (b"x-ratelimit-limit", limit_str),
+                    (b"x-ratelimit-window", window_str),
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": body,
+                "more_body": False,
+            })
+            return
 
-        return await call_next(request)
-
-
-def _client_ip(request: Request) -> str:
-    """Best-effort client IP from forwarded headers or direct connection."""
-    xff = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    client = getattr(request, "client", None)
-    if client:
-        return client.host
-    return "unknown"
+        await self.app(scope, receive, send)
