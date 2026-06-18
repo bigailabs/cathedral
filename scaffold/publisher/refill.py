@@ -32,9 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import multiprocessing
 import os
-import subprocess
-import sys
+import time as _time
 from datetime import datetime, timedelta, timezone
 
 from ..dimacs import gen_planted_3sat
@@ -42,89 +42,93 @@ from .app import seed_challenge
 from .store import Store
 
 # ---------------------------------------------------------------------------
-# Subprocess-based CNF generation.
+# Fork-based CNF generation — releases the GIL while the child runs.
 #
-# gen_planted_3sat is pure-Python CPU-bound (~0.1s locally, ~0.5-2s on Railway's
+# gen_planted_3sat is pure-Python CPU-bound (~0.1s locally, ~5-6s on Railway's
 # shared CPU). asyncio.to_thread(gen_planted_3sat, ...) does NOT release the
 # Python GIL — the worker thread holds it for the entire gen duration, starving
-# the event loop. A cold-start fill of 25+25=50 challenges can freeze the
-# service for 25-50s, causing 6-12s+ request latency.
+# the event loop and causing 5-12s+ request latency every 60s refill tick.
 #
-# Fix: run gen in a subprocess. subprocess.run() waits via os.waitpid() which
-# releases the GIL — the event loop runs freely while the child generates. The
-# child has its own interpreter, its own GIL, no contention.
+# Fix: run gen in a forked child process via multiprocessing.Process(fork).
+#   • fork() copies the parent address space — scaffold.dimacs is already
+#     imported; no sys.path or execve() needed; no seccomp risk.
+#   • Parent receives the CNF over a Pipe. Connection.recv() calls os.read()
+#     (C extension) which releases the GIL — the event loop runs freely while
+#     the child generates.
+#   • Child only imports `random` (already imported); fork-safe.
 #
-# _SUBPROCESS_OK is set at import time by a quick probe. If subprocess creation
-# is blocked (seccomp/container restrictions), the probe catches it and we fall
-# back to in-process gen with a hard cap of 1 mint per pass (MINT_CAP_FALLBACK).
-# At ~1s per gen, 1 mint per 60s tick = ~1.7% of requests may see that 1s GIL
-# hold. Acceptable steady-state; cold start fills slowly (25 ticks = 25 min).
+# If fork gen fails (container restriction, OOM, etc.) we fall back to
+# in-process gen with MINT_CAP_FALLBACK=1 (one GIL-hold of ~5-6s per tick).
 # ---------------------------------------------------------------------------
-_APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-_GEN_SCRIPT = (
-    "import sys;"
-    "sys.path.insert(0,sys.argv[1]);"
-    "from scaffold.dimacs import gen_planted_3sat;"
-    "cnf,_=gen_planted_3sat(int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]),method=sys.argv[5]);"
-    "sys.stdout.write(cnf)"
-)
-
-_SUBPROCESS_TIMEOUT = int(os.environ.get("CATHEDRAL_GEN_SUBPROCESS_TIMEOUT", "30"))
-MINT_CAP_SUBPROCESS = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "3"))
-MINT_CAP_FALLBACK   = 1   # if subprocess blocked; 1 gen×~1s GIL hold per 60s tick
+_FORK_TIMEOUT = int(os.environ.get("CATHEDRAL_GEN_FORK_TIMEOUT", "45"))
+MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "1"))
+MINT_CAP_FALLBACK = 1   # if fork blocked; 1 gen×~5-6s GIL hold per 60s tick
 
 
-def _probe_subprocess() -> bool:
-    """Test subprocess creation AND scaffold import. Returns True only if a child
-    process can import scaffold.dimacs and produce valid output. Probed at import
-    time; if this fails, all gen calls use direct in-process gen with cap=1."""
+def _worker_gen(conn, seed: int, n_vars: int, n_clauses: int, method: str) -> None:
+    """Run inside a forked child: generate CNF and send over pipe."""
     try:
-        # Use the actual gen script with a tiny CNF (10 vars, 43 clauses) so we
-        # confirm the full import+gen path works, not just subprocess creation.
-        r = subprocess.run(
-            [sys.executable, "-c", _GEN_SCRIPT,
-             _APP_ROOT, "42", "10", "43", "ajm"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return (r.returncode == 0
-                and r.stdout.startswith("p cnf ")
-                and len(r.stdout) > 20)
-    except Exception as e:
-        print(f"[refill] subprocess probe failed ({e!r}); using in-process gen")
-        return False
+        cnf, _ = gen_planted_3sat(seed, n_vars, n_clauses, method=method)
+        conn.send(("ok", cnf))
+    except Exception as exc:
+        conn.send(("err", str(exc)))
+    finally:
+        conn.close()
 
 
-# Probe once at import time so startup logs reveal the mode.
-_SUBPROCESS_OK: bool = _probe_subprocess()
-print(f"[refill] subprocess_ok={_SUBPROCESS_OK} app_root={_APP_ROOT}")
+def _gen_cnf_fork(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
+    """Generate CNF in a forked child process.
+
+    The parent blocks on Pipe.recv() — a C-level os.read() that releases the
+    GIL — so the asyncio event loop is free during the child's ~5-6s gen.
+    """
+    ctx = multiprocessing.get_context("fork")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    p = ctx.Process(target=_worker_gen,
+                    args=(child_conn, seed, n_vars, n_clauses, method),
+                    daemon=True)
+    p.start()
+    child_conn.close()          # parent never writes; release child end in parent
+    try:
+        if not parent_conn.poll(_FORK_TIMEOUT):
+            p.terminate()
+            p.join(5)
+            raise RuntimeError(f"gen fork timed out after {_FORK_TIMEOUT}s "
+                               f"(n={n_vars}, m={n_clauses}, method={method})")
+        status, payload = parent_conn.recv()
+    finally:
+        parent_conn.close()
+        p.join(5)
+    if status != "ok":
+        raise RuntimeError(f"gen fork error: {payload}")
+    return payload
 
 
-def _gen_cnf_subprocess(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
-    """Run gen_planted_3sat in a child process. The parent waits via os.waitpid
-    (releases the GIL) — the event loop is free during generation."""
-    r = subprocess.run(
-        [sys.executable, "-c", _GEN_SCRIPT,
-         _APP_ROOT, str(seed), str(n_vars), str(n_clauses), method],
-        capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"gen subprocess rc={r.returncode}: {r.stderr[:300]}")
-    if not r.stdout.startswith("p cnf "):
-        raise RuntimeError(
-            f"gen subprocess bad output: {r.stdout[:50]!r} stderr={r.stderr[:100]!r}")
-    return r.stdout
+# Try one fork at module import time (runs in a thread via to_thread, NOT on
+# the event loop — this is safe). Result cached in _FORK_OK.
+# NOTE: This probe runs during _start_refill() which IS an async coroutine on
+# the event loop, so we do NOT call the probe here synchronously. Instead we
+# optimistically set _FORK_OK=True and let per-call failures flip it to False.
+_FORK_OK: bool = True
+print(f"[refill] fork_mode=optimistic mint_cap={MINT_CAP_FORK} fallback_cap={MINT_CAP_FALLBACK}")
 
 
 def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
-    """Generate CNF, using subprocess if available (GIL-free), else direct gen."""
-    if _SUBPROCESS_OK:
+    """Generate CNF. Uses fork (GIL-free) if _FORK_OK, else direct gen."""
+    global _FORK_OK
+    t0 = _time.monotonic()
+    if _FORK_OK:
         try:
-            return _gen_cnf_subprocess(seed, n_vars, n_clauses, method)
+            cnf = _gen_cnf_fork(seed, n_vars, n_clauses, method)
+            print(f"[refill] fork_gen ok n={n_vars} m={n_clauses} method={method} "
+                  f"elapsed={_time.monotonic()-t0:.2f}s")
+            return cnf
         except Exception as e:
-            print(f"[refill] subprocess gen failed ({e!r}); using in-process gen")
+            print(f"[refill] fork_gen failed ({e!r}); disabling fork, using in-process")
+            _FORK_OK = False
     cnf, _ = gen_planted_3sat(seed, n_vars, n_clauses, method=method)
+    print(f"[refill] inproc_gen ok n={n_vars} elapsed={_time.monotonic()-t0:.2f}s")
     return cnf
 
 _FAMILY = "synthetic_boolean_v1"
@@ -336,7 +340,7 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
                 log=lambda *a, **k: None) -> dict:
     """Synchronous refill (used in tests). Production uses refill_tier_async."""
     seed_input = seed_input or default_seed_input()
-    mint_cap = MINT_CAP_SUBPROCESS if _SUBPROCESS_OK else MINT_CAP_FALLBACK
+    mint_cap = MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK
     retired, work = _plan_tier(store, tier, seed_input, mint_cap, log)
     n_vars_hint = _TIER_SHAPE.get(tier, (6000, 25560))[0]
     n_clauses_hint = _TIER_SHAPE.get(tier, (6000, 25560))[1]
@@ -360,13 +364,13 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
                             log=lambda *a, **k: None) -> dict:
     """Async refill for one tier.
     1. to_thread: retire + plan (DB calls, releases GIL via I/O).
-    2. Per mint: to_thread(_gen_cnf) — subprocess if available (os.waitpid releases
-       GIL), otherwise direct gen with hard cap=1 (bounded ~1s GIL hold per tick).
+    2. Per mint: to_thread(_gen_cnf) — fork process if available (os.read releases
+       GIL on Pipe.recv), otherwise direct gen with hard cap=1 (bounded GIL hold).
     3. to_thread: write challenge to DB.
     4. sleep(0): yield to event loop between mints.
     """
     seed_input = seed_input or default_seed_input()
-    mint_cap = MINT_CAP_SUBPROCESS if _SUBPROCESS_OK else MINT_CAP_FALLBACK
+    mint_cap = MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK
     n_vars_hint, n_clauses_hint = shape_for(tier)
 
     retired, work = await asyncio.to_thread(_plan_tier, store, tier, seed_input, mint_cap, log)
@@ -395,14 +399,15 @@ async def refill_loop(store: Store, *, interval_seconds: int | None = None,
                       log=lambda *a, **k: None, stop_event: asyncio.Event | None = None) -> None:
     """Asyncio task: periodic refill+retire.
     Uses refill_once_async so each gen call is isolated in its own to_thread.
-    With subprocess available: gen runs in a child process (GIL fully released).
-    Fallback: hard cap=1 mint per tier per tick (~1s GIL hold per 60s = acceptable).
+    With fork gen: child process holds its own GIL; parent Pipe.recv releases
+    the parent GIL so the event loop stays responsive during generation.
+    Fallback: hard cap=1 mint per tier per tick (bounded GIL hold per 60s).
     """
     interval = interval_seconds or _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
                                             _DEFAULT_INTERVAL_SECONDS)
     log("refill_loop_start", interval=interval, targets=_DEFAULT_TARGETS,
-        subprocess_ok=_SUBPROCESS_OK,
-        mint_cap=MINT_CAP_SUBPROCESS if _SUBPROCESS_OK else MINT_CAP_FALLBACK)
+        fork_ok=_FORK_OK,
+        mint_cap=MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
     try:
         while not (stop_event and stop_event.is_set()):
             try:
