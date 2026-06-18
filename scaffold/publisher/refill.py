@@ -70,36 +70,11 @@ from .store import Store
 
 _POOL: concurrent.futures.ProcessPoolExecutor | None = None
 _POOL_BROKEN: bool = False
-# Resolved once at import time: the app root directory that must be on
-# sys.path in the spawned worker so it can import scaffold.dimacs.
-# refill.py lives at <app_root>/scaffold/publisher/refill.py, so the
-# app root is 3 directories up from this file.
-_APP_ROOT: str = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-# Per-call timeout for future.result(). Cap at 60s so a hung worker
-# doesn't block the refill thread slot indefinitely.
-_GEN_TIMEOUT: float = 60.0
-
-
-def _worker_init(app_root: str) -> None:
-    """Subprocess initializer: ensure app_root is on sys.path so the
-    worker can import scaffold.dimacs. Called once per worker process.
-    Runs in the child — safe to modify sys.path here."""
-    import sys
-    if app_root not in sys.path:
-        sys.path.insert(0, app_root)
 
 
 def _get_pool() -> concurrent.futures.ProcessPoolExecutor | None:
     """Return the module-level process pool, initialising it lazily with
-    the 'spawn' context. Returns None on init failure (triggers fallback).
-
-    'spawn' is used over 'fork' to avoid inheriting psycopg2 connections
-    (fork-unsafe, causes child crashes) and uvicorn signal handlers.
-    An initializer adds the app root to sys.path so the worker can import
-    scaffold.dimacs without a full pip install in the child.
-    """
+    the 'spawn' context. Returns None on init failure (triggers fallback)."""
     global _POOL, _POOL_BROKEN
     if _POOL_BROKEN:
         return None
@@ -110,14 +85,12 @@ def _get_pool() -> concurrent.futures.ProcessPoolExecutor | None:
         _POOL = concurrent.futures.ProcessPoolExecutor(
             max_workers=1,
             mp_context=ctx,
-            initializer=_worker_init,
-            initargs=(_APP_ROOT,),
         )
         # Warm the pool: submit a trivial task so the worker process is
-        # started now (and _worker_init has run) rather than on the first
-        # real mint. Timeout avoids blocking startup forever if spawn fails.
+        # started now rather than on the first real mint (avoids a 2s
+        # startup spike during the first refill pass).
         _POOL.submit(int, 0).result(timeout=30)
-    except Exception:  # pragma: no cover — spawn unsupported or times out
+    except Exception:  # pragma: no cover — init failure
         _POOL_BROKEN = True
         _POOL = None
         return None
@@ -132,16 +105,16 @@ def _gen_cnf_in_process(seed: int, n_vars: int, n_clauses: int,
     so blocking on Future.result() is safe. The CPU work runs in a separate
     process — no GIL contention with the event loop or other threads.
 
-    Falls back to direct in-thread call if the pool is unavailable or times
-    out, so minting never breaks even if subprocess spawning fails.
+    Falls back to direct in-thread call if the pool is unavailable, so
+    minting never breaks even if subprocess spawning fails.
     """
     pool = _get_pool()
     if pool is None:
         return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
     try:
         future = pool.submit(gen_planted_3sat, seed, n_vars, n_clauses, method)
-        return future.result(timeout=_GEN_TIMEOUT)
-    except Exception:  # pragma: no cover — worker crash, timeout, pickle error
+        return future.result()
+    except Exception:  # pragma: no cover — worker crash / pickle error
         return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
 
 _FAMILY = "synthetic_boolean_v1"
