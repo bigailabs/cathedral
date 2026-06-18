@@ -70,6 +70,12 @@ _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # next_policy_version() and emit two different vectors with the same
 # policy_version (the orchestrator is single-instance — a process lock suffices).
 _build_lock = threading.Lock()
+# Background refresh state.  A single daemon thread rebuilds the vector every
+# _CACHE_TTL_SECS; all request handlers read from _vector_cache without ever
+# blocking on the DB query.  _bg_started tracks whether the thread is running
+# so we only ever spawn one.
+_bg_started = False
+_bg_lock = threading.Lock()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -317,18 +323,59 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     return payload
 
 
+def _bg_refresh_loop(store: Store, signing_key_hex: str) -> None:
+    """Background daemon thread: rebuild the vector every _CACHE_TTL_SECS.
+
+    Never raises — a transient DB error is logged and retried next cycle.
+    Runs forever; the process exiting is the only exit condition (daemon=True).
+    """
+    while True:
+        try:
+            vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
+            with _build_lock:
+                _vector_cache["v"] = (time.time(), vec)
+        except Exception as exc:
+            print(f"[weights] bg_refresh error (will retry): {exc!r}")
+        time.sleep(_CACHE_TTL_SECS)
+
+
+def _ensure_bg_started(store: Store, signing_key_hex: str) -> None:
+    """Lazily start the background refresh thread (idempotent)."""
+    global _bg_started
+    if _bg_started:
+        return
+    with _bg_lock:
+        if _bg_started:
+            return
+        t = threading.Thread(
+            target=_bg_refresh_loop, args=(store, signing_key_hex),
+            name="weights-bg-refresh", daemon=True,
+        )
+        t.start()
+        _bg_started = True
+
+
 def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
-    """Cached build — at most one compose+sign per _CACHE_TTL_SECS so the
-    endpoint never adds load to the write path."""
-    now = time.time()
-    hit = _vector_cache.get("v")
-    if hit is not None and (now - hit[0]) < _CACHE_TTL_SECS:
-        return hit[1]
-    # Double-checked locking: only one thread builds per cache cycle, so
-    # next_policy_version() is never called concurrently.
+    """Serve the latest signed vector from the in-memory cache.
+
+    The background refresh thread (started on first call) rebuilds the vector
+    every _CACHE_TTL_SECS without ever blocking the request path.  Only the
+    very first call (empty cache) waits for a build — after that every request
+    returns in microseconds.
+    """
+    # Ensure the background thread is running so the cache stays fresh.
+    _ensure_bg_started(store, signing_key_hex)
+
     with _build_lock:
         hit = _vector_cache.get("v")
-        if hit is not None and (time.time() - hit[0]) < _CACHE_TTL_SECS:
+    if hit is not None:
+        return hit[1]
+
+    # First call with an empty cache: build synchronously once so the endpoint
+    # is not 503 on startup. Subsequent requests always hit the cache.
+    with _build_lock:
+        hit = _vector_cache.get("v")
+        if hit is not None:
             return hit[1]
         vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
         _vector_cache["v"] = (time.time(), vec)
@@ -337,4 +384,6 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
 
 def _reset_vector_cache() -> None:
     """Test hook."""
+    global _bg_started
     _vector_cache.clear()
+    _bg_started = False
