@@ -67,7 +67,17 @@ MINT_CAP_FALLBACK = 1   # if fork blocked; 1 gen×~5-6s GIL hold per 60s tick
 
 
 def _worker_gen(conn, seed: int, n_vars: int, n_clauses: int, method: str) -> None:
-    """Run inside a forked child: generate CNF and send over pipe."""
+    """Run inside a forked child: generate CNF and send over pipe.
+
+    Runs at nice(19) — lowest scheduler priority — so the parent process
+    (event loop, request handlers) retains full CPU access while the child
+    generates. On a single-vCPU container this prevents CPU starvation of
+    the parent's uvicorn event loop during the ~5s gen.
+    """
+    try:
+        os.nice(19)  # yield CPU priority to parent; child still runs but deferred
+    except OSError:
+        pass  # containers may not permit nice; continue without it
     try:
         cnf, _ = gen_planted_3sat(seed, n_vars, n_clauses, method=method)
         conn.send(("ok", cnf))
