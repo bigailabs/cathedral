@@ -31,13 +31,118 @@ Runs as an asyncio task inside the publisher, gated by CATHEDRAL_REFILL_ENABLED.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
+import multiprocessing
 import os
 from datetime import datetime, timedelta, timezone
 
 from ..dimacs import gen_planted_3sat
 from .app import seed_challenge
 from .store import Store
+
+# ---------------------------------------------------------------------------
+# GIL-free CNF generation via a subprocess pool
+# ---------------------------------------------------------------------------
+# gen_planted_3sat is pure-Python CPU-bound (~2s for tier1 6000/25560 biased).
+# asyncio.to_thread puts the call in a worker thread, but the GIL is still
+# held by that thread during computation. Python's GIL reacquisition bias
+# means a CPU-hungry thread can re-grab the GIL immediately on release,
+# starving the event loop (main thread) even though the nominal switch
+# interval is 5ms. This freezes HTTP request processing for the duration
+# of each gen call.
+#
+# Fix: run gen_planted_3sat in a subprocess (ProcessPoolExecutor with the
+# 'spawn' context). A spawned child starts a fresh Python interpreter —
+# no shared GIL, no inherited DB connections, no asyncio state. The parent
+# thread blocks on Future.result() while the child does the CPU work; the
+# parent thread itself holds no GIL during that wait (blocking IO/wait).
+#
+# 'spawn' is used over 'fork' to avoid:
+#   - inheriting open psycopg2 connections (fork-unsafe, causes crashes)
+#   - inheriting uvicorn signal handlers and asyncio state in the child
+#
+# Pool is created once (lazily) at first call and never recreated per call.
+# max_workers=1: refill_loop runs one pass at a time; >1 workers would
+# waste memory on a single Railway instance. If pool init fails, we fall
+# back to the direct in-thread call — the GIL is held but minting still
+# works (safe degradation).
+
+_POOL: concurrent.futures.ProcessPoolExecutor | None = None
+_POOL_BROKEN: bool = False
+# Resolved once at import time: the app root directory that must be on
+# sys.path in the spawned worker so it can import scaffold.dimacs.
+# refill.py lives at <app_root>/scaffold/publisher/refill.py, so the
+# app root is 3 directories up from this file.
+_APP_ROOT: str = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+# Per-call timeout for future.result(). Cap at 60s so a hung worker
+# doesn't block the refill thread slot indefinitely.
+_GEN_TIMEOUT: float = 60.0
+
+
+def _worker_init(app_root: str) -> None:
+    """Subprocess initializer: ensure app_root is on sys.path so the
+    worker can import scaffold.dimacs. Called once per worker process.
+    Runs in the child — safe to modify sys.path here."""
+    import sys
+    if app_root not in sys.path:
+        sys.path.insert(0, app_root)
+
+
+def _get_pool() -> concurrent.futures.ProcessPoolExecutor | None:
+    """Return the module-level process pool, initialising it lazily with
+    the 'spawn' context. Returns None on init failure (triggers fallback).
+
+    'spawn' is used over 'fork' to avoid inheriting psycopg2 connections
+    (fork-unsafe, causes child crashes) and uvicorn signal handlers.
+    An initializer adds the app root to sys.path so the worker can import
+    scaffold.dimacs without a full pip install in the child.
+    """
+    global _POOL, _POOL_BROKEN
+    if _POOL_BROKEN:
+        return None
+    if _POOL is not None:
+        return _POOL
+    try:
+        ctx = multiprocessing.get_context("spawn")
+        _POOL = concurrent.futures.ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=ctx,
+            initializer=_worker_init,
+            initargs=(_APP_ROOT,),
+        )
+        # Warm the pool: submit a trivial task so the worker process is
+        # started now (and _worker_init has run) rather than on the first
+        # real mint. Timeout avoids blocking startup forever if spawn fails.
+        _POOL.submit(int, 0).result(timeout=30)
+    except Exception:  # pragma: no cover — spawn unsupported or times out
+        _POOL_BROKEN = True
+        _POOL = None
+        return None
+    return _POOL
+
+
+def _gen_cnf_in_process(seed: int, n_vars: int, n_clauses: int,
+                         method: str) -> tuple[str, list[int]]:
+    """Generate CNF in a subprocess, releasing the GIL in the calling thread.
+
+    Called from a worker thread (refill_tier runs via asyncio.to_thread),
+    so blocking on Future.result() is safe. The CPU work runs in a separate
+    process — no GIL contention with the event loop or other threads.
+
+    Falls back to direct in-thread call if the pool is unavailable or times
+    out, so minting never breaks even if subprocess spawning fails.
+    """
+    pool = _get_pool()
+    if pool is None:
+        return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
+    try:
+        future = pool.submit(gen_planted_3sat, seed, n_vars, n_clauses, method)
+        return future.result(timeout=_GEN_TIMEOUT)
+    except Exception:  # pragma: no cover — worker crash, timeout, pickle error
+        return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
 
 _FAMILY = "synthetic_boolean_v1"
 
@@ -204,35 +309,10 @@ def reclaim_retired_cnf(store: Store) -> int:
     return store.write(_do)
 
 
-def max_mints_per_pass() -> int:
-    """Max CNFs to mint per tier per refill pass (env: CATHEDRAL_REFILL_MAX_MINTS).
-
-    gen_planted_3sat is pure-Python CPU-bound (~0.5-1s per challenge on the
-    Railway host). Each mint holds the GIL for that duration, which delays
-    event-loop request handling. Capping mints per pass keeps the worst-case
-    GIL hold bounded:
-      - Steady state (1-2 retirements per hour): 1-2 mints × ~1s = ~2s/pass.
-        At a 60s interval this is negligible.
-      - Cold start (empty board, 25 needed per tier): without a cap this
-        would mint 25 × ~1s = ~25s of consecutive GIL hold, freezing the
-        service. With cap=3: 3 × ~1s = ~3s per pass; board fills in ~8 ticks
-        (~8 minutes). The board is never completely empty post-deploy since
-        Postgres retains seeded challenges from the live feed.
-    Default 3 (enough to absorb normal retirement churn in one pass). Raise
-    via env if the board drains faster than one pass can replenish.
-    """
-    return _env_int("CATHEDRAL_REFILL_MAX_MINTS", 3)
-
-
 def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
                 log=lambda *a, **k: None) -> dict:
     """Retire ready challenges, then mint up to the tier target. Returns a
-    summary. Deterministic in (seed_input, tier, sequence).
-
-    Mints are capped at max_mints_per_pass() per call to bound the GIL hold
-    per refill tick. The loop is re-entered on the next interval until the
-    board reaches target.
-    """
+    summary. Deterministic in (seed_input, tier, sequence)."""
     seed_input = seed_input or default_seed_input()
     retired = retire_ready(store, tier)
     target = target_for(tier)
@@ -243,7 +323,6 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
             live=_TIER_SHAPE.get(tier), method=planting_method)
 
     minted = 0
-    mint_cap = max_mints_per_pass()
     # sequence walks forward until target reached; mint_challenge_id collisions
     # (already-present ids) are skipped so re-runs in the same bucket are idempotent.
     seq = store.query(
@@ -252,8 +331,6 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
     guard = 0
     while active_local_count(store, tier) < target and guard < target * 4 + 8:
         guard += 1
-        if minted >= mint_cap:
-            break  # hit per-pass cap; resume on next tick
         cid = mint_challenge_id(seed_input, tier, seq)
         seq += 1
         existing = store.query(
@@ -261,7 +338,7 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
         if existing:
             continue  # already minted this (seed_input,tier,seq) — idempotent skip
         seed = mint_seed(seed_input, tier, seq - 1)
-        cnf_text, _planted = gen_planted_3sat(seed, n_vars, n_clauses, method=planting_method)
+        cnf_text, _planted = _gen_cnf_in_process(seed, n_vars, n_clauses, method=planting_method)
         seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text,
                        status="active")
         # mark provenance + updated_at for age retirement (seed_challenge defaults
