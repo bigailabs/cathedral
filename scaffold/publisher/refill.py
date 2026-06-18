@@ -76,19 +76,28 @@ MINT_CAP_FALLBACK   = 1   # if subprocess blocked; 1 gen×~1s GIL hold per 60s t
 
 
 def _probe_subprocess() -> bool:
-    """Try spawning a tiny subprocess. Returns True if subprocess creation works."""
+    """Test subprocess creation AND scaffold import. Returns True only if a child
+    process can import scaffold.dimacs and produce valid output. Probed at import
+    time; if this fails, all gen calls use direct in-process gen with cap=1."""
     try:
+        # Use the actual gen script with a tiny CNF (10 vars, 43 clauses) so we
+        # confirm the full import+gen path works, not just subprocess creation.
         r = subprocess.run(
-            [sys.executable, "-c", "print(1)"],
-            capture_output=True, text=True, timeout=5,
+            [sys.executable, "-c", _GEN_SCRIPT,
+             _APP_ROOT, "42", "10", "43", "ajm"],
+            capture_output=True, text=True, timeout=15,
         )
-        return r.returncode == 0 and r.stdout.strip() == "1"
-    except Exception:
+        return (r.returncode == 0
+                and r.stdout.startswith("p cnf ")
+                and len(r.stdout) > 20)
+    except Exception as e:
+        print(f"[refill] subprocess probe failed ({e!r}); using in-process gen")
         return False
 
 
 # Probe once at import time so startup logs reveal the mode.
 _SUBPROCESS_OK: bool = _probe_subprocess()
+print(f"[refill] subprocess_ok={_SUBPROCESS_OK} app_root={_APP_ROOT}")
 
 
 def _gen_cnf_subprocess(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
@@ -102,6 +111,9 @@ def _gen_cnf_subprocess(seed: int, n_vars: int, n_clauses: int, method: str) -> 
     if r.returncode != 0:
         raise RuntimeError(
             f"gen subprocess rc={r.returncode}: {r.stderr[:300]}")
+    if not r.stdout.startswith("p cnf "):
+        raise RuntimeError(
+            f"gen subprocess bad output: {r.stdout[:50]!r} stderr={r.stderr[:100]!r}")
     return r.stdout
 
 
@@ -111,7 +123,7 @@ def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
         try:
             return _gen_cnf_subprocess(seed, n_vars, n_clauses, method)
         except Exception as e:
-            print(f"[refill] subprocess gen failed ({e!r}); retrying in-process")
+            print(f"[refill] subprocess gen failed ({e!r}); using in-process gen")
     cnf, _ = gen_planted_3sat(seed, n_vars, n_clauses, method=method)
     return cnf
 

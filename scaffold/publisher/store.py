@@ -187,6 +187,14 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_epoch_hotkey
             ON per_miner_solves(epoch, miner_hotkey);
     """),
+    # 0017: index on lane_challenge_solves.solved_at_iso so compose_scores
+    # (SELECT DISTINCT miner_hotkey, challenge_id WHERE solved_at_iso > ?)
+    # uses an index scan instead of a full table scan. Without this index the
+    # weight-vector build takes 3-5s on large tables (full scan every 60s TTL).
+    ("0017_lane_challenge_solves_solved_at_idx", """
+        CREATE INDEX IF NOT EXISTS idx_lane_challenge_solves_solved_at
+            ON lane_challenge_solves(solved_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -322,6 +330,13 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_epoch_hotkey
             ON per_miner_solves(epoch, miner_hotkey);
+    """),
+    # 0017: index on lane_challenge_solves.solved_at_iso so compose_scores
+    # (SELECT DISTINCT miner_hotkey, challenge_id WHERE solved_at_iso > ?)
+    # uses an index scan instead of a full table scan.
+    ("0017_lane_challenge_solves_solved_at_idx", """
+        CREATE INDEX IF NOT EXISTS idx_lane_challenge_solves_solved_at
+            ON lane_challenge_solves(solved_at_iso);
     """),
 ]
 
