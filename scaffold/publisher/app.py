@@ -155,6 +155,7 @@ def build_app(
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
     app.state.refill_task = None
+    app.state.inject_task = None
     app.state.seed_task = None
     app.state.arena_eval_task = None
     app.state.arena_payout_task = None
@@ -172,6 +173,22 @@ def build_app(
             loop_log = lambda evt, **kw: print(f"[refill] {evt} {kw}")  # noqa: E731
             app.state.refill_task = asyncio.create_task(
                 refill.refill_loop(store, log=loop_log))
+
+    # ---- Inject lane: continuous ADDITIVE test-puzzle injection (env-gated) -
+    # Runs ALONGSIDE refill under a distinct family_id (default 'gentest') so it
+    # can never starve the board — native refill is untouched and keeps the
+    # board full even if this lane is off or stalls. Default OFF. The injected
+    # challenges are served/gated/verified/scored identically to native ones and
+    # are tagged in their challenge_id for live solve-time + score measurement.
+    # See INJECT.md and measure_inject.py.
+    @app.on_event("startup")
+    async def _start_inject():
+        from . import inject
+        if inject.inject_enabled():
+            import asyncio
+            inj_log = lambda evt, **kw: print(f"[inject] {evt} {kw}")  # noqa: E731
+            app.state.inject_task = asyncio.create_task(
+                inject.inject_loop(store, log=inj_log))
 
     # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
     # Periodically scores registered pending solvers and, on a record-fall,
@@ -259,7 +276,7 @@ def build_app(
 
     @app.on_event("shutdown")
     async def _stop_refill():
-        for attr in ("refill_task", "seed_task", "arena_eval_task", "arena_payout_task"):
+        for attr in ("refill_task", "inject_task", "seed_task", "arena_eval_task", "arena_payout_task"):
             task = getattr(app.state, attr, None)
             if task is not None:
                 task.cancel()
@@ -989,7 +1006,12 @@ def _cnf_put_on_mint(store: Store, challenge_id: str, cnf_text: str) -> None:
 def seed_challenge(store: Store, *, challenge_id: str, tier: int, cnf_text: str,
                    status: str = "active", difficulty_label: str | None = None,
                    score_multiplier: float = 1.0,
-                   designated_solver_digest: str | None = None) -> None:
+                   designated_solver_digest: str | None = None,
+                   family_id: str | None = None) -> None:
+    # family_id defaults to the native family. The additive inject lane (see
+    # inject.py / INJECT.md) passes a distinct family so its challenges are
+    # isolated from native refill counting/retirement yet still served, gated,
+    # verified, and scored identically (cnf_source stays 'local').
     from ..dimacs import parse_cnf
     n_vars, clauses = parse_cnf(cnf_text)
     cnf_bytes = len(cnf_text.encode("utf-8"))
@@ -1000,7 +1022,7 @@ def seed_challenge(store: Store, *, challenge_id: str, tier: int, cnf_text: str,
             "cnf_text, cnf_sha256, cnf_bytes, num_vars, num_clauses, status, "
             "score_multiplier, difficulty_label, designated_solver_digest, created_at_iso) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (challenge_id, _FAMILY, tier, cnf_text, sha256_hex(cnf_text), cnf_bytes,
+            (challenge_id, family_id or _FAMILY, tier, cnf_text, sha256_hex(cnf_text), cnf_bytes,
              n_vars, len(clauses), status, score_multiplier, difficulty_label,
              designated_solver_digest, _now_iso_ms()))
     store.write(_do)
