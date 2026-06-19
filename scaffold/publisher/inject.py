@@ -56,6 +56,9 @@ import asyncio
 import os
 import secrets
 
+import hashlib
+import re
+
 from . import refill
 from .store import Store
 
@@ -65,6 +68,12 @@ _DEFAULT_TARGET = 5             # small: bounds extra income + CPU
 _DEFAULT_TIERS = (1, 2)
 _DEFAULT_INTERVAL_SECONDS = 60
 
+# The native lane's family — injected challenges must NEVER use it, or this lane's
+# counting/retirement would collide with native refill on real emissions.
+_NATIVE_FAMILY = refill._FAMILY
+# Family ids become part of public challenge_ids; keep them to a safe slug.
+_FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,30}$")
+
 
 def inject_enabled() -> bool:
     return os.environ.get("CATHEDRAL_INJECT_ENABLED", "").strip().lower() in {
@@ -73,6 +82,19 @@ def inject_enabled() -> bool:
 
 def inject_family() -> str:
     return os.environ.get("CATHEDRAL_INJECT_FAMILY", "").strip() or _DEFAULT_FAMILY
+
+
+def family_is_safe(family: str) -> tuple[bool, str]:
+    """A family is usable only if it (a) is NOT the native family — else inject
+    counting/retirement would collide with native refill on real emissions — and
+    (b) is a safe slug, since it lands in public challenge_ids. Returns
+    (ok, reason)."""
+    if family == _NATIVE_FAMILY:
+        return False, (f"refuses native family '{_NATIVE_FAMILY}' — would collide "
+                       f"with native refill counting/retirement")
+    if not _FAMILY_RE.match(family):
+        return False, f"family '{family}' must match {_FAMILY_RE.pattern}"
+    return True, ""
 
 
 def inject_tiers() -> list[int]:
@@ -118,10 +140,21 @@ def _inject_seed() -> int:
 
 
 def inject_cid(tier: int, family: str, seed: int) -> str:
-    """``sat-t{tier}-random-3sat-{family}-{seed:016x}``. Keeps the ``sat-t{N}-``
-    prefix so tier_from_challenge_id parses the tier; embeds the family label for
-    filtering and the random seed hex for uniqueness."""
-    return f"sat-t{tier}-random-3sat-{family}-{seed:016x}"
+    """Opaque, unique challenge id that does NOT reveal the seed.
+
+    The suffix is a one-way hash of (tier, family, seed), so a participant
+    CANNOT invert the public id back to the seed and reconstruct the planted
+    assignment — they must actually solve. Keeps the ``sat-t{N}-`` prefix so
+    tier_from_challenge_id parses the tier, and the ``{family}`` label so solves
+    stay filterable for measurement.
+
+    SECURITY: an earlier version used ``{seed:016x}`` directly, which let anyone
+    read the seed off the public board, regenerate ``random.Random(seed)``, and
+    recover the planted model with no solving. The seed is never published and
+    never stored — the served CNF body is the only artifact, and it cannot be
+    reproduced from any public field. See inject_verify.py §SEED-SECRECY."""
+    suffix = hashlib.sha256(f"{tier}:{family}:{seed}".encode()).hexdigest()[:16]
+    return f"sat-t{tier}-random-3sat-{family}-{suffix}"
 
 
 def active_inject_count(store: Store, tier: int, family: str) -> int:
@@ -202,13 +235,18 @@ async def inject_tier_async(store: Store, tier: int, family: str,
         guard += 1
         seed = _inject_seed()
         cid = inject_cid(tier, family, seed)
-        if store.query("SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,)):
-            continue  # astronomically unlikely seed collision — skip
+        # collision check off the event loop (postgres getconn() blocks)
+        exists = await asyncio.to_thread(
+            store.query, "SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,))
+        if exists:
+            continue  # astronomically unlikely id collision — skip
         cnf_text = await asyncio.to_thread(refill._gen_cnf, seed, n_vars, n_clauses, method)
         await asyncio.to_thread(_commit_injected, store, cid, tier, family, cnf_text)
         minted += 1
+        # NOTE: never log the seed — it is the secret that keeps the planted
+        # answer unrecoverable. The opaque cid is enough to identify the mint.
         log("inject_mint", tier=tier, cid=cid[:40], method=method,
-            seed_hex=f"{seed:016x}", shape=(n_vars, n_clauses))
+            shape=(n_vars, n_clauses))
         await asyncio.sleep(0)  # yield between mints
 
     active = await asyncio.to_thread(active_inject_count, store, tier, family)
@@ -218,8 +256,13 @@ async def inject_tier_async(store: Store, tier: int, family: str,
 
 
 async def inject_once_async(store: Store, *, log=lambda *a, **k: None) -> list[dict]:
-    """One full inject+retire pass across configured tiers."""
+    """One full inject+retire pass across configured tiers. No-op (returns []) if
+    the configured family is unsafe — fail closed rather than touch native."""
     family = inject_family()
+    ok, why = family_is_safe(family)
+    if not ok:
+        log("inject_disabled", reason=why)
+        return []
     return [await inject_tier_async(store, tier, family, log) for tier in inject_tiers()]
 
 

@@ -19,7 +19,7 @@ import os
 import sys
 import tempfile
 
-from scaffold.dimacs import gen_planted_3sat
+from scaffold.dimacs import gen_planted_3sat, verify_witness
 from scaffold.publisher import inject, refill
 from scaffold.publisher.app import seed_challenge
 from scaffold.publisher.store import Store
@@ -35,15 +35,19 @@ def check(name: str, cond: bool) -> None:
 
 
 def main() -> int:
+    import hashlib
+
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    store = Store(tmp.path) if hasattr(tmp, "path") else Store(tmp.name)
+    store = Store(tmp.name)
 
     family = "gentest"
-    tier = 1
-    nat_cnf, _ = gen_planted_3sat(1, 5, 21, method="biased")
+    tier = 2  # not 1: tier_from_challenge_id defaults to 1 on parse failure, so a
+              # non-1 tier makes the identifiability check actually meaningful.
+    n_vars, n_clauses = 60, 255
+    nat_cnf, _ = gen_planted_3sat(1, n_vars, n_clauses, method="biased")
     inj_seed = 0x1234_5678_9abc_def0 & ((1 << 63) - 1)
-    inj_cnf, _ = gen_planted_3sat(inj_seed, 5, 21, method="biased")
+    inj_cnf, inj_planted = gen_planted_3sat(inj_seed, n_vars, n_clauses, method="biased")
 
     nat_cid = refill.mint_challenge_id("testblk", tier, 0)
     inj_cid = inject.inject_cid(tier, family, inj_seed)
@@ -51,6 +55,26 @@ def main() -> int:
     seed_challenge(store, challenge_id=nat_cid, tier=tier, cnf_text=nat_cnf, status="active")
     seed_challenge(store, challenge_id=inj_cid, tier=tier, cnf_text=inj_cnf,
                    status="active", family_id=family)
+
+    print("0. SEED SECRECY (the public id must NOT reveal the planted answer)")
+    # The injected challenge's public id and the public board fields (tier, family,
+    # num_vars, num_clauses, cnf_sha256). An attacker reads the id suffix and tries
+    # to use it as the seed — the way the OLD {seed:016x} id leaked.
+    suffix = inj_cid.rsplit("-", 1)[-1]
+    check("seed hex does not appear anywhere in the public id",
+          f"{inj_seed:016x}" not in inj_cid)
+    guessed_seed = int(suffix, 16)
+    check("id suffix does not decode to the real seed",
+          guessed_seed != inj_seed)
+    guessed_cnf, guessed_planted = gen_planted_3sat(guessed_seed, n_vars, n_clauses, method="biased")
+    check("CNF regenerated from the public id does NOT match the served CNF",
+          hashlib.sha256(guessed_cnf.encode()).hexdigest()
+          != hashlib.sha256(inj_cnf.encode()).hexdigest())
+    check("planted answer derived from the public id does NOT solve the served CNF",
+          not verify_witness(inj_cnf, guessed_planted))
+    # sanity: the REAL planted answer does solve it (so the challenge is genuine)
+    check("the real planted answer (secret) does solve the served CNF",
+          verify_witness(inj_cnf, inj_planted))
 
     print("1. ISOLATION")
     check("native count sees only the native challenge",
@@ -91,6 +115,14 @@ def main() -> int:
     nat_retired = refill.retire_ready(store, tier)
     check("native retirement does not retire any injected challenge (none left active)",
           nat_retired == 0)
+
+    print("5. FAMILY GUARD (fail closed on a dangerous family)")
+    ok_native, _ = inject.family_is_safe("synthetic_boolean_v1")
+    check("refuses the native family", ok_native is False)
+    ok_blank, _ = inject.family_is_safe("")
+    check("refuses an empty/invalid family", ok_blank is False)
+    ok_good, _ = inject.family_is_safe("gentest")
+    check("accepts a normal injected family", ok_good is True)
 
     print()
     if FAILS:

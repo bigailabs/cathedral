@@ -24,9 +24,18 @@ challenges and tops up to a small target of **extra** active challenges that are
   one signed solve per `(challenge, hotkey)`, same dedup, same proportional
   scoring.
 - **Identifiable** — the `challenge_id` embeds the family label and still parses
-  to the right tier, e.g. `sat-t2-random-3sat-gentest-<seed-hex>`. Every solve
+  to the right tier, e.g. `sat-t2-random-3sat-gentest-<opaque-hash>`. Every solve
   row carries the `challenge_id`, so measurement is a substring match on
   `-gentest-`.
+- **Seed-secret** — the suffix is a one-way hash of the seed, **not the seed**.
+  The seed is never published, never stored, never logged; the served CNF is the
+  only artifact and cannot be reproduced from any public board field. (An earlier
+  draft put the raw seed in the id, which let anyone reconstruct the planted
+  answer with no solving — caught in review; `inject_verify.py §0` now proves it
+  can't.)
+- **Fail-closed family** — the lane refuses to run on the native family
+  (`synthetic_boolean_v1`) or any non-slug family, so a bad `CATHEDRAL_INJECT_FAMILY`
+  can never collide with native counting/retirement on real emissions.
 
 ### What makes an injected puzzle different from a native one
 
