@@ -83,6 +83,48 @@ solved %, time-to-first-solve (min / median / mean), and mean distinct solvers �
 the side-by-side answer to "do the unpredictable/harder injected instances solve
 slower, and who solves them?"
 
+## Difficulty ladder — paste a rung, measure, climb
+
+The goal is **variance in solve time**. Climb one rung at a time and re-run
+`measure_inject.py` after each. Two independent variables, in order:
+
+**Rung 0 — same shape as native (isolate the SEED).** Injected instances match
+native exactly except the seed is OS-entropy instead of `sha256(utc_hour…)`. If
+native solves suspiciously faster/tighter than `gentest` here, someone is
+pre-solving the predictable seed — that's the exploit, surfaced.
+
+```bash
+CATHEDRAL_INJECT_ENABLED=1  CATHEDRAL_INJECT_TIERS=2  CATHEDRAL_INJECT_TARGET_T2=5
+# method + shape unset → inherit native tier-2 (ajm, 400 vars / 1704 clauses)
+```
+
+**Rung 1 — AJM at the phase transition (isolate HARDNESS).** Force the unbiased
+`ajm` method at m/n ≈ 4.26. `biased` is easy at any size, so this is the first
+rung that can actually move solve time.
+
+```bash
+CATHEDRAL_INJECT_METHOD_T2=ajm  CATHEDRAL_INJECT_NVARS_T2=400  CATHEDRAL_INJECT_NCLAUSES_T2=1704
+```
+
+**Rung 2+ — scale n, hold the ratio.** Raise `NVARS` keeping `NCLAUSES ≈ 4.26 ×
+NVARS`. Hardness climbs steeply with n for `ajm` near threshold.
+
+```bash
+CATHEDRAL_INJECT_METHOD_T2=ajm  CATHEDRAL_INJECT_NVARS_T2=800   CATHEDRAL_INJECT_NCLAUSES_T2=3408
+# next: 1500 / 6390 … keep going until solve-time spreads
+```
+
+**Stop climbing when challenges start getting _zero_ solves** — that means you
+overshot the field: variance turns into "too hard for everyone," those slots stop
+differentiating, and they still cost real weight on the ones that do solve. Watch
+`solved %` in the report; if it falls toward 0 on a rung, step back one.
+
+Caveat: threshold random-3SAT hardness is **not perfectly monotonic** (the
+difficulty-ladder open question — "falsified by the P0 spike"). `ajm`-at-larger-n
+is the right cheap read on variance, but expect a noisy curve, not a clean line;
+the solver-robust ladder (reduced-round preimage / cube-of-real-instance) is a
+later piece.
+
 ## Verify (no live state)
 
 ```bash
