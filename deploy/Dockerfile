@@ -20,14 +20,13 @@ RUN pip install --no-cache-dir -r /app/deploy/requirements.txt
 # Copy only what the publisher runtime needs (scaffold package).
 COPY scaffold /app/scaffold
 
-# Non-root runtime user. Railway mounts the persistent volume over /app/data
-# OWNED BY ROOT at runtime (build-time chown does not survive the mount), so
-# the entrypoint starts as root, chowns the mount, then drops to `cathedral`.
+# Non-root runtime user. Railway mounts the persistent volume as root, so the
+# entrypoint fixes only the active DB path before dropping to `cathedral`.
 RUN useradd --create-home --uid 10001 cathedral && chown -R cathedral:cathedral /app
 
-# DB lives in the working dir by default; mount a volume here for persistence.
-ENV CATHEDRAL_DB_PATH=/app/data/publisher.db
-RUN mkdir -p /app/data && chown cathedral:cathedral /app/data
+# DB lives on the Railway persistent volume by default.
+ENV CATHEDRAL_DB_PATH=/data/publisher.db
+RUN mkdir -p /app/data /data && chown cathedral:cathedral /app/data /data
 
 # Railway provides $PORT; default 8000 for local runs.
 ENV PORT=8000
