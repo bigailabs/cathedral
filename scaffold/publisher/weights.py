@@ -63,6 +63,10 @@ MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"                       # flat_recent | propor
 # Difficulty-weighted scoring: tier2 multiplier (default 3.0).
 # Set to "1.0" to make both tiers score equally (byte-identical to pre-AJM).
 TIER2_MULT_ENV = "CATHEDRAL_WEIGHTS_TIER2_MULT"
+# Transitional per-miner incentive. When >0, shared-board scoring remains the
+# base and verified per-miner solves add a bounded normalized bonus. This lets
+# miners migrate without replacing the live scorer in one step.
+PERMINER_BONUS_MULT_ENV = "CATHEDRAL_PERMINER_BONUS_MULT"
 
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -132,11 +136,29 @@ def tier2_multiplier() -> float:
     return _env_float(TIER2_MULT_ENV, 3.0)
 
 
+def perminer_bonus_multiplier() -> float:
+    """Small additive bonus for miners using per-miner unique assignments.
+
+    Default 0.0 preserves the current vector. A live value like 0.05 means:
+    base shared-board score + up to 5% normalized per-miner bonus, then the
+    combined scores are re-normalized relative to the top combined scorer.
+    """
+    return min(1.0, max(0.0, _env_float(PERMINER_BONUS_MULT_ENV, 0.0)))
+
+
 def coldkey_collapse_enabled() -> bool:
     """Opt-in Sybil hardening. OFF by default so this is byte-identical to today
     until an operator flips it AND a hotkey->coldkey map is supplied."""
     return os.environ.get("CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE", "").strip().lower() in {
         "1", "true", "yes", "on"}
+
+
+def _perminer_scores(store: Store) -> dict[str, float]:
+    """Current-epoch per-miner scores, or empty when disabled/no solves."""
+    from . import per_miner as pm
+    if not pm.perminer_enabled():
+        return {}
+    return pm.compute_perminer_scores(store, pm.current_epoch())
 
 
 def _perminer_compose_scores(store: Store) -> dict[str, float] | None:
@@ -158,6 +180,47 @@ def _perminer_compose_scores(store: Store) -> dict[str, float] | None:
         print(f"[per_miner] shadow_vector epoch={epoch} scores={scores}")
         return None  # fall through to live scoring
     return scores if scores else None
+
+
+def _apply_perminer_bonus(
+    store: Store,
+    base: dict[str, float],
+    coldkey_of: dict[str, str] | None = None,
+) -> dict[str, float]:
+    """Add a transition bonus for per-miner adopters without replacing base scoring."""
+    bonus = perminer_bonus_multiplier()
+    if bonus <= 0.0:
+        return base
+    pm_scores = _perminer_scores(store)
+    if not pm_scores:
+        return base
+    combined = dict(base)
+    use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
+    if not use_ck:
+        for hk, score in pm_scores.items():
+            combined[hk] = combined.get(hk, 0.0) + bonus * float(score)
+    else:
+        def ident(hk: str) -> str:
+            return coldkey_of.get(hk, hk)  # type: ignore[union-attr]
+
+        members: dict[str, set[str]] = {}
+        best: dict[str, float] = {}
+        for hk in set(base) | set(pm_scores):
+            members.setdefault(ident(hk), set()).add(hk)
+        for hk, score in pm_scores.items():
+            idk = ident(hk)
+            best[idk] = max(best.get(idk, 0.0), float(score))
+        for idk, score in best.items():
+            hks = members.get(idk) or set()
+            if not hks:
+                continue
+            per_hotkey_bonus = (bonus * score) / len(hks)
+            for hk in hks:
+                combined[hk] = combined.get(hk, 0.0) + per_hotkey_bonus
+    top = max(combined.values()) if combined else 0.0
+    if top <= 0.0:
+        return {}
+    return {hk: round(v / top, 6) for hk, v in combined.items()}
 
 
 def _load_coldkey_map(store: Store) -> dict[str, str] | None:
@@ -238,14 +301,14 @@ def compose_scores(
                 per = round((w / top) / len(hks[idk]), 6)
                 for hk in hks[idk]:
                     base[hk] = per
-            return base
+            return _apply_perminer_bonus(store, base, coldkey_of)
         # no in-window claim rows -> fall through to flat
 
     feed = store.query(
         "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,))
     hotkeys = {str(r["miner_hotkey"]) for r in feed}
     if not use_ck:
-        return {hk: 1.0 for hk in hotkeys}
+        return _apply_perminer_bonus(store, {hk: 1.0 for hk in hotkeys}, coldkey_of)
     # flat, identity-deduped: each coldkey's hotkeys share a single 1.0
     groups: dict[str, list[str]] = {}
     for hk in hotkeys:
@@ -255,7 +318,7 @@ def compose_scores(
         per = round(1.0 / len(members), 6)
         for hk in members:
             out[hk] = per
-    return out
+    return _apply_perminer_bonus(store, out, coldkey_of)
 
 
 # -- monotonic policy_version (validator rollback fence) -----------------------
