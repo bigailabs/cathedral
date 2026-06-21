@@ -44,6 +44,6 @@ COPY deploy/entrypoint.sh /app/deploy/entrypoint.sh
 RUN chmod +x /app/deploy/entrypoint.sh
 ENTRYPOINT ["/app/deploy/entrypoint.sh"]
 
-# Shell form so $PORT expands at runtime; exec so uvicorn replaces the shell
-# and receives SIGTERM directly (graceful shutdown, clean WAL).
-CMD exec uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT}
+# Run through sh so Railway's runtime PORT expands after the entrypoint drops
+# privileges; exec lets uvicorn receive SIGTERM directly.
+CMD ["sh", "-c", "exec uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT:-8000}"]
