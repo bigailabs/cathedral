@@ -631,14 +631,21 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
     retired, work = await asyncio.to_thread(_plan_tier, store, tier, seed_input, mint_cap, log)
 
     minted = 0
+    failed = 0
     for cid, seed, n_vars, n_clauses, method in work:
-        await asyncio.to_thread(_mint_one, store, cid, tier, seed, n_vars, n_clauses, method)
+        try:
+            await asyncio.to_thread(_mint_one, store, cid, tier, seed, n_vars, n_clauses, method)
+        except Exception as exc:
+            failed += 1
+            log("refill_mint_failed", tier=tier, cid=cid[:20], error=str(exc))
+            await asyncio.sleep(0)
+            continue
         minted += 1
         await asyncio.sleep(0)  # yield to the event loop between mints
 
     active = await asyncio.to_thread(active_local_count, store, tier)
     return {"tier": tier, "retired": retired, "minted": minted,
-            "active": active, "target": target_for(tier),
+            "failed": failed, "active": active, "target": target_for(tier),
             "shape": (n_vars_hint, n_clauses_hint)}
 
 
