@@ -273,14 +273,17 @@ def build_app(
     # ---- helpers ----------------------------------------------------------
     def _challenge_public(r: Any) -> dict[str, Any]:
         cid = r["challenge_id"]
+        label = r["difficulty_label"] or ""
+        score_multiplier = float(r["score_multiplier"])
+        kind = "audit_cnf" if cid.startswith("audit-") or str(label).startswith("audit") else "random_3sat"
         return {
             "family_id": r["family_id"],
             "challenge_id": cid,
             "status": r["status"],
             "tier": r["tier"],
             "difficulty_label": r["difficulty_label"],
-            "score_multiplier": r["score_multiplier"],
-            "kind": "random_3sat",
+            "score_multiplier": score_multiplier,
+            "kind": kind,
             "storage": "sqlite_text",
             "cnf_sha256": r["cnf_sha256"],
             "cnf_bytes": r["cnf_bytes"],
@@ -288,7 +291,11 @@ def build_app(
             "num_clauses": r["num_clauses"],
             "announced_time_limit_secs": 604800,
             "solve_on_submit_enabled": True,
-            "win_rule": "First submitted valid SAT receipt wins.",
+            "win_rule": (
+                "Shadow audit instance: valid witnesses are harvested, no emission score."
+                if score_multiplier <= 0.0 else
+                "First submitted valid SAT receipt wins."
+            ),
             "active_cnf_path": f"/api/cathedral/v1/synthetic-boolean/active-cnf?challenge_id={cid}",
             "submit_path": "/api/cathedral/v1/agents/submit",
         }
@@ -573,8 +580,32 @@ def build_app(
     # pattern as active-cnf (the 6-field claim shape, challenge_id="", solution="").
     # The hotkey IS the identity of the challenge set — no hotkey, no set.
 
+    def _record_perminer_assignments(hotkey: str, epoch: int, items: list[dict[str, Any]]) -> None:
+        assigned_at = _now_iso_ms()
+
+        def _do(conn):
+            for item in items:
+                conn.execute(
+                    "INSERT OR IGNORE INTO per_miner_assignments"
+                    "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, assigned_at_iso) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (item["challenge_id"], hotkey, epoch, int(item["tier"]),
+                     int(item["seq"]), float(item["difficulty_weight"]), assigned_at))
+        store.write(_do)
+
+    def _lookup_perminer_assignment(hotkey: str, epoch: int, challenge_id: str) -> tuple[int, int] | None:
+        found = store.query(
+            "SELECT tier, seq FROM per_miner_assignments "
+            "WHERE challenge_id=? AND miner_hotkey=? AND epoch=?",
+            (challenge_id, hotkey, epoch))
+        if found:
+            return int(found[0]["tier"]), int(found[0]["seq"])
+        return None
+
     @app.get("/v1/synthetic-boolean/per-miner/challenges")
     def per_miner_challenges(
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=500),
         x_cathedral_hotkey: str = Header(...),
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str | None = Header(None),
@@ -598,12 +629,16 @@ def build_app(
             challenge_id="", dimacs_solution_sha256="",
         )
         epoch = pm.current_epoch()
-        items = pm.miner_instance_set(x_cathedral_hotkey, epoch)
+        items = pm.miner_instance_set(x_cathedral_hotkey, epoch, offset=offset, limit=limit)
+        _record_perminer_assignments(x_cathedral_hotkey, epoch, items)
         return {
             "family_id": _FAMILY,
             "kind": "per_miner",
             "epoch": epoch,
             "miner_hotkey": x_cathedral_hotkey,
+            "offset": offset,
+            "limit": limit,
+            "next_offset": offset + limit,
             "count": len(items),
             "items": items,
             "submit_path": "/api/cathedral/v1/agents/submit",
@@ -633,16 +668,17 @@ def build_app(
             challenge_id="", dimacs_solution_sha256="",
         )
         epoch = pm.current_epoch()
-        # Scan the miner's allotment to find the matching challenge.
-        for tier in pm.TIERS:
-            for seq in range(pm.allotment_for(tier)):
-                cid = pm.instance_id(x_cathedral_hotkey, epoch, tier, seq)
-                if cid == challenge_id:
-                    _, cnf_text, _ = pm.generate_instance(x_cathedral_hotkey, epoch, tier, seq)
-                    return PlainTextResponse(cnf_text, media_type="text/plain; charset=utf-8",
-                                            headers={"X-Perminer-Challenge-Id": cid,
-                                                     "X-Perminer-Tier": str(tier),
-                                                     "X-Perminer-Epoch": str(epoch)})
+        tier_seq = _lookup_perminer_assignment(x_cathedral_hotkey, epoch, challenge_id)
+        if tier_seq is None:
+            tier_seq = pm.recover_tier_seq_for(x_cathedral_hotkey, epoch, challenge_id)
+        if tier_seq is not None:
+            tier, seq = tier_seq
+            cid, cnf_text, _ = pm.generate_instance(x_cathedral_hotkey, epoch, tier, seq)
+            if cid == challenge_id:
+                return PlainTextResponse(cnf_text, media_type="text/plain; charset=utf-8",
+                                        headers={"X-Perminer-Challenge-Id": cid,
+                                                 "X-Perminer-Tier": str(tier),
+                                                 "X-Perminer-Epoch": str(epoch)})
         raise HTTPException(404, "challenge_not_in_miner_set")
 
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
@@ -701,15 +737,23 @@ def build_app(
             except ValueError:
                 raise HTTPException(400, "malformed_dimacs_solution")
 
-            ok, reason = pm.verify_miner_submission(
-                x_cathedral_hotkey, epoch, challenge_id, assignment)
+            tier_seq = _lookup_perminer_assignment(x_cathedral_hotkey, epoch, challenge_id)
+            if tier_seq is None:
+                tier_seq = pm.recover_tier_seq_for(x_cathedral_hotkey, epoch, challenge_id)
+            if tier_seq is None:
+                ok, reason = False, "challenge_id_not_in_miner_set"
+            else:
+                ok, reason = pm.verify_miner_submission_for(
+                    x_cathedral_hotkey, epoch, tier_seq[0], tier_seq[1],
+                    challenge_id, assignment)
             sub_id = new_uuid()
 
             if not ok:
                 def _pm_rej(conn):
+                    recorded_at = _now_iso_ms()
                     cur = conn.execute(
                         "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
-                        (x_cathedral_signature, _now_iso_ms()))
+                        (x_cathedral_signature, recorded_at))
                     if not cur.rowcount:
                         return False
                     conn.execute(
@@ -718,13 +762,19 @@ def build_app(
                         "VALUES (?, ?, ?, 'rejected', ?, 0.0, 1, ?, ?)",
                         (sub_id, x_cathedral_hotkey, challenge_id, reason,
                          submitted_at, x_cathedral_signature))
+                    conn.execute(
+                        "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, "
+                        "epoch, status, rejection_reason, dimacs_solution_sha256, "
+                        "submitted_at, recorded_at_iso, signature) "
+                        "VALUES (?, ?, ?, ?, 'rejected', ?, ?, ?, ?, ?)",
+                        (sub_id, challenge_id, x_cathedral_hotkey, epoch, reason,
+                         sol_sha, submitted_at, recorded_at, x_cathedral_signature))
                     return True
                 if not store.write(_pm_rej):
                     raise HTTPException(409, "replayed_signature")
                 raise HTTPException(400, {"detail": reason, "challenge_id": challenge_id})
 
-            # Accepted: find tier/seq to record the solve.
-            tier_seq = pm.recover_tier_seq_for(x_cathedral_hotkey, epoch, challenge_id)
+            # Accepted: tier/seq came from the assignment ledger or compatibility scan.
             tier = tier_seq[0] if tier_seq else 1
             seq = tier_seq[1] if tier_seq else 0
             pm_weight = pm.weight_for(tier)
@@ -752,6 +802,19 @@ def build_app(
                     "VALUES (?, ?, ?, 'ranked', NULL, ?, 1, ?, ?)",
                     (sub_id, x_cathedral_hotkey, challenge_id, pm_weight, submitted_at,
                      x_cathedral_signature))
+                conn.execute(
+                    "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, "
+                    "epoch, status, rejection_reason, dimacs_solution_sha256, "
+                    "submitted_at, recorded_at_iso, signature) "
+                    "VALUES (?, ?, ?, ?, 'ranked', NULL, ?, ?, ?, ?)",
+                    (sub_id, challenge_id, x_cathedral_hotkey, epoch, sol_sha,
+                     submitted_at, now_iso, x_cathedral_signature))
+                conn.execute(
+                    "INSERT INTO per_miner_witnesses(challenge_id, miner_hotkey, epoch, "
+                    "tier, seq, dimacs_solution_sha256, answer_hash, dimacs_solution, "
+                    "recorded_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (challenge_id, x_cathedral_hotkey, epoch, tier, seq, sol_sha,
+                     answer_hash, dimacs_solution, now_iso))
                 emitted = rows.build_solve_rows(
                     row_uuid=row_uuid, miner_hotkey=x_cathedral_hotkey,
                     agent_id=new_uuid(), challenge_id=challenge_id, tier=tier,
@@ -864,7 +927,8 @@ def build_app(
                     return ("already_solved", None, None)
             # row value = flat 1.0 (the audit trail). Economics live in the
             # signed vector (weights.py), composed from this solve ledger.
-            ws = scoring.weighted_score_for(store, x_cathedral_hotkey)
+            score_multiplier = float(chal["score_multiplier"])
+            ws = scoring.weighted_score_for(store, x_cathedral_hotkey) * score_multiplier
             conn.execute(
                 "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
                 "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
@@ -1042,3 +1106,45 @@ def seed_challenge(store: Store, *, challenge_id: str, tier: int, cnf_text: str,
     # upload the immutable body once on mint (no-op for the db backend).
     board_cache_mod.invalidate_all()
     _cnf_put_on_mint(store, challenge_id, cnf_text)
+
+
+def seed_audit_challenge(
+    store: Store,
+    *,
+    challenge_id: str,
+    tier: int,
+    cnf_text: str,
+    manifest: dict[str, Any] | None = None,
+    decode_map: dict[str, Any] | None = None,
+    source_path: str | None = None,
+    status: str = "active",
+    score_multiplier: float = 0.0,
+) -> None:
+    """Seed a structured audit-family CNF in shadow-safe mode by default.
+
+    score_multiplier=0.0 means miners can solve it and we can harvest witnesses,
+    but the challenge contributes zero to proportional weights until an operator
+    explicitly raises the multiplier.
+    """
+    label = "audit_shadow" if score_multiplier <= 0.0 else "audit"
+    seed_challenge(
+        store,
+        challenge_id=challenge_id,
+        tier=tier,
+        cnf_text=cnf_text,
+        status=status,
+        difficulty_label=label,
+        score_multiplier=score_multiplier,
+    )
+    cnf_sha = sha256_hex(cnf_text)
+    manifest_json = json.dumps(manifest or {}, sort_keys=True, separators=(",", ":"))
+    decode_json = json.dumps(decode_map or {}, sort_keys=True, separators=(",", ":"))
+    created_at = _now_iso_ms()
+
+    def _do(conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO audit_challenge_manifests"
+            "(challenge_id, cnf_sha256, manifest_json, decode_map_json, "
+            "source_path, created_at_iso) VALUES (?, ?, ?, ?, ?, ?)",
+            (challenge_id, cnf_sha, manifest_json, decode_json, source_path, created_at))
+    store.write(_do)

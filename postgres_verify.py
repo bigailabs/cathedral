@@ -66,15 +66,18 @@ def main() -> int:
 
     # ---- migrations idempotent --------------------------------------------
     store.migrate()  # second run must be a no-op (already applied)
+    from scaffold.publisher.store import _MIGRATIONS_PG
     applied = store.query("SELECT COUNT(*) AS n FROM schema_migrations")[0]["n"]
-    ck("all 12 migrations applied (idempotent re-run)", int(applied) == 12)
+    ck("all migrations applied (idempotent re-run)", int(applied) == len(_MIGRATIONS_PG))
     # every expected table exists in the verify schema
     tbls = {r[0] for r in store.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema=%s",
         (schema,))}
     want = {"eval_runs", "lane_challenges", "agent_submissions", "arena_solvers",
             "arena_instances", "submit_signatures", "seed_state",
-            "lane_challenge_solves", "schema_migrations"}
+            "lane_challenge_solves", "schema_migrations", "per_miner_solves",
+            "per_miner_attempts", "per_miner_assignments", "per_miner_witnesses",
+            "audit_challenge_manifests"}
     ck(f"all core tables present ({len(want & tbls)}/{len(want)})", want.issubset(tbls))
 
     # ---- insert_row OR IGNORE ---------------------------------------------

@@ -195,6 +195,65 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_lane_challenge_solves_solved_at
             ON lane_challenge_solves(solved_at_iso);
     """),
+    # 0018: per-miner evidence ledgers. Attempts are every accepted/rejected
+    # assigned submission; witnesses keep the accepted solution body so audit
+    # family assignments can be decoded/replayed later.
+    ("0018_per_miner_evidence", """
+        CREATE TABLE IF NOT EXISTS per_miner_attempts (
+            id TEXT PRIMARY KEY,
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            rejection_reason TEXT,
+            dimacs_solution_sha256 TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            recorded_at_iso TEXT NOT NULL,
+            signature TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_challenge_hotkey
+            ON per_miner_attempts(challenge_id, miner_hotkey);
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_epoch_hotkey
+            ON per_miner_attempts(epoch, miner_hotkey);
+
+        CREATE TABLE IF NOT EXISTS per_miner_assignments (
+            challenge_id TEXT PRIMARY KEY,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            difficulty_weight REAL NOT NULL DEFAULT 0.0,
+            assigned_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_per_miner_assignments_epoch_hotkey
+            ON per_miner_assignments(epoch, miner_hotkey);
+
+        CREATE TABLE IF NOT EXISTS per_miner_witnesses (
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            dimacs_solution_sha256 TEXT NOT NULL,
+            answer_hash TEXT NOT NULL,
+            dimacs_solution TEXT NOT NULL,
+            recorded_at_iso TEXT NOT NULL,
+            PRIMARY KEY (challenge_id, miner_hotkey)
+        );
+    """),
+    # 0019: operator-side metadata for structured audit CNFs. These rows are not
+    # public board data; they bind a live CNF to its decode map/manifest hash so
+    # accepted witnesses can be replayed by an operator process.
+    ("0019_audit_challenge_manifests", """
+        CREATE TABLE IF NOT EXISTS audit_challenge_manifests (
+            challenge_id TEXT PRIMARY KEY,
+            cnf_sha256 TEXT NOT NULL,
+            manifest_json TEXT,
+            decode_map_json TEXT,
+            source_path TEXT,
+            created_at_iso TEXT NOT NULL
+        );
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -338,6 +397,59 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_lane_challenge_solves_solved_at
             ON lane_challenge_solves(solved_at_iso);
     """),
+    ("0018_per_miner_evidence", """
+        CREATE TABLE IF NOT EXISTS per_miner_attempts (
+            id TEXT PRIMARY KEY,
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            rejection_reason TEXT,
+            dimacs_solution_sha256 TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            recorded_at_iso TEXT NOT NULL,
+            signature TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_challenge_hotkey
+            ON per_miner_attempts(challenge_id, miner_hotkey);
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_epoch_hotkey
+            ON per_miner_attempts(epoch, miner_hotkey);
+
+        CREATE TABLE IF NOT EXISTS per_miner_assignments (
+            challenge_id TEXT PRIMARY KEY,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            difficulty_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            assigned_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_per_miner_assignments_epoch_hotkey
+            ON per_miner_assignments(epoch, miner_hotkey);
+
+        CREATE TABLE IF NOT EXISTS per_miner_witnesses (
+            challenge_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            dimacs_solution_sha256 TEXT NOT NULL,
+            answer_hash TEXT NOT NULL,
+            dimacs_solution TEXT NOT NULL,
+            recorded_at_iso TEXT NOT NULL,
+            PRIMARY KEY (challenge_id, miner_hotkey)
+        );
+    """),
+    ("0019_audit_challenge_manifests", """
+        CREATE TABLE IF NOT EXISTS audit_challenge_manifests (
+            challenge_id TEXT PRIMARY KEY,
+            cnf_sha256 TEXT NOT NULL,
+            manifest_json TEXT,
+            decode_map_json TEXT,
+            source_path TEXT,
+            created_at_iso TEXT NOT NULL
+        );
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -355,6 +467,10 @@ _PK_BY_TABLE: dict[str, str] = {
     "weight_policy_state": "id",
     "schema_migrations": "id",
     "per_miner_solves": "challenge_id, miner_hotkey",
+    "per_miner_attempts": "id",
+    "per_miner_assignments": "challenge_id",
+    "per_miner_witnesses": "challenge_id, miner_hotkey",
+    "audit_challenge_manifests": "challenge_id",
 }
 
 

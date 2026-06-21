@@ -94,12 +94,23 @@ def epoch_bucket_hours() -> int:
 
 def allotment_for(tier: int) -> int:
     return max(1, _env_int(f"CATHEDRAL_PERMINER_ALLOTMENT_T{tier}",
-                            {1: 5, 2: 3}.get(tier, 3)))
+                            {1: 10_000, 2: 10_000}.get(tier, 10_000)))
 
 
 def weight_for(tier: int) -> float:
     return _env_float(f"CATHEDRAL_PERMINER_WEIGHT_T{tier}",
                       {1: 1.0, 2: 2.0}.get(tier, 1.0))
+
+
+def score_target() -> float:
+    """Throughput denominator for assigned scoring."""
+    configured = _env_float("CATHEDRAL_PERMINER_SCORE_TARGET", 0.0)
+    if configured > 0.0:
+        return configured
+    total = 0.0
+    for tier in TIERS:
+        total += allotment_for(tier) * weight_for(tier)
+    return max(1.0, total)
 
 
 def method_for(tier: int) -> str:
@@ -192,7 +203,13 @@ def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str
     return cid, cnf_text, planted
 
 
-def miner_instance_set(hotkey: str, epoch: int) -> list[dict[str, Any]]:
+def miner_instance_set(
+    hotkey: str,
+    epoch: int,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     """Return the full allotment descriptor for a miner in an epoch.
 
     Returns a list of dicts with keys: challenge_id, tier, seq, n_vars, n_clauses,
@@ -200,11 +217,13 @@ def miner_instance_set(hotkey: str, epoch: int) -> list[dict[str, Any]]:
     get_miner_cnf(). This is the per-miner analogue of active-challenges.
     """
     items = []
+    start = max(0, int(offset))
     for tier in TIERS:
         n_vars, n_clauses = shape_for(tier)
         allotment = allotment_for(tier)
         dw = weight_for(tier)
-        for seq in range(allotment):
+        stop = allotment if limit is None else min(allotment, start + max(1, int(limit)))
+        for seq in range(start, stop):
             cid = instance_id(hotkey, epoch, tier, seq)
             items.append({
                 "challenge_id": cid,
@@ -262,14 +281,30 @@ def verify_miner_submission(
         for seq in range(allotment_for(tier)):
             cid, cnf_text, _planted = generate_instance(hotkey, epoch, tier, seq)
             if cid == challenge_id:
-                ok = verify_witness(cnf_text, assignment)
-                if not ok:
-                    return False, "witness_check_failed"
-                return True, None
+                return verify_miner_submission_for(
+                    hotkey, epoch, tier, seq, challenge_id, assignment)
 
     # The challenge_id was not found in this miner's allotment — either it was
     # generated for a different hotkey (copy attack) or the epoch rolled over.
     return False, "challenge_id_not_in_miner_set"
+
+
+def verify_miner_submission_for(
+    hotkey: str,
+    epoch: int,
+    tier: int,
+    seq: int,
+    challenge_id: str,
+    assignment: list[int],
+) -> tuple[bool, str | None]:
+    """Verify a submission when the assignment ledger already resolved tier/seq."""
+    generated_id, cnf_text, _planted = generate_instance(hotkey, epoch, tier, seq)
+    if generated_id != challenge_id:
+        return False, "challenge_id_not_in_miner_set"
+    ok = verify_witness(cnf_text, assignment)
+    if not ok:
+        return False, "witness_check_failed"
+    return True, None
 
 
 def recover_tier_seq_for(hotkey: str, epoch: int, challenge_id: str) -> tuple[int, int] | None:
@@ -294,7 +329,7 @@ def recover_seq_for(hotkey: str, epoch: int, challenge_id: str) -> int | None:
 # Per-miner scoring (shadow + live)
 # --------------------------------------------------------------------------
 
-def compute_perminer_scores(store: Store, epoch: int) -> dict[str, float]:
+def compute_perminer_raw_scores(store: Store, epoch: int) -> dict[str, float]:
     """Compute reward = Σ difficulty_weight of correctly-solved OWN instances
     for each hotkey in the current epoch.
 
@@ -314,16 +349,20 @@ def compute_perminer_scores(store: Store, epoch: int) -> dict[str, float]:
     for r in rows:
         hk = str(r["miner_hotkey"])
         scores[hk] = round(float(r["total"] or 0.0), 6)
+    return scores
 
+
+def compute_perminer_scores(store: Store, epoch: int) -> dict[str, float]:
+    """Target-normalized per-miner scores for dashboards and shadow logs."""
+    scores = compute_perminer_raw_scores(store, epoch)
     if not scores:
         return {}
 
-    # Normalize to [0, 1] relative to the top scorer (same proportional
-    # semantics as the existing weights.py compose_scores proportional mode).
-    top = max(scores.values())
-    if top <= 0:
+    target = score_target()
+    if target <= 0:
         return {}
-    return {hk: round(s / top, 6) for hk, s in scores.items()}
+    return {hk: round(min(1.0, max(0.0, s / target)), 6)
+            for hk, s in scores.items()}
 
 
 def record_perminer_solve(

@@ -67,6 +67,7 @@ TIER2_MULT_ENV = "CATHEDRAL_WEIGHTS_TIER2_MULT"
 # base and verified per-miner solves add a bounded normalized bonus. This lets
 # miners migrate without replacing the live scorer in one step.
 PERMINER_BONUS_MULT_ENV = "CATHEDRAL_PERMINER_BONUS_MULT"
+PERMINER_REQUIRE_COLDKEY_ENV = "CATHEDRAL_PERMINER_REQUIRE_COLDKEY"
 
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -153,6 +154,11 @@ def coldkey_collapse_enabled() -> bool:
         "1", "true", "yes", "on"}
 
 
+def perminer_require_coldkey() -> bool:
+    raw = os.environ.get(PERMINER_REQUIRE_COLDKEY_ENV, "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _perminer_scores(store: Store) -> dict[str, float]:
     """Current-epoch per-miner scores, or empty when disabled/no solves."""
     from . import per_miner as pm
@@ -161,7 +167,10 @@ def _perminer_scores(store: Store) -> dict[str, float]:
     return pm.compute_perminer_scores(store, pm.current_epoch())
 
 
-def _perminer_compose_scores(store: Store) -> dict[str, float] | None:
+def _perminer_compose_scores(
+    store: Store,
+    coldkey_of: dict[str, str] | None = None,
+) -> dict[str, float] | None:
     """Per-miner scoring path. Returns scores when CATHEDRAL_PERMINER_ENABLED is on
     AND not in shadow-only mode. Returns None when flag is off (caller falls
     through to existing scoring — byte-identical to pre-flag behaviour).
@@ -174,12 +183,48 @@ def _perminer_compose_scores(store: Store) -> dict[str, float] | None:
     if not pm.perminer_enabled():
         return None  # flag off: zero change
     epoch = pm.current_epoch()
-    scores = pm.compute_perminer_scores(store, epoch)
+    scores = pm.compute_perminer_raw_scores(store, epoch)
     if pm.perminer_shadow():
         # Shadow: log the vector for comparison but don't serve it.
-        print(f"[per_miner] shadow_vector epoch={epoch} scores={scores}")
+        shadow = pm.compute_perminer_scores(store, epoch)
+        print(f"[per_miner] shadow_vector epoch={epoch} scores={shadow}")
         return None  # fall through to live scoring
-    return scores if scores else None
+    if not scores:
+        return None
+
+    require_ck = perminer_require_coldkey()
+    use_ck = coldkey_collapse_enabled()
+    if require_ck and (not use_ck or not coldkey_of):
+        print("[per_miner] live vector blocked: coldkey identity required")
+        return None
+
+    identity_scores: dict[str, float] = {}
+    members: dict[str, set[str]] = {}
+    for hk, score in scores.items():
+        if use_ck and coldkey_of:
+            idk = coldkey_of.get(hk)
+            if idk is None and require_ck:
+                continue
+            idk = idk or hk
+        else:
+            idk = hk
+        identity_scores[idk] = max(identity_scores.get(idk, 0.0), float(score))
+        members.setdefault(idk, set()).add(hk)
+
+    target = pm.score_target()
+    if target <= 0.0 or not identity_scores:
+        return None
+
+    out: dict[str, float] = {}
+    for idk, raw_score in identity_scores.items():
+        hks = members.get(idk) or set()
+        if not hks:
+            continue
+        normalized = min(1.0, max(0.0, raw_score / target))
+        per_hotkey = round(normalized / len(hks), 6)
+        for hk in hks:
+            out[hk] = per_hotkey
+    return out or None
 
 
 def _apply_perminer_bonus(
@@ -195,19 +240,25 @@ def _apply_perminer_bonus(
     if not pm_scores:
         return base
     combined = dict(base)
+    if coldkey_collapse_enabled() and not coldkey_of:
+        return base
     use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
     if not use_ck:
         for hk, score in pm_scores.items():
             combined[hk] = combined.get(hk, 0.0) + bonus * float(score)
     else:
         def ident(hk: str) -> str:
-            return coldkey_of.get(hk, hk)  # type: ignore[union-attr]
+            return coldkey_of[hk]  # type: ignore[index]
 
         members: dict[str, set[str]] = {}
         best: dict[str, float] = {}
         for hk in set(base) | set(pm_scores):
+            if hk not in coldkey_of:  # type: ignore[operator]
+                continue
             members.setdefault(ident(hk), set()).add(hk)
         for hk, score in pm_scores.items():
+            if hk not in coldkey_of:  # type: ignore[operator]
+                continue
             idk = ident(hk)
             best[idk] = max(best.get(idk, 0.0), float(score))
         for idk, score in best.items():
@@ -264,21 +315,25 @@ def compose_scores(
     """
     # Per-miner path (flag-gated). When the flag is off this is a no-op and
     # the rest of the function runs unchanged — byte-identical to pre-flag.
-    pm_scores = _perminer_compose_scores(store)
-    if pm_scores is not None:
-        return pm_scores
-
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
+
+    pm_scores = _perminer_compose_scores(store, coldkey_of=coldkey_of)
+    if pm_scores is not None:
+        return pm_scores
 
     def ident(hk: str) -> str:
         return coldkey_of.get(hk, hk) if use_ck else hk
 
     if mode() == "proportional":
         rows = store.query(
-            "SELECT DISTINCT miner_hotkey, challenge_id FROM lane_challenge_solves "
-            "WHERE solved_at_iso > ?", (since,))
+            "SELECT DISTINCT s.miner_hotkey, s.challenge_id, "
+            "COALESCE(c.tier, 1) AS tier, "
+            "COALESCE(c.score_multiplier, 1.0) AS score_multiplier "
+            "FROM lane_challenge_solves s "
+            "LEFT JOIN lane_challenges c ON c.challenge_id=s.challenge_id "
+            "WHERE s.solved_at_iso > ?", (since,))
         # identity -> weighted score (sum of per-challenge tier weights, deduped)
         scores_w: dict[str, float] = {}
         # identity -> set of distinct challenge_ids (for dedup)
@@ -289,9 +344,15 @@ def compose_scores(
             hk = str(r["miner_hotkey"]); idk = ident(hk)
             cid = str(r["challenge_id"])
             if cid not in seen.get(idk, set()):
+                score_multiplier = float(r["score_multiplier"])
+                if score_multiplier <= 0.0:
+                    continue
                 seen.setdefault(idk, set()).add(cid)
-                tier = tier_from_challenge_id(cid)
-                weight = t2_mult if tier == 2 else 1.0
+                try:
+                    tier = int(r["tier"])
+                except Exception:
+                    tier = tier_from_challenge_id(cid)
+                weight = (t2_mult if tier == 2 else 1.0) * score_multiplier
                 scores_w[idk] = scores_w.get(idk, 0.0) + weight
             hks.setdefault(idk, set()).add(hk)
         if scores_w:
