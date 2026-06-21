@@ -6,9 +6,6 @@ builder = "dockerfile"
 dockerfilePath = "deploy/Dockerfile"
 
 [deploy]
-# Railway injects $PORT; the image's CMD binds it.
-startCommand = "uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT}"
-
 # Health gate: Railway holds traffic on the new deploy until /health is 200, so
 # the same-URL swap only cuts over once the thin publisher is actually serving.
 healthcheckPath = "/health"
