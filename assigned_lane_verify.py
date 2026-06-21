@@ -6,7 +6,9 @@ Run:
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 from scaffold.dimacs import gen_planted_3sat
@@ -75,6 +77,30 @@ def main() -> int:
     ck("per-miner attempt row persists status/hash", len(attempts) == 1 and attempts[0]["status"] == "ranked")
     ck("per-miner witness body persists for replay", len(witnesses) == 1 and witnesses[0]["dimacs_solution"] == blob)
     store.close()
+
+    print("MIGRATIONS - tolerate live SQLite drift")
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        store = Store(db_path)
+        store.close()
+        raw = sqlite3.connect(db_path)
+        try:
+            raw.execute("DELETE FROM schema_migrations WHERE id = '0011_lane_challenges_updated_at'")
+            raw.commit()
+        finally:
+            raw.close()
+        store = Store(db_path)
+        marker = store.query(
+            "SELECT id FROM schema_migrations WHERE id = '0011_lane_challenges_updated_at'"
+        )
+        ck("sqlite duplicate ADD COLUMN migration is idempotent", len(marker) == 1)
+        store.close()
+    finally:
+        try:
+            os.remove(db_path)
+        except OSError:
+            pass
 
     print("ASSIGNED LANE - coldkey-safe scoring")
     old = set_env(

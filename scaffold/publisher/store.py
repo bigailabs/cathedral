@@ -567,6 +567,20 @@ class _PgConn:
         return _PgCursorWrapper(cur)
 
 
+def _sqlite_exec_migration(conn: sqlite3.Connection, sql: str) -> None:
+    """Run migration statements; tolerate already-applied ADD COLUMN drift."""
+    for stmt in sql.split(";"):
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                continue
+            raise
+
+
 class Store:
     """Dual-backend store. SQLite (single conn + RLock, BEGIN IMMEDIATE) or
     Postgres (pool, MVCC, no global lock). Backend chosen by the connection
@@ -618,7 +632,7 @@ class Store:
             for mid, sql in _MIGRATIONS:
                 if mid in applied:
                     continue
-                self._conn.executescript(sql)
+                _sqlite_exec_migration(self._conn, sql)
                 self._conn.execute(
                     "INSERT INTO schema_migrations(id, applied_at) VALUES (?, datetime('now'))",
                     (mid,),
