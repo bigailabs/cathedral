@@ -32,15 +32,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import multiprocessing
 import os
 import queue as _queue
 import threading as _threading
 import time as _time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from ..dimacs import gen_planted_3sat
 from .app import seed_challenge
+from .auth import sha256_hex
 from .store import Store
 
 # ---------------------------------------------------------------------------
@@ -263,12 +267,123 @@ def refill_enabled() -> bool:
         "1", "true", "yes", "on"}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     try:
         return int(raw) if raw else default
     except ValueError:
         return default
+
+
+def generator_enabled() -> bool:
+    return (
+        _env_bool("CATHEDRAL_SAT_GENERATOR_ENABLED")
+        and bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_URL", "").strip())
+        and bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_TOKEN", "").strip())
+    )
+
+
+def generator_max_mints() -> int:
+    return max(1, _env_int("CATHEDRAL_SAT_GENERATOR_MAX_MINTS", 25))
+
+
+def generator_kind_for(tier: int) -> str:
+    return os.environ.get(
+        f"CATHEDRAL_SAT_GENERATOR_KIND_T{tier}",
+        os.environ.get("CATHEDRAL_SAT_GENERATOR_KIND", "random_3sat"),
+    ).strip() or "random_3sat"
+
+
+def _generator_timeout() -> int:
+    return max(1, _env_int("CATHEDRAL_SAT_GENERATOR_TIMEOUT_SECONDS", 20))
+
+
+def _generator_url(path_or_url: str) -> str:
+    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+        return path_or_url
+    base = os.environ["CATHEDRAL_SAT_GENERATOR_URL"].strip().rstrip("/") + "/"
+    return urllib.parse.urljoin(base, path_or_url.lstrip("/"))
+
+
+def _generator_json(method: str, path_or_url: str, payload: dict | None = None,
+                    *, idempotency_key: str | None = None) -> dict:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {os.environ['CATHEDRAL_SAT_GENERATOR_TOKEN'].strip()}",
+        "User-Agent": "cathedral-publisher-refill/1",
+    }
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    req = urllib.request.Request(
+        _generator_url(path_or_url), data=body, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=_generator_timeout()) as resp:
+        raw = resp.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
+
+
+def _generator_text(path_or_url: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {os.environ['CATHEDRAL_SAT_GENERATOR_TOKEN'].strip()}",
+        "User-Agent": "cathedral-publisher-refill/1",
+    }
+    req = urllib.request.Request(_generator_url(path_or_url), headers=headers)
+    with urllib.request.urlopen(req, timeout=_generator_timeout()) as resp:
+        return resp.read().decode("utf-8")
+
+
+def _release_generator_lease(lease_id: str) -> None:
+    try:
+        _generator_json("POST", f"/v1/challenges/lease/{lease_id}/release")
+    except Exception as exc:
+        print(f"[refill] generator_release_failed lease_id={lease_id} error={exc!r}")
+
+
+def _lease_generator_cnf(challenge_id: str, tier: int) -> str:
+    """Lease, fetch, hash-check, and confirm one CNF from the generator service."""
+    kind = generator_kind_for(tier)
+    lease_id: str | None = None
+    try:
+        lease = _generator_json(
+            "POST",
+            "/v1/challenges/lease",
+            {"family": _FAMILY, "tier": tier, "kind": kind},
+            idempotency_key=challenge_id,
+        )
+        lease_id = str(lease["lease_id"])
+        cnf_text = _generator_text(str(lease["cnf_url"]))
+        expected_sha = str(lease.get("cnf_sha256") or "")
+        actual_sha = sha256_hex(cnf_text)
+        if expected_sha and actual_sha != expected_sha:
+            raise RuntimeError(
+                f"generator cnf hash mismatch expected={expected_sha} actual={actual_sha}")
+        _generator_json(
+            "POST",
+            f"/v1/challenges/lease/{lease_id}/confirm",
+            {
+                "cathedral_challenge_id": challenge_id,
+                "cnf_sha256_witnessed": actual_sha,
+            },
+        )
+        print(
+            "[refill] generator_lease_ok "
+            f"tier={tier} kind={kind} lease_id={lease_id} "
+            f"run_id={lease.get('generator_run_id')} vars={lease.get('num_vars')} "
+            f"clauses={lease.get('num_clauses')}"
+        )
+        return cnf_text
+    except Exception:
+        if lease_id:
+            _release_generator_lease(lease_id)
+        raise
 
 
 def retire_after_seconds() -> int:
@@ -448,14 +563,14 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
                 log=lambda *a, **k: None) -> dict:
     """Synchronous refill (used in tests). Production uses refill_tier_async."""
     seed_input = seed_input or default_seed_input()
-    mint_cap = MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK
+    mint_cap = generator_max_mints() if generator_enabled() else (
+        MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
     retired, work = _plan_tier(store, tier, seed_input, mint_cap, log)
     n_vars_hint = _TIER_SHAPE.get(tier, (6000, 25560))[0]
     n_clauses_hint = _TIER_SHAPE.get(tier, (6000, 25560))[1]
     minted = 0
     for cid, seed, n_vars, n_clauses, method in work:
-        cnf_text = _gen_cnf(seed, n_vars, n_clauses, method)
-        _commit_challenge(store, cid, tier, cnf_text)
+        _mint_one(store, cid, tier, seed, n_vars, n_clauses, method)
         minted += 1
     return {"tier": tier, "retired": retired, "minted": minted,
             "active": active_local_count(store, tier), "target": target_for(tier),
@@ -476,6 +591,17 @@ def _mint_one(store: Store, cid: str, tier: int, seed: int,
     direct fork gen if the queue is empty (background gen hasn't caught up yet).
     Returns the CNF text so the caller can log it.
     """
+    if generator_enabled():
+        try:
+            cnf_text = _lease_generator_cnf(cid, tier)
+            _commit_challenge(store, cid, tier, cnf_text)
+            print(f"[refill] minted tier={tier} cid={cid[:20]}... source=generator")
+            return cnf_text
+        except Exception as exc:
+            print(f"[refill] generator_mint_failed tier={tier} cid={cid[:20]} error={exc!r}")
+            if not _env_bool("CATHEDRAL_SAT_GENERATOR_LOCAL_FALLBACK", False):
+                raise
+
     cnf_text = _get_pregen_cnf(tier)
     source = "pregen"
     if cnf_text is None:
@@ -495,9 +621,11 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
        falls back to fork gen (GIL-free via Pipe.poll). One at a time.
     4. sleep(0): yield to event loop between mints.
     """
-    _ensure_pregen_started()   # idempotent; starts bg gen threads on first call
+    if not generator_enabled():
+        _ensure_pregen_started()   # idempotent; starts bg gen threads on first call
     seed_input = seed_input or default_seed_input()
-    mint_cap = MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK
+    mint_cap = generator_max_mints() if generator_enabled() else (
+        MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
     n_vars_hint, n_clauses_hint = shape_for(tier)
 
     retired, work = await asyncio.to_thread(_plan_tier, store, tier, seed_input, mint_cap, log)
@@ -533,7 +661,9 @@ async def refill_loop(store: Store, *, interval_seconds: int | None = None,
                                             _DEFAULT_INTERVAL_SECONDS)
     log("refill_loop_start", interval=interval, targets=_DEFAULT_TARGETS,
         fork_ok=_FORK_OK,
-        mint_cap=MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
+        mint_cap=generator_max_mints() if generator_enabled() else (
+            MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
+        generator_enabled=generator_enabled())
     try:
         while not (stop_event and stop_event.is_set()):
             try:
