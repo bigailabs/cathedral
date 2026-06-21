@@ -354,16 +354,23 @@ def build_app(
             raise HTTPException(400, "submitted_at outside acceptable clock-skew window")
         raise HTTPException(401, "invalid hotkey signature")
 
+    _ACTIVE_CHALLENGE_COLUMNS = (
+        "challenge_id, family_id, tier, status, difficulty_label, "
+        "score_multiplier, cnf_sha256, cnf_bytes, num_vars, num_clauses"
+    )
+
     def _active_challenges(tier: int | None = None) -> list[Any]:
         # local only: seeded external mirrors (feed-continuity artifacts, no
         # CNF body) must never reach the miner-facing board — a miner that
         # picks one gets a 404 on the CNF fetch and wastes the attempt.
         if tier is None:
             return store.query(
-                "SELECT * FROM lane_challenges WHERE status='active' AND cnf_source='local' "
+                f"SELECT {_ACTIVE_CHALLENGE_COLUMNS} FROM lane_challenges "
+                "WHERE status='active' AND cnf_source='local' "
                 "ORDER BY challenge_id ASC")
         return store.query(
-            "SELECT * FROM lane_challenges WHERE status='active' AND cnf_source='local' AND tier=? "
+            f"SELECT {_ACTIVE_CHALLENGE_COLUMNS} FROM lane_challenges "
+            "WHERE status='active' AND cnf_source='local' AND tier=? "
             "ORDER BY challenge_id ASC",
             (tier,))
 
