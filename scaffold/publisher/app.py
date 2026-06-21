@@ -727,31 +727,57 @@ def build_app(
             tier_seq = pm.recover_tier_seq_for(x_cathedral_hotkey, epoch, challenge_id)
             tier = tier_seq[0] if tier_seq else 1
             seq = tier_seq[1] if tier_seq else 0
+            pm_weight = pm.weight_for(tier)
+            now_iso = _now_iso_ms()
+            row_uuid = new_uuid()
+            answer_hash = sha256_hex(",".join(str(x) for x in assignment))
+            verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
 
             def _pm_accept(conn):
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
-                    (x_cathedral_signature, _now_iso_ms()))
+                    (x_cathedral_signature, now_iso))
                 if not cur.rowcount:
                     return "replayed_signature"
-                pm.record_perminer_solve(
-                    store, x_cathedral_hotkey, epoch, challenge_id,
-                    tier, seq, verified=True)
+                solved = conn.execute(
+                    "INSERT OR IGNORE INTO per_miner_solves"
+                    "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, "
+                    "verified, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (challenge_id, x_cathedral_hotkey, epoch, tier, seq, pm_weight, 1, now_iso))
+                if not solved.rowcount:
+                    return "already_solved"
                 conn.execute(
                     "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
                     "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
                     "VALUES (?, ?, ?, 'ranked', NULL, ?, 1, ?, ?)",
-                    (sub_id, x_cathedral_hotkey, challenge_id, pm.weight_for(tier),
-                     submitted_at, x_cathedral_signature))
+                    (sub_id, x_cathedral_hotkey, challenge_id, pm_weight, submitted_at,
+                     x_cathedral_signature))
+                emitted = rows.build_solve_rows(
+                    row_uuid=row_uuid, miner_hotkey=x_cathedral_hotkey,
+                    agent_id=new_uuid(), challenge_id=challenge_id, tier=tier,
+                    weighted_score=pm_weight, answer_hash=answer_hash,
+                    verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                    epoch_salt=epoch_salt, solve_rank=1, solved=True,
+                    private_key_hex=key_hex,
+                )
+                for r in emitted:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO eval_runs "
+                        "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
+                         r["miner_hotkey"], r["task_type"], json.dumps(r)))
                 return None
 
             err = store.write(_pm_accept)
             if err == "replayed_signature":
                 raise HTTPException(409, "replayed_signature")
+            if err == "already_solved":
+                raise HTTPException(409, "already_solved")
             return {
-                "status": "ranked", "id": sub_id, "eval_run_id": sub_id,
+                "status": "ranked", "id": sub_id, "eval_run_id": row_uuid,
                 "challenge_id": challenge_id,
-                "weighted_score": pm.weight_for(tier),
+                "weighted_score": pm_weight,
                 "solve_rank": 1, "attestation_status": "pending",
             }
         # ---- End per-miner submit path ----
