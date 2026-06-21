@@ -254,6 +254,16 @@ _MIGRATIONS: list[tuple[str, str]] = [
             created_at_iso TEXT NOT NULL
         );
     """),
+    ("0020_eval_runs_legacy_columns", """
+        ALTER TABLE eval_runs ADD COLUMN id TEXT;
+        ALTER TABLE eval_runs ADD COLUMN ran_at TEXT NOT NULL DEFAULT '';
+        ALTER TABLE eval_runs ADD COLUMN eval_output_schema_version INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE eval_runs ADD COLUMN miner_hotkey TEXT NOT NULL DEFAULT '';
+        ALTER TABLE eval_runs ADD COLUMN task_type TEXT NOT NULL DEFAULT '';
+        ALTER TABLE eval_runs ADD COLUMN row_json TEXT NOT NULL DEFAULT '{}';
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -450,6 +460,16 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             created_at_iso TEXT NOT NULL
         );
     """),
+    ("0020_eval_runs_legacy_columns", """
+        ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS id TEXT;
+        ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS ran_at TEXT NOT NULL DEFAULT '';
+        ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS eval_output_schema_version INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS miner_hotkey TEXT NOT NULL DEFAULT '';
+        ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS task_type TEXT NOT NULL DEFAULT '';
+        ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS row_json TEXT NOT NULL DEFAULT '{}';
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -576,7 +596,11 @@ def _sqlite_exec_migration(conn: sqlite3.Connection, sql: str) -> None:
         try:
             conn.execute(stmt)
         except sqlite3.OperationalError as exc:
-            if "duplicate column name" in str(exc).lower():
+            msg = str(exc).lower()
+            stmt_upper = stmt.upper()
+            if "duplicate column name" in msg:
+                continue
+            if "no such column" in msg and stmt_upper.startswith("CREATE INDEX"):
                 continue
             raise
 

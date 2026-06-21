@@ -102,6 +102,27 @@ def main() -> int:
         except OSError:
             pass
 
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        raw = sqlite3.connect(db_path)
+        try:
+            raw.execute("CREATE TABLE eval_runs (id TEXT PRIMARY KEY, ran_at TEXT NOT NULL, row_json TEXT NOT NULL)")
+            raw.execute("CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+            raw.execute("INSERT INTO schema_migrations(id, applied_at) VALUES ('0001_eval_runs', datetime('now'))")
+            raw.commit()
+        finally:
+            raw.close()
+        store = Store(db_path)
+        cols = {r["name"] for r in store.query("PRAGMA table_info(eval_runs)")}
+        ck("legacy eval_runs schema gains miner_hotkey column", "miner_hotkey" in cols)
+        store.close()
+    finally:
+        try:
+            os.remove(db_path)
+        except OSError:
+            pass
+
     print("ASSIGNED LANE - coldkey-safe scoring")
     old = set_env(
         CATHEDRAL_PERMINER_ENABLED="1",
