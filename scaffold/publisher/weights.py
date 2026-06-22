@@ -318,6 +318,18 @@ def _load_coldkey_map(store: Store) -> dict[str, str] | None:
     return m or None
 
 
+def _load_scoring_coldkey_map(store: Store) -> dict[str, str] | None:
+    """Load coldkey identity when either base scoring or assigned-beta needs it."""
+    if (
+        coldkey_collapse_enabled()
+        or perminer_require_coldkey()
+        or perminer_scoring_mode() == "assigned_only"
+        or perminer_bonus_multiplier() > 0.0
+    ):
+        return _load_coldkey_map(store)
+    return None
+
+
 def compose_scores(
     store: Store, *, now: datetime | None = None,
     coldkey_of: dict[str, str] | None = None,
@@ -444,7 +456,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     now = now or datetime.now(timezone.utc)
-    coldkey_of = _load_coldkey_map(store) if coldkey_collapse_enabled() else None
+    coldkey_of = _load_scoring_coldkey_map(store)
     scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
     policy_inputs = {
@@ -468,7 +480,14 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         ).hexdigest(),
         "key_id": os.environ.get(KEY_ID_ENV, "cathedral-weight-policy"),
         "policy_reason": f"v4_{mode()}_{window_hours():g}h_window",
-        "policy_metadata": {"miner_count": len(scores), "composer": "scaffold.weights"},
+        "policy_metadata": {
+            "miner_count": len(scores),
+            "composer": "scaffold.weights",
+            "perminer_scoring_mode": perminer_scoring_mode(),
+            "perminer_bonus_multiplier": perminer_bonus_multiplier(),
+            "perminer_history_floor": perminer_history_floor(),
+            "coldkey_map_loaded": bool(coldkey_of),
+        },
         "weights": [
             {"miner_hotkey": hk, "weight": scores[hk]} for hk in sorted(scores)
         ],

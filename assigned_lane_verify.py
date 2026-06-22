@@ -210,6 +210,47 @@ def main() -> int:
     finally:
         restore_env(old)
 
+    print("ASSIGNED LANE - bonus loads coldkeys without full collapse")
+    old = set_env(
+        CATHEDRAL_WEIGHTS_MODE="proportional",
+        CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE="0",
+        CATHEDRAL_PERMINER_ENABLED="1",
+        CATHEDRAL_PERMINER_SHADOW="0",
+        CATHEDRAL_PERMINER_SCORING_MODE="bonus",
+        CATHEDRAL_PERMINER_REQUIRE_COLDKEY="1",
+        CATHEDRAL_PERMINER_BONUS_MULT="0.2",
+        CATHEDRAL_PERMINER_HISTORY_FLOOR="0.25",
+        CATHEDRAL_PERMINER_SCORE_TARGET="10",
+    )
+    try:
+        store = Store(":memory:")
+        epoch = __import__("scaffold.publisher.per_miner", fromlist=["current_epoch"]).current_epoch()
+        cnf, _ = gen_planted_3sat(24, 10, 30)
+        seed_challenge(store, challenge_id="sat-nocollapse", tier=1, cnf_text=cnf)
+
+        def _seed_no_collapse(conn):
+            conn.execute("CREATE TABLE IF NOT EXISTS coldkey_map (hotkey TEXT PRIMARY KEY, coldkey TEXT NOT NULL)")
+            conn.execute("INSERT INTO coldkey_map(hotkey, coldkey) VALUES ('hkA', 'ckA')")
+            conn.execute(
+                "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                "VALUES ('sat-nocollapse', 'hkA', ?)",
+                (now_iso(),),
+            )
+            conn.execute(
+                "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, verified, solved_at_iso) VALUES ('pm-nocollapse', 'hkA', ?, 1, 0, 10.0, 1, ?)",
+                (epoch, now_iso()),
+            )
+        store.write(_seed_no_collapse)
+        signing_key = bytes(range(32)).hex()
+        vec = weights.build_signed_vector(store, signing_key_hex=signing_key)
+        ck("per-miner bonus loads coldkey map without shared-board collapse",
+           vec["policy_metadata"]["coldkey_map_loaded"] is True
+           and vec["policy_metadata"]["perminer_scoring_mode"] == "bonus")
+        store.close()
+    finally:
+        restore_env(old)
+
     print("ASSIGNED LANE - same coldkey does not stack bonus")
     old = set_env(
         CATHEDRAL_WEIGHTS_MODE="proportional",
