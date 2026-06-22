@@ -128,6 +128,7 @@ def main() -> int:
         CATHEDRAL_PERMINER_ENABLED="1",
         CATHEDRAL_PERMINER_SHADOW="0",
         CATHEDRAL_PERMINER_REQUIRE_COLDKEY="1",
+        CATHEDRAL_PERMINER_SCORING_MODE="assigned_only",
         CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE="1",
         CATHEDRAL_PERMINER_SCORE_TARGET="10",
     )
@@ -156,6 +157,100 @@ def main() -> int:
            scored == {"hkA1": 0.5, "hkA2": 0.5, "hkB": 0.5})
         no_map = weights.compose_scores(store, coldkey_of=None)
         ck("assigned live scoring fails closed without coldkey map", no_map == {})
+        store.close()
+    finally:
+        restore_env(old)
+
+    print("ASSIGNED LANE - migration bonus rewards history")
+    old = set_env(
+        CATHEDRAL_WEIGHTS_MODE="proportional",
+        CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE="1",
+        CATHEDRAL_PERMINER_ENABLED="1",
+        CATHEDRAL_PERMINER_SHADOW="0",
+        CATHEDRAL_PERMINER_SCORING_MODE="bonus",
+        CATHEDRAL_PERMINER_REQUIRE_COLDKEY="1",
+        CATHEDRAL_PERMINER_BONUS_MULT="0.2",
+        CATHEDRAL_PERMINER_HISTORY_FLOOR="0.25",
+        CATHEDRAL_PERMINER_SCORE_TARGET="10",
+    )
+    try:
+        store = Store(":memory:")
+        epoch = __import__("scaffold.publisher.per_miner", fromlist=["current_epoch"]).current_epoch()
+        cnf1, _ = gen_planted_3sat(21, 10, 30)
+        cnf2, _ = gen_planted_3sat(22, 10, 30)
+        seed_challenge(store, challenge_id="sat-hist-1", tier=1, cnf_text=cnf1)
+        seed_challenge(store, challenge_id="sat-hist-2", tier=1, cnf_text=cnf2)
+
+        def _seed_bonus(conn):
+            conn.execute("CREATE TABLE IF NOT EXISTS coldkey_map (hotkey TEXT PRIMARY KEY, coldkey TEXT NOT NULL)")
+            for hk, ckid in (("hkA1", "ckA"), ("hkA2", "ckA"), ("hkB", "ckB")):
+                conn.execute("INSERT INTO coldkey_map(hotkey, coldkey) VALUES (?, ?)", (hk, ckid))
+            for cid, hk in (
+                ("sat-hist-1", "hkA1"),
+                ("sat-hist-2", "hkA1"),
+                ("sat-hist-1", "hkB"),
+            ):
+                conn.execute(
+                    "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                    "VALUES (?, ?, ?)",
+                    (cid, hk, now_iso()),
+                )
+            for hk, cid in (("hkA1", "pm-a"), ("hkB", "pm-b")):
+                conn.execute(
+                    "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                    "difficulty_weight, verified, solved_at_iso) VALUES (?, ?, ?, 1, 0, 10.0, 1, ?)",
+                    (cid, hk, epoch, now_iso()),
+                )
+        store.write(_seed_bonus)
+        coldkey_of = weights._load_coldkey_map(store)
+        scored = weights.compose_scores(store, coldkey_of=coldkey_of)
+        ck("assigned beta keeps shared-board history as the base",
+           scored.get("hkA1") == 1.0 and 0.51 < scored.get("hkB", 0.0) < 0.53)
+        store.close()
+    finally:
+        restore_env(old)
+
+    print("ASSIGNED LANE - same coldkey does not stack bonus")
+    old = set_env(
+        CATHEDRAL_WEIGHTS_MODE="proportional",
+        CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE="1",
+        CATHEDRAL_PERMINER_ENABLED="1",
+        CATHEDRAL_PERMINER_SHADOW="0",
+        CATHEDRAL_PERMINER_SCORING_MODE="bonus",
+        CATHEDRAL_PERMINER_REQUIRE_COLDKEY="1",
+        CATHEDRAL_PERMINER_BONUS_MULT="0.2",
+        CATHEDRAL_PERMINER_HISTORY_FLOOR="0.25",
+        CATHEDRAL_PERMINER_SCORE_TARGET="10",
+    )
+    try:
+        store = Store(":memory:")
+        epoch = __import__("scaffold.publisher.per_miner", fromlist=["current_epoch"]).current_epoch()
+        cnf, _ = gen_planted_3sat(23, 10, 30)
+        seed_challenge(store, challenge_id="sat-stack", tier=1, cnf_text=cnf)
+
+        def _seed_same_coldkey(conn):
+            conn.execute("CREATE TABLE IF NOT EXISTS coldkey_map (hotkey TEXT PRIMARY KEY, coldkey TEXT NOT NULL)")
+            for hk, ckid in (("hkA1", "ckA"), ("hkA2", "ckA"), ("hkB", "ckB")):
+                conn.execute("INSERT INTO coldkey_map(hotkey, coldkey) VALUES (?, ?)", (hk, ckid))
+            for hk in ("hkA1", "hkA2", "hkB"):
+                conn.execute(
+                    "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                    "VALUES ('sat-stack', ?, ?)",
+                    (hk, now_iso()),
+                )
+            for hk, cid in (("hkA1", "pm-a1"), ("hkA2", "pm-a2"), ("hkB", "pm-b")):
+                conn.execute(
+                    "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                    "difficulty_weight, verified, solved_at_iso) VALUES (?, ?, ?, 1, 0, 10.0, 1, ?)",
+                    (cid, hk, epoch, now_iso()),
+                )
+        store.write(_seed_same_coldkey)
+        coldkey_of = weights._load_coldkey_map(store)
+        scored = weights.compose_scores(store, coldkey_of=coldkey_of)
+        ck("same-coldkey bonus is split, not multiplied",
+           scored.get("hkA1") == scored.get("hkA2")
+           and scored.get("hkB") == 1.0
+           and scored.get("hkA1", 0.0) + scored.get("hkA2", 0.0) <= scored.get("hkB", 0.0))
         store.close()
     finally:
         restore_env(old)

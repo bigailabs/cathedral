@@ -68,6 +68,8 @@ TIER2_MULT_ENV = "CATHEDRAL_WEIGHTS_TIER2_MULT"
 # miners migrate without replacing the live scorer in one step.
 PERMINER_BONUS_MULT_ENV = "CATHEDRAL_PERMINER_BONUS_MULT"
 PERMINER_REQUIRE_COLDKEY_ENV = "CATHEDRAL_PERMINER_REQUIRE_COLDKEY"
+PERMINER_HISTORY_FLOOR_ENV = "CATHEDRAL_PERMINER_HISTORY_FLOOR"
+PERMINER_SCORING_MODE_ENV = "CATHEDRAL_PERMINER_SCORING_MODE"
 
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -140,11 +142,26 @@ def tier2_multiplier() -> float:
 def perminer_bonus_multiplier() -> float:
     """Small additive bonus for miners using per-miner unique assignments.
 
-    Default 0.0 preserves the current vector. A live value like 0.05 means:
-    base shared-board score + up to 5% normalized per-miner bonus, then the
+    Default 0.2 makes assigned-beta solves worth up to a 20% transition bonus:
+    base shared-board score + up to 20% normalized per-miner bonus, then the
     combined scores are re-normalized relative to the top combined scorer.
     """
-    return min(1.0, max(0.0, _env_float(PERMINER_BONUS_MULT_ENV, 0.0)))
+    return min(1.0, max(0.0, _env_float(PERMINER_BONUS_MULT_ENV, 0.2)))
+
+
+def perminer_history_floor() -> float:
+    """Minimum bonus share for assigned-beta miners with little recent history."""
+    return min(1.0, max(0.0, _env_float(PERMINER_HISTORY_FLOOR_ENV, 0.25)))
+
+
+def perminer_scoring_mode() -> str:
+    """How verified per-miner solves affect the live vector.
+
+    bonus: keep shared SAT scoring as base, then add a bounded assigned bonus.
+    assigned_only: replace shared scoring with the assigned-only vector.
+    """
+    raw = os.environ.get(PERMINER_SCORING_MODE_ENV, "bonus").strip().lower()
+    return raw if raw in {"bonus", "assigned_only"} else "bonus"
 
 
 def coldkey_collapse_enabled() -> bool:
@@ -240,32 +257,46 @@ def _apply_perminer_bonus(
     if not pm_scores:
         return base
     combined = dict(base)
-    if coldkey_collapse_enabled() and not coldkey_of:
+    if perminer_require_coldkey() and not coldkey_of:
         return base
-    use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
+    use_ck = bool(coldkey_of)
     if not use_ck:
+        top_base = max(base.values()) if base else 0.0
+        history_floor = perminer_history_floor()
         for hk, score in pm_scores.items():
-            combined[hk] = combined.get(hk, 0.0) + bonus * float(score)
+            history = 1.0 if top_base <= 0.0 else combined.get(hk, 0.0) / top_base
+            history_mult = history_floor + (1.0 - history_floor) * max(0.0, min(1.0, history))
+            combined[hk] = combined.get(hk, 0.0) + bonus * float(score) * history_mult
     else:
         def ident(hk: str) -> str:
             return coldkey_of[hk]  # type: ignore[index]
 
         members: dict[str, set[str]] = {}
         best: dict[str, float] = {}
+        history: dict[str, float] = {}
         for hk in set(base) | set(pm_scores):
             if hk not in coldkey_of:  # type: ignore[operator]
                 continue
             members.setdefault(ident(hk), set()).add(hk)
+        for hk, score in base.items():
+            if hk not in coldkey_of:  # type: ignore[operator]
+                continue
+            idk = ident(hk)
+            history[idk] = max(history.get(idk, 0.0), float(score))
         for hk, score in pm_scores.items():
             if hk not in coldkey_of:  # type: ignore[operator]
                 continue
             idk = ident(hk)
             best[idk] = max(best.get(idk, 0.0), float(score))
+        top_history = max(history.values()) if history else 0.0
+        history_floor = perminer_history_floor()
         for idk, score in best.items():
             hks = members.get(idk) or set()
             if not hks:
                 continue
-            per_hotkey_bonus = (bonus * score) / len(hks)
+            recent = 1.0 if top_history <= 0.0 else history.get(idk, 0.0) / top_history
+            history_mult = history_floor + (1.0 - history_floor) * max(0.0, min(1.0, recent))
+            per_hotkey_bonus = (bonus * score * history_mult) / len(hks)
             for hk in hks:
                 combined[hk] = combined.get(hk, 0.0) + per_hotkey_bonus
     top = max(combined.values()) if combined else 0.0
@@ -320,7 +351,7 @@ def compose_scores(
     use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
 
     pm_scores = _perminer_compose_scores(store, coldkey_of=coldkey_of)
-    if pm_scores is not None:
+    if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
         return pm_scores
 
     def ident(hk: str) -> str:
