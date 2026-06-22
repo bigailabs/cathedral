@@ -250,6 +250,9 @@ def _apply_perminer_bonus(
     coldkey_of: dict[str, str] | None = None,
 ) -> dict[str, float]:
     """Add a transition bonus for per-miner adopters without replacing base scoring."""
+    from . import per_miner as pm
+    if pm.perminer_shadow():
+        return base
     bonus = perminer_bonus_multiplier()
     if bonus <= 0.0:
         return base
@@ -486,6 +489,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "perminer_scoring_mode": perminer_scoring_mode(),
             "perminer_bonus_multiplier": perminer_bonus_multiplier(),
             "perminer_history_floor": perminer_history_floor(),
+            "coldkey_collapse_enabled": coldkey_collapse_enabled(),
             "coldkey_map_loaded": bool(coldkey_of),
         },
         "weights": [

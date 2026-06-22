@@ -210,6 +210,89 @@ def main() -> int:
     finally:
         restore_env(old)
 
+    print("ASSIGNED LANE - live bonus multiplier covered")
+    old = set_env(
+        CATHEDRAL_WEIGHTS_MODE="proportional",
+        CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE="1",
+        CATHEDRAL_PERMINER_ENABLED="1",
+        CATHEDRAL_PERMINER_SHADOW="0",
+        CATHEDRAL_PERMINER_SCORING_MODE="bonus",
+        CATHEDRAL_PERMINER_REQUIRE_COLDKEY="1",
+        CATHEDRAL_PERMINER_BONUS_MULT="0.05",
+        CATHEDRAL_PERMINER_HISTORY_FLOOR="0.25",
+        CATHEDRAL_PERMINER_SCORE_TARGET="10",
+    )
+    try:
+        store = Store(":memory:")
+        epoch = __import__("scaffold.publisher.per_miner", fromlist=["current_epoch"]).current_epoch()
+        cnf1, _ = gen_planted_3sat(25, 10, 30)
+        cnf2, _ = gen_planted_3sat(26, 10, 30)
+        seed_challenge(store, challenge_id="sat-live-1", tier=1, cnf_text=cnf1)
+        seed_challenge(store, challenge_id="sat-live-2", tier=1, cnf_text=cnf2)
+
+        def _seed_live_bonus(conn):
+            conn.execute("CREATE TABLE IF NOT EXISTS coldkey_map (hotkey TEXT PRIMARY KEY, coldkey TEXT NOT NULL)")
+            for hk, ckid in (("hkA", "ckA"), ("hkB", "ckB")):
+                conn.execute("INSERT INTO coldkey_map(hotkey, coldkey) VALUES (?, ?)", (hk, ckid))
+            for cid, hk in (("sat-live-1", "hkA"), ("sat-live-2", "hkA"), ("sat-live-1", "hkB")):
+                conn.execute(
+                    "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                    "VALUES (?, ?, ?)",
+                    (cid, hk, now_iso()),
+                )
+            for hk, cid in (("hkA", "pm-live-a"), ("hkB", "pm-live-b")):
+                conn.execute(
+                    "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                    "difficulty_weight, verified, solved_at_iso) VALUES (?, ?, ?, 1, 0, 10.0, 1, ?)",
+                    (cid, hk, epoch, now_iso()),
+                )
+        store.write(_seed_live_bonus)
+        coldkey_of = weights._load_coldkey_map(store)
+        scored = weights.compose_scores(store, coldkey_of=coldkey_of)
+        ck("live 0.05 bonus keeps history ordering",
+           scored.get("hkA") == 1.0 and 0.50 < scored.get("hkB", 0.0) < 0.51)
+        store.close()
+    finally:
+        restore_env(old)
+
+    print("ASSIGNED LANE - shadow bonus does not affect live vector")
+    old = set_env(
+        CATHEDRAL_WEIGHTS_MODE="proportional",
+        CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE="1",
+        CATHEDRAL_PERMINER_ENABLED="1",
+        CATHEDRAL_PERMINER_SHADOW="1",
+        CATHEDRAL_PERMINER_SCORING_MODE="bonus",
+        CATHEDRAL_PERMINER_REQUIRE_COLDKEY="1",
+        CATHEDRAL_PERMINER_BONUS_MULT="0.2",
+        CATHEDRAL_PERMINER_SCORE_TARGET="10",
+    )
+    try:
+        store = Store(":memory:")
+        epoch = __import__("scaffold.publisher.per_miner", fromlist=["current_epoch"]).current_epoch()
+        cnf, _ = gen_planted_3sat(27, 10, 30)
+        seed_challenge(store, challenge_id="sat-shadow-base", tier=1, cnf_text=cnf)
+
+        def _seed_shadow_bonus(conn):
+            conn.execute("CREATE TABLE IF NOT EXISTS coldkey_map (hotkey TEXT PRIMARY KEY, coldkey TEXT NOT NULL)")
+            conn.execute("INSERT INTO coldkey_map(hotkey, coldkey) VALUES ('hkA', 'ckA')")
+            conn.execute(
+                "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                "VALUES ('sat-shadow-base', 'hkA', ?)",
+                (now_iso(),),
+            )
+            conn.execute(
+                "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, verified, solved_at_iso) VALUES ('pm-shadow-a', 'hkA', ?, 1, 0, 10.0, 1, ?)",
+                (epoch, now_iso()),
+            )
+        store.write(_seed_shadow_bonus)
+        coldkey_of = weights._load_coldkey_map(store)
+        scored = weights.compose_scores(store, coldkey_of=coldkey_of)
+        ck("shadow mode suppresses assigned bonus", scored == {"hkA": 1.0})
+        store.close()
+    finally:
+        restore_env(old)
+
     print("ASSIGNED LANE - bonus loads coldkeys without full collapse")
     old = set_env(
         CATHEDRAL_WEIGHTS_MODE="proportional",
