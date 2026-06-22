@@ -27,6 +27,7 @@ import os
 import sys
 import threading
 import time
+import tempfile
 
 checks: list[tuple[str, bool]] = []
 
@@ -34,6 +35,28 @@ checks: list[tuple[str, bool]] = []
 def ck(name: str, cond: bool) -> None:
     checks.append((name, bool(cond)))
     print(f"  {'PASS' if cond else 'FAIL'} {name}")
+
+
+def _write_fixture_verifier() -> str:
+    f = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8")
+    f.write(
+        "import json, sys\n"
+        "evidence_path, request_path, capacity_path, result_path = sys.argv[1:5]\n"
+        "evidence = json.load(open(evidence_path, encoding='utf-8'))\n"
+        "request = json.load(open(request_path, encoding='utf-8'))\n"
+        "capacity = json.load(open(capacity_path, encoding='utf-8'))\n"
+        "request_ok = evidence.get('evidence_request_id') == request.get('request_id')\n"
+        "capacity_ok = capacity.get('gpu_short_ref') == 'h200' and capacity.get('gpu_count') == 8\n"
+        "ok = request_ok and capacity_ok\n"
+        "result = {'ok': ok, 'verified': ok, 'verifier': 'fixture-tdx-gpu', "
+        "'proof': 'fixture_dcap_nvidia', 'tdx_verified': ok, 'gpu_verified': ok, "
+        "'gpu_claims_match': ok, 'report_data_match': ok, 'debug_disabled': ok}\n"
+        "with open(result_path, 'w', encoding='utf-8') as out:\n"
+        "    json.dump(result, out)\n"
+        "sys.exit(0 if ok else 1)\n"
+    )
+    f.close()
+    return f.name
 
 
 def main() -> int:
@@ -58,26 +81,30 @@ def main() -> int:
     sep = "&" if "?" in base_url else "?"
     dsn = f"{base_url}{sep}options=" + "-c%20search_path%3D" + schema
 
-    from scaffold.publisher.store import Store, new_uuid
-    from scaffold.publisher import scoring
+    from scaffold.publisher.store import Store, new_uuid, _MIGRATIONS_PG
+    from scaffold.publisher import scoring, tee_gpu
 
     store = Store(dsn)
     ck("backend selected = postgres", store.backend == "postgres")
 
     # ---- migrations idempotent --------------------------------------------
     store.migrate()  # second run must be a no-op (already applied)
-    from scaffold.publisher.store import _MIGRATIONS_PG
     applied = store.query("SELECT COUNT(*) AS n FROM schema_migrations")[0]["n"]
-    ck("all migrations applied (idempotent re-run)", int(applied) == len(_MIGRATIONS_PG))
+    ck(
+        f"all {len(_MIGRATIONS_PG)} postgres migrations applied (idempotent re-run)",
+        int(applied) == len(_MIGRATIONS_PG),
+    )
     # every expected table exists in the verify schema
     tbls = {r[0] for r in store.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema=%s",
         (schema,))}
     want = {"eval_runs", "lane_challenges", "agent_submissions", "arena_solvers",
             "arena_instances", "submit_signatures", "seed_state",
-            "lane_challenge_solves", "schema_migrations", "per_miner_solves",
+            "lane_challenge_solves", "weight_policy_state", "per_miner_solves",
             "per_miner_attempts", "per_miner_assignments", "per_miner_witnesses",
-            "audit_challenge_manifests"}
+            "audit_challenge_manifests", "coldkey_map", "tee_gpu_capacity",
+            "tee_gpu_capacity_events", "attest_nonces", "attestations",
+            "schema_migrations"}
     ck(f"all core tables present ({len(want & tbls)}/{len(want)})", want.issubset(tbls))
 
     # ---- insert_row OR IGNORE ---------------------------------------------
@@ -97,7 +124,7 @@ def main() -> int:
     ids = sorted([new_uuid(), new_uuid()])
     for i in ids:
         store.insert_row({**row, "id": i, "ran_at": "2026-06-11T00:00:01.000Z"})
-    allrows = store.recent_rows(None, None, 50)
+    allrows = store.recent_rows("1970-01-01T00:00:00+00:00", "", 50)
     ck("recent_rows returns all 3 rows ordered", len(allrows) == 3)
     ck("recent_rows ascending (ran_at, id)",
        allrows[0]["ran_at"] <= allrows[1]["ran_at"] <= allrows[2]["ran_at"])
@@ -110,6 +137,110 @@ def main() -> int:
     store.set_seed_state("wm", "v2")  # ON CONFLICT(key) DO UPDATE
     ck("seed_state upsert read-back = latest", store.get_seed_state("wm") == "v2")
     ck("seed_state missing key -> None", store.get_seed_state("nope") is None)
+
+    # ---- TEE GPU capacity PG upsert/update path ---------------------------
+    evidence_request = tee_gpu.create_evidence_request(
+        store,
+        owner_hotkey="5PgHotkey",
+        node_id="pg-h200-0",
+        actor="pgverify",
+        ttl_secs=60,
+    )
+    tee_body = {
+        "node_id": "pg-h200-0",
+        "gpu_short_ref": "h200",
+        "gpu_count": 8,
+        "hourly_cost": 2.75,
+        "agent_api": "http://203.0.113.30:32000",
+        "tee_kind": "intel_tdx",
+        "tdx_claimed": True,
+        "gpu_cc_claimed": True,
+        "operator_use_authorized": True,
+        "status": "active",
+        "chutes_server_name": "worker-pg-h200-0",
+        "attestation": {
+            "evidence_request_id": evidence_request["request_id"],
+            "tdx_quote_b64": "fixture-quote",
+            "gpu_evidence_json": {"cc_mode": "on"},
+        },
+    }
+    tee_rec = tee_gpu.create_capacity(
+        store, tee_body, owner_hotkey="5PgHotkey", actor="pgverify",
+        event_type="pg_created", allow_requested_status=True)
+    ck("tee_gpu_capacity create on PG eligible", tee_rec["preflight_status"] == "eligible")
+    ck("tee_gpu_capacity admin create can be active on PG", tee_rec["status"] == "active")
+    tee_upd = tee_gpu.update_capacity_admin(
+        store, tee_rec["capacity_id"], {"status": "paused", "admin_note": "pg-ok"})
+    ck("tee_gpu_capacity admin update on PG", tee_upd is not None and tee_upd["status"] == "paused")
+    tee_again = tee_gpu.create_capacity(
+        store, {**tee_body, "status": "active"}, owner_hotkey="5PgHotkey",
+        actor="pgverify", event_type="pg_resubmitted", preserve_admin_fields=True)
+    ck("tee_gpu_capacity resubmit preserves admin state on PG",
+       tee_again["status"] == "paused" and tee_again["admin_note"] == "pg-ok")
+    try:
+        tee_gpu.list_capacity_on_chutes(store, tee_rec["capacity_id"])
+        blocked_before_crypto = False
+    except tee_gpu.HTTPException as e:
+        blocked_before_crypto = (
+            e.status_code == 400
+            and isinstance(e.detail, dict)
+            and "cryptographic_attestation_required" in e.detail.get("blockers", [])
+        )
+    ck("tee_gpu_capacity Chutes dry-run on PG requires crypto first", blocked_before_crypto)
+
+    old_verifier = os.environ.get("CATHEDRAL_TEE_GPU_VERIFY_CMD")
+    os.environ["CATHEDRAL_TEE_GPU_VERIFY_CMD"] = f"{sys.executable} {_write_fixture_verifier()}"
+    try:
+        tee_verified = tee_gpu.verify_capacity_evidence(store, tee_rec["capacity_id"])
+    finally:
+        if old_verifier is None:
+            os.environ.pop("CATHEDRAL_TEE_GPU_VERIFY_CMD", None)
+        else:
+            os.environ["CATHEDRAL_TEE_GPU_VERIFY_CMD"] = old_verifier
+    ck(
+        "tee_gpu_capacity crypto verifier updates PG evidence",
+        tee_verified is not None
+        and tee_gpu.admin_record(tee_verified)["evidence"]["status"] == "cryptographically_verified",
+    )
+    tee_active = tee_gpu.update_capacity_admin(
+        store,
+        tee_rec["capacity_id"],
+        {"status": "active"},
+    )
+    ck("tee_gpu_capacity can reactivate after crypto on PG",
+       tee_active is not None and tee_active["status"] == "active")
+
+    old_hotkey_path = os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_HOTKEY_PATH")
+    os.environ["CATHEDRAL_TEE_GPU_CHUTES_HOTKEY_PATH"] = "/tmp/chutes.hotkey"
+    try:
+        tee_dry = tee_gpu.list_capacity_on_chutes(store, tee_rec["capacity_id"])
+    finally:
+        if old_hotkey_path is None:
+            os.environ.pop("CATHEDRAL_TEE_GPU_CHUTES_HOTKEY_PATH", None)
+        else:
+            os.environ["CATHEDRAL_TEE_GPU_CHUTES_HOTKEY_PATH"] = old_hotkey_path
+    ck("tee_gpu_capacity Chutes dry-run on PG",
+       tee_dry["status"] == "dry_run" and tee_dry["executed"] is False)
+    tee_metrics = tee_gpu.capacity_metrics(store)
+    ck("tee_gpu_capacity production-ready GPU count on PG", tee_metrics["active_gpus"] == 0)
+    ck(
+        "tee_gpu_capacity production-ready hourly cost on PG",
+        tee_metrics["active_listed_hourly_cost"] == 0.0,
+    )
+    ck(
+        "tee_gpu_capacity active candidate GPU count on PG",
+        tee_metrics["admin_active_candidate_gpus"] == 8,
+    )
+    ck(
+        "tee_gpu_capacity active candidate hourly cost on PG",
+        tee_metrics["admin_active_candidate_hourly_cost"] == 22.0,
+    )
+    tee_rows = tee_gpu.list_capacity(store, owner_hotkey="5PgHotkey")
+    tee_events = store.query(
+        "SELECT COUNT(*) AS n FROM tee_gpu_capacity_events WHERE capacity_id=?",
+        (tee_rec["capacity_id"],))[0]["n"]
+    ck("tee_gpu_capacity list on PG", len(tee_rows) == 1)
+    ck("tee_gpu_capacity audit events on PG", int(tee_events) >= 4)
 
     # ---- scoring.claim_solve distinct claim -------------------------------
     cid = "sat-pg-1"

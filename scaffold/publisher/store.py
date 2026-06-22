@@ -264,6 +264,109 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
     """),
+    ("0021_coldkey_map", """
+        CREATE TABLE IF NOT EXISTS coldkey_map (
+            hotkey TEXT PRIMARY KEY,
+            coldkey TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_coldkey_map_coldkey
+            ON coldkey_map(coldkey);
+    """),
+    # Off-chain TEE GPU capacity intake for provider handoff. These tables are
+    # intentionally not scoring inputs: validators never read them.
+    ("0022_tee_gpu_capacity", """
+        CREATE TABLE IF NOT EXISTS tee_gpu_capacity (
+            capacity_id TEXT PRIMARY KEY,
+            provider_ref TEXT NOT NULL DEFAULT '',
+            owner_hotkey TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            region TEXT NOT NULL DEFAULT '',
+            endpoint_url TEXT NOT NULL DEFAULT '',
+            agent_api TEXT NOT NULL DEFAULT '',
+            public_ip TEXT NOT NULL DEFAULT '',
+            gpu_short_ref TEXT NOT NULL,
+            gpu_model TEXT NOT NULL DEFAULT '',
+            gpu_count INTEGER NOT NULL,
+            gpu_memory_gb INTEGER,
+            tee_kind TEXT NOT NULL DEFAULT '',
+            tdx_claimed INTEGER NOT NULL DEFAULT 0,
+            gpu_cc_claimed INTEGER NOT NULL DEFAULT 0,
+            hourly_cost REAL NOT NULL DEFAULT 0.0,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            attestation_digest TEXT NOT NULL DEFAULT '',
+            attestation_json TEXT NOT NULL DEFAULT '{}',
+            health_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            preflight_status TEXT NOT NULL DEFAULT 'needs_review',
+            preflight_json TEXT NOT NULL DEFAULT '{}',
+            chutes_validator_hotkey TEXT NOT NULL DEFAULT '',
+            chutes_server_name TEXT NOT NULL DEFAULT '',
+            chutes_server_id TEXT NOT NULL DEFAULT '',
+            chutes_status TEXT NOT NULL DEFAULT '',
+            emissions_eligible INTEGER NOT NULL DEFAULT 0 CHECK (emissions_eligible = 0),
+            admin_note TEXT NOT NULL DEFAULT '',
+            created_at_iso TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL,
+            last_heartbeat_iso TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tee_gpu_capacity_owner_node
+            ON tee_gpu_capacity(owner_hotkey, node_id);
+        CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_status
+            ON tee_gpu_capacity(status);
+        CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_owner
+            ON tee_gpu_capacity(owner_hotkey);
+    """),
+    ("0023_tee_gpu_capacity_events", """
+        CREATE TABLE IF NOT EXISTS tee_gpu_capacity_events (
+            id TEXT PRIMARY KEY,
+            capacity_id TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL,
+            event_json TEXT NOT NULL DEFAULT '{}',
+            created_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_events_capacity
+            ON tee_gpu_capacity_events(capacity_id, created_at_iso);
+    """),
+    ("0024_tee_gpu_capacity_authorization", """
+        ALTER TABLE tee_gpu_capacity ADD COLUMN operator_use_authorized INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tee_gpu_capacity ADD COLUMN authorization_version TEXT NOT NULL DEFAULT '';
+        ALTER TABLE tee_gpu_capacity ADD COLUMN authorization_digest TEXT NOT NULL DEFAULT '';
+        ALTER TABLE tee_gpu_capacity ADD COLUMN authorization_json TEXT NOT NULL DEFAULT '{}';
+    """),
+    ("0025_solver_attestation", """
+        CREATE TABLE IF NOT EXISTS attest_nonces (
+            nonce TEXT PRIMARY KEY,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            issued_at_iso TEXT NOT NULL,
+            expires_at_iso TEXT NOT NULL,
+            used_at_iso TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_attest_nonces_miner_challenge
+            ON attest_nonces(miner_hotkey, challenge_id);
+        CREATE TABLE IF NOT EXISTS attestations (
+            id TEXT PRIMARY KEY,
+            eval_run_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            solver_digest TEXT NOT NULL,
+            multiplier REAL NOT NULL,
+            verified_at_iso TEXT NOT NULL,
+            quote_digest TEXT NOT NULL DEFAULT '',
+            receipt_digest TEXT NOT NULL DEFAULT '',
+            verifier_backend TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_attestations_eval_run
+            ON attestations(eval_run_id);
+        CREATE INDEX IF NOT EXISTS idx_attestations_miner_challenge
+            ON attestations(miner_hotkey, challenge_id);
+        ALTER TABLE eval_runs ADD COLUMN attested INTEGER NOT NULL DEFAULT 0;
+    """),
+    ("0026_attest_nonce_pubkey", """
+        ALTER TABLE attest_nonces ADD COLUMN miner_pubkey_b64 TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -470,6 +573,109 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
     """),
+    ("0021_coldkey_map", """
+        CREATE TABLE IF NOT EXISTS coldkey_map (
+            hotkey TEXT PRIMARY KEY,
+            coldkey TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_coldkey_map_coldkey
+            ON coldkey_map(coldkey);
+    """),
+    # Off-chain TEE GPU capacity intake for provider handoff. These tables are
+    # intentionally not scoring inputs: validators never read them.
+    ("0022_tee_gpu_capacity", """
+        CREATE TABLE IF NOT EXISTS tee_gpu_capacity (
+            capacity_id TEXT PRIMARY KEY,
+            provider_ref TEXT NOT NULL DEFAULT '',
+            owner_hotkey TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            region TEXT NOT NULL DEFAULT '',
+            endpoint_url TEXT NOT NULL DEFAULT '',
+            agent_api TEXT NOT NULL DEFAULT '',
+            public_ip TEXT NOT NULL DEFAULT '',
+            gpu_short_ref TEXT NOT NULL,
+            gpu_model TEXT NOT NULL DEFAULT '',
+            gpu_count INTEGER NOT NULL,
+            gpu_memory_gb INTEGER,
+            tee_kind TEXT NOT NULL DEFAULT '',
+            tdx_claimed INTEGER NOT NULL DEFAULT 0,
+            gpu_cc_claimed INTEGER NOT NULL DEFAULT 0,
+            hourly_cost DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            attestation_digest TEXT NOT NULL DEFAULT '',
+            attestation_json TEXT NOT NULL DEFAULT '{}',
+            health_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            preflight_status TEXT NOT NULL DEFAULT 'needs_review',
+            preflight_json TEXT NOT NULL DEFAULT '{}',
+            chutes_validator_hotkey TEXT NOT NULL DEFAULT '',
+            chutes_server_name TEXT NOT NULL DEFAULT '',
+            chutes_server_id TEXT NOT NULL DEFAULT '',
+            chutes_status TEXT NOT NULL DEFAULT '',
+            emissions_eligible INTEGER NOT NULL DEFAULT 0 CHECK (emissions_eligible = 0),
+            admin_note TEXT NOT NULL DEFAULT '',
+            created_at_iso TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL,
+            last_heartbeat_iso TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tee_gpu_capacity_owner_node
+            ON tee_gpu_capacity(owner_hotkey, node_id);
+        CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_status
+            ON tee_gpu_capacity(status);
+        CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_owner
+            ON tee_gpu_capacity(owner_hotkey);
+    """),
+    ("0023_tee_gpu_capacity_events", """
+        CREATE TABLE IF NOT EXISTS tee_gpu_capacity_events (
+            id TEXT PRIMARY KEY,
+            capacity_id TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL,
+            event_json TEXT NOT NULL DEFAULT '{}',
+            created_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_events_capacity
+            ON tee_gpu_capacity_events(capacity_id, created_at_iso);
+    """),
+    ("0024_tee_gpu_capacity_authorization", """
+        ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS operator_use_authorized INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS authorization_version TEXT NOT NULL DEFAULT '';
+        ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS authorization_digest TEXT NOT NULL DEFAULT '';
+        ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS authorization_json TEXT NOT NULL DEFAULT '{}';
+    """),
+    ("0025_solver_attestation", """
+        CREATE TABLE IF NOT EXISTS attest_nonces (
+            nonce TEXT PRIMARY KEY,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            issued_at_iso TEXT NOT NULL,
+            expires_at_iso TEXT NOT NULL,
+            used_at_iso TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_attest_nonces_miner_challenge
+            ON attest_nonces(miner_hotkey, challenge_id);
+        CREATE TABLE IF NOT EXISTS attestations (
+            id TEXT PRIMARY KEY,
+            eval_run_id TEXT NOT NULL,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            solver_digest TEXT NOT NULL,
+            multiplier DOUBLE PRECISION NOT NULL,
+            verified_at_iso TEXT NOT NULL,
+            quote_digest TEXT NOT NULL DEFAULT '',
+            receipt_digest TEXT NOT NULL DEFAULT '',
+            verifier_backend TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_attestations_eval_run
+            ON attestations(eval_run_id);
+        CREATE INDEX IF NOT EXISTS idx_attestations_miner_challenge
+            ON attestations(miner_hotkey, challenge_id);
+        ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS attested INTEGER NOT NULL DEFAULT 0;
+    """),
+    ("0026_attest_nonce_pubkey", """
+        ALTER TABLE attest_nonces ADD COLUMN IF NOT EXISTS miner_pubkey_b64 TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -491,6 +697,11 @@ _PK_BY_TABLE: dict[str, str] = {
     "per_miner_assignments": "challenge_id",
     "per_miner_witnesses": "challenge_id, miner_hotkey",
     "audit_challenge_manifests": "challenge_id",
+    "coldkey_map": "hotkey",
+    "tee_gpu_capacity": "capacity_id",
+    "tee_gpu_capacity_events": "id",
+    "attest_nonces": "nonce",
+    "attestations": "id",
 }
 
 

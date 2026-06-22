@@ -6,8 +6,12 @@ builder = "dockerfile"
 dockerfilePath = "deploy/Dockerfile"
 
 [deploy]
+startCommand = "uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT}"
 healthcheckPath = "/health"
 healthcheckTimeout = 180
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
+
+# Single instance: the SQLite store uses one write lock. Do not scale replicas
+# without moving all writes to a shared DB and adding a fanout broker.
 numReplicas = 1

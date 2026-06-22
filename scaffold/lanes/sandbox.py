@@ -31,13 +31,17 @@ host where `sandbox_available()` is True.
 from __future__ import annotations
 
 import os
-import resource
 import shutil
 import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
+
+try:
+    import resource
+except ModuleNotFoundError:  # Windows/local smoke tests; production sandbox is Linux.
+    resource = None
 
 _MAX_OUTPUT_BYTES = 16 * 1024 * 1024     # cap captured stdout (a DRAT proof can be large)
 _UNSHARE_MIN_VERSION = (2, 36)
@@ -89,6 +93,9 @@ def sandbox_available() -> bool:
 
 
 def _set_limits(cpu_secs: int, as_bytes: int):
+    if resource is None:
+        return None
+
     def _pre() -> None:
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (cpu_secs, cpu_secs))
@@ -125,11 +132,16 @@ def run_solver(
 
     started = time.monotonic()
     try:
-        proc = subprocess.Popen(
-            full_argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=cwd, start_new_session=True,
-            preexec_fn=_set_limits(cpu_secs, as_bytes),
-        )
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "cwd": cwd,
+            "start_new_session": True,
+        }
+        preexec_fn = _set_limits(cpu_secs, as_bytes)
+        if preexec_fn is not None:
+            popen_kwargs["preexec_fn"] = preexec_fn
+        proc = subprocess.Popen(full_argv, **popen_kwargs)
     except (OSError, FileNotFoundError) as e:
         return RunResult("", f"spawn_failed:{e}", None,
                          round((time.monotonic() - started) * 1000, 3), False, contain)

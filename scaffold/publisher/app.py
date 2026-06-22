@@ -61,7 +61,10 @@ def _now_iso_ms() -> str:
 
 def _parse_iso(ts: str) -> float | None:
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
     except Exception:
         return None
 
@@ -136,9 +139,61 @@ def build_app(
     # can push immutable bodies to the bucket backend without an app reference.
     _register_cnf_store(store, cnf_store)
 
+    def _board_distribution(items: list[dict[str, Any]]) -> dict[str, Any]:
+        tier_weights = weights_mod.tier_weights()
+        by_tier: dict[int, dict[str, Any]] = {}
+        total_weighted_units = 0.0
+        for item in items:
+            tier = int(item.get("tier") or 1)
+            weight = float(tier_weights.get(tier, tier_weights.get(1, 1.0)))
+            total_weighted_units += weight
+            entry = by_tier.setdefault(
+                tier,
+                {
+                    "tier": tier,
+                    "count": 0,
+                    "score_weight": weight,
+                    "weighted_units": 0.0,
+                    "num_vars": int(item.get("num_vars") or 0),
+                    "num_clauses": int(item.get("num_clauses") or 0),
+                },
+            )
+            entry["count"] += 1
+            entry["weighted_units"] = round(float(entry["weighted_units"]) + weight, 6)
+        total = len(items)
+        for entry in by_tier.values():
+            entry["count_share"] = round(entry["count"] / total, 6) if total else 0.0
+            entry["weighted_share"] = (
+                round(entry["weighted_units"] / total_weighted_units, 6)
+                if total_weighted_units > 0.0 else 0.0
+            )
+        return {
+            "total_challenges": total,
+            "total_weighted_units": round(total_weighted_units, 6),
+            "tiers": [by_tier[tier] for tier in sorted(by_tier)],
+        }
+
+    def _generator_status() -> dict[str, Any]:
+        from . import refill
+
+        status = refill.generator_config()
+        status["task_running"] = bool(getattr(app.state, "refill_task", None))
+        return status
+
     def _build_board() -> dict[str, Any]:
         items = [_challenge_public(r) for r in _active_challenges()]
-        return {"family_id": _FAMILY, "count": len(items), "items": items}
+        return {
+            "family_id": _FAMILY,
+            "count": len(items),
+            "generator": _generator_status(),
+            "scoring": {
+                "mode": weights_mod.mode(),
+                "unit": "distinct_verified_solve_weighted_by_tier",
+                "tier_weights": weights_mod.tier_weights(),
+            },
+            "distribution": _board_distribution(items),
+            "items": items,
+        }
 
     board_cache = BoardCache(_build_board)
     board_cache_mod.register(board_cache)
@@ -400,16 +455,10 @@ def build_app(
         hotkey: str, signature_b64: str, submitted_at: str,
         *, challenge_id: str | None = None, dimacs_solution_sha256: str | None = None,
         alt_submitted_at: str | None = None,
+        allow_fallback_shapes: bool = True,
     ) -> str:
         """Verify an sr25519 claim or raise HTTPException; return the timestamp
         that actually verified.
-
-        Backend-compat: miners may have signed the timestamp they put in the
-        `submitted_at` form field OR the `X-Cathedral-Submitted-At` header, and
-        either the 6-field solve shape or the legacy 4-field shape (depending on
-        the client/era). The monolith tolerated this spread; we try the same
-        candidate (timestamp x shape) combinations and accept the first that
-        verifies, so no miner needs to re-sign.
         """
         ts_candidates = [t for t in (submitted_at, alt_submitted_at) if t]
         if not ts_candidates:
@@ -421,14 +470,13 @@ def build_app(
                 continue
             any_in_skew = True
             shapes = [
-                # solution-bound 6-field (skill.md submit recipe)
                 dict(challenge_id=challenge_id, dimacs_solution_sha256=dimacs_solution_sha256),
-                # empty-string 6-field — the shape clients reuse from the
-                # active-cnf/registration signing path (challenge_id/solution "")
-                dict(challenge_id="", dimacs_solution_sha256=""),
-                # legacy 4-field (no challenge/solution keys)
-                dict(challenge_id=None, dimacs_solution_sha256=None),
             ]
+            if allow_fallback_shapes:
+                shapes.extend([
+                    dict(challenge_id="", dimacs_solution_sha256=""),
+                    dict(challenge_id=None, dimacs_solution_sha256=None),
+                ])
             for shape in shapes:
                 msg = canonical_claim_bytes(
                     bundle_hash=_empty_bundle_hash(), card_id=_FAMILY,
@@ -458,6 +506,132 @@ def build_app(
             "WHERE status='active' AND cnf_source='local' AND tier=? "
             "ORDER BY challenge_id ASC",
             (tier,))
+
+    # ---- Off-chain TEE GPU capacity intake (default-off, non-emission) ----
+    from . import tee_gpu
+    tee_gpu.register_routes(app, store)
+
+    # ---- Solver attestation receipt surface (default-off, fail-closed) ----
+    @app.post("/v1/attest/nonce")
+    def attest_nonce(
+        challenge_id: str = Form(...),
+        miner_pubkey_b64: str = Form(...),
+        submitted_at: str = Form(None),
+        ttl_secs: int = Form(300),
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
+    ):
+        from . import attest
+        if not attest.attest_enabled():
+            raise HTTPException(404, "not_found")
+        if not challenge_id:
+            raise HTTPException(400, "missing_challenge_id")
+        if not miner_pubkey_b64:
+            raise HTTPException(400, "missing_miner_pubkey_b64")
+        submitted_at = submitted_at or x_cathedral_submitted_at or _now_iso_ms()
+        _verify_hotkey_claim(
+            x_cathedral_hotkey, x_cathedral_signature, submitted_at,
+            challenge_id=challenge_id, dimacs_solution_sha256="",
+            alt_submitted_at=x_cathedral_submitted_at or None,
+            allow_fallback_shapes=False,
+        )
+        ttl = max(1, min(int(ttl_secs), 3600))
+        nonce = attest.issue_nonce(
+            store, token_secret, x_cathedral_hotkey, challenge_id,
+            miner_pubkey_b64=miner_pubkey_b64, ttl_secs=ttl)
+        return {
+            "nonce": nonce,
+            "challenge_id": challenge_id,
+            "miner_hotkey": x_cathedral_hotkey,
+            "expires_in_secs": ttl,
+            "report_data_recipe": "route_b_solver_receipt_v1",
+        }
+
+    def _attest_intel_verifier():
+        from . import attest
+        return attest.configured_intel_verifier()
+
+    def _bearer_value(authorization: str | None) -> str:
+        supplied = (authorization or "").strip()
+        if supplied.lower().startswith("bearer "):
+            supplied = supplied.split(" ", 1)[1].strip()
+        return supplied
+
+    def _attest_status_token_configured() -> str:
+        return os.environ.get("CATHEDRAL_ATTEST_STATUS_TOKEN", "").strip()
+
+    def _attest_status_public() -> bool:
+        return os.environ.get("CATHEDRAL_ATTEST_STATUS_PUBLIC", "").strip().lower() in {
+            "1", "true", "yes", "on"}
+
+    @app.post("/v1/attest")
+    async def attest_verify_endpoint(
+        request: Request,
+        x_cathedral_hotkey: str = Header(default=""),
+        x_cathedral_signature: str = Header(default=""),
+        x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
+    ):
+        from . import attest
+        if not attest.attest_enabled():
+            raise HTTPException(404, "not_found")
+        intel = _attest_intel_verifier()
+        if intel is None:
+            raise HTTPException(503, "attestation_verifier_not_configured")
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "malformed_json")
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "malformed_json")
+        if not (x_cathedral_hotkey and x_cathedral_signature and x_cathedral_submitted_at):
+            raise HTTPException(401, "missing_hotkey_signature")
+        _verify_hotkey_claim(
+            x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+            challenge_id=str(payload.get("challenge_id") or ""),
+            dimacs_solution_sha256="",
+            allow_fallback_shapes=False,
+        )
+        res = attest.verify_attestation(
+            store,
+            payload,
+            private_key_hex=key_hex,
+            intel=intel,
+            authenticated_hotkey=x_cathedral_hotkey,
+        )
+        return {
+            "ok": res.ok,
+            "reason": res.reason,
+            "multiplier": res.multiplier,
+            "eval_run_id": res.eval_run_id,
+            "verifier_backend": getattr(intel, "backend", "unknown"),
+        }
+
+    @app.get("/v1/attest/status/{eval_run_id}")
+    def attest_status(eval_run_id: str, authorization: str | None = Header(None)):
+        from . import attest
+        if not attest.attest_enabled():
+            raise HTTPException(404, "not_found")
+        if not _attest_status_public():
+            token = _attest_status_token_configured()
+            if not token:
+                raise HTTPException(503, "attest_status_token_not_configured")
+            if not hmac.compare_digest(_bearer_value(authorization), token):
+                raise HTTPException(401, "invalid_attest_status_token")
+        rows_ = store.query(
+            "SELECT id, row_json, attested FROM eval_runs WHERE id=?", (eval_run_id,))
+        if not rows_:
+            raise HTTPException(404, "eval_run_not_found")
+        att_rows = store.query(
+            "SELECT id, miner_hotkey, challenge_id, solver_digest, multiplier, "
+            "verified_at_iso FROM attestations WHERE eval_run_id=? "
+            "ORDER BY verified_at_iso DESC",
+            (eval_run_id,))
+        return {
+            "eval_run_id": eval_run_id,
+            "attested": bool(rows_[0]["attested"]),
+            "attestations": [dict(r) for r in att_rows],
+        }
 
     # ---- M1: feed ---------------------------------------------------------
     @app.get("/v1/leaderboard/recent")
@@ -502,6 +676,15 @@ def build_app(
                 "count": len(rows_),
                 "cache_ttl_secs": 45,
             },
+            headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v1/leaderboard/explain")
+    def leaderboard_explain(miner_hotkey: str = Query(..., min_length=1)):
+        """Explain how the current scoring policy treats one miner hotkey."""
+        payload = weights_mod.explain_miner_score(store, miner_hotkey)
+        return JSONResponse(
+            payload,
             headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
         )
 
@@ -707,15 +890,17 @@ def build_app(
             challenge_id="", dimacs_solution_sha256="",
         )
         epoch = pm.current_epoch()
+        assignment_identity = weights_mod.scoring_identity_for_hotkey(store, x_cathedral_hotkey)
         effective_limit = pm.assignment_page_limit(limit)
         items = pm.miner_instance_set(
-            x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
-        _record_perminer_assignments(x_cathedral_hotkey, epoch, items)
+            assignment_identity, epoch, offset=offset, limit=effective_limit)
+        _record_perminer_assignments(assignment_identity, epoch, items)
         return {
             "family_id": _FAMILY,
             "kind": "per_miner",
             "epoch": epoch,
             "miner_hotkey": x_cathedral_hotkey,
+            "assignment_identity": assignment_identity,
             "offset": offset,
             "requested_limit": limit,
             "limit": effective_limit,
@@ -750,12 +935,13 @@ def build_app(
             challenge_id="", dimacs_solution_sha256="",
         )
         epoch = pm.current_epoch()
-        tier_seq = _lookup_perminer_assignment(x_cathedral_hotkey, epoch, challenge_id)
+        assignment_identity = weights_mod.scoring_identity_for_hotkey(store, x_cathedral_hotkey)
+        tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
         if tier_seq is None:
-            tier_seq = pm.recover_tier_seq_for(x_cathedral_hotkey, epoch, challenge_id)
+            tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
         if tier_seq is not None:
             tier, seq = tier_seq
-            cid, cnf_text, _ = pm.generate_instance(x_cathedral_hotkey, epoch, tier, seq)
+            cid, cnf_text, _ = pm.generate_instance(assignment_identity, epoch, tier, seq)
             if cid == challenge_id:
                 return PlainTextResponse(cnf_text, media_type="text/plain; charset=utf-8",
                                         headers={"X-Perminer-Challenge-Id": cid,
@@ -797,6 +983,7 @@ def build_app(
             x_cathedral_hotkey, x_cathedral_signature, submitted_at,
             challenge_id=challenge_id, dimacs_solution_sha256=sol_sha,
             alt_submitted_at=x_cathedral_submitted_at or None,
+            allow_fallback_shapes=False,
         )
 
         # ---- Per-miner submit path (CATHEDRAL_PERMINER_ENABLED) ----
@@ -808,21 +995,26 @@ def build_app(
             _remember_submit(rl_key, now)
 
             epoch = pm.current_epoch()
-            # Parse assignment from dimacs_solution (space-separated signed ints).
-            try:
-                assignment = [int(x) for x in dimacs_solution.split() if x and x != "0"]
-            except ValueError:
-                raise HTTPException(400, "malformed_dimacs_solution")
-
-            tier_seq = _lookup_perminer_assignment(x_cathedral_hotkey, epoch, challenge_id)
+            assignment_identity = weights_mod.scoring_identity_for_hotkey(store, x_cathedral_hotkey)
+            tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
             if tier_seq is None:
-                tier_seq = pm.recover_tier_seq_for(x_cathedral_hotkey, epoch, challenge_id)
+                tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
             if tier_seq is None:
+                check = None
                 ok, reason = False, "challenge_id_not_in_miner_set"
             else:
-                ok, reason = pm.verify_miner_submission_for(
-                    x_cathedral_hotkey, epoch, tier_seq[0], tier_seq[1],
-                    challenge_id, assignment)
+                cnf = pm.get_miner_cnf(assignment_identity, epoch, tier_seq[0], tier_seq[1])
+                if cnf is None:
+                    check = None
+                    ok, reason = False, "challenge_id_not_in_miner_set"
+                else:
+                    _cid, cnf_text = cnf
+                    check = verify_dimacs_solution(cnf_text, dimacs_solution)
+                    if not check.ok:
+                        ok, reason = False, check.rejection_reason
+                    else:
+                        ok, reason = pm.verify_miner_submission(
+                            assignment_identity, epoch, challenge_id, check.assignment)
             sub_id = new_uuid()
 
             if not ok:
@@ -857,7 +1049,7 @@ def build_app(
             pm_weight = pm.weight_for(tier)
             now_iso = _now_iso_ms()
             row_uuid = new_uuid()
-            answer_hash = sha256_hex(",".join(str(x) for x in assignment))
+            answer_hash = sha256_hex(",".join(str(x) for x in (check.assignment if check else [])))
             verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
 
             def _pm_accept(conn):
@@ -1055,6 +1247,7 @@ def build_app(
         _verify_hotkey_claim(
             x_cathedral_hotkey, x_cathedral_signature, submitted_at,
             challenge_id="arena", dimacs_solution_sha256=source_sha256,
+            allow_fallback_shapes=False,
         )
         spec = SolverSpec(source_url, container_digest, source_sha256,
                           owner_hotkey=x_cathedral_hotkey)
@@ -1096,6 +1289,7 @@ def build_app(
         _verify_hotkey_claim(
             x_cathedral_hotkey, x_cathedral_signature, submitted_at,
             challenge_id="arena-instance", dimacs_solution_sha256=cnf_sha,
+            allow_fallback_shapes=False,
         )
         instance_id = new_uuid()
         quarantine_until = round_no + _QUARANTINE_ROUNDS

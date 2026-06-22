@@ -45,13 +45,17 @@ Shadow mode:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
+import secrets
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
 from ..dimacs import gen_planted_3sat, verify_witness
 from .store import Store
+
+_EPHEMERAL_SEED_SECRET = secrets.token_bytes(32)
 
 # --------------------------------------------------------------------------
 # Feature flags
@@ -166,23 +170,31 @@ def current_epoch() -> int:
 # --------------------------------------------------------------------------
 
 def instance_seed(hotkey: str, epoch: int, tier: int, seq: int) -> int:
-    """63-bit deterministic seed from (hotkey, epoch, tier, seq).
+    """63-bit secret-derived seed from (hotkey, epoch, tier, seq).
 
     The hotkey is the primary differentiator: two miners with the same epoch/tier/seq
-    get completely different CNFs because their hotkeys differ. There is no way to
-    predict or precompute another miner's CNF without knowing their hotkey + epoch
-    combination.
+    get completely different CNFs because their hotkeys differ. A server secret
+    is mixed in so miners cannot regenerate the planted witness from public ids.
     """
-    raw = f"{hotkey}:{epoch}:{tier}:{seq}"
-    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    raw = f"seed:{hotkey}:{epoch}:{tier}:{seq}"
+    h = hmac.new(_seed_secret_bytes(), raw.encode("utf-8"), hashlib.sha256).hexdigest()
     return int(h[:16], 16) & 0x7FFFFFFFFFFFFFFF
 
 
 def instance_id(hotkey: str, epoch: int, tier: int, seq: int) -> str:
     """Stable, opaque challenge ID for a per-miner instance."""
-    raw = f"{hotkey}:{epoch}:{tier}:{seq}"
-    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    raw = f"id:{hotkey}:{epoch}:{tier}:{seq}"
+    h = hmac.new(_seed_secret_bytes(), raw.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
     return f"pm-t{tier}-e{epoch}-{h}"
+
+
+def _seed_secret_bytes() -> bytes:
+    raw = (
+        os.environ.get("CATHEDRAL_PERMINER_SEED_SECRET", "").strip()
+        or os.environ.get("CATHEDRAL_REFILL_SEED_SECRET", "").strip()
+        or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").strip()
+    )
+    return raw.encode("utf-8") if raw else _EPHEMERAL_SEED_SECRET
 
 
 # --------------------------------------------------------------------------
@@ -386,18 +398,33 @@ def record_perminer_solve(
     """Record a per-miner solve attempt (idempotent — one solve per hotkey+challenge).
     Returns True if newly recorded, False if already existed.
     """
-    dw = weight_for(tier) if verified else 0.0
-
     def _do(conn):
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO per_miner_solves"
-            "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, verified, solved_at_iso) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (challenge_id, hotkey, epoch, tier, seq, dw, 1 if verified else 0,
-             _now_iso()))
-        return int(cur.rowcount or 0)
+        return int(record_perminer_solve_tx(
+            conn, hotkey, epoch, challenge_id, tier, seq, verified) or 0)
 
     return bool(store.write(_do))
+
+
+def record_perminer_solve_tx(
+    conn,
+    hotkey: str,
+    epoch: int,
+    challenge_id: str,
+    tier: int,
+    seq: int,
+    verified: bool,
+    *,
+    solved_at_iso: str | None = None,
+) -> bool:
+    """Transaction-local per-miner solve insert."""
+    dw = weight_for(tier) if verified else 0.0
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO per_miner_solves"
+        "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, verified, solved_at_iso) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (challenge_id, hotkey, epoch, tier, seq, dw, 1 if verified else 0,
+         solved_at_iso or _now_iso()))
+    return bool(int(cur.rowcount or 0))
 
 
 def _now_iso() -> str:

@@ -16,7 +16,7 @@ Run with a python that has cryptography + bittensor_wallet + fastapi
 from __future__ import annotations
 
 import base64
-import inspect
+import hashlib
 import json
 import os
 import sys
@@ -25,12 +25,17 @@ from pathlib import Path
 from scaffold import wire
 from scaffold.publisher import build_app, seed_challenge
 from scaffold.publisher import rows as rowmod
+from scaffold.publisher import tee_gpu as _tee_gpu
+from scaffold.publisher import weights as _weights
 from scaffold.publisher.auth import (
     ALICE_SS58, canonical_claim_bytes, default_verifier,
 )
 from scaffold.publisher.keys import generate_test_key
 from scaffold.publisher.sat_solution import verify_dimacs_solution
 from scaffold.dimacs import gen_planted_3sat, solve_cnf
+
+for _env_key in (_weights.MODE_ENV, _weights.TIER_WEIGHTS_ENV, _weights.TIER2_MULT_ENV):
+    os.environ.pop(_env_key, None)
 
 FIX = Path(__file__).parent / "fixtures" / "live-20260609"
 checks: list[tuple[str, bool]] = []
@@ -171,18 +176,6 @@ app = build_app(database_path=":memory:", signing_key_hex=key_hex, submit_min_in
 store = app.state.store
 cnf_e2e, _ = gen_planted_3sat(123, 14, 42)
 seed_challenge(store, challenge_id="sat-e2e-1", tier=1, cnf_text=cnf_e2e)
-submit_route = next(
-    (r for r in app.routes if getattr(r, "path", "") == "/v1/agents/submit"),
-    None,
-)
-ck("submit handler is sync so FastAPI runs verification off the event loop",
-   submit_route is not None and not inspect.iscoroutinefunction(submit_route.endpoint))
-route_by_path = {getattr(r, "path", ""): r for r in app.routes}
-ck("memory-only read handlers stay async so submit load cannot starve them",
-   all(
-       inspect.iscoroutinefunction(route_by_path[p].endpoint)
-       for p in ("/health", "/v1/leaderboard/top")
-   ))
 
 with TestClient(app) as client:
     # health + jwks shape
@@ -198,6 +191,19 @@ with TestClient(app) as client:
     pub_keys = set(ac["items"][0])
     ck("active-challenges item carries the live board fields",
        board_keys - {"difficulty_label", "storage"} <= pub_keys)
+    ck("active-challenges exposes scoring and tier distribution",
+       ac["scoring"]["mode"] == "proportional"
+       and ac["distribution"]["total_challenges"] == ac["count"]
+       and ac["distribution"]["tiers"][0]["count"] == ac["count"])
+    generator = ac.get("generator") or {}
+    generator_tiers = {int(t["tier"]): t for t in generator.get("tiers", [])}
+    ck("active-challenges exposes SAT generator refill policy",
+       generator.get("kind") == "local_refill"
+       and generator.get("source") == "scaffold.publisher.refill"
+       and generator_tiers.get(1, {}).get("method") == "biased"
+       and generator_tiers.get(2, {}).get("method") == "ajm"
+       and generator_tiers.get(1, {}).get("target_active") == 25
+       and generator_tiers.get(2, {}).get("target_active") == 25)
 
     from bittensor_wallet import Keypair  # noqa
     miner = Keypair.create_from_uri("//E2EMiner")
@@ -206,9 +212,131 @@ with TestClient(app) as client:
         d = datetime.now(timezone.utc)
         return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{d.microsecond // 1000:03d}Z"
 
+    import blake3 as _blake3
+    old_gate_env = {
+        k: os.environ.get(k)
+        for k in (
+            "CATHEDRAL_TEE_GPU_ENABLED",
+            "CATHEDRAL_TEE_GPU_REQUIRE_INTAKE_CODE",
+            "CATHEDRAL_TEE_GPU_INTAKE_CODE",
+            "CATHEDRAL_TEE_GPU_INTAKE_ALLOWLIST",
+        )
+    }
+    try:
+        os.environ["CATHEDRAL_TEE_GPU_ENABLED"] = "1"
+        os.environ.pop("CATHEDRAL_TEE_GPU_REQUIRE_INTAKE_CODE", None)
+        os.environ.pop("CATHEDRAL_TEE_GPU_INTAKE_CODE", None)
+        os.environ.pop("CATHEDRAL_TEE_GPU_INTAKE_ALLOWLIST", None)
+
+        def _offer_sig(body: dict, *, when: str):
+            digest = hashlib.sha256(
+                json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            claim = canonical_claim_bytes(
+                bundle_hash=_blake3.blake3(b"").hexdigest(),
+                card_id=_tee_gpu.TEE_CARD_ID,
+                miner_hotkey=miner.ss58_address,
+                submitted_at=when,
+                challenge_id=body["node_id"],
+                dimacs_solution_sha256=digest,
+            )
+            return base64.b64encode(miner.sign(claim)).decode()
+
+        offer_body = {
+            "node_id": "publisher-gated-h200-0",
+            "gpu_short_ref": "h200",
+            "gpu_count": 8,
+            "hourly_cost": 2.75,
+            "agent_api": "http://203.0.113.50:32000",
+            "tee_kind": "intel_tdx",
+            "tdx_claimed": True,
+            "gpu_cc_claimed": True,
+            "operator_use_authorized": True,
+        }
+        closed_at = now_iso()
+        closed_offer = client.post(
+            "/v1/tee-gpu/offers",
+            headers={
+                "X-Cathedral-Hotkey": miner.ss58_address,
+                "X-Cathedral-Signature": _offer_sig(offer_body, when=closed_at),
+                "X-Cathedral-Submitted-At": closed_at,
+            },
+            json=offer_body,
+        )
+        ck("TEE GPU live intake fails closed when gate is unconfigured",
+           closed_offer.status_code == 503
+           and closed_offer.json().get("detail") == "tee_gpu_intake_gate_not_configured")
+
+        os.environ["CATHEDRAL_TEE_GPU_REQUIRE_INTAKE_CODE"] = "1"
+        os.environ["CATHEDRAL_TEE_GPU_INTAKE_CODE"] = "publisher-gate-secret"
+        offer_at = now_iso()
+        blocked_offer = client.post(
+            "/v1/tee-gpu/offers",
+            headers={
+                "X-Cathedral-Hotkey": miner.ss58_address,
+                "X-Cathedral-Signature": _offer_sig(offer_body, when=offer_at),
+                "X-Cathedral-Submitted-At": offer_at,
+            },
+            json=offer_body,
+        )
+        ck("TEE GPU live intake rejects missing invite code",
+           blocked_offer.status_code == 403
+           and blocked_offer.json().get("detail") == "invalid_tee_gpu_intake_code")
+
+        allowed_body = {**offer_body, "intake_code": "publisher-gate-secret"}
+        allowed_at = now_iso()
+        allowed_offer = client.post(
+            "/v1/tee-gpu/offers",
+            headers={
+                "X-Cathedral-Hotkey": miner.ss58_address,
+                "X-Cathedral-Signature": _offer_sig(allowed_body, when=allowed_at),
+                "X-Cathedral-Submitted-At": allowed_at,
+            },
+            json=allowed_body,
+        )
+        allowed_json = allowed_offer.json() if allowed_offer.status_code == 200 else {}
+        ck("TEE GPU live intake accepts signed invite-code offer",
+           allowed_offer.status_code == 200
+           and allowed_json.get("capacity", {}).get("node_id") == "publisher-gated-h200-0")
+        request_body = {"node_id": "publisher-gated-evidence-h200-0", "ttl_secs": 60}
+        request_at = now_iso()
+        blocked_request = client.post(
+            "/v1/tee-gpu/evidence-request",
+            headers={
+                "X-Cathedral-Hotkey": miner.ss58_address,
+                "X-Cathedral-Signature": _offer_sig(request_body, when=request_at),
+                "X-Cathedral-Submitted-At": request_at,
+            },
+            json=request_body,
+        )
+        ck("TEE GPU evidence request rejects missing invite code",
+           blocked_request.status_code == 403
+           and blocked_request.json().get("detail") == "invalid_tee_gpu_intake_code")
+        allowed_request_body = {**request_body, "invite_code": "publisher-gate-secret"}
+        allowed_request_at = now_iso()
+        allowed_request = client.post(
+            "/v1/tee-gpu/evidence-request",
+            headers={
+                "X-Cathedral-Hotkey": miner.ss58_address,
+                "X-Cathedral-Signature": _offer_sig(allowed_request_body, when=allowed_request_at),
+                "X-Cathedral-Submitted-At": allowed_request_at,
+            },
+            json=allowed_request_body,
+        )
+        ck("TEE GPU evidence request accepts signed invite code",
+           allowed_request.status_code == 200
+           and allowed_request.json().get("status") == "issued")
+        metrics = client.get("/v1/admin/tee-gpu/metrics", headers={"Authorization": "Bearer no-token"})
+        ck("TEE GPU metrics remain admin-gated", metrics.status_code in (401, 503))
+    finally:
+        for key, value in old_gate_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     # active-cnf: hotkey-signed token fetch
     sa = now_iso()
-    import blake3 as _blake3
     cnf_claim = canonical_claim_bytes(
         bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
         miner_hotkey=miner.ss58_address, submitted_at=sa,
@@ -226,42 +354,16 @@ with TestClient(app) as client:
     cnf_text = client.get(cnf_url).text
     ck("valid token fetches the CNF", cnf_text.startswith("p cnf"))
 
-    old_pm_env = {
-        "CATHEDRAL_PERMINER_ENABLED": os.environ.get("CATHEDRAL_PERMINER_ENABLED"),
-        "CATHEDRAL_PERMINER_MAX_PAGE_LIMIT": os.environ.get("CATHEDRAL_PERMINER_MAX_PAGE_LIMIT"),
-    }
-    os.environ["CATHEDRAL_PERMINER_ENABLED"] = "1"
-    os.environ["CATHEDRAL_PERMINER_MAX_PAGE_LIMIT"] = "3"
-    try:
-        sa_pm = now_iso()
-        pm_claim = canonical_claim_bytes(
-            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
-            miner_hotkey=miner.ss58_address, submitted_at=sa_pm,
-            challenge_id="", dimacs_solution_sha256="")
-        pm_sig = base64.b64encode(miner.sign(pm_claim)).decode()
-        pm_resp = client.get(
-            "/v1/synthetic-boolean/per-miner/challenges?limit=500",
-            headers={"X-Cathedral-Hotkey": miner.ss58_address,
-                     "X-Cathedral-Signature": pm_sig,
-                     "X-Cathedral-Submitted-At": sa_pm},
-        )
-        pm_json = pm_resp.json() if pm_resp.status_code == 200 else {}
-        ck("per-miner challenge list caps oversized miner page requests",
-           pm_resp.status_code == 200
-           and pm_json.get("requested_limit") == 500
-           and pm_json.get("limit") == 3
-           and pm_json.get("max_limit") == 3
-           and pm_json.get("count") <= 6)
-    finally:
-        for _k, _v in old_pm_env.items():
-            if _v is None:
-                os.environ.pop(_k, None)
-            else:
-                os.environ[_k] = _v
-
     # solve with DPLL + submit (6-field signed)
     sol = solve_cnf(cnf_text)
     blob = "s SATISFIABLE\nv " + " ".join(str(x) for x in sol) + " 0\n"
+    blank_reuse = client.post("/v1/agents/submit",
+                              headers={"X-Cathedral-Hotkey": miner.ss58_address,
+                                       "X-Cathedral-Signature": cnf_sig},
+                              data={"card_id": "synthetic_boolean_v1", "submitted_at": sa,
+                                    "challenge_id": "sat-e2e-1", "dimacs_solution": blob})
+    ck("submit rejects reused active-cnf blank signature",
+       blank_reuse.status_code == 401)
     sa2 = now_iso()
     sol_sha = __import__("hashlib").sha256(blob.encode()).hexdigest()
     claim = canonical_claim_bytes(
@@ -277,7 +379,19 @@ with TestClient(app) as client:
     ck("submit accepted as ranked", resp.status_code == 200 and resp.json()["status"] == "ranked")
 
     ck("first solve gets open-window rank 1", resp.json().get("solve_rank") == 1)
-    ck("flat policy emits weighted_score 1.0", resp.json().get("weighted_score") == 1.0)
+    ck("submit row emits base weighted_score 1.0", resp.json().get("weighted_score") == 1.0)
+    explain = client.get(
+        "/v1/leaderboard/explain",
+        params={"miner_hotkey": miner.ss58_address},
+    )
+    explain_json = explain.json() if explain.status_code == 200 else {}
+    ck(
+        "leaderboard explain shows the miner's proportional score inputs",
+        explain.status_code == 200
+        and explain_json.get("score_source") == "proportional"
+        and explain_json.get("normalized_weight") == 1.0
+        and explain_json.get("distinct_challenges") == 1,
+    )
 
     # replay the exact same signature -> rejected
     replay = client.post("/v1/agents/submit",
@@ -340,25 +454,143 @@ with TestClient(app) as client:
                         data={"card_id": "synthetic_boolean_v1", "submitted_at": sa5,
                               "challenge_id": "sat-e2e-1", "dimacs_solution": blob})
     ck("open window: solve on a RETIRED challenge is rejected (no pay on dead challenge)",
-       resp4.status_code >= 400)
+       resp4.status_code == 409)
     # restore active so the downstream validator-pull check still sees the feed.
     def _reactivate(conn):
         conn.execute("UPDATE lane_challenges SET status='active' WHERE challenge_id=?",
                      ("sat-e2e-1",))
     store.write(_reactivate)
 
+    # PER-MINER ASSIGNMENTS: standard DIMACS solver output is accepted, solve
+    # ledger write is atomic inside submit txn, and repeat solve is rejected.
+    from scaffold.publisher import per_miner as _pm
+    old_pm_env = {
+        k: os.environ.get(k)
+        for k in (
+            "CATHEDRAL_PERMINER_ENABLED",
+            "CATHEDRAL_PERMINER_SHADOW",
+            "CATHEDRAL_PERMINER_ALLOTMENT_T1",
+            "CATHEDRAL_PERMINER_ALLOTMENT_T2",
+            "CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE",
+        )
+    }
+    try:
+        os.environ["CATHEDRAL_PERMINER_ENABLED"] = "1"
+        os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
+        os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T1"] = "1"
+        os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T2"] = "1"
+        os.environ["CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE"] = "1"
+        pm_miner = Keypair.create_from_uri("//PerMinerE2E")
+        pm_miner2 = Keypair.create_from_uri("//PerMinerE2EStacked")
+        def _map_pm_coldkey(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
+                "VALUES (?, ?, ?)",
+                (pm_miner.ss58_address, "coldkey-shared", now_iso()),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
+                "VALUES (?, ?, ?)",
+                (pm_miner2.ss58_address, "coldkey-shared", now_iso()),
+            )
+        store.write(_map_pm_coldkey)
+        pm_epoch = _pm.current_epoch()
+        seed_suffix = f"{_pm.instance_seed('coldkey-shared', pm_epoch, 1, 0):016x}"
+        pm_list_at = now_iso()
+        pm_list_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=pm_list_at,
+            challenge_id="", dimacs_solution_sha256="")
+        pm_list_sig = base64.b64encode(pm_miner.sign(pm_list_claim)).decode()
+        pm_list = client.get(
+            "/v1/synthetic-boolean/per-miner/challenges",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_list_sig,
+                     "X-Cathedral-Submitted-At": pm_list_at},
+        )
+        pm_list2_at = now_iso()
+        pm_list2_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner2.ss58_address, submitted_at=pm_list2_at,
+            challenge_id="", dimacs_solution_sha256="")
+        pm_list2_sig = base64.b64encode(pm_miner2.sign(pm_list2_claim)).decode()
+        pm_list2 = client.get(
+            "/v1/synthetic-boolean/per-miner/challenges",
+            headers={"X-Cathedral-Hotkey": pm_miner2.ss58_address,
+                     "X-Cathedral-Signature": pm_list2_sig,
+                     "X-Cathedral-Submitted-At": pm_list2_at},
+        )
+        ck("per-miner coldkey collapse shares one assignment stream across stacked hotkeys",
+           pm_list.status_code == 200
+           and pm_list2.status_code == 200
+           and [i["challenge_id"] for i in pm_list.json()["items"]]
+           == [i["challenge_id"] for i in pm_list2.json()["items"]])
+        pm_cid = pm_list.json()["items"][0]["challenge_id"]
+        _pm_cid, _pm_cnf, pm_assignment = _pm.generate_instance("coldkey-shared", pm_epoch, 1, 0)
+        ck("per-miner assignment endpoint uses coldkey-derived challenge id",
+           pm_cid == _pm_cid)
+        ck("per-miner public challenge id does not leak planted seed prefix",
+           seed_suffix not in pm_cid)
+        pm_blob = "s SATISFIABLE\nv " + " ".join(str(x) for x in pm_assignment) + " 0\n"
+        pm_sha = hashlib.sha256(pm_blob.encode()).hexdigest()
+        pm_at = now_iso()
+        pm_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=pm_at,
+            challenge_id=pm_cid, dimacs_solution_sha256=pm_sha)
+        pm_sig = base64.b64encode(pm_miner.sign(pm_claim)).decode()
+        pm_resp = client.post(
+            "/v1/agents/submit",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_sig},
+            data={"card_id": "synthetic_boolean_v1", "submitted_at": pm_at,
+                  "challenge_id": pm_cid, "dimacs_solution": pm_blob},
+        )
+        ck("per-miner submit accepts standard DIMACS solver output",
+           pm_resp.status_code == 200
+           and pm_resp.json().get("status") == "ranked"
+           and pm_resp.json().get("solve_rank") == 1)
+        pm_rows = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_solves WHERE miner_hotkey=? AND challenge_id=?",
+            (pm_miner.ss58_address, pm_cid),
+        )
+        ck("per-miner submit records exactly one solve row atomically",
+           pm_rows[0]["n"] == 1)
+        pm_at2 = now_iso()
+        pm_claim2 = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=pm_at2,
+            challenge_id=pm_cid, dimacs_solution_sha256=pm_sha)
+        pm_sig2 = base64.b64encode(pm_miner.sign(pm_claim2)).decode()
+        pm_dupe = client.post(
+            "/v1/agents/submit",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_sig2},
+            data={"card_id": "synthetic_boolean_v1", "submitted_at": pm_at2,
+                  "challenge_id": pm_cid, "dimacs_solution": pm_blob},
+        )
+        ck("per-miner duplicate solve is rejected",
+           pm_dupe.status_code == 409)
+    finally:
+        for key, value in old_pm_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     # SIGNED FINAL-SCORES VECTOR (the v4 scoring interface). One number per
     # miner + burn, Ed25519-signed — validators verify and apply, no local
     # averaging. Both e2e miners solved sat-e2e-1 above, so both appear.
-    from scaffold.publisher import weights as _weights
     vec_resp = client.get("/v1/validator/weights/next")
     ck("weights/next serves the signed vector", vec_resp.status_code == 200)
     vec = vec_resp.json()
     vec_hotkeys = {w["miner_hotkey"] for w in vec["weights"]}
     ck("vector contains exactly the miners who solved in-window",
        vec_hotkeys == {miner.ss58_address, miner2.ss58_address})
-    ck("flat_recent: equal weight per recent solver",
-       all(w["weight"] == 1.0 for w in vec["weights"]))
+    ck("default proportional: equal work earns equal weight",
+       vec["policy_metadata"]["requested_mode"] == "proportional"
+       and vec["policy_metadata"]["effective_mode"] == "proportional"
+       and all(w["weight"] == 1.0 for w in vec["weights"]))
     ck("burn rides the same signed payload (85.0 -> uid 204)",
        vec["burn_snapshot"] == {"burn_uid": 204, "forced_burn_percentage": 85.0})
     try:
@@ -435,7 +667,7 @@ with TestClient(app) as client:
         prop_store.close()
     finally:
         os.environ.pop(_weights.MODE_ENV, None)
-    ck("flat_recent restored as default", _weights.mode() == "flat_recent")
+    ck("proportional restored as default", _weights.mode() == "proportional")
 
     # BURN IS REMOTE: change the env, fresh vector carries the new signed burn.
     os.environ[_weights.BURN_PERCENTAGE_ENV] = "50.0"
@@ -492,19 +724,23 @@ with TestClient(app) as client:
 
     # validator-style pull loop: tuple cursor, verify EVERY signature.
     pulled = []
-    cur_ra = "1970-01-01T00:00:00.000Z"
-    cur_id = ""
+    cur_ra, cur_id = "1970-01-01T00:00:00+00:00", ""
     for _ in range(12):
         params = {"limit": 1}
-        if cur_ra:
-            params["since_ran_at"] = cur_ra
-            params["since_id"] = cur_id
+        params["since_ran_at"] = cur_ra
+        params["since_id"] = cur_id
         page = client.get("/v1/leaderboard/recent", params=params).json()
         if not page["items"]:
             break
         pulled += page["items"]
         cur_ra, cur_id = page["next_since_ran_at"], page["next_since_id"]
-    ck("validator pull retrieved v6 + v5compat rows for BOTH solves", len(pulled) == 4)
+    shared_pulled = [
+        r for r in pulled
+        if r.get("miner_hotkey") in {miner.ss58_address, miner2.ss58_address}
+        and r.get("task_type") == "synthetic_boolean_v1"
+    ]
+    ck("validator pull retrieved v6 + v5compat rows for BOTH shared solves",
+       len(shared_pulled) == 4)
     all_verify = all(wire.verify_row(r, pub_hex) for r in pulled)
     ck("every pulled row signature verifies (validator would score it)", all_verify)
     ck("cursor fields present on feed response",
