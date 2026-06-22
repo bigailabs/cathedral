@@ -24,11 +24,12 @@ import hmac
 import json
 import os
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, Form, Header, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..contract import GenerateCtx
@@ -87,6 +88,42 @@ def build_app(
     )
     # in-process per-(hotkey, challenge) last-submit clock for rate limiting
     last_submit: dict[tuple[str, str], float] = {}
+    last_submit_lock = threading.Lock()
+    try:
+        submit_max_concurrency = int(os.environ.get(
+            "CATHEDRAL_SUBMIT_MAX_CONCURRENCY", "24") or "0")
+    except ValueError:
+        submit_max_concurrency = 24
+    submit_gate = (
+        threading.BoundedSemaphore(submit_max_concurrency)
+        if submit_max_concurrency > 0 else None
+    )
+
+    def _submit_slot():
+        if submit_gate is None:
+            yield
+            return
+        if not submit_gate.acquire(blocking=False):
+            raise HTTPException(429, "submit_busy_retry", headers={"Retry-After": "1"})
+        try:
+            yield
+        finally:
+            submit_gate.release()
+
+    def _submit_rate_limited(rl_key: tuple[str, str], now: float) -> bool:
+        if min_interval <= 0:
+            return False
+        with last_submit_lock:
+            prev = last_submit.get(rl_key)
+        return prev is not None and (now - prev) < min_interval
+
+    def _remember_submit(rl_key: tuple[str, str], now: float) -> None:
+        with last_submit_lock:
+            last_submit[rl_key] = now
+            if len(last_submit) > 50_000:
+                horizon = now - max(min_interval, 3600.0)
+                for k in [k for k, t in last_submit.items() if t < horizon]:
+                    last_submit.pop(k, None)
 
     # ---- broadcast tier (KEYSTONE TASK 3) ---------------------------------
     # CNF bodies → backend-switchable store (db | bucket) with immutable cache
@@ -139,7 +176,48 @@ def build_app(
                         scope["raw_path"] = raw.replace(_LEGACY_PREFIX_BYTES, b"", 1)
             await self._app(scope, receive, send)
 
+    class _SlowRequestLogMiddleware:
+        """Pure ASGI middleware: logs slow request paths without query strings."""
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self._app(scope, receive, send)
+                return
+            try:
+                threshold = float(os.environ.get(
+                    "CATHEDRAL_SLOW_REQUEST_LOG_SECS", "2.0") or "0")
+            except ValueError:
+                threshold = 2.0
+            if threshold <= 0:
+                await self._app(scope, receive, send)
+                return
+
+            started = time.monotonic()
+            status = None
+
+            async def _send(message):
+                nonlocal status
+                if message.get("type") == "http.response.start":
+                    status = message.get("status")
+                await send(message)
+
+            try:
+                await self._app(scope, receive, _send)
+            finally:
+                elapsed = time.monotonic() - started
+                if elapsed >= threshold:
+                    print(
+                        "[slow_request] "
+                        f"method={scope.get('method', '')} "
+                        f"path={scope.get('path', '')} "
+                        f"status={status if status is not None else '-'} "
+                        f"elapsed={elapsed:.3f}s"
+                    )
+
     app.add_middleware(_StripLegacyPrefixMiddleware)
+    app.add_middleware(_SlowRequestLogMiddleware)
 
     # Per-key sliding-window rate limiter — anti-flood backpressure for miner
     # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
@@ -410,7 +488,7 @@ def build_app(
         )
 
     @app.get("/v1/leaderboard/top")
-    def leaderboard_top(window: str = Query("24h")):
+    async def leaderboard_top(window: str = Query("24h")):
         """Fast pre-aggregated miner ranking. Cached ~45s in-process.
         Returns top 100 miners ranked by total weighted_score over the window.
         window=24h only for now (others fall back to 24h).
@@ -454,7 +532,7 @@ def build_app(
         return JSONResponse(jwks_doc)
 
     @app.get("/health")
-    def health():
+    async def health():
         return {"status": "ok", "db": "ok", "hippius": "ok", "polaris": "ok",
                 "signing_key": "loaded", "sr25519_backend": getattr(verifier, "backend", "bittensor")}
 
@@ -629,7 +707,9 @@ def build_app(
             challenge_id="", dimacs_solution_sha256="",
         )
         epoch = pm.current_epoch()
-        items = pm.miner_instance_set(x_cathedral_hotkey, epoch, offset=offset, limit=limit)
+        effective_limit = pm.assignment_page_limit(limit)
+        items = pm.miner_instance_set(
+            x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
         _record_perminer_assignments(x_cathedral_hotkey, epoch, items)
         return {
             "family_id": _FAMILY,
@@ -637,8 +717,10 @@ def build_app(
             "epoch": epoch,
             "miner_hotkey": x_cathedral_hotkey,
             "offset": offset,
-            "limit": limit,
-            "next_offset": offset + limit,
+            "requested_limit": limit,
+            "limit": effective_limit,
+            "max_limit": pm.assignment_page_limit_max(),
+            "next_offset": offset + effective_limit,
             "count": len(items),
             "items": items,
             "submit_path": "/api/cathedral/v1/agents/submit",
@@ -683,7 +765,7 @@ def build_app(
 
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
     @app.post("/v1/agents/submit")
-    async def agents_submit(
+    def agents_submit(
         request: Request,
         card_id: str = Form(...),
         display_name: str = Form(""),
@@ -693,6 +775,7 @@ def build_app(
         x_cathedral_hotkey: str = Header(...),
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
+        _slot: None = Depends(_submit_slot),
     ):
         if card_id != _FAMILY:
             raise HTTPException(400, f"only card_id={_FAMILY} accepted (see skill.md)")
@@ -706,10 +789,8 @@ def build_app(
         # per-(hotkey, challenge) rate limit (fires before lock check).
         rl_key = (x_cathedral_hotkey, challenge_id)
         now = time.time()
-        if min_interval > 0:
-            prev = last_submit.get(rl_key)
-            if prev is not None and (now - prev) < min_interval:
-                raise HTTPException(429, "rate_limited")
+        if _submit_rate_limited(rl_key, now):
+            raise HTTPException(429, "rate_limited")
 
         sol_sha = sha256_hex(dimacs_solution)
         submitted_at = _verify_hotkey_claim(
@@ -724,11 +805,7 @@ def build_app(
         # and will 409 — a safe hard stop, not silent misbehaviour).
         from . import per_miner as pm
         if challenge_id.startswith("pm-") and pm.perminer_enabled():
-            last_submit[rl_key] = now
-            if len(last_submit) > 50_000:
-                horizon = now - max(min_interval, 3600.0)
-                for k in [k for k, t in last_submit.items() if t < horizon]:
-                    last_submit.pop(k, None)
+            _remember_submit(rl_key, now)
 
             epoch = pm.current_epoch()
             # Parse assignment from dimacs_solution (space-separated signed ints).
@@ -853,12 +930,7 @@ def build_app(
         if chal["status"] != "active":
             raise HTTPException(409, "challenge_already_locked")
 
-        last_submit[rl_key] = now  # consume the slot only past the gates
-        # bound the rate-limit map (long-lived single process): prune stale slots.
-        if len(last_submit) > 50_000:
-            horizon = now - max(min_interval, 3600.0)
-            for k in [k for k, t in last_submit.items() if t < horizon]:
-                last_submit.pop(k, None)
+        _remember_submit(rl_key, now)  # consume the slot only past the gates
 
         check = verify_dimacs_solution(chal["cnf_text"], dimacs_solution)
         sub_id = new_uuid()

@@ -16,6 +16,7 @@ Run with a python that has cryptography + bittensor_wallet + fastapi
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import os
 import sys
@@ -170,6 +171,18 @@ app = build_app(database_path=":memory:", signing_key_hex=key_hex, submit_min_in
 store = app.state.store
 cnf_e2e, _ = gen_planted_3sat(123, 14, 42)
 seed_challenge(store, challenge_id="sat-e2e-1", tier=1, cnf_text=cnf_e2e)
+submit_route = next(
+    (r for r in app.routes if getattr(r, "path", "") == "/v1/agents/submit"),
+    None,
+)
+ck("submit handler is sync so FastAPI runs verification off the event loop",
+   submit_route is not None and not inspect.iscoroutinefunction(submit_route.endpoint))
+route_by_path = {getattr(r, "path", ""): r for r in app.routes}
+ck("memory-only read handlers stay async so submit load cannot starve them",
+   all(
+       inspect.iscoroutinefunction(route_by_path[p].endpoint)
+       for p in ("/health", "/v1/leaderboard/top")
+   ))
 
 with TestClient(app) as client:
     # health + jwks shape
@@ -212,6 +225,39 @@ with TestClient(app) as client:
     ck("bad CNF token -> opaque 404", bad.status_code == 404)
     cnf_text = client.get(cnf_url).text
     ck("valid token fetches the CNF", cnf_text.startswith("p cnf"))
+
+    old_pm_env = {
+        "CATHEDRAL_PERMINER_ENABLED": os.environ.get("CATHEDRAL_PERMINER_ENABLED"),
+        "CATHEDRAL_PERMINER_MAX_PAGE_LIMIT": os.environ.get("CATHEDRAL_PERMINER_MAX_PAGE_LIMIT"),
+    }
+    os.environ["CATHEDRAL_PERMINER_ENABLED"] = "1"
+    os.environ["CATHEDRAL_PERMINER_MAX_PAGE_LIMIT"] = "3"
+    try:
+        sa_pm = now_iso()
+        pm_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=miner.ss58_address, submitted_at=sa_pm,
+            challenge_id="", dimacs_solution_sha256="")
+        pm_sig = base64.b64encode(miner.sign(pm_claim)).decode()
+        pm_resp = client.get(
+            "/v1/synthetic-boolean/per-miner/challenges?limit=500",
+            headers={"X-Cathedral-Hotkey": miner.ss58_address,
+                     "X-Cathedral-Signature": pm_sig,
+                     "X-Cathedral-Submitted-At": sa_pm},
+        )
+        pm_json = pm_resp.json() if pm_resp.status_code == 200 else {}
+        ck("per-miner challenge list caps oversized miner page requests",
+           pm_resp.status_code == 200
+           and pm_json.get("requested_limit") == 500
+           and pm_json.get("limit") == 3
+           and pm_json.get("max_limit") == 3
+           and pm_json.get("count") <= 6)
+    finally:
+        for _k, _v in old_pm_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
     # solve with DPLL + submit (6-field signed)
     sol = solve_cnf(cnf_text)
@@ -446,7 +492,8 @@ with TestClient(app) as client:
 
     # validator-style pull loop: tuple cursor, verify EVERY signature.
     pulled = []
-    cur_ra = cur_id = None
+    cur_ra = "1970-01-01T00:00:00.000Z"
+    cur_id = ""
     for _ in range(12):
         params = {"limit": 1}
         if cur_ra:

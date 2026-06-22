@@ -15,6 +15,7 @@ in one line.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,13 @@ TOP_CACHE_INTERVAL_SECS = 45
 
 # Window in hours — only 24h is implemented; other values fall back to this.
 TOP_CACHE_WINDOW_H = 24
+
+
+def _slow_build_log_secs() -> float:
+    try:
+        return float(os.environ.get("CATHEDRAL_TOP_CACHE_SLOW_LOG_SECS", "2.0") or "0")
+    except ValueError:
+        return 2.0
 
 
 class TopCache:
@@ -89,19 +97,32 @@ class TopCache:
         store = self._store
         if store is None:
             return
+        started = time.monotonic()
+        rows_count = 0
+        ok = False
         try:
             if getattr(store, "_is_postgres", False) or store.backend == "postgres":
                 rows = self._build_postgres(store)
             else:
                 rows = self._build_sqlite(store)
+            rows_count = len(rows)
             built_at = datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
             with self._lock:
                 self._rows = rows
                 self._built_at_iso = built_at
                 self._window_h = TOP_CACHE_WINDOW_H
+            ok = True
         except Exception as exc:  # never crash the process
             print(f"[top_cache] build error (will retry): {exc!r}")
+        finally:
+            elapsed = time.monotonic() - started
+            threshold = _slow_build_log_secs()
+            if threshold > 0 and elapsed >= threshold:
+                print(
+                    "[top_cache] slow_build "
+                    f"ok={ok} rows={rows_count} elapsed={elapsed:.3f}s"
+                )
 
     def _build_postgres(self, store) -> list[dict[str, Any]]:
         sql = """

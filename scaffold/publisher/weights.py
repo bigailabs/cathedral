@@ -85,6 +85,13 @@ _bg_started = False
 _bg_lock = threading.Lock()
 
 
+def _slow_refresh_log_secs() -> float:
+    try:
+        return float(os.environ.get("CATHEDRAL_WEIGHTS_SLOW_LOG_SECS", "2.0") or "0")
+    except ValueError:
+        return 2.0
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, "") or default)
@@ -504,12 +511,25 @@ def _bg_refresh_loop(store: Store, signing_key_hex: str) -> None:
     Runs forever; the process exiting is the only exit condition (daemon=True).
     """
     while True:
+        started = time.monotonic()
+        ok = False
+        miner_count = 0
         try:
             vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
+            miner_count = len(vec.get("weights", []))
             with _build_lock:
                 _vector_cache["v"] = (time.time(), vec)
+            ok = True
         except Exception as exc:
             print(f"[weights] bg_refresh error (will retry): {exc!r}")
+        finally:
+            elapsed = time.monotonic() - started
+            threshold = _slow_refresh_log_secs()
+            if threshold > 0 and elapsed >= threshold:
+                print(
+                    "[weights] slow_refresh "
+                    f"ok={ok} miners={miner_count} elapsed={elapsed:.3f}s"
+                )
         time.sleep(_CACHE_TTL_SECS)
 
 

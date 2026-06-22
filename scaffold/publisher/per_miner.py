@@ -25,9 +25,10 @@ Epoch:
   CATHEDRAL_PERMINER_EPOCH_BUCKET_HOURS to change the window (default 1).
 
 Allotment:
-  CATHEDRAL_PERMINER_ALLOTMENT_T1   (default 5)  — tier-1 instances per miner
-  CATHEDRAL_PERMINER_ALLOTMENT_T2   (default 3)  — tier-2 instances per miner
-  (Tuned small for shadow; crank up after the shadow run shows differentiation.)
+  CATHEDRAL_PERMINER_ALLOTMENT_T1   (default 10000) — tier-1 instances per miner
+  CATHEDRAL_PERMINER_ALLOTMENT_T2   (default 10000) — tier-2 instances per miner
+  CATHEDRAL_PERMINER_MAX_PAGE_LIMIT (default 50)    — max descriptors per tier/page
+  Allotment controls total epoch supply; page limit controls request-path cost.
 
 Difficulty weights per tier (CATHEDRAL_PERMINER_WEIGHT_T1 / T2, defaults 1.0 / 2.0):
   Tier-2 pays 2× per solve to reward harder work. With AJM hardness near
@@ -95,6 +96,14 @@ def epoch_bucket_hours() -> int:
 def allotment_for(tier: int) -> int:
     return max(1, _env_int(f"CATHEDRAL_PERMINER_ALLOTMENT_T{tier}",
                             {1: 10_000, 2: 10_000}.get(tier, 10_000)))
+
+
+def assignment_page_limit_max() -> int:
+    return max(1, min(500, _env_int("CATHEDRAL_PERMINER_MAX_PAGE_LIMIT", 50)))
+
+
+def assignment_page_limit(requested: int) -> int:
+    return max(1, min(int(requested), assignment_page_limit_max()))
 
 
 def weight_for(tier: int) -> float:
