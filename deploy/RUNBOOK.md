@@ -54,8 +54,12 @@ Set env (see `deploy/.env.example`). For staging:
 - `CATHEDRAL_DB_PATH=/app/data/publisher.db`
 - `CATHEDRAL_REFILL_ENABLED=true`  ·  `CATHEDRAL_REFILL_TARGET_T1=25` ·
   `CATHEDRAL_REFILL_TARGET_T2=25`
+- `CATHEDRAL_REFILL_METHOD_T1=biased` · `CATHEDRAL_REFILL_METHOD_T2=ajm`
 
 Deploy. Confirm `GET /health` is 200 and `sr25519_backend=bittensor`.
+Then confirm `/v1/synthetic-boolean/active-challenges` reports
+`generator.enabled=true`, tier 1 `method=biased`, tier 2 `method=ajm`, and
+targets `25/25`.
 
 ---
 
@@ -113,13 +117,85 @@ daily; watch the divergence band stays OK/WARN, never FAIL.
 
 ---
 
+## Optional: TEE GPU Capacity Intake
+
+This is a publisher-only ops lane for collecting candidate secure GPU capacity.
+It does **not** affect validator weights or miner emissions.
+Prefer an operator-controlled service or Postgres-backed publisher for live
+traffic. If enabled on the production SQLite scoring publisher, offer/admin
+writes share the same SQLite lock as validator feed activity.
+
+Enable only on an operator-controlled service:
+
+```bash
+CATHEDRAL_TEE_GPU_ENABLED=1
+CATHEDRAL_TEE_GPU_ADMIN_TOKEN=<long random token>
+CATHEDRAL_TEE_GPU_REQUIRE_INTAKE_CODE=1
+CATHEDRAL_TEE_GPU_INTAKE_CODE=<shared invite code>
+# or: CATHEDRAL_TEE_GPU_INTAKE_ALLOWLIST=5HotkeyA,5HotkeyB
+```
+
+Optional knobs:
+
+```bash
+CATHEDRAL_TEE_GPU_PUBLIC_CATALOG_ENABLED=0
+# Lab/review mode only: manual operator review can mark evidence acceptable.
+CATHEDRAL_TEE_GPU_REQUIRE_EVIDENCE=1
+
+# Production/provider-listing mode: require the verifier command to prove fresh
+# TDX + NVIDIA GPU confidential-compute evidence before Chutes handoff.
+CATHEDRAL_TEE_GPU_REQUIRE_CRYPTO_EVIDENCE=1
+CATHEDRAL_TEE_GPU_VERIFY_CMD=/app/bin/verify-tdx-gpu-attestation
+
+CATHEDRAL_TEE_GPU_CHUTES_MINER_API=http://127.0.0.1:32000
+CATHEDRAL_TEE_GPU_CHUTES_HOTKEY_PATH=/path/to/chutes/hotkey
+CATHEDRAL_TEE_GPU_CHUTES_CLI=chutes-miner
+CATHEDRAL_TEE_GPU_CHUTES_TIMEOUT_SECS=120
+```
+
+Chutes has two relevant public lists. `GET https://api.chutes.ai/nodes/supported`
+is the general `add-node` short-ref catalog. `GET
+https://api.chutes.ai/servers/tee/measurements` is the TEE measurement catalog.
+As checked on 2026-06-19, the TEE measurement profiles are exactly `8x h200`,
+`8x pro_6000`, `8x b200`, and `8x b300`. H100 is supported generally but is not
+a current public TEE measurement profile.
+
+The Polaris/Chutes runbook also confirms that Chutes' single-node bring-up path
+is stale. Use a two-node topology: one control-plane node and one separate GPU
+worker node/cluster. `agent_api` in the Cathedral offer must be the worker's
+Chutes agent URL, normally `http://<worker-ip>:32000`, after the
+`chutes-miner-gpu` chart is installed. It is not an arbitrary miner endpoint.
+
+Admin routes live under `/v1/admin/tee-gpu/*`; signed miner offers use
+`POST /v1/tee-gpu/offers`. The handoff endpoint
+`GET /v1/admin/tee-gpu/chutes-manifest` emits `chutes-miner add-node` commands
+for active, approved, eligible rows only after `chutes_server_name` and
+`CATHEDRAL_TEE_GPU_CHUTES_HOTKEY_PATH` are set. Pending rows are review
+inventory, not provider-listing inventory.
+Use `GET /v1/admin/tee-gpu/dashboard` for the operator view: list compute with
+Cathedral, review eligibility/authorization, then list approved capacity into
+Chutes.
+
+To list directly from Cathedral, run the service on the Chutes miner control
+plane, install/configure `chutes-miner`, set
+`CATHEDRAL_TEE_GPU_CHUTES_EXECUTE_ENABLED=1`, then call
+`POST /v1/admin/tee-gpu/capacity/{capacity_id}/chutes-list` with
+`{"execute": true}`. Without that env flag, the endpoint only records a dry-run
+audit event and returns the command. `hourly_cost` is per GPU per hour, so the
+admin metrics multiply it by `gpu_count` for total active listed hourly cost. See
+`TEE_GPU_CAPACITY.md`.
+
+---
+
 ## 4. 🔑 Promote the production signing key (staging → prod config)
 
 When soak is green and you're ready, set on the **target** service:
 
-- `CATHEDRAL_EVAL_SIGNING_KEY` = the 32-byte hex of the **live production key**
-  (pubkey `10890a66…f25e26`). This is the only true secret. Store it in Railway
-  service variables, never in git.
+- `CATHEDRAL_EVAL_SIGNING_KEY` = the 32-byte hex of the **live production key**.
+- `CATHEDRAL_PUBLISHER_SEED_SECRET` = a long stable random secret for local and
+  per-miner CNF seed derivation.
+
+Store production secrets in Railway service variables, never in git.
 
 Restart; confirm `GET /.well-known/cathedral-jwks.json` now serves
 `public_key_hex=10890a66…f25e26` (identical to live), and that newly-minted rows

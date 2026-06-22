@@ -1,0 +1,85 @@
+name: required-checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/**
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: python
+      - uses: github/codeql-action/analyze@v4
+
+  analyze-python:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile tracked Python files
+        run: |
+          git ls-files '*.py' | xargs python -m py_compile
+
+  leak-guard:
+    name: leak-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for committed secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          patterns = [
+              re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----"),
+              re.compile(r"AKIA[0-9A-Z]{16}"),
+              re.compile(r"(?i)(?:polaris|openai|anthropic|aws|github|ghp)[-_]?(?:api[-_]?)?key\s*[:=]\s*['\"][^'\"<>{}\s]{20,}['\"]"),
+              re.compile(r"(?i)(?:secret|token|password)\s*[:=]\s*['\"][A-Za-z0-9_./+=-]{40,}['\"]"),
+          ]
+          allow_fragments = (
+              "<long-random-token>",
+              "<approved-real-verifier-digest>",
+              "<sha256-of-approved-verifier-command>",
+              "5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ",
+          )
+          files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          findings = []
+          for name in files:
+              path = pathlib.Path(name)
+              if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf"}:
+                  continue
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              for lineno, line in enumerate(text.splitlines(), 1):
+                  if any(fragment in line for fragment in allow_fragments):
+                      continue
+                  if any(pattern.search(line) for pattern in patterns):
+                      findings.append(f"{name}:{lineno}: possible secret")
+          if findings:
+              print("\n".join(findings))
+              sys.exit(1)
+          PY

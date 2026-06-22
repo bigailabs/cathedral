@@ -3,7 +3,9 @@
 <p align="center">
   Documentation:
   <a href="VALIDATOR.md">Validator</a> |
-  <a href="https://api.cathedral.computer/skill.md">Live Miner Brief</a> |
+  <a href="CATHEDRAL_V0_LANES.md">v0 Lanes</a> |
+  <a href="LAUNCH_V0_RUNBOOK.md">v0 Launch Runbook</a> |
+  <a href="https://api.cathedral.computer/v1/synthetic-boolean/active-challenges">Active Challenges</a> |
   <a href="https://github.com/cathedralai/cathedral/releases">Releases</a>
 </p>
 
@@ -32,7 +34,7 @@ attack with solvers, solver agents, and new search systems.
 
 - **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
 
-- **Designed for solver evolution.** A SAT-solving market is useful on day one: miners earn for solving instances faster than the field. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. Recent work such as [SATLUTION](https://arxiv.org/abs/2509.07367) points toward LLM-driven solver evolution under correctness checks; Cathedral makes that kind of work economic.
+- **Designed for solver evolution.** A SAT-solving market is useful on day one: miners are scored for verified solves, with rewards determined by the live signed validator weight policy. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. Recent work such as [SATLUTION](https://arxiv.org/abs/2509.07367) points toward LLM-driven solver evolution under correctness checks; Cathedral makes that kind of work economic.
 
 - **Real demand.** Hard SAT and SMT instances drive workloads at industrial scale: Amazon has described AWS automated-reasoning systems generating [a billion SMT queries a day](https://www.amazon.science/blog/a-billion-smt-queries-a-day). Chip companies depend on formal verification platforms from Cadence, Synopsys, and Siemens. Today these teams either pay enterprise EDA licenses or run reasoning workloads inside closed cloud services. Cathedral is a third path: verifiable hard-instance solving through an open mining market.
 
@@ -48,14 +50,18 @@ attack with solvers, solver agents, and new search systems.
 6. Validator verifies the Cathedral signature and maps the hotkey to the current metagraph UID.
 7. Validator applies the signed weight policy and calls `set_weights`.
 
-Validators apply one Cathedral-signed weight vector — a final score per miner plus the signed burn snapshot — verified against a pinned key. Scoring (recency window, multi-challenge composition, burn rate) is composed on the publisher and signed, so validators relay the signed number rather than recomputing it locally. The per-solve feed (`/v1/leaderboard/recent`) stays public as an independently re-checkable audit trail.
+Validators apply one Cathedral-signed weight vector: a final score per miner plus the signed burn snapshot, verified against a pinned key. Scoring (recency window, multi-challenge composition, burn rate) is composed on the publisher and signed, so validators relay the signed number rather than recomputing it locally. The per-solve feed (`/v1/leaderboard/recent`) stays public as an independently re-checkable audit trail.
 
 SAT scoring:
 
-- `1.0`: valid satisfying assignment that wins the active challenge.
-- `0.0`: invalid, malformed, incomplete, non-winning, locked, or verifier-error answer.
+- A valid satisfying assignment records a verified solve for that hotkey and challenge.
+- Invalid, malformed, incomplete, non-winning, locked, or verifier-error answers score `0.0`.
+- When proportional mode is enabled and deployed, signed miner weights are composed from distinct verified solves in the recency window, weighted by challenge tier.
 
-Winning is selected by publisher receipt time, not first verified time.
+Winning is selected by publisher receipt time, not first verified time. After
+this publisher release is deployed, it exposes the current generator policy,
+tier mix, and scoring weights in
+`/v1/synthetic-boolean/active-challenges`.
 
 ### Proofs and Protections
 
@@ -73,7 +79,7 @@ The Cathedral publisher is verifier of record for private SAT in v1. Validators 
 
 ---
 
-## 🚀 [Getting Started](#getting-started)
+## [Getting Started](#getting-started)
 
 Use the quick starts below to work inside the subnet.
 
@@ -89,7 +95,7 @@ pip install -e .
 
 ### Miner Quick Start
 
-> **Heads up:** the `cathedral-runtime` Docker image (`ghcr.io/cathedralai/cathedral-runtime:v1.0.7`) is **deprecated**. Current miners do not need it. Run Hermes directly on a Linux SSH host. See [docker/cathedral-runtime/DEPRECATED.md](docker/cathedral-runtime/DEPRECATED.md) for context.
+> **Heads up:** the `cathedral-runtime` Docker image (`ghcr.io/cathedralai/cathedral-runtime:v1.0.7`) is **deprecated**. Current miners do not need it. Run Hermes directly on a Linux SSH host.
 
 You need:
 
@@ -106,7 +112,8 @@ Live miner flow:
 4. Solve locally.
 5. Submit `challenge_id` and `dimacs_solution` to `/v1/agents/submit`.
 
-The canonical live contract is served at [`https://api.cathedral.computer/skill.md`](https://api.cathedral.computer/skill.md).
+The canonical live board is served at
+[`https://api.cathedral.computer/v1/synthetic-boolean/active-challenges`](https://api.cathedral.computer/v1/synthetic-boolean/active-challenges).
 
 Submit a DIMACS assignment:
 

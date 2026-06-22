@@ -1,0 +1,68 @@
+name: launch-readiness
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/**
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cathedral
+          POSTGRES_PASSWORD: cathedral
+          POSTGRES_DB: cathedral_verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cathedral -d cathedral_verify"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install publisher dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[publisher]"
+
+      - name: Run launch verifier suite
+        run: |
+          python publisher_verify.py
+          python tee_gpu_verify.py
+          python attest_verify.py
+          python weights_verify.py
+          python audit_arena_verify.py
+          python distillation_verify.py
+          python arena_runner_verify.py
+          python launch_readiness_verify.py
+          python rc_verify.py
+
+      - name: Run Postgres backend verifier
+        env:
+          DATABASE_URL: postgresql://cathedral:cathedral@localhost:5432/cathedral_verify
+        run: python postgres_verify.py
+
+      - name: Check controlled-v0 readiness
+        run: python launch_readiness_report.py --profile controlled-v0 --require-ready
+
+      - name: Confirm full hardware readiness is still blocked locally
+        run: |
+          if python launch_readiness_report.py --require-ready; then
+            echo "Full hardware readiness unexpectedly passed without real evidence" >&2
+            exit 1
+          fi

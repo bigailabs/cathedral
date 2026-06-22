@@ -32,10 +32,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import multiprocessing
 import os
 import queue as _queue
+import secrets
 import threading as _threading
 import time as _time
 import urllib.parse
@@ -44,7 +46,6 @@ from datetime import datetime, timedelta, timezone
 
 from ..dimacs import gen_planted_3sat
 from .app import seed_challenge
-from .auth import sha256_hex
 from .store import Store
 
 # ---------------------------------------------------------------------------
@@ -68,8 +69,8 @@ from .store import Store
 # ---------------------------------------------------------------------------
 
 _FORK_TIMEOUT = int(os.environ.get("CATHEDRAL_GEN_FORK_TIMEOUT", "45"))
-MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "1"))
-MINT_CAP_FALLBACK = 1   # if fork blocked; 1 gen×~5-6s GIL hold per 60s tick
+MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "4"))
+MINT_CAP_FALLBACK = 1   # if fork blocked; 1 gen×~5-6s GIL hold per tick
 
 
 def _worker_gen(conn, seed: int, n_vars: int, n_clauses: int, method: str) -> None:
@@ -165,11 +166,12 @@ def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
 #   • If the queue is empty (gen can't keep up), the refill tick falls back to
 #     direct _gen_cnf (same as before) so minting never stalls.
 #
-# Queue sizing: 2 per tier is enough for a buffer against timing jitter.
-# Larger queues waste memory (each entry is ~450KB CNF text).
+# Queue sizing: 8 per tier gives the live board enough burst capacity when
+# hundreds of miners saturate active challenges faster than a 1-mint tick.
+# Each entry is roughly 450KB CNF text at the current tier-1 shape.
 # ---------------------------------------------------------------------------
 
-_PREGEN_QUEUE_SIZE = int(os.environ.get("CATHEDRAL_PREGEN_QUEUE_SIZE", "2"))
+_PREGEN_QUEUE_SIZE = int(os.environ.get("CATHEDRAL_PREGEN_QUEUE_SIZE", "8"))
 
 # Per-tier queues: tier -> queue.Queue of (cnf_text,)
 _pregen_queues: dict[int, _queue.Queue] = {}
@@ -244,6 +246,7 @@ def _get_pregen_cnf(tier: int) -> str | None:
 
 
 _FAMILY = "synthetic_boolean_v1"
+_EPHEMERAL_SEED_SECRET = secrets.token_bytes(32)
 
 # Live shape (board.json / live active-challenges): tier1 unchanged.
 # tier2 ships at a smaller AJM size; env-overridable for emergency revert.
@@ -257,9 +260,9 @@ _TIER_METHOD: dict[int, str] = {
     2: "ajm",
 }
 _DEFAULT_TARGETS: dict[int, int] = {1: 25, 2: 25}
-_DEFAULT_RETIRE_AFTER_SECONDS = 60 * 60       # live default (sat_fill.py)
-_DEFAULT_RETIRE_AFTER_DISTINCT_SOLVERS = 64   # live default (sat_fill.py)
-_DEFAULT_INTERVAL_SECONDS = 60
+_DEFAULT_RETIRE_AFTER_SECONDS = 60 * 60
+_DEFAULT_RETIRE_AFTER_DISTINCT_SOLVERS = 256
+_DEFAULT_INTERVAL_SECONDS = 20
 
 
 def refill_enabled() -> bool:
@@ -274,6 +277,59 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def generator_config() -> dict:
+    """Public, read-only config for the live SAT refill generator.
+
+    This is intentionally derived from the same helpers the refill loop uses so
+    the board can expose what will actually mint, not a duplicated doc string.
+    """
+    external_requested = generator_requested()
+    external_configured = generator_configured()
+    external_enabled = external_requested and external_configured
+    return {
+        "enabled": refill_enabled(),
+        "family_id": _FAMILY,
+        "kind": "external_sat_generator" if external_enabled else "local_refill",
+        "source": "scaffold.publisher.refill",
+        "interval_seconds": _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
+                                     _DEFAULT_INTERVAL_SECONDS),
+        "retire_after_seconds": retire_after_seconds(),
+        "retire_after_distinct_solvers": retire_after_distinct_solvers(),
+        "mint_cap": generator_max_mints() if external_enabled else (
+            MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
+        "pregen_queue_size": _PREGEN_QUEUE_SIZE,
+        "external": {
+            "requested": external_requested,
+            "enabled": external_enabled,
+            "configured": external_configured,
+            "configuration_error": (
+                "missing_url_or_token"
+                if external_requested and not external_configured else None
+            ),
+            "local_fallback": _env_bool("CATHEDRAL_SAT_GENERATOR_LOCAL_FALLBACK", False),
+            "timeout_seconds": _generator_timeout(),
+        },
+        "seed": {
+            "kind": "server_hmac",
+            "secret_configured": bool(
+                os.environ.get("CATHEDRAL_REFILL_SEED_SECRET", "").strip()
+                or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").strip()
+            ),
+        },
+        "tiers": [
+            {
+                "tier": tier,
+                "target_active": target_for(tier),
+                "n_vars": shape_for(tier)[0],
+                "n_clauses": shape_for(tier)[1],
+                "method": method_for(tier),
+                "generator_kind": generator_kind_for(tier),
+            }
+            for tier in sorted(_DEFAULT_TARGETS)
+        ],
+    }
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     try:
@@ -282,12 +338,19 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def generator_enabled() -> bool:
+def generator_requested() -> bool:
+    return _env_bool("CATHEDRAL_SAT_GENERATOR_ENABLED")
+
+
+def generator_configured() -> bool:
     return (
-        _env_bool("CATHEDRAL_SAT_GENERATOR_ENABLED")
-        and bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_URL", "").strip())
+        bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_URL", "").strip())
         and bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_TOKEN", "").strip())
     )
+
+
+def generator_enabled() -> bool:
+    return generator_requested() and generator_configured()
 
 
 def generator_max_mints() -> int:
@@ -306,14 +369,19 @@ def _generator_timeout() -> int:
 
 
 def _generator_url(path_or_url: str) -> str:
-    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+    if path_or_url.startswith(("http://", "https://")):
         return path_or_url
     base = os.environ["CATHEDRAL_SAT_GENERATOR_URL"].strip().rstrip("/") + "/"
     return urllib.parse.urljoin(base, path_or_url.lstrip("/"))
 
 
-def _generator_json(method: str, path_or_url: str, payload: dict | None = None,
-                    *, idempotency_key: str | None = None) -> dict:
+def _generator_json(
+    method: str,
+    path_or_url: str,
+    payload: dict | None = None,
+    *,
+    idempotency_key: str | None = None,
+) -> dict:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {os.environ['CATHEDRAL_SAT_GENERATOR_TOKEN'].strip()}",
@@ -361,7 +429,7 @@ def _lease_generator_cnf(challenge_id: str, tier: int) -> str:
         lease_id = str(lease["lease_id"])
         cnf_text = _generator_text(str(lease["cnf_url"]))
         expected_sha = str(lease.get("cnf_sha256") or "")
-        actual_sha = sha256_hex(cnf_text)
+        actual_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
         if expected_sha and actual_sha != expected_sha:
             raise RuntimeError(
                 f"generator cnf hash mismatch expected={expected_sha} actual={actual_sha}")
@@ -417,22 +485,33 @@ def method_for(tier: int) -> str:
     return os.environ.get(f"CATHEDRAL_REFILL_METHOD_T{tier}", default).strip().lower() or default
 
 
+def _seed_secret_bytes() -> bytes:
+    raw = (
+        os.environ.get("CATHEDRAL_REFILL_SEED_SECRET", "").strip()
+        or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").strip()
+    )
+    return raw.encode("utf-8") if raw else _EPHEMERAL_SEED_SECRET
+
+
+def _seed_hmac_hex(*parts: object) -> str:
+    msg = ":".join(str(p) for p in parts).encode("utf-8")
+    return hmac.new(_seed_secret_bytes(), msg, hashlib.sha256).hexdigest()
+
+
 def default_seed_input() -> str:
-    """Block-ish seed bucket. Defaults to the current UTC hour so a restart in
-    the same hour reproduces the same mint sequence; a caller may inject a chain
-    block hash instead for true block-determinism."""
+    """Block-ish seed bucket. Mixed with a server secret before use."""
     return datetime.now(timezone.utc).strftime("%Y%m%d%H")
 
 
 def mint_seed(seed_input: str, tier: int, sequence: int) -> int:
-    """Deterministic 63-bit integer seed from (seed_input, tier, sequence)."""
-    h = hashlib.sha256(f"{seed_input}:{tier}:{sequence}".encode()).hexdigest()
+    """Secret-derived 63-bit integer seed from (seed_input, tier, sequence)."""
+    h = _seed_hmac_hex("seed", seed_input, tier, sequence)
     return int(h[:16], 16)
 
 
 def mint_challenge_id(seed_input: str, tier: int, sequence: int) -> str:
-    suffix = hashlib.sha256(f"{seed_input}:{tier}:{sequence}".encode()).hexdigest()[:16]
-    return f"sat-t{tier}-random-3sat-{seed_input}-{suffix}"
+    suffix = _seed_hmac_hex("id", seed_input, tier, sequence)[:20]
+    return f"sat-t{tier}-random-3sat-{suffix}"
 
 
 def _now_iso() -> str:
@@ -591,6 +670,9 @@ def _mint_one(store: Store, cid: str, tier: int, seed: int,
     direct fork gen if the queue is empty (background gen hasn't caught up yet).
     Returns the CNF text so the caller can log it.
     """
+    if generator_requested() and not generator_configured():
+        raise RuntimeError("sat_generator_enabled_but_missing_url_or_token")
+
     if generator_enabled():
         try:
             cnf_text = _lease_generator_cnf(cid, tier)
@@ -638,14 +720,14 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
         except Exception as exc:
             failed += 1
             log("refill_mint_failed", tier=tier, cid=cid[:20], error=str(exc))
-            await asyncio.sleep(0)
             continue
         minted += 1
         await asyncio.sleep(0)  # yield to the event loop between mints
 
     active = await asyncio.to_thread(active_local_count, store, tier)
     return {"tier": tier, "retired": retired, "minted": minted,
-            "failed": failed, "active": active, "target": target_for(tier),
+            "failed": failed,
+            "active": active, "target": target_for(tier),
             "shape": (n_vars_hint, n_clauses_hint)}
 
 
@@ -670,7 +752,7 @@ async def refill_loop(store: Store, *, interval_seconds: int | None = None,
         fork_ok=_FORK_OK,
         mint_cap=generator_max_mints() if generator_enabled() else (
             MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
-        generator_enabled=generator_enabled())
+        generator=generator_config())
     try:
         while not (stop_event and stop_event.is_set()):
             try:

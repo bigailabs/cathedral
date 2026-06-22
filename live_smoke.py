@@ -1,12 +1,12 @@
-"""live_smoke.py — miner smoke against the DEPLOYED publisher (KEYSTONE TASK 4).
+"""live_smoke.py - miner smoke against the DEPLOYED publisher (KEYSTONE TASK 4).
 
-Drives the real write path end-to-end over HTTP against the cathedral-subnet
-staging publisher (Postgres-backed): pick an active LOCAL challenge from the
-broadcast board, sign as //SmokeMiner, fetch the CNF via the token flow, solve
-with DPLL, submit, assert ranked, then pull the feed and verify the freshly
-signed row verifies under the publisher's advertised JWKS key.
+Drives the real write path end-to-end over HTTP against the deployed publisher:
+pick an active local challenge from the broadcast board, sign as //SmokeMiner,
+fetch the CNF via the token flow, submit a deliberately wrong but well-formed
+assignment, verify the rejected submission persists, and check the public scoring
+metadata/explain surfaces promised by the launch.
 
-Usage: BASE_URL=https://… python live_smoke.py
+Usage: BASE_URL=https://... python live_smoke.py
 Needs bittensor_wallet + cryptography + blake3 (the deploy venv has them).
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -35,7 +36,7 @@ def _get(path: str, headers: dict | None = None):
 
 
 def _post_form(path: str, headers: dict, form: dict):
-    body = "&".join(f"{k}={urllib.request.quote(str(v))}" for k, v in form.items()).encode()
+    body = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in form.items()).encode()
     h = {**headers, "Content-Type": "application/x-www-form-urlencoded"}
     req = urllib.request.Request(BASE + path, data=body, headers=h, method="POST")
     try:
@@ -57,10 +58,8 @@ def main() -> int:
     from bittensor_wallet import Keypair
     import blake3 as _blake3
     from scaffold.publisher.auth import canonical_claim_bytes
-    from scaffold.dimacs import solve_cnf
-    from scaffold import wire
 
-    print(f"LIVE SMOKE — {BASE}")
+    print(f"LIVE SMOKE - {BASE}")
     st, raw = _get("/health")
     health = json.loads(raw)
     ck("/health 200", st == 200)
@@ -70,6 +69,20 @@ def main() -> int:
     st, raw = _get("/v1/synthetic-boolean/active-challenges")
     board = json.loads(raw)
     ck("board served", st == 200 and board["count"] > 0)
+    scoring = board.get("scoring") or {}
+    distribution = board.get("distribution") or {}
+    ck("board exposes scoring metadata",
+       scoring.get("mode") in ("proportional", "per_miner", "row_score_recent", "flat_recent")
+       and isinstance(scoring.get("tier_weights"), dict))
+    ck("board exposes challenge distribution",
+       distribution.get("total_challenges") == board.get("count")
+       and isinstance(distribution.get("tiers"), list))
+    generator = board.get("generator") or {}
+    generator_tiers = {int(t.get("tier")): t for t in generator.get("tiers", []) if t.get("tier")}
+    ck("board exposes SAT generator policy",
+       generator.get("kind") == "local_refill"
+       and generator_tiers.get(1, {}).get("method") == "biased"
+       and generator_tiers.get(2, {}).get("method") == "ajm")
     # pick a LOCAL challenge (has a fetchable body); external mirrors have none.
     local = [c for c in board["items"] if c.get("storage") == "sqlite_text"]
     ck("board has at least one local (minted) challenge", len(local) > 0)
@@ -135,7 +148,7 @@ def main() -> int:
                           "challenge_id": cid, "dimacs_solution": blob})
     body = json.loads(raw) if raw else {}
     # 400 = referee ran in PG and rejected the wrong assignment (write committed).
-    # 200/ranked would mean we happened to satisfy it — also a valid write.
+    # 200/ranked would mean we happened to satisfy it - also a valid write.
     ck("submit reached the PG referee (rejected wrong assignment, 400)",
        st in (200, 400))
     print(f"  submit status={st} detail={str(body)[:120]}")
@@ -148,6 +161,31 @@ def main() -> int:
                                "challenge_id": cid, "dimacs_solution": blob})
     ck("replayed signature rejected 409 (signature persisted to Postgres)",
        st_replay == 409)
+
+    st, raw = _get("/v1/leaderboard/explain?miner_hotkey=" + miner.ss58_address)
+    explain = json.loads(raw)
+    ck("leaderboard explain endpoint served",
+       st == 200 and explain.get("miner_hotkey") == miner.ss58_address)
+    ck("leaderboard explain includes current score source",
+       explain.get("score_source") in (
+           "proportional",
+           "per_miner",
+           "row_score_recent",
+           "flat_recent",
+           "flat_recent_fallback",
+       ))
+
+    st, raw = _get("/v1/validator/weights/next")
+    vector = json.loads(raw)
+    policy = vector.get("policy_metadata") or {}
+    ck("signed vector exposes score_source metadata",
+       policy.get("score_source") in (
+           "proportional",
+           "per_miner",
+           "row_score_recent",
+           "flat_recent",
+           "flat_recent_fallback",
+       ))
 
     # the validator feed serves seeded signed rows verbatim from Postgres (the
     # seeder stored them with their original production cathedral_signature).

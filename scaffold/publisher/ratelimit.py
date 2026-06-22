@@ -25,6 +25,9 @@ serializes concurrent requests and causes 20-30s stalls under load.  A pure
 ASGI middleware calls the downstream app directly with the original send
 callable — zero buffering, zero concurrency overhead.
 
+Security note: current implementation keys pre-auth rate limiting by client IP,
+not claimed hotkey, because signatures are verified later in endpoint handlers.
+
 Usage (in build_app):
     from .ratelimit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
@@ -174,12 +177,7 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = scope.get("headers", [])
-        # Key preference: hotkey header (identifies a miner) > client IP.
-        key = (
-            _get_header(headers, b"x-cathedral-hotkey")
-            or _client_ip_from_scope(scope)
-        )
+        key = _client_ip_from_scope(scope)
 
         if not _state.check(key, limit):
             body = b"rate_limited"
