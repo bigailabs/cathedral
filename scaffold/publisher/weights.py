@@ -741,6 +741,56 @@ def explain_miner_score(
     return base
 
 
+def _compose_proportional_hotkey_sql(store: Store, since: str) -> dict[str, float]:
+    """Fast proportional scorer when identity is the hotkey.
+
+    The old path selected every distinct solve into Python, then looped and
+    tier-weighted in process. On the live board that can hold the GIL during the
+    background weight refresh and stall even `/health`. Let Postgres/SQLite do
+    the distinct/group/sum work and only normalize the small hotkey aggregate.
+    """
+    weights_by_tier = tier_weights()
+    tier_expr_parts = ["CASE WHEN c.tier IS NOT NULL THEN c.tier"]
+    params: list[float | int | str] = []
+    for tier in sorted(weights_by_tier):
+        if int(tier) == 1:
+            continue
+        tier_expr_parts.append("WHEN d.challenge_id LIKE ? THEN ?")
+        params.extend([f"%-t{int(tier)}-%", int(tier)])
+    tier_expr_parts.append("ELSE 1 END")
+    tier_expr = " ".join(tier_expr_parts)
+
+    case_parts: list[str] = []
+    for tier, weight in sorted(weights_by_tier.items()):
+        case_parts.append("WHEN ? THEN ?")
+        params.extend([int(tier), float(weight)])
+    default_weight = float(weights_by_tier.get(1, 1.0))
+    case_sql = "CASE (" + tier_expr + ") " + " ".join(case_parts) + " ELSE ? END"
+    params.extend([default_weight, since])
+    rows = store.query(
+        "SELECT d.miner_hotkey, SUM(" + case_sql + ") AS units "
+        "FROM ("
+        "  SELECT DISTINCT miner_hotkey, challenge_id "
+        "  FROM lane_challenge_solves WHERE solved_at_iso > ?"
+        ") d "
+        "LEFT JOIN lane_challenges c ON c.challenge_id = d.challenge_id "
+        "WHERE COALESCE(c.score_multiplier, 1.0) > 0 "
+        "GROUP BY d.miner_hotkey",
+        tuple(params),
+    )
+    units = {
+        str(r["miner_hotkey"]): float(r["units"] or 0.0)
+        for r in rows
+        if float(r["units"] or 0.0) > 0.0
+    }
+    if not units:
+        return {}
+    top = max(units.values())
+    if top <= 0.0:
+        return {}
+    return {hk: round(score / top, 6) for hk, score in units.items()}
+
+
 def compose_scores(
     store: Store, *, now: datetime | None = None,
     coldkey_of: dict[str, str] | None = None,
@@ -797,6 +847,10 @@ def compose_scores(
         )
 
     if mode() == "proportional":
+        if not use_ck:
+            base = _compose_proportional_hotkey_sql(store, since)
+            if base:
+                return _apply_perminer_bonus(store, base, coldkey_of)
         rows = store.query(
             "SELECT DISTINCT s.miner_hotkey, s.challenge_id "
             "FROM lane_challenge_solves s "
