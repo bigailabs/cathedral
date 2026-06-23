@@ -8,7 +8,12 @@ venv/
 
 # transient data / logs
 data/
+tmp/
 *.log
+*.egg-info/
+.pytest_cache/
+uv.lock
+game/arena/PROGRESS.md
 
 # OS / editor
 .DS_Store
