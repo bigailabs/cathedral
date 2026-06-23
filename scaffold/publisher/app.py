@@ -54,6 +54,73 @@ _MIN_BATCH_SCORE = 0.5      # Lane I (V4-DESIGN.md)
 _CNF_TOKEN_TTL = 120        # active-cnf fetch token lifetime (seconds)
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)) or default)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except ValueError:
+        return default
+
+
+class _SoftTtlCache:
+    """Serve stale cached visibility payloads while one background refresh runs."""
+
+    def __init__(self, name: str, ttl_secs: float) -> None:
+        self.name = name
+        self.ttl_secs = max(0.0, ttl_secs)
+        self._lock = threading.Lock()
+        self._entries: dict[Any, dict[str, Any]] = {}
+
+    def get(self, key: Any, builder) -> tuple[Any, str]:
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                age = now - float(entry["built_at"])
+                if self.ttl_secs <= 0 or age <= self.ttl_secs:
+                    return entry["value"], "hit"
+                if not entry.get("refreshing"):
+                    entry["refreshing"] = True
+                    threading.Thread(
+                        target=self._refresh,
+                        args=(key, builder),
+                        name=f"{self.name}-refresh",
+                        daemon=True,
+                    ).start()
+                return entry["value"], "stale"
+
+        value = builder()
+        with self._lock:
+            self._entries[key] = {
+                "value": value,
+                "built_at": time.monotonic(),
+                "refreshing": False,
+            }
+        return value, "cold"
+
+    def _refresh(self, key: Any, builder) -> None:
+        try:
+            value = builder()
+            with self._lock:
+                self._entries[key] = {
+                    "value": value,
+                    "built_at": time.monotonic(),
+                    "refreshing": False,
+                }
+        except Exception as exc:
+            print(f"[visibility_cache] refresh_failed name={self.name} key={key!r} error={exc!r}")
+            with self._lock:
+                entry = self._entries.get(key)
+                if entry is not None:
+                    entry["refreshing"] = False
+
+
 def _now_iso_ms() -> str:
     dt = datetime.now(timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
@@ -285,6 +352,18 @@ def build_app(
     top_cache = top_cache_mod.TopCache()
     top_cache.start(store)
     top_cache_mod.register(top_cache)
+    recent_cache = _SoftTtlCache(
+        "recent-leaderboard",
+        _env_float("CATHEDRAL_RECENT_CACHE_TTL_SECS", 2.0),
+    )
+    explain_cache = _SoftTtlCache(
+        "leaderboard-explain",
+        _env_float("CATHEDRAL_EXPLAIN_CACHE_TTL_SECS", 10.0),
+    )
+    pm_summary_cache = _SoftTtlCache(
+        "per-miner-summary",
+        _env_float("CATHEDRAL_PM_SUMMARY_CACHE_TTL_SECS", 5.0),
+    )
 
     app = FastAPI(title="cathedral-thin-publisher")
 
@@ -369,6 +448,9 @@ def build_app(
     app.state.cnf_store = cnf_store
     app.state.board_cache = board_cache
     app.state.top_cache = top_cache
+    app.state.recent_cache = recent_cache
+    app.state.explain_cache = explain_cache
+    app.state.pm_summary_cache = pm_summary_cache
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
     app.state.refill_task = None
@@ -379,6 +461,25 @@ def build_app(
     # (the validator constructs ONE lane and reuses it so the champion survives).
     from ..lanes.solver_arena import SolverArenaLane
     app.state.arena_lane = SolverArenaLane(registry=arena_registry)
+
+    @app.on_event("startup")
+    async def _configure_threadpool_tokens():
+        # Sync submit verification still runs in AnyIO's worker pool. Keep the
+        # pool above the submit gate so cheap sync endpoints are not queued
+        # behind solver submissions during PM bursts.
+        try:
+            import anyio.to_thread
+
+            default_tokens = max(64, submit_max_concurrency * 3 if submit_max_concurrency > 0 else 64)
+            desired = _env_int("CATHEDRAL_THREADPOOL_TOKENS", default_tokens)
+            if desired <= 0:
+                return
+            limiter = anyio.to_thread.current_default_thread_limiter()
+            if limiter.total_tokens < desired:
+                limiter.total_tokens = desired
+                print(f"[runtime] anyio_threadpool_tokens={desired}")
+        except Exception as exc:
+            print(f"[runtime] threadpool_config_failed error={exc!r}")
 
     # ---- G2: challenge refill loop (env-gated) ----------------------------
     @app.on_event("startup")
@@ -769,17 +870,11 @@ def build_app(
                 }
         return out
 
-    # ---- M1: feed ---------------------------------------------------------
-    @app.get("/v1/leaderboard/recent")
-    def leaderboard_recent(
-        since: str | None = Query(None),
-        since_ran_at: str | None = Query(None),
-        since_id: str | None = Query(None),
-        limit: int = Query(50, ge=1, le=500),
-    ):
-        # legacy ?since= compat: a single watermark seeds the ran_at cursor.
-        cur_ran_at = since_ran_at or since
-        cur_id = since_id
+    def _recent_payload(
+        cur_ran_at: str | None,
+        cur_id: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
         items = store.recent_rows(cur_ran_at, cur_id, limit)
         if items:
             last = items[-1]
@@ -788,24 +883,49 @@ def build_app(
             nxt_ran_at, nxt_id = cur_ran_at, cur_id
         weight_ctx = _current_weight_context()
         hotkeys = sorted({str(item.get("miner_hotkey") or "") for item in items if item.get("miner_hotkey")})
+        return {
+            "items": items,
+            "view": "recent_signed_receipts",
+            "rank_kind": "none",
+            "explanation": (
+                "Recent is an audit stream, not the earning leaderboard. "
+                "Use current_weights or /v1/leaderboard/top?view=weights for current payment rank."
+            ),
+            "earning_weight_source": "v1/validator/weights/next",
+            "earning_weights_generated_at": weight_ctx["generated_at"],
+            "current_weights": _weight_annotations(weight_ctx, hotkeys),
+            "next_since": nxt_ran_at,
+            "next_since_ran_at": nxt_ran_at,
+            "next_since_id": nxt_id,
+            "merkle_epoch_latest": None,
+        }
+
+    # ---- M1: feed ---------------------------------------------------------
+    @app.get("/v1/leaderboard/recent")
+    async def leaderboard_recent(
+        since: str | None = Query(None),
+        since_ran_at: str | None = Query(None),
+        since_id: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+    ):
+        # legacy ?since= compat: a single watermark seeds the ran_at cursor.
+        cur_ran_at = since_ran_at or since
+        cur_id = since_id
+        cache_status = "cursor"
+        if cur_ran_at is None and cur_id is None:
+            payload, cache_status = recent_cache.get(
+                int(limit),
+                lambda: _recent_payload(None, None, limit),
+            )
+        else:
+            payload = _recent_payload(cur_ran_at, cur_id, limit)
         return JSONResponse(
-            {
-                "items": items,
-                "view": "recent_signed_receipts",
-                "rank_kind": "none",
-                "explanation": (
-                    "Recent is an audit stream, not the earning leaderboard. "
-                    "Use current_weights or /v1/leaderboard/top?view=weights for current payment rank."
-                ),
-                "earning_weight_source": "v1/validator/weights/next",
-                "earning_weights_generated_at": weight_ctx["generated_at"],
-                "current_weights": _weight_annotations(weight_ctx, hotkeys),
-                "next_since": nxt_ran_at,
-                "next_since_ran_at": nxt_ran_at,
-                "next_since_id": nxt_id,
-                "merkle_epoch_latest": None,
+            payload,
+            headers={
+                "Cache-Control": "public, max-age=5",
+                "Access-Control-Allow-Origin": "*",
+                "X-Cathedral-Cache": cache_status,
             },
-            headers={"Cache-Control": "public, max-age=5", "Access-Control-Allow-Origin": "*"},
         )
 
     @app.get("/v1/leaderboard/top")
@@ -882,24 +1002,32 @@ def build_app(
         )
 
     @app.get("/v1/leaderboard/explain")
-    def leaderboard_explain(miner_hotkey: str = Query(..., min_length=1)):
+    async def leaderboard_explain(miner_hotkey: str = Query(..., min_length=1)):
         """Explain how the current scoring policy treats one miner hotkey."""
-        payload = weights_mod.explain_miner_score(store, miner_hotkey)
-        weight_ctx = _current_weight_context()
-        ann = _weight_annotations(weight_ctx, [miner_hotkey]).get(miner_hotkey, {})
-        payload["current_signed_weight"] = ann.get("current_weight", 0.0)
-        payload["current_signed_weight_rank"] = ann.get("current_weight_rank")
-        payload["current_signed_weight_generated_at"] = weight_ctx.get("generated_at")
-        payload["current_signed_weight_policy_reason"] = weight_ctx.get("policy_reason")
-        try:
-            payload.setdefault("perminer", {})
-            payload["perminer"]["contribution"] = _perminer_public_contribution(miner_hotkey)
-        except Exception as exc:
-            payload.setdefault("perminer", {})
-            payload["perminer"]["contribution_error"] = f"{type(exc).__name__}"
+        def _build() -> dict[str, Any]:
+            payload = weights_mod.explain_miner_score(store, miner_hotkey)
+            weight_ctx = _current_weight_context()
+            ann = _weight_annotations(weight_ctx, [miner_hotkey]).get(miner_hotkey, {})
+            payload["current_signed_weight"] = ann.get("current_weight", 0.0)
+            payload["current_signed_weight_rank"] = ann.get("current_weight_rank")
+            payload["current_signed_weight_generated_at"] = weight_ctx.get("generated_at")
+            payload["current_signed_weight_policy_reason"] = weight_ctx.get("policy_reason")
+            try:
+                payload.setdefault("perminer", {})
+                payload["perminer"]["contribution"] = _perminer_public_contribution(miner_hotkey)
+            except Exception as exc:
+                payload.setdefault("perminer", {})
+                payload["perminer"]["contribution_error"] = f"{type(exc).__name__}"
+            return payload
+
+        payload, cache_status = explain_cache.get(miner_hotkey, _build)
         return JSONResponse(
             payload,
-            headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
+            headers={
+                "Cache-Control": "public, max-age=30",
+                "Access-Control-Allow-Origin": "*",
+                "X-Cathedral-Cache": cache_status,
+            },
         )
 
     # ---- M1b: signed final-scores vector (the v4 scoring interface) -------
@@ -935,14 +1063,14 @@ def build_app(
 
     # ---- M2: Lane A read --------------------------------------------------
     @app.get("/v1/synthetic-boolean/active-challenges")
-    def active_challenges_list(request: Request):
+    async def active_challenges_list(request: Request):
         # Broadcast tier: serve the cached board snapshot (rebuilt only on
         # mint/retire + TTL), with ETag/Cache-Control so an edge/CDN caches it
         # and a conditional GET short-circuits to 304 — reads don't touch the DB.
         return _serve_board_snapshot(request)
 
     @app.get("/v1/synthetic-boolean/challenge-broadcast")
-    def challenge_broadcast(request: Request):
+    async def challenge_broadcast(request: Request):
         # Explicit alias for miners/dashboards that want the cache/CDN board
         # broadcast rather than a per-request active-set query.
         return _serve_board_snapshot(request)
@@ -1418,15 +1546,23 @@ def build_app(
         )
 
     @app.get("/v1/synthetic-boolean/per-miner/summary")
-    def per_miner_summary(limit: int = Query(50, ge=1, le=250)):
+    async def per_miner_summary(limit: int = Query(50, ge=1, le=250)):
         """Public aggregate PM status for dashboards/operators.
 
         Contains only public hotkeys and aggregate counts; no signatures, CNFs,
         solutions, or secrets.
         """
+        payload, cache_status = pm_summary_cache.get(
+            int(limit),
+            lambda: _perminer_summary(limit),
+        )
         return JSONResponse(
-            _perminer_summary(limit),
-            headers={"Cache-Control": "public, max-age=10", "Access-Control-Allow-Origin": "*"},
+            payload,
+            headers={
+                "Cache-Control": "public, max-age=10",
+                "Access-Control-Allow-Origin": "*",
+                "X-Cathedral-Cache": cache_status,
+            },
         )
 
     @app.get("/v1/admin/synthetic-boolean/submit-metrics")
