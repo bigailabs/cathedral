@@ -125,6 +125,47 @@ Submit a DIMACS assignment:
 ```
 ````
 
+Per-miner private challenges use the same submit endpoint, but miners fetch
+their own assigned set first:
+
+- `GET /v1/synthetic-boolean/per-miner/challenges`
+- `GET /v1/synthetic-boolean/per-miner/cnf?challenge_id=pm-...`
+- `GET /v1/synthetic-boolean/per-miner/status`
+- `POST /v1/agents/submit`
+
+Use the same Cathedral hotkey signing headers as `active-cnf`. The status
+endpoint shows accepted PM solves, rejected PM attempts, rejection reasons,
+eligible/unique/verified solves, tier mix, current epoch totals, and 24h totals.
+
+Submit full DIMACS solver output for both public and per-miner challenges:
+
+```text
+s SATISFIABLE
+v 1 -2 3 0
+```
+
+Do not submit raw literals only (`1 -2 3 0`). That fails with
+`solution_missing_status`.
+
+Retry behavior:
+
+- `429 submit_busy_retry`: Cathedral submit slots are full. Retry the same
+  signed payload after `Retry-After` with jittered backoff. This is not a bad
+  solve.
+- `429 rate_limited`: the same hotkey/challenge submitted too quickly. Wait
+  longer before retrying.
+- `400 solution_missing_status`: the payload is malformed; include
+  `s SATISFIABLE` and one or more `v ... 0` lines.
+
+Operator visibility:
+
+- `GET /v1/admin/synthetic-boolean/submit-metrics` shows submit pressure,
+  429s, and rejection reason counters.
+- Set `CATHEDRAL_PUBLISHER_ADMIN_TOKEN` and pass
+  `Authorization: Bearer <token>` to read it.
+- `CATHEDRAL_SUBMIT_LOG_EVENTS=1` enables per-submit rejection logs. Leave it
+  off for normal high-throughput operation; counters still record by default.
+
 ### [Validator Quick Start](VALIDATOR.md)
 
 The v4 validator is one loop: fetch one signed score per miner from the publisher, verify the signature, set weights. Scoring lives on the publisher, so there is no re-release for scoring changes.

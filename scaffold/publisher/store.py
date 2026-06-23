@@ -367,6 +367,12 @@ _MIGRATIONS: list[tuple[str, str]] = [
     ("0026_attest_nonce_pubkey", """
         ALTER TABLE attest_nonces ADD COLUMN miner_pubkey_b64 TEXT NOT NULL DEFAULT '';
     """),
+    ("0027_per_miner_time_indexes", """
+        CREATE INDEX IF NOT EXISTS idx_per_miner_solves_solved_at
+            ON per_miner_solves(solved_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_recorded_at
+            ON per_miner_attempts(recorded_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -675,6 +681,12 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
     """),
     ("0026_attest_nonce_pubkey", """
         ALTER TABLE attest_nonces ADD COLUMN IF NOT EXISTS miner_pubkey_b64 TEXT NOT NULL DEFAULT '';
+    """),
+    ("0027_per_miner_time_indexes", """
+        CREATE INDEX IF NOT EXISTS idx_per_miner_solves_solved_at
+            ON per_miner_solves(solved_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_recorded_at
+            ON per_miner_attempts(recorded_at_iso);
     """),
 ]
 

@@ -484,6 +484,8 @@ with TestClient(app) as client:
             "CATHEDRAL_PERMINER_ALLOTMENT_T2",
             "CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE",
             "CATHEDRAL_PERMINER_SEED_SECRET",
+            "CATHEDRAL_PUBLISHER_ADMIN_TOKEN",
+            "CATHEDRAL_TEE_GPU_ADMIN_TOKEN",
         )
     }
     try:
@@ -585,6 +587,128 @@ with TestClient(app) as client:
         )
         ck("per-miner submit records exactly one solve row atomically",
            pm_rows[0]["n"] == 1)
+        pm_bad_cid = pm_list.json()["items"][1]["challenge_id"]
+        pm_bad_blob = "v 1 -2 3 0\n"
+        pm_bad_sha = hashlib.sha256(pm_bad_blob.encode()).hexdigest()
+        pm_bad_at = now_iso()
+        pm_bad_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=pm_bad_at,
+            challenge_id=pm_bad_cid, dimacs_solution_sha256=pm_bad_sha)
+        pm_bad_sig = base64.b64encode(pm_miner.sign(pm_bad_claim)).decode()
+        pm_bad = client.post(
+            "/v1/agents/submit",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_bad_sig},
+            data={"card_id": "synthetic_boolean_v1", "submitted_at": pm_bad_at,
+                  "challenge_id": pm_bad_cid, "dimacs_solution": pm_bad_blob},
+        )
+        ck("per-miner bad DIMACS submit reports reason header",
+           pm_bad.status_code == 400
+           and pm_bad.headers.get("X-Cathedral-Rejection-Reason") == "solution_missing_status")
+        pm_status = client.get(
+            "/v1/synthetic-boolean/per-miner/status",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_list_sig,
+                     "X-Cathedral-Submitted-At": pm_list_at},
+        )
+        pm_status_json = pm_status.json()
+        pm_current = pm_status_json.get("current_epoch_totals", {})
+        ck("per-miner status surfaces accepted and rejected attempts",
+           pm_status.status_code == 200
+           and pm_status_json.get("assignment_identity") == "coldkey-shared"
+           and pm_current.get("unique_verified_solves") == 1
+           and pm_current.get("rejected_attempts") == 1
+           and pm_current.get("rejection_reasons", [{}])[0].get("reason") == "solution_missing_status")
+        pm_summary = client.get("/v1/synthetic-boolean/per-miner/summary")
+        pm_summary_json = pm_summary.json()
+        ck("per-miner summary surfaces dashboard aggregate",
+           pm_summary.status_code == 200
+           and pm_summary_json.get("current_epoch_assignment_miners", 0) >= 1
+           and pm_summary_json.get("active_miners_24h", 0) >= 1
+           and "submit_metrics" not in pm_summary_json
+           and "rejection_reasons_24h" not in pm_summary_json
+           and all("assignment_identity" not in item for item in pm_summary_json.get("miners", []))
+           and all("rejection_reasons" not in item for item in pm_summary_json.get("miners", [])))
+        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = "publisher-admin-secret"
+        pm_submit_metrics = client.get(
+            "/v1/admin/synthetic-boolean/submit-metrics",
+            headers={"Authorization": "Bearer publisher-admin-secret"},
+        )
+        pm_submit_metrics_bad = client.get(
+            "/v1/admin/synthetic-boolean/submit-metrics",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        os.environ.pop("CATHEDRAL_PUBLISHER_ADMIN_TOKEN", None)
+        pm_submit_metrics_missing = client.get(
+            "/v1/admin/synthetic-boolean/submit-metrics",
+            headers={"Authorization": "Bearer publisher-admin-secret"},
+        )
+        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = "publisher-admin-secret"
+        ck("submit metrics are admin-gated and include PM rejection reasons",
+           pm_submit_metrics.status_code == 200
+           and pm_submit_metrics.json().get("by_reason", {}).get("solution_missing_status") == 1
+           and pm_submit_metrics_bad.status_code == 401
+           and pm_submit_metrics_missing.status_code == 503)
+        pm_explain = client.get(
+            "/v1/leaderboard/explain",
+            params={"miner_hotkey": pm_miner.ss58_address},
+        )
+        pm_contribution = pm_explain.json().get("perminer", {}).get("contribution", {})
+        ck("leaderboard explain includes per-miner contribution",
+           pm_explain.status_code == 200
+           and "current_signed_weight" in pm_explain.json()
+           and "current_signed_weight_rank" in pm_explain.json()
+           and pm_contribution.get("current_epoch_totals", {}).get("unique_verified_solves") == 1
+           and "rejection_reasons" not in pm_contribution.get("current_epoch_totals", {})
+           and "assignment_identity" not in pm_contribution
+           and "assignment_supply" not in pm_contribution)
+        rate_app = build_app(
+            database_path=":memory:",
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=60,
+        )
+        def _map_rate_miner(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
+                "VALUES (?, ?, ?)",
+                (pm_miner.ss58_address, "coldkey-shared", now_iso()),
+            )
+        rate_app.state.store.write(_map_rate_miner)
+        bad_pm_id = "pm-not-assigned"
+        rate_blob = "s SATISFIABLE\nv 1 -2 3 0\n"
+        rate_sha = hashlib.sha256(rate_blob.encode()).hexdigest()
+        rate_at_1 = now_iso()
+        rate_claim_1 = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=rate_at_1,
+            challenge_id=bad_pm_id, dimacs_solution_sha256=rate_sha)
+        rate_sig_1 = base64.b64encode(pm_miner.sign(rate_claim_1)).decode()
+        rate_at_2 = now_iso()
+        rate_claim_2 = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=rate_at_2,
+            challenge_id=bad_pm_id, dimacs_solution_sha256=rate_sha)
+        rate_sig_2 = base64.b64encode(pm_miner.sign(rate_claim_2)).decode()
+        with TestClient(rate_app) as rate_client:
+            rate_first = rate_client.post(
+                "/v1/agents/submit",
+                headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                         "X-Cathedral-Signature": rate_sig_1},
+                data={"card_id": "synthetic_boolean_v1", "submitted_at": rate_at_1,
+                      "challenge_id": bad_pm_id, "dimacs_solution": rate_blob},
+            )
+            rate_second = rate_client.post(
+                "/v1/agents/submit",
+                headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                         "X-Cathedral-Signature": rate_sig_2},
+                data={"card_id": "synthetic_boolean_v1", "submitted_at": rate_at_2,
+                      "challenge_id": bad_pm_id, "dimacs_solution": rate_blob},
+            )
+        ck("per-miner invalid assignment attempts are rate-limited after first signed try",
+           rate_first.status_code == 400
+           and rate_second.status_code == 429
+           and rate_second.headers.get("X-Cathedral-Rejection-Reason") == "rate_limited")
         pm_at2 = now_iso()
         pm_claim2 = canonical_claim_bytes(
             bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
@@ -599,13 +723,29 @@ with TestClient(app) as client:
                   "challenge_id": pm_cid, "dimacs_solution": pm_blob},
         )
         ck("per-miner duplicate solve is rejected",
-           pm_dupe.status_code == 409)
+           pm_dupe.status_code == 409
+           and pm_dupe.headers.get("X-Cathedral-Rejection-Reason") == "already_solved")
+        pm_status_after_dupe = client.get(
+            "/v1/synthetic-boolean/per-miner/status",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_list_sig,
+                     "X-Cathedral-Submitted-At": pm_list_at},
+        )
+        reasons_after_dupe = {
+            r.get("reason"): r.get("attempts")
+            for r in pm_status_after_dupe.json().get("current_epoch_totals", {}).get("rejection_reasons", [])
+        }
+        ck("per-miner status includes duplicate-solve rejection reasons",
+           pm_status_after_dupe.status_code == 200
+           and reasons_after_dupe.get("solution_missing_status") == 1
+           and reasons_after_dupe.get("already_solved") == 1)
     finally:
         for key, value in old_pm_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        _weights._reset_vector_cache()
 
     # SIGNED FINAL-SCORES VECTOR (the v4 scoring interface). One number per
     # miner + burn, Ed25519-signed — validators verify and apply, no local
