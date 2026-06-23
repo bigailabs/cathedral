@@ -642,6 +642,58 @@ def build_app(
             "attestations": [dict(r) for r in att_rows],
         }
 
+    def _current_weight_context() -> dict[str, Any]:
+        """Current payment weights for display-only leaderboard annotations."""
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        try:
+            vec = weights_mod.current_vector(store, signing_key_hex=weight_key)
+        except Exception as exc:
+            print(f"[leaderboard] weight context unavailable: {exc!r}")
+            return {
+                "generated_at": None,
+                "policy_reason": None,
+                "ranked": [],
+                "by_hotkey": {},
+            }
+        ranked = [
+            {
+                "miner_hotkey": str(row.get("miner_hotkey") or ""),
+                "current_weight": float(row.get("weight") or 0.0),
+            }
+            for row in vec.get("weights", [])
+            if row.get("miner_hotkey")
+        ]
+        ranked.sort(key=lambda row: row["current_weight"], reverse=True)
+        by_hotkey: dict[str, dict[str, Any]] = {}
+        for rank, row in enumerate(ranked, start=1):
+            row["current_weight_rank"] = rank
+            by_hotkey[row["miner_hotkey"]] = row
+        return {
+            "generated_at": vec.get("generated_at"),
+            "policy_reason": vec.get("policy_reason"),
+            "ranked": ranked,
+            "by_hotkey": by_hotkey,
+        }
+
+    def _weight_annotations(
+        weight_ctx: dict[str, Any], hotkeys: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        by_hotkey = weight_ctx.get("by_hotkey") or {}
+        out: dict[str, dict[str, Any]] = {}
+        for hk in hotkeys:
+            row = by_hotkey.get(hk)
+            if row:
+                out[hk] = {
+                    "current_weight": row["current_weight"],
+                    "current_weight_rank": row["current_weight_rank"],
+                }
+            else:
+                out[hk] = {
+                    "current_weight": 0.0,
+                    "current_weight_rank": None,
+                }
+        return out
+
     # ---- M1: feed ---------------------------------------------------------
     @app.get("/v1/leaderboard/recent")
     def leaderboard_recent(
@@ -659,9 +711,20 @@ def build_app(
             nxt_ran_at, nxt_id = last["ran_at"], last["id"]
         else:
             nxt_ran_at, nxt_id = cur_ran_at, cur_id
+        weight_ctx = _current_weight_context()
+        hotkeys = sorted({str(item.get("miner_hotkey") or "") for item in items if item.get("miner_hotkey")})
         return JSONResponse(
             {
                 "items": items,
+                "view": "recent_signed_receipts",
+                "rank_kind": "none",
+                "explanation": (
+                    "Recent is an audit stream, not the earning leaderboard. "
+                    "Use current_weights or /v1/leaderboard/top?view=weights for current payment rank."
+                ),
+                "earning_weight_source": "v1/validator/weights/next",
+                "earning_weights_generated_at": weight_ctx["generated_at"],
+                "current_weights": _weight_annotations(weight_ctx, hotkeys),
                 "next_since": nxt_ran_at,
                 "next_since_ran_at": nxt_ran_at,
                 "next_since_id": nxt_id,
@@ -671,18 +734,73 @@ def build_app(
         )
 
     @app.get("/v1/leaderboard/top")
-    async def leaderboard_top(window: str = Query("24h")):
+    async def leaderboard_top(
+        window: str = Query("24h"),
+        view: str = Query("weights"),
+    ):
         """Fast pre-aggregated miner ranking. Cached ~45s in-process.
-        Returns top 100 miners ranked by total weighted_score over the window.
+        Defaults to current earning weights. Use view=receipts for the old
+        top 100 miners ranked by total weighted_score over the window.
         window=24h only for now (others fall back to 24h).
         """
         rows_, built_at, window_h = top_cache.get()
+        weight_ctx = _current_weight_context()
+        receipt_by_hotkey = {
+            str(r.get("miner_hotkey")): {**r, "receipt_rank": i}
+            for i, r in enumerate(rows_, start=1)
+            if r.get("miner_hotkey")
+        }
+        requested_view = (view or "weights").strip().lower()
+        normalized_view = "weights" if requested_view in {"weight", "weights", "earning", "earnings"} else "receipts"
+        if normalized_view == "weights" and weight_ctx["ranked"]:
+            miners = []
+            for row in weight_ctx["ranked"][:100]:
+                hk = row["miner_hotkey"]
+                receipt = receipt_by_hotkey.get(hk, {})
+                miners.append({
+                    "miner_hotkey": hk,
+                    "current_weight": row["current_weight"],
+                    "current_weight_rank": row["current_weight_rank"],
+                    "rank_kind": "current_payment_weight",
+                    "receipt_rank_24h": receipt.get("receipt_rank"),
+                    "receipt_total_score_24h": receipt.get("total_score"),
+                    "receipt_distinct_solves_24h": receipt.get("distinct_solves"),
+                    "last_seen": receipt.get("last_seen"),
+                    "display_name": receipt.get("display_name"),
+                })
+            rank_kind = "current_payment_weight"
+        else:
+            miners = []
+            for i, row in enumerate(rows_, start=1):
+                hk = str(row.get("miner_hotkey") or "")
+                ann = _weight_annotations(weight_ctx, [hk]).get(hk, {})
+                miners.append({
+                    **row,
+                    "receipt_rank": i,
+                    "rank_kind": "receipt_total_score_24h",
+                    "current_weight": ann.get("current_weight", 0.0),
+                    "current_weight_rank": ann.get("current_weight_rank"),
+                })
+            rank_kind = "receipt_total_score_24h"
         return JSONResponse(
             {
-                "miners": rows_,
+                "miners": miners,
+                "view": normalized_view,
+                "rank_kind": rank_kind,
+                "default_view": "weights",
+                "views": {
+                    "weights": "current Cathedral payment weights; closest API view to Taostats emission",
+                    "receipts": "24h solve receipt activity; audit/activity view, not payment order",
+                },
+                "explanation": (
+                    "Weights show the current payment order. Receipts show recent solve activity. "
+                    "They can differ during migration and when scoring uses the solve ledger."
+                ),
+                "earning_weight_source": "v1/validator/weights/next",
+                "earning_weights_generated_at": weight_ctx["generated_at"],
                 "window_hours": window_h,
                 "built_at": built_at,
-                "count": len(rows_),
+                "count": len(miners),
                 "cache_ttl_secs": 45,
             },
             headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},

@@ -620,6 +620,21 @@ with TestClient(app) as client:
        vec["policy_metadata"]["requested_mode"] == "proportional"
        and vec["policy_metadata"]["effective_mode"] == "proportional"
        and all(w["weight"] == 1.0 for w in vec["weights"]))
+    top_weights = client.get("/v1/leaderboard/top").json()
+    ck("leaderboard/top defaults to current payment weights",
+       top_weights.get("view") == "weights"
+       and top_weights.get("rank_kind") == "current_payment_weight"
+       and top_weights.get("earning_weight_source") == "v1/validator/weights/next"
+       and top_weights.get("miners")
+       and "current_weight_rank" in top_weights["miners"][0])
+    top_receipts = client.get("/v1/leaderboard/top", params={"view": "receipts"}).json()
+    ck("leaderboard/top view=receipts is explicitly not the earning order",
+       top_receipts.get("view") == "receipts"
+       and top_receipts.get("rank_kind") == "receipt_total_score_24h"
+       and (
+           not top_receipts.get("miners")
+           or "current_weight" in top_receipts.get("miners", [{}])[0]
+       ))
     ck("burn rides the same signed payload (85.0 -> uid 204)",
        vec["burn_snapshot"] == {"burn_uid": 204, "forced_burn_percentage": 85.0})
     try:
@@ -775,6 +790,12 @@ with TestClient(app) as client:
     ck("cursor fields present on feed response",
        all(k in client.get("/v1/leaderboard/recent").json()
            for k in ("next_since", "next_since_ran_at", "next_since_id", "merkle_epoch_latest")))
+    recent_default = client.get("/v1/leaderboard/recent").json()
+    ck("recent exposes current weights without mutating signed receipt rows",
+       recent_default.get("view") == "recent_signed_receipts"
+       and recent_default.get("rank_kind") == "none"
+       and recent_default.get("current_weights")
+       and all(wire.verify_row(r, pub_hex) for r in recent_default["items"]))
 
     # Lane S register + status
     sd = now_iso()
