@@ -618,31 +618,31 @@ def explain_miner_score(
 
     if effective == "proportional":
         rows = store.query(
-            "SELECT DISTINCT s.miner_hotkey, s.challenge_id "
+            "SELECT DISTINCT s.challenge_id "
             "FROM lane_challenge_solves s "
             "LEFT JOIN lane_challenges c ON c.challenge_id = s.challenge_id "
-            "WHERE s.solved_at_iso > ? AND COALESCE(c.score_multiplier, 1.0) > 0",
-            (since,),
+            "WHERE s.solved_at_iso > ? AND s.miner_hotkey=? "
+            "AND COALESCE(c.score_multiplier, 1.0) > 0",
+            (since, hotkey),
         )
-        by_miner: dict[str, dict[str, Any]] = {}
         weights_by_tier = tier_weights()
+        own: dict[str, Any] = {"units": 0.0, "seen": set(), "tiers": {}}
         for r in rows:
-            hk = str(r["miner_hotkey"])
             cid = str(r["challenge_id"])
             tier = tier_from_challenge_id(cid)
             weight = float(weights_by_tier.get(tier, weights_by_tier.get(1, 1.0)))
-            entry = by_miner.setdefault(hk, {"units": 0.0, "seen": set(), "tiers": {}})
-            if cid in entry["seen"]:
+            if cid in own["seen"]:
                 continue
-            entry["seen"].add(cid)
-            entry["units"] += weight
-            tier_entry = entry["tiers"].setdefault(tier, {"solves": 0, "units": 0.0})
+            own["seen"].add(cid)
+            own["units"] += weight
+            tier_entry = own["tiers"].setdefault(tier, {"solves": 0, "units": 0.0})
             tier_entry["solves"] += 1
             tier_entry["units"] += weight
-        own = by_miner.get(hotkey, {"units": 0.0, "seen": set(), "tiers": {}})
-        top_units = max((float(v["units"]) for v in by_miner.values()), default=0.0)
+        raw_units = float(own["units"])
+        normalized_weight = float(base["normalized_weight"])
+        top_units = raw_units / normalized_weight if normalized_weight > 0 else 0.0
         base.update({
-            "raw_units": round(float(own["units"]), 6),
+            "raw_units": round(raw_units, 6),
             "top_units": round(top_units, 6),
             "distinct_challenges": len(own["seen"]),
             "tiers": [
