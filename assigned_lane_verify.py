@@ -73,9 +73,15 @@ def main() -> int:
     assignments = store.query("SELECT * FROM per_miner_assignments")
     attempts = store.query("SELECT * FROM per_miner_attempts")
     witnesses = store.query("SELECT * FROM per_miner_witnesses")
+    solve_indexes = {r["name"] for r in store.query("PRAGMA index_list(per_miner_solves)")}
+    attempt_indexes = {r["name"] for r in store.query("PRAGMA index_list(per_miner_attempts)")}
     ck("per-miner assignment row persists tier/seq", len(assignments) == 1 and assignments[0]["seq"] == 0)
     ck("per-miner attempt row persists status/hash", len(attempts) == 1 and attempts[0]["status"] == "ranked")
     ck("per-miner witness body persists for replay", len(witnesses) == 1 and witnesses[0]["dimacs_solution"] == blob)
+    ck("per-miner solve time index exists for 24h status views",
+       "idx_per_miner_solves_solved_at" in solve_indexes)
+    ck("per-miner attempt time index exists for 24h rejection views",
+       "idx_per_miner_attempts_recorded_at" in attempt_indexes)
     store.close()
 
     print("MIGRATIONS - tolerate live SQLite drift")

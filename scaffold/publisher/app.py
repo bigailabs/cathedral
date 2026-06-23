@@ -26,7 +26,7 @@ import os
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request, Response
@@ -101,13 +101,88 @@ def build_app(
         threading.BoundedSemaphore(submit_max_concurrency)
         if submit_max_concurrency > 0 else None
     )
+    submit_log_events = os.environ.get("CATHEDRAL_SUBMIT_LOG_EVENTS", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+    submit_metrics_lock = threading.Lock()
+    submit_metrics: dict[str, Any] = {
+        "started_at_iso": _now_iso_ms(),
+        "max_concurrency": submit_max_concurrency,
+        "min_interval_secs": min_interval,
+        "total": 0,
+        "by_outcome": {},
+        "by_reason": {},
+        "by_kind": {},
+        "recent": [],
+    }
+
+    def _challenge_kind(challenge_id: str | None) -> str:
+        if not challenge_id:
+            return "unknown"
+        return "per_miner" if challenge_id.startswith("pm-") else "public"
+
+    def _record_submit_event(
+        outcome: str,
+        reason: str,
+        *,
+        challenge_id: str | None = None,
+        status_code: int | None = None,
+        log: bool = False,
+    ) -> None:
+        kind = _challenge_kind(challenge_id)
+        event = {
+            "ts": _now_iso_ms(),
+            "outcome": outcome,
+            "reason": reason,
+            "kind": kind,
+            "status_code": status_code,
+        }
+        with submit_metrics_lock:
+            submit_metrics["total"] = int(submit_metrics["total"]) + 1
+            for bucket, key in (
+                ("by_outcome", outcome),
+                ("by_reason", reason),
+                ("by_kind", kind),
+            ):
+                values = submit_metrics[bucket]
+                values[key] = int(values.get(key, 0)) + 1
+            recent = submit_metrics["recent"]
+            recent.append(event)
+            del recent[:-25]
+        if log and submit_log_events:
+            print("[submit] " + json.dumps(event, sort_keys=True))
+
+    def _submit_metrics_snapshot() -> dict[str, Any]:
+        with submit_metrics_lock:
+            return {
+                "started_at_iso": submit_metrics["started_at_iso"],
+                "max_concurrency": submit_metrics["max_concurrency"],
+                "min_interval_secs": submit_metrics["min_interval_secs"],
+                "total": submit_metrics["total"],
+                "by_outcome": dict(submit_metrics["by_outcome"]),
+                "by_reason": dict(submit_metrics["by_reason"]),
+                "by_kind": dict(submit_metrics["by_kind"]),
+                "recent": list(submit_metrics["recent"]),
+            }
 
     def _submit_slot():
         if submit_gate is None:
             yield
             return
         if not submit_gate.acquire(blocking=False):
-            raise HTTPException(429, "submit_busy_retry", headers={"Retry-After": "1"})
+            _record_submit_event(
+                "rate_limited",
+                "submit_busy_retry",
+                status_code=429,
+                log=True,
+            )
+            raise HTTPException(
+                429,
+                "submit_busy_retry",
+                headers={
+                    "Retry-After": "1",
+                    "X-Cathedral-Rejection-Reason": "submit_busy_retry",
+                },
+            )
         try:
             yield
         finally:
@@ -810,6 +885,18 @@ def build_app(
     def leaderboard_explain(miner_hotkey: str = Query(..., min_length=1)):
         """Explain how the current scoring policy treats one miner hotkey."""
         payload = weights_mod.explain_miner_score(store, miner_hotkey)
+        weight_ctx = _current_weight_context()
+        ann = _weight_annotations(weight_ctx, [miner_hotkey]).get(miner_hotkey, {})
+        payload["current_signed_weight"] = ann.get("current_weight", 0.0)
+        payload["current_signed_weight_rank"] = ann.get("current_weight_rank")
+        payload["current_signed_weight_generated_at"] = weight_ctx.get("generated_at")
+        payload["current_signed_weight_policy_reason"] = weight_ctx.get("policy_reason")
+        try:
+            payload.setdefault("perminer", {})
+            payload["perminer"]["contribution"] = _perminer_public_contribution(miner_hotkey)
+        except Exception as exc:
+            payload.setdefault("perminer", {})
+            payload["perminer"]["contribution_error"] = f"{type(exc).__name__}"
         return JSONResponse(
             payload,
             headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
@@ -1016,6 +1103,341 @@ def build_app(
             raise HTTPException(403, "coldkey_mapping_required")
         return identity
 
+    def _since_24h_iso() -> str:
+        dt = datetime.now(timezone.utc) - timedelta(hours=24)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+    def _tier_mix_from_rows(rows_: list[dict[str, Any]], *, count_key: str = "solves") -> list[dict[str, Any]]:
+        return [
+            {
+                "tier": int(r["tier"]),
+                count_key: int(r["solves"] or 0),
+                "weighted_units": round(float(r["units"] or 0.0), 6),
+            }
+            for r in rows_
+        ]
+
+    def _row_get(row: Any, key: str, default: Any = None) -> Any:
+        if row is None:
+            return default
+        try:
+            return row[key]
+        except Exception:
+            return default
+
+    def _reason_counts_for(
+        *,
+        miner_hotkey: str | None = None,
+        epoch: int | None = None,
+        since_iso: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["status != 'ranked'"]
+        params: list[Any] = []
+        if miner_hotkey is not None:
+            clauses.append("miner_hotkey=?")
+            params.append(miner_hotkey)
+        if epoch is not None:
+            clauses.append("epoch=?")
+            params.append(epoch)
+        if since_iso is not None:
+            clauses.append("recorded_at_iso > ?")
+            params.append(since_iso)
+        sql = (
+            "SELECT COALESCE(rejection_reason, 'unknown') AS reason, COUNT(*) AS attempts "
+            "FROM per_miner_attempts WHERE " + " AND ".join(clauses) +
+            " GROUP BY COALESCE(rejection_reason, 'unknown') ORDER BY attempts DESC, reason"
+        )
+        return [
+            {"reason": str(r["reason"]), "attempts": int(r["attempts"] or 0)}
+            for r in store.query(sql, tuple(params))
+        ]
+
+    def _pm_solve_stats_for(miner_hotkey: str, *, epoch: int | None, since_iso: str | None) -> dict[str, Any]:
+        if epoch is None and since_iso is None:
+            return {
+                "accepted_solves": 0,
+                "verified_solves": 0,
+                "unique_verified_solves": 0,
+                "eligible_solves": 0,
+                "weighted_units": 0.0,
+                "last_solved_at": None,
+                "tier_mix": [],
+            }
+        clauses = ["miner_hotkey=?", "verified=1"]
+        params: list[Any] = [miner_hotkey]
+        if epoch is not None:
+            clauses.append("epoch=?")
+            params.append(epoch)
+        if since_iso is not None:
+            clauses.append("solved_at_iso > ?")
+            params.append(since_iso)
+        where = " AND ".join(clauses)
+        totals = store.query(
+            "SELECT COUNT(DISTINCT challenge_id) AS unique_solves, "
+            "COUNT(*) AS verified_solves, SUM(difficulty_weight) AS units, "
+            "MAX(solved_at_iso) AS last_solved_at "
+            "FROM per_miner_solves WHERE " + where,
+            tuple(params),
+        )
+        tiers = store.query(
+            "SELECT tier, COUNT(DISTINCT challenge_id) AS solves, "
+            "SUM(difficulty_weight) AS units FROM per_miner_solves "
+            "WHERE " + where + " GROUP BY tier ORDER BY tier",
+            tuple(params),
+        )
+        t = totals[0] if totals else None
+        unique = int(_row_get(t, "unique_solves", 0) or 0)
+        verified = int(_row_get(t, "verified_solves", 0) or 0)
+        return {
+            "accepted_solves": verified,
+            "verified_solves": verified,
+            "unique_verified_solves": unique,
+            "eligible_solves": unique,
+            "weighted_units": round(float(_row_get(t, "units", 0.0) or 0.0), 6),
+            "last_solved_at": _row_get(t, "last_solved_at"),
+            "tier_mix": _tier_mix_from_rows(tiers),
+        }
+
+    def _pm_attempt_totals_for(
+        miner_hotkey: str,
+        *,
+        epoch: int | None = None,
+        since_iso: str | None = None,
+    ) -> dict[str, Any]:
+        if epoch is None and since_iso is None:
+            return {
+                "attempts": 0,
+                "accepted_attempts": 0,
+                "rejected_attempts": 0,
+                "rejection_reasons": [],
+            }
+        clauses = ["miner_hotkey=?"]
+        params: list[Any] = [miner_hotkey]
+        if epoch is not None:
+            clauses.append("epoch=?")
+            params.append(epoch)
+        if since_iso is not None:
+            clauses.append("recorded_at_iso > ?")
+            params.append(since_iso)
+        where = " AND ".join(clauses)
+        row = store.query(
+            "SELECT COUNT(*) AS attempts, "
+            "SUM(CASE WHEN status='ranked' THEN 1 ELSE 0 END) AS accepted, "
+            "SUM(CASE WHEN status!='ranked' THEN 1 ELSE 0 END) AS rejected "
+            "FROM per_miner_attempts WHERE " + where,
+            tuple(params),
+        )
+        r = row[0] if row else None
+        return {
+            "attempts": int(_row_get(r, "attempts", 0) or 0),
+            "accepted_attempts": int(_row_get(r, "accepted", 0) or 0),
+            "rejected_attempts": int(_row_get(r, "rejected", 0) or 0),
+            "rejection_reasons": _reason_counts_for(
+                miner_hotkey=miner_hotkey,
+                epoch=epoch,
+                since_iso=since_iso,
+            ),
+        }
+
+    def _pm_assignment_stats_for(assignment_identity: str, epoch: int | None) -> dict[str, Any]:
+        if epoch is None:
+            return {"assigned_challenges": 0, "tier_mix": []}
+        rows_ = store.query(
+            "SELECT tier, COUNT(*) AS solves, SUM(difficulty_weight) AS units "
+            "FROM per_miner_assignments WHERE miner_hotkey=? AND epoch=? "
+            "GROUP BY tier ORDER BY tier",
+            (assignment_identity, epoch),
+        )
+        return {
+            "assigned_challenges": sum(int(r["solves"] or 0) for r in rows_),
+            "tier_mix": _tier_mix_from_rows(rows_, count_key="assigned"),
+        }
+
+    def _perminer_contribution_for(
+        miner_hotkey: str,
+        *,
+        assignment_identity: str | None = None,
+        eligible: bool = True,
+        ineligibility_reason: str | None = None,
+        expose_assignment_identity: bool = True,
+        include_assignment_supply: bool = True,
+        include_attempts: bool = True,
+    ) -> dict[str, Any]:
+        from . import per_miner as pm
+
+        enabled = pm.perminer_enabled()
+        epoch = pm.current_epoch() if enabled else None
+        since_24h = _since_24h_iso()
+        identity = assignment_identity if assignment_identity is not None else miner_hotkey
+        current_totals = _pm_solve_stats_for(miner_hotkey, epoch=epoch, since_iso=None)
+        last_24h_totals = _pm_solve_stats_for(miner_hotkey, epoch=None, since_iso=since_24h)
+        if include_attempts:
+            current_totals.update(_pm_attempt_totals_for(miner_hotkey, epoch=epoch))
+            last_24h_totals.update(_pm_attempt_totals_for(miner_hotkey, since_iso=since_24h))
+
+        payload = {
+            "kind": "per_miner",
+            "enabled": enabled,
+            "shadow": pm.perminer_shadow() if enabled else False,
+            "current_epoch": epoch,
+            "miner_hotkey": miner_hotkey,
+            "eligible": bool(eligible),
+            "ineligibility_reason": ineligibility_reason,
+            "scoring": {
+                "mode": weights_mod.perminer_scoring_mode(),
+                "bonus_multiplier": weights_mod.perminer_bonus_multiplier(),
+                "history_floor": weights_mod.perminer_history_floor(),
+                "coldkey_required": weights_mod.perminer_require_coldkey(),
+            },
+            "current_epoch_totals": current_totals,
+            "last_24h_totals": last_24h_totals,
+        }
+        if expose_assignment_identity:
+            payload["assignment_identity"] = identity
+        if include_assignment_supply:
+            payload["assignment_supply"] = _pm_assignment_stats_for(identity, epoch)
+        return payload
+
+    def _perminer_public_contribution(miner_hotkey: str) -> dict[str, Any]:
+        require_mapped = weights_mod.perminer_require_coldkey()
+        identity = weights_mod.scoring_identity_for_hotkey(
+            store,
+            miner_hotkey,
+            require_mapped=require_mapped,
+        )
+        eligible = identity is not None
+        return _perminer_contribution_for(
+            miner_hotkey,
+            assignment_identity=identity or miner_hotkey,
+            eligible=eligible,
+            ineligibility_reason=None if eligible else "coldkey_mapping_required",
+            expose_assignment_identity=False,
+            include_assignment_supply=False,
+            include_attempts=False,
+        )
+
+    def _perminer_summary(limit: int) -> dict[str, Any]:
+        from . import per_miner as pm
+
+        enabled = pm.perminer_enabled()
+        epoch = pm.current_epoch() if enabled else None
+        since_24h = _since_24h_iso()
+        rows_ = []
+        if epoch is not None:
+            rows_ = store.query(
+                "SELECT miner_hotkey, COUNT(DISTINCT challenge_id) AS unique_solves, "
+                "COUNT(*) AS verified_solves, SUM(difficulty_weight) AS units, "
+                "MAX(solved_at_iso) AS last_solved_at "
+                "FROM per_miner_solves WHERE epoch=? AND verified=1 "
+                "GROUP BY miner_hotkey ORDER BY units DESC, unique_solves DESC, miner_hotkey "
+                "LIMIT ?",
+                (epoch, limit),
+            )
+        active_miners = store.query(
+            "SELECT COUNT(DISTINCT miner_hotkey) AS n FROM per_miner_solves "
+            "WHERE solved_at_iso > ? AND verified=1",
+            (since_24h,),
+        )
+        assigned_miners = []
+        if epoch is not None:
+            assigned_miners = store.query(
+                "SELECT COUNT(DISTINCT miner_hotkey) AS n, COUNT(*) AS assignments "
+                "FROM per_miner_assignments WHERE epoch=?",
+                (epoch,),
+            )
+        return {
+            "kind": "per_miner_summary",
+            "enabled": enabled,
+            "shadow": pm.perminer_shadow() if enabled else False,
+            "current_epoch": epoch,
+            "last_24h_since": since_24h,
+            "scoring": {
+                "mode": weights_mod.perminer_scoring_mode(),
+                "bonus_multiplier": weights_mod.perminer_bonus_multiplier(),
+                "history_floor": weights_mod.perminer_history_floor(),
+                "coldkey_required": weights_mod.perminer_require_coldkey(),
+            },
+            "current_epoch_assignment_miners": int(assigned_miners[0]["n"] or 0) if assigned_miners else 0,
+            "current_epoch_assigned_challenges": int(assigned_miners[0]["assignments"] or 0) if assigned_miners else 0,
+            "active_miners_24h": int(active_miners[0]["n"] or 0) if active_miners else 0,
+            "miners": [
+                {
+                    "miner_hotkey": str(r["miner_hotkey"]),
+                    "unique_verified_solves": int(r["unique_solves"] or 0),
+                    "verified_solves": int(r["verified_solves"] or 0),
+                    "eligible_solves": int(r["unique_solves"] or 0),
+                    "weighted_units": round(float(r["units"] or 0.0), 6),
+                    "last_solved_at": r["last_solved_at"],
+                }
+                for r in rows_
+            ],
+        }
+
+    def _publisher_admin_token_configured() -> str:
+        return os.environ.get("CATHEDRAL_PUBLISHER_ADMIN_TOKEN", "").strip()
+
+    def _require_publisher_admin(authorization: str | None) -> None:
+        token = _publisher_admin_token_configured()
+        if not token:
+            raise HTTPException(503, "publisher_admin_token_not_configured")
+        if not hmac.compare_digest(_bearer_value(authorization), token):
+            raise HTTPException(401, "invalid_admin_token")
+
+    @app.get("/v1/synthetic-boolean/per-miner/status")
+    def per_miner_status(
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        """Authenticated PM status for the calling miner.
+
+        This is the miner-facing visibility endpoint: it reports assigned
+        supply, accepted solves, rejected attempts, reasons, tier mix, current
+        epoch totals, and trailing 24h totals. It is read-only and does not mint
+        assignments.
+        """
+        from . import per_miner as pm
+
+        if not pm.perminer_enabled():
+            raise HTTPException(404, "per_miner_not_enabled")
+        _require_perminer_ready(pm)
+        if x_cathedral_submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        _verify_hotkey_claim(
+            x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+            challenge_id="", dimacs_solution_sha256="",
+        )
+        assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
+        return JSONResponse(
+            _perminer_contribution_for(
+                x_cathedral_hotkey,
+                assignment_identity=assignment_identity,
+                eligible=True,
+            ),
+            headers={"Cache-Control": "private, max-age=5", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v1/synthetic-boolean/per-miner/summary")
+    def per_miner_summary(limit: int = Query(50, ge=1, le=250)):
+        """Public aggregate PM status for dashboards/operators.
+
+        Contains only public hotkeys and aggregate counts; no signatures, CNFs,
+        solutions, or secrets.
+        """
+        return JSONResponse(
+            _perminer_summary(limit),
+            headers={"Cache-Control": "public, max-age=10", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v1/admin/synthetic-boolean/submit-metrics")
+    def submit_metrics_admin(authorization: str | None = Header(None)):
+        """Operator-only submit pressure and rejection telemetry."""
+        _require_publisher_admin(authorization)
+        return JSONResponse(
+            _submit_metrics_snapshot(),
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
     @app.get("/v1/synthetic-boolean/per-miner/challenges")
     def per_miner_challenges(
         offset: int = Query(0, ge=0),
@@ -1129,7 +1551,21 @@ def build_app(
         rl_key = (x_cathedral_hotkey, challenge_id)
         now = time.time()
         if _submit_rate_limited(rl_key, now):
-            raise HTTPException(429, "rate_limited")
+            _record_submit_event(
+                "rate_limited",
+                "rate_limited",
+                challenge_id=challenge_id,
+                status_code=429,
+                log=True,
+            )
+            raise HTTPException(
+                429,
+                "rate_limited",
+                headers={
+                    "Retry-After": str(max(1, min_interval)),
+                    "X-Cathedral-Rejection-Reason": "rate_limited",
+                },
+            )
 
         sol_sha = sha256_hex(dimacs_solution)
         submitted_at = _verify_hotkey_claim(
@@ -1145,8 +1581,8 @@ def build_app(
         # and will 409 — a safe hard stop, not silent misbehaviour).
         from . import per_miner as pm
         if challenge_id.startswith("pm-") and pm.perminer_enabled():
-            _remember_submit(rl_key, now)
             _require_perminer_ready(pm)
+            _remember_submit(rl_key, now)
 
             epoch = _perminer_epoch_for(pm, challenge_id)
             assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
@@ -1169,6 +1605,19 @@ def build_app(
                             assignment_identity, epoch, tier_seq[0], tier_seq[1],
                             challenge_id, check.assignment)
             sub_id = new_uuid()
+
+            def _record_pm_attempt(reason: str) -> None:
+                recorded_at = _now_iso_ms()
+
+                def _attempt(conn):
+                    conn.execute(
+                        "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, "
+                        "epoch, status, rejection_reason, dimacs_solution_sha256, "
+                        "submitted_at, recorded_at_iso, signature) "
+                        "VALUES (?, ?, ?, ?, 'rejected', ?, ?, ?, ?, ?)",
+                        (sub_id, challenge_id, x_cathedral_hotkey, epoch, reason,
+                         sol_sha, submitted_at, recorded_at, x_cathedral_signature))
+                store.write(_attempt)
 
             if not ok:
                 def _pm_rej(conn):
@@ -1193,8 +1642,30 @@ def build_app(
                          sol_sha, submitted_at, recorded_at, x_cathedral_signature))
                     return True
                 if not store.write(_pm_rej):
-                    raise HTTPException(409, "replayed_signature")
-                raise HTTPException(400, {"detail": reason, "challenge_id": challenge_id})
+                    _record_submit_event(
+                        "rejected",
+                        "replayed_signature",
+                        challenge_id=challenge_id,
+                        status_code=409,
+                        log=True,
+                    )
+                    raise HTTPException(
+                        409,
+                        "replayed_signature",
+                        headers={"X-Cathedral-Rejection-Reason": "replayed_signature"},
+                    )
+                _record_submit_event(
+                    "rejected",
+                    reason,
+                    challenge_id=challenge_id,
+                    status_code=400,
+                    log=True,
+                )
+                raise HTTPException(
+                    400,
+                    {"detail": reason, "challenge_id": challenge_id},
+                    headers={"X-Cathedral-Rejection-Reason": reason},
+                )
 
             # Accepted: tier/seq came from the assignment ledger or compatibility scan.
             tier = tier_seq[0] if tier_seq else 1
@@ -1256,9 +1727,33 @@ def build_app(
 
             err = store.write(_pm_accept)
             if err == "replayed_signature":
-                raise HTTPException(409, "replayed_signature")
+                _record_submit_event(
+                    "rejected",
+                    "replayed_signature",
+                    challenge_id=challenge_id,
+                    status_code=409,
+                    log=True,
+                )
+                raise HTTPException(
+                    409,
+                    "replayed_signature",
+                    headers={"X-Cathedral-Rejection-Reason": "replayed_signature"},
+                )
             if err == "already_solved":
-                raise HTTPException(409, "already_solved")
+                _record_pm_attempt("already_solved")
+                _record_submit_event(
+                    "rejected",
+                    "already_solved",
+                    challenge_id=challenge_id,
+                    status_code=409,
+                    log=True,
+                )
+                raise HTTPException(
+                    409,
+                    "already_solved",
+                    headers={"X-Cathedral-Rejection-Reason": "already_solved"},
+                )
+            _record_submit_event("accepted", "ranked", challenge_id=challenge_id, status_code=200)
             return {
                 "status": "ranked", "id": sub_id, "eval_run_id": row_uuid,
                 "challenge_id": challenge_id,
@@ -1270,10 +1765,32 @@ def build_app(
         rows_ = store.query(
             "SELECT * FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
         if not rows_:
-            raise HTTPException(409, "challenge_not_active")
+            _record_submit_event(
+                "rejected",
+                "challenge_not_active",
+                challenge_id=challenge_id,
+                status_code=409,
+                log=True,
+            )
+            raise HTTPException(
+                409,
+                "challenge_not_active",
+                headers={"X-Cathedral-Rejection-Reason": "challenge_not_active"},
+            )
         chal = rows_[0]
         if chal["status"] != "active":
-            raise HTTPException(409, "challenge_already_locked")
+            _record_submit_event(
+                "rejected",
+                "challenge_already_locked",
+                challenge_id=challenge_id,
+                status_code=409,
+                log=True,
+            )
+            raise HTTPException(
+                409,
+                "challenge_already_locked",
+                headers={"X-Cathedral-Rejection-Reason": "challenge_already_locked"},
+            )
 
         _remember_submit(rl_key, now)  # consume the slot only past the gates
 
@@ -1295,8 +1812,30 @@ def build_app(
                      submitted_at, x_cathedral_signature))
                 return True
             if not store.write(_rej):
-                raise HTTPException(409, "replayed_signature")
-            raise HTTPException(400, {"detail": check.rejection_reason, "challenge_id": challenge_id})
+                _record_submit_event(
+                    "rejected",
+                    "replayed_signature",
+                    challenge_id=challenge_id,
+                    status_code=409,
+                    log=True,
+                )
+                raise HTTPException(
+                    409,
+                    "replayed_signature",
+                    headers={"X-Cathedral-Rejection-Reason": "replayed_signature"},
+                )
+            _record_submit_event(
+                "rejected",
+                check.rejection_reason,
+                challenge_id=challenge_id,
+                status_code=400,
+                log=True,
+            )
+            raise HTTPException(
+                400,
+                {"detail": check.rejection_reason, "challenge_id": challenge_id},
+                headers={"X-Cathedral-Rejection-Reason": check.rejection_reason},
+            )
 
         # accept the solve. Default = open-window (live since 2026-06-04): a
         # challenge takes one solve per distinct hotkey while active, each with
@@ -1374,11 +1913,58 @@ def build_app(
             # the challenge just flipped active -> locked: refresh the board.
             board_cache_mod.invalidate_all()
         if err == "replayed_signature":
-            raise HTTPException(409, "replayed_signature")
+            _record_submit_event(
+                "rejected",
+                "replayed_signature",
+                challenge_id=challenge_id,
+                status_code=409,
+                log=True,
+            )
+            raise HTTPException(
+                409,
+                "replayed_signature",
+                headers={"X-Cathedral-Rejection-Reason": "replayed_signature"},
+            )
         if err == "challenge_already_locked":
-            raise HTTPException(409, "challenge_already_locked")
+            _record_submit_event(
+                "rejected",
+                "challenge_already_locked",
+                challenge_id=challenge_id,
+                status_code=409,
+                log=True,
+            )
+            raise HTTPException(
+                409,
+                "challenge_already_locked",
+                headers={"X-Cathedral-Rejection-Reason": "challenge_already_locked"},
+            )
+        if err == "challenge_not_active":
+            _record_submit_event(
+                "rejected",
+                "challenge_not_active",
+                challenge_id=challenge_id,
+                status_code=409,
+                log=True,
+            )
+            raise HTTPException(
+                409,
+                "challenge_not_active",
+                headers={"X-Cathedral-Rejection-Reason": "challenge_not_active"},
+            )
         if err == "already_solved":
-            raise HTTPException(409, "already_solved")
+            _record_submit_event(
+                "rejected",
+                "already_solved",
+                challenge_id=challenge_id,
+                status_code=409,
+                log=True,
+            )
+            raise HTTPException(
+                409,
+                "already_solved",
+                headers={"X-Cathedral-Rejection-Reason": "already_solved"},
+            )
+        _record_submit_event("accepted", "ranked", challenge_id=challenge_id, status_code=200)
         return {
             "status": "ranked", "id": sub_id, "eval_run_id": row_uuid,
             "challenge_id": challenge_id, "weighted_score": ws,
