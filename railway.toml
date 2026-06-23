@@ -6,7 +6,6 @@ builder = "dockerfile"
 dockerfilePath = "deploy/Dockerfile"
 
 [deploy]
-startCommand = "uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT}"
 healthcheckPath = "/health"
 healthcheckTimeout = 180
 restartPolicyType = "on_failure"
