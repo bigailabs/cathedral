@@ -204,6 +204,17 @@ with TestClient(app) as client:
        and generator_tiers.get(2, {}).get("method") == "ajm"
        and generator_tiers.get(1, {}).get("target_active") == 25
        and generator_tiers.get(2, {}).get("target_active") == 25)
+    bc = client.get("/v1/synthetic-boolean/challenge-broadcast")
+    ck("challenge-broadcast serves the same cacheable board snapshot",
+       bc.status_code == 200
+       and bc.json()["items"][0]["challenge_id"] == ac["items"][0]["challenge_id"]
+       and bool(bc.headers.get("etag"))
+       and bc.headers.get("x-cathedral-board-rebuilds") is not None)
+    bc_304 = client.get(
+        "/v1/synthetic-boolean/challenge-broadcast",
+        headers={"If-None-Match": bc.headers.get("etag", "")},
+    )
+    ck("challenge-broadcast supports ETag 304", bc_304.status_code == 304)
 
     from bittensor_wallet import Keypair  # noqa
     miner = Keypair.create_from_uri("//E2EMiner")
@@ -472,6 +483,7 @@ with TestClient(app) as client:
             "CATHEDRAL_PERMINER_ALLOTMENT_T1",
             "CATHEDRAL_PERMINER_ALLOTMENT_T2",
             "CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE",
+            "CATHEDRAL_PERMINER_SEED_SECRET",
         )
     }
     try:
@@ -480,8 +492,25 @@ with TestClient(app) as client:
         os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T1"] = "1"
         os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T2"] = "1"
         os.environ["CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE"] = "1"
+        os.environ.pop("CATHEDRAL_PERMINER_SEED_SECRET", None)
         pm_miner = Keypair.create_from_uri("//PerMinerE2E")
         pm_miner2 = Keypair.create_from_uri("//PerMinerE2EStacked")
+        pm_closed_at = now_iso()
+        pm_closed_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=pm_closed_at,
+            challenge_id="", dimacs_solution_sha256="")
+        pm_closed_sig = base64.b64encode(pm_miner.sign(pm_closed_claim)).decode()
+        pm_closed = client.get(
+            "/v1/synthetic-boolean/per-miner/challenges",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_closed_sig,
+                     "X-Cathedral-Submitted-At": pm_closed_at},
+        )
+        ck("per-miner assignments fail closed without stable seed secret",
+           pm_closed.status_code == 503
+           and pm_closed.json().get("detail") == "per_miner_seed_secret_missing")
+        os.environ["CATHEDRAL_PERMINER_SEED_SECRET"] = "publisher-verify-stable-seed"
         def _map_pm_coldkey(conn):
             conn.execute(
                 "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "

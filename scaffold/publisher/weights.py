@@ -258,7 +258,7 @@ def perminer_require_coldkey() -> bool:
 def _perminer_scores(store: Store) -> dict[str, float]:
     """Current-epoch normalized per-miner scores, or empty when disabled/no solves."""
     from . import per_miner as pm
-    if not pm.perminer_enabled():
+    if not pm.perminer_enabled() or pm.perminer_shadow():
         return {}
     return pm.compute_perminer_scores(store, pm.current_epoch())
 
@@ -403,21 +403,23 @@ def _load_scoring_coldkey_map(store: Store) -> dict[str, str] | None:
     return None
 
 
-def scoring_identity_for_hotkey(store: Store, hotkey: str) -> str:
+def scoring_identity_for_hotkey(
+    store: Store, hotkey: str, *, require_mapped: bool = False
+) -> str | None:
     """Return the scoring identity for hotkey-bound beta lanes.
 
     When coldkey collapse is enabled and a map row exists, per-miner challenge
     assignment uses the coldkey too. This makes sybil stacking pointless at the
     work-assignment layer, not just after score normalization.
     """
-    if not coldkey_collapse_enabled():
+    if not coldkey_collapse_enabled() and not require_mapped:
         return hotkey
     try:
         rows = store.query("SELECT coldkey FROM coldkey_map WHERE hotkey=? LIMIT 1", (hotkey,))
     except Exception:
-        return hotkey
+        return None if require_mapped else hotkey
     if not rows:
-        return hotkey
+        return None if require_mapped else hotkey
     return str(rows[0]["coldkey"] or hotkey)
 
 
@@ -503,6 +505,7 @@ def _perminer_policy_status(store: Store | None = None) -> dict[str, Any]:
             "perminer_enabled": False,
             "perminer_shadow": False,
             "perminer_live_requested": False,
+            "perminer_bonus_live": False,
             "perminer_epoch": None,
             "perminer_has_scores": False,
             "score_source": None,
@@ -518,10 +521,17 @@ def _perminer_policy_status(store: Store | None = None) -> dict[str, Any]:
     if enabled and store is not None and epoch is not None:
         has_scores = bool(pm.compute_perminer_scores(store, epoch))
     live_requested = enabled and not shadow
+    bonus_live = (
+        live_requested
+        and perminer_scoring_mode() == "bonus"
+        and perminer_bonus_multiplier() > 0.0
+        and has_scores
+    )
     return {
         "perminer_enabled": enabled,
         "perminer_shadow": shadow,
         "perminer_live_requested": live_requested,
+        "perminer_bonus_live": bonus_live,
         "perminer_epoch": epoch,
         "perminer_has_scores": has_scores,
         "score_source": "per_miner" if live_requested and has_scores
@@ -574,6 +584,7 @@ def explain_miner_score(
             "enabled": pm_status["perminer_enabled"],
             "shadow": pm_status["perminer_shadow"],
             "live_requested": pm_status["perminer_live_requested"],
+            "bonus_live": pm_status.get("perminer_bonus_live", False),
             "epoch": pm_status["perminer_epoch"],
             "has_scores": pm_status["perminer_has_scores"],
             "scoring_mode": pm_status["scoring_mode"],
@@ -912,6 +923,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
                 "enabled": pm_status["perminer_enabled"],
                 "shadow": pm_status["perminer_shadow"],
                 "live_requested": pm_status["perminer_live_requested"],
+                "bonus_live": pm_status.get("perminer_bonus_live", False),
                 "epoch": pm_status["perminer_epoch"],
                 "has_scores": pm_status["perminer_has_scores"],
                 "scoring_mode": pm_status["scoring_mode"],

@@ -296,6 +296,41 @@ def main() -> int:
     finally:
         restore_env(old)
 
+    print("ASSIGNED LANE - shadow mode does not change live weights")
+    old = set_env(
+        CATHEDRAL_WEIGHTS_MODE="proportional",
+        CATHEDRAL_PERMINER_ENABLED="1",
+        CATHEDRAL_PERMINER_SHADOW="1",
+        CATHEDRAL_PERMINER_SCORING_MODE="bonus",
+        CATHEDRAL_PERMINER_REQUIRE_COLDKEY="0",
+        CATHEDRAL_PERMINER_BONUS_MULT="1.0",
+        CATHEDRAL_PERMINER_SCORE_TARGET="1",
+    )
+    try:
+        store = Store(":memory:")
+        epoch = __import__("scaffold.publisher.per_miner", fromlist=["current_epoch"]).current_epoch()
+        cnf, _ = gen_planted_3sat(25, 10, 30)
+        seed_challenge(store, challenge_id="sat-shadow-base", tier=1, cnf_text=cnf)
+
+        def _seed_shadow(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                "VALUES ('sat-shadow-base', 'hkBase', ?)",
+                (now_iso(),),
+            )
+            conn.execute(
+                "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, verified, solved_at_iso) VALUES ('pm-shadow', 'hkShadow', ?, 1, 0, 1.0, 1, ?)",
+                (epoch, now_iso()),
+            )
+        store.write(_seed_shadow)
+        scored = weights.compose_scores(store)
+        ck("shadow assigned solves are recorded but not live-bonused",
+           scored == {"hkBase": 1.0})
+        store.close()
+    finally:
+        restore_env(old)
+
     print("AUDIT SHADOW - zero multiplier does not pay")
     old = set_env(CATHEDRAL_WEIGHTS_MODE="proportional")
     try:

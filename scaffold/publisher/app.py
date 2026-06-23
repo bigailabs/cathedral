@@ -198,6 +198,15 @@ def build_app(
     board_cache = BoardCache(_build_board)
     board_cache_mod.register(board_cache)
 
+    def _serve_board_snapshot(request: Request):
+        payload, etag = board_cache.get()
+        headers = board_cache_headers(etag)
+        headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(payload, headers=headers)
+
     top_cache = top_cache_mod.TopCache()
     top_cache.start(store)
     top_cache_mod.register(top_cache)
@@ -725,12 +734,13 @@ def build_app(
         # Broadcast tier: serve the cached board snapshot (rebuilt only on
         # mint/retire + TTL), with ETag/Cache-Control so an edge/CDN caches it
         # and a conditional GET short-circuits to 304 — reads don't touch the DB.
-        payload, etag = board_cache.get()
-        headers = board_cache_headers(etag)
-        inm = request.headers.get("if-none-match")
-        if inm and etag in [t.strip() for t in inm.split(",")]:
-            return Response(status_code=304, headers=headers)
-        return JSONResponse(payload, headers=headers)
+        return _serve_board_snapshot(request)
+
+    @app.get("/v1/synthetic-boolean/challenge-broadcast")
+    def challenge_broadcast(request: Request):
+        # Explicit alias for miners/dashboards that want the cache/CDN board
+        # broadcast rather than a per-request active-set query.
+        return _serve_board_snapshot(request)
 
     @app.get("/v1/synthetic-boolean/current-challenge")
     def current_challenge(tier: int | None = Query(None), difficulty: str | None = Query(None)):
@@ -863,6 +873,31 @@ def build_app(
             return int(found[0]["tier"]), int(found[0]["seq"])
         return None
 
+    def _require_perminer_ready(pm) -> None:
+        try:
+            pm.require_seed_secret()
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    def _perminer_epoch_for(pm, challenge_id: str | None = None) -> int:
+        current = pm.current_epoch()
+        if not challenge_id:
+            return current
+        epoch = pm.challenge_epoch(challenge_id) or current
+        if epoch not in {current, current - 1}:
+            raise HTTPException(410, "per_miner_challenge_expired")
+        return epoch
+
+    def _assignment_identity_for_hotkey(hotkey: str) -> str:
+        identity = weights_mod.scoring_identity_for_hotkey(
+            store,
+            hotkey,
+            require_mapped=weights_mod.perminer_require_coldkey(),
+        )
+        if identity is None:
+            raise HTTPException(403, "coldkey_mapping_required")
+        return identity
+
     @app.get("/v1/synthetic-boolean/per-miner/challenges")
     def per_miner_challenges(
         offset: int = Query(0, ge=0),
@@ -883,14 +918,15 @@ def build_app(
         from . import per_miner as pm
         if not pm.perminer_enabled():
             raise HTTPException(404, "per_miner_not_enabled")
+        _require_perminer_ready(pm)
         if x_cathedral_submitted_at is None:
             raise HTTPException(401, "missing X-Cathedral-Submitted-At")
         _verify_hotkey_claim(
             x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
             challenge_id="", dimacs_solution_sha256="",
         )
-        epoch = pm.current_epoch()
-        assignment_identity = weights_mod.scoring_identity_for_hotkey(store, x_cathedral_hotkey)
+        epoch = _perminer_epoch_for(pm)
+        assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
         effective_limit = pm.assignment_page_limit(limit)
         items = pm.miner_instance_set(
             assignment_identity, epoch, offset=offset, limit=effective_limit)
@@ -928,17 +964,16 @@ def build_app(
         from . import per_miner as pm
         if not pm.perminer_enabled():
             raise HTTPException(404, "per_miner_not_enabled")
+        _require_perminer_ready(pm)
         if x_cathedral_submitted_at is None:
             raise HTTPException(401, "missing X-Cathedral-Submitted-At")
         _verify_hotkey_claim(
             x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
             challenge_id="", dimacs_solution_sha256="",
         )
-        epoch = pm.current_epoch()
-        assignment_identity = weights_mod.scoring_identity_for_hotkey(store, x_cathedral_hotkey)
+        epoch = _perminer_epoch_for(pm, challenge_id)
+        assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
         tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
-        if tier_seq is None:
-            tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
         if tier_seq is not None:
             tier, seq = tier_seq
             cid, cnf_text, _ = pm.generate_instance(assignment_identity, epoch, tier, seq)
@@ -947,7 +982,7 @@ def build_app(
                                         headers={"X-Perminer-Challenge-Id": cid,
                                                  "X-Perminer-Tier": str(tier),
                                                  "X-Perminer-Epoch": str(epoch)})
-        raise HTTPException(404, "challenge_not_in_miner_set")
+        raise HTTPException(404, "assignment_required_fetch_challenges_first")
 
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
     @app.post("/v1/agents/submit")
@@ -993,15 +1028,14 @@ def build_app(
         from . import per_miner as pm
         if challenge_id.startswith("pm-") and pm.perminer_enabled():
             _remember_submit(rl_key, now)
+            _require_perminer_ready(pm)
 
-            epoch = pm.current_epoch()
-            assignment_identity = weights_mod.scoring_identity_for_hotkey(store, x_cathedral_hotkey)
+            epoch = _perminer_epoch_for(pm, challenge_id)
+            assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
             tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
             if tier_seq is None:
-                tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
-            if tier_seq is None:
                 check = None
-                ok, reason = False, "challenge_id_not_in_miner_set"
+                ok, reason = False, "assignment_required_fetch_challenges_first"
             else:
                 cnf = pm.get_miner_cnf(assignment_identity, epoch, tier_seq[0], tier_seq[1])
                 if cnf is None:
@@ -1013,8 +1047,9 @@ def build_app(
                     if not check.ok:
                         ok, reason = False, check.rejection_reason
                     else:
-                        ok, reason = pm.verify_miner_submission(
-                            assignment_identity, epoch, challenge_id, check.assignment)
+                        ok, reason = pm.verify_miner_submission_for(
+                            assignment_identity, epoch, tier_seq[0], tier_seq[1],
+                            challenge_id, check.assignment)
             sub_id = new_uuid()
 
             if not ok:

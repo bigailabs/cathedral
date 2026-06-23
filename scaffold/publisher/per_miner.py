@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -56,6 +57,12 @@ from ..dimacs import gen_planted_3sat, verify_witness
 from .store import Store
 
 _EPHEMERAL_SEED_SECRET = secrets.token_bytes(32)
+_SEED_SECRET_ENVS = (
+    "CATHEDRAL_PERMINER_SEED_SECRET",
+    "CATHEDRAL_REFILL_SEED_SECRET",
+    "CATHEDRAL_PUBLISHER_SEED_SECRET",
+)
+_PM_ID_RE = re.compile(r"^pm-t(?P<tier>\d+)-e(?P<epoch>\d+)-[0-9a-f]{24}$")
 
 # --------------------------------------------------------------------------
 # Feature flags
@@ -71,6 +78,22 @@ def perminer_shadow() -> bool:
     return perminer_enabled() and (
         os.environ.get("CATHEDRAL_PERMINER_SHADOW", "").strip().lower() in {
             "1", "true", "yes", "on"})
+
+
+def seed_secret_configured() -> bool:
+    """True when per-miner assignments have a stable deploy-wide seed secret."""
+    return any(os.environ.get(name, "").strip() for name in _SEED_SECRET_ENVS)
+
+
+def require_seed_secret() -> None:
+    """Fail closed when live per-miner assignment would use an ephemeral seed.
+
+    Without a stable secret, a restart changes every `pm-*` id and makes already
+    issued assignments unverifiable. Tests and disabled code paths may still use
+    the process-local fallback, but enabled public endpoints must not.
+    """
+    if perminer_enabled() and not seed_secret_configured():
+        raise RuntimeError("per_miner_seed_secret_missing")
 
 
 # --------------------------------------------------------------------------
@@ -165,6 +188,19 @@ def current_epoch() -> int:
     return ts // (hours * 3600)
 
 
+def parse_challenge_id(challenge_id: str) -> dict[str, int] | None:
+    """Parse tier/epoch from a `pm-*` id. The seq remains secret-derived."""
+    m = _PM_ID_RE.match(challenge_id or "")
+    if not m:
+        return None
+    return {"tier": int(m.group("tier")), "epoch": int(m.group("epoch"))}
+
+
+def challenge_epoch(challenge_id: str) -> int | None:
+    parsed = parse_challenge_id(challenge_id)
+    return parsed["epoch"] if parsed else None
+
+
 # --------------------------------------------------------------------------
 # Deterministic seed derivation
 # --------------------------------------------------------------------------
@@ -189,12 +225,16 @@ def instance_id(hotkey: str, epoch: int, tier: int, seq: int) -> str:
 
 
 def _seed_secret_bytes() -> bytes:
-    raw = (
-        os.environ.get("CATHEDRAL_PERMINER_SEED_SECRET", "").strip()
-        or os.environ.get("CATHEDRAL_REFILL_SEED_SECRET", "").strip()
-        or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").strip()
-    )
-    return raw.encode("utf-8") if raw else _EPHEMERAL_SEED_SECRET
+    raw = ""
+    for name in _SEED_SECRET_ENVS:
+        raw = os.environ.get(name, "").strip()
+        if raw:
+            break
+    if raw:
+        return raw.encode("utf-8")
+    if perminer_enabled():
+        raise RuntimeError("per_miner_seed_secret_missing")
+    return _EPHEMERAL_SEED_SECRET
 
 
 # --------------------------------------------------------------------------
