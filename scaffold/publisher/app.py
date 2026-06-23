@@ -386,10 +386,11 @@ def build_app(
         "per-miner-summary",
         _env_float("CATHEDRAL_PM_SUMMARY_CACHE_TTL_SECS", 5.0),
     )
+    _visibility_cold_async_raw = os.environ.get("CATHEDRAL_VISIBILITY_COLD_ASYNC")
     visibility_cold_async = (
-        store.backend == "postgres"
-        and os.environ.get("CATHEDRAL_VISIBILITY_COLD_ASYNC", "1").strip().lower()
-        not in {"0", "false", "no", "off"}
+        (_visibility_cold_async_raw.strip().lower() not in {"0", "false", "no", "off"})
+        if _visibility_cold_async_raw is not None
+        else database_path != ":memory:"
     )
 
     app = FastAPI(title="cathedral-thin-publisher")
