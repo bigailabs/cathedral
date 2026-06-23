@@ -52,6 +52,7 @@ class BoardCache:
         self._built_at: float = 0.0
         self._dirty = True
         self._rebuilds = 0  # observability: how many times the DB was actually hit
+        self._refreshing = False
 
     def invalidate(self) -> None:
         """Mark the snapshot stale — next read rebuilds. Call on any mutation of
@@ -72,19 +73,42 @@ class BoardCache:
         now = time.time()
         if self._fresh(now):
             return self._payload, self._etag  # type: ignore[return-value]
+        if self._payload is not None and self._etag is not None:
+            self._schedule_refresh()
+            return self._payload, self._etag
         with self._lock:
             # re-check under lock (another thread may have just rebuilt)
             if self._fresh(time.time()):
                 return self._payload, self._etag  # type: ignore[return-value]
-            payload = self._builder()
-            body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-            etag = 'W/"' + hashlib.sha256(body).hexdigest()[:32] + '"'
-            self._payload = payload
-            self._etag = etag
-            self._built_at = time.time()
-            self._dirty = False
-            self._rebuilds += 1
-            return payload, etag
+            self._rebuild_locked()
+            return self._payload, self._etag  # type: ignore[return-value]
+
+    def _rebuild_locked(self) -> None:
+        payload = self._builder()
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        etag = 'W/"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+        self._payload = payload
+        self._etag = etag
+        self._built_at = time.time()
+        self._dirty = False
+        self._rebuilds += 1
+
+    def _schedule_refresh(self) -> None:
+        with self._lock:
+            if self._refreshing:
+                return
+            self._refreshing = True
+
+        def _run() -> None:
+            try:
+                with self._lock:
+                    if not self._fresh(time.time()):
+                        self._rebuild_locked()
+            finally:
+                with self._lock:
+                    self._refreshing = False
+
+        threading.Thread(target=_run, name="board-cache-refresh", daemon=True).start()
 
     @property
     def rebuild_count(self) -> int:

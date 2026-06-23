@@ -550,13 +550,15 @@ def explain_miner_score(
     """
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
-    coldkey_of = _load_scoring_coldkey_map(store)
-    scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
     pm_status = _perminer_policy_status(store)
     requested = mode()
     effective = _effective_mode(store, since)
     source = pm_status["score_source"] or effective
     hotkey = str(miner_hotkey)
+    scores: dict[str, float] = {}
+    if source == "per_miner":
+        coldkey_of = _load_scoring_coldkey_map(store)
+        scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
     base: dict[str, Any] = {
         "miner_hotkey": hotkey,
         "window_hours": window_hours(),
@@ -639,9 +641,42 @@ def explain_miner_score(
             tier_entry["solves"] += 1
             tier_entry["units"] += weight
         raw_units = float(own["units"])
-        normalized_weight = float(base["normalized_weight"])
-        top_units = raw_units / normalized_weight if normalized_weight > 0 else 0.0
+        top_units = raw_units
+        if raw_units > 0.0:
+            try:
+                case_parts = []
+                params: list[float | int | str] = []
+                for tier, weight in sorted(weights_by_tier.items()):
+                    case_parts.append("WHEN ? THEN ?")
+                    params.extend([int(tier), float(weight)])
+                default_weight = float(weights_by_tier.get(1, 1.0))
+                case_sql = (
+                    "CASE COALESCE(c.tier, 1) "
+                    + " ".join(case_parts)
+                    + " ELSE ? END"
+                )
+                params.extend([default_weight, since])
+                top_rows = store.query(
+                    "SELECT MAX(units) AS top_units FROM ("
+                    "SELECT d.miner_hotkey, SUM(" + case_sql + ") AS units "
+                    "FROM (SELECT DISTINCT miner_hotkey, challenge_id "
+                    "FROM lane_challenge_solves WHERE solved_at_iso > ?) d "
+                    "LEFT JOIN lane_challenges c ON c.challenge_id = d.challenge_id "
+                    "WHERE COALESCE(c.score_multiplier, 1.0) > 0 "
+                    "GROUP BY d.miner_hotkey"
+                    ") x",
+                    tuple(params),
+                )
+                top_units = max(
+                    raw_units,
+                    float(top_rows[0]["top_units"] or 0.0) if top_rows else 0.0,
+                )
+            except Exception as exc:
+                base["top_units_error"] = f"{type(exc).__name__}"
+        normalized_weight = raw_units / top_units if top_units > 0 else 0.0
         base.update({
+            "normalized_weight": round(normalized_weight, 6),
+            "top_weight": 1.0 if top_units > 0 else 0.0,
             "raw_units": round(raw_units, 6),
             "top_units": round(top_units, 6),
             "distinct_challenges": len(own["seen"]),
