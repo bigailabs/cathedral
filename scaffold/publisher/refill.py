@@ -69,7 +69,7 @@ from .store import Store
 # ---------------------------------------------------------------------------
 
 _FORK_TIMEOUT = int(os.environ.get("CATHEDRAL_GEN_FORK_TIMEOUT", "45"))
-MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "4"))
+MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "1"))
 MINT_CAP_FALLBACK = 1   # if fork blocked; 1 gen×~5-6s GIL hold per tick
 
 
@@ -171,12 +171,20 @@ def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
 # Each entry is roughly 450KB CNF text at the current tier-1 shape.
 # ---------------------------------------------------------------------------
 
-_PREGEN_QUEUE_SIZE = int(os.environ.get("CATHEDRAL_PREGEN_QUEUE_SIZE", "8"))
+_PREGEN_QUEUE_SIZE = int(os.environ.get("CATHEDRAL_PREGEN_QUEUE_SIZE", "0"))
 
 # Per-tier queues: tier -> queue.Queue of (cnf_text,)
 _pregen_queues: dict[int, _queue.Queue] = {}
 _pregen_started = False
 _pregen_lock = _threading.Lock()
+
+
+def _pregen_enabled() -> bool:
+    return (
+        _PREGEN_QUEUE_SIZE > 0
+        and os.environ.get("CATHEDRAL_PREGEN_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
 
 
 def _pregen_worker(tier: int) -> None:
@@ -215,6 +223,8 @@ def _pregen_worker(tier: int) -> None:
 def _ensure_pregen_started() -> None:
     """Start pre-generation daemon threads (one per tier, idempotent)."""
     global _pregen_started
+    if not _pregen_enabled():
+        return
     if _pregen_started:
         return
     with _pregen_lock:
@@ -236,6 +246,8 @@ def _get_pregen_cnf(tier: int) -> str | None:
 
     Returns None if the queue is empty (caller should fall back to _gen_cnf).
     """
+    if not _pregen_enabled():
+        return None
     q = _pregen_queues.get(tier)
     if q is None:
         return None
@@ -297,6 +309,7 @@ def generator_config() -> dict:
         "retire_after_distinct_solvers": retire_after_distinct_solvers(),
         "mint_cap": generator_max_mints() if external_enabled else (
             MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
+        "pregen_enabled": _pregen_enabled(),
         "pregen_queue_size": _PREGEN_QUEUE_SIZE,
         "external": {
             "requested": external_requested,
