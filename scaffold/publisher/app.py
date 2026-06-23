@@ -77,7 +77,14 @@ class _SoftTtlCache:
         self._lock = threading.Lock()
         self._entries: dict[Any, dict[str, Any]] = {}
 
-    def get(self, key: Any, builder) -> tuple[Any, str]:
+    def get(
+        self,
+        key: Any,
+        builder,
+        *,
+        cold_async: bool = False,
+        cold_value=None,
+    ) -> tuple[Any, str]:
         now = time.monotonic()
         with self._lock:
             entry = self._entries.get(key)
@@ -94,6 +101,21 @@ class _SoftTtlCache:
                         daemon=True,
                     ).start()
                 return entry["value"], "stale"
+
+            if cold_async:
+                value = cold_value() if callable(cold_value) else cold_value
+                self._entries[key] = {
+                    "value": value,
+                    "built_at": 0.0,
+                    "refreshing": True,
+                }
+                threading.Thread(
+                    target=self._refresh,
+                    args=(key, builder),
+                    name=f"{self.name}-cold-refresh",
+                    daemon=True,
+                ).start()
+                return value, "warming"
 
         value = builder()
         with self._lock:
@@ -363,6 +385,11 @@ def build_app(
     pm_summary_cache = _SoftTtlCache(
         "per-miner-summary",
         _env_float("CATHEDRAL_PM_SUMMARY_CACHE_TTL_SECS", 5.0),
+    )
+    visibility_cold_async = (
+        store.backend == "postgres"
+        and os.environ.get("CATHEDRAL_VISIBILITY_COLD_ASYNC", "1").strip().lower()
+        not in {"0", "false", "no", "off"}
     )
 
     app = FastAPI(title="cathedral-thin-publisher")
@@ -900,6 +927,23 @@ def build_app(
             "merkle_epoch_latest": None,
         }
 
+    def _recent_warming_payload(limit: int) -> dict[str, Any]:
+        return {
+            "items": [],
+            "view": "recent_signed_receipts",
+            "rank_kind": "none",
+            "explanation": "Recent visibility cache is warming; retry shortly.",
+            "earning_weight_source": "v1/validator/weights/next",
+            "earning_weights_generated_at": None,
+            "current_weights": {},
+            "next_since": None,
+            "next_since_ran_at": None,
+            "next_since_id": None,
+            "merkle_epoch_latest": None,
+            "visibility_cache_status": "warming",
+            "requested_limit": int(limit),
+        }
+
     # ---- M1: feed ---------------------------------------------------------
     @app.get("/v1/leaderboard/recent")
     async def leaderboard_recent(
@@ -916,6 +960,8 @@ def build_app(
             payload, cache_status = recent_cache.get(
                 int(limit),
                 lambda: _recent_payload(None, None, limit),
+                cold_async=visibility_cold_async,
+                cold_value=lambda: _recent_warming_payload(limit),
             )
         else:
             payload = _recent_payload(cur_ran_at, cur_id, limit)
@@ -1001,26 +1047,51 @@ def build_app(
             headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
         )
 
+    def _leaderboard_explain_payload(miner_hotkey: str) -> dict[str, Any]:
+        payload = weights_mod.explain_miner_score(store, miner_hotkey)
+        weight_ctx = _current_weight_context()
+        ann = _weight_annotations(weight_ctx, [miner_hotkey]).get(miner_hotkey, {})
+        payload["current_signed_weight"] = ann.get("current_weight", 0.0)
+        payload["current_signed_weight_rank"] = ann.get("current_weight_rank")
+        payload["current_signed_weight_generated_at"] = weight_ctx.get("generated_at")
+        payload["current_signed_weight_policy_reason"] = weight_ctx.get("policy_reason")
+        try:
+            payload.setdefault("perminer", {})
+            payload["perminer"]["contribution"] = _perminer_public_contribution(miner_hotkey)
+        except Exception as exc:
+            payload.setdefault("perminer", {})
+            payload["perminer"]["contribution_error"] = f"{type(exc).__name__}"
+        return payload
+
     @app.get("/v1/leaderboard/explain")
     async def leaderboard_explain(miner_hotkey: str = Query(..., min_length=1)):
         """Explain how the current scoring policy treats one miner hotkey."""
-        def _build() -> dict[str, Any]:
-            payload = weights_mod.explain_miner_score(store, miner_hotkey)
-            weight_ctx = _current_weight_context()
-            ann = _weight_annotations(weight_ctx, [miner_hotkey]).get(miner_hotkey, {})
-            payload["current_signed_weight"] = ann.get("current_weight", 0.0)
-            payload["current_signed_weight_rank"] = ann.get("current_weight_rank")
-            payload["current_signed_weight_generated_at"] = weight_ctx.get("generated_at")
-            payload["current_signed_weight_policy_reason"] = weight_ctx.get("policy_reason")
-            try:
-                payload.setdefault("perminer", {})
-                payload["perminer"]["contribution"] = _perminer_public_contribution(miner_hotkey)
-            except Exception as exc:
-                payload.setdefault("perminer", {})
-                payload["perminer"]["contribution_error"] = f"{type(exc).__name__}"
-            return payload
 
-        payload, cache_status = explain_cache.get(miner_hotkey, _build)
+        def _warming_payload() -> dict[str, Any]:
+            return {
+                "miner_hotkey": miner_hotkey,
+                "visibility_cache_status": "warming",
+                "current_signed_weight": 0.0,
+                "current_signed_weight_rank": None,
+                "current_signed_weight_generated_at": None,
+                "current_signed_weight_policy_reason": None,
+                "perminer": {
+                    "contribution": {
+                        "kind": "per_miner",
+                        "enabled": None,
+                        "miner_hotkey": miner_hotkey,
+                        "eligible": False,
+                        "ineligibility_reason": "visibility_cache_warming",
+                    },
+                },
+            }
+
+        payload, cache_status = explain_cache.get(
+            miner_hotkey,
+            lambda: _leaderboard_explain_payload(miner_hotkey),
+            cold_async=visibility_cold_async,
+            cold_value=_warming_payload,
+        )
         return JSONResponse(
             payload,
             headers={
@@ -1501,6 +1572,37 @@ def build_app(
             ],
         }
 
+    def _perminer_summary_warming(limit: int) -> dict[str, Any]:
+        try:
+            from . import per_miner as pm
+
+            enabled = pm.perminer_enabled()
+            shadow = pm.perminer_shadow() if enabled else False
+            epoch = pm.current_epoch() if enabled else None
+        except Exception:
+            enabled = False
+            shadow = False
+            epoch = None
+        return {
+            "kind": "per_miner_summary",
+            "enabled": enabled,
+            "shadow": shadow,
+            "current_epoch": epoch,
+            "last_24h_since": _since_24h_iso(),
+            "visibility_cache_status": "warming",
+            "scoring": {
+                "mode": weights_mod.perminer_scoring_mode(),
+                "bonus_multiplier": weights_mod.perminer_bonus_multiplier(),
+                "history_floor": weights_mod.perminer_history_floor(),
+                "coldkey_required": weights_mod.perminer_require_coldkey(),
+            },
+            "current_epoch_assignment_miners": 0,
+            "current_epoch_assigned_challenges": 0,
+            "active_miners_24h": 0,
+            "requested_limit": int(limit),
+            "miners": [],
+        }
+
     def _publisher_admin_token_configured() -> str:
         return os.environ.get("CATHEDRAL_PUBLISHER_ADMIN_TOKEN", "").strip()
 
@@ -1555,6 +1657,8 @@ def build_app(
         payload, cache_status = pm_summary_cache.get(
             int(limit),
             lambda: _perminer_summary(limit),
+            cold_async=visibility_cold_async,
+            cold_value=lambda: _perminer_summary_warming(limit),
         )
         return JSONResponse(
             payload,
