@@ -307,17 +307,19 @@ def test_chunk_b64_splits_command_safely():
     assert stitch.chunk_b64("", 3000) == []
 
 
-def test_offbox_on_stitch_degrades_gracefully():
+def test_offbox_on_stitch_degrades_gracefully(monkeypatch):
     """The off-box-on-Stitch proof returns a verdict (never crashes); when Stitch is
-    down or z3 absent it reports the reason instead of raising."""
+    down it reports the reason instead of raising. Force the box down so the test is
+    fast and deterministic (no real network) and exercises the down-path explicitly;
+    the up-path is covered by the opt-in *_if_reachable test."""
     from game.arena import mint
+    stitch.stitch_available.cache_clear()
+    monkeypatch.setattr(stitch, "_tcp_reachable", lambda *a, **k: False)
     r = mint.offbox_on_stitch("B2-fee-silent-zero")
     assert "available" in r
-    # the contract is graceful degradation: it reports SOME reason and never raises
-    # (the exact reason varies with the flaky box — stitch_unreachable, ssh_failed,
-    # upload_corrupt, not_sat, … — so don't pin an allow-list that the box can break).
-    if not r["available"]:
+    if not r["available"]:                              # z3-absent path also returns a reason
         assert isinstance(r["reason"], str) and r["reason"]
+    stitch.stitch_available.cache_clear()
 
 
 def test_offbox_on_stitch_if_reachable():
@@ -452,15 +454,20 @@ def test_offbox_hardened_generalizes_to_the_root_model(monkeypatch):
     assert r["cross_confirmed"] is True and r["ok"] is True   # root model, off-box hardened
 
 
-def test_offbox_hardened_degrades_gracefully():
-    """When Stitch is down (or z3 absent) the hardened off-box proof returns a verdict,
-    never raises, and still reports the LOCAL UNSAT it could compute."""
+def test_offbox_hardened_degrades_gracefully(monkeypatch):
+    """When Stitch is down the hardened off-box proof returns a verdict, never raises,
+    and still reports the LOCAL UNSAT it could compute. Force the box down (fast and
+    deterministic, no real network) so we test the down-path; the live A4 is UNSAT
+    locally, so local_unsat is reported even though the remote leg can't run."""
     from game.arena import mint
+    stitch.stitch_available.cache_clear()
+    monkeypatch.setattr(stitch, "_tcp_reachable", lambda *a, **k: False)
     r = mint.offbox_hardened_on_stitch("A4-fee-split-conservation")
     assert "available" in r
     if not r["available"] and mint.z3_available():
-        assert r["reason"] in ("stitch_unreachable", "z3_unavailable_or_not_unsat") \
-               or r["reason"].startswith(("ssh_failed", "upload_corrupt"))
+        assert r["reason"] == "stitch_unreachable"
+        assert r.get("local_unsat") is True            # local CDCL still cross-checks UNSAT
+    stitch.stitch_available.cache_clear()
 
 
 def test_offbox_confirm_unsat_parses_rc20(monkeypatch):
