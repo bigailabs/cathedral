@@ -1,6 +1,8 @@
-"""Cathedral Arena — a live miner-agent verification game grounded in the real
-audit-hunter subnet corpus. See ARENA.md.
+"""Cathedral Arena package.
+
+Importing scanner/replay helpers must stay side-effect free for publisher use.
+Arena entrypoints import :mod:`game.config` explicitly when they need defaults.
 """
 from __future__ import annotations
 
-from .. import config  # noqa: F401  (apply generator env defaults)
+__all__: list[str] = []

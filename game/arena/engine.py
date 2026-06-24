@@ -22,7 +22,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import config
 from ..reward import SolveCredit, compose, sign_vector
 from . import corpus, economy, replay
 from .models import AgentRun, GateOutcome, Mission, Target, TargetState
@@ -56,6 +55,11 @@ ENV_REALNESS = {
     "polaris-tee-gpu": "real seam, offline-stub quote (gated; one bounded live test only)",
     "mocked-tee": "MOCKED — clearly labeled, never scores as trusted",
 }
+
+
+def _game_config():
+    from .. import config
+    return config
 
 
 @dataclass
@@ -253,9 +257,10 @@ _AGENT_METHODS = {
 
 class ArenaEngine:
     def __init__(self, roster: list[AgentSpec] | None = None,
-                 base_epoch: int = config.GAME_EPOCH, season: str = "S1"):
+                 base_epoch: int | None = None, season: str = "S1"):
+        config = _game_config()
         self.roster = roster if roster is not None else default_roster()
-        self.base_epoch = base_epoch
+        self.base_epoch = base_epoch or config.GAME_EPOCH
         self.season = season
         self.targets = corpus.load_targets()
         self.polaris = PolarisClient(live=False)
@@ -773,6 +778,7 @@ class ArenaEngine:
     def _record_agent(self, spec, m, sub, receipt, gates, attested,
                       results, tstate, proof_feed, anticheat_feed, replay_theater,
                       hyp=None) -> None:
+        config = _game_config()
         tier_w = PM.weight_for(sub.tier) * (1.3 if m.bounty else 1.0)
         spd = speed_bonus(sub.wall_ms, config.TIER_REFERENCE_MS.get(sub.tier, 500.0))
         passed = gates.passed()

@@ -32,7 +32,7 @@ class ArenaServer:
     def __init__(self, *, season_path: str | None = None,
                  scanner_ledger_path: str | None = None,
                  base_epoch: int | None = None):
-        from . import config
+        from .. import config
         self.engine = ArenaEngine(base_epoch=base_epoch or config.GAME_EPOCH)
         self.season_path = season_path
         self.scanner_ledger_path = scanner_ledger_path or str(OUT / "scanner_submissions.jsonl")

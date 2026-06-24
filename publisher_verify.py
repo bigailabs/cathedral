@@ -7,6 +7,7 @@ rows in fixtures (key-set equality per schema version 5/6). Also pins:
   * the sr25519 golden vectors (//Alice round-trip + tamper/wrong-key reject),
   * the 9 adversarial + 3 golden DIMACS-solution fixtures (Lane A referee),
   * the active-cnf token flow + constant-time compare + opaque 404,
+  * the signed audit-scanner bridge (replay -> submit -> hash-only ledger),
   * the full M4 end-to-end loop (miner signs, fetches CNF, solves with DPLL,
     submits; validator-style tuple-cursor pull verifies every signature).
 
@@ -345,6 +346,74 @@ with TestClient(app) as client:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+    # AUDIT SCANNER BRIDGE: default-off in production, but release verification
+    # proves the signed replay/submit/ledger path whenever deliberately enabled.
+    old_audit_env = {
+        k: os.environ.get(k)
+        for k in (
+            "CATHEDRAL_AUDIT_SCANNER_ENABLED",
+            "CATHEDRAL_AUDIT_SCANNER_LEDGER_PATH",
+        )
+    }
+    old_audit_pm_env = {
+        k: os.environ.get(k)
+        for k in (
+            "CATHEDRAL_PERMINER_ENABLED",
+            "CATHEDRAL_PERMINER_SEED_SECRET",
+        )
+    }
+    try:
+        import tempfile as _tempfile
+        from game.arena import audit_scanner_smoke as _audit_smoke
+
+        with _tempfile.TemporaryDirectory() as _audit_tmp:
+            os.environ["CATHEDRAL_AUDIT_SCANNER_ENABLED"] = "1"
+            os.environ["CATHEDRAL_AUDIT_SCANNER_LEDGER_PATH"] = str(
+                Path(_audit_tmp) / "audit_scanner_verify.jsonl"
+            )
+            audit_app = build_app(
+                database_path=":memory:",
+                signing_key_hex=key_hex,
+                submit_min_interval_secs=0,
+            )
+            audit_miner = Keypair.create_from_uri("//AuditScannerVerify")
+            with TestClient(audit_app) as audit_client:
+                audit_result = _audit_smoke.run_smoke(
+                    _audit_smoke.TestClientTransport(audit_client),
+                    audit_miner,
+                )
+        ck("audit scanner bridge smoke runs signed replay->submit",
+           audit_result["replay"]["accepted"] is True
+           and audit_result["replay"]["ledger_written"] is False
+           and audit_result["submit"]["accepted"] is True)
+        ck("audit scanner bridge writes hash-only submissions evidence",
+           audit_result["submissions"]["count"] == 1
+           and audit_result["submissions"]["total"] == 1
+           and audit_result["submissions"]["contains_witnesses"] is False
+           and audit_result["submissions"]["contains_reports"] is False)
+        ck("audit scanner bridge remains outside payment weights",
+           audit_result["status"]["payment_weights"] is False
+           and audit_result["submit"]["payment_weights"] is False)
+        ck("audit scanner benchmark exposes replay kill rate",
+           audit_result["benchmark"]["metric"] == "replay_kill_rate"
+           and audit_result["state"]["accepted"] == 1)
+        ck("audit scanner import leaves per-miner scoring env unchanged",
+           {k: os.environ.get(k) for k in old_audit_pm_env} == old_audit_pm_env)
+    except Exception as exc:
+        print(f"    audit scanner bridge smoke failed: {exc!r}")
+        ck("audit scanner bridge smoke runs signed replay->submit", False)
+        ck("audit scanner bridge writes hash-only submissions evidence", False)
+        ck("audit scanner bridge remains outside payment weights", False)
+        ck("audit scanner benchmark exposes replay kill rate", False)
+        ck("audit scanner import leaves per-miner scoring env unchanged", False)
+    finally:
+        for key, value in old_audit_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _weights._reset_vector_cache()
 
     # active-cnf: hotkey-signed token fetch
     sa = now_iso()
