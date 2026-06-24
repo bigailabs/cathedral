@@ -86,6 +86,9 @@ def test_scanner_game_html_is_api_backed(tmp_path):
     assert 'id="objectiveText"' in html
     assert 'id="objectiveFill"' in html
     assert 'id="failureText"' in html
+    assert "Current mission" in html
+    assert 'id="missionObjective"' in html
+    assert 'id="missionHint"' in html
     assert 'id="bestBounty"' in html
     assert 'id="safestTarget"' in html
     assert 'data-strategy="stealth"' in html
@@ -165,6 +168,12 @@ def test_scanner_game_html_preserves_play_loop_contract(tmp_path):
     assert "$('sweepFill').style.width=Math.min(100,state.sweep)+'%'" in html
     assert "target risk '+targetRisk(current())+' now prices every gate" in html
     assert "$('core').style.setProperty('--progress'" in html
+    assert "function phaseInstruction()" in html
+    assert "function renderMission()" in html
+    assert "renderActions();renderMission()" in html
+    assert "Energy is low: press 9 Cooldown before continuing." in html
+    assert "Validator sweep is hot: press 9 Cooldown to avoid losing a gate." in html
+    assert "Next: '+actionLabel()+'.'" in html
     assert ".node{position:absolute;z-index:3;width:132px;height:82px" in html
     assert "return {left:50+Math.cos(a)*42,top:50+Math.sin(a)*41}" in html
     assert "n.style.left=`calc(${p.left}% - 66px)`" in html
