@@ -155,6 +155,18 @@ def test_rules_of_the_arena_panel_is_data_driven(arena):
         assert step in html
 
 
+def test_game_loop_panel_is_action_first(arena):
+    """The first explainer should present the playable loop, not a passive dashboard."""
+    from game.arena.ui import render
+    html = render(arena)
+    assert "Game Loop" in html
+    assert "probe -> encode -> solve -> replay -> attest -> seal" in html
+    for step in ("Pick a target", "Ship proof", "Break or harden", "Survive gates"):
+        assert step in html
+    assert "A report alone scores <b>zero</b>" in html
+    assert "Failed gates multiply reward by <b>0</b>" in html
+
+
 def test_hotkey_stacking_collapsed(arena):
     # two hotkeys under one coldkey (ck_swarm) are capped at one identity's share
     assert arena.sybil_panel

@@ -38,12 +38,14 @@ the stitch-runner agent's solve to a real kissat on Stitch.
 
 Served game routes:
 
-- `/`: auto-running arena render.
+- `/`: redirects to `/game` so the first screen is the playable loop.
 - `/game`: playable scanner game; sealing a proof calls
   `/api/scanner/submit-attested`.
   It starts from `POST /api/scanner/request`, then routes that intake into
   replay-backed subnet targets.
+- `/arena`: auto-running arena report render.
 - `/dashboard.html`: legacy redirect to `/game` for old local links.
+- `/howto`: short game instructions.
 
 Playable `/game` controls:
 

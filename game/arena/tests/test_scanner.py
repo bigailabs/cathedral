@@ -22,6 +22,17 @@ def test_issue_task_uses_real_corpus_and_pinned_replay_target():
     assert tuple(task.required_fields) == replay.TARGETS[task.replay_target_id].decode
     assert task.manifest()["reward_shape"] == "linear_metric_x_boolean_gate"
     assert task.manifest()["optional_claim_schema"]["scoring"] == "metadata_only_replay_required"
+    assert task.manifest()["optional_claim_schema"]["source_lesson"] == (
+        "bitsec_report_shape_cathedral_replay_gate"
+    )
+    for field in (
+        "line_ranges",
+        "description",
+        "vulnerable_code",
+        "code_to_exploit",
+        "rewritten_code_to_fix_vulnerability",
+    ):
+        assert field in task.manifest()["optional_claim_schema"]["fields"]
     assert scanner.task_by_id(task.task_id) == task
     assert scanner.task_by_id("missing") is None
 
@@ -67,6 +78,11 @@ def test_good_submission_accepts_and_scores():
     assert all(verdict.gates.values())
     assert verdict.observed
     assert len(verdict.artifact_sha256) == 64
+    artifact = sub.as_artifact()
+    assert artifact["claim"]["line_ranges"] == []
+    assert artifact["claim"]["vulnerable_code"] == task.replay_target_id
+    assert "code_to_exploit" in artifact["claim"]
+    assert "rewritten_code_to_fix_vulnerability" in artifact["claim"]
 
 
 def test_report_only_and_category_only_do_not_score():
