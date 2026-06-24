@@ -88,6 +88,17 @@ CATHEDRAL_THREADPOOL_TOKENS=8
 CATHEDRAL_PG_POOL_MAX=8
 ```
 
+Optional after volume growth:
+
+```text
+CATHEDRAL_RETENTION_ENABLED=true
+CATHEDRAL_RETENTION_EVAL_RUNS_HOURS=48
+CATHEDRAL_RETENTION_SOLVE_LEDGER_HOURS=48
+CATHEDRAL_RETENTION_PM_ATTEMPT_HOURS=48
+CATHEDRAL_RETENTION_PM_KEEP_EPOCHS=2
+CATHEDRAL_RETENTION_BATCH_SIZE=25000
+```
+
 Allowed traffic:
 
 - health and JWKS only.
@@ -98,6 +109,7 @@ Background loops:
 - seed, if explicitly enabled
 - arena eval, if explicitly enabled
 - arena payout, if explicitly enabled
+- stale-ledger retention, if explicitly enabled
 
 All durable background loops use Postgres advisory locks, so a second worker
 replica should wait instead of double-running work.
@@ -169,7 +181,28 @@ Do not change:
 ## Required Before Final Split
 
 - Grow the Railway Postgres volume; production was reported at 95% full.
+- Current measured main Postgres volume: about 50GB used on a 50GB volume.
+- Largest tables: `eval_runs`, `per_miner_assignments`, `agent_submissions`,
+  `lane_challenge_solves`, `submit_signatures`, `per_miner_witnesses`.
+- Do not rely on `DELETE` alone to save a full Postgres volume. Grow the volume
+  first, then enable retention so stale data stops accumulating.
 - Confirm DB pool, memory, and CPU headroom after adding services.
 - Confirm miners have a working submit base URL or edge path routing.
 - Keep `/v1/validator/weights/next` on the read service so validator reads stay
   isolated from submit bursts.
+
+## Retention Safety
+
+Retention is default-off. When enabled on the worker service, it prunes only
+bounded batches of stale rows and keeps more than the default 24h scoring window.
+
+Default retained windows:
+
+- `eval_runs`: 48h
+- shared solve ledger: 48h
+- PM attempts/solves: 48h
+- PM assignments: current and previous epoch
+
+Do not enable retention before the volume has enough headroom for normal
+Postgres maintenance. Railway supports live volume resize from the volume
+settings UI.

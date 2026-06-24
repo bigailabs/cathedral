@@ -866,11 +866,32 @@ def build_app(
                 _seed_runner,
             ))
 
+    # ---- Retention: bounded stale-ledger pruning (default off) ------------
+    @app.on_event("startup")
+    async def _start_retention():
+        from . import retention
+        if not retention.retention_enabled():
+            return
+        if not _role_runs_worker(service_role):
+            print(f"[retention] skipped service_role={service_role}")
+            return
+        import asyncio
+        app.state.retention_task = asyncio.create_task(
+            _run_singleton_background(
+                "retention",
+                "cathedral:publisher:retention",
+                lambda: retention.retention_loop(
+                    store, log=lambda evt, **kw: print(f"[retention] {evt} {kw}")),
+            ))
+
     @app.on_event("shutdown")
     async def _stop_refill():
         import asyncio
 
-        for attr in ("refill_task", "seed_task", "arena_eval_task", "arena_payout_task"):
+        for attr in (
+            "refill_task", "seed_task", "arena_eval_task", "arena_payout_task",
+            "retention_task",
+        ):
             task = getattr(app.state, attr, None)
             if task is not None:
                 task.cancel()

@@ -279,6 +279,77 @@ with TestClient(app) as client:
                worker_public.status_code == 404
                and worker_public.text == "route_not_served_by_worker_role"
                and worker_public.headers.get("x-cathedral-service-role") == "worker")
+
+        from scaffold.publisher import retention as _retention
+        from datetime import datetime, timezone, timedelta
+
+        retention_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
+                                  submit_min_interval_secs=0)
+        retention_store = retention_app.state.store
+        now_dt = datetime.now(timezone.utc)
+        old_iso = (now_dt - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        recent_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        current_epoch = int(now_dt.timestamp()) // 3600
+
+        def _seed_retention_rows(conn):
+            conn.execute(
+                "INSERT INTO eval_runs(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                "VALUES ('old-eval', ?, 6, 'hk-old', ?, '{}')",
+                (old_iso, "synthetic_boolean_v1"))
+            conn.execute(
+                "INSERT INTO eval_runs(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                "VALUES ('recent-eval', ?, 6, 'hk-new', ?, '{}')",
+                (recent_iso, "synthetic_boolean_v1"))
+            conn.execute(
+                "INSERT INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                "VALUES ('old-shared', 'hk-old', ?)",
+                (old_iso,))
+            conn.execute(
+                "INSERT INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
+                "VALUES ('recent-shared', 'hk-new', ?)",
+                (recent_iso,))
+            conn.execute(
+                "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, epoch, status, "
+                "rejection_reason, dimacs_solution_sha256, submitted_at, recorded_at_iso, signature) "
+                "VALUES ('old-attempt', 'old-pm', 'hk-old', 1, 'rejected', 'x', '00', ?, ?, 'sig-old')",
+                (old_iso, old_iso))
+            conn.execute(
+                "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, epoch, status, "
+                "rejection_reason, dimacs_solution_sha256, submitted_at, recorded_at_iso, signature) "
+                "VALUES ('recent-attempt', 'recent-pm', 'hk-new', ?, 'ranked', NULL, '00', ?, ?, 'sig-new')",
+                (current_epoch, recent_iso, recent_iso))
+            conn.execute(
+                "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, verified, solved_at_iso) VALUES ('old-pm', 'hk-old', 1, 1, 0, 1, 1, ?)",
+                (old_iso,))
+            conn.execute(
+                "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, verified, solved_at_iso) VALUES ('recent-pm', 'hk-new', ?, 1, 0, 1, 1, ?)",
+                (current_epoch, recent_iso))
+            conn.execute(
+                "INSERT INTO per_miner_assignments(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, assigned_at_iso) VALUES ('old-assignment', 'hk-old', 1, 1, 0, 1, ?)",
+                (old_iso,))
+            conn.execute(
+                "INSERT INTO per_miner_assignments(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, assigned_at_iso) VALUES ('recent-assignment', 'hk-new', ?, 1, 0, 1, ?)",
+                (current_epoch, recent_iso))
+
+        retention_store.write(_seed_retention_rows)
+        retention_summary = _retention.retention_tick(retention_store, now=now_dt)
+        deleted = retention_summary["deleted"]
+        ck("retention prunes old high-volume rows in bounded batches",
+           deleted["eval_runs"] == 1
+           and deleted["lane_challenge_solves"] == 1
+           and deleted["per_miner_attempts"] == 1
+           and deleted["per_miner_solves"] == 1
+           and deleted["per_miner_assignments"] == 1)
+        ck("retention keeps recent scoring rows",
+           retention_store.query("SELECT COUNT(*) AS n FROM eval_runs")[0]["n"] == 1
+           and retention_store.query("SELECT COUNT(*) AS n FROM lane_challenge_solves")[0]["n"] == 1
+           and retention_store.query("SELECT COUNT(*) AS n FROM per_miner_attempts")[0]["n"] == 1
+           and retention_store.query("SELECT COUNT(*) AS n FROM per_miner_solves")[0]["n"] == 1
+           and retention_store.query("SELECT COUNT(*) AS n FROM per_miner_assignments")[0]["n"] == 1)
     finally:
         for _key, _value in old_role_env.items():
             if _value is None:
