@@ -531,7 +531,26 @@ with TestClient(app) as client:
            audit_result["submissions"]["count"] == 1
            and audit_result["submissions"]["total"] == 1
            and audit_result["submissions"]["contains_witnesses"] is False
-           and audit_result["submissions"]["contains_reports"] is False)
+           and audit_result["submissions"]["contains_reports"] is False
+           and audit_result["submissions"]["contains_trace_bodies"] is False
+           and "artifact" not in audit_result["submissions"]["entries"][0])
+        ck("audit scanner bridge exposes replay-gated taxonomy",
+           audit_result["families"]["reward_gate"] == "deterministic_replay"
+           and audit_result["families"]["category_scoring"] == "claim_category_is_metadata_only"
+           and audit_result["families"]["claim_categories"]
+           and audit_result["families"]["payment_weights"] is False)
+        ck("audit scanner example endpoint is redacted by default",
+           audit_result["example"]["solution_exported"] is False
+           and audit_result["example"]["submission"]["witness"] is None
+           and audit_result["example"]["redaction"]["witness_exported"] is False)
+        ck("audit scanner bridge exposes hash-only replay trace labels",
+           audit_result["traces"]["count"] == 1
+           and audit_result["traces"]["accepted"] == 1
+           and audit_result["traces"]["contains_witnesses"] is False
+           and audit_result["traces"]["contains_reports"] is False
+           and audit_result["traces"]["contains_trace_bodies"] is False
+           and "artifact" not in audit_result["traces"]["traces"][0]
+           and audit_result["traces"]["traces"][0]["label"] == "accepted")
         ck("audit scanner bridge remains outside payment weights",
            audit_result["status"]["payment_weights"] is False
            and audit_result["submit"]["payment_weights"] is False)
@@ -544,6 +563,9 @@ with TestClient(app) as client:
         print(f"    audit scanner bridge smoke failed: {exc!r}")
         ck("audit scanner bridge smoke runs signed replay->submit", False)
         ck("audit scanner bridge writes hash-only submissions evidence", False)
+        ck("audit scanner bridge exposes replay-gated taxonomy", False)
+        ck("audit scanner example endpoint is redacted by default", False)
+        ck("audit scanner bridge exposes hash-only replay trace labels", False)
         ck("audit scanner bridge remains outside payment weights", False)
         ck("audit scanner benchmark exposes replay kill rate", False)
         ck("audit scanner import leaves per-miner scoring env unchanged", False)
@@ -771,6 +793,46 @@ with TestClient(app) as client:
            pm_cid == _pm_cid)
         ck("per-miner public challenge id does not leak planted seed prefix",
            seed_suffix not in pm_cid)
+        pm_assignments_after_list = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE miner_hotkey=?",
+            ("coldkey-shared",),
+        )
+        ck("per-miner listing does not persist full assignment pages by default",
+           pm_list.json().get("assignment_persistence") == "cnf_fetch"
+           and pm_list.json().get("cnf_params") == ["challenge_id", "tier", "seq"]
+           and pm_assignments_after_list[0]["n"] == 0)
+        pm_cnf_resp = client.get(
+            "/v1/synthetic-boolean/per-miner/cnf",
+            params={"challenge_id": pm_cid, "tier": 1, "seq": 0},
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_list_sig,
+                     "X-Cathedral-Submitted-At": pm_list_at},
+        )
+        pm_assignments_after_cnf = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE miner_hotkey=?",
+            ("coldkey-shared",),
+        )
+        ck("per-miner cnf fetch persists only requested assignment",
+           pm_cnf_resp.status_code == 200
+           and pm_cnf_resp.headers.get("X-Perminer-Seq") == "0"
+           and pm_assignments_after_cnf[0]["n"] == 1)
+        pm_legacy_cid = pm_list.json()["items"][1]["challenge_id"]
+        pm_legacy_cnf = client.get(
+            "/v1/synthetic-boolean/per-miner/cnf",
+            params={"challenge_id": pm_legacy_cid},
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_list_sig,
+                     "X-Cathedral-Submitted-At": pm_list_at},
+        )
+        pm_assignments_after_legacy = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE miner_hotkey=?",
+            ("coldkey-shared",),
+        )
+        ck("per-miner legacy challenge-id cnf fetch still works",
+           pm_legacy_cnf.status_code == 200
+           and pm_legacy_cnf.headers.get("X-Perminer-Tier") == "2"
+           and pm_legacy_cnf.headers.get("X-Perminer-Seq") == "0"
+           and pm_assignments_after_legacy[0]["n"] == 2)
         pm_blob = "s SATISFIABLE\nv " + " ".join(str(x) for x in pm_assignment) + " 0\n"
         pm_sha = hashlib.sha256(pm_blob.encode()).hexdigest()
         pm_at = now_iso()
@@ -833,7 +895,9 @@ with TestClient(app) as client:
         pm_summary_json = pm_summary.json()
         ck("per-miner summary surfaces dashboard aggregate",
            pm_summary.status_code == 200
-           and pm_summary_json.get("current_epoch_assignment_miners", 0) >= 1
+           and pm_summary_json.get("assignment_accounting") == "cnf_fetch"
+           and pm_summary_json.get("current_epoch_assignment_miners", 0) == 0
+           and pm_summary_json.get("current_epoch_assigned_challenges", 0) == 0
            and pm_summary_json.get("active_miners_24h", 0) >= 1
            and "submit_metrics" not in pm_summary_json
            and "rejection_reasons_24h" not in pm_summary_json

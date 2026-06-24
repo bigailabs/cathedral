@@ -1574,6 +1574,12 @@ def build_app(
         return os.environ.get("CATHEDRAL_AUDIT_SCANNER_ENABLED", "").strip().lower() in {
             "1", "true", "yes", "on"}
 
+    def _audit_scanner_example_solutions_enabled() -> bool:
+        return os.environ.get(
+            "CATHEDRAL_AUDIT_SCANNER_EXAMPLE_SOLUTIONS_ENABLED",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
     def _require_audit_scanner_enabled() -> None:
         if not _audit_scanner_enabled():
             raise HTTPException(404, "audit_scanner_not_enabled")
@@ -1613,6 +1619,99 @@ def build_app(
             report=str(payload.get("report", "")),
         )
         return audit_scanner, task, sub
+
+    def _audit_scanner_trace_id(entry: dict[str, Any]) -> str:
+        body = {
+            "task_id": entry.get("task_id"),
+            "miner_hotkey": entry.get("miner_hotkey"),
+            "artifact_sha256": entry.get("artifact_sha256"),
+            "accepted": bool(entry.get("accepted")),
+            "created_at": entry.get("created_at"),
+        }
+        encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+        return "trace-" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+    def _audit_scanner_public_verifier(entry: dict[str, Any]) -> dict[str, Any]:
+        verifier = entry.get("verifier") if isinstance(entry.get("verifier"), dict) else {}
+        try:
+            score = float(verifier.get("score", entry.get("score") or 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        return {
+            "schema": verifier.get("schema", "cathedral.scanner_verdict.v1"),
+            "accepted": bool(verifier.get("accepted", entry.get("accepted"))),
+            "score": score,
+            "gates": dict(verifier.get("gates") or entry.get("gates") or {}),
+            "reasons": list(verifier.get("reasons") or entry.get("reasons") or []),
+            "replay_target_id": (
+                verifier.get("replay_target_id")
+                or entry.get("replay_target_id")
+                or ""
+            ),
+            "artifact_sha256": (
+                verifier.get("artifact_sha256")
+                or entry.get("artifact_sha256")
+                or ""
+            ),
+        }
+
+    def _audit_scanner_public_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "cathedral.audit_scanner.public_submission.v1",
+            "created_at": entry.get("created_at"),
+            "task_id": entry.get("task_id") or "",
+            "target_netuid": entry.get("target_netuid"),
+            "target_name": entry.get("target_name") or "",
+            "replay_target_id": entry.get("replay_target_id") or "",
+            "expected_family": entry.get("expected_family") or "",
+            "miner_hotkey": entry.get("miner_hotkey") or "",
+            "accepted": bool(entry.get("accepted")),
+            "score": float(entry.get("score") or 0.0),
+            "reasons": list(entry.get("reasons") or []),
+            "gates": dict(entry.get("gates") or {}),
+            "artifact_sha256": entry.get("artifact_sha256") or "",
+            "claim_sha256": entry.get("claim_sha256") or "",
+            "claim_present": bool(entry.get("claim_present")),
+            "claim_valid": bool(entry.get("claim_valid")),
+            "verifier": _audit_scanner_public_verifier(entry),
+            "redaction": {
+                "artifact_body_exported": False,
+                "witness_exported": False,
+                "report_body_exported": False,
+                "trace_body_exported": False,
+                "observed_values_exported": False,
+            },
+        }
+
+    def _audit_scanner_public_trace(entry: dict[str, Any]) -> dict[str, Any]:
+        audit_scanner = _audit_scanner_module()
+        accepted = bool(entry.get("accepted"))
+        return {
+            "schema": getattr(audit_scanner, "SCHEMA_AUDIT_TRACE", "cathedral.audit_trace.v1"),
+            "trace_id": _audit_scanner_trace_id(entry),
+            "label": "accepted" if accepted else "rejected",
+            "training_use": (
+                "positive_replay_witness"
+                if accepted else "negative_replay_failure"
+            ),
+            "created_at": entry.get("created_at"),
+            "miner_hotkey": entry.get("miner_hotkey") or "",
+            "task_id": entry.get("task_id") or "",
+            "target_netuid": entry.get("target_netuid"),
+            "target_name": entry.get("target_name") or "",
+            "replay_target_id": entry.get("replay_target_id") or "",
+            "expected_family": entry.get("expected_family") or "",
+            "artifact_sha256": entry.get("artifact_sha256") or "",
+            "claim_sha256": entry.get("claim_sha256") or "",
+            "verifier": _audit_scanner_public_verifier(entry),
+            "redaction": {
+                "artifact_body_exported": False,
+                "witness_exported": False,
+                "report_body_exported": False,
+                "trace_body_exported": False,
+                "observed_values_exported": False,
+            },
+        }
 
     def _verify_audit_scanner_claim(
         payload: dict[str, Any],
@@ -1654,11 +1753,19 @@ def build_app(
                 "headers": [
                     "X-Cathedral-Hotkey",
                     "X-Cathedral-Signature",
-                    "X-Cathedral-Submitted-At",
+                "X-Cathedral-Submitted-At",
                 ],
+            },
+            "example_policy": {
+                "default": "redacted",
+                "raw_solution_requires": (
+                    "CATHEDRAL_AUDIT_SCANNER_EXAMPLE_SOLUTIONS_ENABLED=1 "
+                    "and include_solution=true"
+                ),
             },
             "endpoints": {
                 "catalog": "/v1/audit-scanner/catalog",
+                "families": "/v1/audit-scanner/families",
                 "task": "/v1/audit-scanner/task?index=0",
                 "request": "/v1/audit-scanner/request",
                 "replay": "/v1/audit-scanner/replay",
@@ -1667,9 +1774,20 @@ def build_app(
                 "benchmark": "/v1/audit-scanner/benchmark",
                 "differential": "/v1/audit-scanner/differential",
                 "submissions": "/v1/audit-scanner/submissions?limit=50",
+                "traces": "/v1/audit-scanner/traces?limit=50",
                 "state": "/v1/audit-scanner/state?miner_hotkey=...",
             },
         }
+
+    @app.get("/v1/audit-scanner/families")
+    def audit_scanner_families():
+        _require_audit_scanner_enabled()
+        taxonomy = _audit_scanner_module().family_taxonomy()
+        taxonomy["payment_weights"] = False
+        taxonomy["scoring"] = "claim_family_routes_work_replay_scores_work"
+        taxonomy["category_scoring"] = "claim_category_is_metadata_only"
+        taxonomy["reward_gate"] = "deterministic_replay"
+        return taxonomy
 
     @app.get("/v1/audit-scanner/catalog")
     def audit_scanner_catalog(limit: int | None = Query(None, ge=1, le=50)):
@@ -1686,17 +1804,67 @@ def build_app(
         return _audit_scanner_module().issue_task(index).manifest()
 
     @app.get("/v1/audit-scanner/example")
-    def audit_scanner_example(index: int = Query(0, ge=0)):
+    def audit_scanner_example(
+        index: int = Query(0, ge=0),
+        include_solution: bool = Query(False),
+    ):
         _require_audit_scanner_enabled()
         audit_scanner = _audit_scanner_module()
         task = audit_scanner.issue_task(index)
         sub = audit_scanner.example_accepted_submission(task)
         verdict = audit_scanner.verify_submission(task, sub)
         artifact = sub.as_artifact()
-        return {"task": task.manifest(),
+        artifact_sha = audit_scanner._sha(artifact)
+        if include_solution:
+            if not _audit_scanner_example_solutions_enabled():
+                raise HTTPException(403, "audit_scanner_example_solution_not_enabled")
+            return {
+                "schema": "cathedral.audit_scanner.example.v1",
+                "task": task.manifest(),
                 "submission": artifact,
-                "artifact_sha256": audit_scanner._sha(artifact),
-                "verdict": verdict.as_dict()}
+                "artifact_sha256": artifact_sha,
+                "verdict": verdict.as_dict(),
+                "solution_exported": True,
+                "payment_weights": False,
+            }
+        return {
+            "schema": "cathedral.audit_scanner.example.v1",
+            "task": task.manifest(),
+            "submission": {
+                "schema": artifact.get("schema", "cathedral.scanner_submission.v1"),
+                "task_id": artifact.get("task_id", task.task_id),
+                "miner_hotkey": "replace_with_your_hotkey",
+                "nonce": artifact.get("nonce", ""),
+                "proof_family": artifact.get("proof_family", task.expected_family),
+                "claim_schema": artifact.get("claim_schema", getattr(audit_scanner, "SCHEMA_CLAIM", "")),
+                "claim_sha256": artifact.get("claim_sha256", ""),
+                "report_sha256": artifact.get("report_sha256", ""),
+                "witness": None,
+                "trace": [],
+                "claim": {
+                    "schema": getattr(audit_scanner, "SCHEMA_CLAIM", ""),
+                    "category": task.expected_family,
+                    "description": "redacted example; submit your own replayable witness",
+                },
+            },
+            "artifact_sha256": artifact_sha,
+            "verdict": _audit_scanner_public_verifier({
+                "accepted": verdict.accepted,
+                "score": verdict.score,
+                "gates": verdict.gates,
+                "reasons": verdict.reasons,
+                "replay_target_id": verdict.replay_target_id,
+                "artifact_sha256": artifact_sha,
+            }),
+            "solution_exported": False,
+            "redaction": {
+                "witness_exported": False,
+                "report_body_exported": False,
+                "trace_body_exported": False,
+                "observed_values_exported": False,
+            },
+            "payment_weights": False,
+        }
 
     @app.post("/v1/audit-scanner/request")
     async def audit_scanner_request(request: Request):
@@ -1800,9 +1968,53 @@ def build_app(
             "total": len(entries),
             "limit": limit,
             "order": "newest_first",
-            "entries": rows,
+            "entries": [_audit_scanner_public_entry(entry) for entry in rows],
             "contains_witnesses": False,
             "contains_reports": False,
+            "contains_trace_bodies": False,
+            "payment_weights": False,
+        }
+
+    @app.get("/v1/audit-scanner/traces")
+    def audit_scanner_traces(
+        miner_hotkey: str = Query("", max_length=128),
+        limit: int = Query(50, ge=1, le=500),
+    ):
+        _require_audit_scanner_enabled()
+        audit_scanner = _audit_scanner_module()
+        entries = audit_scanner.read_ledger(_audit_scanner_ledger_path())
+        if miner_hotkey:
+            entries = [
+                entry for entry in entries
+                if entry.get("miner_hotkey") == miner_hotkey
+            ]
+        rows = list(reversed(entries))[:limit]
+        traces = [_audit_scanner_public_trace(entry) for entry in rows]
+        accepted_count = sum(1 for trace in traces if trace["label"] == "accepted")
+        return {
+            "schema": getattr(
+                audit_scanner,
+                "SCHEMA_AUDIT_TRACE_DATASET",
+                "cathedral.audit_trace_dataset.v1",
+            ),
+            "trace_schema": getattr(audit_scanner, "SCHEMA_AUDIT_TRACE", "cathedral.audit_trace.v1"),
+            "count": len(traces),
+            "accepted": accepted_count,
+            "rejected": len(traces) - accepted_count,
+            "total": len(entries),
+            "limit": limit,
+            "order": "newest_first",
+            "miner_hotkey": miner_hotkey,
+            "label_source": "deterministic_replay_verdict",
+            "scoring": "accepted replay is positive label; rejected replay is negative label",
+            "redaction_policy": (
+                "public publisher traces export hashes and labels only; raw "
+                "witnesses, reports, submitted trace bodies, and observed values stay private"
+            ),
+            "traces": traces,
+            "contains_witnesses": False,
+            "contains_reports": False,
+            "contains_trace_bodies": False,
             "payment_weights": False,
         }
 
@@ -1825,6 +2037,37 @@ def build_app(
 
     recorded_pm_assignment_pages: set[tuple[str, int, int, int]] = set()
     recorded_pm_assignment_lock = threading.Lock()
+
+    def _perminer_record_listing_assignments() -> bool:
+        return os.environ.get(
+            "CATHEDRAL_PERMINER_RECORD_LISTING_ASSIGNMENTS", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _perminer_legacy_id_scan_enabled() -> bool:
+        return os.environ.get(
+            "CATHEDRAL_PERMINER_LEGACY_ID_SCAN", "1"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _record_one_perminer_assignment(
+        hotkey: str,
+        epoch: int,
+        challenge_id: str,
+        tier: int,
+        seq: int,
+    ) -> None:
+        from . import per_miner as pm
+
+        assigned_at = _now_iso_ms()
+        difficulty_weight = pm.weight_for(tier)
+
+        def _do(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO per_miner_assignments"
+                "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, assigned_at_iso) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (challenge_id, hotkey, epoch, int(tier), int(seq),
+                 float(difficulty_weight), assigned_at))
+        store.write(_do)
 
     def _record_perminer_assignments(
         hotkey: str,
@@ -1862,6 +2105,26 @@ def build_app(
         if found:
             return int(found[0]["tier"]), int(found[0]["seq"])
         return None
+
+    def _resolve_perminer_tier_seq(
+        pm,
+        hotkey: str,
+        epoch: int,
+        challenge_id: str,
+        tier: int | None,
+        seq: int | None,
+    ) -> tuple[int, int] | None:
+        if tier is not None and seq is not None:
+            if tier not in pm.TIERS:
+                return None
+            if seq < 0 or seq >= pm.allotment_for(tier):
+                return None
+            cid = pm.instance_id(hotkey, epoch, tier, seq)
+            return (tier, seq) if cid == challenge_id else None
+        found = _lookup_perminer_assignment(hotkey, epoch, challenge_id)
+        if found is not None or not _perminer_legacy_id_scan_enabled():
+            return found
+        return pm.recover_tier_seq_for(hotkey, epoch, challenge_id)
 
     def _require_perminer_ready(pm) -> None:
         try:
@@ -2124,7 +2387,11 @@ def build_app(
             (since_24h,),
         )
         assigned_miners = []
-        if epoch is not None:
+        assignment_accounting = (
+            "listing" if _perminer_record_listing_assignments()
+            else "cnf_fetch"
+        )
+        if epoch is not None and _perminer_record_listing_assignments():
             assigned_miners = store.query(
                 "SELECT COUNT(DISTINCT miner_hotkey) AS n, COUNT(*) AS assignments "
                 "FROM per_miner_assignments WHERE epoch=?",
@@ -2142,6 +2409,7 @@ def build_app(
                 "history_floor": weights_mod.perminer_history_floor(),
                 "coldkey_required": weights_mod.perminer_require_coldkey(),
             },
+            "assignment_accounting": assignment_accounting,
             "current_epoch_assignment_miners": int(assigned_miners[0]["n"] or 0) if assigned_miners else 0,
             "current_epoch_assigned_challenges": int(assigned_miners[0]["assignments"] or 0) if assigned_miners else 0,
             "active_miners_24h": int(active_miners[0]["n"] or 0) if active_miners else 0,
@@ -2296,13 +2564,14 @@ def build_app(
         effective_limit = pm.assignment_page_limit(limit)
         items = pm.miner_instance_set(
             assignment_identity, epoch, offset=offset, limit=effective_limit)
-        _record_perminer_assignments(
-            assignment_identity,
-            epoch,
-            items,
-            offset=offset,
-            limit=effective_limit,
-        )
+        if _perminer_record_listing_assignments():
+            _record_perminer_assignments(
+                assignment_identity,
+                epoch,
+                items,
+                offset=offset,
+                limit=effective_limit,
+            )
         return {
             "family_id": _FAMILY,
             "kind": "per_miner",
@@ -2317,11 +2586,19 @@ def build_app(
             "count": len(items),
             "items": items,
             "submit_path": "/api/cathedral/v1/agents/submit",
+            "cnf_path": "/v1/synthetic-boolean/per-miner/cnf",
+            "cnf_params": ["challenge_id", "tier", "seq"],
+            "assignment_persistence": (
+                "listing" if _perminer_record_listing_assignments()
+                else "cnf_fetch"
+            ),
         }
 
     @app.get("/v1/synthetic-boolean/per-miner/cnf")
     def per_miner_cnf(
         challenge_id: str = Query(...),
+        tier: int | None = Query(None, ge=1),
+        seq: int | None = Query(None, ge=0),
         x_cathedral_hotkey: str = Header(...),
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str | None = Header(None),
@@ -2345,14 +2622,18 @@ def build_app(
         )
         epoch = _perminer_epoch_for(pm, challenge_id)
         assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
-        tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
+        tier_seq = _resolve_perminer_tier_seq(
+            pm, assignment_identity, epoch, challenge_id, tier, seq)
         if tier_seq is not None:
             tier, seq = tier_seq
             cid, cnf_text, _ = pm.generate_instance(assignment_identity, epoch, tier, seq)
             if cid == challenge_id:
+                _record_one_perminer_assignment(
+                    assignment_identity, epoch, challenge_id, tier, seq)
                 return PlainTextResponse(cnf_text, media_type="text/plain; charset=utf-8",
                                         headers={"X-Perminer-Challenge-Id": cid,
                                                  "X-Perminer-Tier": str(tier),
+                                                 "X-Perminer-Seq": str(seq),
                                                  "X-Perminer-Epoch": str(epoch)})
         raise HTTPException(404, "assignment_required_fetch_challenges_first")
 

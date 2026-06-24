@@ -372,7 +372,9 @@ def recover_tier_seq_for(hotkey: str, epoch: int, challenge_id: str) -> tuple[in
     """Find (tier, seq) for a challenge_id by scanning the miner's allotment.
     Returns None if the challenge_id was not generated for this hotkey+epoch.
     """
-    for tier in TIERS:
+    parsed = parse_challenge_id(challenge_id)
+    candidate_tiers = [parsed["tier"]] if parsed and parsed["tier"] in TIERS else TIERS
+    for tier in candidate_tiers:
         for seq in range(allotment_for(tier)):
             cid = instance_id(hotkey, epoch, tier, seq)
             if cid == challenge_id:
