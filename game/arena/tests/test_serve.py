@@ -83,6 +83,9 @@ def test_scanner_game_html_is_api_backed(tmp_path):
     assert 'id="sweepFill"' in html
     assert 'id="coreAction"' in html
     assert 'id="actionFlash"' in html
+    assert 'id="arenaTarget"' in html
+    assert 'id="arenaRoute"' in html
+    assert 'id="arenaRiskFill"' in html
     assert 'id="breachPct"' in html
     assert 'id="objectiveText"' in html
     assert 'id="objectiveFill"' in html
@@ -183,6 +186,12 @@ def test_scanner_game_html_preserves_play_loop_contract(tmp_path):
     assert "ATTEST RECEIPT" in html
     assert "PROOF SEALED" in html
     assert "GATE REJECTED" in html
+    assert ".arenaContract{position:absolute" in html
+    assert "Active contract" in html
+    assert "node risk-'+riskBand(risk)" in html
+    assert "state.rejected.has(i)?'blocked':riskBand(risk)" in html
+    assert "$('arenaTarget').textContent='SN'+t.target.netuid+' '+t.target.name" in html
+    assert "$('arenaRiskFill').style.width=Math.min(100,Math.round(risk/42*100))+'%'" in html
     assert ".node{position:absolute;z-index:3;width:132px;height:82px" in html
     assert "return {left:50+Math.cos(a)*42,top:50+Math.sin(a)*41}" in html
     assert "n.style.left=`calc(${p.left}% - 66px)`" in html
