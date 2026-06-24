@@ -94,6 +94,13 @@ def test_audit_scanner_bridge_scores_only_signed_replayable_proof(monkeypatch, t
         killer = next(m for m in board["miners"] if m["miner_hotkey"] == miner.ss58_address)
         assert killer["kills"] == 1
         assert killer["score"] > 0
+        submissions = client.get("/v1/audit-scanner/submissions?limit=1").json()
+        assert submissions["schema"] == "cathedral.audit_scanner.submissions.v1"
+        assert submissions["count"] == 1
+        assert submissions["total"] == 2
+        assert submissions["entries"][0]["miner_hotkey"] == reporter.ss58_address
+        assert submissions["contains_witnesses"] is False
+        assert submissions["payment_weights"] is False
 
 
 def test_audit_scanner_signature_binds_artifact_body(monkeypatch, tmp_path):
@@ -120,4 +127,5 @@ def test_audit_scanner_smoke_cli_exercises_signed_bridge(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "AUDIT SCANNER SMOKE: PASS" in out
+    assert "submissions: total=1 contains_witnesses=false" in out
     assert "payment_weights: false" in out

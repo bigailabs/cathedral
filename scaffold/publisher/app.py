@@ -1348,6 +1348,8 @@ def build_app(
                 "submit": "/v1/audit-scanner/submit",
                 "leaderboard": "/v1/audit-scanner/leaderboard",
                 "benchmark": "/v1/audit-scanner/benchmark",
+                "submissions": "/v1/audit-scanner/submissions?limit=50",
+                "state": "/v1/audit-scanner/state?miner_hotkey=...",
             },
         }
 
@@ -1458,6 +1460,23 @@ def build_app(
     def audit_scanner_benchmark():
         _require_audit_scanner_enabled()
         return _audit_scanner_module().benchmark(_audit_scanner_ledger_path())
+
+    @app.get("/v1/audit-scanner/submissions")
+    def audit_scanner_submissions(limit: int = Query(50, ge=1, le=500)):
+        _require_audit_scanner_enabled()
+        entries = _audit_scanner_module().read_ledger(_audit_scanner_ledger_path())
+        rows = list(reversed(entries))[:limit]
+        return {
+            "schema": "cathedral.audit_scanner.submissions.v1",
+            "count": len(rows),
+            "total": len(entries),
+            "limit": limit,
+            "order": "newest_first",
+            "entries": rows,
+            "contains_witnesses": False,
+            "contains_reports": False,
+            "payment_weights": False,
+        }
 
     @app.get("/v1/audit-scanner/state")
     def audit_scanner_state(miner_hotkey: str = Query(..., min_length=1)):

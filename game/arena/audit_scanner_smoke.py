@@ -132,8 +132,11 @@ def run_smoke(transport: Any, keypair: Keypair) -> dict[str, Any]:
 
     benchmark = transport.get("/v1/audit-scanner/benchmark")
     state = transport.get(f"/v1/audit-scanner/state?miner_hotkey={keypair.ss58_address}")
+    submissions = transport.get("/v1/audit-scanner/submissions?limit=1")
     if state.get("accepted") != 1:
         raise RuntimeError(f"expected one accepted state row, got {state}")
+    if submissions.get("count") != 1 or submissions.get("contains_witnesses") is not False:
+        raise RuntimeError(f"unexpected submissions view: {submissions}")
 
     return {
         "status": status,
@@ -142,6 +145,7 @@ def run_smoke(transport: Any, keypair: Keypair) -> dict[str, Any]:
         "submit": submit,
         "benchmark": benchmark,
         "state": state,
+        "submissions": submissions,
     }
 
 
@@ -202,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  replay: accepted={result['replay']['accepted']} ledger_written={result['replay']['ledger_written']}")
         print(f"  submit: accepted={result['submit']['accepted']} score={result['submit']['score']}")
         print(f"  benchmark: metric={result['benchmark']['metric']} accepted={result['state']['accepted']}")
+        print(f"  submissions: total={result['submissions']['total']} contains_witnesses=false")
         print("  payment_weights: false")
     return 0
 
