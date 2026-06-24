@@ -25,6 +25,16 @@ You get a scoreboard: per-miner metric / reward / weight, a per-solve ledger
 showing every factor of the rule, a Sybil-resistance panel, and an
 independently-verifiable Ed25519-signed weight vector.
 
+For the visual audit/agent game, run the arena instead:
+
+```bash
+python -m game.arena.serve 8790
+# open http://127.0.0.1:8790/game
+```
+
+That surface is **Subnet Breaker**: probe, encode, solve, replay, attest, and
+seal replayable audit proofs. See [`arena/ARENA.md`](arena/ARENA.md).
+
 ## Test it
 
 ```bash

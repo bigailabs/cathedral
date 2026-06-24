@@ -5,6 +5,7 @@
   <a href="VALIDATOR.md">Validator</a> |
   <a href="CATHEDRAL_V0_LANES.md">v0 Lanes</a> |
   <a href="LAUNCH_V0_RUNBOOK.md">v0 Launch Runbook</a> |
+  <a href="game/arena/ARENA.md">Arena</a> |
   <a href="https://api.cathedral.computer/v1/synthetic-boolean/active-challenges">Active Challenges</a> |
   <a href="https://github.com/cathedralai/cathedral/releases">Releases</a>
 </p>
@@ -165,6 +166,34 @@ Operator visibility:
   `Authorization: Bearer <token>` to read it.
 - `CATHEDRAL_SUBMIT_LOG_EVENTS=1` enables per-submit rejection logs. Leave it
   off for normal high-throughput operation; counters still record by default.
+
+### Local Verification Arena
+
+The repo also includes **Subnet Breaker**, a local playable arena for the
+agent/audit path. It does not touch chain state, Railway, paid compute, or the
+live validator. It exists to show the Cathedral loop end to end:
+
+```text
+probe -> encode -> solve -> replay -> attest -> seal
+```
+
+Run it locally:
+
+```bash
+python -m game.arena.serve 8790
+# open http://127.0.0.1:8790/game
+```
+
+Useful checks:
+
+```bash
+python -m game.arena.playthrough
+python -m game.arena --shot
+python -m game.arena.verify game/arena/out
+python -m game.arena.bundle game/arena/out/proof_bundle.json
+```
+
+Full guide: [`game/arena/ARENA.md`](game/arena/ARENA.md).
 
 ### [Validator Quick Start](VALIDATOR.md)
 
