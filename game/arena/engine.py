@@ -912,6 +912,8 @@ class ArenaEngine:
         _offbox = offbox_receipt_status(_out / "offbox_stitch_receipt.json")
         _offbox_i1 = offbox_receipt_status(_out / "offbox_i1_receipt.json")
         _offbox_hardened = offbox_hardened_status(_out / "offbox_hardened_receipt.json")
+        from .stitch import offbox_proof_summary
+        _offbox_summary = offbox_proof_summary(_out)
         _round_attest = round_attest_readiness(
             anchor.get("merkle_root", ""),
             quote_path=_out / "round_attest_quote.json",
@@ -927,6 +929,7 @@ class ArenaEngine:
             "offbox_stitch": _offbox,
             "offbox_i1": _offbox_i1,
             "offbox_hardened": _offbox_hardened,
+            "offbox_summary": _offbox_summary,
             "proof_coverage": self._proof_coverage(),
             "real_solver_bench": self._real_solver_bench(),
             "minted_proof": minted_proof_status(),
