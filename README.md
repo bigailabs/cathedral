@@ -188,12 +188,18 @@ Useful checks:
 
 ```bash
 python -m game.arena.playthrough
+python -m game.arena.audit_scanner_smoke
 python -m game.arena --shot
 python -m game.arena.verify game/arena/out
 python -m game.arena.bundle game/arena/out/proof_bundle.json
 ```
 
 Full guide: [`game/arena/ARENA.md`](game/arena/ARENA.md).
+
+The production-style audit scanner bridge lives at `/v1/audit-scanner/*`.
+It is default-off, signed, replay-scored, and not connected to payment weights
+until explicitly promoted. `python -m game.arena.audit_scanner_smoke` proves
+the full bridge contract locally.
 
 ### [Validator Quick Start](VALIDATOR.md)
 

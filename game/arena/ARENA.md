@@ -21,6 +21,7 @@ python -m game.arena --shot                # report screenshot + playable /game 
 cathedral-arena --season 3                 # same after editable install
 python -m game.arena --submitted           # real external agent PROCESSES sign+submit; arena verifies
 python -m game.arena.playthrough           # machine-check the scoreful /game loop
+python -m game.arena.audit_scanner_smoke   # machine-check the signed /v1/audit-scanner bridge
 python -m game.arena.audit 1               # independently audit scoring invariants
 cathedral-arena-audit 1                    # same after editable install
 python -m game.arena.bundle out/proof_bundle.json   # independently verify a winner's proof bundle
@@ -28,6 +29,7 @@ cathedral-arena-verify out/proof_bundle.json        # same after editable instal
 python -m game.arena.verify out                     # independently verify the full round artifact set
 cathedral-arena-round-verify out                    # same after editable install
 cathedral-arena-playthrough                # same after editable install
+cathedral-audit-scanner-smoke              # same after editable install
 python -m pytest game/tests game/arena/tests -q     # full suite
 ```
 UI: `out/arena.html` (screenshot `out/arena.png`). The playthrough artifact is
@@ -159,6 +161,24 @@ for a replayed proof; it is labeled non-production and is checked again by
 The local `/game` route and backing APIs are tested together: a report-only claim
 fails replay, the same target can recover with a valid witness, sealing updates
 score and kill rate, and successful seals do not trigger heat rollback.
+
+Production-style bridge:
+
+- `GET /v1/audit-scanner/status` is always available.
+- Set `CATHEDRAL_AUDIT_SCANNER_ENABLED=1` to enable the remaining routes.
+- `GET /v1/audit-scanner/catalog?limit=2`
+- `GET /v1/audit-scanner/example?index=0`
+- `POST /v1/audit-scanner/replay`
+- `POST /v1/audit-scanner/submit`
+- `GET /v1/audit-scanner/leaderboard`
+- `GET /v1/audit-scanner/benchmark`
+- `GET /v1/audit-scanner/state?miner_hotkey=...`
+
+Run `python -m game.arena.audit_scanner_smoke` to exercise this bridge
+in-process with a real sr25519 hotkey signature. Run
+`python -m game.arena.audit_scanner_smoke --url http://127.0.0.1:8000` to
+probe a running publisher. The bridge is deliberately `payment_weights=false`
+until it is promoted into the signed weight policy.
 
 ## The proof chain (every link is real, all tested)
 

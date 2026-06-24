@@ -7,6 +7,7 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 from bittensor_wallet import Keypair
 
+from game.arena import audit_scanner_smoke
 from game.arena import scanner
 from scaffold.publisher import build_app
 from scaffold.publisher.app import _AUDIT_SCANNER_CARD, _empty_bundle_hash
@@ -109,3 +110,14 @@ def test_audit_scanner_signature_binds_artifact_body(monkeypatch, tmp_path):
         response = client.post("/v1/audit-scanner/submit", json=payload, headers=headers)
         assert response.status_code == 401
         assert response.json()["detail"] == "invalid hotkey signature"
+
+
+def test_audit_scanner_smoke_cli_exercises_signed_bridge(tmp_path, capsys):
+    rc = audit_scanner_smoke.main([
+        "--ledger-path",
+        str(tmp_path / "audit_scanner_smoke.jsonl"),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "AUDIT SCANNER SMOKE: PASS" in out
+    assert "payment_weights: false" in out
