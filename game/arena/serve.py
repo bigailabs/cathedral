@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import scanner
+from . import replay_differential, scanner
 from .engine import ArenaEngine
 from .season import SeasonState
 from .ui import render
@@ -120,6 +120,9 @@ class ArenaServer:
 
     def scanner_benchmark(self) -> dict:
         return scanner.benchmark(self.scanner_ledger_path)
+
+    def scanner_differential(self) -> dict:
+        return replay_differential.differential_report()
 
     def scanner_request(self, payload: dict) -> dict:
         return scanner.intake_scan_request(payload)
@@ -322,6 +325,9 @@ def _handler(server: ArenaServer):
             if parsed.path == "/api/scanner/benchmark":
                 _send_json(self, 200, server.scanner_benchmark())
                 return
+            if parsed.path == "/api/scanner/differential":
+                _send_json(self, 200, server.scanner_differential())
+                return
             if parsed.path == "/api/scanner/submissions":
                 _send_json(self, 200, server.scanner_submissions(_int_param(qs, "limit", 50)))
                 return
@@ -345,6 +351,24 @@ def _handler(server: ArenaServer):
                 return
             if parsed.path in {"/game", "/game.html"}:
                 body = server.scanner_game_html().encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path in {"/proofs", "/proofs.html"}:
+                from game.arena.proofboard import render_proofboard
+                body = render_proofboard().encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path in {"/home", "/start"}:
+                from game.arena.frontpage import render_frontpage
+                body = render_frontpage().encode("utf-8")
                 self.send_response(200)
                 self.send_header("content-type", "text/html; charset=utf-8")
                 self.send_header("content-length", str(len(body)))
@@ -410,6 +434,7 @@ def serve(port: int = 8800) -> None:
           "POST /api/scanner/replay, POST /api/scanner/attest, "
           "POST /api/scanner/submit-attested, POST /api/scanner/submit, "
           "GET /api/scanner/leaderboard, GET /api/scanner/benchmark, "
+          "GET /api/scanner/differential, "
           "GET /api/scanner/state")
     try:
         httpd.serve_forever()

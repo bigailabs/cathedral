@@ -41,7 +41,10 @@ def test_round_verifier_accepts_main_artifacts(generated_round):
         "weights_consistent",
         "scoring_audit",
         "anchor_consistency",
+        "replay_differential",
     }
+    assert required["replay_differential"]["status"] == "pass"
+    assert "replay harnesses are proven discriminators" in required["replay_differential"]["detail"]
     assert all(c["status"] == "pass" for c in required.values())
 
 

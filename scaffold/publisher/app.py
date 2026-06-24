@@ -1348,6 +1348,7 @@ def build_app(
                 "submit": "/v1/audit-scanner/submit",
                 "leaderboard": "/v1/audit-scanner/leaderboard",
                 "benchmark": "/v1/audit-scanner/benchmark",
+                "differential": "/v1/audit-scanner/differential",
                 "submissions": "/v1/audit-scanner/submissions?limit=50",
                 "state": "/v1/audit-scanner/state?miner_hotkey=...",
             },
@@ -1460,6 +1461,16 @@ def build_app(
     def audit_scanner_benchmark():
         _require_audit_scanner_enabled()
         return _audit_scanner_module().benchmark(_audit_scanner_ledger_path())
+
+    @app.get("/v1/audit-scanner/differential")
+    def audit_scanner_differential():
+        _require_audit_scanner_enabled()
+        from game.arena import replay_differential
+
+        report = replay_differential.differential_report()
+        report["payment_weights"] = False
+        report["scoring"] = "verifier_quality_gate_only"
+        return report
 
     @app.get("/v1/audit-scanner/submissions")
     def audit_scanner_submissions(limit: int = Query(50, ge=1, le=500)):

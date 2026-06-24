@@ -131,6 +131,13 @@ def main() -> None:
     (OUT / "scanner_benchmark.json").write_text(
         json.dumps(scanner.benchmark(bench_ledger), indent=2, default=str)
     )
+    # The replay harnesses this round's scoring relied on are proven real
+    # discriminators. Write them as a round artifact so the verifier can
+    # re-check the gate offline.
+    from . import replay_differential
+    (OUT / "replay_differential.json").write_text(
+        json.dumps(replay_differential.differential_report(), indent=2, default=str)
+    )
     playthrough_ledger = OUT / "scanner_playthrough_ledger.jsonl"
     playthrough_ledger.unlink(missing_ok=True)
     playthrough_report = playthrough.run_playthrough(

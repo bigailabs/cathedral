@@ -298,6 +298,11 @@ def test_scanner_api_methods_verify_proof_not_report(tmp_path):
     assert verdict["accepted"] is True
     assert verdict["score"] > 0
 
+    differential = s.scanner_differential()
+    assert differential["schema"] == "cathedral.arena.replay_differential.v1"
+    assert differential["all_real"] is True
+    assert differential["discriminators"] == differential["total"]
+
 
 def test_scanner_http_endpoints(tmp_path):
     s = ArenaServer(season_path=str(tmp_path / "season.json"),
@@ -500,6 +505,11 @@ def test_scanner_http_endpoints(tmp_path):
         bench_miners = {m["miner_hotkey"]: m for m in bench["miners"]}
         assert bench_miners["hk_example"]["kill_rate"] == miners["hk_example"]["kill_rate"]
         assert bench_miners["hk_http_agent"]["kill_rate"] == miners["hk_http_agent"]["kill_rate"]
+
+        differential = json.loads(urlopen(base + "/api/scanner/differential", timeout=10).read())
+        assert differential["schema"] == "cathedral.arena.replay_differential.v1"
+        assert differential["all_real"] is True
+        assert differential["discriminators"] == differential["total"]
 
         state = json.loads(urlopen(base + "/api/scanner/state?miner_hotkey=hk_example", timeout=10).read())
         assert state["schema"] == scanner.SCHEMA_STATE

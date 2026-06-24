@@ -246,6 +246,19 @@ def verify_round(out_dir: str | Path) -> dict[str, Any]:
             detail += f"; {len(sv['violations'])} violations: {sv['violations'][:2]}"
         add("season_ledger", sv["ok"], detail, optional=True)
 
+    # 8. Replay harnesses are proven real discriminators. Required when present:
+    #    if replay is not a real gate, the round's scoring is theater.
+    differential = _load(out, "replay_differential.json")
+    if differential in (None, "UNPARSEABLE"):
+        add("replay_differential", True, "no differential on file", optional=True, absent=True)
+    else:
+        total = differential.get("total", 0)
+        discs = differential.get("discriminators", -1)
+        ok = bool(differential.get("all_real")) and discs == total and total > 0
+        add("replay_differential", ok,
+            f"{discs}/{total} replay harnesses are proven discriminators "
+            f"({differential.get('exploit', '?')} exploit / {differential.get('conserved', '?')} conserved)")
+
     required_failed = [check["name"] for check in checks if not check["optional"] and not check["ok"]]
     return {
         "ok": not required_failed,
