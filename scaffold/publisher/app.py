@@ -43,6 +43,7 @@ from .sat_solution import verify_dimacs_solution
 from .store import Store, new_uuid
 
 _FAMILY = "synthetic_boolean_v1"
+_AUDIT_SCANNER_CARD = "cathedral_audit_scanner_v1"
 _SKEW_SECS = 300
 # Public, non-scored readiness probe: a tiny satisfiable toy CNF miners fetch to
 # self-test their solve pipeline before mining. Byte-identical to the monolith's
@@ -669,6 +670,7 @@ def build_app(
         *, challenge_id: str | None = None, dimacs_solution_sha256: str | None = None,
         alt_submitted_at: str | None = None,
         allow_fallback_shapes: bool = True,
+        card_id: str = _FAMILY,
     ) -> str:
         """Verify an sr25519 claim or raise HTTPException; return the timestamp
         that actually verified.
@@ -692,7 +694,7 @@ def build_app(
                 ])
             for shape in shapes:
                 msg = canonical_claim_bytes(
-                    bundle_hash=_empty_bundle_hash(), card_id=_FAMILY,
+                    bundle_hash=_empty_bundle_hash(), card_id=card_id,
                     miner_hotkey=hotkey, submitted_at=ts_str, **shape)
                 if verifier.verify(hotkey, msg, signature_b64):
                     return ts_str
@@ -1246,6 +1248,224 @@ def build_app(
             "rejection_reason": None if check.ok else check.rejection_reason,
             "clause_count": 3, "weighted_score": 0.0, "emissions_eligible": False,
         }
+
+    # ---- M2c: Audit scanner bridge (default-off, replay-scored only) ------
+    # This is the production-style bridge for the local Subnet Breaker scanner
+    # contract. It is not wired into SAT payment weights here; it gives miners
+    # a signed, replay-backed submission path that can be enabled deliberately.
+    def _audit_scanner_enabled() -> bool:
+        return os.environ.get("CATHEDRAL_AUDIT_SCANNER_ENABLED", "").strip().lower() in {
+            "1", "true", "yes", "on"}
+
+    def _require_audit_scanner_enabled() -> None:
+        if not _audit_scanner_enabled():
+            raise HTTPException(404, "audit_scanner_not_enabled")
+
+    def _audit_scanner_module():
+        from game.arena import scanner as audit_scanner
+
+        return audit_scanner
+
+    def _audit_scanner_ledger_path() -> str:
+        return os.environ.get(
+            "CATHEDRAL_AUDIT_SCANNER_LEDGER_PATH",
+            "audit_scanner_submissions.jsonl",
+        )
+
+    def _audit_scanner_submission_from_payload(
+        payload: dict[str, Any],
+        *,
+        signed_hotkey: str | None = None,
+    ):
+        audit_scanner = _audit_scanner_module()
+        task_id = str(payload.get("task_id", ""))
+        task = audit_scanner.task_by_id(task_id)
+        if task is None:
+            raise HTTPException(404, "unknown_audit_scanner_task")
+        payload_hotkey = str(payload.get("miner_hotkey") or signed_hotkey or "")
+        if signed_hotkey and payload_hotkey and payload_hotkey != signed_hotkey:
+            raise HTTPException(400, "miner_hotkey_mismatch")
+        sub = audit_scanner.ScannerSubmission(
+            task_id=task_id,
+            miner_hotkey=signed_hotkey or payload_hotkey,
+            nonce=str(payload.get("nonce", "")),
+            proof_family=str(payload.get("proof_family", "")),
+            witness=payload.get("witness"),
+            trace=payload.get("trace") if isinstance(payload.get("trace"), list) else [],
+            claim=payload.get("claim") or {},
+            report=str(payload.get("report", "")),
+        )
+        return audit_scanner, task, sub
+
+    def _verify_audit_scanner_claim(
+        payload: dict[str, Any],
+        *,
+        x_cathedral_hotkey: str,
+        x_cathedral_signature: str,
+        x_cathedral_submitted_at: str | None,
+    ):
+        if x_cathedral_submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        audit_scanner, task, sub = _audit_scanner_submission_from_payload(
+            payload,
+            signed_hotkey=x_cathedral_hotkey,
+        )
+        artifact_sha = audit_scanner._sha(sub.as_artifact())
+        verified_at = _verify_hotkey_claim(
+            x_cathedral_hotkey,
+            x_cathedral_signature,
+            x_cathedral_submitted_at,
+            challenge_id=task.task_id,
+            dimacs_solution_sha256=artifact_sha,
+            allow_fallback_shapes=False,
+            card_id=_AUDIT_SCANNER_CARD,
+        )
+        return audit_scanner, task, sub, artifact_sha, verified_at
+
+    @app.get("/v1/audit-scanner/status")
+    def audit_scanner_status():
+        return {
+            "schema": "cathedral.audit_scanner.status.v1",
+            "enabled": _audit_scanner_enabled(),
+            "card_id": _AUDIT_SCANNER_CARD,
+            "payment_weights": False,
+            "scoring": "local_replay_only_until_promoted_to_weight_policy",
+            "signature_contract": {
+                "card_id": _AUDIT_SCANNER_CARD,
+                "challenge_id": "task_id",
+                "dimacs_solution_sha256": "artifact_sha256",
+                "headers": [
+                    "X-Cathedral-Hotkey",
+                    "X-Cathedral-Signature",
+                    "X-Cathedral-Submitted-At",
+                ],
+            },
+            "endpoints": {
+                "catalog": "/v1/audit-scanner/catalog",
+                "task": "/v1/audit-scanner/task?index=0",
+                "request": "/v1/audit-scanner/request",
+                "replay": "/v1/audit-scanner/replay",
+                "submit": "/v1/audit-scanner/submit",
+                "leaderboard": "/v1/audit-scanner/leaderboard",
+                "benchmark": "/v1/audit-scanner/benchmark",
+            },
+        }
+
+    @app.get("/v1/audit-scanner/catalog")
+    def audit_scanner_catalog(limit: int | None = Query(None, ge=1, le=50)):
+        _require_audit_scanner_enabled()
+        audit_scanner = _audit_scanner_module()
+        tasks = audit_scanner.benchmark_catalog(limit=limit)
+        return {"schema": "cathedral.audit_scanner.catalog.v1",
+                "count": len(tasks),
+                "tasks": [t.manifest() for t in tasks]}
+
+    @app.get("/v1/audit-scanner/task")
+    def audit_scanner_task(index: int = Query(0, ge=0)):
+        _require_audit_scanner_enabled()
+        return _audit_scanner_module().issue_task(index).manifest()
+
+    @app.get("/v1/audit-scanner/example")
+    def audit_scanner_example(index: int = Query(0, ge=0)):
+        _require_audit_scanner_enabled()
+        audit_scanner = _audit_scanner_module()
+        task = audit_scanner.issue_task(index)
+        sub = audit_scanner.example_accepted_submission(task)
+        verdict = audit_scanner.verify_submission(task, sub)
+        artifact = sub.as_artifact()
+        return {"task": task.manifest(),
+                "submission": artifact,
+                "artifact_sha256": audit_scanner._sha(artifact),
+                "verdict": verdict.as_dict()}
+
+    @app.post("/v1/audit-scanner/request")
+    async def audit_scanner_request(request: Request):
+        _require_audit_scanner_enabled()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        return _audit_scanner_module().intake_scan_request(
+            payload if isinstance(payload, dict) else {})
+
+    @app.post("/v1/audit-scanner/replay")
+    async def audit_scanner_replay(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        _require_audit_scanner_enabled()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        audit_scanner, task, sub, artifact_sha, verified_at = _verify_audit_scanner_claim(
+            payload if isinstance(payload, dict) else {},
+            x_cathedral_hotkey=x_cathedral_hotkey,
+            x_cathedral_signature=x_cathedral_signature,
+            x_cathedral_submitted_at=x_cathedral_submitted_at,
+        )
+        verdict = audit_scanner.verify_submission(task, sub).as_dict()
+        verdict.update({
+            "ledger_written": False,
+            "scored": False,
+            "signed_artifact_sha256": artifact_sha,
+            "signature_verified_at": verified_at,
+            "card_id": _AUDIT_SCANNER_CARD,
+        })
+        return verdict
+
+    @app.post("/v1/audit-scanner/submit")
+    async def audit_scanner_submit(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        _require_audit_scanner_enabled()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        audit_scanner, task, sub, artifact_sha, verified_at = _verify_audit_scanner_claim(
+            payload if isinstance(payload, dict) else {},
+            x_cathedral_hotkey=x_cathedral_hotkey,
+            x_cathedral_signature=x_cathedral_signature,
+            x_cathedral_submitted_at=x_cathedral_submitted_at,
+        )
+        verdict = audit_scanner.record_submission(
+            _audit_scanner_ledger_path(),
+            task,
+            sub,
+        )
+        verdict.update({
+            "ledger_written": True,
+            "scored": bool(verdict["accepted"]),
+            "signed_artifact_sha256": artifact_sha,
+            "signature_verified_at": verified_at,
+            "card_id": _AUDIT_SCANNER_CARD,
+            "payment_weights": False,
+        })
+        return verdict
+
+    @app.get("/v1/audit-scanner/leaderboard")
+    def audit_scanner_leaderboard():
+        _require_audit_scanner_enabled()
+        return _audit_scanner_module().leaderboard(_audit_scanner_ledger_path())
+
+    @app.get("/v1/audit-scanner/benchmark")
+    def audit_scanner_benchmark():
+        _require_audit_scanner_enabled()
+        return _audit_scanner_module().benchmark(_audit_scanner_ledger_path())
+
+    @app.get("/v1/audit-scanner/state")
+    def audit_scanner_state(miner_hotkey: str = Query(..., min_length=1)):
+        _require_audit_scanner_enabled()
+        return _audit_scanner_module().miner_state(
+            _audit_scanner_ledger_path(),
+            miner_hotkey,
+        )
 
     # ---- M2b: Per-miner challenge endpoints (CATHEDRAL_PERMINER_ENABLED) ----
     # These endpoints are completely new — no existing miner client calls them.

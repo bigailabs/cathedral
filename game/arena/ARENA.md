@@ -108,6 +108,23 @@ Scoring is intentionally strict:
 This is the clean bridge from "scanner/hunter app" to Cathedral-native proof:
 miners can submit findings, but validators pay only replayable witnesses.
 
+What we take from Bitsec:
+
+- a simple scanner surface: repo/objective in, miner findings out
+- typed findings with category, severity, exploit summary, and fix summary
+- synthetic and real targets as a benchmark feed
+- an organic request path for future customer scans
+
+What we do not inherit:
+
+- report similarity scoring
+- category overlap as a reward metric
+- LLM-generated expected answers as final truth
+- public docs/config/API drift
+
+The Cathedral rule is stricter: claims are useful metadata, but only a pinned
+target plus witness plus deterministic replay can create score.
+
 Local API:
 
 - `GET /api/scanner/catalog?limit=2`
