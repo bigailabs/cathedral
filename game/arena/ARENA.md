@@ -99,6 +99,9 @@ Schemas:
   artifact hash, score.
 - `cathedral.scanner.benchmark.v1`: the live metric artifact. The metric is
   `replay_kill_rate`, not report quality.
+- `cathedral.arena.replay_differential.v1`: verifier-quality artifact proving
+  each replay harness separates exploit witnesses from benign witnesses, or
+  holds across a conserved stress set.
 
 Scoring is intentionally strict:
 
@@ -142,6 +145,7 @@ Local API:
 - `POST /api/scanner/submit`
 - `GET /api/scanner/leaderboard`
 - `GET /api/scanner/benchmark`
+- `GET /api/scanner/differential`
 - `GET /api/scanner/submissions?limit=50`
 - `GET /api/scanner/state?miner_hotkey=...`
 
@@ -174,6 +178,7 @@ Production-style bridge:
 - `POST /v1/audit-scanner/submit`
 - `GET /v1/audit-scanner/leaderboard`
 - `GET /v1/audit-scanner/benchmark`
+- `GET /v1/audit-scanner/differential`
 - `GET /v1/audit-scanner/submissions?limit=50`
 - `GET /v1/audit-scanner/state?miner_hotkey=...`
 

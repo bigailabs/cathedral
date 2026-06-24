@@ -64,6 +64,11 @@ def test_audit_scanner_bridge_scores_only_signed_replayable_proof(monkeypatch, t
     with TestClient(app) as client:
         assert client.get("/v1/audit-scanner/status").json()["enabled"] is True
         assert client.get("/v1/audit-scanner/catalog?limit=2").json()["count"] == 2
+        differential = client.get("/v1/audit-scanner/differential").json()
+        assert differential["schema"] == "cathedral.arena.replay_differential.v1"
+        assert differential["all_real"] is True
+        assert differential["payment_weights"] is False
+        assert differential["scoring"] == "verifier_quality_gate_only"
         intake = client.post("/v1/audit-scanner/request", json={"repo": "https://example/repo", "max_tasks": 1}).json()
         assert intake["scored"] is False and intake["routed_count"] == 1
 

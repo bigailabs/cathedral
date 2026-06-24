@@ -327,6 +327,11 @@ def _register_hardened() -> list[dict]:
 MINTED_TARGETS = _register_minted()
 MINTED_HARDENED = _register_hardened()
 
+# The subtensor ROOT NAV share model: a second pinned invariant family (deposit
+# no-dilution, redeem round-trip, TAO split) replayed as pure integer arithmetic.
+from . import harness_root  # noqa: E402  (registers into TARGETS at import)
+ROOT_TARGETS = harness_root.register_root_targets()
+
 
 def minted_summary() -> dict:
     """For the operator console: which invariant families have a REAL minted
