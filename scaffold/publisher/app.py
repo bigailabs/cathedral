@@ -474,8 +474,64 @@ def build_app(
                         f"elapsed={elapsed:.3f}s"
                     )
 
+    class _SubmitBackpressureMiddleware:
+        """Reject excess submit requests before body parsing/threadpool work."""
+
+        _SUBMIT_PATHS = {
+            "/v1/agents/submit",
+            f"{_LEGACY_PREFIX}/v1/agents/submit",
+        }
+
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+            self._gate = (
+                threading.BoundedSemaphore(submit_max_concurrency)
+                if submit_max_concurrency > 0 else None
+            )
+
+        async def __call__(self, scope, receive, send):
+            if (
+                scope.get("type") != "http"
+                or scope.get("method") != "POST"
+                or scope.get("path", "") not in self._SUBMIT_PATHS
+                or self._gate is None
+            ):
+                await self._app(scope, receive, send)
+                return
+
+            if not self._gate.acquire(blocking=False):
+                _record_submit_event(
+                    "rate_limited",
+                    "submit_busy_retry",
+                    status_code=429,
+                    log=True,
+                )
+                body = b"submit_busy_retry"
+                await send({
+                    "type": "http.response.start",
+                    "status": 429,
+                    "headers": [
+                        (b"content-type", b"text/plain; charset=utf-8"),
+                        (b"content-length", str(len(body)).encode()),
+                        (b"retry-after", b"1"),
+                        (b"x-cathedral-rejection-reason", b"submit_busy_retry"),
+                    ],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": body,
+                    "more_body": False,
+                })
+                return
+
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                self._gate.release()
+
     app.add_middleware(_StripLegacyPrefixMiddleware)
     app.add_middleware(_SlowRequestLogMiddleware)
+    app.add_middleware(_SubmitBackpressureMiddleware)
 
     # Per-key sliding-window rate limiter — anti-flood backpressure for miner
     # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
