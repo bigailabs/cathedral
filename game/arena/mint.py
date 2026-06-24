@@ -304,13 +304,15 @@ def offbox_on_stitch(rule_id: str = "B2-fee-silent-zero") -> dict:
 
 
 def offbox_hardened_on_stitch(rule_id: str = "A4-fee-split-conservation",
-                              model: str = "subtensor-amm") -> dict:
+                              model: str = "subtensor-amm", width: int = 16) -> dict:
     """Off-box HARDENED proof (the DEFENSIVE counterpart of offbox_on_stitch): z3 mints
     a hardened invariant CNF (negated invariant UNSAT — no exploit exists); kissat on
     Stitch CONFIRMS UNSAT, and we cross-check that a local CDCL solver also says UNSAT.
     ok = remote UNSAT ∧ local UNSAT (two independent solvers, one off-box, agree the
-    invariant cannot be violated). Best-effort + reachability-gated."""
-    m = mint_invariant(rule_id, 16, "realistic", model)
+    invariant cannot be violated). `width` is the fixed-point bit-width to mint at — AMM
+    A4 is decidable at 16, but the ROOT-staking invariants are only UNSAT at 8 (z3 returns
+    unknown at 16). Best-effort + reachability-gated."""
+    m = mint_invariant(rule_id, width, "realistic", model)
     if not m or m["result"] != "unsat" or not m.get("cnf_text"):
         return {"available": False, "reason": "z3_unavailable_or_not_unsat"}
     local = solve_minted_cnf(m["cnf_text"])
