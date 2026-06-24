@@ -183,10 +183,17 @@ def build_app(
     last_submit: dict[tuple[str, str], float] = {}
     last_submit_lock = threading.Lock()
     try:
-        submit_max_concurrency = int(os.environ.get(
+        configured_submit_max_concurrency = int(os.environ.get(
             "CATHEDRAL_SUBMIT_MAX_CONCURRENCY", "24") or "0")
     except ValueError:
-        submit_max_concurrency = 24
+        configured_submit_max_concurrency = 24
+    try:
+        submit_hard_cap = int(os.environ.get("CATHEDRAL_SUBMIT_HARD_CAP", "8") or "0")
+    except ValueError:
+        submit_hard_cap = 8
+    submit_max_concurrency = configured_submit_max_concurrency
+    if submit_hard_cap > 0 and submit_max_concurrency > 0:
+        submit_max_concurrency = min(submit_max_concurrency, submit_hard_cap)
     submit_gate = (
         threading.BoundedSemaphore(submit_max_concurrency)
         if submit_max_concurrency > 0 else None
@@ -197,6 +204,8 @@ def build_app(
     submit_metrics: dict[str, Any] = {
         "started_at_iso": _now_iso_ms(),
         "max_concurrency": submit_max_concurrency,
+        "configured_max_concurrency": configured_submit_max_concurrency,
+        "hard_cap": submit_hard_cap,
         "min_interval_secs": min_interval,
         "total": 0,
         "by_outcome": {},
@@ -246,6 +255,8 @@ def build_app(
             return {
                 "started_at_iso": submit_metrics["started_at_iso"],
                 "max_concurrency": submit_metrics["max_concurrency"],
+                "configured_max_concurrency": submit_metrics["configured_max_concurrency"],
+                "hard_cap": submit_metrics["hard_cap"],
                 "min_interval_secs": submit_metrics["min_interval_secs"],
                 "total": submit_metrics["total"],
                 "by_outcome": dict(submit_metrics["by_outcome"]),
