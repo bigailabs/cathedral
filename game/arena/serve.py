@@ -328,6 +328,11 @@ def _handler(server: ArenaServer):
             if parsed.path == "/api/scanner/differential":
                 _send_json(self, 200, server.scanner_differential())
                 return
+            if parsed.path in {"/api/selfcheck", "/healthz"}:
+                from game.arena.selfcheck import selfcheck_report
+                rep = selfcheck_report(OUT)
+                _send_json(self, 200 if rep["ok"] else 503, rep)
+                return
             if parsed.path == "/api/scanner/submissions":
                 _send_json(self, 200, server.scanner_submissions(_int_param(qs, "limit", 50)))
                 return
@@ -425,9 +430,10 @@ def serve(port: int = 8800) -> None:
     # when bound to 127.0.0.1 inside Linux. Bind all interfaces for the local
     # dev server while advertising the localhost URL.
     httpd = ThreadingHTTPServer(("0.0.0.0", port), _handler(srv))
-    print(f"Cathedral Arena LIVE at http://127.0.0.1:{port}  (ticks a fresh round every "
-          f"{MIN_TICK_SECS:.0f}s; auto-refreshes)")
-    print(f"Subnet Breaker game: http://127.0.0.1:{port}/game")
+    print(f"Cathedral Arena LIVE  (ticks a fresh round every {MIN_TICK_SECS:.0f}s; auto-refreshes)")
+    print(f"  START HERE: http://localhost:{port}/home")
+    print("    play: /game | how it works: /howto | proof it is real: /proofs | dashboard: /arena")
+    print(f"  From a Windows browser, swap localhost for the WSL IP (hostname -I) if localhost won't load.")
     print("Scanner API: GET /api/scanner/task, GET /api/scanner/catalog, "
           "GET /api/scanner/example, GET /api/scanner/agent/solve, "
           "POST /api/scanner/request, "
