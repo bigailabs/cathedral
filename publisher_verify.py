@@ -244,6 +244,41 @@ with TestClient(app) as client:
             ck("service role appears in health", role_health["service_role"] == "read")
             ck("read role does not start the refill worker",
                role_app.state.service_role == "read" and role_app.state.refill_task is None)
+            read_submit = role_client.post("/v1/agents/submit", data={})
+            ck("read role rejects submit traffic before route work",
+               read_submit.status_code == 404
+               and read_submit.text == "route_not_served_by_read_role"
+               and read_submit.headers.get("x-cathedral-service-role") == "read")
+
+        os.environ["CATHEDRAL_SERVICE_ROLE"] = "submit"
+        os.environ["CATHEDRAL_REFILL_ENABLED"] = "false"
+        submit_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
+                                    submit_min_interval_secs=0)
+        with TestClient(submit_role_app) as submit_role_client:
+            submit_role_health = submit_role_client.get("/health/live").json()
+            ck("submit role appears in health",
+               submit_role_health["service_role"] == "submit")
+            submit_read = submit_role_client.get("/v1/leaderboard/top")
+            ck("submit role rejects leaderboard traffic before route work",
+               submit_read.status_code == 404
+               and submit_read.text == "route_not_served_by_submit_role"
+               and submit_read.headers.get("x-cathedral-service-role") == "submit")
+            submit_cnf = submit_role_client.get("/v1/synthetic-boolean/active-cnf")
+            ck("submit role allows miner CNF route to reach auth validation",
+               submit_cnf.status_code == 422)
+
+        os.environ["CATHEDRAL_SERVICE_ROLE"] = "worker"
+        worker_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
+                                    submit_min_interval_secs=0)
+        with TestClient(worker_role_app) as worker_role_client:
+            worker_role_health = worker_role_client.get("/health/live").json()
+            ck("worker role appears in health",
+               worker_role_health["service_role"] == "worker")
+            worker_public = worker_role_client.get("/v1/synthetic-boolean/active-challenges")
+            ck("worker role rejects public miner reads",
+               worker_public.status_code == 404
+               and worker_public.text == "route_not_served_by_worker_role"
+               and worker_public.headers.get("x-cathedral-service-role") == "worker")
     finally:
         for _key, _value in old_role_env.items():
             if _value is None:

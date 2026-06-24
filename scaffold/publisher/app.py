@@ -571,6 +571,104 @@ def build_app(
             finally:
                 gate.release()
 
+    class _ServiceRoleGuardMiddleware:
+        """Fail closed when this process is launched as a narrow service role."""
+
+        _SHARED_PATHS = {
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/.well-known/cathedral-jwks.json",
+        }
+        _READ_GET_PATHS = {
+            "/v1/synthetic-boolean/active-challenges",
+            "/v1/synthetic-boolean/challenge-broadcast",
+            "/v1/synthetic-boolean/current-challenge",
+            "/v1/synthetic-boolean/per-miner/status",
+            "/v1/synthetic-boolean/per-miner/summary",
+            "/v1/validator/weights/next",
+            "/v1/leaderboard/recent",
+            "/v1/leaderboard/top",
+            "/v1/leaderboard/explain",
+        }
+        _READ_GET_PREFIXES = {
+            "/v1/audit-scanner/",
+        }
+        _SUBMIT_GET_PATHS = {
+            "/v1/synthetic-boolean/active-cnf",
+            "/v1/synthetic-boolean/per-miner/challenges",
+            "/v1/synthetic-boolean/per-miner/cnf",
+        }
+        _SUBMIT_GET_PREFIXES = {
+            "/v1/challenges/",
+        }
+        _SUBMIT_POST_PATHS = {
+            "/v1/agents/submit",
+        }
+
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        @staticmethod
+        def _canonical_path(path: str) -> str:
+            if path == _LEGACY_PREFIX:
+                return "/"
+            if path.startswith(_LEGACY_PREFIX + "/"):
+                return path[len(_LEGACY_PREFIX):]
+            return path
+
+        def _allowed(self, method: str, path: str) -> bool:
+            if service_role == "all":
+                return True
+            if path in self._SHARED_PATHS:
+                return True
+            if service_role == "worker":
+                return False
+            if service_role == "read":
+                return (
+                    method in {"GET", "HEAD"}
+                    and (
+                        path in self._READ_GET_PATHS
+                        or any(path.startswith(prefix) for prefix in self._READ_GET_PREFIXES)
+                    )
+                )
+            if service_role == "submit":
+                if method in {"GET", "HEAD"}:
+                    return (
+                        path in self._SUBMIT_GET_PATHS
+                        or any(path.startswith(prefix) for prefix in self._SUBMIT_GET_PREFIXES)
+                    )
+                return method == "POST" and path in self._SUBMIT_POST_PATHS
+            return False
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self._app(scope, receive, send)
+                return
+            path = self._canonical_path(scope.get("path", ""))
+            method = scope.get("method", "GET")
+            if self._allowed(method, path):
+                await self._app(scope, receive, send)
+                return
+
+            reason = f"route_not_served_by_{service_role}_role"
+            body = reason.encode("utf-8")
+            await send({
+                "type": "http.response.start",
+                "status": 404,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"x-cathedral-service-role", service_role.encode("utf-8")),
+                    (b"x-cathedral-rejection-reason", body),
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": body,
+                "more_body": False,
+            })
+
     app.add_middleware(_StripLegacyPrefixMiddleware)
     app.add_middleware(_SlowRequestLogMiddleware)
 
@@ -583,6 +681,9 @@ def build_app(
     # Add this last so it is the outermost ASGI layer: overloaded submit/PM-read
     # requests should get a cheap 429 before rate-limit state or route handling.
     app.add_middleware(_HotPathBackpressureMiddleware)
+    # Role guard is now the true outer edge: role-mismatched traffic fails before
+    # rate-limit state, request body parsing, or expensive route work.
+    app.add_middleware(_ServiceRoleGuardMiddleware)
 
     app.state.store = store
     app.state.cnf_store = cnf_store
