@@ -573,7 +573,6 @@ def build_app(
 
     app.add_middleware(_StripLegacyPrefixMiddleware)
     app.add_middleware(_SlowRequestLogMiddleware)
-    app.add_middleware(_HotPathBackpressureMiddleware)
 
     # Per-key sliding-window rate limiter — anti-flood backpressure for miner
     # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
@@ -581,6 +580,9 @@ def build_app(
     # Also pure ASGI (no BaseHTTPMiddleware) for the same buffering reason.
     from .ratelimit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
+    # Add this last so it is the outermost ASGI layer: overloaded submit/PM-read
+    # requests should get a cheap 429 before rate-limit state or route handling.
+    app.add_middleware(_HotPathBackpressureMiddleware)
 
     app.state.store = store
     app.state.cnf_store = cnf_store
