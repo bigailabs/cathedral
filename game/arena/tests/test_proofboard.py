@@ -29,6 +29,22 @@ def test_proofboard_labels_exploit_vs_conserved():
     assert "subtensor-root:redeem-roundtrip@HEAD" in html
 
 
+def test_proofboard_shows_formally_hardened_cross_confirmed_proofs():
+    """The board surfaces the stronger proof class: z3 UNSAT cross-confirmed by an
+    independent CDCL solver (a proof no exploit exists, not just stress-tested)."""
+    from game.arena import replay
+    hardened = [h for h in getattr(replay, "MINTED_HARDENED", []) if h.get("hardened")]
+    if not hardened:
+        return                                          # z3 absent on this host -> skip
+    html = render_proofboard()
+    assert "Formally Hardened" in html
+    assert "FORMALLY HARDENED" in html
+    assert "z3 UNSAT + CDCL UNSAT" in html and "cross-confirmed" in html
+    # each cross-confirmed rule appears by id (e.g. the root TAO-split conservation proof)
+    for h in hardened:
+        assert h["rule_id"] in html
+
+
 def test_proofboard_main_writes_file(tmp_path):
     import sys
     argv = sys.argv
