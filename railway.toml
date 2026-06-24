@@ -13,4 +13,4 @@ restartPolicyMaxRetries = 3
 
 # Production uses Postgres via DATABASE_URL. Multiple read/submit replicas are
 # allowed, but durable background jobs must stay role-gated and advisory-locked.
-numReplicas = 2
+numReplicas = 4
