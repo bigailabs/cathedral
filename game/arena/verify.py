@@ -257,8 +257,16 @@ def verify_round(out_dir: str | Path) -> dict[str, Any]:
 
 def main() -> int:
     default_out = Path(__file__).resolve().parent / "out"
-    out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_out
+    args = sys.argv[1:]
+    as_json = "--json" in args
+    positional = [a for a in args if not a.startswith("--")]
+    out_dir = Path(positional[0]) if positional else default_out
     result = verify_round(out_dir)
+
+    if as_json:
+        # machine-readable verdict for CI / automation: `... --json | jq`
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result["ok"] else 1
 
     print(f"CATHEDRAL ROUND VERIFY - {result['dir']} (offline, no engine)")
     print("-" * 72)
