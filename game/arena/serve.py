@@ -357,6 +357,24 @@ def _handler(server: ArenaServer):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if parsed.path in {"/proofs", "/proofs.html"}:
+                from game.arena.proofboard import render_proofboard
+                body = render_proofboard().encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path in {"/home", "/start"}:
+                from game.arena.frontpage import render_frontpage
+                body = render_frontpage().encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             # /arena and any other path -> the full operator report view.
             body = server.html().encode("utf-8")
             self.send_response(200)

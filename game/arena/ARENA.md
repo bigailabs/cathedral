@@ -43,6 +43,7 @@ Served game routes:
   `/api/scanner/submit-attested`.
   It starts from `POST /api/scanner/request`, then routes that intake into
   replay-backed subnet targets.
+- `/proofs`: human-readable Proof Board for `GET /api/scanner/differential`.
 - `/arena`: auto-running arena report render.
 - `/dashboard.html`: legacy redirect to `/game` for old local links.
 - `/howto`: short game instructions.
