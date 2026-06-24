@@ -1,0 +1,59 @@
+{
+  "schema": "cathedral.arena.offbox_handoff_receipts.v1",
+  "captured_on": "2026-06-24",
+  "note": "Sanitized handoff evidence for the ARENA.md off-box Stitch section. Raw receipts may also exist under ignored game/arena/out/ on an operator machine.",
+  "receipts": [
+    {
+      "file": "offbox_stitch_receipt.json",
+      "direction": "CRACKED",
+      "rule_id": "B2-fee-silent-zero",
+      "model": "subtensor-amm",
+      "host": "polarisserver",
+      "solver": "kissat",
+      "proof_check": "cnf_satisfied",
+      "cnf_satisfied": true,
+      "remote_wall_ms": 2.0,
+      "n_lits": 357,
+      "round_trips": 3,
+      "decoded_input": {
+        "amount": 128,
+        "fee_rate": 512
+      },
+      "cnf_sha256": "17b8fb786ad3229c67d4dfe722b4ae4f9038ddcdd25942a5c1757c100059087c"
+    },
+    {
+      "file": "offbox_i1_receipt.json",
+      "direction": "CRACKED",
+      "rule_id": "I1-div-by-zero",
+      "model": "subtensor-amm",
+      "host": "polarisserver",
+      "solver": "kissat",
+      "proof_check": "cnf_satisfied",
+      "cnf_satisfied": true,
+      "remote_wall_ms": 11.0,
+      "n_lits": 4032,
+      "round_trips": 47,
+      "decoded_input": {
+        "amount": 247,
+        "fee_rate": 510,
+        "delta_in": 1
+      },
+      "cnf_sha256": "9824f4bc98a3d21a862cc70b3ae640c13391391eb29e5ebc160a72b308e6a30d"
+    },
+    {
+      "file": "offbox_hardened_receipt.json",
+      "direction": "HARDENED",
+      "rule_id": "A4-fee-split-conservation",
+      "model": "subtensor-amm",
+      "host": "polarisserver",
+      "solver": "kissat",
+      "proof_check": "remote_unsat_and_local_unsat",
+      "remote_unsat": true,
+      "local_unsat": true,
+      "cross_confirmed": true,
+      "remote_wall_ms": 39.0,
+      "round_trips": 8,
+      "cnf_sha256": "2a566d1f5b531a5b2cf473a51c366e5392c33c37c67671dde705e676929e8ed6"
+    }
+  ]
+}

@@ -262,10 +262,37 @@ Breaker; persistent seasons.
 | `audit.py` | independent scoring invariant auditor |
 | `ui.py` / `serve.py` | visual render; live HTTP server |
 
+## Off-box solves on Stitch — LANDED (real, live-captured)
+
+kissat on Stitch (real remote hardware) solves a z3-minted CNF; the arena decodes the
+raw DIMACS assignment back to the exploit input bits LOCALLY with NO z3 (the bit→var
+decode map z3 emits at mint time → `mint.decode_assignment`), and re-checks it against
+the pinned-invariant CNF (`cnf_satisfied`, solver/model-independent). Captured live in
+BOTH directions and across rules/models. The sanitized evidence manifest is
+`game/arena/offbox_handoff_receipts.json`; operator machines may also keep raw receipts
+under ignored `game/arena/out/`. Rounds with raw receipts are independently re-checkable
+by `python -m game.arena.verify --json` and surfaced in the operator console + real-audit
+vault:
+
+| receipt file | direction | rule | model | evidence |
+|---|---|---|---|---|
+| `offbox_stitch_receipt.json`   | CRACKED  | B2-fee-silent-zero  | amm  | kissat 2ms, 357 lits, decoded no-z3 |
+| `offbox_i1_receipt.json`       | CRACKED  | I1-div-by-zero      | amm  | kissat 11ms, 4032 lits, decoded no-z3 |
+| `offbox_hardened_receipt.json` | HARDENED | A4-fee-split-conservation | amm | kissat 39ms UNSAT + local CDCL UNSAT |
+
+`mint.offbox_on_stitch(rule_id)` / `offbox_hardened_on_stitch(rule_id, model, width)` are
+the entry points; `capture_offbox_receipt` / `capture_hardened_receipt` persist a receipt.
+GOTCHA: z3's bit-blast CNF serialization is non-deterministic across PROCESSES, so a
+receipt's `cnf_sha256` is NOT re-derivable by re-minting — do not add a hash-rebind gate
+(the rigorous proof is `cnf_satisfied`, checked at capture). The root-staking invariants
+are only UNSAT at width 8 (z3 'unknown' at 16) — pass `width=8` for `subtensor-root-reborn`.
+
 ## Remaining Depth
 
 Open depth items: (a) a real Pi/Hermes tool-use loop as the agent instead of
 scripted local behaviors; (b) in-band live attestation in `run_submitted`
-binding the receipt head into a fresh TDX quote; (c) a gated on-chain Merkle-root
-commitment; (d) production mapping from raw external DIMACS assignments back to
-input bits for off-box miner solves.
+binding the receipt head into a fresh TDX quote (the binding recipe is built;
+only a FRESH per-round TDX quote is gated on the box + spend); (c) a gated
+on-chain Merkle-root commitment; (d) a live root-model HARDENED off-box capture
+(A4-tao-split @ width 8 — local CDCL confirms UNSAT; awaiting a stable Stitch
+window for the multi-round-trip upload).

@@ -124,6 +124,15 @@ def test_round_verifier_handles_a_missing_dir_without_crashing(tmp_path):
     assert result["ok"] is False and "proof_bundle" in result["required_failed"]
 
 
+def test_verify_cli_json_outputs_machine_readable_result(generated_round, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["python", str(generated_round), "--json"])
+    assert verify.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["dir"] == str(generated_round)
+    assert any(c["name"] == "signed_vector" for c in payload["checks"])
+
+
 def test_verifier_checks_the_i1_offbox_receipt(generated_round, tmp_path):
     """The multi-rule off-box capture (I1) is an optional check: a genuine I1 receipt
     (cnf_satisfied, rule_id=I1) passes; a non-I1 or unsatisfied one fails."""
