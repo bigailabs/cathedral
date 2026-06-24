@@ -93,6 +93,7 @@ _build_lock = threading.Lock()
 # so we only ever spawn one.
 _bg_started = False
 _bg_lock = threading.Lock()
+_bg_generation = 0
 
 
 def _env_float(name: str, default: float) -> float:
@@ -995,16 +996,20 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     return payload
 
 
-def _bg_refresh_loop(store: Store, signing_key_hex: str) -> None:
+def _bg_refresh_loop(store: Store, signing_key_hex: str, generation: int) -> None:
     """Background daemon thread: rebuild the vector every _CACHE_TTL_SECS.
 
     Never raises — a transient DB error is logged and retried next cycle.
     Runs forever; the process exiting is the only exit condition (daemon=True).
     """
     while True:
+        if generation != _bg_generation:
+            return
         try:
             vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
             with _build_lock:
+                if generation != _bg_generation:
+                    return
                 _vector_cache["v"] = (time.time(), vec)
         except Exception as exc:
             print(f"[weights] bg_refresh error (will retry): {exc!r}")
@@ -1019,8 +1024,9 @@ def _ensure_bg_started(store: Store, signing_key_hex: str) -> None:
     with _bg_lock:
         if _bg_started:
             return
+        generation = _bg_generation
         t = threading.Thread(
-            target=_bg_refresh_loop, args=(store, signing_key_hex),
+            target=_bg_refresh_loop, args=(store, signing_key_hex, generation),
             name="weights-bg-refresh", daemon=True,
         )
         t.start()
@@ -1069,6 +1075,7 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
 
 def _reset_vector_cache() -> None:
     """Test hook."""
-    global _bg_started
+    global _bg_started, _bg_generation
     _vector_cache.clear()
     _bg_started = False
+    _bg_generation += 1
