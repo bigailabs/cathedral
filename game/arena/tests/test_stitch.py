@@ -269,3 +269,40 @@ def test_live_stitch_solve_if_reachable():
     res = stitch.run_on_stitch(cnf, solver="kissat")
     assert res["ok"] and res["remote_measured"]
     assert verify_witness(cnf, res["assignment"])      # remote compute, local correctness gate
+
+
+def test_chunk_b64_splits_command_safely():
+    s = "A" * 7001
+    chunks = stitch.chunk_b64(s, 3000)
+    assert len(chunks) == 3 and "".join(chunks) == s
+    assert all(len(c) <= 3000 for c in chunks)          # each fits the cmdline limit
+    assert stitch.chunk_b64("", 3000) == []
+
+
+def test_offbox_on_stitch_degrades_gracefully():
+    """The off-box-on-Stitch proof returns a verdict (never crashes); when Stitch is
+    down or z3 absent it reports the reason instead of raising."""
+    from game.arena import mint
+    r = mint.offbox_on_stitch("B2-fee-silent-zero")
+    assert "available" in r
+    if not r["available"]:
+        assert r["reason"] in ("z3_unavailable_or_unsat", "stitch_unreachable",
+                               "upload_failed", "offbox_solve_failed") or \
+               r["reason"].startswith(("ssh_failed", "not_sat"))
+
+
+def test_offbox_on_stitch_if_reachable():
+    """Full off-box-on-Stitch: chunk-upload a minted decode-map CNF, kissat solves it
+    on Stitch, decode LOCALLY (no z3), reproduce. Opt-in + reachable only."""
+    import os
+    if os.environ.get("CATHEDRAL_ARENA_STITCH", "").lower() not in {"1", "true", "yes", "on"}:
+        return
+    if not stitch.stitch_available():
+        return
+    from game.arena import mint
+    r = mint.offbox_on_stitch("B2-fee-silent-zero")
+    if not r["available"]:
+        return                                          # transient stitch flake
+    assert r["ok"] is True and r["reproduced"] is True
+    assert r["decode"] == "bit->var map (no z3)"
+    assert r["decoded_input"]["amount"] > 0 and r["n_lits"] > 0

@@ -176,6 +176,78 @@ def parse_remote_solve(stdout: str) -> dict:
             "status": "SAT" if sat else ("UNSAT" if unsat else status)}
 
 
+def chunk_b64(s: str, size: int = 3000) -> list[str]:
+    """Split a base64 string into command-line-safe chunks.
+
+    The ssh->wsl hop caps a single command at about 10KB, so larger CNFs are
+    uploaded in pieces because stdin does not forward through that hop.
+    """
+    return [s[i:i + size] for i in range(0, len(s), size)]
+
+
+def upload_cnf(cnf_text: str, remote_path: str, *, chunk: int = 3000,
+               timeout_s: float = 30.0) -> bool:
+    """Upload a CNF to Stitch by CHUNKED base64 append (bypasses the single-command
+    size limit). Writes <remote>.b64 in pieces, decodes to <remote>. Best-effort."""
+    b64 = base64.b64encode(cnf_text.encode()).decode()
+    rb = remote_path + ".b64"
+    try:
+        _ssh(base64.b64encode(f"rm -f {rb} {remote_path}".encode()).decode(), timeout=timeout_s)
+        for part in chunk_b64(b64, chunk):
+            _ssh(base64.b64encode(f"printf %s {part} >> {rb}".encode()).decode(), timeout=timeout_s)
+        r = _ssh(
+            base64.b64encode(
+                f"base64 -d {rb} > {remote_path}; rm -f {rb}; wc -c < {remote_path}".encode()
+            ).decode(),
+            timeout=timeout_s,
+        )
+        try:
+            return int(r.stdout.strip().splitlines()[-1]) == len(cnf_text)
+        except (IndexError, ValueError):
+            return False
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def offbox_solve(cnf_text: str, *, timeout_s: float = 85.0) -> dict:
+    """OFF-BOX solve: chunk-upload a (minted) CNF to Stitch, solve it with kissat
+    --relaxed (host-measured), return the raw assignment. The caller decodes it
+    LOCALLY via the bit->var map (no z3) and replays. Bounded + best-effort."""
+    import hashlib
+    remote = f"/tmp/arena_offbox_{hashlib.sha256(cnf_text.encode()).hexdigest()[:10]}.cnf"
+    if not upload_cnf(cnf_text, remote, timeout_s=timeout_s):
+        return {"available": False, "reason": "upload_failed"}
+    inner = (f'S=$(date +%s%N); kissat --relaxed {remote} >/tmp/arena_ob.out 2>/dev/null; RC=$?; '
+             f'E=$(date +%s%N); rm -f {remote}; echo "ELAPSED_MS $(( (E-S)/1000000 ))"; '
+             f'echo "RC $RC"; grep "^s " /tmp/arena_ob.out; grep "^v " /tmp/arena_ob.out')
+    try:
+        r = _ssh(base64.b64encode(inner.encode()).decode(), timeout=timeout_s)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"available": False, "reason": f"ssh_failed:{type(e).__name__}"}
+    wall = rc = status = None
+    lits: list[int] = []
+    for ln in r.stdout.splitlines():
+        if ln.startswith("ELAPSED_MS"):
+            try: wall = float(ln.split()[1])
+            except (IndexError, ValueError): pass
+        elif ln.startswith("RC "):
+            try: rc = int(ln.split()[1])
+            except (IndexError, ValueError): pass
+        elif ln.startswith("s "):
+            status = ln[2:].strip()
+        elif ln.startswith("v "):
+            for tok in ln[2:].split():
+                v = int(tok)
+                if v == 0:
+                    break
+                lits.append(v)
+    sat = (rc == 10) or (status or "").upper().startswith("SAT")
+    if not sat:
+        return {"available": False, "reason": f"not_sat:rc={rc}"}
+    return {"available": True, "host": STITCH_NAME, "solver": "kissat",
+            "sat": True, "assignment": lits, "remote_wall_ms": wall, "n_lits": len(lits)}
+
+
 def solve_remote_cnf(remote_path: str, *, timeout_s: float = 85.0) -> dict:
     """Solve a CNF ALREADY ON Stitch with kissat (host-measured), WITHOUT pulling
     it back — works for arbitrarily large CNFs (pushing OR pulling a CNF through

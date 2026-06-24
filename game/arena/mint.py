@@ -252,6 +252,34 @@ def external_decode_status() -> dict:
             "ok": bool(reproduced)}
 
 
+def offbox_on_stitch(rule_id: str = "B2-fee-silent-zero") -> dict:
+    """Full off-box Stitch proof.
+
+    Z3 mints a decode-map CNF locally, Stitch solves it with kissat, and the
+    arena decodes the raw assignment through the bit->var map before replaying
+    the exploit input locally.
+    """
+    mm = mint_with_decode_map(rule_id, 8, "realistic")
+    if not mm or mm["result"] != "sat":
+        return {"available": False, "reason": "z3_unavailable_or_unsat"}
+    from . import stitch
+    if not stitch.stitch_available():
+        return {"available": False, "reason": "stitch_unreachable"}
+    res = stitch.offbox_solve(mm["cnf_text"])
+    if not res.get("available"):
+        return {"available": False, "reason": res.get("reason", "offbox_solve_failed")}
+    decoded = decode_assignment(res["assignment"], mm["decode_map"])
+    from .replay import _silent_zero_harness, _silent_zero_inv
+    inp = {k: decoded[k] for k in ("amount", "fee_rate") if k in decoded}
+    obs = _silent_zero_harness(inp)
+    reproduced = not _silent_zero_inv(obs)
+    return {"available": True, "host": res["host"], "solver": "kissat",
+            "remote_wall_ms": res["remote_wall_ms"], "n_lits": res["n_lits"],
+            "decoded_input": inp, "reproduced": reproduced,
+            "decode": "bit->var map (no z3)", "ok": bool(reproduced),
+            "cnf_sha256": mm["cnf_sha256"]}
+
+
 def z3_available() -> bool:
     try:
         import z3  # noqa: F401
