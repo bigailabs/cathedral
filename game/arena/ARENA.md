@@ -172,13 +172,15 @@ Production-style bridge:
 - `POST /v1/audit-scanner/submit`
 - `GET /v1/audit-scanner/leaderboard`
 - `GET /v1/audit-scanner/benchmark`
+- `GET /v1/audit-scanner/submissions?limit=50`
 - `GET /v1/audit-scanner/state?miner_hotkey=...`
 
 Run `python -m game.arena.audit_scanner_smoke` to exercise this bridge
 in-process with a real sr25519 hotkey signature. Run
 `python -m game.arena.audit_scanner_smoke --url http://127.0.0.1:8000` to
 probe a running publisher. The bridge is deliberately `payment_weights=false`
-until it is promoted into the signed weight policy.
+until it is promoted into the signed weight policy. The submissions endpoint is
+hash-only ledger evidence: it exposes verdict rows, not raw witnesses or reports.
 
 ## The proof chain (every link is real, all tested)
 
