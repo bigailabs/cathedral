@@ -82,6 +82,7 @@ def test_scanner_game_html_is_api_backed(tmp_path):
     assert 'id="sweepText"' in html
     assert 'id="sweepFill"' in html
     assert 'id="coreAction"' in html
+    assert 'id="actionFlash"' in html
     assert 'id="breachPct"' in html
     assert 'id="objectiveText"' in html
     assert 'id="objectiveFill"' in html
@@ -174,6 +175,14 @@ def test_scanner_game_html_preserves_play_loop_contract(tmp_path):
     assert "Energy is low: press 9 Cooldown before continuing." in html
     assert "Validator sweep is hot: press 9 Cooldown to avoid losing a gate." in html
     assert "Next: '+actionLabel()+'.'" in html
+    assert "function flashText(kind,msg)" in html
+    assert "TARGET LOCK" in html
+    assert "INVARIANT ARMED" in html
+    assert "WITNESS READY" in html
+    assert "REPLAY PASS" in html
+    assert "ATTEST RECEIPT" in html
+    assert "PROOF SEALED" in html
+    assert "GATE REJECTED" in html
     assert ".node{position:absolute;z-index:3;width:132px;height:82px" in html
     assert "return {left:50+Math.cos(a)*42,top:50+Math.sin(a)*41}" in html
     assert "n.style.left=`calc(${p.left}% - 66px)`" in html
