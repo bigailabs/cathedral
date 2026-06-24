@@ -30,6 +30,12 @@ publisher = [
 
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
+cathedral-game = "game.__main__:main"
+cathedral-arena = "game.arena.__main__:main"
+cathedral-arena-audit = "game.arena.audit:main"
+cathedral-arena-serve = "game.arena.serve:main"
+cathedral-arena-verify = "game.arena.bundle:main"
 
 [tool.setuptools.packages.find]
-include = ["scaffold*"]
+include = ["scaffold*", "game*"]
+exclude = ["game.tests*", "game.arena.tests*"]

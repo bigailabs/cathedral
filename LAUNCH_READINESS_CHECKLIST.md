@@ -150,6 +150,8 @@ Default launch mode:
   `CATHEDRAL_REFILL_INTERVAL_SECONDS=20`, `CATHEDRAL_REFILL_MAX_MINTS=4`,
   `CATHEDRAL_PREGEN_QUEUE_SIZE=8`, and
   `CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS=256`.
+- [ ] `CATHEDRAL_PREGEN_ENABLED` is left unset/on unless the publisher host
+  cannot spare background low-priority CNF generation.
 - [ ] `CATHEDRAL_REFILL_TARGET_T1=25` and `CATHEDRAL_REFILL_TARGET_T2=25` are
   configured.
 - [ ] `CATHEDRAL_PUBLISHER_SEED_SECRET` is set to a stable production secret
