@@ -95,6 +95,40 @@ def test_anticheat_feed_lists_all_cheaters(arena):
                         "no_decode_map", "fake_compute_profile", "misclassify"}
 
 
+def test_agent_method_describes_what_it_actually_did(arena):
+    """Every agent's trace records the METHOD it used — honest work for honest agents,
+    the specific divergence for each cheat — so the trace is honest training data and
+    the UI shows 'what it did', not just 'which gate caught it'."""
+    methods = {a.run.agent_id: a.run.method for a in arena.agents}
+    assert all(m for m in methods.values())              # never blank
+    # honest agents describe a real solve+reproduce
+    for a in arena.agents:
+        if _arch(a) == "honest":
+            assert "decoded its own" in a.run.method and "reproducing" in a.run.method
+    # each distinct cheat archetype has a distinct method, and it names its gate
+    gate_for = dict([
+        ("copier", "witness_verifies"), ("wrong_owner", "correct_owner"),
+        ("spam", "no_replay"), ("bad_encoder", "cnf_hash_matches"),
+        ("forge_trace", "agent_signature_valid"), ("bad_replay", "replay_succeeds"),
+        ("stale_nonce", "fresh_nonce"), ("no_decode_map", "decode_map_present"),
+        ("fake_attest", "attestation_valid"),
+        ("fake_compute_profile", "compute_profile_honest"),
+        ("misclassify", "hypothesis_aligned"),
+    ])
+    cheat_methods = {}
+    for a in arena.agents:
+        arch = _arch(a)
+        if arch in gate_for:
+            assert gate_for[arch] in a.run.method        # the method names the gate it trips
+            cheat_methods[arch] = a.run.method
+    assert len(set(cheat_methods.values())) == len(cheat_methods)   # all distinct
+
+
+def test_anticheat_feed_carries_the_method(arena):
+    for x in arena.anticheat_feed:
+        assert x.get("method") and x["rejected_by"] in x["method"]
+
+
 def test_ui_renders_with_all_panels(arena):
     from game.arena.ui import render
     html = render(arena)                          # must not raise
@@ -102,6 +136,23 @@ def test_ui_renders_with_all_panels(arena):
     assert "Hotkey-Stacking Guard" in html        # sybil panel
     assert "Solver Bench" in html and "Replay Theater" in html
     assert "Anti-Cheat Feed" in html
+
+
+def test_rules_of_the_arena_panel_is_data_driven(arena):
+    """The 60-second onboarding panel states the win rule and counts the REAL gate
+    set + anti-cheat taxonomy - counts pulled from the engine, so they can't drift."""
+    from game.arena.ui import render
+    from game.arena.models import GateOutcome
+    from game.arena import reports
+    html = render(arena)
+    assert "Rules of the Arena" in html
+    assert "reward = linear_metric x boolean_gate" in html
+    # the gate count + axis count in the panel come from the real sources
+    assert f"All {len(GateOutcome.GATES)} boolean gates must pass" in html
+    assert f"{len(reports.ANTICHEAT_AXES)} anti-cheat axes" in html
+    # the four steps are present (agent -> proof -> win -> why-cheating-fails)
+    for step in ("1 Your agent", "2 The proof", "3 How you win", "4 Why cheating fails"):
+        assert step in html
 
 
 def test_hotkey_stacking_collapsed(arena):

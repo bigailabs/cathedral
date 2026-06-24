@@ -15,6 +15,7 @@ from game.arena import audit as _audit
 from game.arena import attestation as _att
 from game.arena import bundle as _bundle
 from game.arena import mint as _mint
+from game.arena import replay as _replay
 from game.arena.engine import ArenaEngine
 from game.arena.ui import render
 
@@ -101,6 +102,64 @@ def test_real_audit_vault_spans_verdicts_and_families(game):
     if _mint.z3_available():
         assert "CRACKED" in verdicts and "HARDENED" in verdicts
         assert len({c["family"] for c in v}) >= 2        # multiple invariant families
+
+
+def test_offbox_receipts_become_real_audit_vault_cards():
+    """Fire #73: captured off-box receipts are first-class headline vault cards, and
+    they REPLACE their weaker minted twins (off-box = real remote hardware)."""
+    from game.arena.engine import _real_audit_vault
+    offbox = {"available": True, "cnf_satisfied": True, "host": "polarisserver",
+              "remote_wall_ms": 2.0, "rule_id": "B2-fee-silent-zero", "cnf_sha256": "abc"}
+    hardened = {"available": True, "cross_confirmed": True, "host": "polarisserver",
+                "remote_wall_ms": 39.0, "rule_id": "A4-fee-split-conservation", "cnf_sha256": "def"}
+    minted = {"sat_minted": [{"target_id": "subtensor-amm:first-fee-silent-zero@MINTED",
+                              "family": "B_bounds", "reproduced": True, "code_sha256": "x"}],
+              "hardened": [{"model": "subtensor-amm", "rule_id": "A4-fee-split-conservation",
+                            "family": "A_conservation", "invariant": "AMM fee conservation",
+                            "cdcl_unsat": True, "hardened": True, "cnf_sha256": "y"}]}
+    v = _real_audit_vault({}, {}, minted, offbox=offbox, offbox_hardened=hardened)
+    ob = {(c["verdict"], c["family"]) for c in v if c.get("offbox")}
+    assert ob == {("CRACKED", "B_bounds"), ("HARDENED", "A_conservation")}
+    bb = [c for c in v if c["verdict"] == "CRACKED" and c["family"] == "B_bounds"]
+    assert len(bb) == 1 and bb[0]["offbox"] is True           # minted silent-zero twin deduped
+    a4 = [c for c in v if c["verdict"] == "HARDENED" and c["family"] == "A_conservation"]
+    assert len(a4) == 1 and a4[0]["offbox"] is True           # minted AMM-A4 twin deduped
+
+
+def test_offbox_hardened_defers_to_a_stronger_real_cnf_proof():
+    """When a REAL pre-existing audit-CNF proof of A4 conservation exists, the off-box
+    minted-CNF card defers to it (the invariant is shown once, strongest evidence)."""
+    from game.arena.engine import _real_audit_vault
+    stitch_status = {"available": True, "real_cnf": "subtensor-amm__A4-fee-split", "host": "polarisserver",
+                     "remote_wall_ms": 40, "local_solver": "glucose3", "cross_solver_agree": True, "cnf_sha256": "z"}
+    hardened = {"available": True, "cross_confirmed": True, "host": "polarisserver",
+                "rule_id": "A4-fee-split-conservation", "remote_wall_ms": 39.0, "cnf_sha256": "def"}
+    v = _real_audit_vault(stitch_status, {}, {}, offbox_hardened=hardened)
+    a4 = [c for c in v if c["verdict"] == "HARDENED" and c["family"] == "A_conservation"]
+    assert len(a4) == 1 and a4[0].get("real_cnf") and not a4[0].get("offbox")
+
+
+def test_proof_coverage_is_honest_per_subnet(game):
+    """The operator console states, per subnet, whether the arena backs it with a REAL
+    reproducing exploit or it reasons into a HARDENED family (no exploit exists). The
+    counts are internally consistent and every row is classified — no silent gaps."""
+    pc = game.operator_console["proof_coverage"]
+    assert pc["total"] == len(pc["rows"]) == 17
+    # every row carries a real classification + a backing detail
+    kinds = {"real_exploit", "hardened_no_exploit", "fallback"}
+    for r in pc["rows"]:
+        assert r["backing"] in kinds and r["detail"] and r["family"]
+        if r["backing"] == "real_exploit":
+            from game.arena.engine import REPRODUCING_TARGETS
+            assert r["detail"] in REPRODUCING_TARGETS    # a genuine reproducing target id
+    # the three buckets partition the corpus exactly
+    assert pc["real_exploit"] + pc["hardened_no_exploit"] + pc["fallback"] == pc["total"]
+    assert pc["real_exploit"] >= 1                       # at least some real exploit backing
+    # hardened-classified subnets reasoned a family that is actually proven hardened
+    hard_fams = {h["family"] for h in _replay.MINTED_HARDENED}
+    for r in pc["rows"]:
+        if r["backing"] == "hardened_no_exploit":
+            assert r["family"] in hard_fams
 
 
 def test_full_visual_ui_renders(game):

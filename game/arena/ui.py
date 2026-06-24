@@ -65,6 +65,11 @@ th { color:#6b7a99; font-weight:500; font-size:10.5px; text-transform:uppercase;
 .heat { display:flex; gap:8px; flex-wrap:wrap; }
 .heat .h { background:#0f1626; border:1px solid #202c47; border-radius:8px; padding:6px 10px; font-size:11px; }
 .heat .h b { color:#7fd1e0; }
+.rules { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:6px 0 16px; }
+.rules .rcard { background:#0d1322; border:1px solid #202c47; border-left:3px solid #4aa6c0; border-radius:9px; padding:9px 11px; font-size:11px; line-height:1.45; color:#aeb9d4; }
+.rules .rh { font-weight:700; color:#7fd1e0; font-size:11.5px; margin-bottom:3px; }
+.rules .rcard b { color:#e8edf7; }
+@media(max-width:900px){ .rules { grid-template-columns:repeat(2,1fr); } }
 .console { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
 .console .box { background:#0f1626; border:1px solid #1d2740; border-radius:9px; padding:10px; }
 .console .box.real { border-color:#27613f; } .console .box.mock { border-color:#5a3a63; }
@@ -174,11 +179,12 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
         gr = g.provenance_grade
         prov = f'<span class="grade {_GRADE_CLS.get(gr,"gF")}">prov {_esc(gr)}</span>'
         work = ("verified proof" if ok else f"rejected · {_esc(g.first_failure())}")
+        meth = _esc(getattr(a.run, "method", ""))
         arows.append(
             f'<div class="agent"><span class="dot {"ok" if ok else "bad"}"></span>'
             f'<span class="id">{_esc(a.run.agent_id)}</span>'
             f'<span class="env {envcls}">{_esc(env)}</span>{prov}{att}'
-            f'<span class="work">→ sn{a.run.target_netuid} · {work}</span></div>')
+            f'<span class="work" title="{meth}">→ sn{a.run.target_netuid} · {work}</span></div>')
     agents = "".join(arows)
 
     # leaderboard (emissions + rank + provenance)
@@ -188,7 +194,10 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
         hk = a.run.miner_hotkey
         gr = a.gates.provenance_grade
         rank = _esc(r.ranks.get(hk, "Initiate"))
-        why = (f"breached sn{a.run.target_netuid} · prov {_esc(gr)}" if emit > 0
+        c = getattr(a, "credit", None)
+        metric = (f" · metric {c.tier_weight:.2f}×{c.speed:.2f}={c.contrib:.2f}"
+                  if c is not None and emit > 0 else "")
+        why = (f"breached sn{a.run.target_netuid} · prov {_esc(gr)}{metric}" if emit > 0
                else f"0 · {_esc(a.gates.first_failure())}")
         lrows.append(
             f'<tr class="lead"><td>{_esc(aid)}</td>'
@@ -264,8 +273,13 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
         for i, s in enumerate(r.season_board):
             streak = (f'<span class="streak">🔥{s["streak"]}</span>' if s["streak"] else
                       f'<span class="sub">best {s["best_streak"]}</span>')
+            rc = s.get("rank_change")
+            mover = ('<span class="sub" style="color:#7fd1e0">NEW</span>' if rc is None else
+                     f'<span class="pass">▲{rc}</span>' if rc > 0 else
+                     f'<span class="fail">▼{-rc}</span>' if rc < 0 else
+                     '<span class="sub">–</span>')
             srows.append(
-                f'<tr class="szrow"><td>{i+1}. {_esc(s["agent_id"])}</td>'
+                f'<tr class="szrow"><td>{i+1}. {_esc(s["agent_id"])} {mover}</td>'
                 f'<td style="width:150px"><div class="xpbar"><i style="width:{s["emissions"]/maxe*100:.0f}%"></i></div></td>'
                 f'<td style="color:#f5d06f">{s["emissions"]:.0f}τ</td>'
                 f'<td><span class="rankpill">{_esc(s["rank"])}</span></td>'
@@ -304,7 +318,8 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
                   f'<b>{_esc(x["agent"])}</b><span class="tag r">{_esc(x["archetype"])}</span>'
                   f'<span class="sub">{_esc(x["subnet"])}</span>'
                   f'<span class="fail">{_esc(x["rejected_by"])}</span>'
-                  f'<span class="sub">{_esc(", ".join(x["reasons"][:2]))}</span></div>')
+                  f'<span class="sub" title="{_esc(x.get("method",""))}">'
+                  f'{_esc(x.get("method") or ", ".join(x["reasons"][:2]))}</span></div>')
     anticheat = "".join(ac) or '<div class="sub">no rejected submissions</div>'
 
     # hotkey-stacking (Sybil) panel — coldkeys with >1 hotkey, collapsed vs naive
@@ -372,7 +387,9 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
             color = "#f59a9a" if cracked else "#5fe39a"
             bg = "#3a1a1a" if cracked else "#10331f"
             real_badge = ('<span class="tag" style="background:#2a2410;color:#f5d06f">REAL CNF</span>'
-                          if c.get("real_cnf") else '<span class="tag">z3-minted</span>')
+                          if c.get("real_cnf") else
+                          ('<span class="tag" style="background:#221a3a;color:#c9a8ff">OFF-BOX kissat@Stitch</span>'
+                           if c.get("offbox") else '<span class="tag">z3-minted</span>'))
             xb = (' <span class="pass">✓ cross-confirmed</span>' if c.get("cross_confirmed") else "")
             cards.append(
                 f'<div class="breach" style="border-left:3px solid {color}">'
@@ -470,6 +487,68 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
                     f'<b>{inv.get("total_py","?")}</b> harnesses across {inv.get("n_dirs","?")} dirs on '
                     f'{_esc(inv.get("host","?"))} <span class="sub">({_esc(inv.get("captured_at",""))})</span></div>')
 
+    ob = oc.get("offbox_stitch", {})
+    if ob.get("available"):
+        sat = ob.get("cnf_satisfied")
+        obtag = ('<span class="tag" style="background:#221a3a;color:#c9a8ff">OFF-BOX SOLVE ✓</span>'
+                 if sat else '<span class="tag r">off-box unverified</span>')
+        console += (f'<div class="sub" style="margin-top:4px">{obtag} '
+                    f'<b>{_esc(ob.get("solver","kissat"))}</b> solved a minted CNF on '
+                    f'{_esc(ob.get("host","?"))} ({ob.get("remote_wall_ms","?")}ms · '
+                    f'{ob.get("n_lits","?")} lits · {ob.get("round_trips","?")} round-trips) → '
+                    f'decoded LOCALLY <b>no z3</b> → assignment satisfies the pinned-invariant CNF '
+                    f'<span class="sub">({_esc(str(ob.get("captured_at","")))})</span></div>')
+
+    ob1 = oc.get("offbox_i1", {})
+    if ob1.get("available") and ob1.get("cnf_satisfied"):
+        console += (f'<div class="sub" style="margin-top:4px">'
+                    f'<span class="tag" style="background:#221a3a;color:#c9a8ff">OFF-BOX SOLVE ✓ (multi-rule)</span> '
+                    f'<b>{_esc(ob1.get("solver","kissat"))}</b> also solved '
+                    f'<b>{_esc(ob1.get("rule_id","I1-div-by-zero"))}</b> on {_esc(ob1.get("host","?"))} '
+                    f'({ob1.get("remote_wall_ms","?")}ms · {ob1.get("n_lits","?")} lits · '
+                    f'{ob1.get("round_trips","?")} round-trips) → off-box is not B2-only '
+                    f'<span class="sub">({_esc(str(ob1.get("captured_at","")))})</span></div>')
+
+    oh = oc.get("offbox_hardened", {})
+    if oh.get("available"):
+        cc = oh.get("cross_confirmed")
+        ohtag = ('<span class="tag" style="background:#10331f;color:#5fe39a">OFF-BOX HARDENED 🛡</span>'
+                 if cc else '<span class="tag r">hardening unconfirmed</span>')
+        console += (f'<div class="sub" style="margin-top:4px">{ohtag} '
+                    f'<b>{_esc(oh.get("solver","kissat"))}</b> confirmed <b>{_esc(oh.get("rule_id","?"))}</b> '
+                    f'UNSAT on {_esc(oh.get("host","?"))} ({oh.get("remote_wall_ms","?")}ms · '
+                    f'{oh.get("round_trips","?")} round-trips) + local CDCL UNSAT → '
+                    f'invariant proven HARDENED off-box (no exploit exists) '
+                    f'<span class="sub">({_esc(str(oh.get("captured_at","")))})</span></div>')
+
+    pc = oc.get("proof_coverage", {})
+    if pc.get("rows"):
+        chips = []
+        for cov in pc["rows"]:
+            b = cov["backing"]
+            col = ("#5fe39a" if b == "real_exploit" else
+                   "#7fd1e0" if b == "hardened_no_exploit" else "#f0b75f")
+            mark = ("⚔" if b == "real_exploit" else "🛡" if b == "hardened_no_exploit" else "·")
+            chips.append(f'<span class="h" title="{_esc(cov["family"])} · {_esc(str(cov["detail"]))}">'
+                         f'<span style="color:{col}">{mark}</span> {_esc(str(cov["netuid"]))} '
+                         f'{_esc(cov["name"][:14])}</span>')
+        console += (
+            f'<div class="sub" style="margin-top:4px">Per-subnet proof coverage: '
+            f'<b class="pass">{pc["real_exploit"]}</b> backed by a REAL reproducing exploit ⚔ · '
+            f'<b style="color:#7fd1e0">{pc["hardened_no_exploit"]}</b> proven HARDENED 🛡 '
+            f'(no exploit exists) · {pc["fallback"]} fallback of {pc["total"]} subnets</div>'
+            f'<div class="heat" style="margin-top:6px">{"".join(chips)}</div>')
+
+    rb = oc.get("real_solver_bench", []) or []
+    if rb:
+        champ = rb[0]
+        names = " · ".join(f'{_esc(r["name"])} {r["par2_ms"]:.1f}ms'
+                           + (" 👑" if r.get("crown") else "") for r in rb)
+        console += (f'<div class="sub" style="margin-top:4px">'
+                    f'<span class="tag" style="background:#10331f;color:#5fe39a">REAL SOLVER RACE</span> '
+                    f'two distinct real solvers on the same certified CNF batch (PAR-2, lower=better): '
+                    f'{names} — crown <b>{_esc(champ["name"])}</b></div>')
+
     ed = oc.get("external_decode", {})
     if ed.get("available"):
         etag = ('<span class="tag" style="background:#221a3a;color:#c9a8ff">OFF-BOX DECODE ✓</span>'
@@ -506,6 +585,29 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
 
     sv = r.signed_vector
 
+    # "Rules of the Arena" - the 60-second explainer, DATA-DRIVEN from the real gate
+    # set + anti-cheat taxonomy (so the counts can't drift from the engine).
+    from .models import GateOutcome
+    from . import reports
+    n_gates = len(GateOutcome.GATES)
+    n_axes = len(reports.ANTICHEAT_AXES)
+    rules_html = (
+        '<div class="rules">'
+        '<div class="rcard"><div class="rh">1 Your agent</div>operates on an attested / '
+        'Stitch / local / sandbox environment and attacks an assigned subnet target, hunting a '
+        'real invariant violation.</div>'
+        '<div class="rcard"><div class="rh">2 The proof</div>a witness + trace + CNF + replay'
+        ' (+ a TEE attestation when the tier requires it). Prose and severity never score - only '
+        'a replayable witness does.</div>'
+        f'<div class="rcard"><div class="rh">3 How you win</div><b>reward = linear_metric x '
+        f'boolean_gate</b>. All {n_gates} boolean gates must pass; the linear metric (verified '
+        'replays, solver PAR-2, attested runs) then sets your weight.</div>'
+        f'<div class="rcard"><div class="rh">4 Why cheating fails</div>{n_axes} anti-cheat axes, '
+        'each bound to a gate - copied witness, wrong owner, stale replay, fake attestation, fake '
+        'compute, spam, invalid CNF, missing decode map, bad replay harness, hotkey stacking, '
+        'trace forgery, mislabeled finding -> reward x0.</div>'
+        '</div>')
+
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="{refresh_secs}">
 <title>Cathedral Arena — {_esc(r.season)} R{r.round_no}</title><style>{_CSS}</style></head>
@@ -521,6 +623,9 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
   <span class="pill">breaches <b class="pass">{n_pass}</b></span>
   <span class="pill">rejected <b class="fail">{n_rej}</b></span>
 </div>
+
+<h2>Rules of the Arena <span class="sub">- understand it in 60 seconds</span></h2>
+{rules_html}
 
 <h2>Attack Map — 17 subnet targets</h2>
 <div class="sub" style="margin-bottom:10px">status: <span class="pass">●</span> verified proof · <span class="fail">●</span> rejected attempt · ○ untouched</div>

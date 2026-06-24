@@ -35,6 +35,8 @@ def test_console_scripts_are_declared_and_importable():
         "cathedral-arena-audit": "game.arena.audit:main",
         "cathedral-arena-serve": "game.arena.serve:main",
         "cathedral-arena-verify": "game.arena.bundle:main",
+        "cathedral-arena-playthrough": "game.arena.playthrough:main",
+        "cathedral-arena-round-verify": "game.arena.verify:main",
     }
     for name, target in expected.items():
         assert scripts[name] == target

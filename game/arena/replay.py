@@ -248,6 +248,9 @@ _HARDENED_RULES = [
      "root TAO split is exact: tao_s0 + remainder == tao_total (no rounding leak)"),
     ("F2-payout-cap-asymmetry", "subtensor-root-reborn", 8, "F_emission",
      "root partial redeem leaves no stranded holders (E>0 while P'>0)"),
+    ("A1-deposit-no-dilution", "subtensor-root-reborn", 8, "A_conservation",
+     "root deposit cannot dilute existing holders: E'/P' >= E/P "
+     "(floor of shares makes the dilution a direct contradiction)"),
 ]
 
 _HARDENED_MANIFEST = Path(__file__).resolve().parent / "out" / "hardened_manifest.json"

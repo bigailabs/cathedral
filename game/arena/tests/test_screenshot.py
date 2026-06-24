@@ -62,9 +62,27 @@ def test_screenshot_url_cmd_uses_virtual_time_for_js_pages():
     assert "http://127.0.0.1:8800/game" in cmd
 
 
+def test_scanner_game_url_prefers_wsl_ip(monkeypatch):
+    class R:
+        returncode = 0
+        stdout = "172.24.204.42\n"
+
+    monkeypatch.setattr(S.subprocess, "run", lambda *a, **kw: R())
+    assert S.scanner_game_url(8790) == "http://172.24.204.42:8790/game"
+
+
 def test_capture_url_handles_missing_edge_gracefully():
     res = S.capture_url("http://127.0.0.1:1/game", S.OUT / "x.png", edge="/no/such/edge")
     assert res["ok"] is False and res["reason"] == "edge_not_found"
+
+
+def test_scanner_game_screenshot_rejects_tiny_error_pages(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "capture_url", lambda *a, **kw: {
+        "ok": True, "png": str(tmp_path / "error.png"), "bytes": 44_093,
+    })
+    res = S.shoot_scanner_game(tmp_path / "scanner_game.png", edge="edge.exe")
+    assert res["ok"] is False
+    assert res["reason"] == "scanner_game_screenshot_too_small_or_error_page"
 
 
 def test_live_scanner_game_screenshot_if_enabled():

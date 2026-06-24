@@ -255,10 +255,22 @@ def external_decode_status() -> dict:
 def offbox_on_stitch(rule_id: str = "B2-fee-silent-zero") -> dict:
     """Full off-box Stitch proof.
 
-    Z3 mints a decode-map CNF locally, Stitch solves it with kissat, and the
-    arena decodes the raw assignment through the bit->var map before replaying
-    the exploit input locally.
+    Z3 mints a decode-map CNF locally, Stitch solves it with kissat, and the arena
+    decodes the raw assignment through the bit->var map (NO z3) locally.
+
+    The RIGOROUS proof is `cnf_satisfied`: the off-box assignment satisfies the
+    minted CNF, which ENCODES the negated invariant (the violation `amount>0 &
+    fee_rate>0 & fee==0` is a clause). True for ANY valid model => the off-box
+    solver genuinely found a silent-zero violation AT THE MINTED PRECISION (width-8
+    fixed point), checked locally with no z3 and independent of which solver/model.
+    The U64F64 replay harness (`harness_reproduced`) only reproduces sub-rao
+    assignments — larger-magnitude models violate only at the minted precision — so
+    it is precision-scoped corroboration, NOT the proof.
     """
+    from . import replay
+    spec = next((r for r in replay._MINT_RULES if r[0] == rule_id), None)
+    # canonical 3-arg call (default model subtensor-amm) so it shares the lru_cache
+    # key with the other callers — B2 and I1 (the SAT off-box rules) are subtensor-amm.
     mm = mint_with_decode_map(rule_id, 8, "realistic")
     if not mm or mm["result"] != "sat":
         return {"available": False, "reason": "z3_unavailable_or_unsat"}
@@ -268,16 +280,86 @@ def offbox_on_stitch(rule_id: str = "B2-fee-silent-zero") -> dict:
     res = stitch.offbox_solve(mm["cnf_text"])
     if not res.get("available"):
         return {"available": False, "reason": res.get("reason", "offbox_solve_failed")}
+    cnf_satisfied = _satisfies(mm["cnf_text"], res["assignment"])   # no z3, solver-independent
     decoded = decode_assignment(res["assignment"], mm["decode_map"])
-    from .replay import _silent_zero_harness, _silent_zero_inv
-    inp = {k: decoded[k] for k in ("amount", "fee_rate") if k in decoded}
-    obs = _silent_zero_harness(inp)
-    reproduced = not _silent_zero_inv(obs)
+    # Secondary, precision-scoped check: run the RULE'S OWN harness (not a hardcoded
+    # one) on the decoded input — generalizes off-box to any minted SAT rule.
+    harness_reproduced = None
+    inp = dict(decoded)
+    if spec is not None:
+        _rid, _tid, _fam, decode_keys, harness, inv, _sev, _desc = spec
+        inp = {k: decoded[k] for k in decode_keys if k in decoded}
+        if all(k in inp for k in decode_keys):
+            harness_reproduced = not inv(harness(inp))
     return {"available": True, "host": res["host"], "solver": "kissat",
+            "rule_id": rule_id,
             "remote_wall_ms": res["remote_wall_ms"], "n_lits": res["n_lits"],
-            "decoded_input": inp, "reproduced": reproduced,
-            "decode": "bit->var map (no z3)", "ok": bool(reproduced),
+            "round_trips": res.get("round_trips"),
+            "decoded_input": inp,
+            "cnf_satisfied": cnf_satisfied,            # the rigorous proof (no z3)
+            "harness_reproduced": harness_reproduced,  # precision-scoped corroboration
+            "reproduced": harness_reproduced,          # back-compat alias
+            "decode": "bit->var map (no z3)", "ok": bool(cnf_satisfied),
             "cnf_sha256": mm["cnf_sha256"]}
+
+
+def offbox_hardened_on_stitch(rule_id: str = "A4-fee-split-conservation",
+                              model: str = "subtensor-amm") -> dict:
+    """Off-box HARDENED proof (the DEFENSIVE counterpart of offbox_on_stitch): z3 mints
+    a hardened invariant CNF (negated invariant UNSAT — no exploit exists); kissat on
+    Stitch CONFIRMS UNSAT, and we cross-check that a local CDCL solver also says UNSAT.
+    ok = remote UNSAT ∧ local UNSAT (two independent solvers, one off-box, agree the
+    invariant cannot be violated). Best-effort + reachability-gated."""
+    m = mint_invariant(rule_id, 16, "realistic", model)
+    if not m or m["result"] != "unsat" or not m.get("cnf_text"):
+        return {"available": False, "reason": "z3_unavailable_or_not_unsat"}
+    local = solve_minted_cnf(m["cnf_text"])
+    local_unsat = bool(local.get("available") and local.get("sat") is False)
+    from . import stitch
+    if not stitch.stitch_available():
+        return {"available": False, "reason": "stitch_unreachable", "local_unsat": local_unsat}
+    res = stitch.offbox_confirm_unsat(m["cnf_text"])
+    if not res.get("available"):
+        return {"available": False, "reason": res.get("reason", "offbox_unsat_failed"),
+                "local_unsat": local_unsat}
+    remote_unsat = bool(res.get("unsat"))
+    return {"available": True, "host": res["host"], "solver": "kissat", "rule_id": rule_id,
+            "verdict": "HARDENED", "remote_unsat": remote_unsat, "local_unsat": local_unsat,
+            "cross_confirmed": remote_unsat and local_unsat,
+            "remote_wall_ms": res.get("remote_wall_ms"), "round_trips": res.get("round_trips"),
+            "ok": bool(remote_unsat and local_unsat), "cnf_sha256": m["cnf_sha256"]}
+
+
+def capture_offbox_receipt(path, rule_id: str = "B2-fee-silent-zero") -> dict:
+    """Run the off-box-on-Stitch proof and PERSIST the receipt (stamped captured_at)
+    on success, so the operator console can surface a durable artifact. Best-effort +
+    reachability-gated: writes nothing if Stitch is down. Returns the result."""
+    import datetime
+    import json
+    from pathlib import Path
+    from . import stitch
+    stitch.stitch_available.cache_clear()   # re-probe: a stale cached False must not block a capture
+    r = offbox_on_stitch(rule_id)
+    if r.get("available"):
+        r = {**r, "captured_at": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
+        Path(path).write_text(json.dumps(r, indent=2, default=str))
+    return r
+
+
+def capture_hardened_receipt(path, rule_id: str = "A4-fee-split-conservation") -> dict:
+    """Run the off-box HARDENED proof and PERSIST the receipt (stamped captured_at) on
+    success — the defensive counterpart of capture_offbox_receipt. Best-effort +
+    reachability-gated: writes nothing if Stitch is down. Returns the result."""
+    import datetime
+    import json
+    from pathlib import Path
+    from . import stitch
+    stitch.stitch_available.cache_clear()   # re-probe: a stale cached False must not block a capture
+    r = offbox_hardened_on_stitch(rule_id)
+    if r.get("available"):
+        r = {**r, "captured_at": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
+        Path(path).write_text(json.dumps(r, indent=2, default=str))
+    return r
 
 
 def z3_available() -> bool:

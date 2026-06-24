@@ -22,6 +22,7 @@ class AgentSeason:
     rounds_verified: int = 0
     streak: int = 0          # consecutive verified rounds (resets on a rejected round)
     best_streak: int = 0
+    last_position: int = -1  # leaderboard index BEFORE the most recent round (-1 = new)
 
     @property
     def rank(self) -> str:
@@ -57,6 +58,9 @@ class SeasonState:
         """Fold one round's ArenaResult into the cumulative season."""
         self.rounds = max(self.rounds, result.round_no)
         self.season = result.season
+        # snapshot each agent's standings position BEFORE this round, so the board can
+        # show round-over-round movement (climbed / fell / held / new).
+        prev_pos = {s.hotkey: i for i, s in enumerate(self.leaderboard())}
         # cumulative subnet conquest: a target broken once stays conquered.
         for t in result.targets:
             ts = self.targets.get(t.netuid) or TargetSeason(t.netuid, t.name)
@@ -81,6 +85,7 @@ class SeasonState:
                 st.best_streak = max(st.best_streak, st.streak)
             else:
                 st.streak = 0
+            st.last_position = prev_pos.get(hk, -1)   # where it stood before this round
             self.agents[hk] = st
 
     def leaderboard(self) -> list[AgentSeason]:
@@ -109,4 +114,9 @@ class SeasonState:
         for n, t in d.get("targets", {}).items():
             st.targets[int(n)] = TargetSeason(**{k: t[k] for k in t
                                                  if k in TargetSeason.__annotations__})
+        # Older local CLI season runs could preserve cumulative agent counters
+        # while replaying round numbers from 1. Treat the higher counter as the
+        # authoritative cumulative round count when loading those local ledgers.
+        if st.agents:
+            st.rounds = max(st.rounds, max(a.rounds_played for a in st.agents.values()))
         return st
