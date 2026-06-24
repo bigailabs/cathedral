@@ -1161,17 +1161,20 @@ def build_app(
         return _serve_board_snapshot(request)
 
     @app.get("/v1/synthetic-boolean/current-challenge")
-    def current_challenge(tier: int | None = Query(None), difficulty: str | None = Query(None)):
+    async def current_challenge(tier: int | None = Query(None), difficulty: str | None = Query(None)):
         if tier is not None and tier < 0:
             raise HTTPException(400, "tier must be >= 0")
-        actives = _active_challenges(tier)
+        payload, _etag = board_cache.get()
+        actives = list(payload.get("items") or [])
+        if tier is not None:
+            actives = [r for r in actives if int(r.get("tier") or 0) == tier]
         if difficulty is not None:
-            labeled = [r for r in actives if r["difficulty_label"] == difficulty]
+            labeled = [r for r in actives if r.get("difficulty_label") == difficulty]
             if labeled:
                 actives = labeled
         if not actives:
             raise HTTPException(404, "no_active_challenge")
-        return _challenge_public(actives[0])
+        return actives[0]
 
     @app.get("/v1/synthetic-boolean/active-cnf")
     def active_cnf(
