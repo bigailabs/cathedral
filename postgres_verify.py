@@ -86,6 +86,12 @@ def main() -> int:
 
     store = Store(dsn)
     ck("backend selected = postgres", store.backend == "postgres")
+    with store.advisory_lock("postgres_verify_lock") as first_lock:
+        with store.advisory_lock("postgres_verify_lock") as competing_lock:
+            ck("postgres advisory lock excludes competing holder",
+               first_lock is True and competing_lock is False)
+    with store.advisory_lock("postgres_verify_lock") as reacquired_lock:
+        ck("postgres advisory lock releases after context", reacquired_lock is True)
 
     # ---- migrations idempotent --------------------------------------------
     store.migrate()  # second run must be a no-op (already applied)

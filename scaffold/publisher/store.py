@@ -40,6 +40,8 @@ since_id) ordering — the exact semantics released validators use.
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import re
@@ -864,6 +866,10 @@ class Store:
         self._pool = psycopg2.pool.ThreadedConnectionPool(
             minconn, maxconn, dsn, cursor_factory=psycopg2.extras.DictCursor,
             connect_timeout=int(os.environ.get("CATHEDRAL_PG_CONNECT_TIMEOUT", "10")),
+            keepalives=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES", "1")),
+            keepalives_idle=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES_IDLE", "30")),
+            keepalives_interval=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES_INTERVAL", "10")),
+            keepalives_count=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES_COUNT", "3")),
         )
 
     def migrate(self) -> None:
@@ -956,6 +962,44 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    @contextlib.contextmanager
+    def advisory_lock(self, name: str):
+        """Best-effort cross-process lock for singleton background jobs.
+
+        SQLite runs in one process and already serializes writes. Postgres uses a
+        session-level advisory lock held on a pooled connection for the context.
+        The caller gets True only on the process that owns the lock.
+        """
+        if self.backend != "postgres":
+            yield True
+            return
+
+        key = int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:8], "big")
+        key &= (1 << 63) - 1
+        raw = self._pool.getconn()
+        acquired = False
+        try:
+            cur = raw.cursor()
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+            acquired = bool(cur.fetchone()[0])
+            raw.commit()
+            yield acquired
+        except Exception:
+            raw.rollback()
+            raise
+        finally:
+            try:
+                if acquired:
+                    try:
+                        cur = raw.cursor()
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+                        raw.commit()
+                    except Exception:
+                        raw.rollback()
+                        raise
+            finally:
+                self._pool.putconn(raw)
 
     def close(self) -> None:
         if self.backend == "postgres":

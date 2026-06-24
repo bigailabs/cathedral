@@ -159,6 +159,25 @@ def _parse_iso(ts: str) -> float | None:
         return None
 
 
+_SERVICE_ROLES = {"all", "read", "submit", "worker"}
+
+
+def _service_role_from_env() -> str:
+    raw = os.environ.get("CATHEDRAL_SERVICE_ROLE", "all").strip().lower() or "all"
+    if raw not in _SERVICE_ROLES:
+        print(f"[runtime] invalid CATHEDRAL_SERVICE_ROLE={raw!r}; using all")
+        return "all"
+    return raw
+
+
+def _role_runs_worker(role: str) -> bool:
+    return role in {"all", "worker"}
+
+
+def _role_runs_read_background(role: str) -> bool:
+    return role in {"all", "read"}
+
+
 def build_app(
     *,
     database_path: str = ":memory:",
@@ -169,6 +188,7 @@ def build_app(
     pub_hex = rows.public_key_hex(key_hex)
     jwks_doc = rows.jwks_from_key(key_hex)
     store = Store(database_path)
+    service_role = _service_role_from_env()
     verifier = default_verifier()
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
@@ -353,7 +373,9 @@ def build_app(
         from . import refill
 
         status = refill.generator_config()
-        status["task_running"] = bool(getattr(app.state, "refill_task", None))
+        task = getattr(app.state, "refill_task", None)
+        status["task_running"] = bool(task is not None and not task.done())
+        status["service_role"] = service_role
         return status
 
     def _build_board() -> dict[str, Any]:
@@ -384,7 +406,8 @@ def build_app(
         return JSONResponse(payload, headers=headers)
 
     top_cache = top_cache_mod.TopCache()
-    top_cache.start(store)
+    if _role_runs_read_background(service_role):
+        top_cache.start(store)
     top_cache_mod.register(top_cache)
     recent_cache = _SoftTtlCache(
         "recent-leaderboard",
@@ -568,6 +591,7 @@ def build_app(
     app.state.pm_summary_cache = pm_summary_cache
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
+    app.state.service_role = service_role
     app.state.refill_task = None
     app.state.seed_task = None
     app.state.arena_eval_task = None
@@ -596,15 +620,42 @@ def build_app(
         except Exception as exc:
             print(f"[runtime] threadpool_config_failed error={exc!r}")
 
+    async def _run_singleton_background(label: str, lock_name: str, coro_factory):
+        import asyncio
+
+        retry_secs = max(1, int(os.environ.get("CATHEDRAL_SINGLETON_RETRY_SECS", "15")))
+        while True:
+            try:
+                with store.advisory_lock(lock_name) as acquired:
+                    if not acquired:
+                        print(f"[{label}] singleton_lock_held_elsewhere")
+                    else:
+                        print(f"[{label}] singleton_lock_acquired")
+                        await coro_factory()
+                        print(f"[{label}] singleton_task_exited")
+            except asyncio.CancelledError:
+                print(f"[{label}] singleton_task_cancelled")
+                raise
+            except Exception as exc:
+                print(f"[{label}] singleton_task_error error={exc!r}")
+            await asyncio.sleep(retry_secs)
+
     # ---- G2: challenge refill loop (env-gated) ----------------------------
     @app.on_event("startup")
     async def _start_refill():
         from . import refill
         if refill.refill_enabled():
+            if not _role_runs_worker(service_role):
+                print(f"[refill] skipped service_role={service_role}")
+                return
             import asyncio
             loop_log = lambda evt, **kw: print(f"[refill] {evt} {kw}")  # noqa: E731
             app.state.refill_task = asyncio.create_task(
-                refill.refill_loop(store, log=loop_log))
+                _run_singleton_background(
+                    "refill",
+                    "cathedral:publisher:refill",
+                    lambda: refill.refill_loop(store, log=loop_log),
+                ))
 
     # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
     # Periodically scores registered pending solvers and, on a record-fall,
@@ -618,6 +669,9 @@ def build_app(
         from . import arena_eval
         if not arena_eval.arena_eval_enabled():
             return
+        if not _role_runs_worker(service_role):
+            print(f"[arena] skipped service_role={service_role}")
+            return
         import asyncio
         salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
 
@@ -628,10 +682,14 @@ def build_app(
             return None
 
         app.state.arena_eval_task = asyncio.create_task(
-            arena_eval.arena_eval_loop(
-                store, app.state.arena_lane,
-                adapter_for=_prod_adapter_for, private_key_hex=key_hex,
-                epoch_salt=salt, log=lambda evt, **kw: print(f"[arena] {evt} {kw}")))
+            _run_singleton_background(
+                "arena",
+                "cathedral:publisher:arena_eval",
+                lambda: arena_eval.arena_eval_loop(
+                    store, app.state.arena_lane,
+                    adapter_for=_prod_adapter_for, private_key_hex=key_hex,
+                    epoch_salt=salt, log=lambda evt, **kw: print(f"[arena] {evt} {kw}")),
+            ))
 
     # ---- Lane I: payout loop (env-gated, TASK 2) --------------------------
     # Settles breaker instances on pay-on-disagreement-proven-hardness. Default
@@ -643,17 +701,24 @@ def build_app(
         from . import arena_payout
         if not arena_payout.arena_payout_enabled():
             return
+        if not _role_runs_worker(service_role):
+            print(f"[lane-i] skipped service_role={service_role}")
+            return
         import asyncio
         salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
 
         app.state.arena_payout_task = asyncio.create_task(
-            arena_payout.arena_payout_loop(
-                store, app.state.arena_lane,
-                round_source=lambda: int(os.environ.get("CATHEDRAL_ARENA_ROUND", "0")),
-                champion_provider=lambda: None,   # no real runner wired yet
-                closers_provider=lambda: [],
-                private_key_hex=key_hex, epoch_salt=salt,
-                log=lambda evt, **kw: print(f"[lane-i] {evt} {kw}")))
+            _run_singleton_background(
+                "lane-i",
+                "cathedral:publisher:arena_payout",
+                lambda: arena_payout.arena_payout_loop(
+                    store, app.state.arena_lane,
+                    round_source=lambda: int(os.environ.get("CATHEDRAL_ARENA_ROUND", "0")),
+                    champion_provider=lambda: None,   # no real runner wired yet
+                    closers_provider=lambda: [],
+                    private_key_hex=key_hex, epoch_salt=salt,
+                    log=lambda evt, **kw: print(f"[lane-i] {evt} {kw}")),
+            ))
 
     # ---- G1b: self-seed from the live feed (env-gated) --------------------
     # Runs the backfill INSIDE the app process — survives as long as the
@@ -663,6 +728,9 @@ def build_app(
     @app.on_event("startup")
     async def _start_seed():
         if os.environ.get("CATHEDRAL_SEED_ON_BOOT", "").lower() not in ("1", "true", "yes"):
+            return
+        if not _role_runs_worker(service_role):
+            print(f"[seed] skipped service_role={service_role}")
             return
         import asyncio
         from . import seed_live
@@ -688,16 +756,25 @@ def build_app(
                     print(f"[seed] pass error (will retry): {e!r}")
                 await asyncio.sleep(int(os.environ.get("CATHEDRAL_SEED_TOPUP_SECS", "120")))
 
-        app.state.seed_task = asyncio.create_task(_seed_runner())
+        app.state.seed_task = asyncio.create_task(
+            _run_singleton_background(
+                "seed",
+                "cathedral:publisher:seed",
+                _seed_runner,
+            ))
 
     @app.on_event("shutdown")
     async def _stop_refill():
+        import asyncio
+
         for attr in ("refill_task", "seed_task", "arena_eval_task", "arena_payout_task"):
             task = getattr(app.state, attr, None)
             if task is not None:
                 task.cancel()
                 try:
                     await task
+                except asyncio.CancelledError:
+                    pass
                 except Exception:
                     pass
         if hasattr(app.state, "top_cache"):
@@ -1216,10 +1293,37 @@ def build_app(
     def jwks():
         return JSONResponse(jwks_doc)
 
+    def _health_base(kind: str, db: str) -> dict[str, Any]:
+        return {
+            "status": "ok" if db != "error" else "error",
+            "kind": kind,
+            "service_role": service_role,
+            "db": db,
+            "hippius": "ok",
+            "polaris": "ok",
+            "signing_key": "loaded",
+            "sr25519_backend": getattr(verifier, "backend", "bittensor"),
+        }
+
+    @app.get("/health/live")
+    async def health_live():
+        return _health_base("live", "not_checked")
+
+    @app.get("/health/ready")
+    async def health_ready():
+        try:
+            store.query("SELECT 1 AS ok")
+            return _health_base("ready", "ok")
+        except Exception as exc:
+            payload = _health_base("ready", "error")
+            payload["error"] = type(exc).__name__
+            return JSONResponse(payload, status_code=503)
+
     @app.get("/health")
     async def health():
-        return {"status": "ok", "db": "ok", "hippius": "ok", "polaris": "ok",
-                "signing_key": "loaded", "sr25519_backend": getattr(verifier, "backend", "bittensor")}
+        payload = _health_base("live", "not_checked")
+        payload["ready_path"] = "/health/ready"
+        return payload
 
     # ---- M2: Lane A read --------------------------------------------------
     @app.get("/v1/synthetic-boolean/active-challenges")

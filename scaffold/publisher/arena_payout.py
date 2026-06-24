@@ -195,9 +195,12 @@ def settle_instance(
         private_key_hex=private_key_hex)
 
     def _pay(conn):
-        conn.execute(
+        cur = conn.execute(
             "UPDATE arena_instances SET status='paid', last_paid_round=?, paid_at_iso=? "
-            "WHERE instance_id=?", (current_round, ran_at, iid))
+            "WHERE instance_id=? AND (last_paid_round IS NULL OR last_paid_round <> ?)",
+            (current_round, ran_at, iid, current_round))
+        if int(cur.rowcount or 0) != 1:
+            return False
         for r in emitted:
             conn.execute(
                 "INSERT OR IGNORE INTO eval_runs "
@@ -205,7 +208,10 @@ def settle_instance(
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
                  r["miner_hotkey"], r["task_type"], json.dumps(r)))
-    store.write(_pay)
+        return True
+    paid = store.write(_pay)
+    if not paid:
+        return {"instance_id": iid, "paid": False, "reason": "already_paid_this_round"}
     log("lane_i_paid", instance=iid[:12], owner=instance["owner_hotkey"][:8],
         price=price, closer=best_closer.commitment_id[:12], round=current_round)
     return {"instance_id": iid, "paid": True, "price": price,

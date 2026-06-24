@@ -6,15 +6,15 @@ builder = "dockerfile"
 dockerfilePath = "deploy/Dockerfile"
 
 [deploy]
-# Health gate: Railway holds traffic on the new deploy until /health is 200, so
+# Health gate: Railway holds traffic on the new deploy until /health/live is 200, so
 # the same-URL swap only cuts over once the thin publisher is actually serving.
-healthcheckPath = "/health"
+healthcheckPath = "/health/live"
 healthcheckTimeout = 180
 
 # Roll back automatically if the new deploy never goes healthy.
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 
-# Single instance: the SQLite store uses one write lock (winner-take-all atomic
-# claim). Do NOT scale replicas without moving to a shared DB first.
-numReplicas = 1
+# Production uses Postgres via DATABASE_URL. Multiple read/submit replicas are
+# allowed, but durable background jobs must stay role-gated and advisory-locked.
+numReplicas = 2

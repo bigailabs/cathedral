@@ -182,6 +182,19 @@ with TestClient(app) as client:
     # health + jwks shape
     h = client.get("/health").json()
     ck("/health reports ok", h["status"] == "ok")
+    ck("/health is live-fast and points to readiness",
+       h["kind"] == "live" and h["db"] == "not_checked"
+       and h["ready_path"] == "/health/ready")
+    h_live = client.get("/health/live").json()
+    ck("/health/live reports live without DB dependency",
+       h_live["status"] == "ok" and h_live["kind"] == "live"
+       and h_live["db"] == "not_checked")
+    h_ready = client.get("/health/ready").json()
+    ck("/health/ready checks the backing store",
+       h_ready["status"] == "ok" and h_ready["kind"] == "ready"
+       and h_ready["db"] == "ok")
+    with store.advisory_lock("publisher_verify_sqlite") as _got_lock:
+        ck("sqlite advisory lock path allows singleton tasks", _got_lock is True)
     j = client.get("/.well-known/cathedral-jwks.json").json()
     ck("/.well-known jwks served with eval-signing key",
        any(k["kid"] == "cathedral-eval-signing" for k in j["keys"]))
@@ -216,6 +229,27 @@ with TestClient(app) as client:
         headers={"If-None-Match": bc.headers.get("etag", "")},
     )
     ck("challenge-broadcast supports ETag 304", bc_304.status_code == 304)
+
+    old_role_env = {
+        "CATHEDRAL_SERVICE_ROLE": os.environ.get("CATHEDRAL_SERVICE_ROLE"),
+        "CATHEDRAL_REFILL_ENABLED": os.environ.get("CATHEDRAL_REFILL_ENABLED"),
+    }
+    try:
+        os.environ["CATHEDRAL_SERVICE_ROLE"] = "read"
+        os.environ["CATHEDRAL_REFILL_ENABLED"] = "true"
+        role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
+                             submit_min_interval_secs=0)
+        with TestClient(role_app) as role_client:
+            role_health = role_client.get("/health/live").json()
+            ck("service role appears in health", role_health["service_role"] == "read")
+            ck("read role does not start the refill worker",
+               role_app.state.service_role == "read" and role_app.state.refill_task is None)
+    finally:
+        for _key, _value in old_role_env.items():
+            if _value is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _value
 
     from bittensor_wallet import Keypair  # noqa
     miner = Keypair.create_from_uri("//E2EMiner")
@@ -1179,8 +1213,9 @@ _li_store.write(_ins_inst)
 
 # HAPPY PATH: closer registered at round 1 (≤ 5−3=2, quarantine-clear), broadly
 # competitive (solves the whole batch). Champion times out -> instance pays.
+_brk1_stale_snapshot = dict(_li_store.query("SELECT * FROM arena_instances WHERE instance_id='brk-1'")[0])
 v = arena_payout.settle_instance(
-    _li_store, _li_lane, dict(_li_store.query("SELECT * FROM arena_instances WHERE instance_id='brk-1'")[0]),
+    _li_store, _li_lane, _brk1_stale_snapshot,
     champion_spec=_champ_spec, champion_adapter=_champ_adapter,
     closers=[(_closer_spec, _closer_adapter, 1)], current_round=6,
     private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1")
@@ -1193,6 +1228,15 @@ _li_rows = [r for r in _li_feed if r.get("miner_hotkey") == "5InstanceOwner"]
 ck("Lane I emitted v6 + v5compat rows to the instance owner", len(_li_rows) == 2)
 ck("every Lane I payout row verifies under the loaded key",
    len(_li_rows) == 2 and all(wire.verify_row(r, pub_hex) for r in _li_rows))
+v_again = arena_payout.settle_instance(
+    _li_store, _li_lane, _brk1_stale_snapshot,
+    champion_spec=_champ_spec, champion_adapter=_champ_adapter,
+    closers=[(_closer_spec, _closer_adapter, 1)], current_round=6,
+    private_key_hex=key_hex, epoch_salt="epoch_20260610:synthetic_boolean_v1")
+ck("Lane I same-round payout is atomic/idempotent even with stale input",
+   v_again["paid"] is False and v_again["reason"] == "already_paid_this_round"
+   and len([r for r in _li_store.recent_rows(None, None, 50)
+            if r.get("miner_hotkey") == "5InstanceOwner"]) == 2)
 
 # price decays with the round (0.97^r): a later round pays strictly less.
 p_r6 = arena_payout.lane_i_price(2 * 5000.0, 80.0, 5000.0, 6)
