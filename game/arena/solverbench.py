@@ -98,3 +98,62 @@ def run_bench(solvers: list[SolverProfile] | None = None) -> list[dict]:
     for i, r in enumerate(rows):
         r["crown"] = (i == 0 and r["solved"] > 0)           # fastest certified solver holds it
     return rows
+
+
+def _real_solvers():
+    """Two GENUINELY DIFFERENT real SAT solvers available in-process: the scaffold's
+    reference CDCL and pysat's Glucose3 (an industrial solver). Returns
+    [(name, solve_fn)] where solve_fn(cnf) -> assignment | None. Glucose3 is skipped
+    if pysat is absent (the scaffold solver always runs)."""
+    from scaffold.dimacs import solve_cnf
+    sols = [("scaffold-cdcl", solve_cnf)]
+    try:
+        from pysat.formula import CNF
+        from pysat.solvers import Glucose3
+
+        def _glucose(cnf: str):
+            f = CNF(from_string=cnf)
+            s = Glucose3(bootstrap_with=f.clauses)
+            sat = s.solve()
+            m = s.get_model() if sat else None
+            s.delete()
+            return m if sat else None
+
+        sols.append(("glucose3", _glucose))
+    except Exception:
+        pass
+    return sols
+
+
+def real_solver_bench() -> list[dict]:
+    """A REAL solver race (NO simulated latency): each genuinely-distinct real solver
+    solves the SAME seeded CNF batch, wall-clock MEASURED, the witness CERTIFIED via
+    verify_witness, ranked by REAL PAR-2 (unsolved/uncertified -> 2x timeout, the
+    SAT-competition rule). The fastest certified solver holds the crown. This is the
+    real-implementation counterpart to run_bench()'s simulated-skill cards."""
+    from scaffold.dimacs import verify_witness
+    instances = _instances()
+    rows = []
+    for name, fn in _real_solvers():
+        penalties: list[float] = []
+        solved = 0
+        for inst in instances:
+            t0 = time.perf_counter()
+            try:
+                sol = fn(inst.cnf)
+            except Exception:
+                sol = None
+            wall = (time.perf_counter() - t0) * 1000.0
+            certified = bool(sol) and verify_witness(inst.cnf, sol)
+            if certified and wall <= inst.timeout_ms:
+                penalties.append(wall)
+                solved += 1
+            else:
+                penalties.append(2 * inst.timeout_ms)       # PAR-2 penalty
+        rows.append({"name": name, "solver_kind": "REAL",
+                     "par2_ms": round(sum(penalties) / len(penalties), 3),
+                     "solved": solved, "total": len(instances)})
+    rows.sort(key=lambda r: r["par2_ms"])                   # PAR-2: lower is better
+    for i, r in enumerate(rows):
+        r["crown"] = (i == 0 and r["solved"] > 0)
+    return rows

@@ -70,6 +70,39 @@ def test_conquest_persists(tmp_path):
     assert any(t.first_broken_round for t in loaded.targets.values())
 
 
+def _fake_result(round_no, emissions, passed):
+    from types import SimpleNamespace
+    agents = [SimpleNamespace(run=SimpleNamespace(miner_hotkey=hk, agent_id=hk),
+                              gates=SimpleNamespace(passed=lambda v=passed[hk]: v))
+              for hk in emissions]
+    return SimpleNamespace(round_no=round_no, season="S1", targets=[], target_state={},
+                           agents=agents, emissions=emissions)
+
+
+def test_season_tracks_round_over_round_rank_movement():
+    """Standings show momentum: an agent that overtakes another climbs (last_position
+    > current), the overtaken one falls — round-over-round, not just absolute position."""
+    from game.arena.season import SeasonState
+    st = SeasonState()
+    st.update(_fake_result(1, {"A": 100.0, "B": 50.0}, {"A": True, "B": True}))
+    assert [s.hotkey for s in st.leaderboard()] == ["A", "B"]
+    assert all(s.last_position == -1 for s in st.leaderboard())   # NEW entrants
+    st.update(_fake_result(2, {"A": 10.0, "B": 250.0}, {"A": True, "B": True}))
+    lb = st.leaderboard()
+    assert [s.hotkey for s in lb] == ["B", "A"]                   # B overtook A
+    pos = {s.hotkey: i for i, s in enumerate(lb)}
+    bsea = next(s for s in lb if s.hotkey == "B")
+    asea = next(s for s in lb if s.hotkey == "A")
+    assert bsea.last_position == 1 and pos["B"] == 0              # climbed (+1)
+    assert asea.last_position == 0 and pos["A"] == 1              # fell (-1)
+
+
+def test_run_season_board_carries_rank_change(tmp_path):
+    from game.arena.engine import ArenaEngine
+    last, _ = ArenaEngine().run_season(2, state_path=str(tmp_path / "s.json"))
+    assert last.season_board and all("rank_change" in row for row in last.season_board)
+
+
 def test_season_persists_and_continues(tmp_path):
     p = tmp_path / "season.json"
     eng = ArenaEngine()
@@ -79,5 +112,6 @@ def test_season_persists_and_continues(tmp_path):
     eng2 = ArenaEngine()
     _l2, s2 = eng2.run_season(2, state_path=str(p))
     top2 = s2.leaderboard()[0].total_emissions
+    assert s2.rounds == 4
     assert s2.agents[s1.leaderboard()[0].hotkey].rounds_played == 4
     assert top2 > top1

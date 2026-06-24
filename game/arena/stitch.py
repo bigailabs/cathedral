@@ -1,9 +1,9 @@
-"""stitch-runner — a REAL remote execution environment.
+"""stitch-runner - a REAL remote execution environment.
 
 Runs a miner's solve on Stitch (polarisserver) via SSH using a real competition
 SAT solver (kissat/cadical), with the wall time MEASURED ON THE REMOTE HOST (the
-eval host, not the miner's word — the timing invariant). The arena then verifies
-the returned witness LOCALLY (dimacs.verify_witness) — remote compute, local
+eval host, not the miner's word - the timing invariant). The arena then verifies
+the returned witness LOCALLY (dimacs.verify_witness) - remote compute, local
 correctness gate. This is the difference between a "stitch-runner" label and a
 real attested-adjacent execution environment.
 
@@ -19,6 +19,20 @@ import subprocess
 
 STITCH_HOST = "frede@100.112.113.3"
 STITCH_NAME = "polarisserver"
+STITCH_SSH_PORT = 22
+
+
+def _tcp_reachable(timeout: float = 4.0) -> bool:
+    """Fast pre-check: can a TCP connection to Stitch's ssh port open within `timeout`?
+    A black-hole host (drops packets) makes `ssh` hang well past its ConnectTimeout, so
+    a short socket probe is the reliable way to fail fast instead of blocking ~30s."""
+    import socket
+    host = STITCH_HOST.split("@")[-1]
+    try:
+        with socket.create_connection((host, STITCH_SSH_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _ssh(inner_b64: str, timeout: float) -> subprocess.CompletedProcess:
@@ -61,22 +75,28 @@ def parse_solver_output(stdout: str) -> tuple[list[int], float, str]:
 
 
 @functools.lru_cache(maxsize=1)
-def stitch_available(solver: str = "kissat") -> bool:
-    """Probe once: Stitch reachable + the solver present."""
+def stitch_available(solver: str = "kissat", *, probe_timeout: float = 12.0) -> bool:
+    """Probe once: Stitch reachable + the solver present. A fast TCP pre-check
+    short-circuits a down/black-hole host in ~4s; the liveness ssh (a trivial
+    `command -v`) is bounded to `probe_timeout` so the TCP-up-but-WSL-hung state
+    (port 22 open, `wsl -e bash` stuck) fails in ~16s, not ~34s. Solve ops keep
+    their own larger timeouts — this bound is only for the liveness check."""
+    if not _tcp_reachable():
+        return False
     try:
         b64 = base64.b64encode(f"command -v {solver} >/dev/null && echo OK".encode()).decode()
-        r = _ssh(b64, timeout=30)
+        r = _ssh(b64, timeout=probe_timeout)
         return "OK" in r.stdout
     except (subprocess.TimeoutExpired, OSError):
         return False
 
 
 def stitch_status(receipt_path) -> dict:
-    """Read the stored stitch-runner receipt for the operator console — real
+    """Read the stored stitch-runner receipt for the operator console - real
     remote execution evidence. Handles both receipt shapes:
       * a per-miner solve (witness verified locally), and
       * a REAL pre-existing audit CNF cross-proof (kissat on Stitch vs a local
-        CDCL solver — both agree, the invariant is proven hardened/exploitable on
+        CDCL solver - both agree, the invariant is proven hardened/exploitable on
         the actual artifact). `ok` is true when there is real verified evidence."""
     import json
     from pathlib import Path
@@ -105,7 +125,7 @@ def stitch_status(receipt_path) -> dict:
 def solve_commitment(receipt: dict) -> str:
     """A canonical hex commitment binding a TDX quote to THIS EXACT remote solve.
     Used as the attestation nonce so report_data[0:32] = sha256(commitment||pubkey)
-    — a quote then proves "this specific solve ran in the TEE", not merely "some
+    - a quote then proves "this specific solve ran in the TEE", not merely "some
     solve ran". Covers the verifiable solve fields only (deterministic)."""
     import hashlib
     import json
@@ -118,7 +138,7 @@ def solve_commitment(receipt: dict) -> str:
 def attest_readiness(receipt_path, pubkey_b64: str = "", *, quote_path=None) -> dict:
     """Make the REAL Stitch solve attestable. Derives the solve commitment (the
     report_data preimage) so a future TDX quote binds to this exact solve. The
-    live quote is GATED (one bounded attestor call needs approval — no spend
+    live quote is GATED (one bounded attestor call needs approval - no spend
     here): with no quote present this reports ready + the commitment. If a quote
     artifact exists it is verified to bind to the commitment (verify-by-receipt)."""
     import json
@@ -185,19 +205,32 @@ def chunk_b64(s: str, size: int = 3000) -> list[str]:
     return [s[i:i + size] for i in range(0, len(s), size)]
 
 
-def upload_cnf(cnf_text: str, remote_path: str, *, chunk: int = 3000,
+def _push_b64_chunks(b64: str, rb: str, chunk: int, timeout_s: float) -> int:
+    """Append a base64 blob to remote file `rb` in command-line-safe chunks,
+    TRUNCATING on the first chunk (`>`) so no separate `rm` round-trip is needed.
+    Returns the number of ssh round-trips used (== number of chunks)."""
+    parts = chunk_b64(b64, chunk)
+    for i, part in enumerate(parts):
+        op = ">" if i == 0 else ">>"
+        _ssh(base64.b64encode(f"printf %s {part} {op} {rb}".encode()).decode(), timeout=timeout_s)
+    return len(parts)
+
+
+def upload_cnf(cnf_text: str, remote_path: str, *, chunk: int = 6000,
                timeout_s: float = 30.0) -> bool:
     """Upload a CNF to Stitch by CHUNKED base64 append (bypasses the single-command
-    size limit). Writes <remote>.b64 in pieces, decodes to <remote>. Best-effort."""
-    b64 = base64.b64encode(cnf_text.encode()).decode()
-    rb = remote_path + ".b64"
+    size limit; stdin doesn't forward through wsl). The CNF is GZIP-compressed first
+    (DIMACS compresses ~3.5x) and the first chunk TRUNCATES (no rm round-trip), so a
+    ~24KB CNF uploads in ~2 chunks + 1 decode = ~3 round-trips - robust to Stitch's
+    flakiness. Best-effort."""
+    import gzip
+    b64 = base64.b64encode(gzip.compress(cnf_text.encode())).decode()
+    rb = remote_path + ".gz.b64"
     try:
-        _ssh(base64.b64encode(f"rm -f {rb} {remote_path}".encode()).decode(), timeout=timeout_s)
-        for part in chunk_b64(b64, chunk):
-            _ssh(base64.b64encode(f"printf %s {part} >> {rb}".encode()).decode(), timeout=timeout_s)
+        _push_b64_chunks(b64, rb, chunk, timeout_s)
         r = _ssh(
             base64.b64encode(
-                f"base64 -d {rb} > {remote_path}; rm -f {rb}; wc -c < {remote_path}".encode()
+                f"base64 -d {rb} | gunzip > {remote_path}; rm -f {rb}; wc -c < {remote_path}".encode()
             ).decode(),
             timeout=timeout_s,
         )
@@ -209,25 +242,35 @@ def upload_cnf(cnf_text: str, remote_path: str, *, chunk: int = 3000,
         return False
 
 
-def offbox_solve(cnf_text: str, *, timeout_s: float = 85.0) -> dict:
-    """OFF-BOX solve: chunk-upload a (minted) CNF to Stitch, solve it with kissat
-    --relaxed (host-measured), return the raw assignment. The caller decodes it
-    LOCALLY via the bit->var map (no z3) and replays. Bounded + best-effort."""
+def offbox_solve(cnf_text: str, *, chunk: int = 6000, timeout_s: float = 85.0) -> dict:
+    """OFF-BOX solve, minimal round-trips: chunk-upload a (minted) CNF to Stitch
+    (truncate-first, gzip'd), then in a SINGLE final command decode+gunzip+verify
+    size+solve with kissat --relaxed (host-measured)+emit the assignment. Folding
+    decode and solve into one atomic step means a Stitch flap can't split them - so
+    the whole flow is ~3 round-trips for a 24KB CNF (was ~5). The caller decodes the
+    raw assignment LOCALLY via the bit->var map (no z3) and replays. Best-effort."""
+    import gzip
     import hashlib
+    b64 = base64.b64encode(gzip.compress(cnf_text.encode())).decode()
     remote = f"/tmp/arena_offbox_{hashlib.sha256(cnf_text.encode()).hexdigest()[:10]}.cnf"
-    if not upload_cnf(cnf_text, remote, timeout_s=timeout_s):
-        return {"available": False, "reason": "upload_failed"}
-    inner = (f'S=$(date +%s%N); kissat --relaxed {remote} >/tmp/arena_ob.out 2>/dev/null; RC=$?; '
-             f'E=$(date +%s%N); rm -f {remote}; echo "ELAPSED_MS $(( (E-S)/1000000 ))"; '
-             f'echo "RC $RC"; grep "^s " /tmp/arena_ob.out; grep "^v " /tmp/arena_ob.out')
+    rb = remote + ".gz.b64"
     try:
+        n_chunks = _push_b64_chunks(b64, rb, chunk, timeout_s)
+        inner = (f'base64 -d {rb} | gunzip > {remote} 2>/dev/null; SZ=$(wc -c < {remote}); rm -f {rb}; '
+                 f'S=$(date +%s%N); kissat --relaxed {remote} >/tmp/arena_ob.out 2>/dev/null; RC=$?; '
+                 f'E=$(date +%s%N); rm -f {remote}; echo "SIZE $SZ"; '
+                 f'echo "ELAPSED_MS $(( (E-S)/1000000 ))"; echo "RC $RC"; '
+                 f'grep "^s " /tmp/arena_ob.out; grep "^v " /tmp/arena_ob.out')
         r = _ssh(base64.b64encode(inner.encode()).decode(), timeout=timeout_s)
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"available": False, "reason": f"ssh_failed:{type(e).__name__}"}
-    wall = rc = status = None
+    wall = rc = status = size = None
     lits: list[int] = []
     for ln in r.stdout.splitlines():
-        if ln.startswith("ELAPSED_MS"):
+        if ln.startswith("SIZE"):
+            try: size = int(ln.split()[1])
+            except (IndexError, ValueError): pass
+        elif ln.startswith("ELAPSED_MS"):
             try: wall = float(ln.split()[1])
             except (IndexError, ValueError): pass
         elif ln.startswith("RC "):
@@ -241,16 +284,58 @@ def offbox_solve(cnf_text: str, *, timeout_s: float = 85.0) -> dict:
                 if v == 0:
                     break
                 lits.append(v)
+    if size is not None and size != len(cnf_text):       # upload integrity check
+        return {"available": False, "reason": f"upload_corrupt:{size}!={len(cnf_text)}"}
     sat = (rc == 10) or (status or "").upper().startswith("SAT")
     if not sat:
         return {"available": False, "reason": f"not_sat:rc={rc}"}
     return {"available": True, "host": STITCH_NAME, "solver": "kissat",
-            "sat": True, "assignment": lits, "remote_wall_ms": wall, "n_lits": len(lits)}
+            "sat": True, "assignment": lits, "remote_wall_ms": wall, "n_lits": len(lits),
+            "round_trips": n_chunks + 1}
+
+
+def offbox_confirm_unsat(cnf_text: str, *, chunk: int = 6000, timeout_s: float = 120.0) -> dict:
+    """OFF-BOX hardened confirmation — the DEFENSIVE counterpart of offbox_solve:
+    chunk-upload a minted UNSAT CNF (truncate-first, gzip'd) and have kissat --relaxed
+    confirm UNSAT (rc=20) on Stitch. There is no assignment to decode; the caller
+    cross-checks that local z3+CDCL also say UNSAT (no exploit exists). Best-effort."""
+    import gzip
+    import hashlib
+    b64 = base64.b64encode(gzip.compress(cnf_text.encode())).decode()
+    remote = f"/tmp/arena_unsat_{hashlib.sha256(cnf_text.encode()).hexdigest()[:10]}.cnf"
+    rb = remote + ".gz.b64"
+    try:
+        n_chunks = _push_b64_chunks(b64, rb, chunk, timeout_s)
+        inner = (f'base64 -d {rb} | gunzip > {remote} 2>/dev/null; SZ=$(wc -c < {remote}); rm -f {rb}; '
+                 f'S=$(date +%s%N); kissat --relaxed {remote} >/tmp/arena_un.out 2>/dev/null; RC=$?; '
+                 f'E=$(date +%s%N); rm -f {remote}; echo "SIZE $SZ"; '
+                 f'echo "ELAPSED_MS $(( (E-S)/1000000 ))"; echo "RC $RC"; grep "^s " /tmp/arena_un.out')
+        r = _ssh(base64.b64encode(inner.encode()).decode(), timeout=timeout_s)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"available": False, "reason": f"ssh_failed:{type(e).__name__}"}
+    wall = rc = status = size = None
+    for ln in r.stdout.splitlines():
+        if ln.startswith("SIZE"):
+            try: size = int(ln.split()[1])
+            except (IndexError, ValueError): pass
+        elif ln.startswith("ELAPSED_MS"):
+            try: wall = float(ln.split()[1])
+            except (IndexError, ValueError): pass
+        elif ln.startswith("RC "):
+            try: rc = int(ln.split()[1])
+            except (IndexError, ValueError): pass
+        elif ln.startswith("s "):
+            status = ln[2:].strip()
+    if size is not None and size != len(cnf_text):       # upload integrity check
+        return {"available": False, "reason": f"upload_corrupt:{size}!={len(cnf_text)}"}
+    unsat = (rc == 20) or (status or "").upper().startswith("UNSAT")
+    return {"available": True, "host": STITCH_NAME, "solver": "kissat",
+            "unsat": unsat, "rc": rc, "remote_wall_ms": wall, "round_trips": n_chunks + 1}
 
 
 def solve_remote_cnf(remote_path: str, *, timeout_s: float = 85.0) -> dict:
     """Solve a CNF ALREADY ON Stitch with kissat (host-measured), WITHOUT pulling
-    it back — works for arbitrarily large CNFs (pushing OR pulling a CNF through
+    it back - works for arbitrarily large CNFs (pushing OR pulling a CNF through
     the ssh->wsl hop is not viable: stdin doesn't forward and >~10KB overflows the
     command line). For a SAT real audit CNF this proves the invariant is VIOLABLE
     on real hardware; independent cross-confirmation comes from the z3-minted twin
@@ -348,6 +433,51 @@ def inventory_status(path) -> dict:
             "total_py": d.get("total_py"), "n_dirs": len(d.get("dirs", [])),
             "captured_at": d.get("captured_at"),
             "dirs": [r for r in d.get("dirs", []) if r.get("present")][:8]}
+
+
+def offbox_receipt_status(path) -> dict:
+    """Read a stored off-box-on-Stitch receipt for the operator console: kissat
+    solved a minted CNF on Stitch and the arena decoded it locally with NO z3,
+    proving the off-box solution satisfies the pinned-invariant CNF (cnf_satisfied).
+    Honest: returns unavailable until a real run lands one."""
+    import json
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return {"available": False, "reason": "no_offbox_receipt"}
+    try:
+        d = json.loads(p.read_text())
+    except Exception:
+        return {"available": False, "reason": "offbox_receipt_unparseable"}
+    return {"available": bool(d.get("available")), "host": d.get("host"),
+            "solver": d.get("solver"), "cnf_satisfied": d.get("cnf_satisfied"),
+            "rule_id": d.get("rule_id"),
+            "harness_reproduced": d.get("harness_reproduced"),
+            "decoded_input": d.get("decoded_input"), "n_lits": d.get("n_lits"),
+            "remote_wall_ms": d.get("remote_wall_ms"), "round_trips": d.get("round_trips"),
+            "decode": d.get("decode"), "cnf_sha256": d.get("cnf_sha256"),
+            "captured_at": d.get("captured_at")}
+
+
+def offbox_hardened_status(path) -> dict:
+    """Read a stored off-box HARDENED receipt for the operator console: kissat on
+    Stitch confirmed a minted invariant UNSAT and a local CDCL solver agreed (no
+    exploit exists). Unavailable until a real run lands one."""
+    import json
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return {"available": False, "reason": "no_hardened_receipt"}
+    try:
+        d = json.loads(p.read_text())
+    except Exception:
+        return {"available": False, "reason": "hardened_receipt_unparseable"}
+    return {"available": bool(d.get("available")), "host": d.get("host"),
+            "solver": d.get("solver"), "rule_id": d.get("rule_id"),
+            "verdict": d.get("verdict"), "remote_unsat": d.get("remote_unsat"),
+            "local_unsat": d.get("local_unsat"), "cross_confirmed": d.get("cross_confirmed"),
+            "remote_wall_ms": d.get("remote_wall_ms"), "round_trips": d.get("round_trips"),
+            "cnf_sha256": d.get("cnf_sha256"), "captured_at": d.get("captured_at")}
 
 
 def remote_sat_status(receipt_path) -> dict:

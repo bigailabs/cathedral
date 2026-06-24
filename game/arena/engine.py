@@ -130,12 +130,42 @@ def _hyp_policy() -> str:
     return f"LLM:{LLM_MODEL}" if llm_available() else "deterministic-rulebook"
 
 
-def _real_audit_vault(stitch_status: dict, remote_sat: dict, minted: dict) -> list[dict]:
+def _real_audit_vault(stitch_status: dict, remote_sat: dict, minted: dict,
+                      offbox: dict | None = None, offbox_hardened: dict | None = None) -> list[dict]:
     """Headline cards: which subtensor invariants have been settled on REAL audit
     CNFs, with the actual solver evidence. CRACKED = an exploit input exists (SAT);
     HARDENED = no exploit exists (UNSAT, two solvers agree). 'real_cnf=True' means
-    a pre-existing audit artifact on Stitch (not a freshly-minted one)."""
+    a pre-existing audit artifact on Stitch (not a freshly-minted one); 'offbox=True'
+    means kissat solved it ON Stitch (remote hardware) and the arena decoded/cross-
+    checked locally — a captured live receipt."""
     vault: list[dict] = []
+    offbox = offbox or {}
+    offbox_hardened = offbox_hardened or {}
+    # OFF-BOX captured receipts (kissat on Stitch, real remote hardware) — first-class
+    # headline cards. CRACKED: the decoded assignment satisfies the pinned-invariant CNF
+    # (no z3). HARDENED: kissat UNSAT on Stitch + local CDCL UNSAT (cross-confirmed).
+    if offbox.get("available") and offbox.get("cnf_satisfied"):
+        vault.append({
+            "verdict": "CRACKED", "family": "B_bounds", "offbox": True,
+            "invariant": "AMM first_fee silent-zero (amount>0 & fee_rate>0 => fee>0)",
+            "real_cnf": False, "cnf": f"offbox:{offbox.get('rule_id', 'B2-fee-silent-zero')}",
+            "evidence": (f"kissat@{offbox.get('host')} {offbox.get('remote_wall_ms')}ms (off-box) → "
+                         f"decoded no-z3 → assignment satisfies the pinned CNF"),
+            "cross_confirmed": True, "code_sha256": offbox.get("cnf_sha256")})
+    # the off-box HARDENED A4 card defers to an even-stronger REAL pre-existing audit
+    # CNF proof of the same invariant (added just below) — show the invariant once.
+    have_real_cnf_conservation = bool(stitch_status.get("available") and stitch_status.get("real_cnf"))
+    offbox_a4 = (offbox_hardened.get("available") and offbox_hardened.get("cross_confirmed")
+                 and offbox_hardened.get("rule_id") == "A4-fee-split-conservation"
+                 and not have_real_cnf_conservation)
+    if offbox_a4:
+        vault.append({
+            "verdict": "HARDENED", "family": "A_conservation", "offbox": True,
+            "invariant": "AMM fee/delta conservation (fee+delta==amount, fee<=amount)",
+            "real_cnf": False, "cnf": f"offbox:{offbox_hardened.get('rule_id')}",
+            "evidence": (f"kissat@{offbox_hardened.get('host')} {offbox_hardened.get('remote_wall_ms')}ms "
+                         f"UNSAT (off-box) + local CDCL UNSAT (agree)"),
+            "cross_confirmed": True, "code_sha256": offbox_hardened.get("cnf_sha256")})
     # the hardened conservation invariant — real CNF, kissat(Stitch) + local CDCL both UNSAT
     if stitch_status.get("available") and stitch_status.get("real_cnf"):
         vault.append({
@@ -157,8 +187,14 @@ def _real_audit_vault(stitch_status: dict, remote_sat: dict, minted: dict) -> li
                          f"{remote_sat.get('n_lits')}-lit witness (model {(remote_sat.get('model_sha256') or '')[:12]})"),
             "cross_confirmed": bool(remote_sat.get("cross_confirmed")),
             "code_sha256": remote_sat.get("model_sha256")})
-    # locally z3-minted families that solve==replay (corroborating, not real-CNF)
+    # locally z3-minted families that solve==replay (corroborating, not real-CNF).
+    # Skip the minted silent-zero twin when the OFF-BOX B2 card already covers it
+    # (off-box = stronger evidence for the same invariant: real remote hardware).
+    have_offbox_b2 = any(c.get("offbox") and c["verdict"] == "CRACKED"
+                         and c["family"] == "B_bounds" for c in vault)
     for m in (minted.get("sat_minted") or []):
+        if have_offbox_b2 and "silent-zero" in str(m.get("target_id", "")):
+            continue
         vault.append({
             "verdict": "CRACKED", "family": m.get("family"),
             "invariant": m.get("target_id"), "real_cnf": False, "cnf": m.get("target_id"),
@@ -168,7 +204,7 @@ def _real_audit_vault(stitch_status: dict, remote_sat: dict, minted: dict) -> li
     # spanning two pinned models. Skip the AMM A4 when the real-CNF Stitch card
     # already covers it (no duplicate); the root-staking proofs are new.
     have_real_conservation = any(
-        c["verdict"] == "HARDENED" and c["real_cnf"] for c in vault)
+        c["verdict"] == "HARDENED" and (c["real_cnf"] or c.get("offbox")) for c in vault)
     for h in (minted.get("hardened") or []):
         if (h.get("model") == "subtensor-amm"
                 and h.get("rule_id") == "A4-fee-split-conservation"
@@ -194,6 +230,27 @@ def _wrong_family(declared: str) -> str:
     return declared
 
 
+# What each agent archetype ACTUALLY does — a truthful description of the work (or
+# the cheat) the engine applies, so the trace is honest training data and the UI can
+# show "what this agent did", not just "which gate caught it". Each cheat line names
+# the real divergence that trips its gate (see _operate/_gates/_submit_receipt).
+_AGENT_METHODS = {
+    "honest": "decoded its own SAT witness and submitted a reproducing proof",
+    "copier": "submitted another miner's witness — no own solve (fails witness_verifies)",
+    "wrong_owner": "submitted a proof bound to a different miner's hotkey (fails correct_owner)",
+    "spam": "resubmitted a challenge id already in the season replay ledger (fails no_replay)",
+    "bad_encoder": "submitted a CNF whose hash != the manifest (fails cnf_hash_matches)",
+    "forge_trace": "tampered a tool-call digest after signing (fails agent_signature_valid)",
+    "bad_replay": "submitted a witness that does not reproduce the invariant (fails replay_succeeds)",
+    "stale_nonce": "reused a nonce past its validity window (fails fresh_nonce)",
+    "no_decode_map": "omitted the bit→var decode map (fails decode_map_present)",
+    "fake_attest": "claimed attestation from a mocked-TEE env (fails attestation_valid)",
+    "fake_compute_profile": "claimed a trusted compute profile it cannot back (fails compute_profile_honest)",
+    "misclassify": "declared the wrong invariant family for its finding (fails hypothesis_aligned)",
+    "hotkey_stacking": "stacked two hotkeys under one coldkey — sybil (reward split by coldkey_collapse)",
+}
+
+
 class ArenaEngine:
     def __init__(self, roster: list[AgentSpec] | None = None,
                  base_epoch: int = config.GAME_EPOCH, season: str = "S1"):
@@ -205,6 +262,7 @@ class ArenaEngine:
         self._known_hotkeys = {a.hotkey for a in self.roster}
         self._now_tick = 0                           # advances per round (nonce clock)
         self._bench = None                           # PAR-2 solver bench (computed once)
+        self._realbench = None                       # REAL solver race (computed once)
         self._ledger: set[tuple[str, str]] = set()   # (hotkey, cid) season replay ledger
         self._seen_receipts: set[str] = set()        # receipt-id replay set (provenance)
         # each agent owns its on-host Ed25519 identity (deterministic per hotkey).
@@ -252,6 +310,31 @@ class ArenaEngine:
         if pool:
             return pool[idx % len(pool)]
         return REPRODUCING_TARGETS[idx % len(REPRODUCING_TARGETS)]
+
+    def _proof_coverage(self) -> dict:
+        """Per-subnet proof coverage for the operator console — HONEST about which of
+        the corpus subnets the arena can back with a REAL reproducing exploit vs. which
+        reason into a family that is proven HARDENED (no exploit exists, e.g.
+        A_conservation). 'fallback' would mean a family with neither (none today)."""
+        repro = self._repro_index()
+        hardened_fams = {h["family"] for h in replay.MINTED_HARDENED}
+        rows, covered, hardened = [], 0, 0
+        for i, t in enumerate(self.targets):
+            fam = self._hypothesis(t)["family"]
+            pool = repro.get(fam)
+            if pool:
+                backing, detail = "real_exploit", pool[i % len(pool)]
+                covered += 1
+            elif fam in hardened_fams:
+                backing, detail = "hardened_no_exploit", "z3+CDCL UNSAT (invariant proven to hold)"
+                hardened += 1
+            else:
+                backing, detail = "fallback", REPRODUCING_TARGETS[i % len(REPRODUCING_TARGETS)]
+            rows.append({"netuid": t.netuid, "name": t.name, "family": fam,
+                         "backing": backing, "detail": detail})
+        return {"total": len(self.targets), "real_exploit": covered,
+                "hardened_no_exploit": hardened,
+                "fallback": len(self.targets) - covered - hardened, "rows": rows}
 
     # -- mission assignment ---------------------------------------------------
     def _assign(self, idx: int, spec: AgentSpec, epoch: int) -> Mission:
@@ -563,18 +646,23 @@ class ArenaEngine:
         state = SeasonState.load(state_path) if state_path else SeasonState()
         runner = self.run_submitted if submitted else self.run
         last = None
-        for r in range(1, rounds + 1):
+        start_round = state.rounds + 1
+        for r in range(start_round, start_round + rounds):
             last = runner(r)
             state.update(last)
         if state_path:
             state.save(state_path)
         if last is not None:
             last.season_rounds = state.rounds
+            _board = state.leaderboard()
             last.season_board = [{
                 "agent_id": s.agent_id, "hotkey": s.hotkey, "emissions": s.total_emissions,
                 "breaches": s.breaches, "streak": s.streak, "best_streak": s.best_streak,
                 "rounds": s.rounds_played, "rank": s.rank,
-            } for s in state.leaderboard()]
+                # round-over-round movement: prev position - current position
+                # (>0 climbed, <0 fell, 0 held, None = new this round).
+                "rank_change": (s.last_position - i if s.last_position >= 0 else None),
+            } for i, s in enumerate(_board)]
             last.season_targets = {n: {"status": t.status, "breaches": t.breaches,
                                        "first_broken_round": t.first_broken_round}
                                    for n, t in state.targets.items()}
@@ -706,6 +794,7 @@ class ArenaEngine:
             replay_result={"succeeded": gates.replay_succeeds},
             attestation=attested)
         run.trace_sha256 = receipt.head    # the receipt head IS the trace digest
+        run.method = _AGENT_METHODS.get(spec.archetype, _AGENT_METHODS["honest"])
 
         results.append(AgentResult(run=run, gates=gates, credit=credit, mission=m,
                                    receipt=receipt))
@@ -733,7 +822,7 @@ class ArenaEngine:
         if not passed:
             anticheat_feed.append({"agent": spec.agent_id, "archetype": spec.archetype,
                                    "subnet": m.target.name, "rejected_by": gates.first_failure(),
-                                   "reasons": gates.reasons})
+                                   "reasons": gates.reasons, "method": run.method})
 
         ro = sub.replay_outcome
         rt = replay.TARGETS.get(m.replay_target_id)
@@ -810,7 +899,8 @@ class ArenaEngine:
 
         from .attestation import intel_backend, live_status, round_attest_readiness
         from .stitch import (stitch_status, attest_readiness, remote_sat_status,
-                             inventory_status)
+                             inventory_status, offbox_receipt_status,
+                             offbox_hardened_status)
         from .mint import minted_proof_status, external_decode_status
         _out = Path(__file__).resolve().parent / "out"
         _live_att = live_status(_out / "real_attest_receipt.json")
@@ -819,6 +909,9 @@ class ArenaEngine:
                                           quote_path=_out / "stitch_attest_quote.json")
         _remote_sat = remote_sat_status(_out / "stitch_remote_sat_receipt.json")
         _inventory = inventory_status(_out / "stitch_inventory.json")
+        _offbox = offbox_receipt_status(_out / "offbox_stitch_receipt.json")
+        _offbox_i1 = offbox_receipt_status(_out / "offbox_i1_receipt.json")
+        _offbox_hardened = offbox_hardened_status(_out / "offbox_hardened_receipt.json")
         _round_attest = round_attest_readiness(
             anchor.get("merkle_root", ""),
             quote_path=_out / "round_attest_quote.json",
@@ -831,6 +924,11 @@ class ArenaEngine:
             "stitch_attest": _stitch_attest,
             "remote_sat": _remote_sat,
             "stitch_inventory": _inventory,
+            "offbox_stitch": _offbox,
+            "offbox_i1": _offbox_i1,
+            "offbox_hardened": _offbox_hardened,
+            "proof_coverage": self._proof_coverage(),
+            "real_solver_bench": self._real_solver_bench(),
             "minted_proof": minted_proof_status(),
             "external_decode": external_decode_status(),
             "minted_invariants": replay.minted_summary(),
@@ -843,8 +941,9 @@ class ArenaEngine:
                      f"{_corpus_summary['proof_tasks']} proof tasks / CNFs",
                      "z3-MINTED invariants across MULTIPLE families AND TWO pinned models "
                      "(subtensor-amm + subtensor-root-reborn): B_bounds + I_safety solve==replay; "
-                     "A_conservation (AMM fee + root TAO-split) + F_emission (no stranded holders) "
-                     "proven HARDENED — z3 unsat + independent CDCL unsat, no exploit exists",
+                     "A_conservation (AMM fee + root TAO-split + root deposit-no-dilution) + "
+                     "F_emission (no stranded holders) proven HARDENED — z3 unsat + independent "
+                     "CDCL unsat, no exploit exists (4 solver-backed hardened proofs)",
                      "deterministic anti-copy encoded task", "witness verification",
                      "REAL money-math replay (U64F64 fee math, audit_lane harness pattern)",
                      "REAL external agent processes signing their own receipts (--submitted)",
@@ -876,7 +975,8 @@ class ArenaEngine:
                            "real submitted agents over MCP"],
         }
 
-        real_audit_vault = _real_audit_vault(_stitch, _remote_sat, replay.minted_summary())
+        real_audit_vault = _real_audit_vault(_stitch, _remote_sat, replay.minted_summary(),
+                                             offbox=_offbox, offbox_hardened=_offbox_hardened)
 
         result = ArenaResult(
             season=self.season, round_no=round_no, epoch=epoch, targets=self.targets,
@@ -898,3 +998,11 @@ class ArenaEngine:
             from .solverbench import run_bench
             self._bench = run_bench()
         return self._bench
+
+    def _real_solver_bench(self) -> list:
+        # a REAL solver race (two genuinely-distinct real solvers on the same batch),
+        # cached once per engine — the real-implementation counterpart to _solver_bench.
+        if getattr(self, "_realbench", None) is None:
+            from .solverbench import real_solver_bench
+            self._realbench = real_solver_bench()
+        return self._realbench

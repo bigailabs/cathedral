@@ -99,6 +99,7 @@ class AgentRun:
     replay_result: dict[str, Any] | None = None
     attestation: dict[str, Any] | None = None
     trace_sha256: str = ""
+    method: str = ""               # what the agent actually DID (honest work / the cheat)
 
     def status_line(self) -> str:
         return f"{self.agent_id}@{self.environment} -> sn{self.target_netuid}"

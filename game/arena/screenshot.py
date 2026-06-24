@@ -47,12 +47,16 @@ def _winpath(p: Path) -> str:
 def capture(html_path: Path, png_path: Path, *, edge: str = EDGE,
             timeout_s: float = 90.0) -> dict:
     """Render an HTML file to PNG with Edge headless. Best-effort + bounded;
-    {ok, png, bytes} or {ok: False, reason}. Windows/WSL + Edge only."""
+    {ok, png, bytes} or {ok: False, reason}. Windows/WSL + Edge only.
+
+    Accepts str or Path for both paths - this is a deliverable helper, so it must
+    not crash on a string argument (it used to raise AttributeError on str.exists)."""
+    html_path, png_path = Path(html_path), Path(png_path)
     if not Path(edge).exists():
         return {"ok": False, "reason": "edge_not_found"}
     if not html_path.exists():
         return {"ok": False, "reason": "html_missing"}
-    profile = png_path.parent / "edge_profile"
+    profile = png_path.parent / f"edge_profile_{png_path.stem}"
     profile.mkdir(parents=True, exist_ok=True)
     png_path.unlink(missing_ok=True)
     cmd = screenshot_cmd(edge, _winpath(html_path), _winpath(png_path), _winpath(profile))
@@ -83,9 +87,10 @@ def capture_url(url: str, png_path: Path, *, edge: str = EDGE,
                 timeout_s: float = 90.0, vtime_ms: int = 4500) -> dict:
     """Screenshot a live URL with Edge headless (JS-rendered). The profile + png
     MUST be on the C: mount. {ok, png, bytes} or {ok: False, reason}."""
+    png_path = Path(png_path)
     if not Path(edge).exists():
         return {"ok": False, "reason": "edge_not_found"}
-    profile = png_path.parent / "edge_profile"
+    profile = png_path.parent / f"edge_profile_{png_path.stem}"
     profile.mkdir(parents=True, exist_ok=True)
     png_path.unlink(missing_ok=True)
     cmd = screenshot_url_cmd(edge, url, _winpath(png_path), _winpath(profile),
@@ -99,9 +104,25 @@ def capture_url(url: str, png_path: Path, *, edge: str = EDGE,
     return {"ok": False, "reason": "no_png_written"}
 
 
+def scanner_game_url(port: int) -> str:
+    """Return the URL Windows Edge should use to reach the WSL-hosted game."""
+    host = "127.0.0.1"
+    try:
+        res = subprocess.run(
+            ["bash", "-lc", "hostname -I | awk '{print $1}'"],
+            capture_output=True, text=True, timeout=2,
+        )
+        candidate = res.stdout.strip()
+        if res.returncode == 0 and candidate:
+            host = candidate
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return f"http://{host}:{port}/game"
+
+
 def shoot_scanner_game(png_path: Path | None = None, *, edge: str = EDGE) -> dict:
     """Serve the live arena + screenshot the PLAYABLE miner game (SUBNET BREAKER,
-    /game) — the player-facing view, JS-rendered from the scanner API. Spins a
+    /game) - the player-facing view, JS-rendered from the scanner API. Spins a
     short-lived HTTP server on a free port, captures, tears down."""
     import threading
     from http.server import ThreadingHTTPServer
@@ -110,12 +131,19 @@ def shoot_scanner_game(png_path: Path | None = None, *, edge: str = EDGE) -> dic
     OUT.mkdir(exist_ok=True)
     srv = ArenaServer(season_path=str(OUT / "shot_season.json"),
                       scanner_ledger_path=str(OUT / "shot_scanner.jsonl"))
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _handler(srv))
+    # Windows Edge captures the URL from outside WSL. Binding only WSL loopback
+    # can produce a false "ok" screenshot of Edge's connection-error page.
+    httpd = ThreadingHTTPServer(("0.0.0.0", 0), _handler(srv))
     port = httpd.server_port
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     try:
-        return capture_url(f"http://127.0.0.1:{port}/game", png_path, edge=edge)
+        res = capture_url(scanner_game_url(port), png_path, edge=edge)
+        if res.get("ok") and int(res.get("bytes") or 0) < 80_000:
+            res = dict(res)
+            res["ok"] = False
+            res["reason"] = "scanner_game_screenshot_too_small_or_error_page"
+        return res
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -123,7 +151,7 @@ def shoot_scanner_game(png_path: Path | None = None, *, edge: str = EDGE) -> dic
 
 def render_live_html(rounds: int = 4, *, out: Path = OUT) -> Path:
     """Tick the live server `rounds` times (real season progression) and write the
-    live arena HTML — the page the screenshot captures."""
+    live arena HTML - the page the screenshot captures."""
     from .serve import ArenaServer
     out.mkdir(exist_ok=True)
     srv = ArenaServer(season_path=str(out / "shot_season.json"))
@@ -139,7 +167,7 @@ def main() -> int:
     html = render_live_html(rounds)
     res = capture(html, OUT / "arena_live.png")
     if res["ok"]:
-        print(f"screenshot OK: {res['png']} ({res['bytes']} bytes) — live arena, "
+        print(f"screenshot OK: {res['png']} ({res['bytes']} bytes) - live arena, "
               f"{rounds} season rounds")
         return 0
     print(f"screenshot FAILED: {res['reason']} (html at {html})")

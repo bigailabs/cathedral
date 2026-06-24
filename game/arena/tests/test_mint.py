@@ -175,3 +175,37 @@ def test_hardened_proofs_in_vault():
     # wired, an F_emission hardened proof also appears
     fams = {c["family"] for c in hardened}
     assert "A_conservation" in fams
+
+
+# -- A1 deposit-no-dilution wired as a real hardened invariant -----------------
+
+def test_a1_deposit_no_dilution_is_a_confirmed_hardened_invariant():
+    """A1 (root deposit cannot dilute existing holders) is wired from the REAL
+    factory rule: z3 proves the dilution violation is a direct contradiction
+    (UNSAT) and an independent CDCL solver confirms it. Not claimed — re-checked."""
+    if not mint.z3_available():
+        return
+    rule_ids = {h["rule_id"] for h in replay.MINTED_HARDENED}
+    assert "A1-deposit-no-dilution" in rule_ids          # the manifest carries it
+    h = next(h for h in replay.MINTED_HARDENED if h["rule_id"] == "A1-deposit-no-dilution")
+    assert h["model"] == "subtensor-root-reborn" and h["family"] == "A_conservation"
+    assert h["z3"] == "unsat"
+    # re-mint live and confirm UNSAT independently (proof, not a stored claim)
+    m = mint.mint_invariant("A1-deposit-no-dilution", 8, "realistic", "subtensor-root-reborn")
+    assert m["result"] == "unsat"
+    solved = mint.solve_minted_cnf(m["cnf_text"])
+    if solved.get("available"):
+        assert solved["sat"] is False
+        assert h["cdcl_unsat"] is True and h["hardened"] is True
+
+
+def test_a2_roundtrip_is_honestly_not_claimed_decided():
+    """A2 (deposit->redeem roundtrip <= bought) is a genuinely HARD instance —
+    z3 returns 'unknown' (double nested floor). We must NOT ship it as a decided
+    result: it is neither a SAT replay target nor a hardened invariant. Honesty."""
+    if not mint.z3_available():
+        return
+    m = mint.mint_invariant("A2-roundtrip-le", 12, "realistic", "subtensor-root-reborn")
+    assert m["result"] == "unknown"                       # legitimately undecided
+    assert "A2-roundtrip-le" not in replay.MINTED_TARGETS
+    assert "A2-roundtrip-le" not in {h["rule_id"] for h in replay.MINTED_HARDENED}
