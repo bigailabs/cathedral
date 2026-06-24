@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 # How often the background thread re-runs the aggregate query (seconds).
-TOP_CACHE_INTERVAL_SECS = 45
+TOP_CACHE_INTERVAL_SECS = int(os.environ.get("CATHEDRAL_TOP_CACHE_INTERVAL_SECS", "120"))
 
 # Window in hours — only 24h is implemented; other values fall back to this.
 TOP_CACHE_WINDOW_H = 24
@@ -33,6 +33,18 @@ def _slow_build_log_secs() -> float:
         return float(os.environ.get("CATHEDRAL_TOP_CACHE_SLOW_LOG_SECS", "2.0") or "0")
     except ValueError:
         return 2.0
+
+
+def enabled() -> bool:
+    """Receipt leaderboard aggregation is optional production load.
+
+    The default is off because the current payment leaderboard can be served
+    from the in-memory signed weight vector. Receipt enrichment is useful for
+    dashboards, but it must not compete with submit ingress on small runtimes.
+    """
+    return os.environ.get("CATHEDRAL_TOP_CACHE_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
 
 class TopCache:
@@ -69,6 +81,8 @@ class TopCache:
         before it finishes return an empty list (the page shows its loading state).
         Subsequent requests (after the first 45 s cycle) are always fast.
         """
+        if not enabled():
+            return
         self._store = store
         self._stop_event.clear()
         self._thread = threading.Thread(

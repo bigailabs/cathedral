@@ -28,7 +28,7 @@ from typing import Any, Callable
 # Safety-net TTL: even with explicit invalidation on every mutation, rebuild at
 # most this stale so a missed invalidate self-heals. Cheap (~51 rows) so a low
 # value is fine; the whole point is that the EDGE caches, not that we never query.
-BOARD_TTL_SECS = float(os.environ.get("CATHEDRAL_BOARD_TTL_SECS", "10"))
+BOARD_TTL_SECS = float(os.environ.get("CATHEDRAL_BOARD_TTL_SECS", "60"))
 
 # What an edge/CDN is told to cache the board for. Short, because the board does
 # change (~hourly) and a mint should show up quickly; the ETag makes the steady
