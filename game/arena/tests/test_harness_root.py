@@ -44,6 +44,13 @@ def test_root_invariants_hold_across_random_inputs():
         assert hr._a4_inv(a4) is True
         assert a4["s0"] + a4["s1"] == tao_total
 
+        # F2 no-strand: a partial redeem (owed < P) never drains escrow to 0 while shares remain
+        p2 = rng.randint(2, escrow if escrow >= 2 else 2)
+        owed = rng.randint(1, p2 - 1)
+        f2 = hr._f2_harness({"E": escrow, "P": p2, "owed": owed})
+        assert hr._f2_inv(f2) is True
+        assert not (f2["E2"] == 0 and f2["P2"] > 0)
+
 
 def test_root_harness_output_actually_tracks_inputs():
     first = replay.run_replay(

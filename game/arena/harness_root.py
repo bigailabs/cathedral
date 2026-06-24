@@ -92,6 +92,27 @@ def _a4_inv(observed: dict) -> bool:
     return observed["sum"] == observed["tao_total"]
 
 
+def _f2_harness(witness: dict) -> dict:
+    # partial redeem: payout = min(floor(owed*E/P), E); E -= payout; P -= owed.
+    escrow = int(witness["E"])
+    principal = int(witness["P"])
+    owed = min(int(witness["owed"]), principal)
+    payout = min((owed * escrow) // principal, escrow) if principal else 0
+    return {
+        "E": escrow,
+        "P": principal,
+        "owed": owed,
+        "payout": payout,
+        "E2": escrow - payout,
+        "P2": principal - owed,
+    }
+
+
+def _f2_inv(observed: dict) -> bool:
+    # no-strand: a partial redeem must not drain escrow to 0 while shares remain.
+    return not (observed["E2"] == 0 and observed["P2"] > 0)
+
+
 _ROOT_SPECS = [
     (
         "subtensor-root:deposit-no-dilution@HEAD",
@@ -123,6 +144,16 @@ _ROOT_SPECS = [
         {"tao_total": 1_000_000, "w0": 3, "w1": 7},
         "TAO split: tao_s0 + remainder == tao_total (exact)",
     ),
+    (
+        "subtensor-root:payout-no-strand@HEAD",
+        "F_emission",
+        ("E", "P", "owed"),
+        _f2_harness,
+        _f2_inv,
+        7,
+        {"E": 1_000_000, "P": 800_000, "owed": 500_000},
+        "no-strand: a partial redeem must not drain escrow to 0 while shares remain",
+    ),
 ]
 
 
@@ -144,6 +175,12 @@ ROOT_STRESS = {
         {"tao_total": 1, "w0": 1, "w1": 1},
         {"tao_total": 10**9, "w0": 999_983, "w1": 17},
         {"tao_total": 7, "w0": 0, "w1": 5},
+    ],
+    "subtensor-root:payout-no-strand@HEAD": [
+        {"E": 1_000_000, "P": 800_000, "owed": 500_000},
+        {"E": 5, "P": 4, "owed": 1},
+        {"E": 10**9, "P": 2, "owed": 1},
+        {"E": 3, "P": 1_000_000, "owed": 999_999},
     ],
 }
 

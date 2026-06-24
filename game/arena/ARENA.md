@@ -28,6 +28,8 @@ python -m game.arena.bundle out/proof_bundle.json   # independently verify a win
 cathedral-arena-verify out/proof_bundle.json        # same after editable install
 python -m game.arena.verify out                     # independently verify the full round artifact set
 cathedral-arena-round-verify out                    # same after editable install
+python -m game.arena.selfcheck out                  # one-shot operator health: "ARENA REAL & HEALTHY"
+python -m game.arena.proofboard ; python -m game.arena.frontpage  # render the Proof Board / simple hub
 cathedral-arena-playthrough                # same after editable install
 cathedral-audit-scanner-smoke              # same after editable install
 python -m pytest game/tests game/arena/tests -q     # full suite
@@ -39,6 +41,7 @@ the stitch-runner agent's solve to a real kissat on Stitch.
 Served game routes:
 
 - `/`: redirects to `/game` so the first screen is the playable loop.
+- `/home` or `/start`: plain-language hub linking to the game, guide, proof board, and arena.
 - `/game`: playable scanner game; sealing a proof calls
   `/api/scanner/submit-attested`.
   It starts from `POST /api/scanner/request`, then routes that intake into
@@ -47,6 +50,8 @@ Served game routes:
 - `/arena`: auto-running arena report render.
 - `/dashboard.html`: legacy redirect to `/game` for old local links.
 - `/howto`: short game instructions.
+- `/api/selfcheck` or `/healthz`: JSON operator health check; returns 200 when
+  the required replay/proof gates are healthy and 503 when not.
 
 Playable `/game` controls:
 
@@ -149,6 +154,7 @@ Local API:
 - `GET /api/scanner/differential`
 - `GET /api/scanner/submissions?limit=50`
 - `GET /api/scanner/state?miner_hotkey=...`
+- `GET /api/selfcheck` or `GET /healthz`
 
 Run with `python -m game.arena.serve 8800` and open `/game`. The server is
 local/stdlib only and does not touch chain, Polaris, Railway, or production.
