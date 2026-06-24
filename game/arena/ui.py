@@ -487,6 +487,16 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
                     f'<b>{inv.get("total_py","?")}</b> harnesses across {inv.get("n_dirs","?")} dirs on '
                     f'{_esc(inv.get("host","?"))} <span class="sub">({_esc(inv.get("captured_at",""))})</span></div>')
 
+    obs = oc.get("offbox_summary", {})
+    if obs.get("n_exploits", 0) + obs.get("n_hardened", 0) > 0:
+        hw = (' <span class="tag" style="background:#10331f;color:#5fe39a">REAL HW</span>'
+              if obs.get("all_real_hardware") else "")
+        console += (f'<div class="sub" style="margin-top:6px"><b>OFF-BOX proof track record</b>{hw}: '
+                    f'<b class="pass">{obs.get("n_exploits",0)}</b> exploit(s) CRACKED + '
+                    f'<b style="color:#7fd1e0">{obs.get("n_hardened",0)}</b> invariant(s) HARDENED '
+                    f'on {_esc(", ".join(obs.get("hosts",[])) or "?")} — rules: '
+                    f'{_esc(", ".join(obs.get("rules",[])))} (kissat, decoded/cross-checked locally)</div>')
+
     ob = oc.get("offbox_stitch", {})
     if ob.get("available"):
         sat = ob.get("cnf_satisfied")

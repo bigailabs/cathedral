@@ -514,6 +514,41 @@ def test_engine_console_exposes_offbox_hardened_key():
     assert "offbox_hardened" in ArenaEngine().run(1).operator_console
 
 
+def test_offbox_proof_summary_aggregates_receipts(tmp_path):
+    """Fire #77: the off-box track record aggregates every captured receipt — exploits
+    (cnf_satisfied) and hardened (cross_confirmed) — across rules, flagging real hardware."""
+    import json
+    (tmp_path / "offbox_stitch_receipt.json").write_text(json.dumps(
+        {"available": True, "cnf_satisfied": True, "host": "polarisserver",
+         "rule_id": "B2-fee-silent-zero", "remote_wall_ms": 2.0, "n_lits": 357}))
+    (tmp_path / "offbox_i1_receipt.json").write_text(json.dumps(
+        {"available": True, "cnf_satisfied": True, "host": "polarisserver",
+         "rule_id": "I1-div-by-zero", "remote_wall_ms": 11.0, "n_lits": 4032}))
+    (tmp_path / "offbox_hardened_receipt.json").write_text(json.dumps(
+        {"available": True, "verdict": "HARDENED", "cross_confirmed": True,
+         "host": "polarisserver", "rule_id": "A4-fee-split-conservation"}))
+    s = stitch.offbox_proof_summary(tmp_path)
+    assert s["n_exploits"] == 2 and s["n_hardened"] == 1
+    assert set(s["rules"]) == {"B2-fee-silent-zero", "I1-div-by-zero", "A4-fee-split-conservation"}
+    assert s["all_real_hardware"] is True and s["hosts"] == ["polarisserver"]
+    # a non-Stitch host breaks the real-hardware flag; an unavailable receipt is ignored
+    (tmp_path / "offbox_x_receipt.json").write_text(json.dumps(
+        {"available": True, "cnf_satisfied": True, "host": "elsewhere", "rule_id": "X"}))
+    (tmp_path / "offbox_dead_receipt.json").write_text(json.dumps({"available": False}))
+    s2 = stitch.offbox_proof_summary(tmp_path)
+    assert s2["n_exploits"] == 3 and s2["all_real_hardware"] is False
+
+
+def test_offbox_proof_summary_empty_when_no_receipts(tmp_path):
+    s = stitch.offbox_proof_summary(tmp_path)
+    assert s["n_exploits"] == 0 and s["n_hardened"] == 0 and s["all_real_hardware"] is False
+
+
+def test_engine_console_exposes_offbox_summary():
+    from game.arena.engine import ArenaEngine
+    assert "offbox_summary" in ArenaEngine().run(1).operator_console
+
+
 def test_engine_console_exposes_offbox_i1_key_and_reader_carries_rule_id(tmp_path):
     """Fire #76: the I1 multi-rule off-box capture is surfaced in the operator console,
     and the receipt reader carries rule_id so the UI can label it."""

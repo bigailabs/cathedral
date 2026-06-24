@@ -417,6 +417,36 @@ def inventory(dirs: list[str] | None = None, *, timeout_s: float = 60.0) -> dict
             "total_py": sum(d.get("py", 0) for d in rows)}
 
 
+def offbox_proof_summary(out_dir) -> dict:
+    """Aggregate ALL captured off-box proof receipts in out_dir into one summary — the
+    off-box capability's track record across rules and BOTH directions (exploit /
+    hardened), all on real remote hardware. Reads offbox_*receipt.json; pure."""
+    import json
+    from pathlib import Path
+    out = Path(out_dir)
+    exploits: list[dict] = []
+    hardened: list[dict] = []
+    for p in sorted(out.glob("offbox_*receipt.json")):
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not d.get("available"):
+            continue
+        if d.get("verdict") == "HARDENED" and d.get("cross_confirmed"):
+            hardened.append({"rule": d.get("rule_id"), "host": d.get("host"),
+                             "wall_ms": d.get("remote_wall_ms"), "file": p.name})
+        elif d.get("cnf_satisfied"):
+            exploits.append({"rule": d.get("rule_id", "B2-fee-silent-zero"), "host": d.get("host"),
+                             "wall_ms": d.get("remote_wall_ms"), "n_lits": d.get("n_lits"), "file": p.name})
+    every = exploits + hardened
+    return {"exploits": exploits, "hardened": hardened,
+            "n_exploits": len(exploits), "n_hardened": len(hardened),
+            "rules": sorted({e["rule"] for e in every if e.get("rule")}),
+            "hosts": sorted({e["host"] for e in every if e.get("host")}),
+            "all_real_hardware": bool(every) and all(e.get("host") == STITCH_NAME for e in every)}
+
+
 def inventory_status(path) -> dict:
     """Read a stored inventory manifest for the operator console."""
     import json
