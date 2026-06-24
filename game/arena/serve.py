@@ -329,10 +329,19 @@ def _handler(server: ArenaServer):
                 miner = (qs.get("miner_hotkey") or [""])[0]
                 _send_json(self, 200, server.scanner_state(miner))
                 return
-            if parsed.path == "/dashboard.html":
+            if parsed.path in {"/", "/dashboard.html"}:
                 self.send_response(302)
                 self.send_header("location", "/game")
                 self.end_headers()
+                return
+            if parsed.path in {"/howto", "/howto.html"}:
+                from game.arena.howto import render_howto
+                body = render_howto().encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             if parsed.path in {"/game", "/game.html"}:
                 body = server.scanner_game_html().encode("utf-8")
@@ -342,7 +351,7 @@ def _handler(server: ArenaServer):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-
+            # /arena and any other path -> the full operator report view.
             body = server.html().encode("utf-8")
             self.send_response(200)
             self.send_header("content-type", "text/html; charset=utf-8")

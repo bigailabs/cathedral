@@ -98,12 +98,18 @@ class ScannerTask:
             "reward_shape": "linear_metric_x_boolean_gate",
             "optional_claim_schema": {
                 "schema": SCHEMA_CLAIM,
+                "source_lesson": "bitsec_report_shape_cathedral_replay_gate",
                 "fields": [
                     "title",
                     "category",
                     "severity",
                     "location",
+                    "line_ranges",
                     "impact",
+                    "description",
+                    "vulnerable_code",
+                    "code_to_exploit",
+                    "rewritten_code_to_fix_vulnerability",
                     "exploit_summary",
                     "fix_summary",
                 ],
@@ -399,7 +405,14 @@ def example_accepted_submission(task: ScannerTask, miner_hotkey: str = "hk_examp
             "category": task.expected_family,
             "severity": "high",
             "location": {"target": task.target_name, "replay_target_id": task.replay_target_id},
+            "line_ranges": [],
             "impact": "Replay harness reproduces the invariant violation.",
+            "description": "The submitted witness drives the pinned model into a bad state.",
+            "vulnerable_code": task.replay_target_id,
+            "code_to_exploit": json.dumps(proof.known_witness, sort_keys=True),
+            "rewritten_code_to_fix_vulnerability": (
+                "Harden the invariant guard and keep this witness in CI replay tests."
+            ),
             "exploit_summary": "Witness values drive the pinned model into a bad state.",
             "fix_summary": "Harden the invariant guard and replay this witness in CI.",
         },

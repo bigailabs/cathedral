@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 EDGE = "/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
@@ -56,7 +57,7 @@ def capture(html_path: Path, png_path: Path, *, edge: str = EDGE,
         return {"ok": False, "reason": "edge_not_found"}
     if not html_path.exists():
         return {"ok": False, "reason": "html_missing"}
-    profile = png_path.parent / f"edge_profile_{png_path.stem}"
+    profile = png_path.parent / f"edge_profile_{png_path.stem}_{time.monotonic_ns()}"
     profile.mkdir(parents=True, exist_ok=True)
     png_path.unlink(missing_ok=True)
     cmd = screenshot_cmd(edge, _winpath(html_path), _winpath(png_path), _winpath(profile))
@@ -90,7 +91,7 @@ def capture_url(url: str, png_path: Path, *, edge: str = EDGE,
     png_path = Path(png_path)
     if not Path(edge).exists():
         return {"ok": False, "reason": "edge_not_found"}
-    profile = png_path.parent / f"edge_profile_{png_path.stem}"
+    profile = png_path.parent / f"edge_profile_{png_path.stem}_{time.monotonic_ns()}"
     profile.mkdir(parents=True, exist_ok=True)
     png_path.unlink(missing_ok=True)
     cmd = screenshot_url_cmd(edge, url, _winpath(png_path), _winpath(profile),
@@ -138,6 +139,23 @@ def shoot_scanner_game(png_path: Path | None = None, *, edge: str = EDGE) -> dic
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     try:
+        # The server thread can take a moment to bind and render the first
+        # request. Capturing immediately is flaky: Edge may race the listener
+        # and produce no PNG even though the game is healthy.
+        from urllib.request import urlopen
+        ready = False
+        for _ in range(25):
+            try:
+                body = urlopen(f"http://127.0.0.1:{port}/game", timeout=1).read()
+                ready = b"SUBNET BREAKER" in body
+                if ready:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.2)
+        if not ready:
+            return {"ok": False, "reason": "scanner_game_server_not_ready"}
+
         res = capture_url(scanner_game_url(port), png_path, edge=edge)
         if res.get("ok") and int(res.get("bytes") or 0) < 80_000:
             res = dict(res)

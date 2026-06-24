@@ -359,15 +359,20 @@ def test_scanner_http_endpoints(tmp_path):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
 
-        try:
-            build_opener(NoRedirect).open(base + "/dashboard.html", timeout=10)
-            raise AssertionError("legacy dashboard route did not redirect")
-        except HTTPError as e:
-            assert e.code == 302
-            assert e.headers["location"] == "/game"
+        for legacy_route in ("/", "/dashboard.html"):
+            try:
+                build_opener(NoRedirect).open(base + legacy_route, timeout=10)
+                raise AssertionError(f"{legacy_route} did not redirect to game")
+            except HTTPError as e:
+                assert e.code == 302
+                assert e.headers["location"] == "/game"
 
         alias = urlopen(base + "/dashboard.html", timeout=10).read().decode()
         assert "SUBNET BREAKER" in alias
+        root = urlopen(base + "/", timeout=10).read().decode()
+        assert "SUBNET BREAKER" in root
+        arena = urlopen(base + "/arena", timeout=10).read().decode()
+        assert "CATHEDRAL ARENA" in arena and "Attack Map" in arena
 
         solved = json.loads(urlopen(
             base + "/api/scanner/agent/solve?index=999&task_id=" + task["task_id"] + "&miner_hotkey=hk_http_agent",
@@ -506,6 +511,26 @@ def test_scanner_http_endpoints(tmp_path):
         submissions = json.loads(urlopen(base + "/api/scanner/submissions?limit=10", timeout=10).read())
         assert submissions["count"] == 4
         assert "duplicate_task_credit" in submissions["submissions"][0]["reasons"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_howto_route_serves_the_game_instructions_page(tmp_path):
+    """GET /howto returns the standalone game instructions page."""
+    s = ArenaServer(season_path=str(tmp_path / "season.json"),
+                    scanner_ledger_path=str(tmp_path / "scanner.jsonl"))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _handler(s))
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{httpd.server_port}"
+    try:
+        for route in ("/howto", "/howto.html"):
+            page = urlopen(base + route, timeout=10).read().decode()
+            assert "How to Play Cathedral Arena" in page
+            assert "A short guide to the playable proof loop." in page
+            assert "Reports do not score" in page
+            assert "Start the game at /game" in page
     finally:
         httpd.shutdown()
         httpd.server_close()

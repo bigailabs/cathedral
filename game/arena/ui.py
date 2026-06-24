@@ -70,6 +70,14 @@ th { color:#6b7a99; font-weight:500; font-size:10.5px; text-transform:uppercase;
 .rules .rh { font-weight:700; color:#7fd1e0; font-size:11.5px; margin-bottom:3px; }
 .rules .rcard b { color:#e8edf7; }
 @media(max-width:900px){ .rules { grid-template-columns:repeat(2,1fr); } }
+.loopcards { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:6px 0 4px; }
+.loopcards .lc { background:#10182b; border:1px solid #233252; border-radius:10px; padding:12px 13px; line-height:1.5; }
+.loopcards .step { color:#7fd1e0; font-weight:700; font-size:10px; letter-spacing:.12em; text-transform:uppercase; }
+.loopcards .lt { font-weight:700; color:#ffe79a; font-size:13px; margin:5px 0 3px; }
+.loopcards .ld { font-size:12px; color:#cdd6f4; }
+.loopcards .ld b { color:#fff; }
+.loopline { color:#8b9bbd; font-size:12px; margin:2px 0 14px; }
+@media(max-width:900px){ .loopcards { grid-template-columns:repeat(2,1fr); } }
 .console { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
 .console .box { background:#0f1626; border:1px solid #1d2740; border-radius:9px; padding:10px; }
 .console .box.real { border-color:#27613f; } .console .box.mock { border-color:#5a3a63; }
@@ -601,6 +609,27 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
     from . import reports
     n_gates = len(GateOutcome.GATES)
     n_axes = len(reports.ANTICHEAT_AXES)
+
+    # Action-first loop: the page should read like a playable subnet-breaking game,
+    # while staying precise about what earns and what is only a rejected attempt.
+    loop_html = (
+        '<div class="loopcards">'
+        f'<div class="lc"><div class="step">Step 1</div><div class="lt">Pick a target</div>'
+        f'<div class="ld">Agents route across <b>{cs["targets"]}</b> subnet targets. '
+        f'Bounty, risk, proof family, and validator heat decide the route.</div></div>'
+        f'<div class="lc"><div class="step">Step 2</div><div class="lt">Ship proof</div>'
+        f'<div class="ld">A scoring run needs a witness, CNF/decode path, trace, replay, '
+        f'and attestation when required. A report alone scores <b>zero</b>.</div></div>'
+        f'<div class="lc"><div class="step">Step 3</div><div class="lt">Break or harden</div>'
+        f'<div class="ld">SAT witnesses can crack an invariant; UNSAT evidence can harden one. '
+        f'Both are valuable only when the verifier can replay them.</div></div>'
+        f'<div class="lc"><div class="step">Step 4</div><div class="lt">Survive gates</div>'
+        f'<div class="ld">This round accepted <b class="pass">{n_pass}</b> proofs and rejected '
+        f'<b class="fail">{n_rej}</b> attempts. Failed gates multiply reward by <b>0</b>.</div></div>'
+        '</div>'
+        '<div class="loopline">The game loop is probe -> encode -> solve -> replay -> attest -> seal. '
+        'The expert gate model is below.</div>')
+
     rules_html = (
         '<div class="rules">'
         '<div class="rcard"><div class="rh">1 Your agent</div>operates on an attested / '
@@ -634,7 +663,10 @@ def render(r: ArenaResult, refresh_secs: int = 6) -> str:
   <span class="pill">rejected <b class="fail">{n_rej}</b></span>
 </div>
 
-<h2>Rules of the Arena <span class="sub">- understand it in 60 seconds</span></h2>
+<h2>Game Loop <span class="sub">- action first, proof or zero</span></h2>
+{loop_html}
+
+<h2>Rules of the Arena <span class="sub">- the expert version, in 60 seconds</span></h2>
 {rules_html}
 
 <h2>Attack Map — 17 subnet targets</h2>
