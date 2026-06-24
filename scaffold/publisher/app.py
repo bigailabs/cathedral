@@ -474,39 +474,58 @@ def build_app(
                         f"elapsed={elapsed:.3f}s"
                     )
 
-    class _SubmitBackpressureMiddleware:
-        """Reject excess submit requests before body parsing/threadpool work."""
+    class _HotPathBackpressureMiddleware:
+        """Reject excess heavy requests before body parsing/threadpool work."""
 
         _SUBMIT_PATHS = {
             "/v1/agents/submit",
             f"{_LEGACY_PREFIX}/v1/agents/submit",
         }
+        _PM_READ_PATHS = {
+            "/v1/synthetic-boolean/per-miner/challenges",
+            "/v1/synthetic-boolean/per-miner/cnf",
+            f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/challenges",
+            f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/cnf",
+        }
 
         def __init__(self, asgi_app):
             self._app = asgi_app
-            self._gate = (
+            self._submit_gate = (
                 threading.BoundedSemaphore(submit_max_concurrency)
                 if submit_max_concurrency > 0 else None
             )
+            pm_read_cap = _env_int("CATHEDRAL_PM_READ_HARD_CAP", submit_max_concurrency)
+            self._pm_read_gate = (
+                threading.BoundedSemaphore(pm_read_cap)
+                if pm_read_cap > 0 else None
+            )
 
         async def __call__(self, scope, receive, send):
-            if (
-                scope.get("type") != "http"
-                or scope.get("method") != "POST"
-                or scope.get("path", "") not in self._SUBMIT_PATHS
-                or self._gate is None
-            ):
+            if scope.get("type") != "http":
+                await self._app(scope, receive, send)
+                return
+            method = scope.get("method")
+            path = scope.get("path", "")
+            gate = None
+            reason = ""
+            if method == "POST" and path in self._SUBMIT_PATHS:
+                gate = self._submit_gate
+                reason = "submit_busy_retry"
+            elif method == "GET" and path in self._PM_READ_PATHS:
+                gate = self._pm_read_gate
+                reason = "per_miner_busy_retry"
+            if gate is None:
                 await self._app(scope, receive, send)
                 return
 
-            if not self._gate.acquire(blocking=False):
+            if not gate.acquire(blocking=False):
                 _record_submit_event(
                     "rate_limited",
-                    "submit_busy_retry",
+                    reason,
                     status_code=429,
                     log=True,
                 )
-                body = b"submit_busy_retry"
+                body = reason.encode("utf-8")
                 await send({
                     "type": "http.response.start",
                     "status": 429,
@@ -514,7 +533,7 @@ def build_app(
                         (b"content-type", b"text/plain; charset=utf-8"),
                         (b"content-length", str(len(body)).encode()),
                         (b"retry-after", b"1"),
-                        (b"x-cathedral-rejection-reason", b"submit_busy_retry"),
+                        (b"x-cathedral-rejection-reason", body),
                     ],
                 })
                 await send({
@@ -527,11 +546,11 @@ def build_app(
             try:
                 await self._app(scope, receive, send)
             finally:
-                self._gate.release()
+                gate.release()
 
     app.add_middleware(_StripLegacyPrefixMiddleware)
     app.add_middleware(_SlowRequestLogMiddleware)
-    app.add_middleware(_SubmitBackpressureMiddleware)
+    app.add_middleware(_HotPathBackpressureMiddleware)
 
     # Per-key sliding-window rate limiter — anti-flood backpressure for miner
     # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
@@ -1576,7 +1595,21 @@ def build_app(
     # pattern as active-cnf (the 6-field claim shape, challenge_id="", solution="").
     # The hotkey IS the identity of the challenge set — no hotkey, no set.
 
-    def _record_perminer_assignments(hotkey: str, epoch: int, items: list[dict[str, Any]]) -> None:
+    recorded_pm_assignment_pages: set[tuple[str, int, int, int]] = set()
+    recorded_pm_assignment_lock = threading.Lock()
+
+    def _record_perminer_assignments(
+        hotkey: str,
+        epoch: int,
+        items: list[dict[str, Any]],
+        *,
+        offset: int,
+        limit: int,
+    ) -> None:
+        page_key = (hotkey, int(epoch), int(offset), int(limit))
+        with recorded_pm_assignment_lock:
+            if page_key in recorded_pm_assignment_pages:
+                return
         assigned_at = _now_iso_ms()
 
         def _do(conn):
@@ -1588,6 +1621,10 @@ def build_app(
                     (item["challenge_id"], hotkey, epoch, int(item["tier"]),
                      int(item["seq"]), float(item["difficulty_weight"]), assigned_at))
         store.write(_do)
+        with recorded_pm_assignment_lock:
+            if len(recorded_pm_assignment_pages) > 100_000:
+                recorded_pm_assignment_pages.clear()
+            recorded_pm_assignment_pages.add(page_key)
 
     def _lookup_perminer_assignment(hotkey: str, epoch: int, challenge_id: str) -> tuple[int, int] | None:
         found = store.query(
@@ -2031,7 +2068,13 @@ def build_app(
         effective_limit = pm.assignment_page_limit(limit)
         items = pm.miner_instance_set(
             assignment_identity, epoch, offset=offset, limit=effective_limit)
-        _record_perminer_assignments(assignment_identity, epoch, items)
+        _record_perminer_assignments(
+            assignment_identity,
+            epoch,
+            items,
+            offset=offset,
+            limit=effective_limit,
+        )
         return {
             "family_id": _FAMILY,
             "kind": "per_miner",
