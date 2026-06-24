@@ -400,6 +400,59 @@ def test_offbox_hardened_cross_confirms_unsat(monkeypatch):
     assert r2["remote_unsat"] is False and r2["ok"] is False
 
 
+def test_offbox_hardened_passes_configured_width(monkeypatch):
+    """ROOT-staking hardened invariants can be decidable at width 8 when width 16
+    returns unknown, so the off-box path must not silently hard-code width 16."""
+    from game.arena import mint
+    seen = {}
+
+    def fake_mint(rule_id, width, cap, model):
+        seen.update({"rule_id": rule_id, "width": width, "cap": cap, "model": model})
+        return {"result": "unsat", "cnf_text": "p cnf 1 2\n1 0\n-1 0\n",
+                "cnf_sha256": "abc123"}
+
+    monkeypatch.setattr(mint, "mint_invariant", fake_mint)
+    monkeypatch.setattr(mint, "solve_minted_cnf",
+                        lambda _cnf: {"available": True, "sat": False})
+    monkeypatch.setattr(stitch, "stitch_available", lambda *a, **k: True)
+    monkeypatch.setattr(stitch, "offbox_confirm_unsat",
+                        lambda _cnf: {"available": True, "host": "polarisserver",
+                                      "unsat": True, "remote_wall_ms": 1.0,
+                                      "round_trips": 1})
+
+    r = mint.offbox_hardened_on_stitch(
+        "A1-deposit-no-dilution", model="subtensor-root-reborn", width=8)
+
+    assert seen == {"rule_id": "A1-deposit-no-dilution", "width": 8,
+                    "cap": "realistic", "model": "subtensor-root-reborn"}
+    assert r["available"] is True and r["ok"] is True
+
+
+def test_offbox_hardened_generalizes_to_the_root_model(monkeypatch):
+    """Fire #78: offbox_hardened_on_stitch takes a `width` so it covers the ROOT-staking
+    model (A4-tao-split is UNSAT at width 8, where the hardcoded 16 returned 'unknown').
+    Driven without Stitch by mocking the remote UNSAT confirmation; local UNSAT is real."""
+    from game.arena import mint
+    if not mint.z3_available():
+        return
+    m = mint.mint_invariant("A4-tao-split-conservation", 8, "realistic", "subtensor-root-reborn")
+    if not m or m["result"] != "unsat":
+        return
+    if not mint.solve_minted_cnf(m["cnf_text"]).get("available"):
+        return                                          # pysat absent
+    monkeypatch.setattr(stitch, "stitch_available", lambda *a, **k: True)
+    monkeypatch.setattr(stitch, "offbox_confirm_unsat", lambda *a, **k: {
+        "available": True, "host": "polarisserver", "solver": "kissat",
+        "unsat": True, "rc": 20, "remote_wall_ms": 40.0, "round_trips": 9})
+    r = mint.offbox_hardened_on_stitch("A4-tao-split-conservation", "subtensor-root-reborn", 8)
+    assert r["available"] and r["rule_id"] == "A4-tao-split-conservation"
+    assert r["remote_unsat"] is True and r["local_unsat"] is True
+    assert r["cross_confirmed"] is True and r["ok"] is True
+    # at the old hardcoded width 16 the root invariant is z3 'unknown' -> not UNSAT -> gated
+    r16 = mint.offbox_hardened_on_stitch("A4-tao-split-conservation", "subtensor-root-reborn", 16)
+    assert r16["available"] is False and r16["reason"] == "z3_unavailable_or_not_unsat"
+
+
 def test_offbox_hardened_degrades_gracefully():
     """When Stitch is down (or z3 absent) the hardened off-box proof returns a verdict,
     never raises, and still reports the LOCAL UNSAT it could compute."""
