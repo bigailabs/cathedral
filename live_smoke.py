@@ -47,6 +47,7 @@ def _post_form(path: str, headers: dict, form: dict):
 
 
 def _url(path: str) -> str:
+    path = path.lstrip("\ufeff").strip()
     if path.startswith("http://") or path.startswith("https://"):
         return path
     return BASE + path

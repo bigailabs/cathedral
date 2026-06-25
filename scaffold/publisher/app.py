@@ -73,8 +73,8 @@ def _env_int(name: str, default: int) -> int:
 
 def _cnf_token_secret() -> bytes:
     raw = (
-        os.environ.get(_CNF_TOKEN_SECRET_ENV, "").strip()
-        or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").strip()
+        os.environ.get(_CNF_TOKEN_SECRET_ENV, "").lstrip("\ufeff").strip()
+        or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").lstrip("\ufeff").strip()
     )
     if raw:
         return hashlib.sha256(raw.encode("utf-8")).digest()
@@ -85,7 +85,7 @@ def _cnf_token_secret() -> bytes:
 
 
 def _public_cnf_url(path: str) -> str:
-    base = os.environ.get(_CNF_PUBLIC_BASE_URL_ENV, "").strip().rstrip("/")
+    base = os.environ.get(_CNF_PUBLIC_BASE_URL_ENV, "").lstrip("\ufeff").strip().rstrip("/")
     return f"{base}{path}" if base else path
 
 
