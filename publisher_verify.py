@@ -250,6 +250,24 @@ with TestClient(app) as client:
         headers={"If-None-Match": bc.headers.get("etag", "")},
     )
     ck("challenge-broadcast supports ETag 304", bc_304.status_code == 304)
+    old_rpm = os.environ.get("CATHEDRAL_RATELIMIT_RPM")
+    os.environ["CATHEDRAL_RATELIMIT_RPM"] = "1"
+    try:
+        pm_read_statuses = [
+            client.get("/v1/synthetic-boolean/per-miner/challenges").status_code,
+            client.get("/v1/synthetic-boolean/per-miner/challenges").status_code,
+            client.get("/v1/synthetic-boolean/per-miner/cnf",
+                       params={"challenge_id": "pm-test"}).status_code,
+            client.get("/v1/synthetic-boolean/per-miner/cnf",
+                       params={"challenge_id": "pm-test"}).status_code,
+        ]
+        ck("per-miner read paths bypass coarse RPM limiter",
+           pm_read_statuses == [422, 422, 422, 422])
+    finally:
+        if old_rpm is None:
+            os.environ.pop("CATHEDRAL_RATELIMIT_RPM", None)
+        else:
+            os.environ["CATHEDRAL_RATELIMIT_RPM"] = old_rpm
 
     old_role_env = {
         "CATHEDRAL_SERVICE_ROLE": os.environ.get("CATHEDRAL_SERVICE_ROLE"),

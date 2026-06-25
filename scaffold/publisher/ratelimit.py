@@ -49,6 +49,11 @@ _EXEMPT_SUFFIXES: tuple[str, ...] = (
     "/health",
     "/v1/validator/weights/next",
     "/.well-known/cathedral-jwks.json",
+    # Per-miner assignment reads are hot-path signed GETs.  They have their
+    # own bounded concurrency gate in app.py; the coarse per-IP RPM limiter
+    # unfairly throttles legitimate high-throughput miners behind one egress IP.
+    "/v1/synthetic-boolean/per-miner/challenges",
+    "/v1/synthetic-boolean/per-miner/cnf",
 )
 
 # Prefix for the legacy path-strip compat so exempt check works both ways.

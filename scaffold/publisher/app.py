@@ -537,7 +537,10 @@ def build_app(
                 threading.BoundedSemaphore(submit_max_concurrency)
                 if submit_max_concurrency > 0 else None
             )
-            pm_read_cap = _env_int("CATHEDRAL_PM_READ_HARD_CAP", submit_max_concurrency)
+            # PM challenge/CNF reads are signed GETs and are materially cheaper
+            # than solution submission. Keep a backpressure valve, but do not
+            # inherit the write-path cap by default.
+            pm_read_cap = _env_int("CATHEDRAL_PM_READ_HARD_CAP", 64)
             self._pm_read_gate = (
                 threading.BoundedSemaphore(pm_read_cap)
                 if pm_read_cap > 0 else None
