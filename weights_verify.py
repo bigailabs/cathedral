@@ -357,6 +357,74 @@ try:
         os.environ.pop(weights.PERMINER_PUBLIC_BASELINE_ENV, None)
         os.environ.pop(weights.PERMINER_REQUIRE_COLDKEY_ENV, None)
 
+    pm_mapped_store = Store(":memory:")
+    try:
+        from scaffold.publisher import per_miner
+
+        pm_epoch = per_miner.current_epoch()
+        os.environ[weights.MODE_ENV] = "proportional"
+        os.environ["CATHEDRAL_PERMINER_ENABLED"] = "1"
+        os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
+        os.environ[weights.PERMINER_SCORING_MODE_ENV] = "pm_primary"
+        os.environ[weights.PERMINER_PUBLIC_BASELINE_ENV] = "0.05"
+        os.environ[weights.PERMINER_REQUIRE_COLDKEY_ENV] = "1"
+        insert_solve(pm_mapped_store, "sat-t2-public-only", "5PublicOnly", recent)
+        insert_perminer_solve(
+            pm_mapped_store,
+            "pm-t2-private-mapped",
+            "5PrivateMapped",
+            pm_epoch,
+            tier=2,
+            difficulty_weight=3.0,
+            solved_at=recent,
+        )
+        insert_perminer_solve(
+            pm_mapped_store,
+            "pm-t2-unmapped-huge",
+            "5UnmappedHuge",
+            pm_epoch,
+            tier=2,
+            difficulty_weight=100.0,
+            solved_at=recent,
+        )
+
+        def _map_private(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
+                "VALUES (?, ?, ?)",
+                ("5PrivateMapped", "5ColdPrivate", recent),
+            )
+
+        pm_mapped_store.write(_map_private)
+        mapped_scores = weights.compose_scores(
+            pm_mapped_store,
+            now=now,
+            coldkey_of={"5PrivateMapped": "5ColdPrivate"},
+        )
+        ck(
+            "pm_primary excludes unmapped PM hotkeys when coldkey identity is required",
+            mapped_scores == {"5PrivateMapped": 1.0, "5PublicOnly": 0.052632},
+        )
+        mapped_vec = weights.build_signed_vector(
+            pm_mapped_store,
+            signing_key_hex=generate_test_key(),
+            now=now,
+        )
+        mapped_hotkeys = {w["miner_hotkey"] for w in mapped_vec["weights"]}
+        ck(
+            "pm_primary signed vector omits unmapped PM leaders",
+            mapped_vec["policy_metadata"]["score_source"] == "pm_primary"
+            and mapped_vec["policy_metadata"]["perminer"]["primary_live"] is True
+            and "5UnmappedHuge" not in mapped_hotkeys,
+        )
+    finally:
+        pm_mapped_store.close()
+        os.environ.pop("CATHEDRAL_PERMINER_ENABLED", None)
+        os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
+        os.environ.pop(weights.PERMINER_SCORING_MODE_ENV, None)
+        os.environ.pop(weights.PERMINER_PUBLIC_BASELINE_ENV, None)
+        os.environ.pop(weights.PERMINER_REQUIRE_COLDKEY_ENV, None)
+
     ck("generic tier parser reads sat and future lane ids",
        weights.tier_from_challenge_id("sat-t2-abc") == 2
        and weights.tier_from_challenge_id("audit-t3-abc") == 3

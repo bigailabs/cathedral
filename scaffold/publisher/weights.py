@@ -293,7 +293,10 @@ def _perminer_window_scores(
     identity_best: dict[str, float] = {}
     hks: dict[str, set[str]] = {}
     for hk, total in hk_totals.items():
-        idk = str(ident(hk))
+        ident_value = ident(hk)
+        if ident_value is None:
+            continue
+        idk = str(ident_value)
         identity_best[idk] = max(identity_best.get(idk, 0.0), total)
         hks.setdefault(idk, set()).add(hk)
     if not identity_best:
@@ -547,7 +550,7 @@ def _perminer_policy_status(
     store: Store | None = None,
     *,
     now: datetime | None = None,
-    coldkey_loaded: bool | None = None,
+    coldkey_of: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Surface per-miner flag state so a score-source flip is never silent."""
     try:
@@ -571,8 +574,20 @@ def _perminer_policy_status(
     shadow = pm.perminer_shadow()
     epoch = pm.current_epoch() if enabled else None
     has_scores = False
+    coldkey_loaded = bool(coldkey_of)
     if enabled and store is not None and epoch is not None:
-        has_scores = bool(_perminer_scores(store, now=now))
+        if perminer_require_coldkey():
+            if coldkey_of:
+                now = now or datetime.now(timezone.utc)
+                since = _ms_iso(now - timedelta(hours=window_hours()))
+
+                def mapped_identity(hk: str) -> str | None:
+                    return coldkey_of.get(hk)
+
+                has_scores = bool(_perminer_window_scores(
+                    store, since=since, ident=mapped_identity))
+        else:
+            has_scores = bool(_perminer_scores(store, now=now))
     live_requested = enabled and not shadow
     scoring_mode = perminer_scoring_mode()
     identity_ready = (
@@ -624,7 +639,7 @@ def explain_miner_score(
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     coldkey_of = _load_scoring_coldkey_map(store)
-    pm_status = _perminer_policy_status(store, now=now, coldkey_loaded=bool(coldkey_of))
+    pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
     requested = mode()
     effective = _effective_mode(store, since)
     source = pm_status["score_source"] or effective
@@ -900,8 +915,8 @@ def compose_scores(
     def ident(hk: str) -> str:
         return coldkey_of.get(hk, hk) if use_ck else hk
 
-    def pm_ident(hk: str) -> str:
-        return coldkey_of.get(hk, hk) if use_pm_ck else ident(hk)
+    def pm_ident(hk: str) -> str | None:
+        return coldkey_of.get(hk) if use_pm_ck else ident(hk)
 
     pm_scores = _perminer_compose_scores(store, ident=pm_ident, since=since)
     if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
@@ -1007,7 +1022,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
-    pm_status = _perminer_policy_status(store, now=now, coldkey_loaded=bool(coldkey_of))
+    pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
     score_source = pm_status["score_source"] or effective_mode
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
     policy_inputs = {
