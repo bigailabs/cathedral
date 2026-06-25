@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from .. import wire
 from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
@@ -1240,6 +1241,53 @@ def build_app(
             print(f"[leaderboard] public row compatibility score fallback: {exc!r}")
         return 1.0
 
+    def _task_id_public(challenge_id: str, tier: int) -> str:
+        return hashlib.sha256(f"{challenge_id}:{int(tier)}".encode("utf-8")).hexdigest()[:16]
+
+    def _known_pm_task_ids() -> set[str]:
+        rows_ = store.query(
+            "SELECT DISTINCT challenge_id, tier FROM per_miner_solves "
+            "WHERE verified=1"
+        )
+        return {
+            _task_id_public(str(r["challenge_id"]), int(r["tier"]))
+            for r in rows_
+            if str(r["challenge_id"] or "").startswith("pm-")
+        }
+
+    def _rewrite_recent_rows_for_legacy_pm_primary(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Serve old-validator /recent economics consistent with PM-primary.
+
+        Existing eval rows are immutable audit records. During the PM-primary
+        rollout, however, old validators may still aggregate /recent instead of
+        the signed vector. Rewrite only the response copy, then re-sign, so the
+        compatibility feed cannot keep paying public-board rows at full value.
+        """
+        baseline = _public_row_score_multiplier()
+        if baseline == 1.0:
+            return items
+        pm_task_ids = _known_pm_task_ids()
+        out: list[dict[str, Any]] = []
+        for item in items:
+            row = dict(item)
+            if row.get("task_type") == _FAMILY:
+                cid = str(row.get("challenge_id") or "")
+                task_id = str(row.get("task_id_public") or "")
+                is_pm = cid.startswith("pm-") or task_id in pm_task_ids
+                if not is_pm and float(row.get("weighted_score") or 0.0) > baseline:
+                    row["weighted_score"] = float(baseline)
+                    row["score_parts"] = {"binary_correct": float(baseline)}
+                    if int(row.get("eval_output_schema_version", 0)) == 6:
+                        row["challenge_value"] = float(baseline)
+                    card = row.get("output_card")
+                    if isinstance(card, dict):
+                        card = dict(card)
+                        card["weighted_score"] = float(baseline)
+                        row["output_card"] = card
+                    row["cathedral_signature"] = wire.sign_row(row, key_hex)
+            out.append(row)
+        return out
+
     def _nullable_float(value: Any) -> float | None:
         try:
             out = float(value)
@@ -1471,7 +1519,9 @@ def build_app(
         cur_id: str | None,
         limit: int,
     ) -> dict[str, Any]:
-        items = store.recent_rows(cur_ran_at, cur_id, limit)
+        items = _rewrite_recent_rows_for_legacy_pm_primary(
+            store.recent_rows(cur_ran_at, cur_id, limit)
+        )
         if items:
             last = items[-1]
             nxt_ran_at, nxt_id = last["ran_at"], last["id"]
