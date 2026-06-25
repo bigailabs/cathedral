@@ -8,6 +8,7 @@ import {
   normalizedCacheKeyUrl,
   originAllowsEdgeStore,
   originRequest,
+  originTimeoutForRoute,
   unsupportedCacheQueryParams,
 } from "./worker.mjs";
 
@@ -45,6 +46,16 @@ assert.deepEqual(
   { freshTtl: 2, edgeTtl: 20, swr: true, params: ["limit", "since", "since_ran_at", "since_id"] },
 );
 assert.equal(cachePolicyForPath("/v1/synthetic-boolean/per-miner/cnf"), null);
+
+assert.equal(originTimeoutForRoute({}, "read", "/health/ready"), 9000);
+assert.equal(originTimeoutForRoute({}, "read", "/.well-known/cathedral-jwks.json"), 9000);
+assert.equal(originTimeoutForRoute({}, "read", "/v1/synthetic-boolean/active-challenges", true), 4500);
+assert.equal(originTimeoutForRoute({}, "read", "/v1/synthetic-boolean/per-miner/status"), 4500);
+assert.equal(originTimeoutForRoute({}, "submit", "/v1/agents/submit"), 10000);
+assert.equal(
+  originTimeoutForRoute({ READ_HEALTH_ORIGIN_TIMEOUT_MS: "12000" }, "read", "/health/ready"),
+  12000,
+);
 
 assert.equal(
   normalizedCacheKeyUrl(

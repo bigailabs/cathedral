@@ -46,6 +46,20 @@ Cached read routes serve stale data while refreshing in the background, except
 `/v1/validator/weights/next`, which refreshes synchronously so validators do not
 receive an intentionally stale signed vector unless the origin errors.
 
+## Origin timeouts
+
+Default Worker origin timeouts:
+
+| Route class | Env var | Default |
+| --- | --- | ---: |
+| Cached read miss/refresh and non-health read bypass | `READ_ORIGIN_TIMEOUT_MS` | 4500ms |
+| Health/readiness/JWKS read bypass | `READ_HEALTH_ORIGIN_TIMEOUT_MS` | 9000ms |
+| Submit/private-CNF routes | `SUBMIT_ORIGIN_TIMEOUT_MS` | 10000ms |
+
+Health/readiness routes are not cached. They intentionally get a longer timeout
+than cacheable board reads so transient Railway stalls do not make the edge
+look dead while cached board traffic is still healthy.
+
 ## Deploy
 
 Deploy from this directory after uncommenting the route in `wrangler.toml`.

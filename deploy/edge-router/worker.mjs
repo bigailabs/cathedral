@@ -19,6 +19,13 @@ const READ_GET_PATHS = new Set([
   "/v1/leaderboard/explain",
 ]);
 
+const READ_HEALTH_PATHS = new Set([
+  "/health",
+  "/health/live",
+  "/health/ready",
+  "/.well-known/cathedral-jwks.json",
+]);
+
 const READ_GET_PREFIXES = [
   "/v1/audit-scanner/",
 ];
@@ -214,6 +221,19 @@ function originTimeoutMs(env, key, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+export function originTimeoutForRoute(env, role, path, cacheable = false) {
+  if (role === "submit") {
+    return originTimeoutMs(env, "SUBMIT_ORIGIN_TIMEOUT_MS", 10000);
+  }
+  if (role === "read" && cacheable) {
+    return originTimeoutMs(env, "READ_ORIGIN_TIMEOUT_MS", 4500);
+  }
+  if (role === "read" && READ_HEALTH_PATHS.has(path)) {
+    return originTimeoutMs(env, "READ_HEALTH_ORIGIN_TIMEOUT_MS", 9000);
+  }
+  return originTimeoutMs(env, "READ_ORIGIN_TIMEOUT_MS", 4500);
+}
+
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
 }
@@ -337,15 +357,13 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
       originBase,
       ctx,
       route.path,
-      originTimeoutMs(env, "READ_ORIGIN_TIMEOUT_MS", 4500),
+      originTimeoutForRoute(env, route.role, route.path, true),
     );
   }
 
   let resp;
   try {
-    const timeoutKey = route.role === "read" ? "READ_ORIGIN_TIMEOUT_MS" : "SUBMIT_ORIGIN_TIMEOUT_MS";
-    const fallbackMs = route.role === "read" ? 4500 : 10000;
-    resp = await fetchWithTimeout(originReq, originTimeoutMs(env, timeoutKey, fallbackMs));
+    resp = await fetchWithTimeout(originReq, originTimeoutForRoute(env, route.role, route.path));
   } catch (error) {
     return Response.json(
       { error: `${route.role}_origin_unavailable`, detail: String(error && error.message || error) },
