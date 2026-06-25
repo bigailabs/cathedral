@@ -112,6 +112,7 @@ node worker.test.mjs
 node smoke.mjs
 node route-map.mjs
 node soak.mjs
+node diagnose.mjs
 ```
 
 Override the smoke target with:
@@ -137,6 +138,45 @@ CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_EXPECT_WOR
 
 That mode proves routed hot paths are actually hitting the Worker while sampled
 non-routed monolith paths still pass through.
+
+## Diagnose
+
+Use this when miners report timeouts or 429s and you need to distinguish
+Railway origin trouble from Cloudflare edge trouble:
+
+```bash
+node diagnose.mjs
+```
+
+Expected healthy shape:
+
+```text
+api      200 ... edge=BYPASS server=cloudflare body=json
+read     200 ... server=railway-hikari body=json
+submit   200 ... server=railway-hikari body=json
+status=healthy
+```
+
+If `api` returns Cloudflare HTML with `status=429` while `read` and `submit`
+return `200`, the split Railway services are healthy and
+`api.cathedral.computer` is being rate-limited before Cathedral/Worker code can
+respond. That is a Cloudflare zone policy issue, not a Railway outage.
+
+If the diagnostic returns `status=network_probe_error`, rerun it from another
+network before restarting services. That status means the diagnostic machine
+could not complete one or more endpoint probes.
+
+Immediate mitigation:
+
+- tell miners to use `https://read.cathedral.computer` for reads
+- tell miners to use `https://submit.cathedral.computer` for submits/private CNF
+
+Permanent fix:
+
+- add a targeted Cloudflare rate-limit/WAF bypass or per-path override for the
+  Cathedral API hot paths listed above
+- keep the Worker routes attached for `api.cathedral.computer`
+- rerun `node diagnose.mjs`, then `node route-map.mjs`, then `node soak.mjs`
 
 For a fuller cutover gate, use:
 

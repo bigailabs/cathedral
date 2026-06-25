@@ -12,6 +12,7 @@ tmp/
 *.log
 *.egg-info/
 .pytest_cache/
+.wrangler/
 uv.lock
 game/arena/PROGRESS.md
 

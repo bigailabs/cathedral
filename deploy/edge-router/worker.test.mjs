@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import {
+  classifyEdgeHealth,
+} from "./diagnose.mjs";
+import {
   cachedFresh,
   cachePolicyForPath,
   canonicalPath,
@@ -126,6 +129,120 @@ assert.equal(originAllowsEdgeStore(new Response("{}", {
 assert.equal(originAllowsEdgeStore(new Response("{}", {
   headers: { "Vary": "Accept-Encoding" },
 })), true);
+
+const cfRateLimited = {
+  status: 429,
+  edge: "",
+  server: "cloudflare",
+  bodyKind: "cloudflare_rate_limited",
+  body: "This website has been temporarily rate limited",
+};
+const healthyRead = {
+  status: 200,
+  edge: "",
+  server: "railway-hikari",
+  bodyKind: "json",
+  body: '{"service_role":"read"}',
+};
+const healthySubmit = {
+  status: 200,
+  edge: "",
+  server: "railway-hikari",
+  bodyKind: "json",
+  body: '{"service_role":"submit"}',
+};
+const probeException = {
+  status: 0,
+  edge: "",
+  server: "",
+  bodyKind: "exception",
+  body: "fetch failed",
+};
+
+for (const [name, probes, expected] of [
+  [
+    "api Cloudflare rate limited while split origins are healthy",
+    { apiReady: cfRateLimited, readReady: healthyRead, submitReady: healthySubmit },
+    "cloudflare_zone_rate_limited",
+  ],
+  [
+    "api Worker readiness is healthy",
+    {
+      apiReady: {
+        status: 200,
+        edge: "BYPASS",
+        server: "cloudflare",
+        bodyKind: "json",
+        body: '{"service_role":"read"}',
+      },
+      readReady: healthyRead,
+      submitReady: healthySubmit,
+    },
+    "healthy",
+  ],
+  [
+    "read probe exception is not origin unhealthy",
+    { apiReady: cfRateLimited, readReady: probeException, submitReady: healthySubmit },
+    "network_probe_error",
+  ],
+  [
+    "api probe exception is not origin unhealthy",
+    { apiReady: probeException, readReady: healthyRead, submitReady: healthySubmit },
+    "network_probe_error",
+  ],
+  [
+    "submit probe exception is not origin unhealthy",
+    { apiReady: cfRateLimited, readReady: healthyRead, submitReady: probeException },
+    "network_probe_error",
+  ],
+  [
+    "read origin reports unhealthy",
+    {
+      apiReady: cfRateLimited,
+      readReady: {
+        status: 503,
+        edge: "",
+        server: "railway-hikari",
+        bodyKind: "json",
+        body: '{"service_role":"read","db":"error"}',
+      },
+      submitReady: healthySubmit,
+    },
+    "origin_unhealthy",
+  ],
+  [
+    "Cloudflare response has no Worker edge header",
+    {
+      apiReady: {
+        status: 429,
+        edge: "",
+        server: "cloudflare",
+        bodyKind: "html_or_text",
+        body: "<html>blocked</html>",
+      },
+      readReady: healthyRead,
+      submitReady: healthySubmit,
+    },
+    "cloudflare_policy_or_route_gap",
+  ],
+  [
+    "split origins healthy but api does not match a known state",
+    {
+      apiReady: {
+        status: 503,
+        edge: "BYPASS",
+        server: "cloudflare",
+        bodyKind: "json",
+        body: '{"status":"error"}',
+      },
+      readReady: healthyRead,
+      submitReady: healthySubmit,
+    },
+    "unknown_edge_state",
+  ],
+]) {
+  assert.equal(classifyEdgeHealth(probes).status, expected, name);
+}
 
 const preflight = await handleRequest(new Request("https://api.cathedral.computer/v1/agents/submit", {
   method: "OPTIONS",
