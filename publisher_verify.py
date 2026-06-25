@@ -603,6 +603,51 @@ with TestClient(app) as client:
     cnf_text = client.get(cnf_url).text
     ck("valid token fetches the CNF", cnf_text.startswith("p cnf"))
 
+    # Split-role production can mint active-cnf tokens on one replica and serve
+    # the CNF on another. A stable secret must make that round trip valid.
+    import tempfile as _cnf_tempfile
+    old_cnf_token_secret = os.environ.get("CATHEDRAL_CNF_TOKEN_SECRET")
+    cnf_db_path = ""
+    try:
+        os.environ["CATHEDRAL_CNF_TOKEN_SECRET"] = "publisher-verify-shared-cnf-token-secret"
+        with _cnf_tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as _cnf_db:
+            cnf_db_path = _cnf_db.name
+        token_app_a = build_app(
+            database_path=cnf_db_path,
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        token_store = token_app_a.state.store
+        seed_challenge(token_store, challenge_id="sat-token-cross-app", tier=1, cnf_text=cnf_e2e)
+        token_app_b = build_app(
+            database_path=cnf_db_path,
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        with TestClient(token_app_a) as token_client_a, TestClient(token_app_b) as token_client_b:
+            token_resp = token_client_a.get(
+                "/v1/synthetic-boolean/active-cnf?challenge_id=sat-token-cross-app",
+                headers={"X-Cathedral-Hotkey": miner.ss58_address,
+                         "X-Cathedral-Signature": cnf_sig,
+                         "X-Cathedral-Submitted-At": sa},
+            )
+            token_url = token_resp.json()["cnf_url"] if token_resp.status_code == 200 else ""
+            cross_resp = token_client_b.get(token_url) if token_url else token_resp
+            ck("active-cnf token validates across split app instances",
+               token_resp.status_code == 200
+               and cross_resp.status_code == 200
+               and cross_resp.text.startswith("p cnf"))
+    finally:
+        if old_cnf_token_secret is None:
+            os.environ.pop("CATHEDRAL_CNF_TOKEN_SECRET", None)
+        else:
+            os.environ["CATHEDRAL_CNF_TOKEN_SECRET"] = old_cnf_token_secret
+        try:
+            if cnf_db_path:
+                os.unlink(cnf_db_path)
+        except Exception:
+            pass
+
     # solve with DPLL + submit (6-field signed)
     sol = solve_cnf(cnf_text)
     blob = "s SATISFIABLE\nv " + " ".join(str(x) for x in sol) + " 0\n"

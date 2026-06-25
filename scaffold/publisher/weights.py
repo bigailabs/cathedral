@@ -357,9 +357,22 @@ def _apply_perminer_primary(
         return base
     baseline = perminer_public_baseline()
     pm_share = 1.0 - baseline
+
+    def budgeted(scores: dict[str, float], budget: float) -> dict[str, float]:
+        if budget <= 0.0:
+            return {}
+        total = sum(max(0.0, float(v)) for v in scores.values())
+        if total <= 0.0:
+            return {}
+        return {
+            hk: budget * max(0.0, float(score)) / total
+            for hk, score in scores.items()
+        }
+
     combined: dict[str, float] = {}
-    for hk in set(base) | set(pm_scores):
-        combined[hk] = baseline * float(base.get(hk, 0.0)) + pm_share * float(pm_scores.get(hk, 0.0))
+    for part in (budgeted(base, baseline), budgeted(pm_scores, pm_share)):
+        for hk, score in part.items():
+            combined[hk] = combined.get(hk, 0.0) + score
     top = max(combined.values()) if combined else 0.0
     if top <= 0.0:
         return {}
@@ -926,6 +939,8 @@ def compose_scores(
         if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
             if perminer_require_coldkey() and not coldkey_of:
                 return _apply_perminer_bonus(store, base, coldkey_of, now=now)
+            if perminer_require_coldkey() and coldkey_of:
+                base = {hk: score for hk, score in base.items() if hk in coldkey_of}
             return _apply_perminer_primary(base, pm_scores)
         return _apply_perminer_bonus(store, base, coldkey_of, now=now)
 

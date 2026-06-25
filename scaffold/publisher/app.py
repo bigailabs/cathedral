@@ -53,6 +53,7 @@ _READINESS_SHA = hashlib.sha256(_READINESS_CNF.encode("utf-8")).hexdigest()
 _QUARANTINE_ROUNDS = 3      # Lane I (V4-DESIGN.md)
 _MIN_BATCH_SCORE = 0.5      # Lane I (V4-DESIGN.md)
 _CNF_TOKEN_TTL = 120        # active-cnf fetch token lifetime (seconds)
+_CNF_TOKEN_SECRET_ENV = "CATHEDRAL_CNF_TOKEN_SECRET"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -67,6 +68,19 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)) or default)
     except ValueError:
         return default
+
+
+def _cnf_token_secret() -> bytes:
+    raw = (
+        os.environ.get(_CNF_TOKEN_SECRET_ENV, "").strip()
+        or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").strip()
+    )
+    if raw:
+        return hashlib.sha256(raw.encode("utf-8")).digest()
+    # Local/dev fallback. Production split roles must set a stable secret.
+    print(f"[cnf] WARNING: {_CNF_TOKEN_SECRET_ENV} is unset; "
+          "active-cnf tokens are process-local and unsafe for split replicas")
+    return secrets.token_bytes(32)
 
 
 class _SoftTtlCache:
@@ -192,8 +206,8 @@ def build_app(
     verifier = default_verifier()
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
-    # secret for HMAC CNF fetch tokens — fresh per process (tokens are short-lived)
-    token_secret = secrets.token_bytes(32)
+    # Shared HMAC secret lets active-cnf and CNF fetch land on different replicas.
+    token_secret = _cnf_token_secret()
     min_interval = (
         submit_min_interval_secs
         if submit_min_interval_secs is not None

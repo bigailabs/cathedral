@@ -369,6 +369,7 @@ try:
         os.environ[weights.PERMINER_PUBLIC_BASELINE_ENV] = "0.05"
         os.environ[weights.PERMINER_REQUIRE_COLDKEY_ENV] = "1"
         insert_solve(pm_mapped_store, "sat-t2-public-only", "5PublicOnly", recent)
+        insert_solve(pm_mapped_store, "sat-t2-unmapped-public", "5UnmappedPublic", recent)
         insert_perminer_solve(
             pm_mapped_store,
             "pm-t2-private-mapped",
@@ -394,12 +395,17 @@ try:
                 "VALUES (?, ?, ?)",
                 ("5PrivateMapped", "5ColdPrivate", recent),
             )
+            conn.execute(
+                "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
+                "VALUES (?, ?, ?)",
+                ("5PublicOnly", "5ColdPublic", recent),
+            )
 
         pm_mapped_store.write(_map_private)
         mapped_scores = weights.compose_scores(
             pm_mapped_store,
             now=now,
-            coldkey_of={"5PrivateMapped": "5ColdPrivate"},
+            coldkey_of={"5PrivateMapped": "5ColdPrivate", "5PublicOnly": "5ColdPublic"},
         )
         ck(
             "pm_primary excludes unmapped PM hotkeys when coldkey identity is required",
@@ -417,8 +423,74 @@ try:
             and mapped_vec["policy_metadata"]["perminer"]["primary_live"] is True
             and "5UnmappedHuge" not in mapped_hotkeys,
         )
+        ck(
+            "pm_primary signed vector omits unmapped public baseline hotkeys",
+            "5UnmappedPublic" not in mapped_hotkeys,
+        )
     finally:
         pm_mapped_store.close()
+        os.environ.pop("CATHEDRAL_PERMINER_ENABLED", None)
+        os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
+        os.environ.pop(weights.PERMINER_SCORING_MODE_ENV, None)
+        os.environ.pop(weights.PERMINER_PUBLIC_BASELINE_ENV, None)
+        os.environ.pop(weights.PERMINER_REQUIRE_COLDKEY_ENV, None)
+
+    pm_budget_store = Store(":memory:")
+    try:
+        from scaffold.publisher import per_miner
+
+        pm_epoch = per_miner.current_epoch()
+        os.environ[weights.MODE_ENV] = "proportional"
+        os.environ["CATHEDRAL_PERMINER_ENABLED"] = "1"
+        os.environ[weights.PERMINER_SCORING_MODE_ENV] = "pm_primary"
+        os.environ[weights.PERMINER_PUBLIC_BASELINE_ENV] = "0.02"
+        os.environ[weights.PERMINER_REQUIRE_COLDKEY_ENV] = "1"
+        insert_perminer_solve(
+            pm_budget_store,
+            "pm-t2-budget-private",
+            "5BudgetPrivate",
+            pm_epoch,
+            tier=2,
+            difficulty_weight=3.0,
+            solved_at=recent,
+        )
+        for idx in range(60):
+            hk = f"5BudgetPublic{idx:02d}"
+            insert_solve(pm_budget_store, f"sat-t2-budget-public-{idx}", hk, recent)
+
+        def _map_budget(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
+                "VALUES (?, ?, ?)",
+                ("5BudgetPrivate", "5ColdBudgetPrivate", recent),
+            )
+            for idx in range(60):
+                hk = f"5BudgetPublic{idx:02d}"
+                conn.execute(
+                    "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
+                    "VALUES (?, ?, ?)",
+                    (hk, f"5ColdBudgetPublic{idx:02d}", recent),
+                )
+
+        pm_budget_store.write(_map_budget)
+        budget_scores = weights.compose_scores(
+            pm_budget_store,
+            now=now,
+            coldkey_of={
+                "5BudgetPrivate": "5ColdBudgetPrivate",
+                **{f"5BudgetPublic{idx:02d}": f"5ColdBudgetPublic{idx:02d}" for idx in range(60)},
+            },
+        )
+        public_total = round(sum(
+            score for hk, score in budget_scores.items()
+            if hk.startswith("5BudgetPublic")
+        ), 6)
+        ck(
+            "pm_primary public baseline is a total budget, not per-hotkey",
+            budget_scores.get("5BudgetPrivate") == 1.0 and public_total < 0.03,
+        )
+    finally:
+        pm_budget_store.close()
         os.environ.pop("CATHEDRAL_PERMINER_ENABLED", None)
         os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
         os.environ.pop(weights.PERMINER_SCORING_MODE_ENV, None)
