@@ -1069,6 +1069,48 @@ with TestClient(app) as client:
            and pm_weight_by_hotkey.get(pm_miner.ss58_address) == 1.0
            and pm_weight_by_hotkey.get(miner.ss58_address, 0.0) < 0.1
            and pm_weight_by_hotkey.get(miner2.ss58_address, 0.0) < 0.1)
+        compat_app = build_app(
+            database_path=":memory:",
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        compat_store = compat_app.state.store
+        compat_cnf, _compat_planted = gen_planted_3sat(333, 10, 30)
+        seed_challenge(compat_store, challenge_id="sat-pm-primary-compat", tier=1, cnf_text=compat_cnf)
+        compat_sol = solve_cnf(compat_cnf)
+        compat_blob = "s SATISFIABLE\nv " + " ".join(str(x) for x in compat_sol) + " 0\n"
+        compat_sha = hashlib.sha256(compat_blob.encode()).hexdigest()
+        compat_at = now_iso()
+        compat_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=miner3.ss58_address, submitted_at=compat_at,
+            challenge_id="sat-pm-primary-compat", dimacs_solution_sha256=compat_sha)
+        compat_sig = base64.b64encode(miner3.sign(compat_claim)).decode()
+        with TestClient(compat_app) as compat_client:
+            compat_resp = compat_client.post(
+                "/v1/agents/submit",
+                headers={"X-Cathedral-Hotkey": miner3.ss58_address,
+                         "X-Cathedral-Signature": compat_sig},
+                data={"card_id": "synthetic_boolean_v1", "submitted_at": compat_at,
+                      "challenge_id": "sat-pm-primary-compat", "dimacs_solution": compat_blob},
+            )
+        compat_rows = compat_store.query(
+            "SELECT row_json FROM eval_runs WHERE miner_hotkey=? AND task_type=?",
+            (miner3.ss58_address, "synthetic_boolean_v1"),
+        )
+        compat_feed_rows = [json.loads(r["row_json"]) for r in compat_rows]
+        compat_public_rows = [
+            r for r in compat_feed_rows
+            if r.get("task_id_public") == hashlib.sha256(
+                "sat-pm-primary-compat:1".encode("utf-8")
+            ).hexdigest()[:16]
+        ]
+        ck("pm-primary public-board rows are baseline-weighted for old validators",
+           compat_resp.status_code == 200
+           and len(compat_public_rows) == 2
+           and all(abs(float(r.get("weighted_score", 0.0)) - 0.05) < 1e-9
+                   for r in compat_public_rows)
+           and all(wire.verify_row(r, pub_hex) for r in compat_public_rows))
         degraded_app = build_app(
             database_path=":memory:",
             signing_key_hex=key_hex,

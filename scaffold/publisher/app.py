@@ -1219,6 +1219,27 @@ def build_app(
                 }
         return out
 
+    def _public_row_score_multiplier() -> float:
+        """Legacy /recent compatibility for the PM-primary rollout.
+
+        New validators use the signed vector from /v1/validator/weights/next.
+        Older validators still aggregate signed receipt rows from /leaderboard/recent.
+        When PM is primary, public-board receipt rows must therefore carry only
+        the configured baseline value; otherwise old validators keep paying the
+        retired public-board lane as if nothing changed.
+        """
+        try:
+            from . import per_miner as pm
+            if (
+                pm.perminer_enabled()
+                and not pm.perminer_shadow()
+                and weights_mod.perminer_scoring_mode() == "pm_primary"
+            ):
+                return weights_mod.perminer_public_baseline()
+        except Exception as exc:
+            print(f"[leaderboard] public row compatibility score fallback: {exc!r}")
+        return 1.0
+
     def _nullable_float(value: Any) -> float | None:
         try:
             out = float(value)
@@ -3439,7 +3460,11 @@ def build_app(
             # row value = flat 1.0 (the audit trail). Economics live in the
             # signed vector (weights.py), composed from this solve ledger.
             score_multiplier = float(chal["score_multiplier"])
-            ws = scoring.weighted_score_for(store, x_cathedral_hotkey) * score_multiplier
+            ws = (
+                scoring.weighted_score_for(store, x_cathedral_hotkey)
+                * score_multiplier
+                * _public_row_score_multiplier()
+            )
             conn.execute(
                 "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
                 "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
