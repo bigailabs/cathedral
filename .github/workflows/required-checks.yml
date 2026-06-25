@@ -36,6 +36,18 @@ jobs:
         run: |
           git ls-files '*.py' | xargs python -m py_compile
 
+  edge-router:
+    name: Edge Router
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Run offline Cloudflare Worker tests
+        run: node deploy/edge-router/worker.test.mjs
+
   leak-guard:
     name: leak-guard
     runs-on: ubuntu-latest
