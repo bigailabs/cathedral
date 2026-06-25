@@ -162,6 +162,11 @@ return `200`, the split Railway services are healthy and
 `api.cathedral.computer` is being rate-limited before Cathedral/Worker code can
 respond. That is a Cloudflare zone policy issue, not a Railway outage.
 
+If the diagnostic returns `status=cloudflare_worker_plan_limit`, Cloudflare is
+serving Error 1027 because the Worker reached its request plan limit. A WAF or
+rate-limit bypass does not fix that. Either upgrade the Cloudflare Workers plan
+or disable the Worker routes and keep miners on the direct split endpoints.
+
 If the diagnostic returns `status=network_probe_error`, rerun it from another
 network before restarting services. That status means the diagnostic machine
 could not complete one or more endpoint probes.
@@ -171,12 +176,33 @@ Immediate mitigation:
 - tell miners to use `https://read.cathedral.computer` for reads
 - tell miners to use `https://submit.cathedral.computer` for submits/private CNF
 
+Do not assume the Workers.dev hostname is a safe emergency API. It is also
+served by Cloudflare and can show the same edge-side rate limiting. The direct
+split Railway hostnames above are the intended bypass while the branded API
+hostname is being fixed.
+
 Permanent fix:
 
 - add a targeted Cloudflare rate-limit/WAF bypass or per-path override for the
   Cathedral API hot paths listed above
 - keep the Worker routes attached for `api.cathedral.computer`
 - rerun `node diagnose.mjs`, then `node route-map.mjs`, then `node soak.mjs`
+
+The repeatable path is:
+
+```bash
+node cloudflare-api-bypass.mjs
+CLOUDFLARE_API_TOKEN=... node cloudflare-api-bypass.mjs --apply
+```
+
+The token must be able to read the `cathedral.computer` zone and edit zone
+rulesets/WAF/rate-limit rules. `Account API Tokens Write` alone is not enough;
+that permission can create tokens but cannot inspect or fix the zone policy.
+
+The bypass is intentionally limited to known Cathedral API hot paths. It skips
+Cloudflare WAF/rate-limit products for those paths, so origin-side auth,
+signature checks, nonce/replay protection, submit backpressure, and explicit
+allowlisting remain load-bearing.
 
 For a fuller cutover gate, use:
 

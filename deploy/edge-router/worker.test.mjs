@@ -137,6 +137,13 @@ const cfRateLimited = {
   bodyKind: "cloudflare_rate_limited",
   body: "This website has been temporarily rate limited",
 };
+const cfWorkerPlanLimited = {
+  status: 429,
+  edge: "",
+  server: "cloudflare",
+  bodyKind: "cloudflare_worker_plan_limit",
+  body: "Error 1027 owner has reached their plan limits",
+};
 const healthyRead = {
   status: 200,
   edge: "",
@@ -164,6 +171,11 @@ for (const [name, probes, expected] of [
     "api Cloudflare rate limited while split origins are healthy",
     { apiReady: cfRateLimited, readReady: healthyRead, submitReady: healthySubmit },
     "cloudflare_zone_rate_limited",
+  ],
+  [
+    "api Cloudflare Worker plan limited while split origins are healthy",
+    { apiReady: cfWorkerPlanLimited, readReady: healthyRead, submitReady: healthySubmit },
+    "cloudflare_worker_plan_limit",
   ],
   [
     "api Worker readiness is healthy",

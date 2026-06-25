@@ -10,6 +10,7 @@ function baseUrl(value, fallback) {
 
 function bodyKind(body) {
   const text = String(body || "");
+  if (/Error\s+1027/i.test(text) || /owner has reached their plan limits/i.test(text)) return "cloudflare_worker_plan_limit";
   if (/temporarily rate limited/i.test(text)) return "cloudflare_rate_limited";
   if (/route_not_served_by_cathedral_edge/i.test(text)) return "edge_route_denied";
   if (/route_not_served_by_.*_role/i.test(text)) return "service_role_denied";
@@ -51,8 +52,17 @@ export function classifyEdgeHealth(probes) {
     return {
       status: "cloudflare_zone_rate_limited",
       severity: "operator_action",
-      summary: "api.cathedral.computer is being rate-limited by Cloudflare before Cathedral JSON reaches the client.",
+      summary: "The API edge hostname is being rate-limited by Cloudflare before Cathedral JSON reaches the client.",
       action: "Add a targeted Cloudflare rate-limit/WAF bypass for the Cathedral API hot paths, or keep miners on read/submit split endpoints.",
+    };
+  }
+
+  if (api.status === 429 && api.bodyKind === "cloudflare_worker_plan_limit") {
+    return {
+      status: "cloudflare_worker_plan_limit",
+      severity: "operator_action",
+      summary: "The API edge hostname is blocked because the Cloudflare Worker has reached its request plan limit.",
+      action: "Upgrade the Cloudflare Workers plan or disable the Worker routes; keep miners on read/submit split endpoints until api.cathedral.computer is healthy.",
     };
   }
 
@@ -60,8 +70,8 @@ export function classifyEdgeHealth(probes) {
     return {
       status: "cloudflare_policy_or_route_gap",
       severity: "operator_action",
-      summary: "api.cathedral.computer is passing through Cloudflare but not returning Worker edge headers.",
-      action: "Check Worker route attachment and Cloudflare zone security/rate-limit rules for api.cathedral.computer.",
+      summary: "The API edge hostname is passing through Cloudflare but not returning Worker edge headers.",
+      action: "Check Worker route attachment and Cloudflare zone security/rate-limit rules for the API edge hostname.",
     };
   }
 
@@ -69,7 +79,7 @@ export function classifyEdgeHealth(probes) {
     return {
       status: "healthy",
       severity: "ok",
-      summary: "api.cathedral.computer reaches the Worker and read origin readiness is healthy.",
+      summary: "The API edge hostname reaches the Worker and read origin readiness is healthy.",
       action: "No action needed for edge readiness.",
     };
   }
@@ -77,7 +87,7 @@ export function classifyEdgeHealth(probes) {
   return {
     status: "unknown_edge_state",
     severity: "investigate",
-    summary: "Split origins are healthy, but api.cathedral.computer did not match a known healthy/failure pattern.",
+    summary: "Split origins are healthy, but the API edge hostname did not match a known healthy/failure pattern.",
     action: "Run route-map and inspect Cloudflare Worker routes and zone security events.",
   };
 }
