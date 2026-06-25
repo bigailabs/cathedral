@@ -597,6 +597,23 @@ with TestClient(app) as client:
                             "X-Cathedral-Submitted-At": sa})
     ck("active-cnf returns a tokenized cnf_url", r.status_code == 200 and "?t=" in r.json()["cnf_url"])
     cnf_url = r.json()["cnf_url"]
+    old_cnf_public_base = os.environ.get("CATHEDRAL_CNF_PUBLIC_BASE_URL")
+    try:
+        os.environ["CATHEDRAL_CNF_PUBLIC_BASE_URL"] = "https://submit.cathedral.computer"
+        abs_r = client.get(
+            "/v1/synthetic-boolean/active-cnf",
+            headers={"X-Cathedral-Hotkey": miner.ss58_address,
+                     "X-Cathedral-Signature": cnf_sig,
+                     "X-Cathedral-Submitted-At": sa},
+        )
+        ck("active-cnf can advertise submit-host cnf_url",
+           abs_r.status_code == 200
+           and abs_r.json()["cnf_url"].startswith("https://submit.cathedral.computer/v1/challenges/"))
+    finally:
+        if old_cnf_public_base is None:
+            os.environ.pop("CATHEDRAL_CNF_PUBLIC_BASE_URL", None)
+        else:
+            os.environ["CATHEDRAL_CNF_PUBLIC_BASE_URL"] = old_cnf_public_base
     # token gates: bad token -> opaque 404
     bad = client.get(cnf_url[:cnf_url.index("?t=")] + "?t=deadbeef.bad")
     ck("bad CNF token -> opaque 404", bad.status_code == 404)

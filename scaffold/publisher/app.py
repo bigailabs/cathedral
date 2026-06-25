@@ -54,6 +54,7 @@ _QUARANTINE_ROUNDS = 3      # Lane I (V4-DESIGN.md)
 _MIN_BATCH_SCORE = 0.5      # Lane I (V4-DESIGN.md)
 _CNF_TOKEN_TTL = 120        # active-cnf fetch token lifetime (seconds)
 _CNF_TOKEN_SECRET_ENV = "CATHEDRAL_CNF_TOKEN_SECRET"
+_CNF_PUBLIC_BASE_URL_ENV = "CATHEDRAL_CNF_PUBLIC_BASE_URL"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -81,6 +82,11 @@ def _cnf_token_secret() -> bytes:
     print(f"[cnf] WARNING: {_CNF_TOKEN_SECRET_ENV} is unset; "
           "active-cnf tokens are process-local and unsafe for split replicas")
     return secrets.token_bytes(32)
+
+
+def _public_cnf_url(path: str) -> str:
+    base = os.environ.get(_CNF_PUBLIC_BASE_URL_ENV, "").strip().rstrip("/")
+    return f"{base}{path}" if base else path
 
 
 class _SoftTtlCache:
@@ -1522,7 +1528,7 @@ def build_app(
         token = _mint_token(cid)
         return {
             "challenge_id": cid, "tier": c["tier"], "cnf_sha256": c["cnf_sha256"],
-            "cnf_url": f"/v1/challenges/{cid}/cnf?t={token}",
+            "cnf_url": _public_cnf_url(f"/v1/challenges/{cid}/cnf?t={token}"),
         }
 
     @app.get("/v1/challenges/{challenge_id}/cnf")

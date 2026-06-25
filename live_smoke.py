@@ -30,7 +30,7 @@ def ck(name: str, cond: bool) -> None:
 
 
 def _get(path: str, headers: dict | None = None):
-    req = urllib.request.Request(BASE + path, headers=headers or {})
+    req = urllib.request.Request(_url(path), headers=headers or {})
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.status, r.read()
 
@@ -44,6 +44,12 @@ def _post_form(path: str, headers: dict, form: dict):
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+
+
+def _url(path: str) -> str:
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    return BASE + path
 
 
 def now_iso() -> str:
@@ -109,7 +115,7 @@ def main() -> int:
     cnf_url = acnf["cnf_url"]
 
     # fetch the CNF body + check immutable cache headers
-    req = urllib.request.Request(BASE + cnf_url)
+    req = urllib.request.Request(_url(cnf_url))
     with urllib.request.urlopen(req, timeout=30) as r:
         cnf_text = r.read().decode()
         cc = r.headers.get("Cache-Control", "")
