@@ -19,6 +19,8 @@ service is one module + the auth/store/rows/sat_solution helpers, well under the
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -30,7 +32,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
@@ -436,6 +439,101 @@ def build_app(
         if inm and etag in [t.strip() for t in inm.split(",")]:
             return Response(status_code=304, headers=headers)
         return JSONResponse(payload, headers=headers)
+
+    def _snapshot_bytes(payload: dict[str, Any]) -> bytes:
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+
+    def _snapshot_hash(payload: dict[str, Any]) -> str:
+        return "sha256:" + hashlib.sha256(_snapshot_bytes(payload)).hexdigest()
+
+    def _snapshot_etag(payload: dict[str, Any]) -> str:
+        return '"' + hashlib.sha256(_snapshot_bytes(payload)).hexdigest() + '"'
+
+    def _sign_latest_pointer(payload: dict[str, Any]) -> dict[str, Any]:
+        signed = dict(payload)
+        signed["key_id"] = os.environ.get(
+            weights_mod.KEY_ID_ENV, "cathedral-weight-policy")
+        signing_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key.strip()))
+        signed["signature"] = base64.b64encode(
+            sk.sign(weights_mod.canonical_bytes(signed))
+        ).decode()
+        return signed
+
+    def _sat_snapshot_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+        board_payload, board_etag = board_cache.get()
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        weights_payload = weights_mod.current_vector(store, signing_key_hex=weight_key)
+        board_hash = _snapshot_hash(board_payload)
+        weights_hash = _snapshot_hash(weights_payload)
+        policy_version = str(weights_payload.get("policy_version") or int(time.time() * 1000))
+        sequence_digest = hashlib.sha256(
+            f"{policy_version}:{board_hash}:{weights_hash}".encode("utf-8")
+        ).hexdigest()[:12]
+        sequence = f"{policy_version}-{sequence_digest}"
+        created_at = str(weights_payload.get("generated_at") or _now_iso_ms())
+        board_url = f"/sat/sequences/{sequence}/board.json"
+        weights_url = f"/sat/sequences/{sequence}/weights.json"
+        pointer = {
+            "schema": "cathedral.sat.latest.v1",
+            "lane": "sat",
+            "sequence": sequence,
+            "created_at": created_at,
+            "publisher_generation_id": os.environ.get(
+                "CATHEDRAL_PUBLISHER_GENERATION_ID", "default"),
+            "storage": "in_process_current_snapshot",
+            "trust_root": "signed_latest_pointer_and_artifact_hashes",
+            "artifacts": {
+                "board": {
+                    "url": board_url,
+                    "content_type": "application/json",
+                    "hash": board_hash,
+                    "size_bytes": len(_snapshot_bytes(board_payload)),
+                    "etag": board_etag,
+                },
+                "weights": {
+                    "url": weights_url,
+                    "content_type": "application/json",
+                    "hash": weights_hash,
+                    "size_bytes": len(_snapshot_bytes(weights_payload)),
+                    "signature": "embedded",
+                    "generated_at": weights_payload.get("generated_at"),
+                    "expires_at": weights_payload.get("expires_at"),
+                },
+            },
+            "miner_paths": {
+                "latest": "/sat/latest.json",
+                "events": "/sat/events",
+                "public_board": board_url,
+                "public_compat": "/v1/synthetic-boolean/active-challenges",
+                "private_assignments": "/v1/synthetic-boolean/per-miner/challenges",
+                "private_cnf": "/v1/synthetic-boolean/per-miner/cnf",
+                "submit": "/v1/agents/submit",
+                "receipt_status": "/v1/agents/receipts/{receipt_id}",
+            },
+            "compatibility": {
+                "legacy_read_endpoints_kept": True,
+                "legacy_validator_weights_kept": True,
+                "historical_sequence_storage": "not_yet_published",
+            },
+        }
+        signed_pointer = _sign_latest_pointer(pointer)
+        return signed_pointer, board_payload, weights_payload, _snapshot_etag(signed_pointer)
+
+    def _sat_snapshot_headers(etag: str, sequence: str, *, immutable: bool = False) -> dict[str, str]:
+        cache_control = (
+            "public, max-age=31536000, immutable"
+            if immutable
+            else "public, max-age=5, must-revalidate"
+        )
+        return {
+            "Cache-Control": cache_control,
+            "ETag": etag,
+            "X-Cathedral-Sequence": sequence,
+            "Access-Control-Allow-Origin": "*",
+        }
 
     top_cache = top_cache_mod.TopCache()
     if _role_runs_read_background(service_role):
@@ -1843,6 +1941,97 @@ def build_app(
         # Explicit alias for miners/dashboards that want the cache/CDN board
         # broadcast rather than a per-request active-set query.
         return _serve_board_snapshot(request)
+
+    @app.get("/sat/latest.json")
+    async def sat_latest(request: Request):
+        latest, _board, _weights, etag = _sat_snapshot_bundle()
+        headers = _sat_snapshot_headers(etag, str(latest["sequence"]))
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(latest, headers=headers)
+
+    @app.get("/sat/sequences/{sequence}/board.json")
+    async def sat_sequence_board(sequence: str, request: Request):
+        latest, board_payload, _weights, _latest_etag = _sat_snapshot_bundle()
+        current_sequence = str(latest["sequence"])
+        if sequence != current_sequence:
+            raise HTTPException(
+                404,
+                {
+                    "detail": "snapshot_sequence_not_available",
+                    "current_sequence": current_sequence,
+                },
+            )
+        etag = _snapshot_etag(board_payload)
+        headers = _sat_snapshot_headers(etag, sequence, immutable=True)
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(board_payload, headers=headers)
+
+    @app.get("/sat/sequences/{sequence}/weights.json")
+    async def sat_sequence_weights(sequence: str, request: Request):
+        latest, _board, weights_payload, _latest_etag = _sat_snapshot_bundle()
+        current_sequence = str(latest["sequence"])
+        if sequence != current_sequence:
+            raise HTTPException(
+                404,
+                {
+                    "detail": "snapshot_sequence_not_available",
+                    "current_sequence": current_sequence,
+                },
+            )
+        etag = _snapshot_etag(weights_payload)
+        headers = _sat_snapshot_headers(etag, sequence, immutable=True)
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(weights_payload, headers=headers)
+
+    @app.get("/sat/events")
+    async def sat_events(request: Request, once: bool = Query(False)):
+        heartbeat_secs = max(1.0, _env_float("CATHEDRAL_SSE_HEARTBEAT_SECS", 30.0))
+
+        def _snapshot_event_frame(latest: dict[str, Any]) -> str:
+            event = {
+                "kind": "cathedral.sat.snapshot.ready",
+                "sequence": latest["sequence"],
+                "lane": "sat",
+                "type": "snapshot",
+                "latest_url": "/sat/latest.json",
+                "artifact_hash": _snapshot_hash(latest),
+            }
+            return (
+                "retry: 30000\n"
+                f"id: {latest['sequence']}\n"
+                "event: cathedral.sat.snapshot\n"
+                f"data: {json.dumps(event, sort_keys=True, separators=(',', ':'))}\n\n"
+            )
+
+        async def _stream():
+            last_sequence = request.headers.get("last-event-id", "")
+            while True:
+                latest, _board, _weights, _latest_etag = _sat_snapshot_bundle()
+                sequence = str(latest["sequence"])
+                if sequence != last_sequence:
+                    yield _snapshot_event_frame(latest)
+                    last_sequence = sequence
+                else:
+                    yield ": keepalive\n\n"
+                if once or await request.is_disconnected():
+                    return
+                await asyncio.sleep(heartbeat_secs)
+
+        return StreamingResponse(
+            _stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
     @app.get("/v1/synthetic-boolean/current-challenge")
     async def current_challenge(tier: int | None = Query(None), difficulty: str | None = Query(None)):
@@ -3550,6 +3739,57 @@ def build_app(
             "challenge_id": challenge_id, "weighted_score": ws,
             "solve_rank": rank, "attestation_status": "pending",
         }
+
+    @app.get("/v1/agents/receipts/{receipt_id}")
+    async def agent_receipt_status(receipt_id: str):
+        rows_ = store.query(
+            "SELECT id, miner_hotkey, sat_challenge_id, status, rejection_reason, "
+            "current_score, seq_no, submitted_at "
+            "FROM agent_submissions WHERE id=?",
+            (receipt_id,),
+        )
+        if rows_:
+            row = rows_[0]
+            return JSONResponse(
+                {
+                    "schema": "cathedral.submit_receipt.v1",
+                    "receipt_id": row["id"],
+                    "source": "agent_submissions",
+                    "miner_hotkey": row["miner_hotkey"],
+                    "challenge_id": row["sat_challenge_id"],
+                    "status": row["status"],
+                    "rejection_reason": row["rejection_reason"],
+                    "current_score": row["current_score"],
+                    "seq_no": row["seq_no"],
+                    "submitted_at": row["submitted_at"],
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        pm_rows = store.query(
+            "SELECT id, challenge_id, miner_hotkey, epoch, status, rejection_reason, "
+            "dimacs_solution_sha256, submitted_at, recorded_at_iso "
+            "FROM per_miner_attempts WHERE id=?",
+            (receipt_id,),
+        )
+        if pm_rows:
+            row = pm_rows[0]
+            return JSONResponse(
+                {
+                    "schema": "cathedral.submit_receipt.v1",
+                    "receipt_id": row["id"],
+                    "source": "per_miner_attempts",
+                    "miner_hotkey": row["miner_hotkey"],
+                    "challenge_id": row["challenge_id"],
+                    "status": row["status"],
+                    "rejection_reason": row["rejection_reason"],
+                    "epoch": row["epoch"],
+                    "dimacs_solution_sha256": row["dimacs_solution_sha256"],
+                    "submitted_at": row["submitted_at"],
+                    "recorded_at": row["recorded_at_iso"],
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        raise HTTPException(404, "receipt_not_found")
 
     # ---- M3: Lane S registry ----------------------------------------------
     @app.post("/v1/arena/solvers")

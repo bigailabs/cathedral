@@ -703,3 +703,22 @@ Acceptance:
 
 This slice moves Cathedral away from hot database reads without changing SAT
 scoring or miner submit semantics.
+
+## Current Compatibility Slice
+
+The first mergeable slice keeps existing miner and validator URLs working while
+adding the scalable read contract:
+
+- `GET /sat/latest.json` returns a signed latest pointer with sequence, hashes,
+  sizes, and artifact URLs.
+- `GET /sat/sequences/{sequence}/board.json` returns the current board snapshot
+  for the active sequence.
+- `GET /sat/sequences/{sequence}/weights.json` returns the current signed
+  weights snapshot for the active sequence.
+- `GET /sat/events` streams SSE hints containing only sequence and latest URL.
+- `GET /v1/agents/receipts/{receipt_id}` returns durable submit status without
+  scraping recent activity.
+
+This is deliberately a transition layer: it does not yet publish historical
+immutable object storage, CNF artifacts, transactional outbox rows, or async
+verification workers.

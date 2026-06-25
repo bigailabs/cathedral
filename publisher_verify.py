@@ -250,6 +250,40 @@ with TestClient(app) as client:
         headers={"If-None-Match": bc.headers.get("etag", "")},
     )
     ck("challenge-broadcast supports ETag 304", bc_304.status_code == 304)
+    latest = client.get("/sat/latest.json")
+    latest_json = latest.json()
+    latest_etag = latest.headers.get("etag", "")
+    latest_seq = str(latest_json.get("sequence"))
+    ck("sat latest pointer exposes signed snapshot artifacts",
+       latest.status_code == 200
+       and latest_json.get("schema") == "cathedral.sat.latest.v1"
+       and latest_json.get("signature")
+       and latest_json.get("artifacts", {}).get("board", {}).get("url")
+       == f"/sat/sequences/{latest_seq}/board.json"
+       and latest_json.get("artifacts", {}).get("weights", {}).get("url")
+       == f"/sat/sequences/{latest_seq}/weights.json"
+       and latest_json.get("artifacts", {}).get("board", {}).get("hash", "").startswith("sha256:"))
+    latest_304 = client.get("/sat/latest.json", headers={"If-None-Match": latest_etag})
+    ck("sat latest pointer supports ETag 304", latest_304.status_code == 304)
+    sat_board = client.get(f"/sat/sequences/{latest_seq}/board.json")
+    ck("sat board snapshot matches active-challenges",
+       sat_board.status_code == 200
+       and sat_board.json()["items"][0]["challenge_id"] == ac["items"][0]["challenge_id"]
+       and sat_board.headers.get("x-cathedral-sequence") == latest_seq)
+    sat_weights = client.get(f"/sat/sequences/{latest_seq}/weights.json")
+    ck("sat weights snapshot preserves signed vector shape",
+       sat_weights.status_code == 200
+       and sat_weights.json().get("signature")
+       and isinstance(sat_weights.json().get("weights"), list)
+       and sat_weights.headers.get("x-cathedral-sequence") == latest_seq)
+    stale_snapshot = client.get("/sat/sequences/stale-test-sequence/board.json")
+    ck("sat stale sequence fails closed", stale_snapshot.status_code == 404)
+    sat_events = client.get("/sat/events", params={"once": "true"})
+    ck("sat events emits latest pointer hint only",
+       sat_events.status_code == 200
+       and "event: cathedral.sat.snapshot" in sat_events.text
+       and '"latest_url":"/sat/latest.json"' in sat_events.text
+       and '"sequence":"' in sat_events.text)
     old_rpm = os.environ.get("CATHEDRAL_RATELIMIT_RPM")
     os.environ["CATHEDRAL_RATELIMIT_RPM"] = "1"
     try:
@@ -730,6 +764,18 @@ with TestClient(app) as client:
 
     ck("first solve gets open-window rank 1", resp.json().get("solve_rank") == 1)
     ck("submit row emits base weighted_score 1.0", resp.json().get("weighted_score") == 1.0)
+    receipt = client.get(f"/v1/agents/receipts/{resp.json().get('id')}")
+    receipt_json = receipt.json() if receipt.status_code == 200 else {}
+    ck("submit receipt endpoint returns durable accepted status",
+       receipt.status_code == 200
+       and receipt_json.get("schema") == "cathedral.submit_receipt.v1"
+       and receipt_json.get("challenge_id") == "sat-e2e-1"
+       and receipt_json.get("miner_hotkey") == miner.ss58_address
+       and receipt_json.get("status") == "ranked"
+       and receipt.headers.get("cache-control") == "no-store")
+    missing_receipt = client.get("/v1/agents/receipts/not-a-real-receipt")
+    ck("submit receipt endpoint fails closed for missing IDs",
+       missing_receipt.status_code == 404)
     explain = client.get(
         "/v1/leaderboard/explain",
         params={"miner_hotkey": miner.ss58_address},
