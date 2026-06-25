@@ -97,6 +97,7 @@ https://submit.cathedral.computer/health/ready
 node worker.test.mjs
 node smoke.mjs
 node route-map.mjs
+node soak.mjs
 ```
 
 Override the smoke target with:
@@ -135,6 +136,22 @@ bypasses the Worker. To run a direct-origin availability check before cutover:
 ```bash
 CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_ALLOW_BYPASS=1 node route-map.mjs
 ```
+
+For a bounded low-load soak after cutover:
+
+```bash
+CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_SOAK_ITERATIONS=12 node soak.mjs
+```
+
+Pre-cutover origin-direct soak requires explicit bypass mode:
+
+```bash
+CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_ALLOW_BYPASS=1 CATHEDRAL_EDGE_SOAK_ITERATIONS=3 node soak.mjs
+```
+
+`soak.mjs` intentionally skips `/v1/leaderboard/top` by default. Add
+`CATHEDRAL_EDGE_INCLUDE_TOP=1` only when you explicitly want to include that
+heavier dashboard path.
 
 ## Rollback
 
