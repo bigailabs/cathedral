@@ -1,0 +1,27 @@
+name = "cathedral-edge-router"
+main = "worker.mjs"
+compatibility_date = "2026-06-25"
+workers_dev = true
+preview_urls = true
+
+# Route intentionally left commented. Enable only after smoke checks pass. Use
+# exact hot-path routes; do not start with api.cathedral.computer/* or
+# /v1/synthetic-boolean/* because non-SAT/compute/readiness endpoints may still
+# live on the monolith.
+# routes = [
+#   { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-challenges*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-cnf*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/challenges*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/leaderboard/recent*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/leaderboard/top*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/leaderboard/explain*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/v1/validator/weights/next*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/.well-known/*", zone_name = "cathedral.computer" },
+#   { pattern = "api.cathedral.computer/health*", zone_name = "cathedral.computer" },
+# ]
+
+[vars]
+READ_ORIGIN = "https://read.cathedral.computer"
+SUBMIT_ORIGIN = "https://submit.cathedral.computer"

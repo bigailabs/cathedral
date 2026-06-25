@@ -34,7 +34,9 @@ Allowed traffic:
 - `GET /v1/synthetic-boolean/per-miner/status`
 - `GET /v1/synthetic-boolean/per-miner/summary`
 - `GET /v1/validator/weights/next`
-- `GET /v1/leaderboard/*`
+- `GET /v1/leaderboard/recent`
+- `GET /v1/leaderboard/top`
+- `GET /v1/leaderboard/explain`
 - `GET /v1/audit-scanner/*`
 
 Must reject:
@@ -70,7 +72,9 @@ Allowed traffic:
 
 Must reject:
 
-- `/v1/leaderboard/*`
+- `/v1/leaderboard/recent`
+- `/v1/leaderboard/top`
+- `/v1/leaderboard/explain`
 - `/v1/validator/weights/next`
 - active board listing endpoints.
 
@@ -190,6 +194,34 @@ Do not change:
 - Confirm miners have a working submit base URL or edge path routing.
 - Keep `/v1/validator/weights/next` on the read service so validator reads stay
   isolated from submit bursts.
+
+## Edge Router Step
+
+After `read.cathedral.computer` and `submit.cathedral.computer` are both green,
+deploy the Cloudflare Worker in `deploy/edge-router`.
+
+The Worker keeps the same public API shape while routing:
+
+- public read routes to `read.cathedral.computer`
+- submit/private-CNF routes to `submit.cathedral.computer`
+- safe read routes through Cloudflare cache
+- signed/private/submit traffic directly to origin with no cache
+- query-string cache normalization, so random `?x=...` values do not bypass
+  cache and amplify Railway load; unsupported params are rejected
+- default-deny for unmatched routes, so new mechanisms require explicit routing
+- browser preflight handling for signed submit headers
+
+This is the first step toward a true broadcast layer. It reduces origin read
+pressure now while preserving the current Railway services as rollback targets.
+
+Start with exact hot-path Cloudflare routes for SAT/read/submit paths only. Do
+not route the whole host with `api.cathedral.computer/*`, and do not route the
+whole synthetic, leaderboard, validator, or challenge prefixes until every
+public endpoint on the monolith has been explicitly classified.
+
+For this cutover, keep `/v1/challenges/{challenge_id}/cnf` on the existing
+monolith. Cloudflare route syntax cannot safely target only that leaf without
+also catching unrelated `/v1/challenges/*` generator lease endpoints.
 
 ## Retention Safety
 

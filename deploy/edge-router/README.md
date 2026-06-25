@@ -1,0 +1,128 @@
+# Cathedral Edge Router
+
+Purpose: move miner read pressure off Railway while preserving the current split
+services.
+
+This Worker is intentionally small:
+
+- read routes go to `https://read.cathedral.computer`
+- submit and private-CNF routes go to `https://submit.cathedral.computer`
+- safe public read routes are cached at the Cloudflare edge
+- submit/private routes are never cached
+- unknown routes are default-denied by the Worker; add an explicit route before
+  exposing a new mechanism through `api.cathedral.computer`
+- legacy `/api/cathedral/...` paths are normalized before routing
+
+## Why this exists
+
+The Railway split made read and submit services independent, but miners can
+still overload Railway by polling read endpoints directly. The next step is to
+place Cloudflare in front of the read routes so the common active-board,
+weights, and leaderboard reads are served from edge cache.
+
+## Cache policy
+
+The Worker uses short fresh TTLs and a longer edge fallback window:
+
+| Route | Fresh | Edge fallback |
+| --- | ---: | ---: |
+| `/v1/synthetic-boolean/active-challenges` | 5s | 60s |
+| `/v1/synthetic-boolean/challenge-broadcast` | 5s | 60s |
+| `/v1/synthetic-boolean/current-challenge` | 5s | 30s |
+| `/v1/synthetic-boolean/per-miner/summary` | 5s | 30s |
+| `/v1/validator/weights/next` | 15s | 30s |
+| `/v1/leaderboard/recent` | 2s | 20s |
+| `/v1/leaderboard/top` | 15s | 90s |
+| `/v1/leaderboard/explain` | 10s | 60s |
+
+Private or signed requests bypass cache. Cache keys whitelist known query
+parameters per route. For routes with known query parameters, unsupported
+parameters are rejected instead of being forwarded to origin, so random
+`?x=...` cache-busting cannot amplify Railway load. For zero-parameter public
+snapshot routes, extra query parameters are ignored and collapse to the same
+cache key.
+
+Cached read routes serve stale data while refreshing in the background, except
+`/v1/validator/weights/next`, which refreshes synchronously so validators do not
+receive an intentionally stale signed vector unless the origin errors.
+
+## Deploy
+
+Deploy from this directory after uncommenting the route in `wrangler.toml`.
+
+```bash
+npx wrangler deploy
+```
+
+Production routes are exact hot paths, not broad prefixes:
+
+```text
+api.cathedral.computer/v1/synthetic-boolean/active-challenges*
+api.cathedral.computer/v1/synthetic-boolean/challenge-broadcast*
+api.cathedral.computer/v1/synthetic-boolean/current-challenge*
+api.cathedral.computer/v1/synthetic-boolean/active-cnf*
+api.cathedral.computer/v1/synthetic-boolean/per-miner/challenges*
+api.cathedral.computer/v1/synthetic-boolean/per-miner/cnf*
+api.cathedral.computer/v1/synthetic-boolean/per-miner/status*
+api.cathedral.computer/v1/synthetic-boolean/per-miner/summary*
+api.cathedral.computer/v1/agents/submit*
+api.cathedral.computer/v1/leaderboard/recent*
+api.cathedral.computer/v1/leaderboard/top*
+api.cathedral.computer/v1/leaderboard/explain*
+api.cathedral.computer/v1/validator/weights/next*
+api.cathedral.computer/.well-known/*
+api.cathedral.computer/health*
+```
+
+Legacy `/api/cathedral/...` forms are also routed for the same hot paths.
+`/v1/challenges/{challenge_id}/cnf` stays on the existing monolith during this
+cutover because Cloudflare route syntax cannot target only that leaf without
+catching unrelated `/v1/challenges/*` generator lease endpoints.
+
+Do not start with `api.cathedral.computer/*` or
+`api.cathedral.computer/v1/synthetic-boolean/*`. This Worker default-denies
+unknown routes, and readiness/non-SAT/compute endpoints may still live on the
+monolith during migration.
+
+Do this only after split endpoints are green:
+
+```text
+https://read.cathedral.computer/health/ready
+https://submit.cathedral.computer/health/ready
+```
+
+## Test
+
+```bash
+node worker.test.mjs
+node smoke.mjs
+```
+
+Override the smoke target with:
+
+```bash
+CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer node smoke.mjs
+```
+
+For `api.cathedral.computer`, smoke expects the Worker to be in path by default.
+Before the DNS proxy is flipped, use explicit bypass mode for an origin
+availability check:
+
+```bash
+CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_ALLOW_BYPASS=1 node smoke.mjs
+```
+
+After `api.cathedral.computer` is orange-cloud proxied through Cloudflare, run
+without bypass mode, or equivalently:
+
+```bash
+CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_EXPECT_WORKER=1 node smoke.mjs
+```
+
+That mode proves routed hot paths are actually hitting the Worker while sampled
+non-routed monolith paths still pass through.
+
+## Rollback
+
+Remove or disable the Cloudflare Worker route. The Railway split domains remain
+usable directly.
