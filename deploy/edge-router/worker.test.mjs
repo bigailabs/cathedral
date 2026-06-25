@@ -135,6 +135,14 @@ assert.equal(await responseIsVisibilityWarming(new Response(
   { headers: { "Content-Type": "application/json" } },
 )), true);
 assert.equal(await responseIsVisibilityWarming(new Response(
+  JSON.stringify({ data_status: "warming", current_signed_weight: null }),
+  { headers: { "Content-Type": "application/json" } },
+)), true);
+assert.equal(await responseIsVisibilityWarming(new Response(
+  JSON.stringify({ visibility: { sources: { payment: { status: "warming" } } } }),
+  { headers: { "Content-Type": "application/json" } },
+)), true);
+assert.equal(await responseIsVisibilityWarming(new Response(
   JSON.stringify({ items: [{ id: "row" }] }),
   { headers: { "Content-Type": "application/json" } },
 )), false);

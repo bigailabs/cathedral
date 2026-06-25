@@ -560,6 +560,31 @@ INDEX_HTML = r"""<!doctype html>
       return n.toFixed(digits).replace(/\.?0+$/, '');
     }
 
+    function firstDefined(...values) {
+      return values.find(v => v !== undefined && v !== null && v !== '');
+    }
+
+    function boolText(value) {
+      if (value === true) return 'yes';
+      if (value === false) return 'no';
+      return 'unknown';
+    }
+
+    function visibilityFor(row) {
+      return (row && row.visibility) || {};
+    }
+
+    function sourceSummary(visibility) {
+      const sources = (visibility && visibility.sources) || {};
+      const payment = sources.payment || {};
+      const chainSource = sources.chain || {};
+      const pay = payment.status || visibility.current_signed_weight_status || 'unknown';
+      const chain = chainSource.status || ((visibility.chain || {}).source || 'unknown');
+      const payAge = payment.staleness_seconds == null ? '' : ` ${fmtAge(payment.staleness_seconds)}`;
+      const chainAge = chainSource.staleness_seconds == null ? '' : ` ${fmtAge(chainSource.staleness_seconds)}`;
+      return `payment=${pay}${payAge} chain=${chain}${chainAge}`;
+    }
+
     function tierCountsText(counts) {
       return `t1=${counts[1] || counts['1'] || 0} t2=${counts[2] || counts['2'] || 0} t3=${counts[3] || counts['3'] || 0}`;
     }
@@ -1205,24 +1230,40 @@ INDEX_HTML = r"""<!doctype html>
         {key:'sha', label:'sha256', w:'360px', cls:'mono'},
       ], activeRows);
 
-      const topRows = ((top.miners || []).map((m, idx) => ({
-        id: m.miner_hotkey,
-        n: idx + 1,
-        miner: m.miner_hotkey,
-        display: m.display_name,
-        distinct: m.distinct_solves,
-        score: m.total_score,
-        last_seen: m.last_seen,
-        source: 'diagnostic_top_cache',
-      })));
+      const topByHotkey = new Map((top.miners || []).map(m => [m.miner_hotkey, m]));
+      const topRows = ((top.miners || []).map((m, idx) => {
+        const vis = visibilityFor(m);
+        const pm = vis.perminer_contribution || {};
+        const activity = vis.recent_activity || {};
+        return {
+          id: m.miner_hotkey,
+          n: idx + 1,
+          miner: m.miner_hotkey,
+          uid: firstDefined(m.uid, vis.uid, ''),
+          registered: boolText(firstDefined(m.registered, vis.registered)),
+          payable: boolText(firstDefined(m.payable, vis.payable)),
+          signed_weight: fmtNum(firstDefined(m.current_signed_weight, m.current_weight, vis.current_signed_weight), 8),
+          chain_incentive: fmtNum(firstDefined(m.chain_incentive, vis.chain_incentive), 8),
+          chain_emission: fmtNum(firstDefined(m.chain_emission, vis.chain_emission), 8),
+          pm_units: fmtNum(firstDefined(m.perminer_weighted_units, pm.weighted_units), 3),
+          recent_activity: `${firstDefined(m.receipt_distinct_solves_24h, activity.receipt_distinct_solves_24h, m.distinct_solves, 0)} solves`,
+          last_seen: firstDefined(m.last_seen, activity.last_seen, ''),
+          source: sourceSummary(vis),
+        };
+      }));
       renderTable('topTable', [
         {key:'n', label:'#', w:'50px', cls:'right'},
-        {key:'miner', label:'miner_hotkey', w:'420px', cls:'mono'},
-        {key:'display', label:'display', w:'160px'},
-        {key:'distinct', label:'distinct_solves', w:'130px', cls:'right'},
-        {key:'score', label:'total_score', w:'120px', cls:'right'},
+        {key:'miner', label:'hotkey', w:'420px', cls:'mono'},
+        {key:'uid', label:'uid', w:'70px', cls:'right'},
+        {key:'registered', label:'registered', w:'100px'},
+        {key:'payable', label:'payable', w:'90px'},
+        {key:'signed_weight', label:'signed_weight', w:'140px', cls:'right'},
+        {key:'chain_incentive', label:'chain_incentive', w:'150px', cls:'right'},
+        {key:'chain_emission', label:'chain_emission', w:'150px', cls:'right'},
+        {key:'pm_units', label:'pm_units', w:'110px', cls:'right'},
+        {key:'recent_activity', label:'recent_activity', w:'140px'},
         {key:'last_seen', label:'last_seen', w:'190px', cls:'mono'},
-        {key:'source', label:'source', w:'170px'},
+        {key:'source', label:'source/staleness', w:'260px'},
       ], topRows);
 
       const totalWeight = Number(d.weight_total || 0);
@@ -1237,16 +1278,30 @@ INDEX_HTML = r"""<!doctype html>
           id: w.id,
           n: idx + 1,
           miner: w.miner,
+          uid: firstDefined(visibilityFor(topByHotkey.get(w.miner)).uid, ''),
+          registered: boolText(visibilityFor(topByHotkey.get(w.miner)).registered),
+          payable: boolText(visibilityFor(topByHotkey.get(w.miner)).payable),
           weight: fmtNum(w.weight_raw, 8),
           share: totalWeight > 0 ? fmtPct(w.weight_raw / totalWeight, 4) : '',
-          source: 'signed_vector',
+          chain_incentive: fmtNum(visibilityFor(topByHotkey.get(w.miner)).chain_incentive, 8),
+          chain_emission: fmtNum(visibilityFor(topByHotkey.get(w.miner)).chain_emission, 8),
+          pm_units: fmtNum((visibilityFor(topByHotkey.get(w.miner)).perminer_contribution || {}).weighted_units, 3),
+          activity: `${firstDefined((visibilityFor(topByHotkey.get(w.miner)).recent_activity || {}).receipt_distinct_solves_24h, 0)} solves`,
+          source: sourceSummary(visibilityFor(topByHotkey.get(w.miner))),
         })));
       renderTable('weightsTable', [
         {key:'n', label:'#', w:'50px', cls:'right'},
-        {key:'miner', label:'miner_hotkey', w:'460px', cls:'mono'},
+        {key:'miner', label:'hotkey', w:'420px', cls:'mono'},
+        {key:'uid', label:'uid', w:'70px', cls:'right'},
+        {key:'registered', label:'registered', w:'100px'},
+        {key:'payable', label:'payable', w:'90px'},
         {key:'weight', label:'weight', w:'140px', cls:'right'},
         {key:'share', label:'share_of_total', w:'130px', cls:'right'},
-        {key:'source', label:'source', w:'140px'},
+        {key:'chain_incentive', label:'chain_incentive', w:'150px', cls:'right'},
+        {key:'chain_emission', label:'chain_emission', w:'150px', cls:'right'},
+        {key:'pm_units', label:'pm_units', w:'110px', cls:'right'},
+        {key:'activity', label:'recent_activity', w:'140px'},
+        {key:'source', label:'source/staleness', w:'260px'},
       ], weightRows);
 
       $('rawJson').textContent = JSON.stringify(snapshot, null, 2);

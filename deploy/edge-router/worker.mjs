@@ -248,7 +248,14 @@ export async function responseIsVisibilityWarming(response) {
   if (!contentType.toLowerCase().includes("application/json")) return false;
   try {
     const body = await response.clone().json();
-    return body && body.visibility_cache_status === "warming";
+    if (!body || typeof body !== "object") return false;
+    if (body.visibility_cache_status === "warming" || body.data_status === "warming") {
+      return true;
+    }
+    const visibility = body.visibility || {};
+    if (visibility.current_signed_weight_status === "warming") return true;
+    const sources = body.sources || visibility.sources || {};
+    return Object.values(sources).some((source) => source && source.status === "warming");
   } catch {
     return false;
   }

@@ -375,6 +375,20 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_recorded_at
             ON per_miner_attempts(recorded_at_iso);
     """),
+    ("0028_metagraph_hotkeys", """
+        CREATE TABLE IF NOT EXISTS metagraph_hotkeys (
+            network TEXT NOT NULL,
+            netuid INTEGER NOT NULL,
+            hotkey TEXT NOT NULL,
+            uid INTEGER,
+            coldkey TEXT NOT NULL DEFAULT '',
+            block INTEGER,
+            updated_at_iso TEXT NOT NULL,
+            PRIMARY KEY (network, netuid, hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
+            ON metagraph_hotkeys(network, netuid, updated_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -690,6 +704,20 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_recorded_at
             ON per_miner_attempts(recorded_at_iso);
     """),
+    ("0028_metagraph_hotkeys", """
+        CREATE TABLE IF NOT EXISTS metagraph_hotkeys (
+            network TEXT NOT NULL,
+            netuid INTEGER NOT NULL,
+            hotkey TEXT NOT NULL,
+            uid INTEGER,
+            coldkey TEXT NOT NULL DEFAULT '',
+            block BIGINT,
+            updated_at_iso TEXT NOT NULL,
+            PRIMARY KEY (network, netuid, hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
+            ON metagraph_hotkeys(network, netuid, updated_at_iso);
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -712,6 +740,7 @@ _PK_BY_TABLE: dict[str, str] = {
     "per_miner_witnesses": "challenge_id, miner_hotkey",
     "audit_challenge_manifests": "challenge_id",
     "coldkey_map": "hotkey",
+    "metagraph_hotkeys": "network, netuid, hotkey",
     "tee_gpu_capacity": "capacity_id",
     "tee_gpu_capacity_events": "id",
     "attest_nonces": "nonce",

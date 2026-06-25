@@ -1170,6 +1170,7 @@ def build_app(
             }
         ranked = [
             {
+                **row,
                 "miner_hotkey": str(row.get("miner_hotkey") or ""),
                 "current_weight": float(row.get("weight") or 0.0),
             }
@@ -1202,10 +1203,236 @@ def build_app(
                 }
             else:
                 out[hk] = {
-                    "current_weight": 0.0,
+                    "current_weight": 0.0 if weight_ctx.get("generated_at") else None,
                     "current_weight_rank": None,
                 }
         return out
+
+    def _nullable_float(value: Any) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if out == out else None
+
+    def _nullable_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _nullable_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "y"}:
+                return True
+            if lowered in {"0", "false", "no", "n"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return None
+
+    def _age_seconds(ts: str | None) -> float | None:
+        parsed = _parse_iso(str(ts)) if ts else None
+        return round(time.time() - parsed, 3) if parsed is not None else None
+
+    def _pick_annotation(sources: list[dict[str, Any]], keys: tuple[str, ...]) -> Any:
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            nested = source.get("chain")
+            for candidate in (source, nested if isinstance(nested, dict) else {}):
+                for key in keys:
+                    if key in candidate and candidate[key] is not None and candidate[key] != "":
+                        return candidate[key]
+        return None
+
+    def _chain_visibility(*sources: dict[str, Any]) -> dict[str, Any]:
+        source_list = [s for s in sources if isinstance(s, dict)]
+        uid = _nullable_int(_pick_annotation(source_list, ("uid", "chain_uid")))
+        registered = _nullable_bool(_pick_annotation(
+            source_list, ("registered", "is_registered", "chain_registered")
+        ))
+        payable = _nullable_bool(_pick_annotation(
+            source_list, ("payable", "is_payable", "chain_payable")
+        ))
+        incentive = _nullable_float(_pick_annotation(
+            source_list, ("incentive", "chain_incentive")
+        ))
+        emission = _nullable_float(_pick_annotation(
+            source_list, ("emission", "emissions", "chain_emission", "chain_emissions")
+        ))
+        updated_at = _pick_annotation(
+            source_list, ("chain_updated_at", "chain_fetched_at", "updated_at", "fetched_at")
+        )
+        has_chain = any(v is not None for v in (uid, registered, payable, incentive, emission))
+        return {
+            "uid": uid,
+            "registered": registered,
+            "payable": payable,
+            "incentive": incentive,
+            "emission": emission,
+            "source": "upstream_annotation" if has_chain else "unavailable",
+            "updated_at": updated_at,
+            "staleness_seconds": _age_seconds(str(updated_at)) if updated_at else None,
+        }
+
+    def _source_meta(
+        *,
+        path: str,
+        status: str,
+        generated_at: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        out = {
+            "path": path,
+            "status": status,
+            "generated_at": generated_at,
+            "staleness_seconds": _age_seconds(generated_at),
+        }
+        if note:
+            out["note"] = note
+        return out
+
+    def _pm_visibility_from_summary(pm_row: dict[str, Any] | None) -> dict[str, Any]:
+        if not pm_row:
+            return {
+                "status": "not_found",
+                "source": "v1/synthetic-boolean/per-miner/summary",
+                "weighted_units": None,
+                "unique_verified_solves": None,
+                "last_solved_at": None,
+            }
+        return {
+            "status": "available",
+            "source": "v1/synthetic-boolean/per-miner/summary",
+            "weighted_units": pm_row.get("weighted_units"),
+            "unique_verified_solves": pm_row.get("unique_verified_solves"),
+            "verified_solves": pm_row.get("verified_solves"),
+            "last_solved_at": pm_row.get("last_solved_at"),
+        }
+
+    def _pm_visibility_from_contribution(contribution: dict[str, Any] | None) -> dict[str, Any]:
+        if not contribution:
+            return {
+                "status": "not_requested",
+                "source": "v1/leaderboard/explain",
+                "weighted_units": None,
+                "unique_verified_solves": None,
+                "last_solved_at": None,
+            }
+        totals = contribution.get("last_24h_totals") or {}
+        return {
+            "status": "available" if contribution.get("eligible", True) else "ineligible",
+            "source": "v1/leaderboard/explain",
+            "enabled": contribution.get("enabled"),
+            "eligible": contribution.get("eligible"),
+            "ineligibility_reason": contribution.get("ineligibility_reason"),
+            "weighted_units": totals.get("weighted_units"),
+            "unique_verified_solves": totals.get("unique_verified_solves"),
+            "verified_solves": totals.get("verified_solves"),
+            "last_solved_at": totals.get("last_solved_at"),
+        }
+
+    def _miner_visibility_row(
+        miner_hotkey: str,
+        weight_ctx: dict[str, Any],
+        *,
+        receipt: dict[str, Any] | None = None,
+        pm_summary_row: dict[str, Any] | None = None,
+        pm_contribution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        by_hotkey = weight_ctx.get("by_hotkey") or {}
+        weight_row = by_hotkey.get(miner_hotkey) or {}
+        ann = _weight_annotations(weight_ctx, [miner_hotkey]).get(miner_hotkey, {})
+        weight_known = miner_hotkey in by_hotkey
+        current_weight = ann.get("current_weight", 0.0) if weight_ctx.get("generated_at") else None
+        chain = _chain_visibility(weight_row, receipt or {})
+        pm_visibility = (
+            _pm_visibility_from_contribution(pm_contribution)
+            if pm_contribution is not None
+            else _pm_visibility_from_summary(pm_summary_row)
+        )
+        recent_activity = {
+            "source": "v1/leaderboard/top?view=receipts",
+            "rank_kind": "activity_only_not_payment",
+            "receipt_rank_24h": (receipt or {}).get("receipt_rank"),
+            "receipt_total_score_24h": (receipt or {}).get("total_score"),
+            "receipt_distinct_solves_24h": (receipt or {}).get("distinct_solves"),
+            "last_seen": (receipt or {}).get("last_seen"),
+        }
+        payment_status = "available" if weight_known else (
+            "absent_from_signed_vector" if weight_ctx.get("generated_at") else "unavailable"
+        )
+        return {
+            "miner_hotkey": miner_hotkey,
+            "uid": chain["uid"],
+            "registered": chain["registered"],
+            "payable": chain["payable"],
+            "current_signed_weight": current_weight,
+            "current_signed_weight_rank": ann.get("current_weight_rank") if weight_known else None,
+            "current_signed_weight_status": payment_status,
+            "chain_incentive": chain["incentive"],
+            "chain_emission": chain["emission"],
+            "chain": chain,
+            "perminer_contribution": pm_visibility,
+            "recent_activity": recent_activity,
+            "sources": {
+                "payment": _source_meta(
+                    path="v1/validator/weights/next",
+                    status=payment_status,
+                    generated_at=weight_ctx.get("generated_at"),
+                    note="signed Cathedral weight; validator input",
+                ),
+                "chain": {
+                    "status": "available" if chain["source"] != "unavailable" else "unavailable",
+                    "source": chain["source"],
+                    "updated_at": chain["updated_at"],
+                    "staleness_seconds": chain["staleness_seconds"],
+                    "note": "publisher only reports chain annotations when an upstream feed provides them",
+                },
+                "recent_activity": _source_meta(
+                    path="v1/leaderboard/top?view=receipts",
+                    status="available" if receipt else "not_found",
+                    generated_at=(receipt or {}).get("last_seen"),
+                    note="activity/audit signal, not payment order",
+                ),
+                "perminer": {
+                    "status": pm_visibility.get("status"),
+                    "source": pm_visibility.get("source"),
+                    "generated_at": pm_visibility.get("last_solved_at"),
+                    "staleness_seconds": _age_seconds(pm_visibility.get("last_solved_at")),
+                },
+            },
+        }
+
+    def _flatten_visibility(visibility: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "uid": visibility.get("uid"),
+            "registered": visibility.get("registered"),
+            "payable": visibility.get("payable"),
+            "current_signed_weight": visibility.get("current_signed_weight"),
+            "current_signed_weight_rank": visibility.get("current_signed_weight_rank"),
+            "current_signed_weight_status": visibility.get("current_signed_weight_status"),
+            "chain_incentive": visibility.get("chain_incentive"),
+            "chain_emission": visibility.get("chain_emission"),
+            "perminer_weighted_units": (
+                visibility.get("perminer_contribution") or {}
+            ).get("weighted_units"),
+            "perminer_unique_verified_solves": (
+                visibility.get("perminer_contribution") or {}
+            ).get("unique_verified_solves"),
+            "recent_activity_rank_24h": (
+                visibility.get("recent_activity") or {}
+            ).get("receipt_rank_24h"),
+            "recent_activity_last_seen": (
+                visibility.get("recent_activity") or {}
+            ).get("last_seen"),
+        }
 
     def _recent_payload(
         cur_ran_at: str | None,
@@ -1231,6 +1458,7 @@ def build_app(
             "earning_weight_source": "v1/validator/weights/next",
             "earning_weights_generated_at": weight_ctx["generated_at"],
             "current_weights": _weight_annotations(weight_ctx, hotkeys),
+            "current_weights_status": "available" if weight_ctx["generated_at"] else "unavailable",
             "next_since": nxt_ran_at,
             "next_since_ran_at": nxt_ran_at,
             "next_since_id": nxt_id,
@@ -1246,11 +1474,13 @@ def build_app(
             "earning_weight_source": "v1/validator/weights/next",
             "earning_weights_generated_at": None,
             "current_weights": {},
+            "current_weights_status": "warming",
             "next_since": None,
             "next_since_ran_at": None,
             "next_since_id": None,
             "merkle_epoch_latest": None,
             "visibility_cache_status": "warming",
+            "data_status": "warming",
             "requested_limit": int(limit),
         }
 
@@ -1301,6 +1531,16 @@ def build_app(
             for i, r in enumerate(rows_, start=1)
             if r.get("miner_hotkey")
         }
+        try:
+            pm_summary = _perminer_summary(250)
+            pm_by_hotkey = {
+                str(r.get("miner_hotkey")): r
+                for r in pm_summary.get("miners", [])
+                if r.get("miner_hotkey")
+            }
+        except Exception as exc:
+            print(f"[leaderboard] per-miner summary unavailable: {exc!r}")
+            pm_by_hotkey = {}
         requested_view = (view or "weights").strip().lower()
         normalized_view = "weights" if requested_view in {"weight", "weights", "earning", "earnings"} else "receipts"
         if normalized_view == "weights" and weight_ctx["ranked"]:
@@ -1308,6 +1548,12 @@ def build_app(
             for row in weight_ctx["ranked"][:100]:
                 hk = row["miner_hotkey"]
                 receipt = receipt_by_hotkey.get(hk, {})
+                visibility = _miner_visibility_row(
+                    hk,
+                    weight_ctx,
+                    receipt=receipt,
+                    pm_summary_row=pm_by_hotkey.get(hk),
+                )
                 miners.append({
                     "miner_hotkey": hk,
                     "current_weight": row["current_weight"],
@@ -1318,6 +1564,8 @@ def build_app(
                     "receipt_distinct_solves_24h": receipt.get("distinct_solves"),
                     "last_seen": receipt.get("last_seen"),
                     "display_name": receipt.get("display_name"),
+                    **_flatten_visibility(visibility),
+                    "visibility": visibility,
                 })
             rank_kind = "current_payment_weight"
         else:
@@ -1325,12 +1573,20 @@ def build_app(
             for i, row in enumerate(rows_, start=1):
                 hk = str(row.get("miner_hotkey") or "")
                 ann = _weight_annotations(weight_ctx, [hk]).get(hk, {})
+                visibility = _miner_visibility_row(
+                    hk,
+                    weight_ctx,
+                    receipt={**row, "receipt_rank": i},
+                    pm_summary_row=pm_by_hotkey.get(hk),
+                )
                 miners.append({
                     **row,
                     "receipt_rank": i,
                     "rank_kind": "receipt_total_score_24h",
-                    "current_weight": ann.get("current_weight", 0.0),
+                    "current_weight": ann.get("current_weight"),
                     "current_weight_rank": ann.get("current_weight_rank"),
+                    **_flatten_visibility(visibility),
+                    "visibility": visibility,
                 })
             rank_kind = "receipt_total_score_24h"
         return JSONResponse(
@@ -1349,6 +1605,27 @@ def build_app(
                 ),
                 "earning_weight_source": "v1/validator/weights/next",
                 "earning_weights_generated_at": weight_ctx["generated_at"],
+                "visibility_schema": "cathedral_miner_truth_v1",
+                "sources": {
+                    "payment": {
+                        "path": "v1/validator/weights/next",
+                        "status": "available" if weight_ctx.get("generated_at") else "unavailable",
+                        "generated_at": weight_ctx.get("generated_at"),
+                        "note": "signed Cathedral weight; validator input",
+                    },
+                    "recent_activity": {
+                        "path": "v1/leaderboard/recent",
+                        "status": "activity_only_not_payment",
+                    },
+                    "chain": {
+                        "status": "upstream_annotation_only",
+                        "note": "uid/registered/payable/incentive/emission are null unless a chain feed annotates rows",
+                    },
+                    "perminer": {
+                        "path": "v1/synthetic-boolean/per-miner/summary",
+                        "status": "summary",
+                    },
+                },
                 "window_hours": window_h,
                 "built_at": built_at,
                 "count": len(miners),
@@ -1361,16 +1638,36 @@ def build_app(
         payload = weights_mod.explain_miner_score(store, miner_hotkey)
         weight_ctx = _current_weight_context()
         ann = _weight_annotations(weight_ctx, [miner_hotkey]).get(miner_hotkey, {})
-        payload["current_signed_weight"] = ann.get("current_weight", 0.0)
+        payload["current_signed_weight"] = ann.get("current_weight")
         payload["current_signed_weight_rank"] = ann.get("current_weight_rank")
         payload["current_signed_weight_generated_at"] = weight_ctx.get("generated_at")
         payload["current_signed_weight_policy_reason"] = weight_ctx.get("policy_reason")
+        contribution = None
         try:
             payload.setdefault("perminer", {})
-            payload["perminer"]["contribution"] = _perminer_public_contribution(miner_hotkey)
+            contribution = _perminer_public_contribution(miner_hotkey)
+            payload["perminer"]["contribution"] = contribution
         except Exception as exc:
             payload.setdefault("perminer", {})
             payload["perminer"]["contribution_error"] = f"{type(exc).__name__}"
+        try:
+            rows_, _built_at, _window_h = top_cache.get()
+            receipt = next(
+                ({**r, "receipt_rank": i} for i, r in enumerate(rows_, start=1)
+                 if str(r.get("miner_hotkey") or "") == miner_hotkey),
+                None,
+            )
+        except Exception:
+            receipt = None
+        visibility = _miner_visibility_row(
+            miner_hotkey,
+            weight_ctx,
+            receipt=receipt,
+            pm_contribution=contribution,
+        )
+        payload["visibility_schema"] = "cathedral_miner_truth_v1"
+        payload["visibility"] = visibility
+        payload.update(_flatten_visibility(visibility))
         return payload
 
     @app.get("/v1/leaderboard/explain")
@@ -1381,17 +1678,46 @@ def build_app(
             return {
                 "miner_hotkey": miner_hotkey,
                 "visibility_cache_status": "warming",
-                "current_signed_weight": 0.0,
+                "data_status": "warming",
+                "visibility_schema": "cathedral_miner_truth_v1",
+                "uid": None,
+                "registered": None,
+                "payable": None,
+                "current_signed_weight": None,
                 "current_signed_weight_rank": None,
+                "current_signed_weight_status": "warming",
                 "current_signed_weight_generated_at": None,
                 "current_signed_weight_policy_reason": None,
+                "chain_incentive": None,
+                "chain_emission": None,
                 "perminer": {
                     "contribution": {
                         "kind": "per_miner",
                         "enabled": None,
                         "miner_hotkey": miner_hotkey,
-                        "eligible": False,
-                        "ineligibility_reason": "visibility_cache_warming",
+                        "eligible": None,
+                        "ineligibility_reason": None,
+                        "status": "warming",
+                    },
+                },
+                "visibility": {
+                    "miner_hotkey": miner_hotkey,
+                    "uid": None,
+                    "registered": None,
+                    "payable": None,
+                    "current_signed_weight": None,
+                    "current_signed_weight_rank": None,
+                    "current_signed_weight_status": "warming",
+                    "chain_incentive": None,
+                    "chain_emission": None,
+                    "chain": {"source": "warming"},
+                    "perminer_contribution": {"status": "warming"},
+                    "recent_activity": {"rank_kind": "activity_only_not_payment"},
+                    "sources": {
+                        "payment": {"path": "v1/validator/weights/next", "status": "warming"},
+                        "chain": {"status": "warming"},
+                        "recent_activity": {"status": "warming"},
+                        "perminer": {"status": "warming"},
                     },
                 },
             }
@@ -2472,17 +2798,15 @@ def build_app(
         enabled = pm.perminer_enabled()
         epoch = pm.current_epoch() if enabled else None
         since_24h = _since_24h_iso()
-        rows_ = []
-        if epoch is not None:
-            rows_ = store.query(
-                "SELECT miner_hotkey, COUNT(DISTINCT challenge_id) AS unique_solves, "
-                "COUNT(*) AS verified_solves, SUM(difficulty_weight) AS units, "
-                "MAX(solved_at_iso) AS last_solved_at "
-                "FROM per_miner_solves WHERE epoch=? AND verified=1 "
-                "GROUP BY miner_hotkey ORDER BY units DESC, unique_solves DESC, miner_hotkey "
-                "LIMIT ?",
-                (epoch, limit),
-            )
+        rows_ = store.query(
+            "SELECT miner_hotkey, COUNT(DISTINCT challenge_id) AS unique_solves, "
+            "COUNT(*) AS verified_solves, SUM(difficulty_weight) AS units, "
+            "MAX(solved_at_iso) AS last_solved_at "
+            "FROM per_miner_solves WHERE solved_at_iso > ? AND verified=1 "
+            "GROUP BY miner_hotkey ORDER BY units DESC, unique_solves DESC, miner_hotkey "
+            "LIMIT ?",
+            (since_24h, limit),
+        )
         active_miners = store.query(
             "SELECT COUNT(DISTINCT miner_hotkey) AS n FROM per_miner_solves "
             "WHERE solved_at_iso > ? AND verified=1",
@@ -2546,15 +2870,17 @@ def build_app(
             "current_epoch": epoch,
             "last_24h_since": _since_24h_iso(),
             "visibility_cache_status": "warming",
+            "data_status": "warming",
+            "metrics_status": "unavailable",
             "scoring": {
                 "mode": weights_mod.perminer_scoring_mode(),
                 "bonus_multiplier": weights_mod.perminer_bonus_multiplier(),
                 "history_floor": weights_mod.perminer_history_floor(),
                 "coldkey_required": weights_mod.perminer_require_coldkey(),
             },
-            "current_epoch_assignment_miners": 0,
-            "current_epoch_assigned_challenges": 0,
-            "active_miners_24h": 0,
+            "current_epoch_assignment_miners": None,
+            "current_epoch_assigned_challenges": None,
+            "active_miners_24h": None,
             "requested_limit": int(limit),
             "miners": [],
         }

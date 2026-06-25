@@ -783,6 +783,9 @@ with TestClient(app) as client:
             "CATHEDRAL_PERMINER_ALLOTMENT_T1",
             "CATHEDRAL_PERMINER_ALLOTMENT_T2",
             "CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE",
+            "CATHEDRAL_PERMINER_SCORING_MODE",
+            "CATHEDRAL_PERMINER_REQUIRE_COLDKEY",
+            "CATHEDRAL_PERMINER_PUBLIC_BASELINE",
             "CATHEDRAL_PERMINER_SEED_SECRET",
             "CATHEDRAL_PUBLISHER_ADMIN_TOKEN",
             "CATHEDRAL_TEE_GPU_ADMIN_TOKEN",
@@ -1001,10 +1004,53 @@ with TestClient(app) as client:
            pm_explain.status_code == 200
            and "current_signed_weight" in pm_explain.json()
            and "current_signed_weight_rank" in pm_explain.json()
+           and pm_explain.json().get("visibility_schema") == "cathedral_miner_truth_v1"
+           and pm_explain.json().get("visibility", {}).get("perminer_contribution", {}).get("status") in {"available", "ineligible"}
+           and pm_explain.json().get("visibility", {}).get("recent_activity", {}).get("rank_kind") == "activity_only_not_payment"
            and pm_contribution.get("current_epoch_totals", {}).get("unique_verified_solves") == 1
            and "rejection_reasons" not in pm_contribution.get("current_epoch_totals", {})
            and "assignment_identity" not in pm_contribution
            and "assignment_supply" not in pm_contribution)
+        os.environ["CATHEDRAL_PERMINER_SCORING_MODE"] = "pm_primary"
+        os.environ["CATHEDRAL_PERMINER_REQUIRE_COLDKEY"] = "1"
+        os.environ["CATHEDRAL_PERMINER_PUBLIC_BASELINE"] = "0.05"
+        _weights._reset_vector_cache()
+        pm_vector = _weights.build_signed_vector(store, signing_key_hex=key_hex)
+        pm_weight_by_hotkey = {
+            str(w["miner_hotkey"]): float(w["weight"])
+            for w in pm_vector.get("weights", [])
+        }
+        pm_meta = pm_vector.get("policy_metadata", {}).get("perminer", {})
+        ck("pm-primary vector pays the private-assignment solver",
+           pm_meta.get("enabled") is True
+           and pm_meta.get("primary_live") is True
+           and pm_meta.get("identity_ready") is True
+           and pm_meta.get("degraded_reason") is None
+           and pm_vector.get("policy_metadata", {}).get("score_source") == "pm_primary"
+           and pm_weight_by_hotkey.get(pm_miner.ss58_address) == 1.0
+           and pm_weight_by_hotkey.get(miner.ss58_address, 0.0) < 0.1
+           and pm_weight_by_hotkey.get(miner2.ss58_address, 0.0) < 0.1)
+        degraded_app = build_app(
+            database_path=":memory:",
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        degraded_store = degraded_app.state.store
+        def _seed_unmapped_pm_solve(conn):
+            conn.execute(
+                "INSERT INTO per_miner_solves(challenge_id, miner_hotkey, epoch, tier, seq, "
+                "difficulty_weight, verified, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("pm-unmapped", "5UnmappedPmMiner", _pm.current_epoch(), 1, 0, 1.0, 1, now_iso()),
+            )
+        degraded_store.write(_seed_unmapped_pm_solve)
+        degraded_vector = _weights.build_signed_vector(degraded_store, signing_key_hex=key_hex)
+        degraded_pm = degraded_vector.get("policy_metadata", {}).get("perminer", {})
+        ck("pm-primary degraded state is explicit when coldkey map is missing",
+           degraded_pm.get("enabled") is True
+           and degraded_pm.get("primary_live") is False
+           and degraded_pm.get("identity_ready") is False
+           and degraded_pm.get("degraded_reason") == "coldkey_map_required_but_unavailable"
+           and degraded_vector.get("weights") == [])
         rate_app = build_app(
             database_path=":memory:",
             signing_key_hex=key_hex,
@@ -1109,6 +1155,16 @@ with TestClient(app) as client:
        and top_weights.get("earning_weight_source") == "v1/validator/weights/next"
        and top_weights.get("miners")
        and "current_weight_rank" in top_weights["miners"][0])
+    top_visibility = top_weights["miners"][0].get("visibility", {}) if top_weights.get("miners") else {}
+    ck("leaderboard/top surfaces miner truth fields with source labels",
+       top_weights.get("visibility_schema") == "cathedral_miner_truth_v1"
+       and bool(top_weights.get("miners"))
+       and {"uid", "registered", "payable", "current_signed_weight",
+            "chain_incentive", "chain_emission", "perminer_weighted_units",
+            "recent_activity_last_seen"} <= set(top_weights["miners"][0])
+       and top_visibility.get("recent_activity", {}).get("rank_kind") == "activity_only_not_payment"
+       and top_visibility.get("sources", {}).get("payment", {}).get("path") == "v1/validator/weights/next"
+       and top_visibility.get("sources", {}).get("chain", {}).get("status") == "unavailable")
     top_receipts = client.get("/v1/leaderboard/top", params={"view": "receipts"}).json()
     ck("leaderboard/top view=receipts is explicitly not the earning order",
        top_receipts.get("view") == "receipts"
@@ -1276,6 +1332,7 @@ with TestClient(app) as client:
     ck("recent exposes current weights without mutating signed receipt rows",
        recent_default.get("view") == "recent_signed_receipts"
        and recent_default.get("rank_kind") == "none"
+       and recent_default.get("current_weights_status") == "available"
        and recent_default.get("current_weights")
        and all(wire.verify_row(r, pub_hex) for r in recent_default["items"]))
 

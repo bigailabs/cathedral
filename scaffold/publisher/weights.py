@@ -81,6 +81,10 @@ PERMINER_REQUIRE_COLDKEY_ENV = "CATHEDRAL_PERMINER_REQUIRE_COLDKEY"
 PERMINER_HISTORY_FLOOR_ENV = "CATHEDRAL_PERMINER_HISTORY_FLOOR"
 PERMINER_SCORING_MODE_ENV = "CATHEDRAL_PERMINER_SCORING_MODE"
 PERMINER_PUBLIC_BASELINE_ENV = "CATHEDRAL_PERMINER_PUBLIC_BASELINE"
+# Off by default. "mark" signs metagraph membership gaps in metadata; "filter"
+# removes non-payable hotkeys from the signed weights when a fresh snapshot exists.
+PAYABLE_HOTKEYS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS"  # off | mark | filter
+PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS_MAX_AGE_SECS"
 
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -261,6 +265,96 @@ def coldkey_collapse_enabled() -> bool:
 def perminer_require_coldkey() -> bool:
     raw = os.environ.get(PERMINER_REQUIRE_COLDKEY_ENV, "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def payable_hotkeys_mode() -> str:
+    raw = os.environ.get(PAYABLE_HOTKEYS_ENV, "off").strip().lower()
+    return raw if raw in {"off", "mark", "filter"} else "off"
+
+
+def payable_hotkeys_max_age_secs() -> float:
+    return max(0.0, _env_float(PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV, 600.0))
+
+
+def _load_fresh_metagraph_hotkeys(
+    store: Store,
+    *,
+    now: datetime,
+) -> tuple[set[str] | None, dict[str, Any]]:
+    """Load a fresh out-of-band metagraph membership snapshot.
+
+    The publisher still does not need chain credentials. An external poller can
+    refresh metagraph_hotkeys; stale rows age out and are not treated payable.
+    """
+    network = os.environ.get(NETWORK_ENV, "finney")
+    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    max_age = payable_hotkeys_max_age_secs()
+    cutoff = _ms_iso(now - timedelta(seconds=max_age))
+    meta: dict[str, Any] = {
+        "network": network,
+        "netuid": netuid,
+        "max_age_secs": max_age,
+        "cutoff": cutoff,
+        "snapshot_fresh": False,
+        "snapshot_hotkey_count": 0,
+        "snapshot_updated_at": None,
+    }
+    try:
+        rows = store.query(
+            "SELECT hotkey, updated_at_iso FROM metagraph_hotkeys "
+            "WHERE network=? AND netuid=? AND updated_at_iso > ?",
+            (network, netuid, cutoff),
+        )
+    except Exception as exc:
+        meta["snapshot_error"] = str(exc)
+        return None, meta
+    hotkeys = {str(r["hotkey"]) for r in rows}
+    if not hotkeys:
+        return None, meta
+    meta["snapshot_fresh"] = True
+    meta["snapshot_hotkey_count"] = len(hotkeys)
+    meta["snapshot_updated_at"] = max(str(r["updated_at_iso"]) for r in rows)
+    return hotkeys, meta
+
+
+def _apply_payable_hotkey_policy(
+    store: Store,
+    scores: dict[str, float],
+    *,
+    now: datetime,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    mode_value = payable_hotkeys_mode()
+    meta: dict[str, Any] = {
+        "mode": mode_value,
+        "enabled": mode_value != "off",
+        "enforced": False,
+        "status": "off",
+        "raw_miner_count": len(scores),
+        "final_miner_count": len(scores),
+        "missing_count": 0,
+        "missing_hotkeys": [],
+    }
+    if mode_value == "off":
+        return scores, meta
+
+    payable, snapshot_meta = _load_fresh_metagraph_hotkeys(store, now=now)
+    meta.update(snapshot_meta)
+    if payable is None:
+        meta["status"] = "no_fresh_snapshot"
+        return scores, meta
+
+    missing = sorted(set(scores) - payable)
+    meta["missing_hotkeys"] = missing
+    meta["missing_count"] = len(missing)
+    if mode_value == "filter":
+        filtered = {hk: score for hk, score in scores.items() if hk in payable}
+        meta["enforced"] = True
+        meta["final_miner_count"] = len(filtered)
+        meta["status"] = "filtered" if missing else "all_payable"
+        return filtered, meta
+
+    meta["status"] = "marked_missing" if missing else "all_payable"
+    return scores, meta
 
 
 def _perminer_window_scores(
@@ -574,6 +668,7 @@ def _perminer_policy_status(
             "perminer_shadow": False,
             "perminer_live_requested": False,
             "perminer_bonus_live": False,
+            "perminer_primary_live": False,
             "perminer_epoch": None,
             "perminer_has_scores": False,
             "score_source": None,
@@ -582,6 +677,8 @@ def _perminer_policy_status(
             "history_floor": perminer_history_floor(),
             "public_baseline": perminer_public_baseline(),
             "coldkey_required": perminer_require_coldkey(),
+            "identity_ready": not perminer_require_coldkey(),
+            "degraded_reason": "per_miner_import_failed",
         }
     enabled = pm.perminer_enabled()
     shadow = pm.perminer_shadow()
@@ -603,11 +700,13 @@ def _perminer_policy_status(
             has_scores = bool(_perminer_scores(store, now=now))
     live_requested = enabled and not shadow
     scoring_mode = perminer_scoring_mode()
-    identity_ready = (
-        not perminer_require_coldkey()
-        if coldkey_loaded is None
-        else (not perminer_require_coldkey() or coldkey_loaded)
-    )
+    identity_ready = not perminer_require_coldkey() or coldkey_loaded
+    degraded_reason = None
+    if live_requested and scoring_mode in {"pm_primary", "assigned_only"}:
+        if perminer_require_coldkey() and not coldkey_loaded:
+            degraded_reason = "coldkey_map_required_but_unavailable"
+        elif not has_scores:
+            degraded_reason = "no_verified_per_miner_scores"
     bonus_live = (
         live_requested
         and scoring_mode == "bonus"
@@ -631,6 +730,8 @@ def _perminer_policy_status(
         "history_floor": perminer_history_floor(),
         "public_baseline": perminer_public_baseline(),
         "coldkey_required": perminer_require_coldkey(),
+        "identity_ready": identity_ready,
+        "degraded_reason": degraded_reason,
     }
 
 
@@ -1034,6 +1135,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     coldkey_of = _load_scoring_coldkey_map(store)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
+    scores, payable_meta = _apply_payable_hotkey_policy(store, scores, now=now)
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
@@ -1046,6 +1148,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         "window_hours": window_hours(),
         "burn": burn_percentage(), "burn_uid": burn_uid(),
         "tier_weights": tier_weights(),
+        "payable_hotkeys": payable_meta,
         "hotkeys": sorted(scores), "scores": [scores[k] for k in sorted(scores)],
     }
     payload: dict[str, Any] = {
@@ -1073,6 +1176,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "score_source": score_source,
             "proportional_ledger_empty": proportional_ledger_empty,
             "coldkey_map_loaded": bool(coldkey_of),
+            "payable_hotkeys": payable_meta,
             "perminer_scoring_mode": pm_status["scoring_mode"],
             "perminer": {
                 "enabled": pm_status["perminer_enabled"],
@@ -1087,6 +1191,8 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
                 "history_floor": pm_status["history_floor"],
                 "public_baseline": pm_status["public_baseline"],
                 "coldkey_required": pm_status["coldkey_required"],
+                "identity_ready": pm_status.get("identity_ready", False),
+                "degraded_reason": pm_status.get("degraded_reason"),
             },
         },
         "weights": [
