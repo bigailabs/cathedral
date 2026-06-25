@@ -322,6 +322,14 @@ with TestClient(app) as client:
                read_submit.status_code == 404
                and read_submit.text == "route_not_served_by_read_role"
                and read_submit.headers.get("x-cathedral-service-role") == "read")
+            read_latest = role_client.get("/sat/latest.json")
+            read_seq = str(read_latest.json().get("sequence")) if read_latest.status_code == 200 else ""
+            read_snapshot = role_client.get(f"/sat/sequences/{read_seq}/board.json")
+            read_events = role_client.get("/sat/events", params={"once": "true"})
+            ck("read role serves scalable SAT snapshot endpoints",
+               read_latest.status_code == 200
+               and read_snapshot.status_code == 200
+               and read_events.status_code == 200)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "submit"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "false"
@@ -339,6 +347,10 @@ with TestClient(app) as client:
             submit_cnf = submit_role_client.get("/v1/synthetic-boolean/active-cnf")
             ck("submit role allows miner CNF route to reach auth validation",
                submit_cnf.status_code == 422)
+            submit_receipt = submit_role_client.get("/v1/agents/receipts/not-real")
+            ck("submit role serves receipt status route",
+               submit_receipt.status_code == 404
+               and submit_receipt.headers.get("x-cathedral-service-role") is None)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "worker"
         worker_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
@@ -1157,6 +1169,72 @@ with TestClient(app) as client:
            and all(abs(float(r.get("weighted_score", 0.0)) - 0.05) < 1e-9
                    for r in compat_public_rows)
            and all(wire.verify_row(r, pub_hex) for r in compat_public_rows))
+        old_public = rowmod.build_solve_rows(
+            row_uuid="old-public-row",
+            miner_hotkey=miner2.ss58_address,
+            agent_id="old-public-agent",
+            challenge_id="sat-old-public",
+            tier=1,
+            weighted_score=1.0,
+            answer_hash="old-public-answer",
+            verifier_details_hash="old-public-details",
+            ran_at=now_iso(),
+            epoch_salt="epoch-test",
+            solve_rank=1,
+            solved=True,
+            private_key_hex=key_hex,
+        )
+        old_pm = rowmod.build_solve_rows(
+            row_uuid="old-pm-row",
+            miner_hotkey=pm_miner.ss58_address,
+            agent_id="old-pm-agent",
+            challenge_id="pm-t1-compat-legacy",
+            tier=1,
+            weighted_score=1.0,
+            answer_hash="old-pm-answer",
+            verifier_details_hash="old-pm-details",
+            ran_at=now_iso(),
+            epoch_salt="epoch-test",
+            solve_rank=1,
+            solved=True,
+            private_key_hex=key_hex,
+        )
+        def _seed_legacy_recent_rows(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO per_miner_solves"
+                "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, "
+                "verified, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("pm-t1-compat-legacy", pm_miner.ss58_address, _pm.current_epoch(),
+                 1, 0, 1.0, 1, now_iso()),
+            )
+            for row in [*old_public, *old_pm]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (row["id"], row["ran_at"], int(row["eval_output_schema_version"]),
+                     row["miner_hotkey"], row["task_type"], json.dumps(row)),
+                )
+        compat_store.write(_seed_legacy_recent_rows)
+        with TestClient(compat_app) as compat_client:
+            legacy_recent = compat_client.get("/v1/leaderboard/recent", params={"limit": 10}).json()
+        legacy_public = [
+            r for r in legacy_recent.get("items", [])
+            if r.get("id") in {"old-public-row", "old-public-row-v5compat"}
+        ]
+        legacy_pm = [
+            r for r in legacy_recent.get("items", [])
+            if r.get("id") in {"old-pm-row", "old-pm-row-v5compat"}
+        ]
+        ck("pm-primary recent feed rewrites legacy public rows but preserves PM rows",
+           len(legacy_public) == 2
+           and len(legacy_pm) == 2
+           and all(abs(float(r.get("weighted_score", 0.0)) - 0.05) < 1e-9
+                   and wire.verify_row(r, pub_hex)
+                   for r in legacy_public)
+           and all(abs(float(r.get("weighted_score", 0.0)) - 1.0) < 1e-9
+                   and wire.verify_row(r, pub_hex)
+                   for r in legacy_pm))
         degraded_app = build_app(
             database_path=":memory:",
             signing_key_hex=key_hex,
