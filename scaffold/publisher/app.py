@@ -1500,8 +1500,11 @@ def build_app(
             payload, cache_status = recent_cache.get(
                 int(limit),
                 lambda: _recent_payload(None, None, limit),
-                cold_async=visibility_cold_async,
-                cold_value=lambda: _recent_warming_payload(limit),
+                # This endpoint is a validator compatibility contract, not just
+                # dashboard visibility. Older validators may call it without a
+                # cursor, so the first response must contain signed rows instead
+                # of an empty warming placeholder.
+                cold_async=False,
             )
         else:
             payload = _recent_payload(cur_ran_at, cur_id, limit)

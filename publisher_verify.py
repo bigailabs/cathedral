@@ -173,6 +173,27 @@ ck(f"verifier totality: 0 crashes on hostile solution input ({crashes})", crashe
 print("END-TO-END — miner solve + validator pull loop")
 from fastapi.testclient import TestClient  # noqa: E402
 
+old_visibility_cold_async = os.environ.get("CATHEDRAL_VISIBILITY_COLD_ASYNC")
+os.environ["CATHEDRAL_VISIBILITY_COLD_ASYNC"] = "1"
+try:
+    compat_app = build_app(database_path=":memory:", signing_key_hex=key_hex, submit_min_interval_secs=0)
+    for compat_row in emitted:
+        compat_app.state.store.insert_row(compat_row)
+    with TestClient(compat_app) as compat_client:
+        compat_recent = compat_client.get("/v1/leaderboard/recent", params={"limit": 2})
+        compat_body = compat_recent.json()
+        ck("recent feed cold no-cursor call returns signed rows, not warming",
+           compat_recent.status_code == 200
+           and compat_body.get("items")
+           and compat_body.get("visibility_cache_status") != "warming"
+           and compat_recent.headers.get("X-Cathedral-Cache") != "warming"
+           and all(wire.verify_row(r, pub_hex) for r in compat_body["items"]))
+finally:
+    if old_visibility_cold_async is None:
+        os.environ.pop("CATHEDRAL_VISIBILITY_COLD_ASYNC", None)
+    else:
+        os.environ["CATHEDRAL_VISIBILITY_COLD_ASYNC"] = old_visibility_cold_async
+
 app = build_app(database_path=":memory:", signing_key_hex=key_hex, submit_min_interval_secs=0)
 store = app.state.store
 cnf_e2e, _ = gen_planted_3sat(123, 14, 42)
