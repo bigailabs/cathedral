@@ -80,13 +80,22 @@ def insert_perminer_solve(
     tier: int = 1,
     seq: int = 0,
     difficulty_weight: float = 1.0,
+    solved_at: str | None = None,
 ) -> None:
     def _do(conn):
         conn.execute(
             "INSERT OR IGNORE INTO per_miner_solves "
             "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, verified, solved_at_iso) "
             "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-            (challenge_id, hotkey, epoch, tier, seq, difficulty_weight, iso(datetime.now(timezone.utc))),
+            (
+                challenge_id,
+                hotkey,
+                epoch,
+                tier,
+                seq,
+                difficulty_weight,
+                solved_at or iso(datetime.now(timezone.utc)),
+            ),
         )
 
     store.write(_do)
@@ -103,6 +112,9 @@ saved_env = {
         "CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE",
         "CATHEDRAL_PERMINER_ENABLED",
         "CATHEDRAL_PERMINER_SHADOW",
+        weights.PERMINER_SCORING_MODE_ENV,
+        weights.PERMINER_PUBLIC_BASELINE_ENV,
+        weights.PERMINER_REQUIRE_COLDKEY_ENV,
     )
 }
 for key in saved_env:
@@ -244,6 +256,106 @@ try:
         os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
         os.environ.pop("CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE", None)
         os.environ.pop(weights.PERMINER_SCORING_MODE_ENV, None)
+
+    pm_primary_store = Store(":memory:")
+    try:
+        from scaffold.publisher import per_miner
+
+        pm_epoch = per_miner.current_epoch()
+        os.environ[weights.MODE_ENV] = "proportional"
+        os.environ["CATHEDRAL_PERMINER_ENABLED"] = "1"
+        os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
+        os.environ[weights.PERMINER_SCORING_MODE_ENV] = "pm_primary"
+        os.environ[weights.PERMINER_PUBLIC_BASELINE_ENV] = "0.05"
+        insert_solve(pm_primary_store, "sat-t2-public-only", "5PublicOnly", recent)
+        no_pm_scores = weights.compose_scores(pm_primary_store, now=now)
+        ck(
+            "pm_primary falls back to public scoring until accepted PM solves exist",
+            no_pm_scores == {"5PublicOnly": 1.0},
+        )
+        insert_perminer_solve(
+            pm_primary_store,
+            "pm-t2-private",
+            "5Private",
+            pm_epoch,
+            tier=2,
+            difficulty_weight=3.0,
+            solved_at=recent,
+        )
+        insert_perminer_solve(
+            pm_primary_store,
+            "pm-t1-old-epoch-window",
+            "5Private",
+            pm_epoch - 1,
+            tier=1,
+            difficulty_weight=1.0,
+            solved_at=iso(now - timedelta(hours=23)),
+        )
+        insert_perminer_solve(
+            pm_primary_store,
+            "pm-t2-too-old",
+            "5Private",
+            pm_epoch,
+            tier=2,
+            difficulty_weight=3.0,
+            solved_at=iso(now - timedelta(hours=25)),
+        )
+        coldkey_blocked_scores = weights.compose_scores(pm_primary_store, now=now)
+        ck(
+            "pm_primary does not activate without required coldkey identity",
+            coldkey_blocked_scores == {"5PublicOnly": 1.0},
+        )
+        coldkey_blocked_vec = weights.build_signed_vector(
+            pm_primary_store,
+            signing_key_hex=generate_test_key(),
+            now=now,
+        )
+        ck(
+            "pm_primary metadata stays inactive without required coldkey identity",
+            coldkey_blocked_vec["policy_metadata"]["score_source"] == "proportional"
+            and coldkey_blocked_vec["policy_metadata"]["perminer"]["primary_live"] is False,
+        )
+        os.environ[weights.PERMINER_REQUIRE_COLDKEY_ENV] = "0"
+        primary_scores = weights.compose_scores(pm_primary_store, now=now)
+        ck(
+            "pm_primary makes private assigned work the paying path",
+            primary_scores == {"5Private": 1.0, "5PublicOnly": 0.052632},
+        )
+        primary_vec = weights.build_signed_vector(
+            pm_primary_store,
+            signing_key_hex=generate_test_key(),
+            now=now,
+        )
+        ck(
+            "pm_primary signed vector exposes the live score source and baseline",
+            primary_vec["policy_metadata"]["score_source"] == "pm_primary"
+            and primary_vec["policy_metadata"]["perminer"]["primary_live"] is True
+            and primary_vec["policy_metadata"]["perminer"]["public_baseline"] == 0.05,
+        )
+        primary_explain = weights.explain_miner_score(
+            pm_primary_store,
+            "5Private",
+            now=now,
+        )
+        ck(
+            "pm_primary miner explanation uses 24h PM units",
+            primary_explain["score_source"] == "pm_primary"
+            and primary_explain["raw_units"] == 4.0
+            and primary_explain["top_units"] == 4.0
+            and primary_explain["distinct_challenges"] == 2
+            and primary_explain["normalized_weight"] == 1.0,
+        )
+        ck(
+            "pm_primary explain exposes primary-live status",
+            primary_explain["perminer"]["primary_live"] is True,
+        )
+    finally:
+        pm_primary_store.close()
+        os.environ.pop("CATHEDRAL_PERMINER_ENABLED", None)
+        os.environ.pop("CATHEDRAL_PERMINER_SHADOW", None)
+        os.environ.pop(weights.PERMINER_SCORING_MODE_ENV, None)
+        os.environ.pop(weights.PERMINER_PUBLIC_BASELINE_ENV, None)
+        os.environ.pop(weights.PERMINER_REQUIRE_COLDKEY_ENV, None)
 
     ck("generic tier parser reads sat and future lane ids",
        weights.tier_from_challenge_id("sat-t2-abc") == 2

@@ -80,6 +80,7 @@ PERMINER_BONUS_MULT_ENV = "CATHEDRAL_PERMINER_BONUS_MULT"
 PERMINER_REQUIRE_COLDKEY_ENV = "CATHEDRAL_PERMINER_REQUIRE_COLDKEY"
 PERMINER_HISTORY_FLOOR_ENV = "CATHEDRAL_PERMINER_HISTORY_FLOOR"
 PERMINER_SCORING_MODE_ENV = "CATHEDRAL_PERMINER_SCORING_MODE"
+PERMINER_PUBLIC_BASELINE_ENV = "CATHEDRAL_PERMINER_PUBLIC_BASELINE"
 
 _CACHE_TTL_SECS = 60.0
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -238,10 +239,16 @@ def perminer_scoring_mode() -> str:
     """How verified per-miner solves affect the live vector.
 
     bonus: keep shared SAT scoring as base, then add a bounded assigned bonus.
+    pm_primary: make assigned solves primary, with a small shared-board baseline.
     assigned_only: replace shared scoring with the assigned-only vector.
     """
     raw = os.environ.get(PERMINER_SCORING_MODE_ENV, "bonus").strip().lower()
-    return raw if raw in {"bonus", "assigned_only"} else "bonus"
+    return raw if raw in {"bonus", "pm_primary", "assigned_only"} else "bonus"
+
+
+def perminer_public_baseline() -> float:
+    """Shared-board score share when per-miner work is the primary lane."""
+    return min(1.0, max(0.0, _env_float(PERMINER_PUBLIC_BASELINE_ENV, 0.05)))
 
 
 def coldkey_collapse_enabled() -> bool:
@@ -256,32 +263,18 @@ def perminer_require_coldkey() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
-def _perminer_scores(store: Store) -> dict[str, float]:
-    """Current-epoch normalized per-miner scores, or empty when disabled/no solves."""
-    from . import per_miner as pm
-    if not pm.perminer_enabled() or pm.perminer_shadow():
-        return {}
-    return pm.compute_perminer_scores(store, pm.current_epoch())
-
-
-def _perminer_compose_scores(store: Store, *, ident=lambda hk: hk) -> dict[str, float] | None:
-    """Per-miner scoring path. Returns scores when CATHEDRAL_PERMINER_ENABLED is on
-    AND not in shadow-only mode. Returns None when flag is off (caller falls
-    through to existing scoring — byte-identical to pre-flag behaviour).
-
-    Shadow mode: flag is on + CATHEDRAL_PERMINER_SHADOW=1 → compute the vector,
-    log it, but return None so the LIVE vector stays the current scoring. This
-    lets us run shadow comparisons without touching the live board.
-    """
-    from . import per_miner as pm
-    if not pm.perminer_enabled():
-        return None  # flag off: zero change
-    epoch = pm.current_epoch()
+def _perminer_window_scores(
+    store: Store,
+    *,
+    since: str,
+    ident=lambda hk: hk,
+) -> dict[str, float]:
+    """Trailing-window normalized per-miner scores."""
     try:
         rows = store.query(
             "SELECT miner_hotkey, challenge_id, difficulty_weight "
-            "FROM per_miner_solves WHERE epoch=? AND verified=1 ",
-            (epoch,),
+            "FROM per_miner_solves WHERE solved_at_iso > ? AND verified=1",
+            (since,),
         )
     except Exception:
         rows = []
@@ -303,31 +296,84 @@ def _perminer_compose_scores(store: Store, *, ident=lambda hk: hk) -> dict[str, 
         idk = str(ident(hk))
         identity_best[idk] = max(identity_best.get(idk, 0.0), total)
         hks.setdefault(idk, set()).add(hk)
+    if not identity_best:
+        return {}
+    top = max(identity_best.values())
+    if top <= 0.0:
+        return {}
     scores: dict[str, float] = {}
-    if identity_best:
-        top = max(identity_best.values())
-        if top > 0.0:
-            for idk, total in identity_best.items():
-                per = round((total / top) / len(hks[idk]), 6)
-                for hk in hks[idk]:
-                    scores[hk] = per
+    for idk, total in identity_best.items():
+        per = round((total / top) / len(hks[idk]), 6)
+        for hk in hks[idk]:
+            scores[hk] = per
+    return scores
+
+
+def _perminer_scores(store: Store, *, now: datetime | None = None) -> dict[str, float]:
+    """Trailing-window normalized per-miner scores, or empty when disabled/no solves."""
+    from . import per_miner as pm
+    if not pm.perminer_enabled() or pm.perminer_shadow():
+        return {}
+    now = now or datetime.now(timezone.utc)
+    since = _ms_iso(now - timedelta(hours=window_hours()))
+    return _perminer_window_scores(store, since=since)
+
+
+def _perminer_compose_scores(
+    store: Store,
+    *,
+    ident=lambda hk: hk,
+    since: str | None = None,
+) -> dict[str, float] | None:
+    """Per-miner scoring path. Returns scores when CATHEDRAL_PERMINER_ENABLED is on
+    AND not in shadow-only mode. Returns None when flag is off (caller falls
+    through to existing scoring — byte-identical to pre-flag behaviour).
+
+    Shadow mode: flag is on + CATHEDRAL_PERMINER_SHADOW=1 → compute the vector,
+    log it, but return None so the LIVE vector stays the current scoring. This
+    lets us run shadow comparisons without touching the live board.
+    """
+    from . import per_miner as pm
+    if not pm.perminer_enabled():
+        return None  # flag off: zero change
+    since = since or _ms_iso(datetime.now(timezone.utc) - timedelta(hours=window_hours()))
+    scores = _perminer_window_scores(store, since=since, ident=ident)
     if pm.perminer_shadow():
         # Shadow: log the vector for comparison but don't serve it.
-        print(f"[per_miner] shadow_vector epoch={epoch} scores={scores}")
+        print(f"[per_miner] shadow_vector window_hours={window_hours()} scores={scores}")
         return None  # fall through to live scoring
     return scores if scores else None
+
+
+def _apply_perminer_primary(
+    base: dict[str, float],
+    pm_scores: dict[str, float] | None,
+) -> dict[str, float]:
+    """Make PM solves primary while keeping a small public-board baseline."""
+    if not pm_scores:
+        return base
+    baseline = perminer_public_baseline()
+    pm_share = 1.0 - baseline
+    combined: dict[str, float] = {}
+    for hk in set(base) | set(pm_scores):
+        combined[hk] = baseline * float(base.get(hk, 0.0)) + pm_share * float(pm_scores.get(hk, 0.0))
+    top = max(combined.values()) if combined else 0.0
+    if top <= 0.0:
+        return {}
+    return {hk: round(v / top, 6) for hk, v in combined.items()}
 
 
 def _apply_perminer_bonus(
     store: Store,
     base: dict[str, float],
     coldkey_of: dict[str, str] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, float]:
     """Add a transition bonus for per-miner adopters without replacing base scoring."""
     bonus = perminer_bonus_multiplier()
     if bonus <= 0.0:
         return base
-    pm_scores = _perminer_scores(store)
+    pm_scores = _perminer_scores(store, now=now)
     if not pm_scores:
         return base
     combined = dict(base)
@@ -397,7 +443,7 @@ def _load_scoring_coldkey_map(store: Store) -> dict[str, str] | None:
     if (
         coldkey_collapse_enabled()
         or perminer_require_coldkey()
-        or perminer_scoring_mode() == "assigned_only"
+        or perminer_scoring_mode() in {"assigned_only", "pm_primary"}
         or perminer_bonus_multiplier() > 0.0
     ):
         return _load_coldkey_map(store)
@@ -497,7 +543,12 @@ def _proportional_ledger_has_rows(store: Store, since: str) -> bool:
     return bool(rows)
 
 
-def _perminer_policy_status(store: Store | None = None) -> dict[str, Any]:
+def _perminer_policy_status(
+    store: Store | None = None,
+    *,
+    now: datetime | None = None,
+    coldkey_loaded: bool | None = None,
+) -> dict[str, Any]:
     """Surface per-miner flag state so a score-source flip is never silent."""
     try:
         from . import per_miner as pm
@@ -513,6 +564,7 @@ def _perminer_policy_status(store: Store | None = None) -> dict[str, Any]:
             "scoring_mode": perminer_scoring_mode(),
             "bonus_multiplier": perminer_bonus_multiplier(),
             "history_floor": perminer_history_floor(),
+            "public_baseline": perminer_public_baseline(),
             "coldkey_required": perminer_require_coldkey(),
         }
     enabled = pm.perminer_enabled()
@@ -520,26 +572,36 @@ def _perminer_policy_status(store: Store | None = None) -> dict[str, Any]:
     epoch = pm.current_epoch() if enabled else None
     has_scores = False
     if enabled and store is not None and epoch is not None:
-        has_scores = bool(pm.compute_perminer_scores(store, epoch))
+        has_scores = bool(_perminer_scores(store, now=now))
     live_requested = enabled and not shadow
+    scoring_mode = perminer_scoring_mode()
+    identity_ready = (
+        not perminer_require_coldkey()
+        if coldkey_loaded is None
+        else (not perminer_require_coldkey() or coldkey_loaded)
+    )
     bonus_live = (
         live_requested
-        and perminer_scoring_mode() == "bonus"
+        and scoring_mode == "bonus"
         and perminer_bonus_multiplier() > 0.0
         and has_scores
+        and identity_ready
     )
+    primary_live = live_requested and scoring_mode == "pm_primary" and has_scores and identity_ready
     return {
         "perminer_enabled": enabled,
         "perminer_shadow": shadow,
         "perminer_live_requested": live_requested,
         "perminer_bonus_live": bonus_live,
+        "perminer_primary_live": primary_live,
         "perminer_epoch": epoch,
         "perminer_has_scores": has_scores,
         "score_source": "per_miner" if live_requested and has_scores
-        and perminer_scoring_mode() == "assigned_only" else None,
-        "scoring_mode": perminer_scoring_mode(),
+        and scoring_mode == "assigned_only" else "pm_primary" if primary_live else None,
+        "scoring_mode": scoring_mode,
         "bonus_multiplier": perminer_bonus_multiplier(),
         "history_floor": perminer_history_floor(),
+        "public_baseline": perminer_public_baseline(),
         "coldkey_required": perminer_require_coldkey(),
     }
 
@@ -561,14 +623,14 @@ def explain_miner_score(
     """
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
-    pm_status = _perminer_policy_status(store)
+    coldkey_of = _load_scoring_coldkey_map(store)
+    pm_status = _perminer_policy_status(store, now=now, coldkey_loaded=bool(coldkey_of))
     requested = mode()
     effective = _effective_mode(store, since)
     source = pm_status["score_source"] or effective
     hotkey = str(miner_hotkey)
     scores: dict[str, float] = {}
-    if source == "per_miner":
-        coldkey_of = _load_scoring_coldkey_map(store)
+    if source in {"per_miner", "pm_primary"}:
         scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
     base: dict[str, Any] = {
         "miner_hotkey": hotkey,
@@ -586,29 +648,30 @@ def explain_miner_score(
             "shadow": pm_status["perminer_shadow"],
             "live_requested": pm_status["perminer_live_requested"],
             "bonus_live": pm_status.get("perminer_bonus_live", False),
+            "primary_live": pm_status.get("perminer_primary_live", False),
             "epoch": pm_status["perminer_epoch"],
             "has_scores": pm_status["perminer_has_scores"],
             "scoring_mode": pm_status["scoring_mode"],
             "bonus_multiplier": pm_status["bonus_multiplier"],
             "history_floor": pm_status["history_floor"],
+            "public_baseline": pm_status["public_baseline"],
             "coldkey_required": pm_status["coldkey_required"],
         },
     }
 
-    if source == "per_miner":
+    if source in {"per_miner", "pm_primary"}:
         try:
-            from . import per_miner as pm
             rows = store.query(
                 "SELECT tier, COUNT(*) AS solves, SUM(difficulty_weight) AS units "
-                "FROM per_miner_solves WHERE epoch=? AND miner_hotkey=? AND verified=1 "
+                "FROM per_miner_solves WHERE solved_at_iso > ? AND miner_hotkey=? AND verified=1 "
                 "GROUP BY tier ORDER BY tier",
-                (pm.current_epoch(), hotkey),
+                (since, hotkey),
             )
             top_rows = store.query(
                 "SELECT miner_hotkey, SUM(difficulty_weight) AS units "
-                "FROM per_miner_solves WHERE epoch=? AND verified=1 "
+                "FROM per_miner_solves WHERE solved_at_iso > ? AND verified=1 "
                 "GROUP BY miner_hotkey",
-                (pm.current_epoch(),),
+                (since,),
             )
             raw_units = sum(float(r["units"] or 0.0) for r in rows)
             top_units = max((float(r["units"] or 0.0) for r in top_rows), default=0.0)
@@ -823,6 +886,7 @@ def compose_scores(
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
+    use_pm_ck = perminer_require_coldkey() and bool(coldkey_of)
 
     if (
         perminer_scoring_mode() == "assigned_only"
@@ -836,22 +900,28 @@ def compose_scores(
     def ident(hk: str) -> str:
         return coldkey_of.get(hk, hk) if use_ck else hk
 
-    pm_scores = _perminer_compose_scores(store, ident=ident)
+    def pm_ident(hk: str) -> str:
+        return coldkey_of.get(hk, hk) if use_pm_ck else ident(hk)
+
+    pm_scores = _perminer_compose_scores(store, ident=pm_ident, since=since)
     if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
         return pm_scores
 
+    def finish_base(base: dict[str, float]) -> dict[str, float]:
+        if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
+            if perminer_require_coldkey() and not coldkey_of:
+                return _apply_perminer_bonus(store, base, coldkey_of, now=now)
+            return _apply_perminer_primary(base, pm_scores)
+        return _apply_perminer_bonus(store, base, coldkey_of, now=now)
+
     if mode() == "row_score_recent":
-        return _apply_perminer_bonus(
-            store,
-            _compose_row_score_recent(store, since, ident=ident),
-            coldkey_of,
-        )
+        return finish_base(_compose_row_score_recent(store, since, ident=ident))
 
     if mode() == "proportional":
         if not use_ck:
             base = _compose_proportional_hotkey_sql(store, since)
             if base:
-                return _apply_perminer_bonus(store, base, coldkey_of)
+                return finish_base(base)
         rows = store.query(
             "SELECT DISTINCT s.miner_hotkey, s.challenge_id "
             "FROM lane_challenge_solves s "
@@ -880,14 +950,14 @@ def compose_scores(
                 per = round((w / top) / len(hks[idk]), 6)
                 for hk in hks[idk]:
                     base[hk] = per
-            return _apply_perminer_bonus(store, base, coldkey_of)
+            return finish_base(base)
         # no in-window claim rows -> fall through to flat
 
     feed = store.query(
         "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,))
     hotkeys = {str(r["miner_hotkey"]) for r in feed}
     if not use_ck:
-        return _apply_perminer_bonus(store, {hk: 1.0 for hk in hotkeys}, coldkey_of)
+        return finish_base({hk: 1.0 for hk in hotkeys})
     # flat, identity-deduped: each coldkey's hotkeys share a single 1.0
     groups: dict[str, list[str]] = {}
     for hk in hotkeys:
@@ -897,7 +967,7 @@ def compose_scores(
         per = round(1.0 / len(members), 6)
         for hk in members:
             out[hk] = per
-    return _apply_perminer_bonus(store, out, coldkey_of)
+    return finish_base(out)
 
 
 # -- monotonic policy_version (validator rollback fence) -----------------------
@@ -937,7 +1007,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
-    pm_status = _perminer_policy_status(store)
+    pm_status = _perminer_policy_status(store, now=now, coldkey_loaded=bool(coldkey_of))
     score_source = pm_status["score_source"] or effective_mode
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
     policy_inputs = {
@@ -979,11 +1049,13 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
                 "shadow": pm_status["perminer_shadow"],
                 "live_requested": pm_status["perminer_live_requested"],
                 "bonus_live": pm_status.get("perminer_bonus_live", False),
+                "primary_live": pm_status.get("perminer_primary_live", False),
                 "epoch": pm_status["perminer_epoch"],
                 "has_scores": pm_status["perminer_has_scores"],
                 "scoring_mode": pm_status["scoring_mode"],
                 "bonus_multiplier": pm_status["bonus_multiplier"],
                 "history_floor": pm_status["history_floor"],
+                "public_baseline": pm_status["public_baseline"],
                 "coldkey_required": pm_status["coldkey_required"],
             },
         },
