@@ -238,6 +238,12 @@ def build_app(
         threading.BoundedSemaphore(submit_max_concurrency)
         if submit_max_concurrency > 0 else None
     )
+    configured_pm_read_hard_cap = _env_int("CATHEDRAL_PM_READ_HARD_CAP", 128)
+    pm_read_min_cap = _env_int("CATHEDRAL_PM_READ_MIN_CAP", 128)
+    pm_read_hard_cap = (
+        0 if configured_pm_read_hard_cap <= 0
+        else max(configured_pm_read_hard_cap, pm_read_min_cap)
+    )
     submit_log_events = os.environ.get("CATHEDRAL_SUBMIT_LOG_EVENTS", "").strip().lower() in {
         "1", "true", "yes", "on"}
     submit_metrics_lock = threading.Lock()
@@ -246,6 +252,9 @@ def build_app(
         "max_concurrency": submit_max_concurrency,
         "configured_max_concurrency": configured_submit_max_concurrency,
         "hard_cap": submit_hard_cap,
+        "pm_read_hard_cap": pm_read_hard_cap,
+        "configured_pm_read_hard_cap": configured_pm_read_hard_cap,
+        "pm_read_min_cap": pm_read_min_cap,
         "min_interval_secs": min_interval,
         "total": 0,
         "by_outcome": {},
@@ -297,6 +306,9 @@ def build_app(
                 "max_concurrency": submit_metrics["max_concurrency"],
                 "configured_max_concurrency": submit_metrics["configured_max_concurrency"],
                 "hard_cap": submit_metrics["hard_cap"],
+                "pm_read_hard_cap": submit_metrics["pm_read_hard_cap"],
+                "configured_pm_read_hard_cap": submit_metrics["configured_pm_read_hard_cap"],
+                "pm_read_min_cap": submit_metrics["pm_read_min_cap"],
                 "min_interval_secs": submit_metrics["min_interval_secs"],
                 "total": submit_metrics["total"],
                 "by_outcome": dict(submit_metrics["by_outcome"]),
@@ -537,13 +549,9 @@ def build_app(
                 threading.BoundedSemaphore(submit_max_concurrency)
                 if submit_max_concurrency > 0 else None
             )
-            # PM challenge/CNF reads are signed GETs and are materially cheaper
-            # than solution submission. Keep a backpressure valve, but do not
-            # inherit the write-path cap by default.
-            pm_read_cap = _env_int("CATHEDRAL_PM_READ_HARD_CAP", 64)
             self._pm_read_gate = (
-                threading.BoundedSemaphore(pm_read_cap)
-                if pm_read_cap > 0 else None
+                threading.BoundedSemaphore(pm_read_hard_cap)
+                if pm_read_hard_cap > 0 else None
             )
 
         async def __call__(self, scope, receive, send):
