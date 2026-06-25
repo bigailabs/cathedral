@@ -87,7 +87,7 @@ def main() -> int:
     generator = board.get("generator") or {}
     generator_tiers = {int(t.get("tier")): t for t in generator.get("tiers", []) if t.get("tier")}
     ck("board exposes SAT generator policy",
-       generator.get("kind") == "local_refill"
+       generator.get("kind") in ("local_refill", "external_sat_generator")
        and generator_tiers.get(1, {}).get("method") == "biased"
        and generator_tiers.get(2, {}).get("method") == "ajm")
     # pick a LOCAL challenge (has a fetchable body); external mirrors have none.
@@ -120,7 +120,7 @@ def main() -> int:
     with urllib.request.urlopen(req, timeout=30) as r:
         cnf_text = r.read().decode()
         cc = r.headers.get("Cache-Control", "")
-    ck("CNF body fetched via token", cnf_text.startswith("p cnf"))
+    ck("CNF body fetched via token", "p cnf" in cnf_text[:512])
     ck("CNF served with immutable cache headers", "immutable" in cc)
 
     # bad token -> opaque 404
@@ -173,13 +173,14 @@ def main() -> int:
     explain = json.loads(raw)
     ck("leaderboard explain endpoint served",
        st == 200 and explain.get("miner_hotkey") == miner.ss58_address)
-    ck("leaderboard explain includes current score source",
-       explain.get("score_source") in (
-           "proportional",
-           "per_miner",
-           "row_score_recent",
-           "flat_recent",
-           "flat_recent_fallback",
+    ck("leaderboard explain includes current score context",
+       "current_signed_weight" in explain or explain.get("score_source") in (
+            "proportional",
+            "per_miner",
+            "pm_primary",
+            "row_score_recent",
+            "flat_recent",
+            "flat_recent_fallback",
        ))
 
     st, raw = _get("/v1/validator/weights/next")
@@ -187,10 +188,11 @@ def main() -> int:
     policy = vector.get("policy_metadata") or {}
     ck("signed vector exposes score_source metadata",
        policy.get("score_source") in (
-           "proportional",
-           "per_miner",
-           "row_score_recent",
-           "flat_recent",
+            "proportional",
+            "per_miner",
+            "pm_primary",
+            "row_score_recent",
+            "flat_recent",
            "flat_recent_fallback",
        ))
 

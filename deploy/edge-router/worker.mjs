@@ -243,6 +243,17 @@ export function cachedFresh(response, now = nowSeconds()) {
   return Number.isFinite(until) && until > now;
 }
 
+export async function responseIsVisibilityWarming(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) return false;
+  try {
+    const body = await response.clone().json();
+    return body && body.visibility_cache_status === "warming";
+  } catch {
+    return false;
+  }
+}
+
 async function fetchReadThroughCache(request, originBase, ctx, path, timeoutMs) {
   const unsupportedParams = unsupportedCacheQueryParams(request.url, path);
   if (unsupportedParams.length) {
@@ -300,7 +311,8 @@ async function fetchReadThroughCache(request, originBase, ctx, path, timeoutMs) 
     policy &&
     request.method === "GET" &&
     originResp.status === 200 &&
-    originAllowsEdgeStore(originResp)
+    originAllowsEdgeStore(originResp) &&
+    !(await responseIsVisibilityWarming(originResp))
   );
   if (!shouldStore) {
     return responseWithEdgeHeaders(originResp, outHeaders);
@@ -320,6 +332,7 @@ async function refreshCachedRead(cache, cacheKey, originReq, policy, timeoutMs) 
   try {
     const originResp = await fetchWithTimeout(originReq, timeoutMs);
     if (originResp.status !== 200 || !originAllowsEdgeStore(originResp)) return;
+    if (await responseIsVisibilityWarming(originResp)) return;
     const freshUntil = nowSeconds() + policy.freshTtl;
     const toStore = responseWithEdgeHeaders(originResp.clone(), {
       "Cache-Control": cacheControlForPolicy(policy),

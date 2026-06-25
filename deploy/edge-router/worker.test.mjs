@@ -12,6 +12,7 @@ import {
   originAllowsEdgeStore,
   originRequest,
   originTimeoutForRoute,
+  responseIsVisibilityWarming,
   unsupportedCacheQueryParams,
 } from "./worker.mjs";
 
@@ -129,6 +130,14 @@ assert.equal(originAllowsEdgeStore(new Response("{}", {
 assert.equal(originAllowsEdgeStore(new Response("{}", {
   headers: { "Vary": "Accept-Encoding" },
 })), true);
+assert.equal(await responseIsVisibilityWarming(new Response(
+  JSON.stringify({ visibility_cache_status: "warming", items: [] }),
+  { headers: { "Content-Type": "application/json" } },
+)), true);
+assert.equal(await responseIsVisibilityWarming(new Response(
+  JSON.stringify({ items: [{ id: "row" }] }),
+  { headers: { "Content-Type": "application/json" } },
+)), false);
 
 const cfRateLimited = {
   status: 429,
