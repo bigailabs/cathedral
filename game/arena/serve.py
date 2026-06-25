@@ -131,7 +131,13 @@ class ArenaServer:
         entries = scanner.read_ledger(self.scanner_ledger_path)
         return {"schema": scanner.SCHEMA_LEDGER,
                 "count": len(entries),
-                "submissions": list(reversed(entries[-limit:]))}
+                "submissions": [
+                    scanner.public_ledger_entry(entry)
+                    for entry in reversed(entries[-limit:])
+                ],
+                "contains_witnesses": False,
+                "contains_reports": False,
+                "contains_trace_bodies": False}
 
     def scanner_state(self, miner_hotkey: str) -> dict:
         return scanner.miner_state(self.scanner_ledger_path, miner_hotkey)

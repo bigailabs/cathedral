@@ -29,9 +29,103 @@ SCHEMA_LEDGER = "cathedral.scanner.ledger.v1"
 SCHEMA_LEADERBOARD = "cathedral.scanner.leaderboard.v1"
 SCHEMA_BENCHMARK = "cathedral.scanner.benchmark.v1"
 SCHEMA_STATE = "cathedral.scanner.state.v1"
+SCHEMA_CONTRACT = "cathedral.scanner.contract.v1"
+SCHEMA_ROUTE = "cathedral.scanner.route.v1"
+SCHEMA_AUDIT_TRACE = "cathedral.audit_trace.v1"
+SCHEMA_AUDIT_TRACE_DATASET = "cathedral.audit_trace_dataset.v1"
 SCHEMA_CLAIM = "cathedral.scanner.claim.v1"
 SCHEMA_SCAN_REQUEST = "cathedral.scanner.request.v1"
 SCHEMA_SCAN_INTAKE = "cathedral.scanner.request_intake.v1"
+SCHEMA_FAMILY_TAXONOMY = "cathedral.scanner.family_taxonomy.v1"
+
+FAMILY_NOTES = {
+    "A_conservation": (
+        "Conservation",
+        "Money in must equal money out; no silent value creation or loss.",
+    ),
+    "B_bounds": (
+        "Bounds",
+        "Accounting paths must stay inside explicit numeric and economic bounds.",
+    ),
+    "F_emission": (
+        "Emission",
+        "Reward or take splits must not distribute more than the available pool.",
+    ),
+    "G_scoring": (
+        "Scoring",
+        "Validator scoring math must measure the intended work, not a shortcut.",
+    ),
+}
+
+BITSEC_CATEGORY_ROUTES: tuple[dict[str, Any], ...] = (
+    {
+        "category": "incorrect calculation",
+        "cathedral_focus": "money-math and accounting mistakes",
+        "proof_families": ("A_conservation", "B_bounds"),
+    },
+    {
+        "category": "rounding error",
+        "cathedral_focus": "precision loss, fee drift, and dust extraction",
+        "proof_families": ("A_conservation", "B_bounds"),
+    },
+    {
+        "category": "arithmetic overflow and underflow vulnerability",
+        "cathedral_focus": "bounded integer math and impossible balances",
+        "proof_families": ("B_bounds", "A_conservation"),
+    },
+    {
+        "category": "oracle/price manipulation",
+        "cathedral_focus": "unsafe external price assumptions and value transfer",
+        "proof_families": ("B_bounds", "A_conservation"),
+    },
+    {
+        "category": "governance attacks",
+        "cathedral_focus": "reward-policy and control-plane capture",
+        "proof_families": ("F_emission", "G_scoring"),
+    },
+    {
+        "category": "frontrunning",
+        "cathedral_focus": "ordering-dependent reward or allocation wins",
+        "proof_families": ("F_emission", "G_scoring"),
+    },
+    {
+        "category": "weak access control",
+        "cathedral_focus": "unauthorized scoring, ownership, or validator control",
+        "proof_families": ("G_scoring",),
+    },
+    {
+        "category": "improper input validation",
+        "cathedral_focus": "malformed values that bypass validator assumptions",
+        "proof_families": ("G_scoring", "B_bounds"),
+    },
+    {
+        "category": "replay attacks/signature malleability",
+        "cathedral_focus": "public-answer reuse, copied proofs, and stale receipts",
+        "proof_families": ("G_scoring",),
+    },
+    {
+        "category": "bad randomness vulnerability",
+        "cathedral_focus": "predictable sampling or validator selection shortcuts",
+        "proof_families": ("G_scoring",),
+    },
+    {
+        "category": "reentrancy",
+        "cathedral_focus": "state-update ordering that violates accounting invariants",
+        "proof_families": ("A_conservation", "B_bounds"),
+    },
+    {
+        "category": "self destruct",
+        "cathedral_focus": "liveness and custody failures that need sandbox replay",
+        "proof_families": (),
+    },
+    {
+        "category": "uninitialized proxy",
+        "cathedral_focus": "deployment-state bugs that need sandbox replay",
+        "proof_families": (),
+    },
+)
+
+CLAIM_CATEGORIES = tuple(route["category"] for route in BITSEC_CATEGORY_ROUTES)
 
 
 def _sha(obj: Any) -> str:
@@ -113,6 +207,7 @@ class ScannerTask:
                     "exploit_summary",
                     "fix_summary",
                 ],
+                "accepted_categories": list(CLAIM_CATEGORIES),
                 "scoring": "metadata_only_replay_required",
             },
         }
@@ -267,6 +362,100 @@ def benchmark_catalog(limit: int | None = None) -> list[ScannerTask]:
 
     n = len(_replay_positive_targets()) if limit is None else limit
     return [issue_task(i) for i in range(n)]
+
+
+def claim_category_catalog(
+    backed_families: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return public vulnerability categories mapped onto Cathedral proof lanes.
+
+    These categories are intake and claim metadata. A category is useful for
+    routing, but it does not score until a replay-backed family verifies the
+    witness.
+    """
+
+    if backed_families is None:
+        backed_families = {target.family for target in _replay_positive_targets()}
+    categories: list[dict[str, Any]] = []
+    for route in BITSEC_CATEGORY_ROUTES:
+        proof_families = list(route["proof_families"])
+        live_families = [fam for fam in proof_families if fam in backed_families]
+        categories.append({
+            "category": route["category"],
+            "cathedral_focus": route["cathedral_focus"],
+            "proof_families": proof_families,
+            "live_replay_families": live_families,
+            "support_status": (
+                "replay_backed" if live_families else "intake_metadata_only"
+            ),
+            "reward_gate": "deterministic_replay",
+            "scoring": "metadata_only_replay_required",
+        })
+    return categories
+
+
+def family_taxonomy() -> dict[str, Any]:
+    """Return the scanner proof-family taxonomy.
+
+    This is the useful Bitsec lesson without importing report-similarity
+    scoring: vulnerability families organize work, but replay remains the
+    reward gate.
+    """
+
+    rows: dict[str, dict[str, Any]] = {}
+    for target in _replay_positive_targets():
+        title, description = FAMILY_NOTES.get(
+            target.family,
+            (target.family, "Pinned replay family from the local audit corpus."),
+        )
+        row = rows.setdefault(target.family, {
+            "family": target.family,
+            "title": title,
+            "description": description,
+            "targets": 0,
+            "classes": set(),
+            "sources": set(),
+            "required_fields": set(),
+            "reachable_targets": 0,
+            "max_severity": 0,
+            "examples": [],
+        })
+        row["targets"] += 1
+        row["classes"].add(target.cls)
+        row["sources"].add(target.source)
+        row["required_fields"].update(target.decode)
+        row["reachable_targets"] += 1 if target.reachable else 0
+        row["max_severity"] = max(row["max_severity"], target.severity)
+        if len(row["examples"]) < 3:
+            row["examples"].append({
+                "target_id": target.target_id,
+                "property": target.property_desc,
+            })
+
+    categories = claim_category_catalog(set(rows))
+    categories_by_family: dict[str, list[str]] = {family: [] for family in rows}
+    for category in categories:
+        for family in category["live_replay_families"]:
+            categories_by_family.setdefault(family, []).append(category["category"])
+
+    families = []
+    for row in rows.values():
+        row["classes"] = sorted(row["classes"])
+        row["sources"] = sorted(row["sources"])
+        row["required_fields"] = sorted(row["required_fields"])
+        row["claim_categories"] = sorted(categories_by_family.get(row["family"], []))
+        families.append(row)
+    families.sort(key=lambda r: (-r["max_severity"], r["family"]))
+    return {
+        "schema": SCHEMA_FAMILY_TAXONOMY,
+        "count": len(families),
+        "families": families,
+        "claim_categories": categories,
+        "scoring": "family_is_gate_replay_is_score",
+        "category_scoring": "claim_category_is_metadata_only",
+        "reward_gate": "deterministic_replay",
+        "lesson": "Taxonomy organizes targets; category overlap never scores without a replayed witness.",
+    }
 
 
 def task_by_id(task_id: str) -> ScannerTask | None:
@@ -469,6 +658,7 @@ def append_ledger(path: str | Path, task: ScannerTask, sub: ScannerSubmission,
     entry = {
         "schema": SCHEMA_LEDGER,
         "created_at": time.time(),
+        "task": task.manifest(),
         "task_id": task.task_id,
         "target_netuid": task.target_netuid,
         "target_name": task.target_name,
@@ -483,6 +673,17 @@ def append_ledger(path: str | Path, task: ScannerTask, sub: ScannerSubmission,
         "claim_sha256": artifact["claim_sha256"],
         "claim_present": bool(artifact["claim"]),
         "claim_valid": bool(artifact["claim_valid"]),
+        "verifier": {
+            "schema": SCHEMA_VERDICT,
+            "accepted": bool(verdict["accepted"]),
+            "score": float(verdict["score"]),
+            "gates": dict(verdict["gates"]),
+            "reasons": list(verdict["reasons"]),
+            "replay_target_id": verdict.get("replay_target_id", task.replay_target_id),
+            "observed": {},
+            "observed_values_exported": False,
+            "artifact_sha256": verdict["artifact_sha256"],
+        },
     }
     with p.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
@@ -500,12 +701,208 @@ def record_submission(path: str | Path, task: ScannerTask,
     return verdict
 
 
+def public_ledger_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return a hash/metadata-only ledger row safe for public debug views."""
+
+    out = {
+        key: value
+        for key, value in entry.items()
+        if key not in {"artifact"}
+    }
+    verifier = dict(out.get("verifier") or {})
+    if verifier:
+        verifier["observed"] = {}
+        verifier["observed_values_exported"] = False
+        out["verifier"] = verifier
+    out["redaction"] = {
+        "artifact_body_exported": False,
+        "witness_exported": False,
+        "report_body_exported": False,
+        "trace_body_exported": False,
+        "observed_values_exported": False,
+    }
+    return out
+
+
+def _task_manifest_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    task = entry.get("task")
+    if isinstance(task, dict):
+        return task
+    found = task_by_id(str(entry.get("task_id") or ""))
+    if found is not None:
+        return found.manifest()
+    return {
+        "schema": SCHEMA_TASK,
+        "task_id": str(entry.get("task_id") or ""),
+        "target": {
+            "netuid": entry.get("target_netuid"),
+            "name": entry.get("target_name") or "",
+            "repo": "",
+        },
+        "objective": "",
+        "replay_target_id": entry.get("replay_target_id") or "",
+        "expected_family": entry.get("expected_family") or "",
+        "required_fields": [],
+        "nonce": "",
+        "bounty_weight": 0.0,
+        "artifact_available": False,
+    }
+
+
+def _artifact_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    artifact = entry.get("artifact")
+    if isinstance(artifact, dict):
+        claim = artifact.get("claim") if isinstance(artifact.get("claim"), dict) else {}
+        return {
+            "schema": artifact.get("schema", SCHEMA_SUBMISSION),
+            "task_id": artifact.get("task_id") or entry.get("task_id") or "",
+            "miner_hotkey": artifact.get("miner_hotkey") or entry.get("miner_hotkey") or "",
+            "nonce_sha256": _sha(artifact.get("nonce") or ""),
+            "proof_family": artifact.get("proof_family") or entry.get("expected_family") or "",
+            "artifact_sha256": entry.get("artifact_sha256") or _sha(artifact),
+            "claim_sha256": entry.get("claim_sha256") or _sha(claim),
+            "claim_present": bool(claim or entry.get("claim_present")),
+            "claim_valid": bool(entry.get("claim_valid")),
+            "artifact_available": True,
+            "witness_exported": False,
+            "report_body_exported": False,
+            "trace_body_exported": False,
+        }
+    return {
+        "schema": SCHEMA_SUBMISSION,
+        "task_id": str(entry.get("task_id") or ""),
+        "miner_hotkey": str(entry.get("miner_hotkey") or ""),
+        "nonce_sha256": "",
+        "proof_family": str(entry.get("expected_family") or ""),
+        "artifact_sha256": entry.get("artifact_sha256") or "",
+        "claim_sha256": entry.get("claim_sha256") or "",
+        "claim_present": bool(entry.get("claim_present")),
+        "claim_valid": bool(entry.get("claim_valid")),
+        "artifact_available": False,
+        "witness_exported": False,
+        "report_body_exported": False,
+        "trace_body_exported": False,
+    }
+
+
+def _verifier_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    verifier = entry.get("verifier")
+    if isinstance(verifier, dict):
+        out = dict(verifier)
+        out["observed"] = {}
+        out["observed_values_exported"] = False
+        return out
+    return {
+        "schema": SCHEMA_VERDICT,
+        "accepted": bool(entry.get("accepted")),
+        "score": float(entry.get("score") or 0.0),
+        "gates": dict(entry.get("gates") or {}),
+        "reasons": list(entry.get("reasons") or []),
+        "replay_target_id": entry.get("replay_target_id") or "",
+        "observed": {},
+        "observed_values_exported": False,
+        "artifact_sha256": entry.get("artifact_sha256") or "",
+    }
+
+
+def audit_trace_dataset(
+    path: str | Path,
+    *,
+    miner_hotkey: str = "",
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Export ledger attempts as replay-labeled training traces.
+
+    The label is the verifier verdict, not human severity. Raw witness, report,
+    tool trace, and observed replay values are not exported here; public routes
+    can serve this dataset without leaking solved artifacts.
+    """
+
+    entries = read_ledger(path)
+    if miner_hotkey:
+        entries = [
+            entry for entry in entries
+            if entry.get("miner_hotkey") == miner_hotkey
+        ]
+    if limit > 0:
+        entries = entries[-limit:]
+
+    traces: list[dict[str, Any]] = []
+    for entry in entries:
+        accepted = bool(entry.get("accepted"))
+        verifier = _verifier_for_entry(entry)
+        artifact = _artifact_for_entry(entry)
+        trace_id = "trace-" + _sha({
+            "task_id": entry.get("task_id"),
+            "miner_hotkey": entry.get("miner_hotkey"),
+            "artifact_sha256": entry.get("artifact_sha256"),
+            "accepted": accepted,
+            "created_at": entry.get("created_at"),
+        })[:16]
+        traces.append({
+            "schema": SCHEMA_AUDIT_TRACE,
+            "trace_id": trace_id,
+            "label": "accepted" if accepted else "rejected",
+            "training_use": (
+                "positive_replay_witness"
+                if accepted else "negative_replay_failure"
+            ),
+            "created_at": entry.get("created_at"),
+            "miner_hotkey": entry.get("miner_hotkey") or "",
+            "task": _task_manifest_for_entry(entry),
+            "artifact": artifact,
+            "artifact_sha256": entry.get("artifact_sha256") or "",
+            "claim_sha256": entry.get("claim_sha256") or "",
+            "verifier": verifier,
+            "redaction": {
+                "artifact_body_exported": False,
+                "witness_exported": False,
+                "report_body_exported": False,
+                "trace_body_exported": False,
+                "observed_values_exported": False,
+                "raw_external_code_exported": False,
+                "artifact_available": bool(artifact.get("artifact_available")),
+            },
+        })
+
+    accepted_count = sum(1 for trace in traces if trace["label"] == "accepted")
+    return {
+        "schema": SCHEMA_AUDIT_TRACE_DATASET,
+        "trace_schema": SCHEMA_AUDIT_TRACE,
+        "count": len(traces),
+        "accepted": accepted_count,
+        "rejected": len(traces) - accepted_count,
+        "miner_hotkey": miner_hotkey,
+        "label_source": "deterministic_replay_verdict",
+        "scoring": "accepted replay is positive label; rejected replay is negative label",
+        "redaction_policy": (
+            "trace rows export labels, hashes, task metadata, and proof-family "
+            "metadata only; raw witnesses, reports, trace bodies, and observed "
+            "replay values are not exported"
+        ),
+        "contains_witnesses": False,
+        "contains_reports": False,
+        "contains_trace_bodies": False,
+        "traces": traces,
+    }
+
+
 def leaderboard(path: str | Path) -> dict[str, Any]:
     """Aggregate local scanner ledger into miner rankings."""
 
     catalog = benchmark_catalog()
-    catalog_task_ids = {t.task_id for t in catalog}
+    catalog_by_id = {t.task_id: t for t in catalog}
+    catalog_task_ids = set(catalog_by_id)
     possible_score = sum(t.bounty_weight for t in catalog)
+    family_totals: dict[str, dict[str, Any]] = {}
+    for task in catalog:
+        fam = family_totals.setdefault(task.expected_family, {
+            "family": task.expected_family,
+            "tasks": 0,
+            "possible_score": 0.0,
+        })
+        fam["tasks"] += 1
+        fam["possible_score"] += task.bounty_weight
     rows: dict[str, dict[str, Any]] = {}
     for e in read_ledger(path):
         hk = e.get("miner_hotkey") or ""
@@ -537,6 +934,35 @@ def leaderboard(path: str | Path) -> dict[str, Any]:
         row["unique_tasks"] = len(task_ids)
         row["benchmark_tasks"] = len(catalog_task_ids)
         row["kills"] = catalog_kills
+        family_coverage: list[dict[str, Any]] = []
+        for family, total in sorted(family_totals.items()):
+            family_tasks = [
+                task for task in catalog
+                if task.expected_family == family
+            ]
+            killed_tasks = [
+                task for task in family_tasks
+                if task.task_id in task_ids
+            ]
+            score = sum(task.bounty_weight for task in killed_tasks)
+            possible = float(total["possible_score"])
+            kills = len(killed_tasks)
+            family_coverage.append({
+                "family": family,
+                "kills": kills,
+                "tasks": int(total["tasks"]),
+                "kill_rate": round(kills / int(total["tasks"]), 6)
+                if total["tasks"] else 0.0,
+                "score": round(score, 6),
+                "possible_score": round(possible, 6),
+                "weighted_kill_rate": round(score / possible, 6)
+                if possible else 0.0,
+            })
+        row["covered_families"] = sum(
+            1 for family in family_coverage if family["kills"] > 0
+        )
+        row["family_count"] = len(family_coverage)
+        row["family_coverage"] = family_coverage
         row["kill_rate"] = round(
             catalog_kills / len(catalog_task_ids), 6
         ) if catalog_task_ids else 0.0
@@ -545,7 +971,19 @@ def leaderboard(path: str | Path) -> dict[str, Any]:
         ) if possible_score else 0.0
         row["benchmark_score"] = round(row["benchmark_score"], 6)
         row["score"] = round(row["score"], 6)
-    return {"schema": SCHEMA_LEADERBOARD, "miners": ranked, "count": len(ranked)}
+    return {
+        "schema": SCHEMA_LEADERBOARD,
+        "miners": ranked,
+        "count": len(ranked),
+        "family_totals": [
+            {
+                "family": row["family"],
+                "tasks": int(row["tasks"]),
+                "possible_score": round(float(row["possible_score"]), 6),
+            }
+            for row in sorted(family_totals.values(), key=lambda r: r["family"])
+        ],
+    }
 
 
 def benchmark(path: str | Path) -> dict[str, Any]:
@@ -565,8 +1003,15 @@ def benchmark(path: str | Path) -> dict[str, Any]:
         "boolean_gate": "task_matches && nonce_matches && family_aligned && decode_map_present && replay_succeeds",
         "benchmark_tasks": len(tasks),
         "possible_score": round(sum(t.bounty_weight for t in tasks), 6),
+        "family_totals": board["family_totals"],
         "miners": board["miners"],
     }
+
+
+def task_risk(task: ScannerTask) -> int:
+    """Risk score mirrored by the game UI for route planning."""
+
+    return min(42, round(8 + len(task.required_fields) * 4 + task.bounty_weight * 8))
 
 
 def miner_state(path: str | Path, miner_hotkey: str) -> dict[str, Any]:
@@ -593,4 +1038,115 @@ def miner_state(path: str | Path, miner_hotkey: str) -> dict[str, Any]:
         "attempts": len(entries),
         "rank": row.get("rank") if row else None,
         "leaderboard_row": row,
+    }
+
+
+def contract_status(
+    path: str | Path,
+    miner_hotkey: str,
+    *,
+    proof_goal: int = 5,
+    family_goal: int | None = None,
+) -> dict[str, Any]:
+    """Return backend-owned scanner contract progress for one miner.
+
+    The game can render this, but the contract is intentionally computed from
+    the ledger and benchmark taxonomy so the client is not the source of truth.
+    """
+
+    proof_goal = max(1, int(proof_goal))
+    board = leaderboard(path)
+    family_count = len(board["family_totals"])
+    family_goal = max(1, int(family_goal or min(3, family_count or 3)))
+    row = next((m for m in board["miners"] if m["miner_hotkey"] == miner_hotkey), None)
+    family_coverage = list(row.get("family_coverage", [])) if row else []
+    covered_families = sorted(
+        str(family["family"]) for family in family_coverage
+        if int(family.get("kills") or 0) > 0
+    )
+    proofs = int(row.get("accepted") or 0) if row else 0
+    family_covered = len(covered_families)
+    proof_progress = min(1.0, proofs / proof_goal)
+    family_progress = min(1.0, family_covered / family_goal)
+    complete = proofs >= proof_goal and family_covered >= family_goal
+    return {
+        "schema": SCHEMA_CONTRACT,
+        "miner_hotkey": miner_hotkey,
+        "reward_shape": "linear_metric_x_boolean_gate",
+        "linear_metric": "accepted_replayable_task_kills",
+        "boolean_gate": "proof_goal_met && family_goal_met",
+        "proofs": proofs,
+        "proof_goal": proof_goal,
+        "family_covered": family_covered,
+        "family_goal": family_goal,
+        "family_count": family_count,
+        "covered_families": covered_families,
+        "kill_rate": float(row.get("kill_rate") or 0.0) if row else 0.0,
+        "score": float(row.get("score") or 0.0) if row else 0.0,
+        "progress": round(((proof_progress + family_progress) / 2) * 100, 2),
+        "complete": complete,
+        "missing": {
+            "proofs": max(0, proof_goal - proofs),
+            "families": max(0, family_goal - family_covered),
+        },
+        "leaderboard_row": row,
+    }
+
+
+def route_recommendation(
+    path: str | Path,
+    miner_hotkey: str,
+    *,
+    mode: str = "family",
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Recommend the next scanner task from verifier-owned state."""
+
+    mode = mode if mode in {"bounty", "safe", "family"} else "family"
+    tasks = benchmark_catalog(limit=limit)
+    state = miner_state(path, miner_hotkey)
+    accepted = set(state["accepted_task_ids"])
+    contract = contract_status(path, miner_hotkey)
+    covered = set(contract["covered_families"])
+    open_tasks = [task for task in tasks if task.task_id not in accepted]
+    candidates = [
+        task for task in open_tasks
+        if mode != "family" or task.expected_family not in covered
+    ]
+    exhausted_reason = ""
+    if not candidates and mode == "family":
+        exhausted_reason = "all_live_families_covered"
+    elif not candidates:
+        exhausted_reason = "no_open_tasks"
+
+    if mode == "safe":
+        candidates.sort(key=lambda task: (
+            task_risk(task),
+            -task.bounty_weight,
+            task.task_id,
+        ))
+    else:
+        candidates.sort(key=lambda task: (
+            -task.bounty_weight,
+            task_risk(task),
+            task.task_id,
+        ))
+
+    task = candidates[0] if candidates else None
+    return {
+        "schema": SCHEMA_ROUTE,
+        "miner_hotkey": miner_hotkey,
+        "mode": mode,
+        "task": task.manifest() if task else None,
+        "task_id": task.task_id if task else "",
+        "risk": task_risk(task) if task else 0,
+        "reason": (
+            "highest_bounty" if mode == "bounty"
+            else "lowest_risk" if mode == "safe"
+            else "highest_bounty_uncovered_family"
+        ) if task else exhausted_reason,
+        "open_tasks": len(open_tasks),
+        "candidates": len(candidates),
+        "covered_families": sorted(covered),
+        "contract_complete": bool(contract["complete"]),
     }

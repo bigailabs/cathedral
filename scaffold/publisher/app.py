@@ -1738,6 +1738,83 @@ def build_app(
         )
         return audit_scanner, task, sub, artifact_sha, verified_at
 
+    def _audit_scanner_schema_contract() -> dict[str, Any]:
+        audit_scanner = _audit_scanner_module()
+        return {
+            "schema": "cathedral.audit_scanner.contract.v1",
+            "enabled": _audit_scanner_enabled(),
+            "card_id": _AUDIT_SCANNER_CARD,
+            "payment_weights": False,
+            "scoring": {
+                "linear_metric": "task.bounty_weight",
+                "boolean_gate": [
+                    "hotkey_signature_valid",
+                    "task_matches",
+                    "nonce_matches",
+                    "proof_family_matches",
+                    "required_witness_fields_present",
+                    "deterministic_replay_succeeds",
+                    "not_duplicate_credit",
+                ],
+                "reports_score": False,
+                "claims_score": False,
+                "category_scoring": "metadata_only_replay_required",
+            },
+            "signature_contract": {
+                "card_id": _AUDIT_SCANNER_CARD,
+                "challenge_id": "task_id",
+                "dimacs_solution_sha256": "sha256(canonical_submission_artifact)",
+                "artifact_hash_helper": "game.arena.scanner._sha(submission.as_artifact())",
+                "headers": [
+                    "X-Cathedral-Hotkey",
+                    "X-Cathedral-Signature",
+                    "X-Cathedral-Submitted-At",
+                ],
+            },
+            "submission_schema": {
+                "schema": getattr(audit_scanner, "SCHEMA_SUBMISSION", "cathedral.scanner.submission.v1"),
+                "required_fields": [
+                    "task_id",
+                    "miner_hotkey",
+                    "nonce",
+                    "proof_family",
+                    "witness",
+                ],
+                "optional_fields": [
+                    "trace",
+                    "claim",
+                    "report",
+                ],
+                "witness_shape": "object keyed by task.required_fields",
+                "trace_shape": "array of tool/action metadata; stored privately, public traces export hashes/labels only",
+                "claim_schema": getattr(audit_scanner, "SCHEMA_CLAIM", "cathedral.scanner.claim.v1"),
+                "accepted_claim_categories": list(getattr(audit_scanner, "CLAIM_CATEGORIES", ())),
+            },
+            "redaction_policy": {
+                "public_submissions_export_raw_artifact": False,
+                "public_traces_export_raw_witness": False,
+                "public_traces_export_raw_report": False,
+                "public_traces_export_trace_body": False,
+                "example_solution_exported_by_default": False,
+            },
+            "endpoints": {
+                "status": "/v1/audit-scanner/status",
+                "schema": "/v1/audit-scanner/schema",
+                "catalog": "/v1/audit-scanner/catalog",
+                "families": "/v1/audit-scanner/families",
+                "task": "/v1/audit-scanner/task?index=0",
+                "example": "/v1/audit-scanner/example?index=0",
+                "replay": "/v1/audit-scanner/replay",
+                "submit": "/v1/audit-scanner/submit",
+                "leaderboard": "/v1/audit-scanner/leaderboard",
+                "benchmark": "/v1/audit-scanner/benchmark",
+                "differential": "/v1/audit-scanner/differential",
+                "submissions": "/v1/audit-scanner/submissions?limit=50",
+                "traces": "/v1/audit-scanner/traces?limit=50",
+                "state": "/v1/audit-scanner/state?miner_hotkey=...",
+            },
+        }
+
     @app.get("/v1/audit-scanner/status")
     def audit_scanner_status():
         return {
@@ -1764,6 +1841,7 @@ def build_app(
                 ),
             },
             "endpoints": {
+                "schema": "/v1/audit-scanner/schema",
                 "catalog": "/v1/audit-scanner/catalog",
                 "families": "/v1/audit-scanner/families",
                 "task": "/v1/audit-scanner/task?index=0",
@@ -1778,6 +1856,10 @@ def build_app(
                 "state": "/v1/audit-scanner/state?miner_hotkey=...",
             },
         }
+
+    @app.get("/v1/audit-scanner/schema")
+    def audit_scanner_schema():
+        return _audit_scanner_schema_contract()
 
     @app.get("/v1/audit-scanner/families")
     def audit_scanner_families():

@@ -548,6 +548,8 @@ def test_scanner_http_endpoints(tmp_path):
         submissions = json.loads(urlopen(base + "/api/scanner/submissions?limit=10", timeout=10).read())
         assert submissions["count"] == 4
         assert "duplicate_task_credit" in submissions["submissions"][0]["reasons"]
+        assert all("artifact" not in row for row in submissions["submissions"])
+        assert all(row.get("verifier", {}).get("observed") == {} for row in submissions["submissions"])
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -110,14 +110,48 @@ def run_smoke(transport: Any, keypair: Keypair) -> dict[str, Any]:
         raise RuntimeError("audit scanner bridge is disabled")
     if status.get("payment_weights") is not False:
         raise RuntimeError("audit scanner smoke expected payment_weights=false")
+    contract = transport.get("/v1/audit-scanner/schema")
+    if (
+        contract.get("schema") != "cathedral.audit_scanner.contract.v1"
+        or contract.get("card_id") != _AUDIT_SCANNER_CARD
+        or contract.get("payment_weights") is not False
+        or contract.get("scoring", {}).get("reports_score") is not False
+        or "witness" not in contract.get("submission_schema", {}).get("required_fields", [])
+    ):
+        raise RuntimeError(f"unexpected audit scanner contract: {contract}")
 
     catalog = transport.get("/v1/audit-scanner/catalog?limit=1")
     if catalog.get("count") != 1:
         raise RuntimeError(f"expected one catalog task, got {catalog.get('count')}")
+    families = transport.get("/v1/audit-scanner/families")
+    if (
+        families.get("reward_gate") != "deterministic_replay"
+        or families.get("category_scoring") != "claim_category_is_metadata_only"
+        or not families.get("claim_categories")
+    ):
+        raise RuntimeError(f"unexpected families taxonomy: {families}")
+    redacted_example = transport.get("/v1/audit-scanner/example?index=0")
+    if (
+        redacted_example.get("solution_exported") is not False
+        or redacted_example.get("submission", {}).get("witness") is not None
+        or redacted_example.get("redaction", {}).get("witness_exported") is not False
+    ):
+        raise RuntimeError(f"example endpoint leaked a solution: {redacted_example}")
 
-    example = transport.get("/v1/audit-scanner/example?index=0")
-    payload = dict(example["submission"])
-    payload["miner_hotkey"] = keypair.ss58_address
+    # The publisher example endpoint is redacted by default. The deterministic
+    # scanner catalog lets this smoke build its own local proof without asking
+    # a production server to reveal a solved witness.
+    task = scanner.issue_task(0)
+    catalog_task_id = catalog.get("tasks", [{}])[0].get("task_id")
+    if catalog_task_id != task.task_id:
+        raise RuntimeError(
+            f"local scanner task does not match publisher catalog: "
+            f"{task.task_id} != {catalog_task_id}"
+        )
+    payload = scanner.example_accepted_submission(
+        task,
+        miner_hotkey=keypair.ss58_address,
+    ).as_artifact()
 
     headers = _signed_headers(payload, keypair)
     replay = transport.post("/v1/audit-scanner/replay", payload, headers)
@@ -135,17 +169,38 @@ def run_smoke(transport: Any, keypair: Keypair) -> dict[str, Any]:
     submissions = transport.get("/v1/audit-scanner/submissions?limit=1")
     if state.get("accepted") != 1:
         raise RuntimeError(f"expected one accepted state row, got {state}")
-    if submissions.get("count") != 1 or submissions.get("contains_witnesses") is not False:
+    if (
+        submissions.get("count") != 1
+        or submissions.get("contains_witnesses") is not False
+        or submissions.get("contains_trace_bodies") is not False
+    ):
         raise RuntimeError(f"unexpected submissions view: {submissions}")
+    if "artifact" in submissions.get("entries", [{}])[0]:
+        raise RuntimeError(f"submissions view leaked raw artifact: {submissions}")
+
+    traces = transport.get("/v1/audit-scanner/traces?limit=1")
+    if (
+        traces.get("count") != 1
+        or traces.get("accepted") != 1
+        or traces.get("contains_witnesses") is not False
+        or traces.get("contains_trace_bodies") is not False
+    ):
+        raise RuntimeError(f"unexpected traces view: {traces}")
+    if "artifact" in traces.get("traces", [{}])[0]:
+        raise RuntimeError(f"traces view leaked raw artifact: {traces}")
 
     return {
         "status": status,
+        "contract": contract,
         "task_id": payload["task_id"],
         "replay": replay,
         "submit": submit,
         "benchmark": benchmark,
+        "families": families,
+        "example": redacted_example,
         "state": state,
         "submissions": submissions,
+        "traces": traces,
     }
 
 
@@ -203,10 +258,26 @@ def main(argv: list[str] | None = None) -> int:
         print("AUDIT SCANNER SMOKE: PASS")
         print(f"  hotkey: {keypair.ss58_address}")
         print(f"  task: {result['task_id']}")
+        print("  schema: payment_weights=false reports_score=false")
+        print(
+            "  families: "
+            f"{result['families']['count']} "
+            "reward_gate=deterministic_replay"
+        )
+        print(
+            "  example: "
+            f"solution_exported={str(result['example']['solution_exported']).lower()}"
+        )
         print(f"  replay: accepted={result['replay']['accepted']} ledger_written={result['replay']['ledger_written']}")
         print(f"  submit: accepted={result['submit']['accepted']} score={result['submit']['score']}")
         print(f"  benchmark: metric={result['benchmark']['metric']} accepted={result['state']['accepted']}")
         print(f"  submissions: total={result['submissions']['total']} contains_witnesses=false")
+        print(
+            "  traces: "
+            f"total={result['traces']['total']} "
+            f"accepted={result['traces']['accepted']} "
+            "contains_trace_bodies=false"
+        )
         print("  payment_weights: false")
     return 0
 

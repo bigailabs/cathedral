@@ -25,6 +25,10 @@ def test_issue_task_uses_real_corpus_and_pinned_replay_target():
     assert task.manifest()["optional_claim_schema"]["source_lesson"] == (
         "bitsec_report_shape_cathedral_replay_gate"
     )
+    accepted_categories = task.manifest()["optional_claim_schema"]["accepted_categories"]
+    assert "incorrect calculation" in accepted_categories
+    assert "oracle/price manipulation" in accepted_categories
+    assert "weak access control" in accepted_categories
     for field in (
         "line_ranges",
         "description",
@@ -35,6 +39,28 @@ def test_issue_task_uses_real_corpus_and_pinned_replay_target():
         assert field in task.manifest()["optional_claim_schema"]["fields"]
     assert scanner.task_by_id(task.task_id) == task
     assert scanner.task_by_id("missing") is None
+
+
+def test_family_taxonomy_maps_public_vuln_categories_to_replay_gates():
+    taxonomy = scanner.family_taxonomy()
+    categories = {row["category"]: row for row in taxonomy["claim_categories"]}
+
+    assert taxonomy["schema"] == scanner.SCHEMA_FAMILY_TAXONOMY
+    assert taxonomy["category_scoring"] == "claim_category_is_metadata_only"
+    assert taxonomy["reward_gate"] == "deterministic_replay"
+    assert categories["incorrect calculation"]["support_status"] == "replay_backed"
+    assert categories["rounding error"]["support_status"] == "replay_backed"
+    assert categories["oracle/price manipulation"]["support_status"] == "replay_backed"
+    assert categories["uninitialized proxy"]["support_status"] == "intake_metadata_only"
+    assert all(
+        row["scoring"] == "metadata_only_replay_required"
+        and row["reward_gate"] == "deterministic_replay"
+        for row in categories.values()
+    )
+    assert any(
+        "incorrect calculation" in family["claim_categories"]
+        for family in taxonomy["families"]
+    )
 
 
 def test_scan_request_intake_routes_to_replay_tasks_without_scoring():
@@ -204,6 +230,71 @@ def test_record_submission_persists_and_leaderboards(tmp_path):
     assert 0 < board["miners"][0]["weighted_kill_rate"] <= 1
 
 
+def test_audit_trace_dataset_exports_replay_labeled_training_rows(tmp_path):
+    ledger = tmp_path / "scanner.jsonl"
+    task0 = scanner.issue_task(0)
+    task1 = scanner.issue_task(1)
+    accepted = scanner.example_accepted_submission(task0, miner_hotkey="hk_trace")
+    rejected = replace(
+        scanner.example_accepted_submission(task1, miner_hotkey="hk_trace"),
+        witness={k: 0 for k in task1.required_fields},
+    )
+
+    scanner.record_submission(ledger, task0, accepted)
+    scanner.record_submission(ledger, task1, rejected)
+
+    dataset = scanner.audit_trace_dataset(ledger, miner_hotkey="hk_trace")
+    assert dataset["schema"] == scanner.SCHEMA_AUDIT_TRACE_DATASET
+    assert dataset["trace_schema"] == scanner.SCHEMA_AUDIT_TRACE
+    assert dataset["label_source"] == "deterministic_replay_verdict"
+    assert dataset["count"] == 2
+    assert dataset["accepted"] == 1
+    assert dataset["rejected"] == 1
+
+    rows = {row["label"]: row for row in dataset["traces"]}
+    assert rows["accepted"]["training_use"] == "positive_replay_witness"
+    assert rows["accepted"]["verifier"]["accepted"] is True
+    assert rows["accepted"]["task"]["schema"] == scanner.SCHEMA_TASK
+    assert rows["accepted"]["artifact"]["artifact_available"] is False
+    assert "trace" not in rows["accepted"]["artifact"]
+    assert "witness" not in rows["accepted"]["artifact"]
+    assert rows["accepted"]["artifact"]["trace_body_exported"] is False
+    assert rows["accepted"]["artifact"]["witness_exported"] is False
+    assert rows["accepted"]["redaction"]["report_body_exported"] is False
+    assert rows["accepted"]["redaction"]["observed_values_exported"] is False
+
+    assert rows["rejected"]["training_use"] == "negative_replay_failure"
+    assert rows["rejected"]["verifier"]["accepted"] is False
+    assert rows["rejected"]["verifier"]["gates"]["replay_succeeds"] is False
+    assert rows["rejected"]["verifier"]["observed_values_exported"] is False
+
+    empty = scanner.audit_trace_dataset(ledger, miner_hotkey="hk_other")
+    assert empty["count"] == 0
+    assert empty["traces"] == []
+
+
+def test_public_ledger_entry_redacts_legacy_artifacts():
+    row = scanner.public_ledger_entry({
+        "schema": scanner.SCHEMA_LEDGER,
+        "task_id": "task",
+        "artifact": {
+            "witness": {"amount": 1},
+            "trace": [{"tool": "solver"}],
+            "report": "raw report",
+        },
+        "verifier": {
+            "observed": {"amount": 1},
+            "accepted": True,
+        },
+    })
+
+    assert "artifact" not in row
+    assert row["verifier"]["observed"] == {}
+    assert row["verifier"]["observed_values_exported"] is False
+    assert row["redaction"]["witness_exported"] is False
+    assert row["redaction"]["trace_body_exported"] is False
+
+
 def test_duplicate_accepted_task_does_not_double_score(tmp_path):
     ledger = tmp_path / "scanner.jsonl"
     task = scanner.issue_task(0)
@@ -256,6 +347,91 @@ def test_benchmark_metric_is_replay_kill_rate_not_report_quality(tmp_path):
     assert killer["kill_rate"] == round(1 / len(scanner.benchmark_catalog()), 6)
     assert reporter["kills"] == 0
     assert reporter["kill_rate"] == 0.0
+
+
+def test_leaderboard_reports_family_coverage(tmp_path):
+    ledger = tmp_path / "scanner.jsonl"
+    task = scanner.issue_task(0)
+    scanner.record_submission(
+        ledger,
+        task,
+        scanner.example_accepted_submission(task, miner_hotkey="hk_family"),
+    )
+
+    board = scanner.leaderboard(ledger)
+    row = board["miners"][0]
+    killed_family = next(
+        family for family in row["family_coverage"]
+        if family["family"] == task.expected_family
+    )
+
+    assert board["family_totals"]
+    assert row["family_count"] == len(board["family_totals"])
+    assert row["covered_families"] == 1
+    assert killed_family["kills"] == 1
+    assert killed_family["tasks"] >= 1
+    assert killed_family["score"] == round(task.bounty_weight, 6)
+    assert scanner.benchmark(ledger)["family_totals"] == board["family_totals"]
+
+
+def test_contract_status_requires_proofs_and_family_breadth(tmp_path):
+    ledger = tmp_path / "scanner.jsonl"
+    empty = scanner.contract_status(ledger, "hk_contract", proof_goal=2, family_goal=2)
+    assert empty["schema"] == scanner.SCHEMA_CONTRACT
+    assert empty["complete"] is False
+    assert empty["missing"] == {"proofs": 2, "families": 2}
+
+    selected = []
+    seen = set()
+    for task in scanner.benchmark_catalog():
+        if task.expected_family in seen:
+            continue
+        selected.append(task)
+        seen.add(task.expected_family)
+        if len(selected) == 2:
+            break
+
+    assert len(selected) == 2
+    for task in selected:
+        scanner.record_submission(
+            ledger,
+            task,
+            scanner.example_accepted_submission(task, miner_hotkey="hk_contract"),
+        )
+
+    done = scanner.contract_status(ledger, "hk_contract", proof_goal=2, family_goal=2)
+    assert done["complete"] is True
+    assert done["proofs"] == 2
+    assert done["family_covered"] == 2
+    assert done["progress"] == 100
+    assert done["covered_families"] == sorted(t.expected_family for t in selected)
+    assert done["boolean_gate"] == "proof_goal_met && family_goal_met"
+
+
+def test_route_recommendation_uses_ledger_and_contract_state(tmp_path):
+    ledger = tmp_path / "scanner.jsonl"
+    family_route = scanner.route_recommendation(ledger, "hk_route", mode="family")
+    safe_route = scanner.route_recommendation(ledger, "hk_route", mode="safe")
+    bounty_route = scanner.route_recommendation(ledger, "hk_route", mode="bounty")
+
+    assert family_route["schema"] == scanner.SCHEMA_ROUTE
+    assert family_route["reason"] == "highest_bounty_uncovered_family"
+    assert family_route["task"]
+    assert safe_route["risk"] <= scanner.task_risk(scanner.task_by_id(family_route["task_id"]))
+    assert bounty_route["task"]["bounty_weight"] >= safe_route["task"]["bounty_weight"]
+
+    accepted = scanner.task_by_id(family_route["task_id"])
+    assert accepted is not None
+    scanner.record_submission(
+        ledger,
+        accepted,
+        scanner.example_accepted_submission(accepted, miner_hotkey="hk_route"),
+    )
+
+    next_family = scanner.route_recommendation(ledger, "hk_route", mode="family")
+    assert next_family["task_id"] != accepted.task_id
+    assert next_family["task"]["expected_family"] != accepted.expected_family
+    assert accepted.expected_family in next_family["covered_families"]
 
 
 def test_weighted_kill_rate_ignores_non_benchmark_score(tmp_path):

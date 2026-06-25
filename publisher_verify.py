@@ -534,6 +534,12 @@ with TestClient(app) as client:
            and audit_result["submissions"]["contains_reports"] is False
            and audit_result["submissions"]["contains_trace_bodies"] is False
            and "artifact" not in audit_result["submissions"]["entries"][0])
+        ck("audit scanner contract endpoint documents replay-only scoring",
+           audit_result["contract"]["card_id"] == audit_result["status"]["card_id"]
+           and audit_result["contract"]["payment_weights"] is False
+           and audit_result["contract"]["scoring"]["reports_score"] is False
+           and audit_result["contract"]["scoring"]["claims_score"] is False
+           and "witness" in audit_result["contract"]["submission_schema"]["required_fields"])
         ck("audit scanner bridge exposes replay-gated taxonomy",
            audit_result["families"]["reward_gate"] == "deterministic_replay"
            and audit_result["families"]["category_scoring"] == "claim_category_is_metadata_only"
@@ -563,6 +569,7 @@ with TestClient(app) as client:
         print(f"    audit scanner bridge smoke failed: {exc!r}")
         ck("audit scanner bridge smoke runs signed replay->submit", False)
         ck("audit scanner bridge writes hash-only submissions evidence", False)
+        ck("audit scanner contract endpoint documents replay-only scoring", False)
         ck("audit scanner bridge exposes replay-gated taxonomy", False)
         ck("audit scanner example endpoint is redacted by default", False)
         ck("audit scanner bridge exposes hash-only replay trace labels", False)
