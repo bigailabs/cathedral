@@ -322,6 +322,14 @@ with TestClient(app) as client:
                read_submit.status_code == 404
                and read_submit.text == "route_not_served_by_read_role"
                and read_submit.headers.get("x-cathedral-service-role") == "read")
+            read_latest = role_client.get("/sat/latest.json")
+            read_seq = str(read_latest.json().get("sequence")) if read_latest.status_code == 200 else ""
+            read_snapshot = role_client.get(f"/sat/sequences/{read_seq}/board.json")
+            read_events = role_client.get("/sat/events", params={"once": "true"})
+            ck("read role serves scalable SAT snapshot endpoints",
+               read_latest.status_code == 200
+               and read_snapshot.status_code == 200
+               and read_events.status_code == 200)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "submit"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "false"
@@ -339,6 +347,10 @@ with TestClient(app) as client:
             submit_cnf = submit_role_client.get("/v1/synthetic-boolean/active-cnf")
             ck("submit role allows miner CNF route to reach auth validation",
                submit_cnf.status_code == 422)
+            submit_receipt = submit_role_client.get("/v1/agents/receipts/not-real")
+            ck("submit role serves receipt status route",
+               submit_receipt.status_code == 404
+               and submit_receipt.headers.get("x-cathedral-service-role") is None)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "worker"
         worker_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,

@@ -711,6 +711,8 @@ def build_app(
             "/.well-known/cathedral-jwks.json",
         }
         _READ_GET_PATHS = {
+            "/sat/latest.json",
+            "/sat/events",
             "/v1/synthetic-boolean/active-challenges",
             "/v1/synthetic-boolean/challenge-broadcast",
             "/v1/synthetic-boolean/current-challenge",
@@ -722,6 +724,7 @@ def build_app(
             "/v1/leaderboard/explain",
         }
         _READ_GET_PREFIXES = {
+            "/sat/sequences/",
             "/v1/audit-scanner/",
         }
         _SUBMIT_GET_PATHS = {
@@ -731,6 +734,7 @@ def build_app(
         }
         _SUBMIT_GET_PREFIXES = {
             "/v1/challenges/",
+            "/v1/agents/receipts/",
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
