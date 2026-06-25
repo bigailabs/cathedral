@@ -96,6 +96,7 @@ https://submit.cathedral.computer/health/ready
 ```bash
 node worker.test.mjs
 node smoke.mjs
+node route-map.mjs
 ```
 
 Override the smoke target with:
@@ -121,6 +122,19 @@ CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_EXPECT_WOR
 
 That mode proves routed hot paths are actually hitting the Worker while sampled
 non-routed monolith paths still pass through.
+
+For a fuller cutover gate, use:
+
+```bash
+CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer node route-map.mjs
+```
+
+Before DNS proxying, this command should fail because the production host still
+bypasses the Worker. To run a direct-origin availability check before cutover:
+
+```bash
+CATHEDRAL_EDGE_BASE_URL=https://api.cathedral.computer CATHEDRAL_EDGE_ALLOW_BYPASS=1 node route-map.mjs
+```
 
 ## Rollback
 
