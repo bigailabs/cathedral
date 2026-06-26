@@ -2,12 +2,40 @@
 
 ## Scope
 
-- Offline verifier only: no live services, no target subnet calls, no validator emissions.
-- Launch path: DIMACS witness -> CNF check -> SAT-bound decode -> deterministic replay -> private trace.
+- Live scanner path: signed miner package -> deterministic replay -> private trace -> signed `audit_replay_v1` eval row -> bounded signed-weight bonus.
+- Offline/Subtensor shadow path: DIMACS witness -> CNF check -> SAT-bound decode -> deterministic replay -> private trace.
 - Source files:
+  - `game/arena/scanner.py`
+  - `game/arena/audit_scanner_smoke.py`
+  - `game/arena/tests/test_publisher_audit_scanner.py`
+  - `scaffold/publisher/app.py` (`/v1/audit-scanner/*`)
+  - `scaffold/publisher/weights.py` (`audit_replay` bonus term)
   - `scaffold/lanes/audit_arena.py`
   - `scaffold/lanes/subtensor_replay.py`
   - `audit_arena_verify.py`
+
+## Live Scanner Payment Path
+
+- Endpoints:
+  - `GET /v1/audit-scanner/status`
+  - `GET /v1/audit-scanner/catalog`
+  - `GET /v1/audit-scanner/task?index=0`
+  - `POST /v1/audit-scanner/replay`
+  - `POST /v1/audit-scanner/submit`
+- Signing:
+  - Uses the same Cathedral hotkey header contract as SAT submits.
+  - `card_id`: `cathedral_audit_scanner_v1`
+  - `challenge_id`: `task_id`
+  - `dimacs_solution_sha256`: `sha256(canonical_submission_artifact)`
+- Payment:
+  - Accepted `submit` calls emit signed `eval_runs` rows with `task_type=audit_replay_v1`.
+  - `weights.py` adds a capped normalized audit replay bonus to the existing signed vector.
+  - Existing SAT scoring remains unchanged when no accepted audit replay rows exist.
+- Operator knobs:
+  - `CATHEDRAL_AUDIT_SCANNER_ENABLED=0` disables the scanner surface.
+  - `CATHEDRAL_AUDIT_SCANNER_PAYMENT_WEIGHTS_ENABLED=0` keeps replay/ledger on but disables payment rows.
+  - `CATHEDRAL_AUDIT_SCANNER_REQUIRE_ATTESTATION=1` records accepted rows but excludes them from weights until `/v1/attest` upgrades the row.
+  - `CATHEDRAL_AUDIT_REPLAY_BONUS_MULT=0.25` controls the default audit replay bonus term.
 
 ## Miner Submission Format
 
@@ -96,20 +124,22 @@ v 1 -2 3 0
   - `subtensor_replay_package_sha256_mismatch`: task pin does not match the supplied package.
   - `invariant_required_check_missing`: package has checks, but none are required.
   - `invariant_number_must_be_finite`: observed invariant input is not a finite number.
-- This is a shadow/offline seam. It does not yet clone real Subtensor state, execute extrinsics, attest runtime output, score live miners, or pay emissions.
+- This remains a shadow/offline seam. It does not yet clone real Subtensor state, execute extrinsics, attest runtime output, score live miners, or pay emissions.
 
 ## Scoring Ladder
 
-- v0 is shadow-only: `earning_policy = shadow_replay_only`.
+- Live scanner v0 earning policy: `accepted deterministic replay -> audit_replay_v1 row -> signed-vector audit bonus`.
+- Subtensor clone package policy: `earning_policy = shadow_replay_only` until a real clone runner is wired.
 - Ladder:
   - Malformed task, CNF, decode map, or DIMACS witness: zero.
   - SAT-valid witness that fails deterministic replay: zero.
-  - Reproduced low-severity/dust witness: accepted trace, zero live emissions.
-  - Reproduced material witness: accepted trace, eligible for manual review/disclosure policy.
-  - Future live rewards require a separate policy flip and should consume replay-verified traces only.
+  - Reproduced scanner witness: accepted trace and live audit replay bonus unless payment rows are disabled.
+  - Reproduced scanner witness with `CATHEDRAL_AUDIT_SCANNER_REQUIRE_ATTESTATION=1`: accepted trace, pending payment until attested.
+  - Reproduced Subtensor clone package: accepted shadow trace only until the clone runner is promoted.
 
 ## Local Check
 
 ```bash
 python3 audit_arena_verify.py
+python3 -m game.arena.audit_scanner_smoke
 ```

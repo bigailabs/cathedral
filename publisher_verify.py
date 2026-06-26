@@ -611,13 +611,17 @@ with TestClient(app) as client:
             else:
                 os.environ[key] = value
 
-    # AUDIT SCANNER BRIDGE: default-off in production, but release verification
-    # proves the signed replay/submit/ledger path whenever deliberately enabled.
+    # AUDIT SCANNER BRIDGE: release verification proves the signed
+    # replay/submit/ledger/payment path. Operators can still kill-switch it
+    # with CATHEDRAL_AUDIT_SCANNER_ENABLED=0.
     old_audit_env = {
         k: os.environ.get(k)
         for k in (
             "CATHEDRAL_AUDIT_SCANNER_ENABLED",
             "CATHEDRAL_AUDIT_SCANNER_LEDGER_PATH",
+            "CATHEDRAL_AUDIT_SCANNER_PAYMENT_WEIGHTS_ENABLED",
+            "CATHEDRAL_AUDIT_SCANNER_REQUIRE_ATTESTATION",
+            "CATHEDRAL_AUDIT_REPLAY_BONUS_MULT",
         )
     }
     old_audit_pm_env = {
@@ -633,6 +637,8 @@ with TestClient(app) as client:
 
         with _tempfile.TemporaryDirectory() as _audit_tmp:
             os.environ["CATHEDRAL_AUDIT_SCANNER_ENABLED"] = "1"
+            os.environ.pop("CATHEDRAL_AUDIT_SCANNER_REQUIRE_ATTESTATION", None)
+            os.environ["CATHEDRAL_AUDIT_REPLAY_BONUS_MULT"] = "0.25"
             os.environ["CATHEDRAL_AUDIT_SCANNER_LEDGER_PATH"] = str(
                 Path(_audit_tmp) / "audit_scanner_verify.jsonl"
             )
@@ -647,6 +653,16 @@ with TestClient(app) as client:
                     _audit_smoke.TestClientTransport(audit_client),
                     audit_miner,
                 )
+                _weights._reset_vector_cache()
+                audit_vector = audit_client.get("/v1/validator/weights/next").json()
+                audit_weight = next(
+                    (
+                        float(row.get("weight") or 0.0)
+                        for row in audit_vector.get("weights", [])
+                        if row.get("miner_hotkey") == audit_miner.ss58_address
+                    ),
+                    0.0,
+                )
         ck("audit scanner bridge smoke runs signed replay->submit",
            audit_result["replay"]["accepted"] is True
            and audit_result["replay"]["ledger_written"] is False
@@ -658,9 +674,10 @@ with TestClient(app) as client:
            and audit_result["submissions"]["contains_reports"] is False
            and audit_result["submissions"]["contains_trace_bodies"] is False
            and "artifact" not in audit_result["submissions"]["entries"][0])
-        ck("audit scanner contract endpoint documents replay-only scoring",
+        ck("audit scanner contract endpoint documents replay-gated live scoring",
            audit_result["contract"]["card_id"] == audit_result["status"]["card_id"]
-           and audit_result["contract"]["payment_weights"] is False
+           and audit_result["contract"]["payment_weights"] is True
+           and audit_result["contract"]["payment"]["task_type"] == "audit_replay_v1"
            and audit_result["contract"]["scoring"]["reports_score"] is False
            and audit_result["contract"]["scoring"]["claims_score"] is False
            and "witness" in audit_result["contract"]["submission_schema"]["required_fields"])
@@ -668,7 +685,7 @@ with TestClient(app) as client:
            audit_result["families"]["reward_gate"] == "deterministic_replay"
            and audit_result["families"]["category_scoring"] == "claim_category_is_metadata_only"
            and audit_result["families"]["claim_categories"]
-           and audit_result["families"]["payment_weights"] is False)
+           and audit_result["families"]["payment_weights"] is True)
         ck("audit scanner example endpoint is redacted by default",
            audit_result["example"]["solution_exported"] is False
            and audit_result["example"]["submission"]["witness"] is None
@@ -681,9 +698,12 @@ with TestClient(app) as client:
            and audit_result["traces"]["contains_trace_bodies"] is False
            and "artifact" not in audit_result["traces"]["traces"][0]
            and audit_result["traces"]["traces"][0]["label"] == "accepted")
-        ck("audit scanner bridge remains outside payment weights",
-           audit_result["status"]["payment_weights"] is False
-           and audit_result["submit"]["payment_weights"] is False)
+        ck("audit scanner bridge emits payment row and reaches signed weights",
+           audit_result["status"]["payment_weights"] is True
+           and audit_result["submit"]["payment_weights"] is True
+           and audit_result["submit"]["payment_row_emitted"] is True
+           and bool(audit_result["submit"].get("eval_run_id"))
+           and audit_weight > 0.0)
         ck("audit scanner benchmark exposes replay kill rate",
            audit_result["benchmark"]["metric"] == "replay_kill_rate"
            and audit_result["state"]["accepted"] == 1)
@@ -693,11 +713,11 @@ with TestClient(app) as client:
         print(f"    audit scanner bridge smoke failed: {exc!r}")
         ck("audit scanner bridge smoke runs signed replay->submit", False)
         ck("audit scanner bridge writes hash-only submissions evidence", False)
-        ck("audit scanner contract endpoint documents replay-only scoring", False)
+        ck("audit scanner contract endpoint documents replay-gated live scoring", False)
         ck("audit scanner bridge exposes replay-gated taxonomy", False)
         ck("audit scanner example endpoint is redacted by default", False)
         ck("audit scanner bridge exposes hash-only replay trace labels", False)
-        ck("audit scanner bridge remains outside payment weights", False)
+        ck("audit scanner bridge emits payment row and reaches signed weights", False)
         ck("audit scanner benchmark exposes replay kill rate", False)
         ck("audit scanner import leaves per-miner scoring env unchanged", False)
     finally:

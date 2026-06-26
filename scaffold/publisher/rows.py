@@ -78,6 +78,8 @@ def build_solve_rows(
     solved: bool,
     private_key_hex: str,
     rejection_reason: str | None = None,
+    task_type: str = TASK_TYPE,
+    agent_display_prefix: str = "AL-SAT",
 ) -> list[dict[str, Any]]:
     """Build a signed v6 row + its `-v5compat` mirror for one scored solve.
 
@@ -85,7 +87,7 @@ def build_solve_rows(
     challenge_value/solve_rank/solved/operator (the v6 signed extension) plus a
     post-signing output_card. The v5 id is the v6 id + '-v5compat' (live shape).
     """
-    display = f"AL-SAT-{miner_hotkey[:8]}"
+    display = f"{agent_display_prefix}-{miner_hotkey[:8]}"
     task_id_public = _hash16(f"{challenge_id}:{tier}")
     score_parts = {"binary_correct": float(weighted_score)}
 
@@ -93,7 +95,7 @@ def build_solve_rows(
         "agent_id": agent_id,
         "agent_display_name": display,
         "miner_hotkey": miner_hotkey,
-        "task_type": TASK_TYPE,
+        "task_type": task_type,
         "task_id_public": task_id_public,
         "epoch_salt": epoch_salt,
         "difficulty_tier": int(tier),
@@ -120,7 +122,7 @@ def build_solve_rows(
         "difficulty_tier": int(tier),
         "rejection_reason": rejection_reason,
         "task_id_public": task_id_public,
-        "task_type": TASK_TYPE,
+        "task_type": task_type,
         "weighted_score": float(weighted_score),
         "worker_owner_hotkey": miner_hotkey,
     }

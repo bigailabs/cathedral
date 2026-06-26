@@ -1,9 +1,9 @@
 """Smoke-test the production-style audit scanner bridge.
 
 This exercises the `/v1/audit-scanner` surface with a real sr25519 signature,
-but it does not touch chain state or payment weights. By default it builds the
-publisher app in-process with the scanner gate enabled. Pass `--url` to probe a
-running publisher instead.
+including the signed payment-row path. By default it builds the publisher app
+in-process with the scanner gate enabled. Pass `--url` to probe a running
+publisher instead.
 """
 from __future__ import annotations
 
@@ -108,13 +108,13 @@ def run_smoke(transport: Any, keypair: Keypair) -> dict[str, Any]:
     status = transport.get("/v1/audit-scanner/status")
     if not status.get("enabled"):
         raise RuntimeError("audit scanner bridge is disabled")
-    if status.get("payment_weights") is not False:
-        raise RuntimeError("audit scanner smoke expected payment_weights=false")
+    if status.get("payment_weights") is not True:
+        raise RuntimeError("audit scanner smoke expected payment_weights=true")
     contract = transport.get("/v1/audit-scanner/schema")
     if (
         contract.get("schema") != "cathedral.audit_scanner.contract.v1"
         or contract.get("card_id") != _AUDIT_SCANNER_CARD
-        or contract.get("payment_weights") is not False
+        or contract.get("payment_weights") is not True
         or contract.get("scoring", {}).get("reports_score") is not False
         or "witness" not in contract.get("submission_schema", {}).get("required_fields", [])
     ):
@@ -161,8 +161,12 @@ def run_smoke(transport: Any, keypair: Keypair) -> dict[str, Any]:
     submit = transport.post("/v1/audit-scanner/submit", payload, headers)
     if submit.get("accepted") is not True:
         raise RuntimeError(f"submit failed: {submit}")
-    if submit.get("payment_weights") is not False:
-        raise RuntimeError("audit scanner submit unexpectedly changed payment weights")
+    if (
+        submit.get("payment_weights") is not True
+        or submit.get("payment_row_emitted") is not True
+        or not submit.get("eval_run_id")
+    ):
+        raise RuntimeError(f"audit scanner submit did not emit payment row: {submit}")
 
     benchmark = transport.get("/v1/audit-scanner/benchmark")
     state = transport.get(f"/v1/audit-scanner/state?miner_hotkey={keypair.ss58_address}")
@@ -258,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         print("AUDIT SCANNER SMOKE: PASS")
         print(f"  hotkey: {keypair.ss58_address}")
         print(f"  task: {result['task_id']}")
-        print("  schema: payment_weights=false reports_score=false")
+        print("  schema: payment_weights=true reports_score=false")
         print(
             "  families: "
             f"{result['families']['count']} "
@@ -278,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             f"accepted={result['traces']['accepted']} "
             "contains_trace_bodies=false"
         )
-        print("  payment_weights: false")
+        print("  payment_weights: true")
     return 0
 
 
