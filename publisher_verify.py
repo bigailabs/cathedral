@@ -826,6 +826,7 @@ with TestClient(app) as client:
             "CATHEDRAL_PERMINER_REQUIRE_COLDKEY",
             "CATHEDRAL_PERMINER_PUBLIC_BASELINE",
             "CATHEDRAL_PERMINER_SEED_SECRET",
+            "CATHEDRAL_PERMINER_LEGACY_ID_SCAN",
             "CATHEDRAL_PUBLISHER_ADMIN_TOKEN",
             "CATHEDRAL_TEE_GPU_ADMIN_TOKEN",
         )
@@ -952,6 +953,19 @@ with TestClient(app) as client:
             miner_hotkey=pm_miner.ss58_address, submitted_at=pm_at,
             challenge_id=pm_cid, dimacs_solution_sha256=pm_sha)
         pm_sig = base64.b64encode(pm_miner.sign(pm_claim)).decode()
+        pm_assignment_visible = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE challenge_id=?",
+            (pm_cid,),
+        )
+        store.write(lambda conn: conn.execute(
+            "DELETE FROM per_miner_assignments WHERE challenge_id=?",
+            (pm_cid,),
+        ))
+        os.environ["CATHEDRAL_PERMINER_LEGACY_ID_SCAN"] = "0"
+        pm_assignment_hidden = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE challenge_id=?",
+            (pm_cid,),
+        )
         pm_resp = client.post(
             "/v1/agents/submit",
             headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
@@ -960,9 +974,41 @@ with TestClient(app) as client:
                   "challenge_id": pm_cid, "dimacs_solution": pm_blob},
         )
         ck("per-miner submit accepts standard DIMACS solver output",
-           pm_resp.status_code == 200
-           and pm_resp.json().get("status") == "ranked"
-           and pm_resp.json().get("solve_rank") == 1)
+            pm_resp.status_code == 200
+            and pm_resp.json().get("status") == "ranked"
+            and pm_resp.json().get("solve_rank") == 1)
+        pm_assignment_recovered = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE challenge_id=?",
+            (pm_cid,),
+        )
+        ck("per-miner submit recovers when assignment row is replica-stale",
+           pm_assignment_visible[0]["n"] == 1
+           and pm_assignment_hidden[0]["n"] == 0
+           and pm_resp.status_code == 200
+           and pm_assignment_recovered[0]["n"] == 1)
+        pm_cross_miner = Keypair.create_from_uri("//PerMinerE2ECross")
+        pm_cross_cid, _pm_cross_cnf, pm_cross_assignment = _pm.generate_instance(
+            pm_cross_miner.ss58_address, pm_epoch, 1, 0)
+        pm_cross_blob = "s SATISFIABLE\nv " + " ".join(str(x) for x in pm_cross_assignment) + " 0\n"
+        pm_cross_sha = hashlib.sha256(pm_cross_blob.encode()).hexdigest()
+        pm_cross_at = now_iso()
+        pm_cross_claim = canonical_claim_bytes(
+            bundle_hash=_blake3.blake3(b"").hexdigest(), card_id="synthetic_boolean_v1",
+            miner_hotkey=pm_miner.ss58_address, submitted_at=pm_cross_at,
+            challenge_id=pm_cross_cid, dimacs_solution_sha256=pm_cross_sha)
+        pm_cross_sig = base64.b64encode(pm_miner.sign(pm_cross_claim)).decode()
+        pm_cross = client.post(
+            "/v1/agents/submit",
+            headers={"X-Cathedral-Hotkey": pm_miner.ss58_address,
+                     "X-Cathedral-Signature": pm_cross_sig},
+            data={"card_id": "synthetic_boolean_v1", "submitted_at": pm_cross_at,
+                  "challenge_id": pm_cross_cid, "dimacs_solution": pm_cross_blob},
+        )
+        os.environ.pop("CATHEDRAL_PERMINER_LEGACY_ID_SCAN", None)
+        ck("per-miner submit still rejects another miner's valid challenge id",
+           pm_cross.status_code == 400
+           and pm_cross.headers.get("X-Cathedral-Rejection-Reason")
+           == "assignment_required_fetch_challenges_first")
         pm_rows = store.query(
             "SELECT COUNT(*) AS n FROM per_miner_solves WHERE miner_hotkey=? AND challenge_id=?",
             (pm_miner.ss58_address, pm_cid),
@@ -997,11 +1043,14 @@ with TestClient(app) as client:
         pm_status_json = pm_status.json()
         pm_current = pm_status_json.get("current_epoch_totals", {})
         ck("per-miner status surfaces accepted and rejected attempts",
-           pm_status.status_code == 200
-           and pm_status_json.get("assignment_identity") == "coldkey-shared"
-           and pm_current.get("unique_verified_solves") == 1
-           and pm_current.get("rejected_attempts") == 1
-           and pm_current.get("rejection_reasons", [{}])[0].get("reason") == "solution_missing_status")
+            pm_status.status_code == 200
+            and pm_status_json.get("assignment_identity") == "coldkey-shared"
+            and pm_current.get("unique_verified_solves") == 1
+            and pm_current.get("rejected_attempts", 0) >= 2
+            and any(
+                r.get("reason") == "solution_missing_status"
+                for r in pm_current.get("rejection_reasons", [])
+            ))
         pm_summary = client.get("/v1/synthetic-boolean/per-miner/summary")
         pm_summary_json = pm_summary.json()
         ck("per-miner summary surfaces dashboard aggregate",
