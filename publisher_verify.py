@@ -306,8 +306,22 @@ with TestClient(app) as client:
     old_role_env = {
         "CATHEDRAL_SERVICE_ROLE": os.environ.get("CATHEDRAL_SERVICE_ROLE"),
         "CATHEDRAL_REFILL_ENABLED": os.environ.get("CATHEDRAL_REFILL_ENABLED"),
+        "CATHEDRAL_CNF_TOKEN_SECRET": os.environ.get("CATHEDRAL_CNF_TOKEN_SECRET"),
+        "CATHEDRAL_PM_READ_HARD_CAP": os.environ.get("CATHEDRAL_PM_READ_HARD_CAP"),
+        "CATHEDRAL_PM_READ_MIN_CAP": os.environ.get("CATHEDRAL_PM_READ_MIN_CAP"),
+        "CATHEDRAL_PUBLISHER_ADMIN_TOKEN": os.environ.get("CATHEDRAL_PUBLISHER_ADMIN_TOKEN"),
     }
     try:
+        os.environ["CATHEDRAL_SERVICE_ROLE"] = "typo"
+        try:
+            build_app(database_path=":memory:", signing_key_hex=key_hex,
+                      submit_min_interval_secs=0)
+            invalid_role_failed_closed = False
+        except RuntimeError as exc:
+            invalid_role_failed_closed = "invalid CATHEDRAL_SERVICE_ROLE" in str(exc)
+        ck("invalid service role fails startup",
+           invalid_role_failed_closed)
+
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "read"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "true"
         role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
@@ -333,12 +347,34 @@ with TestClient(app) as client:
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "submit"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "false"
+        os.environ.pop("CATHEDRAL_CNF_TOKEN_SECRET", None)
+        try:
+            build_app(database_path=":memory:", signing_key_hex=key_hex,
+                      submit_min_interval_secs=0)
+            missing_submit_secret_failed_closed = False
+        except RuntimeError as exc:
+            missing_submit_secret_failed_closed = "CATHEDRAL_CNF_TOKEN_SECRET" in str(exc)
+        ck("submit role requires stable CNF token secret",
+           missing_submit_secret_failed_closed)
+        os.environ["CATHEDRAL_CNF_TOKEN_SECRET"] = "publisher-verify-submit-role-secret"
+        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = "publisher-verify-admin-token"
+        os.environ["CATHEDRAL_PM_READ_HARD_CAP"] = "1"
+        os.environ["CATHEDRAL_PM_READ_MIN_CAP"] = "128"
         submit_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
                                     submit_min_interval_secs=0)
         with TestClient(submit_role_app) as submit_role_client:
             submit_role_health = submit_role_client.get("/health/live").json()
             ck("submit role appears in health",
                submit_role_health["service_role"] == "submit")
+            submit_metrics = submit_role_client.get(
+                "/v1/admin/synthetic-boolean/submit-metrics",
+                headers={"Authorization": "Bearer publisher-verify-admin-token"},
+            )
+            ck("PM read hard cap is a hard cap",
+               submit_metrics.status_code == 200
+               and submit_metrics.json()["pm_read_hard_cap"] == 1
+               and submit_metrics.json()["configured_pm_read_hard_cap"] == 1
+               and submit_metrics.json()["pm_read_min_cap"] == 128)
             submit_read = submit_role_client.get("/v1/leaderboard/top")
             ck("submit role rejects leaderboard traffic before route work",
                submit_read.status_code == 404

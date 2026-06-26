@@ -30,7 +30,7 @@ The Worker uses short fresh TTLs and a longer edge fallback window:
 | `/v1/synthetic-boolean/challenge-broadcast` | 5s | 60s |
 | `/v1/synthetic-boolean/current-challenge` | 5s | 30s |
 | `/v1/synthetic-boolean/per-miner/summary` | 5s | 30s |
-| `/v1/validator/weights/next` | 15s | 30s |
+| `/v1/validator/weights/next` | 15s | 1200s |
 | `/v1/leaderboard/recent` | 2s | 20s |
 | `/v1/leaderboard/top` | 15s | 90s |
 | `/v1/leaderboard/explain` | 10s | 60s |
@@ -42,9 +42,10 @@ parameters are rejected instead of being forwarded to origin, so random
 snapshot routes, extra query parameters are ignored and collapse to the same
 cache key.
 
-Cached read routes serve stale data while refreshing in the background, except
-`/v1/validator/weights/next`, which refreshes synchronously so validators do not
-receive an intentionally stale signed vector unless the origin errors.
+Cached read routes serve stale data while refreshing in the background. This
+includes `/v1/validator/weights/next`: validators must prefer the last good
+signed vector over a 504 during read-origin stalls. Validators still verify the
+signature, expiry, subnet, and policy-version rollback fence before applying it.
 
 ## Origin timeouts
 

@@ -75,13 +75,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _cnf_token_secret() -> bytes:
+def _cnf_token_secret(service_role: str) -> bytes:
     raw = (
         os.environ.get(_CNF_TOKEN_SECRET_ENV, "").lstrip("\ufeff").strip()
         or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").lstrip("\ufeff").strip()
     )
     if raw:
         return hashlib.sha256(raw.encode("utf-8")).digest()
+    if service_role == "submit":
+        raise RuntimeError(
+            f"{_CNF_TOKEN_SECRET_ENV} is required when CATHEDRAL_SERVICE_ROLE=submit"
+        )
     # Local/dev fallback. Production split roles must set a stable secret.
     print(f"[cnf] WARNING: {_CNF_TOKEN_SECRET_ENV} is unset; "
           "active-cnf tokens are process-local and unsafe for split replicas")
@@ -189,8 +193,7 @@ _SERVICE_ROLES = {"all", "read", "submit", "worker"}
 def _service_role_from_env() -> str:
     raw = os.environ.get("CATHEDRAL_SERVICE_ROLE", "all").strip().lower() or "all"
     if raw not in _SERVICE_ROLES:
-        print(f"[runtime] invalid CATHEDRAL_SERVICE_ROLE={raw!r}; using all")
-        return "all"
+        raise RuntimeError(f"invalid CATHEDRAL_SERVICE_ROLE={raw!r}")
     return raw
 
 
@@ -217,7 +220,7 @@ def build_app(
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
     # Shared HMAC secret lets active-cnf and CNF fetch land on different replicas.
-    token_secret = _cnf_token_secret()
+    token_secret = _cnf_token_secret(service_role)
     min_interval = (
         submit_min_interval_secs
         if submit_min_interval_secs is not None
@@ -244,10 +247,7 @@ def build_app(
     )
     configured_pm_read_hard_cap = _env_int("CATHEDRAL_PM_READ_HARD_CAP", 128)
     pm_read_min_cap = _env_int("CATHEDRAL_PM_READ_MIN_CAP", 128)
-    pm_read_hard_cap = (
-        0 if configured_pm_read_hard_cap <= 0
-        else max(configured_pm_read_hard_cap, pm_read_min_cap)
-    )
+    pm_read_hard_cap = 0 if configured_pm_read_hard_cap <= 0 else max(1, configured_pm_read_hard_cap)
     submit_log_events = os.environ.get("CATHEDRAL_SUBMIT_LOG_EVENTS", "").strip().lower() in {
         "1", "true", "yes", "on"}
     submit_metrics_lock = threading.Lock()
@@ -728,6 +728,7 @@ def build_app(
             "/v1/audit-scanner/",
         }
         _SUBMIT_GET_PATHS = {
+            "/v1/admin/synthetic-boolean/submit-metrics",
             "/v1/synthetic-boolean/active-cnf",
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",

@@ -54,6 +54,7 @@ Required env:
 CATHEDRAL_SERVICE_ROLE=submit
 CATHEDRAL_REFILL_ENABLED=false
 CATHEDRAL_SEED_ON_BOOT=false
+CATHEDRAL_CNF_TOKEN_SECRET=<same strong secret as every submit replica>
 CATHEDRAL_SUBMIT_HARD_CAP=1
 CATHEDRAL_PM_READ_HARD_CAP=1
 CATHEDRAL_THREADPOOL_TOKENS=16
@@ -68,6 +69,7 @@ Allowed traffic:
 - `GET /v1/synthetic-boolean/per-miner/challenges`
 - `GET /v1/synthetic-boolean/per-miner/cnf`
 - `GET /v1/challenges/{challenge_id}/cnf`
+- `GET /v1/admin/synthetic-boolean/submit-metrics` with admin auth
 - `POST /v1/agents/submit`
 
 Must reject:
@@ -145,6 +147,7 @@ Submit service:
 GET  /health/live                         -> 200, service_role=submit
 GET  /v1/leaderboard/top                  -> 404 route_not_served_by_submit_role
 GET  /v1/synthetic-boolean/active-cnf     -> reaches auth validation, not role guard
+GET  /v1/admin/synthetic-boolean/submit-metrics -> 200 with admin auth
 POST /v1/agents/submit                    -> accepts/rejects by normal submit logic
 ```
 
@@ -194,6 +197,21 @@ Do not change:
 - Confirm miners have a working submit base URL or edge path routing.
 - Keep `/v1/validator/weights/next` on the read service so validator reads stay
   isolated from submit bursts.
+- Refresh the SN39 hotkey-to-coldkey map after registration churn:
+
+```bash
+python scripts/refresh_coldkey_map.py --database "$DATABASE_URL" --network finney --netuid 39
+```
+
+To debug a miner seeing `coldkey_mapping_required`:
+
+```bash
+python scripts/refresh_coldkey_map.py --database "$DATABASE_URL" --no-refresh \
+  --check-hotkey <miner-hotkey>
+```
+
+That error means the hotkey is not currently mapped to a coldkey, so PM-primary
+assignment/scoring fails closed to prevent hotkey stacking.
 
 ## Edge Router Step
 
