@@ -68,6 +68,9 @@ VALID_FOR_ENV = "CATHEDRAL_WEIGHT_POLICY_VALID_FOR_SECS"
 WINDOW_HOURS_ENV = "CATHEDRAL_WEIGHTS_WINDOW_HOURS"
 MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"                       # flat_recent | proportional | row_score_recent
 ROW_SCORE_TASK_TYPES_ENV = "CATHEDRAL_WEIGHTS_ROW_SCORE_TASK_TYPES"
+AUDIT_REPLAY_TASK_TYPES_ENV = "CATHEDRAL_AUDIT_REPLAY_TASK_TYPES"
+AUDIT_REPLAY_BONUS_MULT_ENV = "CATHEDRAL_AUDIT_REPLAY_BONUS_MULT"
+AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV = "CATHEDRAL_AUDIT_SCANNER_REQUIRE_ATTESTATION"
 # Difficulty-weighted scoring. CATHEDRAL_WEIGHTS_TIER_WEIGHTS accepts JSON
 # {"1":1,"2":3,"3":8} or comma form "1=1,2=3,3=8". If unset, preserve the
 # existing launch default: tier 1 = 1.0, tier 2 = CATHEDRAL_WEIGHTS_TIER2_MULT.
@@ -108,6 +111,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def window_hours() -> float:
     return _env_float(WINDOW_HOURS_ENV, 24.0)
 
@@ -127,6 +137,26 @@ def row_score_task_types() -> set[str]:
         for item in raw.replace(";", ",").split(",")
         if item.strip()
     }
+
+
+def audit_replay_task_types() -> set[str]:
+    raw = os.environ.get(
+        AUDIT_REPLAY_TASK_TYPES_ENV,
+        "audit_replay_v1,audit_arena_v1",
+    )
+    return {
+        item.strip()
+        for item in raw.replace(";", ",").split(",")
+        if item.strip()
+    }
+
+
+def audit_replay_bonus_multiplier() -> float:
+    return max(0.0, _env_float(AUDIT_REPLAY_BONUS_MULT_ENV, 0.25))
+
+
+def audit_replay_require_attestation() -> bool:
+    return _env_bool(AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV, False)
 
 
 def burn_percentage() -> float:
@@ -605,6 +635,7 @@ def _compose_row_score_recent(
     to row_score_recent.
     """
     allowed_task_types = row_score_task_types()
+    audit_task_types = audit_replay_task_types()
     rows = store.query(
         "SELECT miner_hotkey, task_type, row_json FROM eval_runs "
         "WHERE ran_at > ? AND attested=1",
@@ -612,7 +643,8 @@ def _compose_row_score_recent(
     totals: dict[str, float] = {}
     hks: dict[str, set[str]] = {}
     for r in rows:
-        if str(r["task_type"]) not in allowed_task_types:
+        task_type = str(r["task_type"])
+        if task_type not in allowed_task_types or task_type in audit_task_types:
             continue
         score = _positive_row_weighted_score(r["row_json"])
         if score is None:
@@ -632,6 +664,87 @@ def _compose_row_score_recent(
         for hk in hks[idk]:
             result[hk] = per
     return result
+
+
+def _compose_audit_replay_scores(
+    store: Store,
+    since: str,
+    *,
+    ident=lambda hk: hk,
+) -> dict[str, float]:
+    """Normalized score term for deterministic audit/replay work.
+
+    This is deliberately separate from flat SAT participation so audit rows do
+    not accidentally pay as ordinary eval rows. If attestation is required,
+    only rows upgraded through /v1/attest count.
+    """
+    allowed_task_types = audit_replay_task_types()
+    if not allowed_task_types:
+        return {}
+    require_attestation = audit_replay_require_attestation()
+    rows = store.query(
+        "SELECT miner_hotkey, task_type, row_json FROM eval_runs "
+        "WHERE ran_at > ? AND eval_output_schema_version=6"
+        + (" AND attested=1" if require_attestation else ""),
+        (since,),
+    )
+    totals: dict[str, float] = {}
+    hks: dict[str, set[str]] = {}
+    for r in rows:
+        task_type = str(r["task_type"])
+        if task_type not in allowed_task_types:
+            continue
+        score = _positive_row_weighted_score(r["row_json"])
+        if score is None:
+            continue
+        hk = str(r["miner_hotkey"])
+        idk = str(ident(hk))
+        totals[idk] = totals.get(idk, 0.0) + score
+        hks.setdefault(idk, set()).add(hk)
+    if not totals:
+        return {}
+    top = max(totals.values())
+    if top <= 0.0:
+        return {}
+    result: dict[str, float] = {}
+    for idk, score in totals.items():
+        per = round((score / top) / len(hks[idk]), 6)
+        for hk in hks[idk]:
+            result[hk] = per
+    return result
+
+
+def _apply_audit_replay_bonus(
+    base: dict[str, float],
+    audit_scores: dict[str, float],
+) -> dict[str, float]:
+    mult = audit_replay_bonus_multiplier()
+    if mult <= 0.0 or not audit_scores:
+        return base
+    combined: dict[str, float] = dict(base)
+    for hk, score in audit_scores.items():
+        combined[hk] = float(combined.get(hk, 0.0)) + (float(score) * mult)
+    top = max(combined.values(), default=0.0)
+    if top <= 0.0:
+        return {}
+    return {hk: round(score / top, 6) for hk, score in combined.items() if score > 0.0}
+
+
+def _non_audit_eval_hotkeys(store: Store, since: str) -> set[str]:
+    audit_types = audit_replay_task_types()
+    if not audit_types:
+        rows = store.query(
+            "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?",
+            (since,),
+        )
+        return {str(r["miner_hotkey"]) for r in rows}
+    placeholders = ",".join("?" for _ in audit_types)
+    rows = store.query(
+        "SELECT DISTINCT miner_hotkey FROM eval_runs "
+        f"WHERE ran_at > ? AND task_type NOT IN ({placeholders})",
+        (since, *sorted(audit_types)),
+    )
+    return {str(r["miner_hotkey"]) for r in rows}
 
 
 def _proportional_ledger_has_rows(store: Store, since: str) -> bool:
@@ -1033,8 +1146,11 @@ def compose_scores(
 
     def finish_base(base: dict[str, float]) -> dict[str, float]:
         if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
-            return _apply_perminer_primary(base, pm_scores)
-        return _apply_perminer_bonus(store, base, coldkey_of, now=now)
+            base = _apply_perminer_primary(base, pm_scores)
+        else:
+            base = _apply_perminer_bonus(store, base, coldkey_of, now=now)
+        audit_scores = _compose_audit_replay_scores(store, since, ident=ident)
+        return _apply_audit_replay_bonus(base, audit_scores)
 
     if mode() == "row_score_recent":
         return finish_base(_compose_row_score_recent(store, since, ident=ident))
@@ -1075,9 +1191,7 @@ def compose_scores(
             return finish_base(base)
         # no in-window claim rows -> fall through to flat
 
-    feed = store.query(
-        "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,))
-    hotkeys = {str(r["miner_hotkey"]) for r in feed}
+    hotkeys = _non_audit_eval_hotkeys(store, since)
     if not use_ck:
         return finish_base({hk: 1.0 for hk in hotkeys})
     # flat, identity-deduped: each coldkey's hotkeys share a single 1.0
@@ -1139,6 +1253,11 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         "window_hours": window_hours(),
         "burn": burn_percentage(), "burn_uid": burn_uid(),
         "tier_weights": tier_weights(),
+        "audit_replay": {
+            "task_types": sorted(audit_replay_task_types()),
+            "bonus_multiplier": audit_replay_bonus_multiplier(),
+            "require_attestation": audit_replay_require_attestation(),
+        },
         "payable_hotkeys": payable_meta,
         "hotkeys": sorted(scores), "scores": [scores[k] for k in sorted(scores)],
     }
@@ -1162,6 +1281,11 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "miner_count": len(scores),
             "composer": "scaffold.weights",
             "tier_weights": tier_weights(),
+            "audit_replay": {
+                "task_types": sorted(audit_replay_task_types()),
+                "bonus_multiplier": audit_replay_bonus_multiplier(),
+                "require_attestation": audit_replay_require_attestation(),
+            },
             "requested_mode": requested_mode,
             "effective_mode": effective_mode,
             "score_source": score_source,

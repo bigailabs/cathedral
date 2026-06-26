@@ -115,6 +115,9 @@ saved_env = {
         weights.PERMINER_SCORING_MODE_ENV,
         weights.PERMINER_PUBLIC_BASELINE_ENV,
         weights.PERMINER_REQUIRE_COLDKEY_ENV,
+        weights.AUDIT_REPLAY_BONUS_MULT_ENV,
+        weights.AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV,
+        weights.AUDIT_REPLAY_TASK_TYPES_ENV,
     )
 }
 for key in saved_env:
@@ -581,6 +584,114 @@ try:
         )
     finally:
         empty_prop.close()
+
+    audit_bonus_store = Store(":memory:")
+    try:
+        os.environ[weights.MODE_ENV] = "proportional"
+        os.environ[weights.AUDIT_REPLAY_BONUS_MULT_ENV] = "0.25"
+        os.environ.pop(weights.AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV, None)
+        insert_eval(
+            audit_bonus_store,
+            "audit-replay",
+            recent,
+            "5Audit",
+            row(1.0),
+            task_type="audit_replay_v1",
+            attested=False,
+        )
+        audit_only = weights.compose_scores(audit_bonus_store, now=now)
+        ck(
+            "audit replay rows earn through explicit audit bonus when no SAT base exists",
+            audit_only == {"5Audit": 1.0},
+        )
+        insert_eval(
+            audit_bonus_store,
+            "sat-base",
+            recent,
+            "5Sat",
+            row(1.0),
+            task_type="synthetic_boolean_v1",
+            attested=True,
+        )
+        mixed = weights.compose_scores(audit_bonus_store, now=now)
+        ck(
+            "audit replay rows are a bounded bonus, not ordinary flat fallback",
+            mixed == {"5Sat": 1.0, "5Audit": 0.25},
+        )
+        os.environ[weights.AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV] = "1"
+        gated = weights.compose_scores(audit_bonus_store, now=now)
+        ck(
+            "audit replay bonus respects attestation requirement",
+            gated == {"5Sat": 1.0},
+        )
+        def _attest_audit(conn):
+            conn.execute("UPDATE eval_runs SET attested=1 WHERE id=?", ("audit-replay",))
+
+        audit_bonus_store.write(_attest_audit)
+        attested = weights.compose_scores(audit_bonus_store, now=now)
+        ck(
+            "attested audit replay rows re-enter the bonus term",
+            attested == {"5Sat": 1.0, "5Audit": 0.25},
+        )
+        audit_vec = weights.build_signed_vector(
+            audit_bonus_store,
+            signing_key_hex=generate_test_key(),
+            now=now,
+        )
+        ck(
+            "signed vector exposes audit replay policy metadata",
+            audit_vec["policy_metadata"]["audit_replay"]["bonus_multiplier"] == 0.25
+            and audit_vec["policy_metadata"]["audit_replay"]["require_attestation"] is True
+            and "audit_replay_v1" in audit_vec["policy_metadata"]["audit_replay"]["task_types"],
+        )
+    finally:
+        audit_bonus_store.close()
+        os.environ.pop(weights.AUDIT_REPLAY_BONUS_MULT_ENV, None)
+        os.environ.pop(weights.AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV, None)
+        os.environ.pop(weights.AUDIT_REPLAY_TASK_TYPES_ENV, None)
+
+    audit_row_score_store = Store(":memory:")
+    try:
+        os.environ[weights.MODE_ENV] = "row_score_recent"
+        os.environ[weights.AUDIT_REPLAY_BONUS_MULT_ENV] = "0.25"
+        os.environ.pop(weights.AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV, None)
+        insert_eval(
+            audit_row_score_store,
+            "row-mode-sat",
+            recent,
+            "5RowSat",
+            row(1.0),
+            task_type="synthetic_boolean_v1",
+            attested=True,
+        )
+        insert_eval(
+            audit_row_score_store,
+            "row-mode-audit",
+            recent,
+            "5RowAudit",
+            row(1.0),
+            task_type="audit_replay_v1",
+            attested=False,
+        )
+        row_mode_audit = weights.compose_scores(audit_row_score_store, now=now)
+        ck(
+            "row_score_recent still pays audit replay through explicit audit bonus",
+            row_mode_audit == {"5RowSat": 1.0, "5RowAudit": 0.25},
+        )
+        def _attest_row_mode_audit(conn):
+            conn.execute("UPDATE eval_runs SET attested=1 WHERE id=?", ("row-mode-audit",))
+
+        audit_row_score_store.write(_attest_row_mode_audit)
+        row_mode_attested = weights.compose_scores(audit_row_score_store, now=now)
+        ck(
+            "row_score_recent does not double-count attested audit replay rows",
+            row_mode_attested == {"5RowSat": 1.0, "5RowAudit": 0.25},
+        )
+    finally:
+        audit_row_score_store.close()
+        os.environ.pop(weights.AUDIT_REPLAY_BONUS_MULT_ENV, None)
+        os.environ.pop(weights.AUDIT_REPLAY_REQUIRE_ATTESTATION_ENV, None)
+        os.environ.pop(weights.AUDIT_REPLAY_TASK_TYPES_ENV, None)
 
     key_hex = generate_test_key()
     os.environ[weights.MODE_ENV] = "row_score_recent"

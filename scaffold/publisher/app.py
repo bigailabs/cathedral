@@ -65,6 +65,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)) or default)
@@ -536,6 +543,10 @@ def build_app(
         _SUBMIT_PATHS = {
             "/v1/agents/submit",
             f"{_LEGACY_PREFIX}/v1/agents/submit",
+            "/v1/audit-scanner/replay",
+            "/v1/audit-scanner/submit",
+            f"{_LEGACY_PREFIX}/v1/audit-scanner/replay",
+            f"{_LEGACY_PREFIX}/v1/audit-scanner/submit",
         }
         _PM_READ_PATHS = {
             "/v1/synthetic-boolean/per-miner/challenges",
@@ -636,6 +647,8 @@ def build_app(
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
+            "/v1/audit-scanner/replay",
+            "/v1/audit-scanner/submit",
         }
 
         def __init__(self, asgi_app):
@@ -2004,13 +2017,56 @@ def build_app(
             "clause_count": 3, "weighted_score": 0.0, "emissions_eligible": False,
         }
 
-    # ---- M2c: Audit scanner bridge (default-off, replay-scored only) ------
+    # ---- M2c: Audit scanner bridge (replay-scored, weight-bonus capable) ---
     # This is the production-style bridge for the local Subnet Breaker scanner
-    # contract. It is not wired into SAT payment weights here; it gives miners
-    # a signed, replay-backed submission path that can be enabled deliberately.
+    # contract. Accepted deterministic replays can emit signed eval rows with
+    # task_type=audit_replay_v1; weights.py applies the bounded live bonus.
     def _audit_scanner_enabled() -> bool:
-        return os.environ.get("CATHEDRAL_AUDIT_SCANNER_ENABLED", "").strip().lower() in {
-            "1", "true", "yes", "on"}
+        return _env_bool("CATHEDRAL_AUDIT_SCANNER_ENABLED", True)
+
+    def _audit_scanner_payment_weights_enabled() -> bool:
+        return (
+            _audit_scanner_enabled()
+            and _env_bool("CATHEDRAL_AUDIT_SCANNER_PAYMENT_WEIGHTS_ENABLED", True)
+            and _audit_scanner_task_type() in weights_mod.audit_replay_task_types()
+        )
+
+    def _audit_scanner_require_attestation() -> bool:
+        return weights_mod.audit_replay_require_attestation()
+
+    def _audit_scanner_task_type() -> str:
+        return os.environ.get("CATHEDRAL_AUDIT_SCANNER_TASK_TYPE", "audit_replay_v1").strip() or "audit_replay_v1"
+
+    def _audit_scanner_tier() -> int:
+        return max(1, _env_int("CATHEDRAL_AUDIT_SCANNER_TIER", 3))
+
+    def _audit_scanner_row_score(verdict: dict[str, Any]) -> float:
+        try:
+            score = float(verdict.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        score *= _env_float("CATHEDRAL_AUDIT_SCANNER_ROW_SCORE_MULT", 1.0)
+        return round(min(1.0, max(0.0, score)), 6)
+
+    def _audit_scanner_payment_metadata() -> dict[str, Any]:
+        return {
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
+            "task_type": _audit_scanner_task_type(),
+            "tier": _audit_scanner_tier(),
+            "row_score_cap": 1.0,
+            "attestation_required": _audit_scanner_require_attestation(),
+            "audit_replay_bonus_multiplier": weights_mod.audit_replay_bonus_multiplier(),
+            "audit_replay_task_types": sorted(weights_mod.audit_replay_task_types()),
+            "degraded_reason": (
+                None
+                if _audit_scanner_task_type() in weights_mod.audit_replay_task_types()
+                else "audit_scanner_task_type_not_in_weight_policy"
+            ),
+            "attestation_status": (
+                "required_until_v1_attested"
+                if _audit_scanner_require_attestation() else "optional"
+            ),
+        }
 
     def _audit_scanner_example_solutions_enabled() -> bool:
         return os.environ.get(
@@ -2176,13 +2232,99 @@ def build_app(
         )
         return audit_scanner, task, sub, artifact_sha, verified_at
 
+    def _audit_scanner_emit_payment_row(
+        *,
+        task: Any,
+        sub: Any,
+        artifact_sha: str,
+        verdict: dict[str, Any],
+        verified_at: str,
+    ) -> dict[str, Any] | None:
+        if not _audit_scanner_payment_weights_enabled():
+            return None
+        if not bool(verdict.get("accepted")):
+            return None
+        weighted_score = _audit_scanner_row_score(verdict)
+        if weighted_score <= 0.0:
+            return None
+        row_uuid = new_uuid()
+        tier = _audit_scanner_tier()
+        now_iso = _now_iso_ms()
+        verifier_details = {
+            "schema": "cathedral.audit_replay.payment_verifier.v1",
+            "task_id": task.task_id,
+            "replay_target_id": getattr(task, "replay_target_id", ""),
+            "artifact_sha256": artifact_sha,
+            "gates": dict(verdict.get("gates") or {}),
+            "reasons": list(verdict.get("reasons") or []),
+            "signature_verified_at": verified_at,
+        }
+        emitted = rows.build_solve_rows(
+            row_uuid=row_uuid,
+            miner_hotkey=sub.miner_hotkey,
+            agent_id=new_uuid(),
+            challenge_id=task.task_id,
+            tier=tier,
+            weighted_score=weighted_score,
+            answer_hash=artifact_sha,
+            verifier_details_hash=sha256_hex(json.dumps(
+                verifier_details,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )),
+            ran_at=now_iso,
+            epoch_salt=f"audit_replay:{task.task_id}",
+            solve_rank=1,
+            solved=True,
+            private_key_hex=key_hex,
+            task_type=_audit_scanner_task_type(),
+            agent_display_prefix="AL-AUDIT",
+        )
+        payment_meta = _audit_scanner_payment_metadata()
+        payment_meta.update({
+            "eval_run_id": row_uuid,
+            "weighted_score": weighted_score,
+            "signature_verified_at": verified_at,
+        })
+        for r in emitted:
+            if isinstance(r.get("output_card"), dict):
+                r["output_card"]["audit_replay"] = {
+                    "task_id": task.task_id,
+                    "target_netuid": getattr(task, "target_netuid", None),
+                    "target_name": getattr(task, "target_name", ""),
+                    "replay_target_id": getattr(task, "replay_target_id", ""),
+                    "artifact_sha256": artifact_sha,
+                    "attestation_required": _audit_scanner_require_attestation(),
+                }
+        def _insert(conn):
+            for r in emitted:
+                conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json, attested) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    (
+                        r["id"],
+                        r["ran_at"],
+                        int(r["eval_output_schema_version"]),
+                        r["miner_hotkey"],
+                        r["task_type"],
+                        json.dumps(r),
+                    ),
+                )
+            return True
+
+        store.write(_insert)
+        return payment_meta
+
     def _audit_scanner_schema_contract() -> dict[str, Any]:
         audit_scanner = _audit_scanner_module()
         return {
             "schema": "cathedral.audit_scanner.contract.v1",
             "enabled": _audit_scanner_enabled(),
             "card_id": _AUDIT_SCANNER_CARD,
-            "payment_weights": False,
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
+            "payment": _audit_scanner_payment_metadata(),
             "scoring": {
                 "linear_metric": "task.bounty_weight",
                 "boolean_gate": [
@@ -2259,8 +2401,9 @@ def build_app(
             "schema": "cathedral.audit_scanner.status.v1",
             "enabled": _audit_scanner_enabled(),
             "card_id": _AUDIT_SCANNER_CARD,
-            "payment_weights": False,
-            "scoring": "local_replay_only_until_promoted_to_weight_policy",
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
+            "payment": _audit_scanner_payment_metadata(),
+            "scoring": "accepted_deterministic_replay_emits_signed_audit_replay_row",
             "signature_contract": {
                 "card_id": _AUDIT_SCANNER_CARD,
                 "challenge_id": "task_id",
@@ -2303,7 +2446,8 @@ def build_app(
     def audit_scanner_families():
         _require_audit_scanner_enabled()
         taxonomy = _audit_scanner_module().family_taxonomy()
-        taxonomy["payment_weights"] = False
+        taxonomy["payment_weights"] = _audit_scanner_payment_weights_enabled()
+        taxonomy["payment"] = _audit_scanner_payment_metadata()
         taxonomy["scoring"] = "claim_family_routes_work_replay_scores_work"
         taxonomy["category_scoring"] = "claim_category_is_metadata_only"
         taxonomy["reward_gate"] = "deterministic_replay"
@@ -2345,7 +2489,7 @@ def build_app(
                 "artifact_sha256": artifact_sha,
                 "verdict": verdict.as_dict(),
                 "solution_exported": True,
-                "payment_weights": False,
+                "payment_weights": _audit_scanner_payment_weights_enabled(),
             }
         return {
             "schema": "cathedral.audit_scanner.example.v1",
@@ -2383,7 +2527,7 @@ def build_app(
                 "trace_body_exported": False,
                 "observed_values_exported": False,
             },
-            "payment_weights": False,
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
         }
 
     @app.post("/v1/audit-scanner/request")
@@ -2421,6 +2565,8 @@ def build_app(
             "signed_artifact_sha256": artifact_sha,
             "signature_verified_at": verified_at,
             "card_id": _AUDIT_SCANNER_CARD,
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
+            "payment_preview": _audit_scanner_payment_metadata(),
         })
         return verdict
 
@@ -2447,13 +2593,29 @@ def build_app(
             task,
             sub,
         )
+        payment_row = _audit_scanner_emit_payment_row(
+            task=task,
+            sub=sub,
+            artifact_sha=artifact_sha,
+            verdict=verdict,
+            verified_at=verified_at,
+        )
         verdict.update({
             "ledger_written": True,
             "scored": bool(verdict["accepted"]),
             "signed_artifact_sha256": artifact_sha,
             "signature_verified_at": verified_at,
             "card_id": _AUDIT_SCANNER_CARD,
-            "payment_weights": False,
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
+            "payment": payment_row or _audit_scanner_payment_metadata(),
+            "eval_run_id": (payment_row or {}).get("eval_run_id"),
+            "payment_row_emitted": bool(payment_row),
+            "attestation_required": _audit_scanner_require_attestation(),
+            "attestation_status": (
+                "pending"
+                if payment_row and _audit_scanner_require_attestation()
+                else "optional" if payment_row else "not_emitted"
+            ),
         })
         return verdict
 
@@ -2473,7 +2635,8 @@ def build_app(
         from game.arena import replay_differential
 
         report = replay_differential.differential_report()
-        report["payment_weights"] = False
+        report["payment_weights"] = _audit_scanner_payment_weights_enabled()
+        report["payment"] = _audit_scanner_payment_metadata()
         report["scoring"] = "verifier_quality_gate_only"
         return report
 
@@ -2492,7 +2655,7 @@ def build_app(
             "contains_witnesses": False,
             "contains_reports": False,
             "contains_trace_bodies": False,
-            "payment_weights": False,
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
         }
 
     @app.get("/v1/audit-scanner/traces")
@@ -2535,7 +2698,7 @@ def build_app(
             "contains_witnesses": False,
             "contains_reports": False,
             "contains_trace_bodies": False,
-            "payment_weights": False,
+            "payment_weights": _audit_scanner_payment_weights_enabled(),
         }
 
     @app.get("/v1/audit-scanner/state")
