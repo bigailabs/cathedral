@@ -487,8 +487,6 @@ def _apply_perminer_bonus(
     if not pm_scores:
         return base
     combined = dict(base)
-    if perminer_require_coldkey() and not coldkey_of:
-        return base
     use_ck = bool(coldkey_of)
     if not use_ck:
         top_base = max(base.values()) if base else 0.0
@@ -499,23 +497,17 @@ def _apply_perminer_bonus(
             combined[hk] = combined.get(hk, 0.0) + bonus * float(score) * history_mult
     else:
         def mapped(hk: str) -> str:
-            return coldkey_of[hk]  # type: ignore[index]
+            return coldkey_of.get(hk, hk)  # type: ignore[union-attr]
 
         members: dict[str, set[str]] = {}
         best: dict[str, float] = {}
         history: dict[str, float] = {}
         for hk in set(base) | set(pm_scores):
-            if hk not in coldkey_of:  # type: ignore[operator]
-                continue
             members.setdefault(mapped(hk), set()).add(hk)
         for hk, score in base.items():
-            if hk not in coldkey_of:  # type: ignore[operator]
-                continue
             idk = mapped(hk)
             history[idk] = max(history.get(idk, 0.0), float(score))
         for hk, score in pm_scores.items():
-            if hk not in coldkey_of:  # type: ignore[operator]
-                continue
             idk = mapped(hk)
             best[idk] = max(best.get(idk, 0.0), float(score))
         top_history = max(history.values()) if history else 0.0
@@ -685,27 +677,34 @@ def _perminer_policy_status(
     epoch = pm.current_epoch() if enabled else None
     has_scores = False
     coldkey_loaded = bool(coldkey_of)
+    unmapped_hotkeys_24h: int | None = None
     if enabled and store is not None and epoch is not None:
-        if perminer_require_coldkey():
-            if coldkey_of:
-                now = now or datetime.now(timezone.utc)
-                since = _ms_iso(now - timedelta(hours=window_hours()))
+        now = now or datetime.now(timezone.utc)
+        since = _ms_iso(now - timedelta(hours=window_hours()))
 
-                def mapped_identity(hk: str) -> str | None:
-                    return coldkey_of.get(hk)
+        def mapped_identity(hk: str) -> str:
+            return coldkey_of.get(hk, hk) if coldkey_of else hk
 
-                has_scores = bool(_perminer_window_scores(
-                    store, since=since, ident=mapped_identity))
-        else:
-            has_scores = bool(_perminer_scores(store, now=now))
+        has_scores = bool(_perminer_window_scores(
+            store, since=since, ident=mapped_identity))
+        try:
+            rows = store.query(
+                "SELECT DISTINCT miner_hotkey FROM per_miner_solves "
+                "WHERE solved_at_iso > ? AND verified=1",
+                (since,),
+            )
+            unmapped_hotkeys_24h = sum(
+                1 for r in rows
+                if not coldkey_of or str(r["miner_hotkey"]) not in coldkey_of
+            )
+        except Exception:
+            unmapped_hotkeys_24h = None
     live_requested = enabled and not shadow
     scoring_mode = perminer_scoring_mode()
-    identity_ready = not perminer_require_coldkey() or coldkey_loaded
+    identity_ready = True
     degraded_reason = None
     if live_requested and scoring_mode in {"pm_primary", "assigned_only"}:
-        if perminer_require_coldkey() and not coldkey_loaded:
-            degraded_reason = "coldkey_map_required_but_unavailable"
-        elif not has_scores:
+        if not has_scores:
             degraded_reason = "no_verified_per_miner_scores"
     bonus_live = (
         live_requested
@@ -731,6 +730,11 @@ def _perminer_policy_status(
         "public_baseline": perminer_public_baseline(),
         "coldkey_required": perminer_require_coldkey(),
         "identity_ready": identity_ready,
+        "identity_mode": (
+            "coldkey_map_with_hotkey_fallback"
+            if coldkey_loaded else "hotkey_fallback"
+        ),
+        "unmapped_hotkeys_24h": unmapped_hotkeys_24h,
         "degraded_reason": degraded_reason,
     }
 
@@ -1015,22 +1019,13 @@ def compose_scores(
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     use_ck = coldkey_collapse_enabled() and bool(coldkey_of)
-    use_pm_ck = perminer_require_coldkey() and bool(coldkey_of)
-
-    if (
-        perminer_scoring_mode() == "assigned_only"
-        and perminer_require_coldkey()
-        and not coldkey_of
-    ):
-        from . import per_miner as pm
-        if pm.perminer_enabled() and not pm.perminer_shadow():
-            return {}
+    use_pm_ck = bool(coldkey_of)
 
     def ident(hk: str) -> str:
         return coldkey_of.get(hk, hk) if use_ck else hk
 
     def pm_ident(hk: str) -> str | None:
-        return coldkey_of.get(hk) if use_pm_ck else ident(hk)
+        return coldkey_of.get(hk, hk) if use_pm_ck else ident(hk)
 
     pm_scores = _perminer_compose_scores(store, ident=pm_ident, since=since)
     if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
@@ -1038,10 +1033,6 @@ def compose_scores(
 
     def finish_base(base: dict[str, float]) -> dict[str, float]:
         if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
-            if perminer_require_coldkey() and not coldkey_of:
-                return _apply_perminer_bonus(store, base, coldkey_of, now=now)
-            if perminer_require_coldkey() and coldkey_of:
-                base = {hk: score for hk, score in base.items() if hk in coldkey_of}
             return _apply_perminer_primary(base, pm_scores)
         return _apply_perminer_bonus(store, base, coldkey_of, now=now)
 

@@ -162,7 +162,8 @@ def main() -> int:
         ck("same-coldkey hotkeys share one best assigned score",
            scored == {"hkA1": 0.5, "hkA2": 0.5, "hkB": 0.5})
         no_map = weights.compose_scores(store, coldkey_of=None)
-        ck("assigned live scoring fails closed without coldkey map", no_map == {})
+        ck("assigned live scoring falls back to hotkey identity without coldkey map",
+           no_map == {"hkA1": 1.0, "hkA2": 1.0, "hkB": 0.5})
         store.close()
     finally:
         restore_env(old)

@@ -1192,12 +1192,14 @@ with TestClient(app) as client:
         degraded_store.write(_seed_unmapped_pm_solve)
         degraded_vector = _weights.build_signed_vector(degraded_store, signing_key_hex=key_hex)
         degraded_pm = degraded_vector.get("policy_metadata", {}).get("perminer", {})
-        ck("pm-primary degraded state is explicit when coldkey map is missing",
+        ck("pm-primary uses hotkey fallback identity when coldkey map is missing",
            degraded_pm.get("enabled") is True
-           and degraded_pm.get("primary_live") is False
-           and degraded_pm.get("identity_ready") is False
-           and degraded_pm.get("degraded_reason") == "coldkey_map_required_but_unavailable"
-           and degraded_vector.get("weights") == [])
+           and degraded_pm.get("primary_live") is True
+           and degraded_pm.get("identity_ready") is True
+           and degraded_pm.get("degraded_reason") is None
+           and degraded_vector.get("weights") == [
+               {"miner_hotkey": "5UnmappedPmMiner", "weight": 1.0}
+           ])
         rate_app = build_app(
             database_path=":memory:",
             signing_key_hex=key_hex,
