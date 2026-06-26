@@ -389,6 +389,20 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
             ON metagraph_hotkeys(network, netuid, updated_at_iso);
     """),
+    ("0029_sat_snapshots", """
+        CREATE TABLE IF NOT EXISTS sat_snapshots (
+            sequence TEXT PRIMARY KEY,
+            created_at_iso TEXT NOT NULL,
+            latest_json TEXT NOT NULL,
+            board_json TEXT NOT NULL,
+            weights_json TEXT NOT NULL,
+            latest_etag TEXT NOT NULL,
+            board_etag TEXT NOT NULL,
+            weights_etag TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sat_snapshots_created_at
+            ON sat_snapshots(created_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -718,6 +732,20 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
             ON metagraph_hotkeys(network, netuid, updated_at_iso);
     """),
+    ("0029_sat_snapshots", """
+        CREATE TABLE IF NOT EXISTS sat_snapshots (
+            sequence TEXT PRIMARY KEY,
+            created_at_iso TEXT NOT NULL,
+            latest_json TEXT NOT NULL,
+            board_json TEXT NOT NULL,
+            weights_json TEXT NOT NULL,
+            latest_etag TEXT NOT NULL,
+            board_etag TEXT NOT NULL,
+            weights_etag TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sat_snapshots_created_at
+            ON sat_snapshots(created_at_iso);
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -745,6 +773,7 @@ _PK_BY_TABLE: dict[str, str] = {
     "tee_gpu_capacity_events": "id",
     "attest_nonces": "nonce",
     "attestations": "id",
+    "sat_snapshots": "sequence",
 }
 
 

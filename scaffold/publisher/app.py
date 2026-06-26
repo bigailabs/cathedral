@@ -169,7 +169,13 @@ class _SoftTtlCache:
 
 
 def _now_iso_ms() -> str:
-    dt = datetime.now(timezone.utc)
+    return _iso_ms(datetime.now(timezone.utc))
+
+
+def _iso_ms(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -452,6 +458,104 @@ def build_app(
     def _snapshot_etag(payload: dict[str, Any]) -> str:
         return '"' + hashlib.sha256(_snapshot_bytes(payload)).hexdigest() + '"'
 
+    snapshot_lock = threading.Lock()
+    snapshot_ring_size = max(1, _env_int("CATHEDRAL_SAT_SNAPSHOT_RING_SIZE", 16))
+    snapshot_retention_hours = max(1.0, _env_float("CATHEDRAL_SAT_SNAPSHOT_RETENTION_HOURS", 6.0))
+    snapshot_ring: dict[str, dict[str, Any]] = {}
+    snapshot_order: list[str] = []
+
+    def _snapshot_item(
+        latest: dict[str, Any],
+        board_payload: dict[str, Any],
+        weights_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        latest_bytes = _snapshot_bytes(latest)
+        board_bytes = _snapshot_bytes(board_payload)
+        weights_bytes = _snapshot_bytes(weights_payload)
+        return {
+            "latest": latest,
+            "board": board_payload,
+            "weights": weights_payload,
+            "latest_bytes": latest_bytes,
+            "board_bytes": board_bytes,
+            "weights_bytes": weights_bytes,
+            "latest_etag": '"' + hashlib.sha256(latest_bytes).hexdigest() + '"',
+            "board_etag": '"' + hashlib.sha256(board_bytes).hexdigest() + '"',
+            "weights_etag": '"' + hashlib.sha256(weights_bytes).hexdigest() + '"',
+        }
+
+    def _snapshot_cache_local(sequence: str, item: dict[str, Any]) -> None:
+        if sequence not in snapshot_ring:
+            snapshot_order.append(sequence)
+        snapshot_ring[sequence] = item
+        while len(snapshot_order) > snapshot_ring_size:
+            old = snapshot_order.pop(0)
+            snapshot_ring.pop(old, None)
+
+    def _snapshot_remember(
+        sequence: str,
+        latest: dict[str, Any],
+        board_payload: dict[str, Any],
+        weights_payload: dict[str, Any],
+    ) -> None:
+        item = _snapshot_item(latest, board_payload, weights_payload)
+        with snapshot_lock:
+            seen_local = sequence in snapshot_ring
+            _snapshot_cache_local(sequence, item)
+        if seen_local:
+            return
+
+        cutoff = _iso_ms(datetime.now(timezone.utc) - timedelta(hours=snapshot_retention_hours))
+
+        def _store_snapshot(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO sat_snapshots("
+                "sequence, created_at_iso, latest_json, board_json, weights_json, "
+                "latest_etag, board_etag, weights_etag"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    sequence,
+                    str(latest.get("created_at") or _now_iso_ms()),
+                    item["latest_bytes"].decode("utf-8"),
+                    item["board_bytes"].decode("utf-8"),
+                    item["weights_bytes"].decode("utf-8"),
+                    item["latest_etag"],
+                    item["board_etag"],
+                    item["weights_etag"],
+                ),
+            )
+            conn.execute(
+                "DELETE FROM sat_snapshots WHERE created_at_iso < ?",
+                (cutoff,),
+            )
+
+        store.write(_store_snapshot)
+
+    def _snapshot_lookup(sequence: str) -> dict[str, Any] | None:
+        with snapshot_lock:
+            item = snapshot_ring.get(sequence)
+            if item is not None:
+                return dict(item)
+        rows_ = store.query(
+            "SELECT latest_json, board_json, weights_json, latest_etag, "
+            "board_etag, weights_etag FROM sat_snapshots WHERE sequence=?",
+            (sequence,),
+        )
+        if not rows_:
+            return None
+        row = rows_[0]
+        item = {
+            "latest_bytes": str(row["latest_json"]).encode("utf-8"),
+            "board_bytes": str(row["board_json"]).encode("utf-8"),
+            "weights_bytes": str(row["weights_json"]).encode("utf-8"),
+            "latest_etag": row["latest_etag"],
+            "board_etag": row["board_etag"],
+            "weights_etag": row["weights_etag"],
+        }
+        with snapshot_lock:
+            _snapshot_cache_local(sequence, item)
+        return dict(item)
+
     def _sign_latest_pointer(payload: dict[str, Any]) -> dict[str, Any]:
         signed = dict(payload)
         signed["key_id"] = os.environ.get(
@@ -464,11 +568,13 @@ def build_app(
         return signed
 
     def _sat_snapshot_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
-        board_payload, board_etag = board_cache.get()
+        board_payload, _board_cache_etag = board_cache.get()
         weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         weights_payload = weights_mod.current_vector(store, signing_key_hex=weight_key)
         board_hash = _snapshot_hash(board_payload)
         weights_hash = _snapshot_hash(weights_payload)
+        board_etag = _snapshot_etag(board_payload)
+        weights_etag = _snapshot_etag(weights_payload)
         policy_version = str(weights_payload.get("policy_version") or int(time.time() * 1000))
         sequence_digest = hashlib.sha256(
             f"{policy_version}:{board_hash}:{weights_hash}".encode("utf-8")
@@ -484,7 +590,7 @@ def build_app(
             "created_at": created_at,
             "publisher_generation_id": os.environ.get(
                 "CATHEDRAL_PUBLISHER_GENERATION_ID", "default"),
-            "storage": "in_process_current_snapshot",
+            "storage": "in_process_recent_snapshot_ring",
             "trust_root": "signed_latest_pointer_and_artifact_hashes",
             "artifacts": {
                 "board": {
@@ -499,6 +605,7 @@ def build_app(
                     "content_type": "application/json",
                     "hash": weights_hash,
                     "size_bytes": len(_snapshot_bytes(weights_payload)),
+                    "etag": weights_etag,
                     "signature": "embedded",
                     "generated_at": weights_payload.get("generated_at"),
                     "expires_at": weights_payload.get("expires_at"),
@@ -521,11 +628,16 @@ def build_app(
             },
         }
         signed_pointer = _sign_latest_pointer(pointer)
+        _snapshot_remember(sequence, signed_pointer, board_payload, weights_payload)
         return signed_pointer, board_payload, weights_payload, _snapshot_etag(signed_pointer)
 
     def _sat_snapshot_headers(etag: str, sequence: str, *, immutable: bool = False) -> dict[str, str]:
+        # Sequence URLs are content-addressed by the signed latest pointer, but
+        # this transition slice stores only a small in-process history. Do not
+        # advertise year-long immutable origin availability until snapshots are
+        # written to durable object storage.
         cache_control = (
-            "public, max-age=31536000, immutable"
+            "public, max-age=300, stale-while-revalidate=600"
             if immutable
             else "public, max-age=5, must-revalidate"
         )
@@ -2003,13 +2115,18 @@ def build_app(
         inm = request.headers.get("if-none-match")
         if inm and etag in [t.strip() for t in inm.split(",")]:
             return Response(status_code=304, headers=headers)
-        return JSONResponse(latest, headers=headers)
+        return Response(
+            content=_snapshot_bytes(latest),
+            media_type="application/json",
+            headers=headers,
+        )
 
     @app.get("/sat/sequences/{sequence}/board.json")
     async def sat_sequence_board(sequence: str, request: Request):
-        latest, board_payload, _weights, _latest_etag = _sat_snapshot_bundle()
-        current_sequence = str(latest["sequence"])
-        if sequence != current_sequence:
+        snapshot = _snapshot_lookup(sequence)
+        if snapshot is None:
+            latest, _board_payload, _weights, _latest_etag = _sat_snapshot_bundle()
+            current_sequence = str(latest["sequence"])
             raise HTTPException(
                 404,
                 {
@@ -2017,18 +2134,24 @@ def build_app(
                     "current_sequence": current_sequence,
                 },
             )
-        etag = _snapshot_etag(board_payload)
+        board_bytes = snapshot["board_bytes"]
+        etag = str(snapshot["board_etag"])
         headers = _sat_snapshot_headers(etag, sequence, immutable=True)
         inm = request.headers.get("if-none-match")
         if inm and etag in [t.strip() for t in inm.split(",")]:
             return Response(status_code=304, headers=headers)
-        return JSONResponse(board_payload, headers=headers)
+        return Response(
+            content=board_bytes,
+            media_type="application/json",
+            headers=headers,
+        )
 
     @app.get("/sat/sequences/{sequence}/weights.json")
     async def sat_sequence_weights(sequence: str, request: Request):
-        latest, _board, weights_payload, _latest_etag = _sat_snapshot_bundle()
-        current_sequence = str(latest["sequence"])
-        if sequence != current_sequence:
+        snapshot = _snapshot_lookup(sequence)
+        if snapshot is None:
+            latest, _board, _weights_payload, _latest_etag = _sat_snapshot_bundle()
+            current_sequence = str(latest["sequence"])
             raise HTTPException(
                 404,
                 {
@@ -2036,12 +2159,17 @@ def build_app(
                     "current_sequence": current_sequence,
                 },
             )
-        etag = _snapshot_etag(weights_payload)
+        weights_bytes = snapshot["weights_bytes"]
+        etag = str(snapshot["weights_etag"])
         headers = _sat_snapshot_headers(etag, sequence, immutable=True)
         inm = request.headers.get("if-none-match")
         if inm and etag in [t.strip() for t in inm.split(",")]:
             return Response(status_code=304, headers=headers)
-        return JSONResponse(weights_payload, headers=headers)
+        return Response(
+            content=weights_bytes,
+            media_type="application/json",
+            headers=headers,
+        )
 
     @app.get("/sat/events")
     async def sat_events(request: Request, once: bool = Query(False)):

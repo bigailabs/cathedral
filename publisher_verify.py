@@ -269,13 +269,26 @@ with TestClient(app) as client:
     ck("sat board snapshot matches active-challenges",
        sat_board.status_code == 200
        and sat_board.json()["items"][0]["challenge_id"] == ac["items"][0]["challenge_id"]
-       and sat_board.headers.get("x-cathedral-sequence") == latest_seq)
+       and sat_board.headers.get("x-cathedral-sequence") == latest_seq
+       and sat_board.headers.get("etag") == latest_json["artifacts"]["board"]["etag"])
+    ck("sat board snapshot bytes match signed pointer hash and size",
+       "sha256:" + hashlib.sha256(sat_board.content).hexdigest()
+       == latest_json["artifacts"]["board"]["hash"]
+       and len(sat_board.content) == latest_json["artifacts"]["board"]["size_bytes"])
     sat_weights = client.get(f"/sat/sequences/{latest_seq}/weights.json")
     ck("sat weights snapshot preserves signed vector shape",
        sat_weights.status_code == 200
        and sat_weights.json().get("signature")
        and isinstance(sat_weights.json().get("weights"), list)
-       and sat_weights.headers.get("x-cathedral-sequence") == latest_seq)
+       and sat_weights.headers.get("x-cathedral-sequence") == latest_seq
+       and sat_weights.headers.get("etag") == latest_json["artifacts"]["weights"]["etag"])
+    ck("sat weights snapshot bytes match signed pointer hash and size",
+       "sha256:" + hashlib.sha256(sat_weights.content).hexdigest()
+       == latest_json["artifacts"]["weights"]["hash"]
+       and len(sat_weights.content) == latest_json["artifacts"]["weights"]["size_bytes"])
+    ck("sat sequence artifacts do not claim durable immutable origin storage yet",
+       "immutable" not in (sat_board.headers.get("cache-control") or "").lower()
+       and "31536000" not in (sat_board.headers.get("cache-control") or ""))
     stale_snapshot = client.get("/sat/sequences/stale-test-sequence/board.json")
     ck("sat stale sequence fails closed", stale_snapshot.status_code == 404)
     sat_events = client.get("/sat/events", params={"once": "true"})
@@ -284,6 +297,52 @@ with TestClient(app) as client:
        and "event: cathedral.sat.snapshot" in sat_events.text
        and '"latest_url":"/sat/latest.json"' in sat_events.text
        and '"sequence":"' in sat_events.text)
+    import tempfile as _snapshot_tempfile
+    snapshot_db_path = ""
+    try:
+        with _snapshot_tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as _snapshot_db:
+            snapshot_db_path = _snapshot_db.name
+        snapshot_app_a = build_app(
+            database_path=snapshot_db_path,
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        seed_challenge(
+            snapshot_app_a.state.store,
+            challenge_id="sat-snapshot-cross-app",
+            tier=1,
+            cnf_text=cnf_e2e,
+        )
+        snapshot_app_b = build_app(
+            database_path=snapshot_db_path,
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        with TestClient(snapshot_app_a) as snapshot_client_a, TestClient(snapshot_app_b) as snapshot_client_b:
+            cross_latest = snapshot_client_a.get("/sat/latest.json")
+            cross_latest_json = cross_latest.json()
+            cross_seq = str(cross_latest_json.get("sequence"))
+            cross_board = snapshot_client_b.get(
+                cross_latest_json["artifacts"]["board"]["url"])
+            cross_weights = snapshot_client_b.get(
+                cross_latest_json["artifacts"]["weights"]["url"])
+            ck("sat sequence artifacts resolve across split read replicas",
+               cross_latest.status_code == 200
+               and cross_board.status_code == 200
+               and cross_weights.status_code == 200
+               and cross_board.headers.get("x-cathedral-sequence") == cross_seq
+               and cross_weights.headers.get("x-cathedral-sequence") == cross_seq)
+            ck("cross-replica sat artifact bytes match signed pointer hashes",
+               "sha256:" + hashlib.sha256(cross_board.content).hexdigest()
+               == cross_latest_json["artifacts"]["board"]["hash"]
+               and "sha256:" + hashlib.sha256(cross_weights.content).hexdigest()
+               == cross_latest_json["artifacts"]["weights"]["hash"])
+    finally:
+        try:
+            if snapshot_db_path:
+                os.unlink(snapshot_db_path)
+        except Exception:
+            pass
     old_rpm = os.environ.get("CATHEDRAL_RATELIMIT_RPM")
     os.environ["CATHEDRAL_RATELIMIT_RPM"] = "1"
     try:

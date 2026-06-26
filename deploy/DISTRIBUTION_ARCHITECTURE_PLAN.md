@@ -712,13 +712,16 @@ adding the scalable read contract:
 - `GET /sat/latest.json` returns a signed latest pointer with sequence, hashes,
   sizes, and artifact URLs.
 - `GET /sat/sequences/{sequence}/board.json` returns the current board snapshot
-  for the active sequence.
+  for a recent sequence persisted in the shared publisher database.
 - `GET /sat/sequences/{sequence}/weights.json` returns the current signed
-  weights snapshot for the active sequence.
+  weights snapshot for a recent sequence persisted in the shared publisher
+  database.
 - `GET /sat/events` streams SSE hints containing only sequence and latest URL.
 - `GET /v1/agents/receipts/{receipt_id}` returns durable submit status without
   scraping recent activity.
 
 This is deliberately a transition layer: it does not yet publish historical
 immutable object storage, CNF artifacts, transactional outbox rows, or async
-verification workers.
+verification workers. Sequence artifact responses serve byte-exact,
+hash-verifiable JSON from a bounded shared-database cache, but they use bounded
+cache headers rather than claiming permanent origin availability.
