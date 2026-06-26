@@ -3217,9 +3217,15 @@ def build_app(
             assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
             tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
             if tier_seq is None:
+                tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
+            if tier_seq is None:
                 check = None
                 ok, reason = False, "assignment_required_fetch_challenges_first"
             else:
+                # The assignment row is a ledger/cache entry, not the authority.
+                # Re-materialize it when submit beats read-replica visibility.
+                _record_one_perminer_assignment(
+                    assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
                 cnf = pm.get_miner_cnf(assignment_identity, epoch, tier_seq[0], tier_seq[1])
                 if cnf is None:
                     check = None
