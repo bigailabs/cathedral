@@ -337,6 +337,52 @@ with TestClient(app) as client:
                == cross_latest_json["artifacts"]["board"]["hash"]
                and "sha256:" + hashlib.sha256(cross_weights.content).hexdigest()
                == cross_latest_json["artifacts"]["weights"]["hash"])
+
+        snapshot_fail_app_a = build_app(
+            database_path=snapshot_db_path,
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        snapshot_fail_app_b = build_app(
+            database_path=snapshot_db_path,
+            signing_key_hex=key_hex,
+            submit_min_interval_secs=0,
+        )
+        snapshot_fail_app_a.state.store.write(
+            lambda conn: conn.execute("DELETE FROM sat_snapshots"))
+        original_write = snapshot_fail_app_a.state.store.write
+        failed_snapshot_write = {"done": False}
+
+        class _FailOneSnapshotInsert:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args, **kwargs):
+                if (
+                    not failed_snapshot_write["done"]
+                    and "INSERT OR REPLACE INTO sat_snapshots" in str(sql)
+                ):
+                    failed_snapshot_write["done"] = True
+                    raise RuntimeError("forced_sat_snapshot_write_failure")
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        def _flaky_write(fn):
+            return original_write(lambda conn: fn(_FailOneSnapshotInsert(conn)))
+
+        snapshot_fail_app_a.state.store.write = _flaky_write
+        with TestClient(snapshot_fail_app_a, raise_server_exceptions=False) as fail_client_a, TestClient(snapshot_fail_app_b) as fail_client_b:
+            failed_latest = fail_client_a.get("/sat/latest.json")
+            retry_latest = fail_client_a.get("/sat/latest.json")
+            retry_latest_json = retry_latest.json()
+            retry_board = fail_client_b.get(retry_latest_json["artifacts"]["board"]["url"])
+            ck("sat snapshot write failure does not poison local cache",
+               failed_latest.status_code == 500
+               and retry_latest.status_code == 200
+               and retry_board.status_code == 200
+               and failed_snapshot_write["done"])
     finally:
         try:
             if snapshot_db_path:
@@ -367,10 +413,31 @@ with TestClient(app) as client:
         "CATHEDRAL_REFILL_ENABLED": os.environ.get("CATHEDRAL_REFILL_ENABLED"),
     }
     try:
+        role_db_path = ""
+        with _snapshot_tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as _role_db:
+            role_db_path = _role_db.name
+        os.environ["CATHEDRAL_SERVICE_ROLE"] = "all"
+        role_seed_app = build_app(database_path=role_db_path, signing_key_hex=key_hex,
+                                  submit_min_interval_secs=0)
+        seed_challenge(
+            role_seed_app.state.store,
+            challenge_id="sat-snapshot-role-seed",
+            tier=1,
+            cnf_text=cnf_e2e,
+        )
+        with TestClient(role_seed_app) as role_seed_client:
+            role_seed_latest = role_seed_client.get("/sat/latest.json")
+            ck("role test prepublishes SAT snapshot",
+               role_seed_latest.status_code == 200)
+
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "read"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "true"
-        role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
+        role_app = build_app(database_path=role_db_path, signing_key_hex=key_hex,
                              submit_min_interval_secs=0)
+        before_snapshots = role_app.state.store.query(
+            "SELECT COUNT(*) AS count FROM sat_snapshots")[0]["count"]
+        before_weight_policy = role_app.state.store.query(
+            "SELECT COUNT(*) AS count FROM weight_policy_state")[0]["count"]
         with TestClient(role_app) as role_client:
             role_health = role_client.get("/health/live").json()
             ck("service role appears in health", role_health["service_role"] == "read")
@@ -389,6 +456,13 @@ with TestClient(app) as client:
                read_latest.status_code == 200
                and read_snapshot.status_code == 200
                and read_events.status_code == 200)
+        after_snapshots = role_app.state.store.query(
+            "SELECT COUNT(*) AS count FROM sat_snapshots")[0]["count"]
+        after_weight_policy = role_app.state.store.query(
+            "SELECT COUNT(*) AS count FROM weight_policy_state")[0]["count"]
+        ck("read role serves SAT snapshots without publishing",
+           before_snapshots == after_snapshots
+           and before_weight_policy == after_weight_policy)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "submit"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "false"
@@ -500,6 +574,11 @@ with TestClient(app) as client:
                 os.environ.pop(_key, None)
             else:
                 os.environ[_key] = _value
+        try:
+            if "role_db_path" in locals() and role_db_path:
+                os.unlink(role_db_path)
+        except Exception:
+            pass
 
     from bittensor_wallet import Keypair  # noqa
     miner = Keypair.create_from_uri("//E2EMiner")

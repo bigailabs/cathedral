@@ -501,7 +501,6 @@ def build_app(
         item = _snapshot_item(latest, board_payload, weights_payload)
         with snapshot_lock:
             seen_local = sequence in snapshot_ring
-            _snapshot_cache_local(sequence, item)
         if seen_local:
             return
 
@@ -530,6 +529,8 @@ def build_app(
             )
 
         store.write(_store_snapshot)
+        with snapshot_lock:
+            _snapshot_cache_local(sequence, item)
 
     def _snapshot_lookup(sequence: str) -> dict[str, Any] | None:
         with snapshot_lock:
@@ -555,6 +556,42 @@ def build_app(
         with snapshot_lock:
             _snapshot_cache_local(sequence, item)
         return dict(item)
+
+    def _snapshot_latest_persisted() -> dict[str, Any] | None:
+        rows_ = store.query(
+            "SELECT sequence, latest_json, board_json, weights_json, latest_etag, "
+            "board_etag, weights_etag FROM sat_snapshots "
+            "ORDER BY created_at_iso DESC, sequence DESC LIMIT 1"
+        )
+        if not rows_:
+            return None
+        row = rows_[0]
+        sequence = str(row["sequence"])
+        item = {
+            "latest_bytes": str(row["latest_json"]).encode("utf-8"),
+            "board_bytes": str(row["board_json"]).encode("utf-8"),
+            "weights_bytes": str(row["weights_json"]).encode("utf-8"),
+            "latest_etag": row["latest_etag"],
+            "board_etag": row["board_etag"],
+            "weights_etag": row["weights_etag"],
+        }
+        with snapshot_lock:
+            _snapshot_cache_local(sequence, item)
+        return dict(item)
+
+    def _sat_latest_snapshot(*, allow_publish: bool) -> tuple[bytes, str, str] | None:
+        persisted = _snapshot_latest_persisted()
+        if persisted is not None:
+            try:
+                latest_obj = json.loads(persisted["latest_bytes"].decode("utf-8"))
+                sequence = str(latest_obj.get("sequence") or "")
+            except Exception:
+                sequence = ""
+            return persisted["latest_bytes"], str(persisted["latest_etag"]), sequence
+        if not allow_publish:
+            return None
+        latest, _board, _weights, etag = _sat_snapshot_bundle()
+        return _snapshot_bytes(latest), etag, str(latest["sequence"])
 
     def _sign_latest_pointer(payload: dict[str, Any]) -> dict[str, Any]:
         signed = dict(payload)
@@ -590,7 +627,7 @@ def build_app(
             "created_at": created_at,
             "publisher_generation_id": os.environ.get(
                 "CATHEDRAL_PUBLISHER_GENERATION_ID", "default"),
-            "storage": "in_process_recent_snapshot_ring",
+            "storage": "shared_db_recent_snapshot_cache",
             "trust_root": "signed_latest_pointer_and_artifact_hashes",
             "artifacts": {
                 "board": {
@@ -624,7 +661,7 @@ def build_app(
             "compatibility": {
                 "legacy_read_endpoints_kept": True,
                 "legacy_validator_weights_kept": True,
-                "historical_sequence_storage": "not_yet_published",
+                "historical_sequence_storage": "bounded_shared_db_cache",
             },
         }
         signed_pointer = _sign_latest_pointer(pointer)
@@ -2110,13 +2147,16 @@ def build_app(
 
     @app.get("/sat/latest.json")
     async def sat_latest(request: Request):
-        latest, _board, _weights, etag = _sat_snapshot_bundle()
-        headers = _sat_snapshot_headers(etag, str(latest["sequence"]))
+        latest_snapshot = _sat_latest_snapshot(allow_publish=service_role != "read")
+        if latest_snapshot is None:
+            raise HTTPException(503, {"detail": "sat_snapshot_not_published"})
+        latest_bytes, etag, sequence = latest_snapshot
+        headers = _sat_snapshot_headers(etag, sequence)
         inm = request.headers.get("if-none-match")
         if inm and etag in [t.strip() for t in inm.split(",")]:
             return Response(status_code=304, headers=headers)
         return Response(
-            content=_snapshot_bytes(latest),
+            content=latest_bytes,
             media_type="application/json",
             headers=headers,
         )
@@ -2125,8 +2165,13 @@ def build_app(
     async def sat_sequence_board(sequence: str, request: Request):
         snapshot = _snapshot_lookup(sequence)
         if snapshot is None:
-            latest, _board_payload, _weights, _latest_etag = _sat_snapshot_bundle()
-            current_sequence = str(latest["sequence"])
+            latest_snapshot = _sat_latest_snapshot(allow_publish=service_role != "read")
+            current_sequence = ""
+            if latest_snapshot is not None:
+                try:
+                    current_sequence = str(json.loads(latest_snapshot[0].decode("utf-8")).get("sequence") or "")
+                except Exception:
+                    current_sequence = ""
             raise HTTPException(
                 404,
                 {
@@ -2150,8 +2195,13 @@ def build_app(
     async def sat_sequence_weights(sequence: str, request: Request):
         snapshot = _snapshot_lookup(sequence)
         if snapshot is None:
-            latest, _board, _weights_payload, _latest_etag = _sat_snapshot_bundle()
-            current_sequence = str(latest["sequence"])
+            latest_snapshot = _sat_latest_snapshot(allow_publish=service_role != "read")
+            current_sequence = ""
+            if latest_snapshot is not None:
+                try:
+                    current_sequence = str(json.loads(latest_snapshot[0].decode("utf-8")).get("sequence") or "")
+                except Exception:
+                    current_sequence = ""
             raise HTTPException(
                 404,
                 {
@@ -2174,6 +2224,8 @@ def build_app(
     @app.get("/sat/events")
     async def sat_events(request: Request, once: bool = Query(False)):
         heartbeat_secs = max(1.0, _env_float("CATHEDRAL_SSE_HEARTBEAT_SECS", 30.0))
+        if service_role == "read" and _snapshot_latest_persisted() is None:
+            raise HTTPException(503, {"detail": "sat_snapshot_not_published"})
 
         def _snapshot_event_frame(latest: dict[str, Any]) -> str:
             event = {
@@ -2194,7 +2246,14 @@ def build_app(
         async def _stream():
             last_sequence = request.headers.get("last-event-id", "")
             while True:
-                latest, _board, _weights, _latest_etag = _sat_snapshot_bundle()
+                latest_snapshot = _sat_latest_snapshot(allow_publish=service_role != "read")
+                if latest_snapshot is None:
+                    yield ": snapshot_not_published\n\n"
+                    if once or await request.is_disconnected():
+                        return
+                    await asyncio.sleep(heartbeat_secs)
+                    continue
+                latest = json.loads(latest_snapshot[0].decode("utf-8"))
                 sequence = str(latest["sequence"])
                 if sequence != last_sequence:
                     yield _snapshot_event_frame(latest)
