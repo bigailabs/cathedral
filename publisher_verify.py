@@ -856,6 +856,31 @@ with TestClient(app) as client:
            pm_closed.status_code == 503
            and pm_closed.json().get("detail") == "per_miner_seed_secret_missing")
         os.environ["CATHEDRAL_PERMINER_SEED_SECRET"] = "publisher-verify-stable-seed"
+        _pm._instance_index.cache_clear()
+        os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T1"] = "3"
+        cache_epoch = _pm.current_epoch()
+        cache_id = _pm.instance_id("cache-hotkey", cache_epoch, 1, 2)
+        cache_first = _pm.recover_tier_seq_for("cache-hotkey", cache_epoch, cache_id)
+        cache_info_first = _pm._instance_index.cache_info()
+        cache_second = _pm.recover_tier_seq_for("cache-hotkey", cache_epoch, cache_id)
+        cache_info_second = _pm._instance_index.cache_info()
+        cache_foreign = _pm.recover_tier_seq_for("cache-other-hotkey", cache_epoch, cache_id)
+        os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T1"] = "2"
+        cache_reduced_allotment = _pm.recover_tier_seq_for("cache-hotkey", cache_epoch, cache_id)
+        os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T1"] = "3"
+        os.environ["CATHEDRAL_PERMINER_SEED_SECRET"] = "publisher-verify-cache-rotated"
+        cache_rotated = _pm.recover_tier_seq_for("cache-hotkey", cache_epoch, cache_id)
+        ck("per-miner recovery index is cached and seed-scoped",
+           cache_first == (1, 2)
+           and cache_second == (1, 2)
+           and cache_info_first.misses >= 1
+           and cache_info_second.hits > cache_info_first.hits
+           and cache_foreign is None
+           and cache_reduced_allotment is None
+           and cache_rotated is None)
+        os.environ["CATHEDRAL_PERMINER_SEED_SECRET"] = "publisher-verify-stable-seed"
+        os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T1"] = "1"
+        _pm._instance_index.cache_clear()
         def _map_pm_coldkey(conn):
             conn.execute(
                 "INSERT OR REPLACE INTO coldkey_map(hotkey, coldkey, updated_at_iso) "
