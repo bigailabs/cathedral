@@ -130,7 +130,7 @@ def row_score_task_types() -> set[str]:
 
 
 def burn_percentage() -> float:
-    return min(100.0, max(0.0, _env_float(BURN_PERCENTAGE_ENV, 85.0)))
+    return min(100.0, max(0.0, _env_float(BURN_PERCENTAGE_ENV, 0.0)))
 
 
 def burn_uid() -> int | None:

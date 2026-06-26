@@ -266,9 +266,9 @@ redeploying.
 
 ## What is NOT in this swap (deferred by design)
 
-- **Burn step-down.** The 85% burn is hardcoded validator-side (local-weights
-  mode). It does NOT change at swap — it ships later as the one bundled
-  "jackpot release" (V4-DESIGN.md migration §). This swap is feed-backend-only.
+- **Burn policy.** The burn percentage is signed in the weight vector
+  (local-weights mode). The code default is `0.0`; an explicit
+  `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE` environment value still wins.
 - **Lane S/I activation as on-chain value.** Endpoints exist (additive) but
   ramping their row values is a deliberate, gradual publisher-side decision
   inside the 7-day window — not part of go-live.
