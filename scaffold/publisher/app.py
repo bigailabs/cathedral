@@ -1245,15 +1245,24 @@ def build_app(
         return hashlib.sha256(f"{challenge_id}:{int(tier)}".encode("utf-8")).hexdigest()[:16]
 
     def _known_pm_task_ids() -> set[str]:
+        cached = getattr(app.state, "known_pm_task_ids_cache", None)
+        now = time.monotonic()
+        if cached and now < float(cached.get("expires_at", 0.0)):
+            return set(cached.get("task_ids") or ())
         rows_ = store.query(
             "SELECT DISTINCT challenge_id, tier FROM per_miner_solves "
             "WHERE verified=1"
         )
-        return {
+        task_ids = {
             _task_id_public(str(r["challenge_id"]), int(r["tier"]))
             for r in rows_
             if str(r["challenge_id"] or "").startswith("pm-")
         }
+        app.state.known_pm_task_ids_cache = {
+            "task_ids": tuple(task_ids),
+            "expires_at": now + 30.0,
+        }
+        return task_ids
 
     def _rewrite_recent_rows_for_legacy_pm_primary(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Serve old-validator /recent economics consistent with PM-primary.
@@ -1527,8 +1536,6 @@ def build_app(
             nxt_ran_at, nxt_id = last["ran_at"], last["id"]
         else:
             nxt_ran_at, nxt_id = cur_ran_at, cur_id
-        weight_ctx = _current_weight_context()
-        hotkeys = sorted({str(item.get("miner_hotkey") or "") for item in items if item.get("miner_hotkey")})
         return {
             "items": items,
             "view": "recent_signed_receipts",
@@ -1538,9 +1545,9 @@ def build_app(
                 "Use current_weights or /v1/leaderboard/top?view=weights for current payment rank."
             ),
             "earning_weight_source": "v1/validator/weights/next",
-            "earning_weights_generated_at": weight_ctx["generated_at"],
-            "current_weights": _weight_annotations(weight_ctx, hotkeys),
-            "current_weights_status": "available" if weight_ctx["generated_at"] else "unavailable",
+            "earning_weights_generated_at": None,
+            "current_weights": {},
+            "current_weights_status": "not_included_on_validator_feed",
             "next_since": nxt_ran_at,
             "next_since_ran_at": nxt_ran_at,
             "next_since_id": nxt_id,

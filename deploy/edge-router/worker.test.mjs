@@ -47,7 +47,7 @@ assert.deepEqual(
 
 assert.deepEqual(
   cachePolicyForPath("/v1/leaderboard/recent"),
-  { freshTtl: 2, edgeTtl: 20, swr: true, params: ["limit", "since", "since_ran_at", "since_id"] },
+  { freshTtl: 5, edgeTtl: 300, swr: true, params: ["limit", "since", "since_ran_at", "since_id"] },
 );
 assert.equal(cachePolicyForPath("/v1/synthetic-boolean/per-miner/cnf"), null);
 
