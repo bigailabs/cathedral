@@ -368,17 +368,33 @@ def verify_miner_submission_for(
     return True, None
 
 
+_RECOVER_INDEX_CACHE = max(1, _env_int("CATHEDRAL_PERMINER_RECOVER_INDEX_CACHE", 64))
+
+
+@lru_cache(maxsize=_RECOVER_INDEX_CACHE)
+def _instance_index(hotkey: str, epoch: int, tier: int) -> dict[str, int]:
+    """Reverse map challenge_id -> seq for one (hotkey, epoch, tier), built once and cached.
+
+    ``instance_id`` is a deterministic HMAC, so this map is stable for the process lifetime.
+    It turns ``recover_tier_seq_for`` from an O(allotment) HMAC re-scan on every call into an
+    amortized O(1) lookup. That recovery path runs inside the submit gate slot (it backs the
+    assignment-row replica-lag tolerance added in #296), so re-scanning ~allotment HMACs on
+    every replica-lagged submit can dominate submit latency under load. Bounded by
+    ``CATHEDRAL_PERMINER_RECOVER_INDEX_CACHE`` (default 64 maps).
+    """
+    return {instance_id(hotkey, epoch, tier, seq): seq for seq in range(allotment_for(tier))}
+
+
 def recover_tier_seq_for(hotkey: str, epoch: int, challenge_id: str) -> tuple[int, int] | None:
-    """Find (tier, seq) for a challenge_id by scanning the miner's allotment.
+    """Find (tier, seq) for a challenge_id from the miner's allotment (cached O(1) lookup).
     Returns None if the challenge_id was not generated for this hotkey+epoch.
     """
     parsed = parse_challenge_id(challenge_id)
     candidate_tiers = [parsed["tier"]] if parsed and parsed["tier"] in TIERS else TIERS
     for tier in candidate_tiers:
-        for seq in range(allotment_for(tier)):
-            cid = instance_id(hotkey, epoch, tier, seq)
-            if cid == challenge_id:
-                return tier, seq
+        seq = _instance_index(hotkey, epoch, tier).get(challenge_id)
+        if seq is not None:
+            return tier, seq
     return None
 
 
