@@ -268,7 +268,10 @@ redeploying.
 
 - **Burn policy.** The burn percentage is signed in the weight vector
   (local-weights mode). The code default is `0.0`; an explicit
-  `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE` environment value still wins.
+  `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2` environment value still
+  wins. The legacy `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE` key is
+  intentionally ignored so stale production `80` values cannot override this
+  policy.
 - **Lane S/I activation as on-chain value.** Endpoints exist (additive) but
   ramping their row values is a deliberate, gradual publisher-side decision
   inside the 7-day window — not part of go-live.
