@@ -6,6 +6,7 @@
 - Launch path: DIMACS witness -> CNF check -> SAT-bound decode -> deterministic replay -> private trace.
 - Source files:
   - `scaffold/lanes/audit_arena.py`
+  - `scaffold/lanes/subtensor_replay.py`
   - `audit_arena_verify.py`
 
 ## Miner Submission Format
@@ -71,6 +72,31 @@ v 1 -2 3 0
   - `replay_code_sha256`
 
 - The accepted bit is derived from deterministic replay, not from miner text.
+
+## Subtensor Clone Shadow Replay
+
+- Wire schema: `cathedral.subtensor_replay.v1`
+- Scope:
+  - validates a task-pinned replay package hash, target commit, runtime hash, clone-state hash, script hash, witness binding, and invariant checks.
+  - accepts only when the SAT-decoded witness matches the replay package and an injected observation violates the declared invariant.
+  - rejects missing observations instead of starting a node or running a script implicitly.
+- Task requirement:
+  - `task.source.subtensor_replay_package_sha256` must equal the canonical replay package hash.
+- Required package fields:
+  - `target_commit`
+  - `runtime_sha256`
+  - `clone_state_sha256`
+  - `script_sha256`
+  - `script_steps`
+  - `invariant_id`
+  - `expected_witness`
+  - `checks`, with at least one required invariant check
+- Additional rejection reasons:
+  - `subtensor_replay_package_unpinned`: task did not pin the replay package hash.
+  - `subtensor_replay_package_sha256_mismatch`: task pin does not match the supplied package.
+  - `invariant_required_check_missing`: package has checks, but none are required.
+  - `invariant_number_must_be_finite`: observed invariant input is not a finite number.
+- This is a shadow/offline seam. It does not yet clone real Subtensor state, execute extrinsics, attest runtime output, score live miners, or pay emissions.
 
 ## Scoring Ladder
 

@@ -25,6 +25,11 @@ from scaffold.lanes.audit_arena import (
     sha256_text,
     verify_and_replay,
 )
+from scaffold.lanes.subtensor_replay import (
+    SUBTENSOR_REPLAY_SCHEMA_VERSION,
+    SubtensorReplayPackage,
+    make_subtensor_replay_adapter,
+)
 
 
 checks: list[tuple[str, bool]] = []
@@ -217,6 +222,326 @@ def main() -> None:
     ck("trace hash is stable across decode-map key order",
        prod_verdict.distillation_trace["trace_hash"]
        == prod_reordered.distillation_trace["trace_hash"])
+
+    subtensor_package = SubtensorReplayPackage(
+        schema_version=SUBTENSOR_REPLAY_SCHEMA_VERSION,
+        target_commit=target.commit,
+        runtime_sha256="a" * 64,
+        clone_state_sha256="b" * 64,
+        clone_block=2764,
+        clone_state_root="0x" + "c" * 64,
+        script_sha256="d" * 64,
+        script_steps=[
+            {
+                "call": "Subtensor.synthetic_transfer",
+                "args": {"amount": 1, "fee_rate": 1},
+            }
+        ],
+        invariant_id="INV-SUBTENSOR-CONSERVATION",
+        expected_witness={"amount": 1, "fee_rate": 1},
+        checks=[
+            {
+                "id": "total-issuance-conserved",
+                "kind": "numeric_delta",
+                "before_path": "before.total_issuance",
+                "after_path": "after.total_issuance",
+                "operator": "delta_eq",
+                "expected_delta": 0,
+            }
+        ],
+        artifact_sha256={"replay_script": "d" * 64},
+    )
+    subtensor_task = AuditTask(
+        task_id="audit-subtensor-clone-shadow",
+        target=target,
+        invariant_id="INV-SUBTENSOR-CONSERVATION",
+        invariant="total issuance must be conserved across the replayed transaction sequence",
+        challenge_id="audit-subtensor-clone-cnf",
+        cnf_sha256=sha256_text(prod_cnf),
+        decode_map=prod_decode_map,
+        replay_kind="subtensor_clone_shadow",
+        source={"subtensor_replay_package_sha256": subtensor_package.sha256()},
+    )
+    subtensor_submission = MinerAuditSubmission(
+        task_id=subtensor_task.task_id,
+        miner_hotkey="5AuditMiner",
+        dimacs_solution="s SATISFIABLE\nv 1 2 0\n",
+    )
+    subtensor_observed = {
+        "runtime_sha256": "a" * 64,
+        "clone_state_sha256": "b" * 64,
+        "script_sha256": "d" * 64,
+        "artifact_sha256": {"replay_script": "d" * 64},
+        "before": {"total_issuance": 100.0},
+        "after": {"total_issuance": 101.0},
+    }
+    subtensor_replay = verify_and_replay(
+        subtensor_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=subtensor_observed,
+        ),
+    )
+    ck("Subtensor clone shadow replay accepts SAT-bound invariant break",
+       subtensor_replay.accepted
+       and subtensor_replay.stage == "accepted"
+       and subtensor_replay.distillation_trace["label"] == "reproduced_witness")
+    ck("Subtensor clone replay artifacts bind package and target commit",
+       subtensor_replay.replay is not None
+       and len(subtensor_replay.replay.artifacts["subtensor_replay_package_sha256"]) == 64
+       and subtensor_replay.replay.artifacts["target_commit"] == target.commit)
+
+    bad_schema_package = SubtensorReplayPackage(
+        schema_version="cathedral.subtensor_replay.v0",
+        target_commit=target.commit,
+        runtime_sha256="a" * 64,
+        clone_state_sha256="b" * 64,
+        script_sha256="d" * 64,
+        script_steps=subtensor_package.script_steps,
+        invariant_id=subtensor_package.invariant_id,
+        expected_witness=subtensor_package.expected_witness,
+        checks=subtensor_package.checks,
+    )
+    bad_schema_task = AuditTask(
+        task_id=subtensor_task.task_id,
+        target=target,
+        invariant_id=subtensor_task.invariant_id,
+        invariant=subtensor_task.invariant,
+        challenge_id=subtensor_task.challenge_id,
+        cnf_sha256=subtensor_task.cnf_sha256,
+        decode_map=subtensor_task.decode_map,
+        replay_kind=subtensor_task.replay_kind,
+        source={"subtensor_replay_package_sha256": bad_schema_package.sha256()},
+    )
+    bad_schema_replay = verify_and_replay(
+        bad_schema_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            bad_schema_package,
+            observed_result=subtensor_observed,
+        ),
+    )
+    ck("Subtensor replay rejects wrong package schema",
+       not bad_schema_replay.accepted
+       and bad_schema_replay.stage == "replay"
+       and bad_schema_replay.rejection_reason == "subtensor_replay_schema_mismatch")
+
+    bad_hash_observed = dict(subtensor_observed)
+    bad_hash_observed["script_sha256"] = "e" * 64
+    bad_hash_replay = verify_and_replay(
+        subtensor_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=bad_hash_observed,
+        ),
+    )
+    ck("Subtensor replay rejects observed script hash mismatch",
+       not bad_hash_replay.accepted
+       and bad_hash_replay.rejection_reason == "script_sha256_mismatch")
+
+    unpinned_task = AuditTask(
+        task_id=subtensor_task.task_id,
+        target=target,
+        invariant_id=subtensor_task.invariant_id,
+        invariant=subtensor_task.invariant,
+        challenge_id=subtensor_task.challenge_id,
+        cnf_sha256=subtensor_task.cnf_sha256,
+        decode_map=subtensor_task.decode_map,
+        replay_kind=subtensor_task.replay_kind,
+        source={},
+    )
+    unpinned_replay = verify_and_replay(
+        unpinned_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=subtensor_observed,
+        ),
+    )
+    ck("Subtensor replay rejects packages not pinned by the task",
+       not unpinned_replay.accepted
+       and unpinned_replay.rejection_reason == "subtensor_replay_package_unpinned")
+
+    pin_mismatch_task = AuditTask(
+        task_id=subtensor_task.task_id,
+        target=target,
+        invariant_id=subtensor_task.invariant_id,
+        invariant=subtensor_task.invariant,
+        challenge_id=subtensor_task.challenge_id,
+        cnf_sha256=subtensor_task.cnf_sha256,
+        decode_map=subtensor_task.decode_map,
+        replay_kind=subtensor_task.replay_kind,
+        source={"subtensor_replay_package_sha256": "f" * 64},
+    )
+    pin_mismatch_replay = verify_and_replay(
+        pin_mismatch_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=subtensor_observed,
+        ),
+    )
+    ck("Subtensor replay rejects package hash not pinned to task source",
+       not pin_mismatch_replay.accepted
+       and pin_mismatch_replay.rejection_reason
+       == "subtensor_replay_package_sha256_mismatch")
+
+    bad_artifact_observed = dict(subtensor_observed)
+    bad_artifact_observed["artifact_sha256"] = {"replay_script": "f" * 64}
+    bad_artifact_replay = verify_and_replay(
+        subtensor_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=bad_artifact_observed,
+        ),
+    )
+    ck("Subtensor replay rejects observed artifact hash mismatch",
+       not bad_artifact_replay.accepted
+       and bad_artifact_replay.rejection_reason == "artifact_sha256_mismatch:replay_script")
+
+    no_break_observed = dict(subtensor_observed)
+    no_break_observed["after"] = {"total_issuance": 100.0}
+    no_break_replay = verify_and_replay(
+        subtensor_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=no_break_observed,
+        ),
+    )
+    ck("Subtensor replay rejects valid execution when invariant does not break",
+       not no_break_replay.accepted
+       and no_break_replay.rejection_reason == "invariant_not_violated"
+       and no_break_replay.replay is not None
+       and no_break_replay.replay.reproduced is False)
+
+    mismatch_package = SubtensorReplayPackage(
+        schema_version=SUBTENSOR_REPLAY_SCHEMA_VERSION,
+        target_commit=target.commit,
+        runtime_sha256="a" * 64,
+        clone_state_sha256="b" * 64,
+        script_sha256="d" * 64,
+        script_steps=subtensor_package.script_steps,
+        invariant_id=subtensor_package.invariant_id,
+        expected_witness={"amount": 2, "fee_rate": 1},
+        checks=subtensor_package.checks,
+    )
+    mismatch_task = AuditTask(
+        task_id=subtensor_task.task_id,
+        target=target,
+        invariant_id=subtensor_task.invariant_id,
+        invariant=subtensor_task.invariant,
+        challenge_id=subtensor_task.challenge_id,
+        cnf_sha256=subtensor_task.cnf_sha256,
+        decode_map=subtensor_task.decode_map,
+        replay_kind=subtensor_task.replay_kind,
+        source={"subtensor_replay_package_sha256": mismatch_package.sha256()},
+    )
+    mismatch_replay = verify_and_replay(
+        mismatch_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            mismatch_package,
+            observed_result=subtensor_observed,
+        ),
+    )
+    ck("Subtensor replay rejects package decoupled from decoded SAT witness",
+       not mismatch_replay.accepted
+       and mismatch_replay.rejection_reason == "witness_mismatch")
+
+    missing_observation_replay = verify_and_replay(
+        subtensor_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(subtensor_package),
+    )
+    ck("Subtensor replay rejects missing observation instead of executing implicitly",
+       not missing_observation_replay.accepted
+       and missing_observation_replay.rejection_reason == "subtensor_replay_missing_observation")
+
+    no_required_check_package = SubtensorReplayPackage(
+        schema_version=SUBTENSOR_REPLAY_SCHEMA_VERSION,
+        target_commit=target.commit,
+        runtime_sha256="a" * 64,
+        clone_state_sha256="b" * 64,
+        script_sha256="d" * 64,
+        script_steps=subtensor_package.script_steps,
+        invariant_id=subtensor_package.invariant_id,
+        expected_witness=subtensor_package.expected_witness,
+        checks=[
+            {
+                "id": "optional-observation",
+                "kind": "numeric_delta",
+                "before_path": "before.total_issuance",
+                "after_path": "after.total_issuance",
+                "operator": "delta_eq",
+                "expected_delta": 0,
+                "required": False,
+            }
+        ],
+    )
+    no_required_check_task = AuditTask(
+        task_id=subtensor_task.task_id,
+        target=target,
+        invariant_id=subtensor_task.invariant_id,
+        invariant=subtensor_task.invariant,
+        challenge_id=subtensor_task.challenge_id,
+        cnf_sha256=subtensor_task.cnf_sha256,
+        decode_map=subtensor_task.decode_map,
+        replay_kind=subtensor_task.replay_kind,
+        source={"subtensor_replay_package_sha256": no_required_check_package.sha256()},
+    )
+    no_required_check_replay = verify_and_replay(
+        no_required_check_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            no_required_check_package,
+            observed_result=subtensor_observed,
+        ),
+    )
+    ck("Subtensor replay rejects packages with no required invariant check",
+       not no_required_check_replay.accepted
+       and no_required_check_replay.rejection_reason == "invariant_required_check_missing")
+
+    bad_number_observed = dict(subtensor_observed)
+    bad_number_observed["after"] = {"total_issuance": "not-a-number"}
+    bad_number_replay = verify_and_replay(
+        subtensor_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=bad_number_observed,
+        ),
+    )
+    ck("Subtensor replay rejects non-numeric invariant observations cleanly",
+       not bad_number_replay.accepted
+       and bad_number_replay.rejection_reason == "invariant_number_must_be_finite")
+
+    subtensor_replay_repeat = verify_and_replay(
+        subtensor_task,
+        subtensor_submission,
+        cnf_text=prod_cnf,
+        replay_fn=make_subtensor_replay_adapter(
+            subtensor_package,
+            observed_result=subtensor_observed,
+        ),
+    )
+    ck("Subtensor clone shadow replay trace hash is deterministic",
+       subtensor_replay.distillation_trace["trace_hash"]
+       == subtensor_replay_repeat.distillation_trace["trace_hash"])
 
     sparse_prod_task = AuditTask(
         task_id="audit-sparse-production-map",
