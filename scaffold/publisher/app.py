@@ -2665,11 +2665,9 @@ def build_app(
         identity = weights_mod.scoring_identity_for_hotkey(
             store,
             hotkey,
-            require_mapped=weights_mod.perminer_require_coldkey(),
+            require_mapped=False,
         )
-        if identity is None:
-            raise HTTPException(403, "coldkey_mapping_required")
-        return identity
+        return identity or hotkey
 
     def _since_24h_iso() -> str:
         dt = datetime.now(timezone.utc) - timedelta(hours=24)
@@ -2867,18 +2865,16 @@ def build_app(
         return payload
 
     def _perminer_public_contribution(miner_hotkey: str) -> dict[str, Any]:
-        require_mapped = weights_mod.perminer_require_coldkey()
         identity = weights_mod.scoring_identity_for_hotkey(
             store,
             miner_hotkey,
-            require_mapped=require_mapped,
+            require_mapped=False,
         )
-        eligible = identity is not None
         return _perminer_contribution_for(
             miner_hotkey,
             assignment_identity=identity or miner_hotkey,
-            eligible=eligible,
-            ineligibility_reason=None if eligible else "coldkey_mapping_required",
+            eligible=True,
+            ineligibility_reason=None,
             expose_assignment_identity=False,
             include_assignment_supply=False,
             include_attempts=False,

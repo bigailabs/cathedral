@@ -302,8 +302,8 @@ try:
         )
         coldkey_blocked_scores = weights.compose_scores(pm_primary_store, now=now)
         ck(
-            "pm_primary does not activate without required coldkey identity",
-            coldkey_blocked_scores == {"5PublicOnly": 1.0},
+            "pm_primary falls back to hotkey identity without coldkey map",
+            coldkey_blocked_scores == {"5Private": 1.0, "5PublicOnly": 0.052632},
         )
         coldkey_blocked_vec = weights.build_signed_vector(
             pm_primary_store,
@@ -311,9 +311,11 @@ try:
             now=now,
         )
         ck(
-            "pm_primary metadata stays inactive without required coldkey identity",
-            coldkey_blocked_vec["policy_metadata"]["score_source"] == "proportional"
-            and coldkey_blocked_vec["policy_metadata"]["perminer"]["primary_live"] is False,
+            "pm_primary metadata stays active with hotkey fallback identity",
+            coldkey_blocked_vec["policy_metadata"]["score_source"] == "pm_primary"
+            and coldkey_blocked_vec["policy_metadata"]["perminer"]["primary_live"] is True
+            and coldkey_blocked_vec["policy_metadata"]["perminer"]["identity_ready"] is True
+            and coldkey_blocked_vec["policy_metadata"]["perminer"]["degraded_reason"] is None,
         )
         os.environ[weights.PERMINER_REQUIRE_COLDKEY_ENV] = "0"
         primary_scores = weights.compose_scores(pm_primary_store, now=now)
@@ -408,8 +410,11 @@ try:
             coldkey_of={"5PrivateMapped": "5ColdPrivate", "5PublicOnly": "5ColdPublic"},
         )
         ck(
-            "pm_primary excludes unmapped PM hotkeys when coldkey identity is required",
-            mapped_scores == {"5PrivateMapped": 1.0, "5PublicOnly": 0.052632},
+            "pm_primary uses coldkey map opportunistically and falls back for unmapped PM hotkeys",
+            mapped_scores.get("5UnmappedHuge") == 1.0
+            and 0.02 < mapped_scores.get("5PrivateMapped", 0.0) < 0.04
+            and 0.02 < mapped_scores.get("5PublicOnly", 0.0) < 0.04
+            and 0.02 < mapped_scores.get("5UnmappedPublic", 0.0) < 0.04,
         )
         mapped_vec = weights.build_signed_vector(
             pm_mapped_store,
@@ -418,14 +423,14 @@ try:
         )
         mapped_hotkeys = {w["miner_hotkey"] for w in mapped_vec["weights"]}
         ck(
-            "pm_primary signed vector omits unmapped PM leaders",
+            "pm_primary signed vector includes unmapped PM leaders via hotkey fallback",
             mapped_vec["policy_metadata"]["score_source"] == "pm_primary"
             and mapped_vec["policy_metadata"]["perminer"]["primary_live"] is True
-            and "5UnmappedHuge" not in mapped_hotkeys,
+            and "5UnmappedHuge" in mapped_hotkeys,
         )
         ck(
-            "pm_primary signed vector omits unmapped public baseline hotkeys",
-            "5UnmappedPublic" not in mapped_hotkeys,
+            "pm_primary signed vector includes unmapped public baseline hotkeys",
+            "5UnmappedPublic" in mapped_hotkeys,
         )
     finally:
         pm_mapped_store.close()
