@@ -49,6 +49,10 @@ assert.deepEqual(
   cachePolicyForPath("/v1/leaderboard/recent"),
   { freshTtl: 5, edgeTtl: 300, swr: true, params: ["limit", "since", "since_ran_at", "since_id"] },
 );
+assert.deepEqual(
+  cachePolicyForPath("/v1/validator/weights/next"),
+  { freshTtl: 15, edgeTtl: 300, swr: true, params: [] },
+);
 assert.equal(cachePolicyForPath("/v1/synthetic-boolean/per-miner/cnf"), null);
 
 assert.equal(originTimeoutForRoute({}, "read", "/health/ready"), 9000);

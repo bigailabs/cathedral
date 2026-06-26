@@ -1542,7 +1542,7 @@ def build_app(
             "rank_kind": "none",
             "explanation": (
                 "Recent is an audit stream, not the earning leaderboard. "
-                "Use current_weights or /v1/leaderboard/top?view=weights for current payment rank."
+                "Use /v1/leaderboard/top?view=weights for current payment rank."
             ),
             "earning_weight_source": "v1/validator/weights/next",
             "earning_weights_generated_at": None,
