@@ -1476,11 +1476,11 @@ with TestClient(app) as client:
        all(k in client.get("/v1/leaderboard/recent").json()
            for k in ("next_since", "next_since_ran_at", "next_since_id", "merkle_epoch_latest")))
     recent_default = client.get("/v1/leaderboard/recent").json()
-    ck("recent exposes current weights without mutating signed receipt rows",
+    ck("recent keeps validator feed light and omits payment annotations",
        recent_default.get("view") == "recent_signed_receipts"
        and recent_default.get("rank_kind") == "none"
-       and recent_default.get("current_weights_status") == "available"
-       and recent_default.get("current_weights")
+       and recent_default.get("current_weights_status") == "not_included_on_validator_feed"
+       and recent_default.get("current_weights") == {}
        and all(wire.verify_row(r, pub_hex) for r in recent_default["items"]))
 
     # Lane S register + status
