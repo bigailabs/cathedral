@@ -125,6 +125,12 @@ def allotment_for(tier: int) -> int:
                             {1: 10_000, 2: 10_000}.get(tier, 10_000)))
 
 
+# Worst-case entries are roughly cache_size * allotment_for(tier).
+_RECOVER_INDEX_CACHE_SIZE = max(
+    1, _env_int("CATHEDRAL_PERMINER_RECOVER_INDEX_CACHE", 64)
+)
+
+
 def assignment_page_limit_max() -> int:
     return max(1, min(500, _env_int("CATHEDRAL_PERMINER_MAX_PAGE_LIMIT", 50)))
 
@@ -235,6 +241,10 @@ def _seed_secret_bytes() -> bytes:
     if perminer_enabled():
         raise RuntimeError("per_miner_seed_secret_missing")
     return _EPHEMERAL_SEED_SECRET
+
+
+def _seed_secret_fingerprint() -> str:
+    return hashlib.sha256(_seed_secret_bytes()).hexdigest()
 
 
 # --------------------------------------------------------------------------
@@ -369,17 +379,31 @@ def verify_miner_submission_for(
 
 
 def recover_tier_seq_for(hotkey: str, epoch: int, challenge_id: str) -> tuple[int, int] | None:
-    """Find (tier, seq) for a challenge_id by scanning the miner's allotment.
+    """Find (tier, seq) for a challenge_id in the miner's allotment.
     Returns None if the challenge_id was not generated for this hotkey+epoch.
     """
     parsed = parse_challenge_id(challenge_id)
-    candidate_tiers = [parsed["tier"]] if parsed and parsed["tier"] in TIERS else TIERS
-    for tier in candidate_tiers:
-        for seq in range(allotment_for(tier)):
-            cid = instance_id(hotkey, epoch, tier, seq)
-            if cid == challenge_id:
-                return tier, seq
+    if not parsed or parsed["epoch"] != int(epoch) or parsed["tier"] not in TIERS:
+        return None
+    tier = parsed["tier"]
+    seq = _instance_index(_recover_index_key(hotkey, epoch, tier)).get(challenge_id)
+    if seq is not None:
+        return tier, seq
     return None
+
+
+def _recover_index_key(hotkey: str, epoch: int, tier: int) -> tuple[str, int, int, int, str]:
+    return hotkey, int(epoch), int(tier), allotment_for(tier), _seed_secret_fingerprint()
+
+
+@lru_cache(maxsize=_RECOVER_INDEX_CACHE_SIZE)
+def _instance_index(key: tuple[str, int, int, int, str]) -> dict[str, int]:
+    """Shared read-only cid->seq cache; do not mutate the returned dict."""
+    hotkey, epoch, tier, allotment, _secret_fingerprint = key
+    return {
+        instance_id(hotkey, epoch, tier, seq): seq
+        for seq in range(allotment)
+    }
 
 
 def recover_seq_for(hotkey: str, epoch: int, challenge_id: str) -> int | None:
