@@ -1322,8 +1322,8 @@ with TestClient(app) as client:
            not top_receipts.get("miners")
            or "current_weight" in top_receipts.get("miners", [{}])[0]
        ))
-    ck("burn rides the same signed payload (85.0 -> uid 204)",
-       vec["burn_snapshot"] == {"burn_uid": 204, "forced_burn_percentage": 85.0})
+    ck("burn rides the same signed payload (0.0 default -> uid 204 fallback)",
+       vec["burn_snapshot"] == {"burn_uid": 204, "forced_burn_percentage": 0.0})
     try:
         _weights.verify_signature(vec, public_key_hex=pub_hex,
                                   expected_key_id="cathedral-weight-policy")
@@ -1429,11 +1429,11 @@ with TestClient(app) as client:
         _hk2uid = {w["miner_hotkey"]: i + 1 for i, w in enumerate(vec["weights"])}
         _uw = _vthin.vector_to_uid_weights(vec, _hk2uid)
         thin_ok = (abs(sum(_uw.values()) - 1.0) < 1e-9
-                   and abs(_uw.get(204, 0.0) - 0.85) < 1e-9)
+                   and abs(_uw.get(204, 0.0)) < 1e-9)
     except Exception as _e:
         print(f"    thin validator rejected: {_e}")
         thin_ok = False
-    ck("thin validator: verify -> burn -> normalized uid vector (85% to uid 204)", thin_ok)
+    ck("thin validator: verify -> burn -> normalized uid vector (0% to uid 204 by default)", thin_ok)
     try:
         _vthin.accept_vector(vec, public_key_hex=pub_hex,
                              key_id="cathedral-weight-policy",
