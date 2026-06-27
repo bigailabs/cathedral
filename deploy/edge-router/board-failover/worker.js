@@ -308,6 +308,15 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
   const url = new URL(request.url);
   const route = classifyBoardRequest(request.method, url.pathname);
   if (route.tier === "none") {
+    // DEFAULT-DENY: any path this worker does not explicitly classify gets a 404.
+    // This is SAFE ONLY because this worker is attached to the exact hot paths in
+    // wrangler.toml (board reads, leaderboard, submit-role).
+    //
+    // !!! NEVER ATTACH THIS WORKER AS A CATCH-ALL (e.g. `*` /
+    // `api.cathedral.computer/*`). A catch-all would make this default-deny 404
+    // every unrelated API path (health, jwks, validator weight feed, admin, ...)
+    // and take the whole surface down. Attach ONLY the per-path routes listed in
+    // wrangler.toml. See README.md "NEVER attach as catch-all".
     return Response.json(
       { error: "route_not_served_by_board_failover", path: route.path },
       { status: 404, headers: { "Cache-Control": "no-store" } },

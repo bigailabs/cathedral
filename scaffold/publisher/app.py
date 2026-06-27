@@ -3505,24 +3505,48 @@ def build_app(
         now_iso = _now_iso_ms()
         q = submit_admission.queue_metrics(store, now_iso=now_iso)
         since_iso = _now_iso_ms_plus(-window_secs)
+        # P2 fix: split the drain rates by LIVE vs SHADOW kind. A shadow drain
+        # also stamps status + verified_at_iso (into shadow_* + a terminal status),
+        # so counting all kinds together let an operator running shadow-ONLY mode
+        # believe LIVE pm was draining when only the (default-off) shadow diagnostic
+        # was. The headline accepted/rejected rates now count LIVE async kinds
+        # (public + per_miner) only; shadow is reported separately so it stays
+        # visible without inflating the live numbers.
         rates = store.query(
-            "SELECT status, COUNT(*) AS n FROM per_miner_attempts "
+            "SELECT challenge_kind AS kind, status, COUNT(*) AS n "
+            "FROM per_miner_attempts "
             "WHERE verified_at_iso IS NOT NULL AND verified_at_iso > ? "
             "AND challenge_kind IS NOT NULL "
-            "GROUP BY status", (since_iso,))
+            "GROUP BY challenge_kind, status", (since_iso,))
         accepted = rejected = 0
+        shadow_accepted = shadow_rejected = 0
         for r in rates:
             st = str(r["status"])
+            kind = str(r["kind"])
+            n = int(r["n"] or 0)
+            is_shadow = kind == submit_admission.KIND_PER_MINER_SHADOW
             if st == submit_admission.STATUS_RANKED:
-                accepted = int(r["n"] or 0)
+                if is_shadow:
+                    shadow_accepted += n
+                else:
+                    accepted += n
             elif st == submit_admission.STATUS_REJECTED:
-                rejected = int(r["n"] or 0)
+                if is_shadow:
+                    shadow_rejected += n
+                else:
+                    rejected += n
         win = max(1.0, float(window_secs))
         q["window_secs"] = win
+        # LIVE async drain rates (public + per_miner) — shadow excluded.
         q["accepted_per_sec"] = round(accepted / win, 4)
         q["rejected_per_sec"] = round(rejected / win, 4)
         q["accepted_in_window"] = accepted
         q["rejected_in_window"] = rejected
+        # Shadow drain reported separately so it never inflates the live rates.
+        q["shadow_accepted_in_window"] = shadow_accepted
+        q["shadow_rejected_in_window"] = shadow_rejected
+        q["shadow_accepted_per_sec"] = round(shadow_accepted / win, 4)
+        q["shadow_rejected_per_sec"] = round(shadow_rejected / win, 4)
         q["pm_async_enabled"] = pm_submit_async_enabled
         q["pm_async_shadow"] = pm_async_shadow_enabled
         q["public_async_enabled"] = submit_async_enabled
@@ -3706,7 +3730,13 @@ def build_app(
         *, challenge_id, miner_hotkey, signature, submitted_at, received_at_iso,
         sol_sha, dimacs_solution, epoch, assignment_identity, inline_marker,
     ):
-        idem = submit_admission.idempotency_key(miner_hotkey, challenge_id, sol_sha)
+        # P1 fix: the shadow twin MUST use a namespaced idempotency key so it can
+        # never collide with the LIVE pm-async key for the same payload. Without
+        # this, a miner retrying the same solution after cutover (shadow off, live
+        # on) would have admit_pending() match the stale shadow row and replay its
+        # receipt instead of creating the live authoritative pm receipt.
+        idem = submit_admission.shadow_idempotency_key(
+            miner_hotkey, challenge_id, sol_sha)
         receipt_id = "shd_" + new_uuid().replace("-", "")
         now_iso = _now_iso_ms()
 

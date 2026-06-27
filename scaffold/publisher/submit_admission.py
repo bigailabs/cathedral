@@ -70,6 +70,23 @@ def idempotency_key(
     return sha256_hex(f"{miner_hotkey}\x00{challenge_id}\x00{dimacs_solution_sha256}")
 
 
+def shadow_idempotency_key(
+    miner_hotkey: str, challenge_id: str, dimacs_solution_sha256: str
+) -> str:
+    """Idempotency key for the pm-* SHADOW twin, NAMESPACED away from the live key.
+
+    The shadow row lives in the SAME per_miner_attempts table under a UNIQUE
+    idempotency_key index. If it reused the live ``idempotency_key`` then, after
+    shadow mode is turned off and live pm-async turned on, a miner retrying the
+    SAME payload would have ``admit_pending`` match the old shadow row and replay
+    its receipt instead of creating the LIVE authoritative pm receipt — the miner
+    would never get a real ranked receipt (and could be silently un-paid). The
+    ``shadow:`` prefix in the hashed material guarantees the shadow twin can never
+    collide with — or be matched by — the live admission lookup."""
+    return sha256_hex(
+        f"shadow\x00{miner_hotkey}\x00{challenge_id}\x00{dimacs_solution_sha256}")
+
+
 def challenge_kind(challenge_id: str | None) -> str:
     if not challenge_id:
         return "unknown"
@@ -149,7 +166,12 @@ def admit_pending(
     kind = challenge_kind(challenge_id)
 
     def _do(conn) -> tuple[str, Any]:
-        existing = _fetch_by_idem(conn, idem_key)
+        # Defense in depth: live admission must NEVER match a per_miner_shadow
+        # row, even if a shadow row somehow shared the live key. Shadow keys are
+        # already namespaced (shadow_idempotency_key), but matching only
+        # non-shadow rows here means a live retry post-cutover always creates a
+        # fresh authoritative receipt instead of replaying a shadow twin.
+        existing = _fetch_by_idem(conn, idem_key, exclude_shadow=True)
         if existing is not None:
             return ("replayed", existing)
         cur = conn.execute(
@@ -166,7 +188,7 @@ def admit_pending(
         if not cur.rowcount:
             # Lost an admission race on the UNIQUE idempotency_key. Re-read the
             # winner and treat as a replay (idempotent for the miner).
-            existing = _fetch_by_idem(conn, idem_key)
+            existing = _fetch_by_idem(conn, idem_key, exclude_shadow=True)
             if existing is not None:
                 return ("replayed", existing)
         created = _fetch_by_id(conn, receipt_id)
@@ -175,7 +197,13 @@ def admit_pending(
     return store.write(_do)
 
 
-def _fetch_by_idem(conn, idem_key: str):
+def _fetch_by_idem(conn, idem_key: str, *, exclude_shadow: bool = False):
+    if exclude_shadow:
+        cur = conn.execute(
+            "SELECT * FROM per_miner_attempts WHERE idempotency_key=? "
+            "AND (challenge_kind IS NULL OR challenge_kind != ?) LIMIT 1",
+            (idem_key, KIND_PER_MINER_SHADOW))
+        return cur.fetchone()
     cur = conn.execute(
         "SELECT * FROM per_miner_attempts WHERE idempotency_key=? LIMIT 1",
         (idem_key,))

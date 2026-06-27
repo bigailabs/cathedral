@@ -449,6 +449,167 @@ def test_queue_metrics_worker_lag_grows_with_oldest_pending(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# P2 (Track 1): shadow drains must NOT inflate the LIVE accepted/rejected rates.
+# ---------------------------------------------------------------------------
+def test_shadow_drain_does_not_inflate_live_accepted_rates(tmp_path, monkeypatch):
+    # In SHADOW mode the inline path is authoritative and the worker re-verifies
+    # the shadow twin into shadow_* (stamping a terminal status + verified_at_iso).
+    # The headline accepted/rejected rates on the submit-metrics queue surface must
+    # count only LIVE async kinds (public + per_miner); a shadow drain must show up
+    # ONLY in the separate shadow_* rate fields, never the live ones — otherwise an
+    # operator running shadow-only mode would think LIVE pm was draining.
+    app, store = _build(tmp_path, monkeypatch, shadow=True)
+    kp = _keypair()
+    cid, body = _pm_solution_for(kp)
+    with TestClient(app) as client:
+        r = _submit(client, kp, challenge_id=cid, solution=body)
+        assert r.status_code == 200, r.text  # inline authoritative
+        # Drain the shadow twin (records into shadow_* + a terminal status).
+        assert app.state.async_verify_tick(worker_id="t", batch_size=8) == 1
+        q = _metrics(client)["queue"]
+    # The shadow twin verified to ranked -> it must NOT appear in the live counters.
+    assert q["accepted_in_window"] == 0
+    assert q["accepted_per_sec"] == 0.0
+    assert q["rejected_in_window"] == 0
+    assert q["rejected_per_sec"] == 0.0
+    # ...but it IS visible in the dedicated shadow counters.
+    assert q["shadow_accepted_in_window"] == 1
+    assert q["shadow_accepted_per_sec"] > 0.0
+
+
+def test_live_drain_inflates_live_rates_not_shadow(tmp_path, monkeypatch):
+    # Mirror of the above for the LIVE lane: a live pm drain shows up in the live
+    # accepted counters and NOT the shadow counters.
+    app, store = _build(tmp_path, monkeypatch, pm_async=True)
+    kp = _keypair()
+    cid, body = _pm_solution_for(kp)
+    with TestClient(app) as client:
+        _submit(client, kp, challenge_id=cid, solution=body)
+        assert app.state.async_verify_tick(worker_id="t", batch_size=8) == 1
+        q = _metrics(client)["queue"]
+    assert q["accepted_in_window"] == 1
+    assert q["accepted_per_sec"] > 0.0
+    assert q["shadow_accepted_in_window"] == 0
+    assert q["shadow_accepted_per_sec"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# P1 (Track 1): shadow/live idempotency MUST be namespaced — a SAME-payload retry
+# after cutover creates a NEW live authoritative receipt, never a shadow replay.
+# ---------------------------------------------------------------------------
+def test_shadow_and_live_idempotency_keys_are_namespaced():
+    # Unit-level proof of the fix: the shadow twin's idempotency key must differ
+    # from the live key for the SAME (miner, challenge, solution) triple, so the
+    # two rows can coexist in the UNIQUE idempotency_key index and a live lookup
+    # can never match the shadow row.
+    hk, cid, sha = "hk", "pm-t1-e1-x", "deadbeef"
+    live = submit_admission.idempotency_key(hk, cid, sha)
+    shadow = submit_admission.shadow_idempotency_key(hk, cid, sha)
+    assert live != shadow
+
+
+def test_admit_pending_with_namespaced_shadow_row_present_creates_fresh_live(
+        tmp_path, monkeypatch):
+    # With the fix, the shadow twin lives under the NAMESPACED shadow key, so it
+    # coexists with the live key in the UNIQUE idempotency_key index. A live
+    # admission for the SAME (miner, challenge, solution) uses the live key, finds
+    # NO matching live row, and creates a fresh authoritative receipt — it never
+    # replays the shadow row.
+    app, store = _build(tmp_path, monkeypatch, pm_async=True)
+    hk, cid, sha = "hk", "pm-t1-e1-x", "deadbeef"
+    live_key = submit_admission.idempotency_key(hk, cid, sha)
+    shadow_key = submit_admission.shadow_idempotency_key(hk, cid, sha)
+    assert live_key != shadow_key  # the fix: keys are distinct
+
+    # A drained shadow twin sitting in the ledger under the namespaced shadow key.
+    def _ins_shadow(conn):
+        conn.execute(
+            "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, epoch, "
+            "status, dimacs_solution_sha256, submitted_at, recorded_at_iso, "
+            "signature, idempotency_key, received_at_iso, challenge_kind, "
+            "solution_body, assignment_identity, attempt_count) "
+            "VALUES ('shd_old', ?, ?, 0, 'ranked', ?, '2026-01-01T00:00:00.000Z', "
+            "'2026-01-01T00:00:00.000Z', 'sig-shadow', ?, "
+            "'2026-01-01T00:00:00.000Z', ?, NULL, ?, 0)",
+            (cid, hk, sha, shadow_key, submit_admission.KIND_PER_MINER_SHADOW, hk))
+    store.write(_ins_shadow)
+
+    outcome, row = submit_admission.admit_pending(
+        store, receipt_id="sub_live", idem_key=live_key, miner_hotkey=hk,
+        challenge_id=cid, dimacs_solution_sha256=sha, dimacs_solution="body",
+        submitted_at="2026-06-27T00:00:00.000Z",
+        received_at_iso="2026-06-27T00:00:00.000Z", signature="sig-live",
+        epoch=0, assignment_identity=hk)
+    # NOT a replay of the shadow row: a fresh live receipt was created.
+    assert outcome == "created"
+    assert row["id"] == "sub_live"
+    assert row["challenge_kind"] == submit_admission.KIND_PER_MINER
+    # both rows coexist; the shadow twin was never touched
+    rows = store.query(
+        "SELECT id, challenge_kind FROM per_miner_attempts WHERE miner_hotkey=? "
+        "ORDER BY id", (hk,))
+    assert {r["id"] for r in rows} == {"shd_old", "sub_live"}
+
+
+def test_same_payload_retry_after_shadow_cutover_creates_live_ranked_receipt(
+        tmp_path, monkeypatch):
+    # End-to-end cutover: a drained shadow twin for (miner, challenge, solution) is
+    # present in the ledger (as it would be after running shadow mode), but the LIVE
+    # lane has NOT yet paid this solution. After disabling shadow / enabling live,
+    # the miner retries the SAME payload. It must get a NEW live authoritative
+    # receipt (sub_ prefix) that RANKS, NOT a 200 replay of the shadow (shd_)
+    # receipt, and there must be exactly one solve (no double pay).
+    #
+    # The shadow twin is seeded directly the way the (now-namespaced) shadow path
+    # writes it, so this isolates the receipts-table idempotency cutover hole: the
+    # live retry must never resolve to the shadow receipt.
+    app_l, store = _build(tmp_path, monkeypatch, pm_async=True)
+    kp = _keypair()
+    cid, body = _pm_solution_for(kp)
+    sol_sha = sha256_hex(body)
+    shadow_key = submit_admission.shadow_idempotency_key(
+        kp.ss58_address, cid, sol_sha)
+
+    # Seed the drained shadow twin (namespaced shadow key, kind=shadow) — exactly
+    # what survives in the ledger after shadow mode is run and turned off.
+    def _seed_shadow(conn):
+        conn.execute(
+            "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, epoch, "
+            "status, shadow_status, dimacs_solution_sha256, submitted_at, "
+            "recorded_at_iso, verified_at_iso, signature, idempotency_key, "
+            "received_at_iso, challenge_kind, solution_body, assignment_identity, "
+            "attempt_count) "
+            "VALUES ('shd_old', ?, ?, 0, 'ranked', 'ranked', ?, "
+            "'2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', "
+            "'2026-01-01T00:00:00.000Z', 'sig-shadow', ?, "
+            "'2026-01-01T00:00:00.000Z', ?, NULL, ?, 0)",
+            (cid, kp.ss58_address, sol_sha, shadow_key,
+             submit_admission.KIND_PER_MINER_SHADOW, kp.ss58_address))
+    store.write(_seed_shadow)
+    assert _solves(store, cid, kp.ss58_address) == 0  # live lane has not paid
+
+    # Live pm-async on, shadow off: retry the SAME payload.
+    with TestClient(app_l) as client_l:
+        r2 = _submit(client_l, kp, challenge_id=cid, solution=body)
+        # MUST be a NEW live receipt (202), NOT a 200 replay of the shadow receipt.
+        assert r2.status_code == 202, r2.text
+        live_receipt = r2.json()
+        assert live_receipt["receipt_id"].startswith("sub_")
+        assert live_receipt["receipt_id"] != "shd_old"
+        # drain the live receipt -> it ranks (the live lane is the first payer)
+        assert app_l.state.async_verify_tick(worker_id="t", batch_size=8) >= 1
+        g = client_l.get(live_receipt["receipt_url"]).json()
+    assert g["status"] == "ranked", g
+    assert g["receipt_id"].startswith("sub_")
+    # exactly one solve from the LIVE lane (no double pay)
+    assert _solves(store, cid, kp.ss58_address) == 1
+    # the original shadow twin is untouched and was never replayed
+    still_shadow = store.query(
+        "SELECT id FROM per_miner_attempts WHERE id='shd_old'")
+    assert len(still_shadow) == 1
+
+
+# ---------------------------------------------------------------------------
 # Startup WARNING: pm-async on but no drain worker configured.
 # ---------------------------------------------------------------------------
 def test_startup_warns_when_pm_async_on_but_verify_worker_disabled(

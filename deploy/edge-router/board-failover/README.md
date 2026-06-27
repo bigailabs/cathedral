@@ -77,6 +77,27 @@ here, or the isolation is defeated.
 `OPTIONS` preflight is answered locally (`204` + CORS headers) and never hits an
 origin, mirroring the main router so browser submit keeps working under failover.
 
+## NEVER attach as catch-all (default-deny is path-scoped on purpose)
+
+This worker **default-denies**: any path it does not explicitly classify
+(`worker.js` `classifyBoardRequest` → tier `"none"`) returns `404
+route_not_served_by_board_failover`. That behaviour is **safe only because the
+routes in `wrangler.toml` are exact hot paths** (board reads, leaderboard,
+submit-role). Each attached route hands this worker exactly one known path.
+
+> **Do NOT attach this worker to a catch-all route** such as
+> `api.cathedral.computer/*` (or any broad `*` pattern). A catch-all would make
+> the default-deny `404` **every unrelated API path** that flows through it —
+> `/health`, `/.well-known/cathedral-jwks.json`, the Tier-0 validator weight feed
+> `/v1/validator/weights/next`, `/v1/admin/*`, `/v1/leaderboard/explain`, and any
+> future endpoint — taking the whole surface down. The blast radius of a misattach
+> here is the entire API, not just the board.
+
+Only ever uncomment the **per-path** patterns listed in `wrangler.toml`. If you
+later need this worker to front a broader prefix, change the default-deny branch
+to pass unknown paths through to a configured origin first — do not point a
+catch-all at the current default-deny worker.
+
 ## Environment
 
 | Var | Default | Meaning |

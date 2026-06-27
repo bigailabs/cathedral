@@ -25,6 +25,15 @@ preview_urls = true
 # exact path off the main edge router. See README.md for cutover + rollback.
 #
 # Leave commented until you are deliberately cutting the board over.
+#
+# !!! NEVER ATTACH THIS WORKER AS A CATCH-ALL !!!
+# This worker DEFAULT-DENIES (404) any path it does not explicitly classify
+# (worker.js classifyBoardRequest -> tier "none"). That is safe ONLY because the
+# routes below are exact hot paths. A catch-all pattern such as
+#   { pattern = "api.cathedral.computer/*", zone_name = "cathedral.computer" }
+# would 404 EVERY unrelated API (health, jwks, /v1/validator/weights/next, admin,
+# leaderboard/explain, ...) and take the whole surface down. Only ever uncomment
+# the per-path patterns listed here. See README.md "NEVER attach as catch-all".
 routes = [
   # --- READ-role board reads -> BOARD_ORIGIN ---
   # { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-challenges*", zone_name = "cathedral.computer" },
