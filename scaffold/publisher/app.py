@@ -37,8 +37,10 @@ from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
 from . import keys, rows, scoring, top_cache as top_cache_mod, weights as weights_mod
+from . import materialized_snapshot as materialized_snapshot_mod
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
+from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
 from .sat_solution import verify_dimacs_solution
 from . import submit_admission
@@ -601,14 +603,34 @@ def build_app(
     board_cache = BoardCache(_build_board)
     board_cache_mod.register(board_cache)
 
-    def _serve_board_snapshot(request: Request):
-        payload, etag = board_cache.get()
-        headers = board_cache_headers(etag)
-        headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
+    # Track 3 / item 6: timer-built materialized snapshot of the rendered board.
+    # DEFAULT-OFF — only started/served when the feature flag is on (see
+    # materialized_snapshot.enabled()). When on, the read is served from the last
+    # timer-materialized payload (never builds on the request path); when the
+    # snapshot is cold or too stale, get() returns None and the route falls back
+    # to the live board_cache path below — degrade to stale-then-live, not error.
+    board_snapshot = MaterializedSnapshot("board", _build_board)
+    materialized_snapshot_mod.register(board_snapshot)
+
+    def _conditional_response(payload, etag, headers, request: Request):
         inm = request.headers.get("if-none-match")
         if inm and etag in [t.strip() for t in inm.split(",")]:
             return Response(status_code=304, headers=headers)
         return JSONResponse(payload, headers=headers)
+
+    def _serve_board_snapshot(request: Request):
+        if materialized_snapshot_mod.enabled():
+            served = board_snapshot.get()
+            if served is not None:
+                payload, etag, meta = served
+                headers = snapshot_headers(etag, meta)
+                headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
+                return _conditional_response(payload, etag, headers, request)
+        # Flag off, or snapshot cold/too-stale: live cache-backed path (unchanged).
+        payload, etag = board_cache.get()
+        headers = board_cache_headers(etag)
+        headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
+        return _conditional_response(payload, etag, headers, request)
 
     top_cache = top_cache_mod.TopCache()
     if _role_runs_read_background(service_role):
@@ -991,6 +1013,7 @@ def build_app(
     app.state.cnf_store = cnf_store
     app.state.board_cache = board_cache
     app.state.top_cache = top_cache
+    app.state.board_snapshot = board_snapshot
     app.state.recent_cache = recent_cache
     app.state.explain_cache = explain_cache
     app.state.pm_summary_cache = pm_summary_cache
@@ -1048,6 +1071,24 @@ def build_app(
             print(f"[board] warm_started service_role={service_role}")
         except Exception as exc:
             print(f"[board] warm_start_failed error={exc!r}")
+
+    @app.on_event("startup")
+    async def _start_materialized_snapshots():
+        # Track 3 / item 6: start the timer that re-materializes the board +
+        # leaderboard-top read payloads off the request path. DEFAULT-OFF —
+        # start_all() is a no-op unless CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED is
+        # set, so live behavior is unchanged when the flag is unset. Only the
+        # read-background role runs the builders (same gate as board/top caches).
+        if not _role_runs_read_background(service_role):
+            return
+        if not materialized_snapshot_mod.enabled():
+            return
+        try:
+            board_snapshot.start()
+            leaderboard_top_snapshot.start()
+            print(f"[materialized_snapshot] started service_role={service_role}")
+        except Exception as exc:
+            print(f"[materialized_snapshot] start_failed error={exc!r}")
 
     async def _run_singleton_background(label: str, lock_name: str, coro_factory):
         import asyncio
@@ -1295,6 +1336,13 @@ def build_app(
                     pass
         if hasattr(app.state, "top_cache"):
             app.state.top_cache.stop()
+        for attr in ("board_snapshot", "leaderboard_top_snapshot"):
+            snap = getattr(app.state, attr, None)
+            if snap is not None:
+                try:
+                    snap.stop()
+                except Exception:
+                    pass
 
     # ---- helpers ----------------------------------------------------------
     def _challenge_public(r: Any) -> dict[str, Any]:
@@ -1969,16 +2017,7 @@ def build_app(
             },
         )
 
-    @app.get("/v1/leaderboard/top")
-    async def leaderboard_top(
-        window: str = Query("24h"),
-        view: str = Query("weights"),
-    ):
-        """Fast pre-aggregated miner ranking. Cached ~45s in-process.
-        Defaults to current earning weights. Use view=receipts for the old
-        top 100 miners ranked by total weighted_score over the window.
-        window=24h only for now (others fall back to 24h).
-        """
+    def _leaderboard_top_payload(view: str) -> dict[str, Any]:
         rows_, built_at, window_h = top_cache.get()
         weight_ctx = _current_weight_context()
         receipt_by_hotkey = {
@@ -2044,48 +2083,89 @@ def build_app(
                     "visibility": visibility,
                 })
             rank_kind = "receipt_total_score_24h"
-        return JSONResponse(
-            {
-                "miners": miners,
-                "view": normalized_view,
-                "rank_kind": rank_kind,
-                "default_view": "weights",
-                "views": {
-                    "weights": "current Cathedral payment weights; closest API view to Taostats emission",
-                    "receipts": "24h solve receipt activity; audit/activity view, not payment order",
-                },
-                "explanation": (
-                    "Weights show the current payment order. Receipts show recent solve activity. "
-                    "They can differ during migration and when scoring uses the solve ledger."
-                ),
-                "earning_weight_source": "v1/validator/weights/next",
-                "earning_weights_generated_at": weight_ctx["generated_at"],
-                "visibility_schema": "cathedral_miner_truth_v1",
-                "sources": {
-                    "payment": {
-                        "path": "v1/validator/weights/next",
-                        "status": "available" if weight_ctx.get("generated_at") else "unavailable",
-                        "generated_at": weight_ctx.get("generated_at"),
-                        "note": "signed Cathedral weight; validator input",
-                    },
-                    "recent_activity": {
-                        "path": "v1/leaderboard/recent",
-                        "status": "activity_only_not_payment",
-                    },
-                    "chain": {
-                        "status": "upstream_annotation_only",
-                        "note": "uid/registered/payable/incentive/emission are null unless a chain feed annotates rows",
-                    },
-                    "perminer": {
-                        "path": "v1/synthetic-boolean/per-miner/summary",
-                        "status": "summary",
-                    },
-                },
-                "window_hours": window_h,
-                "built_at": built_at,
-                "count": len(miners),
-                "cache_ttl_secs": 45,
+        return {
+            "miners": miners,
+            "view": normalized_view,
+            "rank_kind": rank_kind,
+            "default_view": "weights",
+            "views": {
+                "weights": "current Cathedral payment weights; closest API view to Taostats emission",
+                "receipts": "24h solve receipt activity; audit/activity view, not payment order",
             },
+            "explanation": (
+                "Weights show the current payment order. Receipts show recent solve activity. "
+                "They can differ during migration and when scoring uses the solve ledger."
+            ),
+            "earning_weight_source": "v1/validator/weights/next",
+            "earning_weights_generated_at": weight_ctx["generated_at"],
+            "visibility_schema": "cathedral_miner_truth_v1",
+            "sources": {
+                "payment": {
+                    "path": "v1/validator/weights/next",
+                    "status": "available" if weight_ctx.get("generated_at") else "unavailable",
+                    "generated_at": weight_ctx.get("generated_at"),
+                    "note": "signed Cathedral weight; validator input",
+                },
+                "recent_activity": {
+                    "path": "v1/leaderboard/recent",
+                    "status": "activity_only_not_payment",
+                },
+                "chain": {
+                    "status": "upstream_annotation_only",
+                    "note": "uid/registered/payable/incentive/emission are null unless a chain feed annotates rows",
+                },
+                "perminer": {
+                    "path": "v1/synthetic-boolean/per-miner/summary",
+                    "status": "summary",
+                },
+            },
+            "window_hours": window_h,
+            "built_at": built_at,
+            "count": len(miners),
+            "cache_ttl_secs": 45,
+        }
+
+    # Track 3 / item 6: timer-built materialized snapshot of the default
+    # leaderboard-top read (view=weights, the dashboard hot path). DEFAULT-OFF —
+    # only served when materialized_snapshot.enabled(); otherwise the route builds
+    # inline exactly as before. The builder pins view=weights because that is the
+    # canonical materialized payload; other views fall through to the live build.
+    leaderboard_top_snapshot = MaterializedSnapshot(
+        "leaderboard-top", lambda: _leaderboard_top_payload("weights")
+    )
+    materialized_snapshot_mod.register(leaderboard_top_snapshot)
+    app.state.leaderboard_top_snapshot = leaderboard_top_snapshot
+
+    def _leaderboard_top_default_view(view: str) -> bool:
+        return (view or "weights").strip().lower() in {
+            "weight", "weights", "earning", "earnings"
+        }
+
+    @app.get("/v1/leaderboard/top")
+    async def leaderboard_top(
+        request: Request,
+        window: str = Query("24h"),
+        view: str = Query("weights"),
+    ):
+        """Fast pre-aggregated miner ranking. Cached ~45s in-process.
+        Defaults to current earning weights. Use view=receipts for the old
+        top 100 miners ranked by total weighted_score over the window.
+        window=24h only for now (others fall back to 24h).
+        """
+        # Materialized-snapshot fast path (flag-gated): serve the timer-built
+        # default-view payload without touching the per-request build. Only the
+        # canonical default view is materialized; receipts/other views fall to live.
+        if materialized_snapshot_mod.enabled() and _leaderboard_top_default_view(view):
+            served = leaderboard_top_snapshot.get()
+            if served is not None:
+                payload, etag, meta = served
+                headers = snapshot_headers(etag, meta)
+                headers["Access-Control-Allow-Origin"] = "*"
+                return _conditional_response(payload, etag, headers, request)
+        # Flag off, non-default view, or snapshot cold/too-stale: live build path
+        # (unchanged) — degrade to live, never to an error.
+        return JSONResponse(
+            _leaderboard_top_payload(view),
             headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
         )
 

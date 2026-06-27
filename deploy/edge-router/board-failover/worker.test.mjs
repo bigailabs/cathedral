@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  boardLkgKey,
   canonicalPath,
   classifyBoardRequest,
   handleRequest,
@@ -7,7 +8,32 @@ import {
   originRequest,
   originTimeoutForTier,
   preflightResponse,
+  serveBoardStale,
 } from "./worker.js";
+
+// Minimal in-memory KV mock matching the Cloudflare KV surface this worker uses
+// (get-with-metadata + put-with-metadata). Used to exercise the opt-in board LKG.
+function makeKv() {
+  const store = new Map();
+  return {
+    store,
+    async getWithMetadata(key) {
+      return store.get(key) || null;
+    },
+    async put(key, value, opts) {
+      store.set(key, { value, metadata: (opts && opts.metadata) || {} });
+    },
+  };
+}
+
+// Drain ctx.waitUntil promises so KV mirror writes complete before assertions.
+function makeCtx() {
+  const pending = [];
+  return {
+    ctx: { waitUntil: (p) => pending.push(p) },
+    settle: () => Promise.all(pending),
+  };
+}
 
 // --- canonicalPath strips the legacy prefix and trailing slash ---
 assert.equal(canonicalPath("/v1/synthetic-boolean/current-challenge"), "/v1/synthetic-boolean/current-challenge");
@@ -250,6 +276,86 @@ assert.equal(originTimeoutForTier({ SUBMIT_ORIGIN_TIMEOUT_MS: "15000" }, "submit
   );
   assert.equal(resp.status, 404);
   assert.match(await resp.text(), /route_not_served_by_board_failover/);
+}
+
+// --- OPT-IN board LKG: a healthy board response is mirrored to KV, then served
+//     as last-known-good when the origin later fails (degrade to stale) ---
+{
+  const realFetch = globalThis.fetch;
+  const kv = makeKv();
+  const path = "/v1/synthetic-boolean/active-challenges";
+  try {
+    // 1) Healthy origin -> response passes through AND is mirrored to KV.
+    globalThis.fetch = async () =>
+      new Response('{"items":[{"id":"c1"}]}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    const okCtx = makeCtx();
+    const ok = await handleRequest(
+      new Request(`https://api.cathedral.computer${path}`),
+      { BOARD_ORIGIN: "https://board.example", BOARD_LKG: kv },
+      okCtx.ctx,
+    );
+    assert.equal(ok.status, 200);
+    assert.equal(await ok.text(), '{"items":[{"id":"c1"}]}');
+    await okCtx.settle();
+    const stored = kv.store.get(boardLkgKey(path));
+    assert.ok(stored && stored.value === '{"items":[{"id":"c1"}]}', "board body mirrored to KV");
+
+    // 2) Origin now throws -> serve the last-known-good from KV, marked stale,
+    //    NOT a 504.
+    globalThis.fetch = async () => {
+      throw new Error("connect timeout");
+    };
+    const staleResp = await handleRequest(
+      new Request(`https://api.cathedral.computer${path}`),
+      { BOARD_ORIGIN: "https://board.example", BOARD_LKG: kv },
+      makeCtx().ctx,
+    );
+    assert.equal(staleResp.status, 200, "stale fallback served, not 504");
+    assert.equal(staleResp.headers.get("x-cathedral-board-source"), "stale_fallback");
+    assert.equal(staleResp.headers.get("cache-control"), "no-store");
+    assert.equal(await staleResp.text(), '{"items":[{"id":"c1"}]}');
+
+    // 3) Origin 5xx -> also degrades to the stored snapshot rather than the error.
+    globalThis.fetch = async () => new Response("boom", { status: 503 });
+    const fiveXx = await handleRequest(
+      new Request(`https://api.cathedral.computer${path}`),
+      { BOARD_ORIGIN: "https://board.example", BOARD_LKG: kv },
+      makeCtx().ctx,
+    );
+    assert.equal(fiveXx.status, 200, "5xx degrades to stale snapshot");
+    assert.equal(fiveXx.headers.get("x-cathedral-board-source"), "stale_fallback");
+    assert.match(fiveXx.headers.get("x-cathedral-fallback-reason"), /origin_status_503/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// --- FLAG-OFF (no BOARD_LKG binding): behavior is unchanged — an origin failure
+//     still returns 504, nothing is cached, serveBoardStale yields null ---
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("connect timeout");
+  };
+  try {
+    const resp = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/synthetic-boolean/active-challenges"),
+      { BOARD_ORIGIN: "https://board.example" }, // no BOARD_LKG -> LKG disabled
+      makeCtx().ctx,
+    );
+    assert.equal(resp.status, 504, "no KV binding => unchanged 504 behavior");
+    assert.equal((await resp.json()).error, "board_origin_unavailable");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  // serveBoardStale with no binding returns null (caller falls through to 504).
+  assert.equal(
+    await serveBoardStale({}, "/v1/synthetic-boolean/active-challenges", "origin_error"),
+    null,
+  );
 }
 
 console.log("board-failover worker tests passed");
