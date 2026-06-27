@@ -83,6 +83,10 @@ class BoardCache:
             self._rebuild_locked()
             return self._payload, self._etag  # type: ignore[return-value]
 
+    def warm_async(self) -> None:
+        """Start a background refresh so the first miner read is not cold."""
+        self._schedule_refresh()
+
     def _rebuild_locked(self) -> None:
         payload = self._builder()
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

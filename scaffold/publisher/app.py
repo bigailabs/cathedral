@@ -768,6 +768,16 @@ def build_app(
         except Exception as exc:
             print(f"[weights] bg_refresh_start_failed error={exc!r}")
 
+    @app.on_event("startup")
+    async def _warm_board_cache():
+        if not _role_runs_read_background(service_role):
+            return
+        try:
+            board_cache.warm_async()
+            print(f"[board] warm_started service_role={service_role}")
+        except Exception as exc:
+            print(f"[board] warm_start_failed error={exc!r}")
+
     async def _run_singleton_background(label: str, lock_name: str, coro_factory):
         import asyncio
 
