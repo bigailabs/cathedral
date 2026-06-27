@@ -26,6 +26,7 @@ TOP_CACHE_INTERVAL_SECS = int(os.environ.get("CATHEDRAL_TOP_CACHE_INTERVAL_SECS"
 
 # Window in hours — only 24h is implemented; other values fall back to this.
 TOP_CACHE_WINDOW_H = 24
+TOP_CACHE_LOCK_NAME = "cathedral:top-cache:refresh"
 
 
 def _slow_build_log_secs() -> float:
@@ -115,10 +116,13 @@ class TopCache:
         rows_count = 0
         ok = False
         try:
-            if getattr(store, "_is_postgres", False) or store.backend == "postgres":
-                rows = self._build_postgres(store)
-            else:
-                rows = self._build_sqlite(store)
+            with store.advisory_lock(TOP_CACHE_LOCK_NAME) as acquired:
+                if not acquired:
+                    return
+                if getattr(store, "_is_postgres", False) or store.backend == "postgres":
+                    rows = self._build_postgres(store)
+                else:
+                    rows = self._build_sqlite(store)
             rows_count = len(rows)
             built_at = datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
