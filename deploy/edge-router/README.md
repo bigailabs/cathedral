@@ -26,9 +26,9 @@ The Worker uses short fresh TTLs and a longer edge fallback window:
 
 | Route | Fresh | Edge fallback |
 | --- | ---: | ---: |
-| `/v1/synthetic-boolean/active-challenges` | 5s | 60s |
-| `/v1/synthetic-boolean/challenge-broadcast` | 5s | 60s |
-| `/v1/synthetic-boolean/current-challenge` | 5s | 30s |
+| `/v1/synthetic-boolean/active-challenges` | 5s | 900s |
+| `/v1/synthetic-boolean/challenge-broadcast` | 5s | 900s |
+| `/v1/synthetic-boolean/current-challenge` | 5s | 300s |
 | `/v1/synthetic-boolean/per-miner/summary` | 5s | 30s |
 | `/v1/validator/weights/next` | 15s | 30s |
 | `/v1/leaderboard/recent` | 2s | 20s |

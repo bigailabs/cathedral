@@ -45,9 +45,9 @@ const SUBMIT_POST_PATHS = new Set([
 ]);
 
 const CACHE_POLICIES = new Map([
-  ["/v1/synthetic-boolean/active-challenges", { freshTtl: 5, edgeTtl: 60, swr: true, params: [] }],
-  ["/v1/synthetic-boolean/challenge-broadcast", { freshTtl: 5, edgeTtl: 60, swr: true, params: [] }],
-  ["/v1/synthetic-boolean/current-challenge", { freshTtl: 5, edgeTtl: 30, swr: true, params: ["tier", "difficulty"] }],
+  ["/v1/synthetic-boolean/active-challenges", { freshTtl: 5, edgeTtl: 900, swr: true, params: [] }],
+  ["/v1/synthetic-boolean/challenge-broadcast", { freshTtl: 5, edgeTtl: 900, swr: true, params: [] }],
+  ["/v1/synthetic-boolean/current-challenge", { freshTtl: 5, edgeTtl: 300, swr: true, params: ["tier", "difficulty"] }],
   ["/v1/synthetic-boolean/per-miner/summary", { freshTtl: 5, edgeTtl: 30, swr: true, params: ["limit"] }],
   ["/v1/validator/weights/next", { freshTtl: 15, edgeTtl: 300, swr: true, params: [] }],
   ["/v1/leaderboard/recent", { freshTtl: 5, edgeTtl: 300, swr: true, params: ["limit", "since", "since_ran_at", "since_id"] }],

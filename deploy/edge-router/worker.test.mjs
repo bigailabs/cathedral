@@ -50,6 +50,10 @@ assert.deepEqual(
   { freshTtl: 5, edgeTtl: 300, swr: true, params: ["limit", "since", "since_ran_at", "since_id"] },
 );
 assert.deepEqual(
+  cachePolicyForPath("/v1/synthetic-boolean/active-challenges"),
+  { freshTtl: 5, edgeTtl: 900, swr: true, params: [] },
+);
+assert.deepEqual(
   cachePolicyForPath("/v1/validator/weights/next"),
   { freshTtl: 15, edgeTtl: 300, swr: true, params: [] },
 );
