@@ -9,7 +9,7 @@ dockerfilePath = "deploy/Dockerfile"
 # Health gate: Railway holds traffic on the new deploy until /health/live is 200, so
 # the same-URL swap only cuts over once the thin publisher is actually serving.
 healthcheckPath = "/health/live"
-healthcheckTimeout = 10
+healthcheckTimeout = 180
 
 # Roll back automatically if the new deploy never goes healthy.
 restartPolicyType = "on_failure"
