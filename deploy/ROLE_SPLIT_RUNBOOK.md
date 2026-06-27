@@ -22,7 +22,23 @@ Required env:
 CATHEDRAL_SERVICE_ROLE=read
 CATHEDRAL_REFILL_ENABLED=false
 CATHEDRAL_SEED_ON_BOOT=false
+WEB_CONCURRENCY=2
 ```
+
+Guarded knob (off by default): if a slow `/v1/leaderboard/recent` is
+head-of-line-blocking the cheap board reads, you may raise `WEB_CONCURRENCY` so
+board reads have a worker to run on while a leaderboard query is in flight:
+
+```text
+WEB_CONCURRENCY=4
+```
+
+Before raising it: confirm the read service has CPU/RAM headroom (each worker is
+a full app replica) and that `WEB_CONCURRENCY * CATHEDRAL_PG_POOL_MAX` stays
+within the Postgres connection ceiling (pool is per worker). This reduces
+head-of-line blocking but does not isolate the board; for true isolation move
+the board reads to a healthy publisher origin via the board-failover edge worker
+(`deploy/edge-router/board-failover/`). Roll back by setting `WEB_CONCURRENCY=2`.
 
 Allowed traffic:
 
