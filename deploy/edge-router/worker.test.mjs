@@ -61,6 +61,15 @@ assert.equal(originTimeoutForRoute({}, "read", "/v1/synthetic-boolean/active-cha
 assert.equal(originTimeoutForRoute({}, "read", "/v1/synthetic-boolean/per-miner/status"), 4500);
 assert.equal(originTimeoutForRoute({}, "submit", "/v1/agents/submit"), 10000);
 assert.equal(
+  originTimeoutForRoute(
+    { READ_ORIGIN_TIMEOUT_MS: "10000" },
+    "read",
+    "/v1/synthetic-boolean/active-challenges",
+    true,
+  ),
+  10000,
+);
+assert.equal(
   originTimeoutForRoute({ READ_HEALTH_ORIGIN_TIMEOUT_MS: "12000" }, "read", "/health/ready"),
   12000,
 );

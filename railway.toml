@@ -11,6 +11,6 @@ healthcheckTimeout = 180
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 
-# Production uses Postgres via DATABASE_URL. Multiple read/submit replicas are
-# allowed, but durable background jobs must stay role-gated and advisory-locked.
-numReplicas = 4
+# Do not set numReplicas here while this Railway service has an attached volume:
+# Railway rejects multi-replica deployments for volume-backed services. Scale
+# with separate read/submit services instead of replicas on this service.

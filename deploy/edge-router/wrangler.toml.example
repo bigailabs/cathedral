@@ -25,3 +25,4 @@ preview_urls = true
 [vars]
 READ_ORIGIN = "https://read.cathedral.computer"
 SUBMIT_ORIGIN = "https://submit.cathedral.computer"
+READ_ORIGIN_TIMEOUT_MS = "10000"
