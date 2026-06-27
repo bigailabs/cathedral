@@ -24,5 +24,8 @@ preview_urls = true
 
 [vars]
 READ_ORIGIN = "https://read.cathedral.computer"
+# Optional provider-origin routing knobs.
+# READ_ORIGIN_HOST = "api.cathedral.computer"
+# READ_ORIGIN_RESOLVE_OVERRIDE = "origin.example.com"
 SUBMIT_ORIGIN = "https://submit.cathedral.computer"
 READ_ORIGIN_TIMEOUT_MS = "10000"

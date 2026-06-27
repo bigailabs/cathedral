@@ -161,9 +161,13 @@ export function originRequest(request, originBase, options = {}) {
   const origin = new URL(originBase);
   origin.pathname = canonicalPath(incoming.pathname);
   origin.search = options.search !== undefined ? options.search : incoming.search;
+  const headers = cloneHeaders(request.headers);
+  if (options.hostHeader) {
+    headers.set("Host", options.hostHeader);
+  }
   const init = {
     method: request.method,
-    headers: cloneHeaders(request.headers),
+    headers,
     body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
     redirect: "manual",
   };
@@ -212,8 +216,12 @@ function timeoutSignal(ms) {
   return controller.signal;
 }
 
-function fetchWithTimeout(request, ms) {
-  return fetch(request, { signal: timeoutSignal(ms) });
+function fetchWithTimeout(request, ms, options = {}) {
+  const init = { signal: timeoutSignal(ms) };
+  if (options.resolveOverride) {
+    init.cf = { resolveOverride: options.resolveOverride };
+  }
+  return fetch(request, init);
 }
 
 function originTimeoutMs(env, key, fallback) {
@@ -261,7 +269,15 @@ export async function responseIsVisibilityWarming(response) {
   }
 }
 
-async function fetchReadThroughCache(request, originBase, ctx, path, timeoutMs) {
+async function fetchReadThroughCache(
+  request,
+  originBase,
+  ctx,
+  path,
+  timeoutMs,
+  originHost = "",
+  resolveOverride = "",
+) {
   const unsupportedParams = unsupportedCacheQueryParams(request.url, path);
   if (unsupportedParams.length) {
     return Response.json(
@@ -283,6 +299,7 @@ async function fetchReadThroughCache(request, originBase, ctx, path, timeoutMs) 
   });
   const originReq = originRequest(request, originBase, {
     search: new URL(normalizedUrl).search,
+    hostHeader: originHost,
   });
   const cached = await cache.match(cacheKey);
   const cachedCanServe = cached && cached.status >= 200 && cached.status < 500;
@@ -291,13 +308,13 @@ async function fetchReadThroughCache(request, originBase, ctx, path, timeoutMs) 
   }
 
   if (cachedCanServe && policy && policy.swr !== false) {
-    ctx.waitUntil(refreshCachedRead(cache, cacheKey, originReq, policy, timeoutMs));
+    ctx.waitUntil(refreshCachedRead(cache, cacheKey, originReq, policy, timeoutMs, resolveOverride));
     return responseWithEdgeHeaders(cached, { "X-Cathedral-Edge-Cache": "STALE-REFRESH" });
   }
 
   let originResp;
   try {
-    originResp = await fetchWithTimeout(originReq, timeoutMs);
+    originResp = await fetchWithTimeout(originReq, timeoutMs, { resolveOverride });
   } catch (error) {
     if (cachedCanServe) {
       return responseWithEdgeHeaders(cached, {
@@ -335,9 +352,9 @@ async function fetchReadThroughCache(request, originBase, ctx, path, timeoutMs) 
   return responseWithEdgeHeaders(toStore, outHeaders);
 }
 
-async function refreshCachedRead(cache, cacheKey, originReq, policy, timeoutMs) {
+async function refreshCachedRead(cache, cacheKey, originReq, policy, timeoutMs, resolveOverride = "") {
   try {
-    const originResp = await fetchWithTimeout(originReq, timeoutMs);
+    const originResp = await fetchWithTimeout(originReq, timeoutMs, { resolveOverride });
     if (originResp.status !== 200 || !originAllowsEdgeStore(originResp)) return;
     if (await responseIsVisibilityWarming(originResp)) return;
     const freshUntil = nowSeconds() + policy.freshTtl;
@@ -369,7 +386,13 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
   const originBase = route.role === "read"
     ? envUrl(env, "READ_ORIGIN", DEFAULT_READ_ORIGIN)
     : envUrl(env, "SUBMIT_ORIGIN", DEFAULT_SUBMIT_ORIGIN);
-  const originReq = originRequest(request, originBase);
+  const originHost = route.role === "read"
+    ? envUrl(env, "READ_ORIGIN_HOST", "")
+    : envUrl(env, "SUBMIT_ORIGIN_HOST", "");
+  const resolveOverride = route.role === "read"
+    ? envUrl(env, "READ_ORIGIN_RESOLVE_OVERRIDE", "")
+    : envUrl(env, "SUBMIT_ORIGIN_RESOLVE_OVERRIDE", "");
+  const originReq = originRequest(request, originBase, { hostHeader: originHost });
 
   if (route.role === "read" && isCacheableRead(request, route.path)) {
     return fetchReadThroughCache(
@@ -378,12 +401,18 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
       ctx,
       route.path,
       originTimeoutForRoute(env, route.role, route.path, true),
+      originHost,
+      resolveOverride,
     );
   }
 
   let resp;
   try {
-    resp = await fetchWithTimeout(originReq, originTimeoutForRoute(env, route.role, route.path));
+    resp = await fetchWithTimeout(
+      originReq,
+      originTimeoutForRoute(env, route.role, route.path),
+      { resolveOverride },
+    );
   } catch (error) {
     return Response.json(
       { error: `${route.role}_origin_unavailable`, detail: String(error && error.message || error) },

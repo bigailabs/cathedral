@@ -112,6 +112,14 @@ assert.deepEqual(
   });
   assert.equal(origin.url, "https://read.cathedral.computer/v1/synthetic-boolean/active-challenges");
 }
+{
+  const request = new Request("https://api.cathedral.computer/v1/validator/weights/next");
+  const origin = originRequest(request, "https://2rdrh9ax.up.railway.app", {
+    hostHeader: "api.cathedral.computer",
+  });
+  assert.equal(origin.url, "https://2rdrh9ax.up.railway.app/v1/validator/weights/next");
+  assert.equal(origin.headers.get("host"), "api.cathedral.computer");
+}
 assert.deepEqual(
   unsupportedCacheQueryParams(
     "https://api.cathedral.computer/v1/leaderboard/recent?limit=20&since_id=abc",
