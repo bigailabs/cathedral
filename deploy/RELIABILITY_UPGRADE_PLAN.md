@@ -1,74 +1,181 @@
-# Cathedral SAT — Reliability Upgrade Plan (canonical)
+# Cathedral SAT Reliability Upgrade Plan
 
-**Status:** Draft for action · **Owner:** Fred · **Scope:** live SAT lane (`api.cathedral.computer`) only — no Bittensor mainnet, no SN39 validator (UID200) changes.
-**Last verified against code + live probes:** 2026-06-27.
+**Status:** Draft for action
+**Owner:** Fred
+**Last verified against code and live probes:** 2026-06-27
+**Canonical file:** `deploy/RELIABILITY_UPGRADE_PLAN.md` (single source of truth)
+**Tracking issue:** cathedralai/cathedral#309
 
-This is the single source of truth for fixing SAT-lane reliability. It supersedes ad-hoc fixes (PRs #302–#308). Every claim below was checked against the code or a live probe; items not yet confirmed are marked **(hypothesis)**.
+This plan merges the live deploy runbook and the longer-term submit architecture
+plan into one source of truth. It supersedes and replaces the earlier short
+deploy-only draft; do not keep a second reliability plan in the repo.
 
----
+## Scope
 
-## TL;DR
+In scope:
 
-Two confirmed problems are hurting live miners:
+- Live SAT lane reliability for `api.cathedral.computer`, `read.cathedral.computer`, and `submit.cathedral.computer`.
+- Miner challenge fetch, CNF fetch, submit admission, receipts, verification, and status surfaces.
+- Deploy configuration, Railway service health, Cloudflare edge behavior, and operator observability.
+- Compatibility for existing public API paths used by miners and validators.
 
-1. **Read origin is fully down right now** — every read path returns `504` after ~10s (the edge timeout firing because the origin never answers). Miners can't even fetch a challenge. **This is an outage and is the top priority.**
-2. **Submit concurrency is hard-capped at 1** in the split deploy script — so the moment two miner submits overlap, the second gets an instant `429 submit_busy_retry`. This is the "submit is unreliable" complaint.
+Out of scope for this plan:
 
-Fix order: **restore reads → raise submit cap → make the bad config un-repeatable in the repo → root-cause the read origin → add real backpressure + alerting.** Raising the submit cap alone does nothing while reads are 504 (you can't submit a solution to a challenge you can't read).
+- Bittensor mainnet governance changes.
+- SN39 validator hotkey or UID200 runtime changes.
+- Compute/Agent lanes outside the SAT service path.
+- Decentralization and protocol-hardening work beyond the reliability changes listed here.
 
----
+## Executive Summary
 
-## Confirmed problems & evidence
+The reliability work has two layers:
 
-### P1 — Read origin outage (ACUTE)
-Live probes, 2026-06-27 (safe GETs only):
+1. **Acute live recovery**
+   - Restore the read origin first.
+   - Raise the submit cap from the split-deploy choke.
+   - Make the bad deploy config impossible to reintroduce silently.
+   - Add enough observability to know when the system is sick.
 
-| Path | Result |
-|---|---|
-| `GET /health/ready` | `504` after **9.4s** |
-| `GET /v1/synthetic-boolean/current-challenge` | `504` after **10.2s** |
-| `GET /v1/synthetic-boolean/active-challenges` | `504` after **11.7s** (earlier reports got a stale `200` from edge cache; now also 504) |
+2. **Durable submit architecture**
+   - Change submit from synchronous verification to durable admission.
+   - Return `202 Accepted` with a stable receipt.
+   - Verify SAT solutions asynchronously in workers.
+   - Keep miner retries idempotent and fair.
 
-`/health/ready` timing out means the read origin is **not answering at all** (down / crash-looping / OOM / unreachable), not merely slow. Edge timeouts that turn this into a 504 (`deploy/edge-router/worker.mjs:228-238`):
-- submit route: `SUBMIT_ORIGIN_TIMEOUT_MS` = **10000**
-- read cacheable: `READ_ORIGIN_TIMEOUT_MS` = **4500**
-- read health: `READ_HEALTH_ORIGIN_TIMEOUT_MS` = **9000**
+These are not competing plans. The acute plan stops the bleeding; the durable
+architecture removes the class of failure where miners lose work because the
+request path was busy.
 
-PRs #302–#308 ("route edge reads around broken read origin", "extend active board edge cache", "restore edge read origin to split service") were repeated attempts at exactly this and **did not resolve it** — the origin is still down. Root cause is not yet identified (see Phase 2).
+## Confirmed Problems
 
-### P2 — Submit concurrency hard-capped at 1
-The effective submit concurrency (`scaffold/publisher/app.py:233-247`):
+### P0: Read Origin Outage
+
+At the time this plan was written, safe live GET probes showed the read origin
+timing out behind the edge:
+
+| Path | Observed result |
+| --- | --- |
+| `GET /health/ready` | `504` after about 9s |
+| `GET /v1/synthetic-boolean/current-challenge` | `504` after about 10s |
+| `GET /v1/synthetic-boolean/active-challenges` | `504` after about 10s |
+
+This means miners may fail before submit, because they cannot reliably fetch
+fresh challenge state. Raising submit capacity does not help if challenge reads
+are down.
+
+### P0: Submit Concurrency Choked By Deploy Config
+
+The submit app computes effective concurrency as:
+
+```text
+min(CATHEDRAL_SUBMIT_MAX_CONCURRENCY, CATHEDRAL_SUBMIT_HARD_CAP)
 ```
-submit_max_concurrency = min(CATHEDRAL_SUBMIT_MAX_CONCURRENCY, CATHEDRAL_SUBMIT_HARD_CAP)
+
+Code defaults are safer than the split deploy:
+
+- `CATHEDRAL_SUBMIT_MAX_CONCURRENCY=24`
+- `CATHEDRAL_SUBMIT_HARD_CAP=8`
+
+The split deploy config currently documents or sets:
+
+- `CATHEDRAL_SUBMIT_HARD_CAP=1`
+- `WEB_CONCURRENCY=1`
+
+With a hard cap of `1`, two overlapping submits cause one miner to receive:
+
+```text
+HTTP 429 submit_busy_retry
 ```
-Code defaults: `MAX_CONCURRENCY=24`, `HARD_CAP=8`. **The split deploy overrides `HARD_CAP=1` and `WEB_CONCURRENCY=1`:**
-- `deploy/railway-split.ps1:178` → `CATHEDRAL_SUBMIT_HARD_CAP=1`
-- `deploy/railway-split.ps1:180` → `WEB_CONCURRENCY=1`
-- `deploy/ROLE_SPLIT_RUNBOOK.md:78` → documents the same `=1`
 
-There are **two** non-blocking gates a submit must pass, each a `BoundedSemaphore(submit_max_concurrency)`:
-1. ASGI pre-body backpressure middleware — `scaffold/publisher/app.py:631-700` (own `_submit_gate`, app.py:646)
-2. FastAPI dependency `_submit_slot` — `scaffold/publisher/app.py:324-345`, wired at `agents_submit` `app.py:3369-3381`
+That is expected backpressure behavior, but the configured value serializes the
+whole submit lane.
 
-Both call `gate.acquire(blocking=False)` and **immediately** raise `429 submit_busy_retry` (header `X-Cathedral-Rejection-Reason: submit_busy_retry`) when full — they do **not** queue. With cap 1, one in-flight submit blocks all others. This reproduces even for an unauthenticated dummy POST because the gate runs *before* auth/solution validation. Confirmed cause of the complaint.
+### P1: Submit Does Heavy Work Inline
 
-### Background — why both gates exist
-The non-blocking gates protect the Postgres origin from being swamped by heavy submit/CNF work. The design is correct; the **value (1) is wrong**. The goal is "shed load past capacity," not "serialize all miners to one at a time."
+Today, `POST /v1/agents/submit` does too much synchronously:
 
----
-
-## The plan
-
-### Phase 0 — Immediate triage (live; requires Railway access)
-> Cannot be done from the dev WSL environment — no `railway` CLI / token there. Must run wherever Railway deploys are issued.
-
-**0a. Restore the read origin (do this first — it's the outage).**
-- Inspect the read service in Railway: is it crashed, OOM-killed, health-failing, or undeployed? `/health/ready` → 504 points to the process not answering.
-- Confirm the read service domain (`read.cathedral.computer`, `railway-split.ps1:173`) is actually attached and the edge worker `READ_ORIGIN` points at it.
-- Restart / redeploy the read service. Re-probe `/health/ready` until it returns `200`.
-
-**0b. Raise submit concurrency** on the submit service:
+```text
+Miner -> Submit API
+          - parse form body
+          - verify hotkey signature
+          - load CNF
+          - verify DIMACS solution
+          - write DB rows
+          - update claim/rank
+          - emit signed feed rows
+          - return ranked/rejected response
 ```
+
+While verification runs, the request holds an in-process submit slot. Under
+traffic spikes, the gate protects the origin but miners can lose a final POST
+after spending real solve time.
+
+## Reliability Principles
+
+- Restore reads before tuning submits.
+- Keep public API paths backward compatible.
+- Make deploy notes executable in code, config, or smoke tests.
+- Keep request admission cheap, durable, and idempotent.
+- Do not remove backpressure; right-size it and make it miner-friendly.
+- Rank accepted work by server `received_at`, not worker completion time.
+- Prefer boring Postgres-backed durability first; add managed queues only when pressure requires it.
+- Do not store raw rejected solution bodies forever.
+
+## Target Architecture
+
+```text
+Miner
+  |
+  | POST /v1/agents/submit
+  v
+Submit Admission API
+  | cheap checks
+  | durable receipt
+  | solution body to DB or object storage
+  v
+Durable Submit Queue / Log
+  |
+  | workers claim pending attempts
+  v
+Verification Workers
+  | load CNF and solution
+  | verify DIMACS
+  | write ranked/rejected result
+  v
+Receipts / Score Rows / Signed Feeds
+```
+
+The first durable milestone is:
+
+```text
+POST /v1/agents/submit returns 202 pending in under 1 second, backed by a durable receipt.
+```
+
+## Phase 0: Immediate Live Triage
+
+Goal: restore the live miner path without changing scoring semantics.
+
+### 0a. Restore Read Origin
+
+Do this first.
+
+Actions:
+
+- Inspect the Railway read service.
+- Check whether it is crashed, OOM-killed, health-failing, undeployed, or routed to the wrong domain.
+- Confirm `read.cathedral.computer` is attached to the read service.
+- Confirm the edge worker `READ_ORIGIN` points at the read service.
+- Restart or redeploy the read service after logs are captured.
+- Re-probe until these return `200`:
+  - `GET /health/ready`
+  - `GET /v1/synthetic-boolean/current-challenge`
+  - `GET /v1/synthetic-boolean/active-challenges`
+
+### 0b. Raise Submit Capacity
+
+Start with:
+
+```text
 CATHEDRAL_SUBMIT_HARD_CAP=8
 CATHEDRAL_SUBMIT_MAX_CONCURRENCY=24
 WEB_CONCURRENCY=2
@@ -76,89 +183,552 @@ CATHEDRAL_PM_READ_HARD_CAP=128
 CATHEDRAL_THREADPOOL_TOKENS=32
 CATHEDRAL_PG_POOL_MAX=32
 ```
-Then confirm via `GET /v1/admin/synthetic-boolean/submit-metrics` (`app.py:306-322`): `hard_cap` should read 8, and `by_reason.submit_busy_retry` should fall. Do **not** jump to unlimited — step to `HARD_CAP=16` only if DB/CPU headroom is confirmed.
 
-### Phase 1 — Make the bad config un-repeatable (repo; side branch, NOT main)
-The root of P2 is that the deploy script bakes in `=1`. Until that's fixed, any re-run of the split script silently re-introduces the choke.
-- Edit `deploy/railway-split.ps1`: submit service → `HARD_CAP=8`, add `MAX_CONCURRENCY=24`, `WEB_CONCURRENCY=2`, `PM_READ_HARD_CAP=128`, `THREADPOOL_TOKENS=32`, `PG_POOL_MAX=32`.
-- Edit `deploy/ROLE_SPLIT_RUNBOOK.md` to match and explain *why* (link this doc).
-- Land on a side branch, reviewed; do not merge to `main` without Fred's sign-off.
+Then verify:
 
-### Phase 2 — Root-cause the read origin (the actually-unsolved bug)
-P0a restarts it; this prevents recurrence. Investigate, in order:
-- **Is it OOM / crash-looping?** Check Railway memory/restart counts on the read service. `PG_POOL_MAX=16` × `WEB_CONCURRENCY=2` and threadpool sizing vs container memory.
-- **Is Postgres the bottleneck?** Slow/again-saturated DB makes `/health/ready` hang. Check connection count vs `PG_POOL_MAX`, slow queries on the active-board read path.
-- **Is the cursor scan starving the hot path?** PR b55ac1e ("stop recent-feed cursor scans from starving the read hot path") suggests a known offender — verify it's deployed and effective.
-- **Edge cache fallback:** ensure `active-challenges` serves stale-while-revalidate so a brief origin blip degrades to stale data, not 504 (it already does for that route; extend to `current-challenge` if safe).
+```text
+GET /v1/admin/synthetic-boolean/submit-metrics
+```
 
-### Phase 3 — Replace instant-429 with bounded queueing (design hardening)
-Non-blocking gates convert *any* overlap into a reject. Soften:
-- Give `_submit_slot` / ASGI gate a short bounded wait (e.g. `acquire(timeout=0.25–0.5s)`) before 429, so brief bursts queue instead of bounce. Keep a hard ceiling so true overload still sheds.
-- Ensure `Retry-After` (already set to `1`) plus client jitter/backoff is documented for miners.
-- Consider separating the ASGI gate and dependency gate sizes so a submit doesn't consume two slots for one request.
+Expected:
 
-### Phase 4 — Observability & SLOs
-- **Alerts:** page when `/health/ready` ≠ 200 for >60s, or `submit_busy_retry` rate > X/min, or read p95 > edge timeout.
-- **Dashboard:** surface `/v1/admin/synthetic-boolean/submit-metrics` (`max_concurrency`, `hard_cap`, `by_reason`, `recent`) and read-origin health continuously.
-- **SLOs (proposed):** read availability ≥ 99.5%; submit `429` rate < 1% under normal load; challenge-fetch p95 < 2s.
+- `hard_cap` is `8`
+- `submit_busy_retry` trends down
+- DB and CPU stay inside headroom
 
-### Phase 5 — Miner-facing error contract
-Publish what each error means and the correct client action, so complaints separate "server degraded" from "client bug":
+Only test `CATHEDRAL_SUBMIT_HARD_CAP=16` after the service is stable at `8`.
+
+### 0c. Miner Guidance During Triage
+
+Publish the short-term contract:
+
+- `429 submit_busy_retry` means submit saturation.
+- Honor `Retry-After`.
+- Retry with jitter and a fresh signature.
+- `504 *_origin_unavailable` is server-side, not a miner solution bug.
+
+Done when:
+
+- Read health is stable.
+- Challenge reads work through public URLs.
+- Submit metrics show the intended cap.
+- Miners are no longer mostly blocked by `429`.
+
+## Phase 1: Make Bad Config Unrepeatable
+
+Goal: prevent the split deploy from silently reintroducing the cap-1 choke.
+
+Actions:
+
+- Edit `deploy/railway-split.ps1`:
+  - set submit `CATHEDRAL_SUBMIT_HARD_CAP=8`
+  - set `CATHEDRAL_SUBMIT_MAX_CONCURRENCY=24`
+  - set `WEB_CONCURRENCY=2`
+  - set `CATHEDRAL_PM_READ_HARD_CAP=128`
+  - set `CATHEDRAL_THREADPOOL_TOKENS=32`
+  - set `CATHEDRAL_PG_POOL_MAX=32`
+- Edit `deploy/ROLE_SPLIT_RUNBOOK.md` to match.
+- Add or keep startup checks for:
+  - valid `CATHEDRAL_SERVICE_ROLE`
+  - shared `CATHEDRAL_CNF_TOKEN_SECRET`
+  - role-specific route exposure
+- Land on a reviewed side branch.
+- Do not merge to `main` without Fred's sign-off.
+
+Done when:
+
+- The repo and runbook agree on target config.
+- Re-running deploy scripts cannot quietly reset submit to cap `1`.
+- Submit metrics prove the live service is using the intended cap.
+
+## Phase 2: Root-Cause Read Origin
+
+Goal: fix the recurring unsolved read-origin failure, not just restart around it.
+
+Investigate in order:
+
+- Railway service state:
+  - crash loop
+  - OOM kill
+  - failed deploy
+  - bad domain binding
+  - wrong service role
+- Postgres pressure:
+  - connection count versus pool sizing
+  - slow queries
+  - transaction locks
+  - active-board path latency
+- App hot paths:
+  - recent-feed cursor scans
+  - background cache builders
+  - startup work that can block request handling
+  - per-replica local state that should be shared
+- Edge behavior:
+  - stale-while-revalidate on safe read routes
+  - origin timeout values
+  - cache keys for active challenge shapes
+
+Important distinction:
+
+- Edge caching can hide a read-origin problem after one successful fill.
+- Edge caching cannot be the root fix if `/health/ready` and `/health/live` do not answer.
+
+Done when:
+
+- Root cause is documented.
+- Read service can be restarted/redeployed without long 504 windows.
+- Hot read routes degrade to stale data where safe instead of hard 504.
+
+## Phase 3: Better Backpressure
+
+Goal: stop turning every small overlap into an instant miner-facing reject.
+
+Actions:
+
+- Keep a hard submit ceiling.
+- Add a short bounded wait before returning `429`, for example `0.25s` to `0.5s`.
+- Avoid double-counting one submit across both ASGI and dependency gates if possible.
+- Keep `Retry-After` on overload responses.
+- Document client jitter/backoff.
+- Add per-hotkey abuse limits separately from global saturation limits.
+
+Normal pressure levels:
+
+1. Normal: accept submit.
+2. Queue high: accept submit and include estimated delay when receipts exist.
+3. Queue critical: accept only one pending submit per hotkey/challenge.
+4. Admission emergency: return `503 submit_admission_unavailable`.
+
+Avoid `submit_busy_retry` as a normal outcome once durable admission exists.
+
+## Phase 4: Durable Submit Admission
+
+Goal: make submit cheap, durable, and retry-safe.
+
+The submit endpoint should do only cheap work:
+
+1. capture server `received_at` at handler entry
+2. enforce max request/body size
+3. parse required fields
+4. verify hotkey signature
+5. compute `dimacs_solution_sha256`
+6. compute idempotency key
+7. persist pending receipt
+8. persist or upload solution body
+9. enqueue verification work
+10. return `202 Accepted`
+
+The submit endpoint should not verify the SAT solution inline.
+
+### Miner Submit Contract
+
+`POST /v1/agents/submit` usually returns:
+
+```http
+202 Accepted
+```
+
+```json
+{
+  "schema": "cathedral.submit_receipt.v2",
+  "status": "pending",
+  "receipt_id": "sub_...",
+  "challenge_id": "pm-t1-...",
+  "miner_hotkey": "...",
+  "received_at": "2026-06-27T...Z",
+  "dimacs_solution_sha256": "...",
+  "receipt_url": "/v1/agents/receipts/sub_..."
+}
+```
+
+### Idempotency
+
+Use:
+
+```text
+sha256(miner_hotkey + challenge_id + dimacs_solution_sha256)
+```
+
+If the same miner resubmits the same solution, return the existing
+receipt/result.
+
+### Fairness Timestamp
+
+Capture:
+
+```text
+received_at = server time at beginning of submit handler
+```
+
+Store separately:
+
+```text
+received_at
+verified_at
+```
+
+Rank/order by `received_at`, not worker completion time.
+
+### Durable attempts table (reconcile with existing code — not greenfield)
+
+**Verified in code:** the service already has a `/v1/agents/receipts/{receipt_id}`
+endpoint (`scaffold/publisher/app.py:3819`) and a `per_miner_attempts` table that
+`agents_submit` writes to inline. So this phase **extends what exists** rather than
+standing up a parallel system:
+
+- Reuse / evolve `per_miner_attempts` (and the existing receipts endpoint) instead
+  of adding a second, divergent attempts table. If a rename to `submit_attempts`
+  is preferred, migrate the existing table — do not run both.
+- The fields below are the target shape to converge on; treat columns the current
+  table already has as "keep", and the rest as "add".
+- Goal: one attempts table is the source of truth for both admission and
+  verification, surfaced through the one existing receipts endpoint.
+
+Target schema sketch (superset to converge on):
+
+```sql
+CREATE TABLE submit_attempts (
+  id TEXT PRIMARY KEY,
+  idempotency_key TEXT UNIQUE NOT NULL,
+  miner_hotkey TEXT NOT NULL,
+  challenge_id TEXT NOT NULL,
+  challenge_kind TEXT NOT NULL,
+  dimacs_solution_sha256 TEXT NOT NULL,
+  solution_storage_kind TEXT NOT NULL,
+  solution_storage_key TEXT,
+  solution_bytes INTEGER,
+  signature TEXT NOT NULL,
+  submitted_at TEXT,
+  received_at_iso TEXT NOT NULL,
+  status TEXT NOT NULL,
+  rejection_reason TEXT,
+  solve_rank INTEGER,
+  weighted_score REAL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at_iso TEXT,
+  locked_by TEXT,
+  locked_until_iso TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL
+);
+```
+
+Important indexes:
+
+```sql
+CREATE INDEX submit_attempts_status_next_attempt_idx
+  ON submit_attempts(status, next_attempt_at_iso);
+
+CREATE INDEX submit_attempts_challenge_miner_idx
+  ON submit_attempts(challenge_id, miner_hotkey);
+
+CREATE INDEX submit_attempts_miner_created_idx
+  ON submit_attempts(miner_hotkey, created_at_iso);
+
+CREATE INDEX submit_attempts_received_idx
+  ON submit_attempts(received_at_iso);
+```
+
+### Solution Body Storage
+
+Short-term:
+
+- Store `dimacs_solution` in Postgres for speed.
+
+Preferred:
+
+- Store solution body in object storage.
+- Store only metadata and object key in Postgres.
+
+Example key:
+
+```text
+r2://cathedral-submits/YYYY/MM/DD/{receipt_id}.dimacs
+```
+
+Done when:
+
+- `/submit` returns `202 pending` quickly.
+- retries return the same receipt/result.
+- accepted receipts are durable once returned.
+- SAT verification no longer runs inline in the request path.
+
+## Phase 5: Async Verification Workers
+
+Goal: scale verification horizontally without blocking submit admission.
+
+Worker claim sketch:
+
+```sql
+UPDATE submit_attempts
+SET status = 'verifying',
+    locked_by = $worker_id,
+    locked_until_iso = $deadline,
+    attempt_count = attempt_count + 1,
+    updated_at_iso = $now
+WHERE id IN (
+  SELECT id
+  FROM submit_attempts
+  WHERE status IN ('pending', 'failed_retryable')
+    AND (next_attempt_at_iso IS NULL OR next_attempt_at_iso <= $now)
+  ORDER BY received_at_iso, id
+  LIMIT $batch_size
+  FOR UPDATE SKIP LOCKED
+)
+RETURNING *;
+```
+
+Worker steps:
+
+1. claim pending attempts
+2. load solution body from object storage or DB
+3. load CNF by `challenge_id`
+4. run existing DIMACS verification
+5. atomically record result:
+   - `ranked`
+   - `rejected`
+6. preserve existing rejection vocabulary
+7. emit signed feed rows if accepted
+8. apply retention policy to raw solution body
+
+Crash safety:
+
+- row remains `verifying`
+- `locked_until_iso` expires
+- another worker can reclaim it
+
+Duplicate safety:
+
+- use DB constraints to prevent duplicate payouts
+- preserve existing per-mode uniqueness semantics
+
+Done when:
+
+- multiple workers can run safely.
+- worker crash does not lose submits.
+- retries do not duplicate payouts.
+- queue depth and verification latency are observable.
+
+## Phase 6: Cost And Scale Hardening
+
+Recommended retention:
+
+| Data | Retention |
+| --- | ---: |
+| Pending solution body | until verified |
+| Rejected raw solution | 1-24 hours |
+| Accepted raw solution | 1-7 days |
+| Accepted witness hash / answer hash | forever |
+| Receipt metadata | 30-90 days |
+| Aggregate scoring rows | forever or archived |
+
+After verification, compact accepted solves to:
+
+```text
+answer_hash
+verifier_details_hash
+dimacs_solution_sha256
+received_at
+verified_at
+rank
+score
+```
+
+Scale order:
+
+1. Postgres table as durable queue.
+2. Date/epoch partitioning.
+3. Retention job.
+4. Object storage for raw bodies.
+5. Managed queue only when Postgres queue pressure is proven.
+
+Managed queue messages must be small:
+
+```json
+{
+  "receipt_id": "...",
+  "challenge_id": "...",
+  "miner_hotkey": "...",
+  "solution_object_key": "...",
+  "dimacs_solution_sha256": "...",
+  "received_at": "..."
+}
+```
+
+Do not put full DIMACS solution bodies into queue messages.
+
+## Phase 7: Observability, Alerts, And SLOs
+
+Admission metrics:
+
+- requests/sec
+- accepted/sec
+- rejected/sec by reason
+- p50/p95/p99 admission latency
+- body size distribution
+- idempotent replay rate
+
+Queue metrics:
+
+- pending jobs
+- oldest pending age
+- jobs/sec enqueued
+- jobs/sec verified
+- retry count
+- dead-letter count
+
+Verification metrics:
+
+- p50/p95/p99 verification time
+- CNF load time
+- solution parse time
+- DB commit time
+- accepted/rejected rates by reason
+- per-tier verification cost
+
+Read metrics:
+
+- `/health/live`
+- `/health/ready`
+- challenge-fetch p50/p95/p99
+- edge cache hit/stale/error rate
+- origin timeout rate
+
+Critical alerts:
+
+- `/health/ready` not `200` for more than 60s
+- oldest pending age exceeds SLO
+- admission returns emergency failures
+- `submit_busy_retry` rate above threshold
+- DB write latency spikes
+- object storage writes fail
+- worker success rate drops
+- receipts stuck in `verifying` past lock timeout
+
+Suggested SLOs:
+
+```text
+Read availability: 99.5% or better.
+Challenge fetch p95: under 2s.
+Submit admission: 99.9% of valid submits receive a receipt within 1s.
+Verification: 95% within 30s, 99% within 5m.
+Durability: no accepted submit receipt is lost after 202.
+Retry: same idempotency key returns same receipt/result.
+```
+
+## Miner-Facing Error Contract
 
 | HTTP / reason | Meaning | Miner action |
-|---|---|---|
-| `429 submit_busy_retry` | submit service saturated | retry with jitter/backoff (honor `Retry-After`) |
-| `409 challenge_not_active` | stale/retired challenge | refetch active challenge + CNF |
-| `409 challenge_already_locked` | locked/retired during a race | refetch |
+| --- | --- | --- |
+| `429 submit_busy_retry` | submit service saturated | retry with jitter/backoff, honor `Retry-After` |
+| `503 submit_admission_unavailable` | durable admission unavailable | back off; server-side incident |
+| `409 challenge_not_active` | stale or retired challenge | refetch active challenge and CNF |
+| `409 challenge_already_locked` | locked or retired during race | refetch |
 | `409 already_solved` | this hotkey already solved it | move to next challenge |
 | `401 invalid hotkey signature` | signing payload mismatch | fix client signing |
-| `400 solution_*` | invalid DIMACS/solver output | fix solution format |
-| `404` on CNF URL | CNF token expired/invalid | refetch active-cnf |
-| `504 *_origin_unavailable` | origin/edge timeout | **server-side** — not a miner bug |
+| `400 solution_*` | invalid DIMACS or solver output | fix solution format |
+| `404` on CNF URL | CNF token expired or invalid | refetch active CNF |
+| `504 *_origin_unavailable` | origin or edge timeout | server-side; not a miner bug |
 
----
+## Target Configuration Reference
 
-## Target configuration reference
+| Variable | Submit now | Submit target | Read target | Notes |
+| --- | --- | --- | --- | --- |
+| `CATHEDRAL_SUBMIT_HARD_CAP` | `1` in split deploy | `8`, then `16` if headroom | n/a | current choke |
+| `CATHEDRAL_SUBMIT_MAX_CONCURRENCY` | default `24` | `24` | n/a | effective cap uses min |
+| `WEB_CONCURRENCY` | `1` | `2` | `2` | watch DB connections |
+| `CATHEDRAL_PM_READ_HARD_CAP` | `1` in split deploy | `128` | `128` | per-miner read gate |
+| `CATHEDRAL_THREADPOOL_TOKENS` | `16` | `32` | `32` | tune after measurements |
+| `CATHEDRAL_PG_POOL_MAX` | `16` | `32` | `16` | keep total below DB max |
+| `CATHEDRAL_CNF_TOKEN_SECRET` | shared | shared | shared | must match every replica |
+| `CATHEDRAL_SERVICE_ROLE` | `submit` | `submit` | `read` | fail startup on invalid role |
 
-| Variable | Submit svc (now) | Submit svc (target) | Read svc | Notes |
-|---|---|---|---|---|
-| `CATHEDRAL_SUBMIT_HARD_CAP` | **1** | **8** (→16 if headroom) | n/a | the choke |
-| `CATHEDRAL_SUBMIT_MAX_CONCURRENCY` | (24 default) | 24 | n/a | ceiling; effective = min(this, hard_cap) |
-| `WEB_CONCURRENCY` | **1** | **2** | 2 | uvicorn workers |
-| `CATHEDRAL_PM_READ_HARD_CAP` | **1** | 128 | 128 (default) | per-miner read gate |
-| `CATHEDRAL_THREADPOOL_TOKENS` | 16 | 32 | 32 | |
-| `CATHEDRAL_PG_POOL_MAX` | 16 | 32 | 16 | watch total DB connections across replicas |
-| `CATHEDRAL_CNF_TOKEN_SECRET` | shared | shared (identical every replica) | shared | required for CNF token validation |
-| `CATHEDRAL_SERVICE_ROLE` | submit | submit | read | |
+Edge timeouts should be tuned only after origin is healthy.
 
-Edge timeouts (`worker.mjs`): submit 10s, read 4.5s, read-health 9s — tune only after origin is healthy.
+## Verification And Rollback
 
----
+Verify after Phase 0:
 
-## Verification & rollback
+1. `GET /health/ready` returns `200`.
+2. `GET /v1/synthetic-boolean/current-challenge` returns `200`.
+3. `GET /v1/synthetic-boolean/active-challenges` returns `200`.
+4. `GET /v1/admin/synthetic-boolean/submit-metrics` shows `hard_cap: 8`.
+5. `submit_busy_retry` trends down.
+6. A real miner round completes submit without normal-load `429`.
 
-**Verify after Phase 0:**
-1. `GET /health/ready` → `200`.
-2. `GET /v1/synthetic-boolean/current-challenge` → `200` with a live challenge.
-3. `GET /v1/admin/synthetic-boolean/submit-metrics` → `hard_cap: 8`, `submit_busy_retry` trending down.
-4. A real miner round completes submit without `429` under normal load.
+Rollback:
 
-**Rollback:** every Phase 0 change is a single env-var revert + redeploy. If raising the cap stresses Postgres (connection exhaustion, CPU), step `HARD_CAP` back to 4 and `PG_POOL_MAX` down before reverting fully. Read-origin restart is non-destructive.
+- Phase 0 env changes are single-variable reverts plus redeploy.
+- If Postgres saturates, step `HARD_CAP` down to `4` before reverting fully.
+- If DB connections spike, reduce `PG_POOL_MAX` and/or `WEB_CONCURRENCY`.
+- Read-origin restart is non-destructive, but capture logs before restarting.
 
----
+## Implementation Order
 
-## Risks & non-goals
-- **Don't unbounded the gate.** Removing the cap trades 429s for an origin meltdown. The fix is "right-sized + queue briefly," not "off."
-- **Watch DB connections** when raising `PG_POOL_MAX` × replicas × `WEB_CONCURRENCY` — keep total under Postgres `max_connections`.
-- **Non-goals:** no Bittensor mainnet changes; no SN39 validator (UID200) changes; no merge to `main` without sign-off; this plan does not touch the Compute/Agent lanes.
+### Now: Stop Bleeding
 
----
+1. Restore read origin.
+2. Raise submit cap to `8`.
+3. Fix split deploy config on a side branch.
+4. Wire submit metrics into operator dashboard.
+5. Publish miner error contract.
 
-## Status checklist
-- [ ] P0a — read origin restored (`/health/ready` = 200)
-- [ ] P0b — submit cap raised to 8, verified via submit-metrics
-- [ ] P1 — deploy script + runbook fixed on a side branch
-- [ ] P2 — read-origin root cause identified & documented
-- [ ] P3 — bounded-queue backpressure shipped
-- [ ] P4 — alerts + dashboard live
-- [ ] P5 — miner error contract published
+### Next: Harden The Current Request Path
+
+1. Root-cause read origin.
+2. Add bounded wait before `429`.
+3. Add request body-size limits if missing.
+4. Capture `received_at` at handler entry.
+5. Keep public read routes snapshot/cache-first where safe.
+
+### Then: Durable Receipts
+
+1. Add `submit_attempts`.
+2. Add idempotency key.
+3. Return `202 Accepted`.
+4. Extend receipt endpoint.
+5. Move verification to workers.
+
+### Later: Scale And Cost
+
+1. Move raw bodies to object storage.
+2. Add retention job.
+3. Partition large tables.
+4. Add worker dashboards and alerts.
+5. Evaluate managed queue when Postgres becomes the bottleneck.
+
+## What Not To Do
+
+- Do not raise concurrency forever as the main reliability strategy.
+- Do not remove submit gates entirely.
+- Do not let read-origin health depend on heavy dynamic queries.
+- Do not make miners solve again because the final POST was busy.
+- Do not put full solution bodies into queue messages.
+- Do not keep two divergent reliability plans in the repo.
+- Do not store raw rejected solution bodies forever.
+
+## Status Checklist
+
+- [ ] P0a: read origin restored
+- [ ] P0b: submit cap raised and verified
+- [ ] P1: split deploy config fixed
+- [ ] P2: read-origin root cause documented
+- [ ] P3: bounded backpressure shipped
+- [ ] P4: durable submit receipts shipped
+- [ ] P5: async verification workers shipped
+- [ ] P6: retention and storage policy shipped
+- [ ] P7: alerts and dashboards live
+- [ ] Miner error contract published
+
+## Bottom Line
+
+The coherent plan is:
+
+1. Restore reads.
+2. Raise submit capacity to a sane bounded value.
+3. Make that config stick.
+4. Root-cause the read origin.
+5. Replace inline submit verification with durable `202` receipts and async workers.
+
+Once submit admission is durable and idempotent, verification can be slow or
+bursty without breaking the miner experience.
