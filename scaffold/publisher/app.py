@@ -42,6 +42,11 @@ from .board_cache import BoardCache, board_cache_headers
 from .cnf_store import CNFStore
 from .sat_solution import verify_dimacs_solution
 from . import submit_admission
+from .per_hotkey_limit import (
+    ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
+    PerHotkeyLimiter,
+    config_from_env as per_hotkey_config_from_env,
+)
 from .store import Store, new_uuid
 
 _FAMILY = "synthetic_boolean_v1"
@@ -71,6 +76,15 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)) or default)
     except ValueError:
         return default
+
+
+def _scope_header(scope, name: bytes) -> str | None:
+    """Extract a single header value from a raw ASGI scope (latin-1 decoded)."""
+    name_lower = name.lower()
+    for k, v in scope.get("headers", []):
+        if k.lower() == name_lower:
+            return v.decode("latin-1", errors="replace")
+    return None
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -288,7 +302,13 @@ def build_app(
     except ValueError:
         submit_hard_cap = 8
     submit_max_concurrency = configured_submit_max_concurrency
-    if submit_hard_cap > 0 and submit_max_concurrency > 0:
+    # Track 2 (item 7): the global concurrency cap is a *saturation* gate, not a
+    # fairness throttle. Once admission is cheap (async verify) it can be raised
+    # high, with the per-hotkey limiter (below) preventing any single miner from
+    # starving the rest. DEFAULT OFF: the legacy hard-cap clamp stays in force
+    # unless an operator explicitly lifts it, so live behaviour is unchanged.
+    submit_hard_cap_bypass = _env_bool("CATHEDRAL_SUBMIT_HARD_CAP_BYPASS", False)
+    if submit_hard_cap > 0 and submit_max_concurrency > 0 and not submit_hard_cap_bypass:
         submit_max_concurrency = min(submit_max_concurrency, submit_hard_cap)
     submit_gate = (
         threading.BoundedSemaphore(submit_max_concurrency)
@@ -327,6 +347,11 @@ def build_app(
     # Body-size limit for the cheap inline check (chars of the DIMACS solution).
     pm_submit_max_solution_bytes = _env_int(
         "CATHEDRAL_PM_SUBMIT_MAX_SOLUTION_BYTES", 1_000_000)
+    # Track 2 (item 7): per-hotkey fairness limiter — abuse control distinct from
+    # the global saturation gate. DEFAULT OFF (see per_hotkey_limit.py); when off
+    # `allow()` is a no-op so live behaviour is unchanged. Rejections from this
+    # limiter use the distinct reason `abuse_rate_limited`.
+    per_hotkey_limiter = PerHotkeyLimiter(per_hotkey_config_from_env())
     # Phase 3: short bounded wait before returning submit_busy_retry (seconds).
     submit_busy_wait_secs = max(
         0.0, min(2.0, float(os.environ.get("CATHEDRAL_SUBMIT_BUSY_WAIT_SECS", "0.35") or "0")))
@@ -749,12 +774,47 @@ def build_app(
             path = scope.get("path", "")
             gate = None
             reason = ""
-            if method == "POST" and path in self._SUBMIT_PATHS:
+            is_submit = method == "POST" and path in self._SUBMIT_PATHS
+            if is_submit:
                 gate = self._submit_gate
                 reason = "submit_busy_retry"
             elif method == "GET" and path in self._PM_READ_PATHS:
                 gate = self._pm_read_gate
                 reason = "per_miner_busy_retry"
+
+            # Track 2 (item 7): per-hotkey fairness check BEFORE the global gate.
+            # A single hotkey over its budget is rejected with the distinct
+            # `abuse_rate_limited` reason; well-behaved miners and the saturation
+            # gate are untouched. No-op when the limiter is disabled (default).
+            if is_submit and per_hotkey_limiter.active:
+                hotkey = _scope_header(scope, b"x-cathedral-hotkey")
+                if not per_hotkey_limiter.allow(hotkey):
+                    cfg = per_hotkey_limiter.config
+                    abuse_body = _PER_HOTKEY_ABUSE_REASON.encode("utf-8")
+                    _record_submit_event(
+                        "rate_limited",
+                        _PER_HOTKEY_ABUSE_REASON,
+                        challenge_id=None,
+                        status_code=429,
+                        log=True,
+                    )
+                    await send({
+                        "type": "http.response.start",
+                        "status": 429,
+                        "headers": [
+                            (b"content-type", b"text/plain; charset=utf-8"),
+                            (b"content-length", str(len(abuse_body)).encode()),
+                            (b"retry-after", str(cfg.retry_after_secs).encode()),
+                            (b"x-cathedral-rejection-reason", abuse_body),
+                        ],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": abuse_body,
+                        "more_body": False,
+                    })
+                    return
+
             if gate is None:
                 await self._app(scope, receive, send)
                 return
