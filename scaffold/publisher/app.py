@@ -41,6 +41,7 @@ from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
 from .cnf_store import CNFStore
 from .sat_solution import verify_dimacs_solution
+from . import submit_admission
 from .store import Store, new_uuid
 
 _FAMILY = "synthetic_boolean_v1"
@@ -70,6 +71,13 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)) or default)
     except ValueError:
         return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _cnf_token_secret() -> bytes:
@@ -170,6 +178,11 @@ def _now_iso_ms() -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+def _now_iso_ms_plus(secs: float) -> str:
+    dt = datetime.now(timezone.utc) + timedelta(seconds=secs)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
 def _parse_iso(ts: str) -> float | None:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -247,6 +260,16 @@ def build_app(
     )
     submit_log_events = os.environ.get("CATHEDRAL_SUBMIT_LOG_EVENTS", "").strip().lower() in {
         "1", "true", "yes", "on"}
+    # Phase 4/5 durable admission. DEFAULT OFF: when off, /v1/agents/submit keeps
+    # its legacy synchronous 200 ranked/rejected contract verbatim (no behaviour
+    # change for live miners/validators). When on, the PUBLIC lane returns 202 +
+    # a durable receipt and an async worker verifies later (see submit_admission /
+    # verify_worker). Older clients can still force the legacy path per-request
+    # with `X-Cathedral-Submit-Mode: sync`.
+    submit_async_enabled = _env_bool("CATHEDRAL_SUBMIT_ASYNC_ENABLED", False)
+    # Phase 3: short bounded wait before returning submit_busy_retry (seconds).
+    submit_busy_wait_secs = max(
+        0.0, min(2.0, float(os.environ.get("CATHEDRAL_SUBMIT_BUSY_WAIT_SECS", "0.35") or "0")))
     submit_metrics_lock = threading.Lock()
     submit_metrics: dict[str, Any] = {
         "started_at_iso": _now_iso_ms(),
@@ -322,7 +345,14 @@ def build_app(
         if submit_gate is None:
             yield
             return
-        if not submit_gate.acquire(blocking=False):
+        # Phase 3: a brief bounded wait turns most transient overlaps into an
+        # accepted submit instead of an instant miner-facing 429. The hard ceiling
+        # is preserved — we still reject after the wait, just less often.
+        acquired = (
+            submit_gate.acquire(timeout=submit_busy_wait_secs)
+            if submit_busy_wait_secs > 0 else submit_gate.acquire(blocking=False)
+        )
+        if not acquired:
             _record_submit_event(
                 "rate_limited",
                 "submit_busy_retry",
@@ -573,7 +603,17 @@ def build_app(
                 await self._app(scope, receive, send)
                 return
 
-            if not gate.acquire(blocking=False):
+            # Phase 3: bounded non-blocking wait before rejecting. We poll the
+            # semaphore with short asyncio sleeps rather than a blocking acquire so
+            # the event loop is never stalled while we wait for a slot to free.
+            acquired = gate.acquire(blocking=False)
+            if not acquired and submit_busy_wait_secs > 0:
+                import asyncio
+                deadline = time.monotonic() + submit_busy_wait_secs
+                while not acquired and time.monotonic() < deadline:
+                    await asyncio.sleep(0.02)
+                    acquired = gate.acquire(blocking=False)
+            if not acquired:
                 _record_submit_event(
                     "rate_limited",
                     reason,
@@ -625,6 +665,9 @@ def build_app(
         }
         _READ_GET_PREFIXES = {
             "/v1/audit-scanner/",
+            # Durable submit receipts (Phase 4): a read of durable state, safe to
+            # serve from the read role as well as submit (miners poll their receipt).
+            "/v1/agents/receipts/",
         }
         _SUBMIT_GET_PATHS = {
             "/v1/synthetic-boolean/active-cnf",
@@ -633,6 +676,9 @@ def build_app(
         }
         _SUBMIT_GET_PREFIXES = {
             "/v1/challenges/",
+            # The submit role returns 202 + receipt_url; let the same host resolve
+            # that receipt so miners don't need a second host for status polling.
+            "/v1/agents/receipts/",
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
@@ -731,6 +777,7 @@ def build_app(
     app.state.seed_task = None
     app.state.arena_eval_task = None
     app.state.arena_payout_task = None
+    app.state.async_verify_task = None
     # Lane S champion machine + registry persist across eval ticks on app.state
     # (the validator constructs ONE lane and reuses it so the champion survives).
     from ..lanes.solver_arena import SolverArenaLane
@@ -814,6 +861,49 @@ def build_app(
                     "cathedral:publisher:refill",
                     lambda: refill.refill_loop(store, log=loop_log),
                 ))
+
+    # ---- Phase 5: async SAT verification worker (env-gated) ---------------
+    # Drains pending durable-admission attempts off the request path. Default OFF;
+    # only runs on a worker-capable role AND when both durable admission and the
+    # worker flag are enabled. The singleton advisory lock keeps exactly one loop
+    # active across replicas (claim is already crash-safe via locked_until_iso).
+    @app.on_event("startup")
+    async def _start_async_verify():
+        from . import verify_worker
+        verify_on = verify_worker.async_verify_enabled()
+        # Loud WARNING for the foot-gun: async admission returns 202 receipts, but
+        # if NO process is configured to run the drain worker those receipts stay
+        # `pending` forever and the miners that earned them never get paid. Two
+        # ways this happens: (a) CATHEDRAL_ASYNC_VERIFY_ENABLED was never turned on
+        # (no worker anywhere); (b) this is the only role and it is not worker-
+        # capable (e.g. a single submit/read role with no companion worker role).
+        if submit_async_enabled and not verify_on:
+            print(
+                "[verify] WARNING: CATHEDRAL_SUBMIT_ASYNC_ENABLED is on but "
+                "CATHEDRAL_ASYNC_VERIFY_ENABLED is not set — 202 receipts will "
+                "NEVER drain to ranked and miners go UNPAID. Enable the worker "
+                "(see deploy/ROLE_SPLIT_RUNBOOK.md 'Safe enable order').")
+        elif (submit_async_enabled and verify_on
+              and not _role_runs_worker(service_role)):
+            print(
+                f"[verify] WARNING: async admission on (service_role="
+                f"{service_role}) but this role does not run the verify worker; "
+                "ensure a worker/all role is deployed or 202 receipts go UNPAID.")
+        if not (submit_async_enabled and verify_on):
+            return
+        if not _role_runs_worker(service_role):
+            print(f"[verify] skipped service_role={service_role}")
+            return
+        import asyncio
+        worker_id = f"{service_role}:{new_uuid()[:8]}"
+        app.state.async_verify_task = asyncio.create_task(
+            _run_singleton_background(
+                "verify",
+                "cathedral:publisher:async_verify",
+                lambda: verify_worker.verify_loop(
+                    app.state.async_verify_tick, worker_id=worker_id,
+                    log=lambda evt, **kw: print(f"[verify] {evt} {kw}")),
+            ))
 
     # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
     # Periodically scores registered pending solvers and, on a record-fall,
@@ -3198,8 +3288,11 @@ def build_app(
         x_cathedral_hotkey: str = Header(...),
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
+        x_cathedral_submit_mode: str = Header(default="", alias="X-Cathedral-Submit-Mode"),
         _slot: None = Depends(_submit_slot),
     ):
+        # Fairness clock: server time at handler entry, BEFORE any verification.
+        received_at_iso = _now_iso_ms()
         if card_id != _FAMILY:
             raise HTTPException(400, f"only card_id={_FAMILY} accepted (see skill.md)")
         if not dimacs_solution or not challenge_id:
@@ -3462,6 +3555,47 @@ def build_app(
 
         _remember_submit(rl_key, now)  # consume the slot only past the gates
 
+        # ---- Phase 4: durable admission (public lane, default-off) ----
+        # When CATHEDRAL_SUBMIT_ASYNC_ENABLED is on AND the client did not force
+        # the legacy path (X-Cathedral-Submit-Mode: sync), do only cheap work here:
+        # persist a pending receipt keyed by idempotency and return 202. The async
+        # verify_worker loads the CNF, runs verify_dimacs_solution, and records the
+        # ranked/rejected result + signed feed rows in received_at order. Replays of
+        # the same solution return the SAME receipt (no second attempt / no double
+        # payout). The signature is NOT burned at admission — burn happens in the
+        # worker's atomic accept/reject, preserving exactly-once replay semantics.
+        want_sync = x_cathedral_submit_mode.strip().lower() == "sync"
+        if submit_async_enabled and not want_sync:
+            idem = submit_admission.idempotency_key(
+                x_cathedral_hotkey, challenge_id, sol_sha)
+            receipt_id = "sub_" + new_uuid().replace("-", "")
+            outcome, row = submit_admission.admit_pending(
+                store,
+                receipt_id=receipt_id,
+                idem_key=idem,
+                miner_hotkey=x_cathedral_hotkey,
+                challenge_id=challenge_id,
+                dimacs_solution_sha256=sol_sha,
+                dimacs_solution=dimacs_solution,
+                submitted_at=submitted_at,
+                received_at_iso=received_at_iso,
+                signature=x_cathedral_signature,
+                epoch=0,
+            )
+            receipt = submit_admission.receipt_from_row(row)
+            if outcome == "replayed":
+                # Idempotent replay: echo the existing receipt with its current
+                # status. 200 (not 202) signals "already known" to the client.
+                _record_submit_event(
+                    "accepted", "idempotent_replay",
+                    challenge_id=challenge_id, status_code=200)
+                return JSONResponse(status_code=200, content=receipt)
+            _record_submit_event(
+                "accepted", "admitted_pending",
+                challenge_id=challenge_id, status_code=202)
+            return JSONResponse(status_code=202, content=receipt)
+        # ---- End durable admission; fall through to legacy synchronous path ----
+
         check = verify_dimacs_solution(chal["cnf_text"], dimacs_solution)
         sub_id = new_uuid()
         if not check.ok:
@@ -3642,6 +3776,130 @@ def build_app(
             "challenge_id": challenge_id, "weighted_score": ws,
             "solve_rank": rank, "attestation_status": "pending",
         }
+
+    # ---- Durable submit receipts (Phase 4) --------------------------------
+    @app.get("/v1/agents/receipts/{receipt_id}")
+    def agents_receipt(receipt_id: str):
+        """Look up a durable submit receipt by id. Returns the same receipt shape
+        the 202 admission returned, with `status` advancing pending -> ranked/
+        rejected as the async worker verifies. 404 if unknown."""
+        receipt = submit_admission.get_receipt(store, receipt_id)
+        if receipt is None:
+            raise HTTPException(404, "receipt_not_found")
+        return receipt
+
+    # ---- Async verification finalize (Phase 5) ----------------------------
+    # Mirror of the legacy inline public-lane _accept: one atomic txn that burns
+    # the signature, claims the distinct-solver slot, writes the submission row and
+    # the signed feed rows. Reused by the worker so the async path has IDENTICAL
+    # scoring/payout semantics to the synchronous path — only the timing differs.
+    def _accept_public_async(receipt_id, attempt_row, check, now_iso):
+        challenge_id = str(attempt_row["challenge_id"])
+        miner_hotkey = str(attempt_row["miner_hotkey"])
+        signature = str(attempt_row["signature"])
+        submitted_at = attempt_row["submitted_at"]
+        chal_rows = store.query(
+            "SELECT * FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
+        if not chal_rows:
+            return ("challenge_not_active", None, None, None)
+        chal = chal_rows[0]
+        if chal["status"] not in ("active", "locked"):
+            return ("challenge_not_active", None, None, None)
+        row_uuid = new_uuid()
+        answer_hash = sha256_hex(",".join(str(x) for x in check.assignment))
+        sol_sha = str(attempt_row["dimacs_solution_sha256"])
+        verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
+        lock_wins = scoring.submit_mode() == "lock_wins"
+
+        def _accept(conn):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                (signature, now_iso))
+            if not cur.rowcount:
+                return ("replayed_signature", None, None, None)
+            if lock_wins:
+                locked = conn.execute(
+                    "UPDATE lane_challenges SET status='locked' "
+                    "WHERE challenge_id=? AND status='active'", (challenge_id,))
+                if locked.rowcount != 1:
+                    return ("challenge_already_locked", None, None, None)
+                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso) or 1
+            else:
+                active = conn.execute(
+                    "UPDATE lane_challenges SET updated_at_iso=? "
+                    "WHERE challenge_id=? AND status='active'", (now_iso, challenge_id))
+                if active.rowcount != 1:
+                    return ("challenge_not_active", None, None, None)
+                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso)
+                if rank is None:
+                    return ("already_solved", None, None, None)
+            score_multiplier = float(chal["score_multiplier"])
+            ws = (
+                scoring.weighted_score_for(store, miner_hotkey)
+                * score_multiplier
+                * _public_row_score_multiplier()
+            )
+            conn.execute(
+                "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
+                "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
+                "VALUES (?, ?, ?, 'ranked', NULL, ?, ?, ?, ?)",
+                (receipt_id, miner_hotkey, challenge_id, ws, rank,
+                 submitted_at, signature))
+            emitted = rows.build_solve_rows(
+                row_uuid=row_uuid, miner_hotkey=miner_hotkey,
+                agent_id=new_uuid(), challenge_id=challenge_id, tier=chal["tier"],
+                weighted_score=ws, answer_hash=answer_hash,
+                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                epoch_salt=epoch_salt, solve_rank=rank, solved=True,
+                private_key_hex=key_hex,
+            )
+            for r in emitted:
+                conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
+                     r["miner_hotkey"], r["task_type"], json.dumps(r)))
+            # Advance the receipt to its terminal ranked result in the SAME txn so a
+            # crash between feed rows and receipt update cannot exist.
+            conn.execute(
+                "UPDATE per_miner_attempts SET status='ranked', rejection_reason=NULL, "
+                "verified_at_iso=?, recorded_at_iso=?, solve_rank=?, weighted_score=?, "
+                "eval_run_id=?, solution_body=NULL, locked_by=NULL, locked_until_iso=NULL "
+                "WHERE id=?",
+                (now_iso, now_iso, rank, ws, row_uuid, receipt_id))
+            return (None, rank, ws, row_uuid)
+
+        err, rank, ws, eval_run_id = store.write(_accept)
+        if err is None and lock_wins:
+            board_cache_mod.invalidate_all()
+        return (err, rank, ws, eval_run_id)
+
+    def _async_verify_load_cnf(challenge_id):
+        rows_ = store.query(
+            "SELECT cnf_text FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
+        return rows_[0]["cnf_text"] if rows_ else None
+
+    def _async_verify_tick(*, worker_id, batch_size=8, lock_secs=120):
+        """Claim and verify up to `batch_size` pending attempts. Returns the count
+        processed. Safe to call from a loop or a test."""
+        now_iso = _now_iso_ms()
+        deadline = _now_iso_ms_plus(lock_secs)
+        claimed = submit_admission.claim_pending(
+            store, worker_id=worker_id, now_iso=now_iso,
+            lock_deadline_iso=deadline, batch_size=batch_size)
+        for attempt in claimed:
+            submit_admission.finalize_attempt(
+                store, attempt, now_iso=_now_iso_ms(),
+                load_cnf=_async_verify_load_cnf,
+                verify_dimacs=verify_dimacs_solution,
+                accept_public=_accept_public_async,
+                record_event=lambda outcome, reason, challenge_id=None: _record_submit_event(
+                    outcome, reason, challenge_id=challenge_id),
+            )
+        return len(claimed)
+
+    app.state.async_verify_tick = _async_verify_tick
 
     # ---- M3: Lane S registry ----------------------------------------------
     @app.post("/v1/arena/solvers")
