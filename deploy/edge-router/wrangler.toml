@@ -19,6 +19,10 @@ routes = [
   { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/status*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/summary*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/v1/challenges/*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/verifiable-sat/coinbase/status*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/verifiable-sat/coinbase/challenge*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/verifiable-sat/coinbase/verify*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/verifiable-sat/coinbase/submit*", zone_name = "cathedral.computer" },
 
   { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/active-challenges*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/challenge-broadcast*", zone_name = "cathedral.computer" },
@@ -29,6 +33,10 @@ routes = [
   { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/status*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/summary*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/api/cathedral/v1/challenges/*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/verifiable-sat/coinbase/status*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/verifiable-sat/coinbase/challenge*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/verifiable-sat/coinbase/verify*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/verifiable-sat/coinbase/submit*", zone_name = "cathedral.computer" },
 
   { pattern = "api.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/api/cathedral/v1/agents/submit*", zone_name = "cathedral.computer" },

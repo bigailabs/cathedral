@@ -30,8 +30,8 @@ The Worker uses short fresh TTLs and a longer edge fallback window:
 | `/v1/synthetic-boolean/challenge-broadcast` | 5s | 900s |
 | `/v1/synthetic-boolean/current-challenge` | 5s | 300s |
 | `/v1/synthetic-boolean/per-miner/summary` | 5s | 30s |
-| `/v1/validator/weights/next` | 15s | 30s |
-| `/v1/leaderboard/recent` | 2s | 20s |
+| `/v1/validator/weights/next` | 15s | 300s |
+| `/v1/leaderboard/recent` | 5s | 300s |
 | `/v1/leaderboard/top` | 15s | 90s |
 | `/v1/leaderboard/explain` | 10s | 60s |
 
@@ -79,6 +79,10 @@ api.cathedral.computer/v1/synthetic-boolean/per-miner/challenges*
 api.cathedral.computer/v1/synthetic-boolean/per-miner/cnf*
 api.cathedral.computer/v1/synthetic-boolean/per-miner/status*
 api.cathedral.computer/v1/synthetic-boolean/per-miner/summary*
+api.cathedral.computer/v1/verifiable-sat/coinbase/status*
+api.cathedral.computer/v1/verifiable-sat/coinbase/challenge*
+api.cathedral.computer/v1/verifiable-sat/coinbase/verify*
+api.cathedral.computer/v1/verifiable-sat/coinbase/submit*
 api.cathedral.computer/v1/agents/submit*
 api.cathedral.computer/v1/leaderboard/recent*
 api.cathedral.computer/v1/leaderboard/top*
@@ -103,6 +107,12 @@ Do this only after split endpoints are green:
 ```text
 https://read.cathedral.computer/health/ready
 https://submit.cathedral.computer/health/ready
+```
+
+Or run the executable split-origin smoke from the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -SkipValidatorReleaseGate -SkipEdgeSmoke -SkipRouteMap -SkipSoak -SkipLiveSmoke
 ```
 
 ## Test

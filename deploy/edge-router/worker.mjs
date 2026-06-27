@@ -17,6 +17,7 @@ const READ_GET_PATHS = new Set([
   "/v1/leaderboard/recent",
   "/v1/leaderboard/top",
   "/v1/leaderboard/explain",
+  "/v1/verifiable-sat/coinbase/status",
 ]);
 
 const READ_HEALTH_PATHS = new Set([
@@ -34,6 +35,7 @@ const SUBMIT_GET_PATHS = new Set([
   "/v1/synthetic-boolean/active-cnf",
   "/v1/synthetic-boolean/per-miner/challenges",
   "/v1/synthetic-boolean/per-miner/cnf",
+  "/v1/verifiable-sat/coinbase/challenge",
 ]);
 
 const SUBMIT_GET_PREFIXES = [
@@ -42,6 +44,8 @@ const SUBMIT_GET_PREFIXES = [
 
 const SUBMIT_POST_PATHS = new Set([
   "/v1/agents/submit",
+  "/v1/verifiable-sat/coinbase/verify",
+  "/v1/verifiable-sat/coinbase/submit",
 ]);
 
 const CACHE_POLICIES = new Map([

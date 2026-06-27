@@ -346,6 +346,14 @@ with TestClient(app) as client:
                read_latest.status_code == 200
                and read_snapshot.status_code == 200
                and read_events.status_code == 200)
+            read_vsat_status = role_client.get("/v1/verifiable-sat/coinbase/status")
+            ck("read role serves verifiable SAT status",
+               read_vsat_status.status_code == 200
+               and read_vsat_status.json().get("card_id") == "cathedral_verifiable_sat_v1")
+            read_vsat_issue = role_client.get("/v1/verifiable-sat/coinbase/challenge")
+            ck("read role rejects verifiable SAT challenge issuance",
+               read_vsat_issue.status_code == 404
+               and read_vsat_issue.text == "route_not_served_by_read_role")
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "submit"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "false"
@@ -390,6 +398,14 @@ with TestClient(app) as client:
             ck("submit role serves receipt status route",
                submit_receipt.status_code == 404
                and submit_receipt.headers.get("x-cathedral-service-role") is None)
+            submit_vsat_issue = submit_role_client.get("/v1/verifiable-sat/coinbase/challenge")
+            ck("submit role allows verifiable SAT challenge issuance route",
+               submit_vsat_issue.status_code == 422)
+            submit_vsat_verify = submit_role_client.post("/v1/verifiable-sat/coinbase/verify", json={})
+            submit_vsat_submit = submit_role_client.post("/v1/verifiable-sat/coinbase/submit", json={})
+            ck("submit role allows verifiable SAT proof routes",
+               submit_vsat_verify.status_code == 422
+               and submit_vsat_submit.status_code == 422)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "worker"
         worker_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
@@ -654,7 +670,11 @@ with TestClient(app) as client:
                     audit_miner,
                 )
                 _weights._reset_vector_cache()
-                audit_vector = audit_client.get("/v1/validator/weights/next").json()
+                audit_vector = _weights.current_vector(
+                    audit_app.state.store,
+                    signing_key_hex=key_hex,
+                    force_rebuild=True,
+                )
                 audit_weight = next(
                     (
                         float(row.get("weight") or 0.0)

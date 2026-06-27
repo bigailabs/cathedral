@@ -60,13 +60,15 @@ for (const path of [
 }
 
 // --- SUBMIT-role paths classify as "submit" (submit origin), NOT board/read.
-//     This is the must-fix: per-miner/cnf, per-miner/challenges, active-cnf and
-//     the private /v1/challenges/* fetch + POST submit are served by the SUBMIT
-//     origin in prod; a read origin 404s them. They must never be "board". ---
+//     This is the must-fix: per-miner/cnf, per-miner/challenges, active-cnf,
+//     verifiable-SAT issue/proof routes, and the private /v1/challenges/* fetch
+//     + POST submit are served by the SUBMIT origin in prod; a read origin 404s
+//     them. They must never be "board". ---
 for (const path of [
   "/v1/synthetic-boolean/active-cnf",
   "/v1/synthetic-boolean/per-miner/challenges",
   "/v1/synthetic-boolean/per-miner/cnf",
+  "/v1/verifiable-sat/coinbase/challenge",
 ]) {
   const got = classifyBoardRequest("GET", path);
   assert.equal(got.tier, "submit", `submit-role GET ${path} must classify as submit`);
@@ -85,6 +87,14 @@ assert.equal(
 assert.deepEqual(
   classifyBoardRequest("POST", "/v1/agents/submit"),
   { tier: "submit", path: "/v1/agents/submit" },
+);
+assert.deepEqual(
+  classifyBoardRequest("POST", "/v1/verifiable-sat/coinbase/verify"),
+  { tier: "submit", path: "/v1/verifiable-sat/coinbase/verify" },
+);
+assert.deepEqual(
+  classifyBoardRequest("POST", "/v1/verifiable-sat/coinbase/submit"),
+  { tier: "submit", path: "/v1/verifiable-sat/coinbase/submit" },
 );
 
 // --- The slow leaderboard hog is LEFT on the leaderboard (read) origin ---
@@ -124,6 +134,7 @@ assert.deepEqual(
     "/v1/synthetic-boolean/active-cnf",
     "/v1/synthetic-boolean/per-miner/challenges",
     "/v1/synthetic-boolean/per-miner/cnf",
+    "/v1/verifiable-sat/coinbase/challenge",
     "/v1/challenges/abc",
   ]) {
     const { tier } = classifyBoardRequest("GET", path);

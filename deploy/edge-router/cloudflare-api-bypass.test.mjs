@@ -8,8 +8,10 @@ const expression = apiHotPathExpression();
 assert.match(expression, /http\.host eq "api\.cathedral\.computer"/);
 assert.match(expression, /starts_with\(http\.request\.uri\.path, "\/v1\/synthetic-boolean\/"\)/);
 assert.match(expression, /starts_with\(http\.request\.uri\.path, "\/v1\/agents\/submit"\)/);
+assert.match(expression, /starts_with\(http\.request\.uri\.path, "\/v1\/verifiable-sat\/"\)/);
 assert.match(expression, /starts_with\(http\.request\.uri\.path, "\/api\/cathedral\/v1\/synthetic-boolean\/"\)/);
 assert.match(expression, /starts_with\(http\.request\.uri\.path, "\/api\/cathedral\/v1\/agents\/submit"\)/);
+assert.match(expression, /starts_with\(http\.request\.uri\.path, "\/api\/cathedral\/v1\/verifiable-sat\/"\)/);
 assert.doesNotMatch(expression, /starts_with\(http\.request\.uri\.path, "\/api\/cathedral\/v1\/"\)/);
 
 const rule = bypassRule();

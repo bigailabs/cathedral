@@ -46,7 +46,13 @@ jobs:
         with:
           node-version: "24"
       - name: Run offline Cloudflare Worker tests
-        run: node deploy/edge-router/worker.test.mjs
+        run: |
+          node deploy/edge-router/worker.test.mjs
+          node deploy/edge-router/cloudflare-api-bypass.test.mjs
+          node deploy/edge-router/board-failover/worker.test.mjs
+          node deploy/edge-router/route-config.test.mjs
+          node deploy/railway-split.test.mjs
+          node deploy/split-origin-smoke.test.mjs
 
   leak-guard:
     name: leak-guard

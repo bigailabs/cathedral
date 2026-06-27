@@ -3,6 +3,7 @@ binaries. Thin by design: Cathedral verifies; the heavy solving is the binary's.
 
 Proven on Stitch 2026-06-04:
   cryptominisat5 in.cnf proof.drat   -> exit 20 (UNSAT) + DRAT proof
+  cadical --no-binary in.cnf proof.drat -> exit 20 (UNSAT) + ASCII DRAT proof
   drat-trim in.cnf proof.drat        -> "s VERIFIED"
   cryptominisat5 in.cnf              -> "s SATISFIABLE" + "v <model> 0"
 
@@ -18,6 +19,7 @@ from pathlib import Path
 from shutil import which
 
 CMSAT = os.environ.get("CMSAT_BIN", "cryptominisat5")
+CADICAL = os.environ.get("CADICAL_BIN", "cadical")
 DRAT_TRIM = os.environ.get("DRAT_TRIM_BIN", "drat-trim")  # e.g. ~/tools/drat-trim/drat-trim
 
 
@@ -26,7 +28,7 @@ def _have(binary: str) -> bool:
 
 
 def have_solver() -> bool:
-    return _have(CMSAT)
+    return _have(CMSAT) or _have(CADICAL)
 
 
 def have_drat_trim() -> bool:
@@ -39,13 +41,26 @@ def solve_cnf_real(cnf_text: str, *, want_drat: bool = False, timeout: int = 120
       {status: 'UNSAT', drat: <proof text if want_drat>} |
       {status: 'UNKNOWN'|'UNAVAILABLE', ...}
     """
-    if not _have(CMSAT):
-        return {"status": "UNAVAILABLE", "reason": f"{CMSAT} not installed"}
+    solver = CMSAT if _have(CMSAT) else CADICAL if _have(CADICAL) else ""
+    if not solver:
+        return {"status": "UNAVAILABLE", "reason": f"{CMSAT} or {CADICAL} not installed"}
+    binary = solver if which(solver) else os.path.expanduser(solver)
+    solver_name = os.path.basename(binary).lower()
     with tempfile.TemporaryDirectory() as d:
         cnf = Path(d) / "p.cnf"
         cnf.write_text(cnf_text)
         drat = Path(d) / "p.drat"
-        cmd = [CMSAT, "--verb=0", str(cnf)] + ([str(drat)] if want_drat else [])
+        if "cadical" in solver_name:
+            cmd = [binary]
+            if want_drat:
+                # CaDiCaL defaults to binary DRAT. The verifier path carries
+                # proofs as text, so force ASCII DRAT for transport.
+                cmd.append("--no-binary")
+            cmd.append(str(cnf))
+            if want_drat:
+                cmd.append(str(drat))
+        else:
+            cmd = [binary, "--verb=0", str(cnf)] + ([str(drat)] if want_drat else [])
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:

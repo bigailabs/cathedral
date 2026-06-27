@@ -15,10 +15,11 @@ preview_urls = true
 #   - read-role board reads  -> BOARD_ORIGIN  (default read.cathedral.computer)
 #   - submit-role paths       -> SUBMIT_ORIGIN (default submit.cathedral.computer)
 # Submit-role paths (active-cnf, per-miner/challenges, per-miner/cnf,
-# /v1/challenges/*, POST /v1/agents/submit) are served by the SUBMIT origin in
-# prod; a read origin 404s them. They are routed here so that, when board
-# failover owns these api.cathedral.computer paths, submit still reaches the
-# submit origin. Do NOT point them at BOARD_ORIGIN/LEADERBOARD_ORIGIN.
+# verifiable-SAT issue/proof routes, /v1/challenges/*, POST /v1/agents/submit)
+# are served by the SUBMIT origin in prod; a read origin 404s them. They are
+# routed here so that, when board failover owns these api.cathedral.computer
+# paths, submit/verifiable-SAT still reaches the submit origin. Do NOT point them
+# at BOARD_ORIGIN/LEADERBOARD_ORIGIN.
 #
 # Attach these routes ONLY during/after a board 504 incident, after the board
 # origin (BOARD_ORIGIN) is confirmed green. Attaching a route here moves that
@@ -52,12 +53,18 @@ routes = [
   # { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-cnf*", zone_name = "cathedral.computer" },
   # { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/challenges*", zone_name = "cathedral.computer" },
   # { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/verifiable-sat/coinbase/challenge*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/verifiable-sat/coinbase/verify*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/verifiable-sat/coinbase/submit*", zone_name = "cathedral.computer" },
   # { pattern = "api.cathedral.computer/v1/challenges/*", zone_name = "cathedral.computer" },
   # { pattern = "api.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
 
   # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/active-cnf*", zone_name = "cathedral.computer" },
   # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/challenges*", zone_name = "cathedral.computer" },
   # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/verifiable-sat/coinbase/challenge*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/verifiable-sat/coinbase/verify*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/verifiable-sat/coinbase/submit*", zone_name = "cathedral.computer" },
 ]
 
 # OPT-IN durable last-known-good (LKG) for the cheap board reads, mirroring the
@@ -86,8 +93,9 @@ BOARD_ORIGIN_RESOLVE_OVERRIDE = ""
 LEADERBOARD_ORIGIN = "https://read.cathedral.computer"
 
 # SUBMIT_ORIGIN: the submit service. Submit-role paths (active-cnf,
-# per-miner/challenges, per-miner/cnf, /v1/challenges/*, POST submit) are served
-# here in prod. A read origin 404s them, so this MUST be the submit origin.
+# per-miner/challenges, per-miner/cnf, verifiable-SAT issue/proof,
+# /v1/challenges/*, POST submit) are served here in prod. A read origin 404s
+# them, so this MUST be the submit origin.
 SUBMIT_ORIGIN = "https://submit.cathedral.computer"
 SUBMIT_ORIGIN_RESOLVE_OVERRIDE = ""
 

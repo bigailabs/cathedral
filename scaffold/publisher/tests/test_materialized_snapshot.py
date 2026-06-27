@@ -11,6 +11,7 @@ In-process app uses sqlite :memory: via TestClient. No network, no chain.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -219,3 +220,60 @@ def test_flag_on_leaderboard_top_nondefault_view_uses_live(monkeypatch):
     assert resp.status_code == 200
     assert resp.headers.get("X-Cathedral-Snapshot") is None
     assert resp.json()["view"] == "receipts"
+
+
+def test_leaderboard_recent_query_failure_is_structured_retryable(monkeypatch):
+    app = _make_client(monkeypatch, enabled=False)
+
+    def boom(*args, **kwargs):
+        raise TimeoutError("statement timeout")
+
+    app.state.store.recent_rows = boom
+    with TestClient(app) as c:
+        resp = c.get("/v1/leaderboard/recent?limit=2")
+
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "2"
+    assert resp.headers["X-Cathedral-Cache"] == "degraded"
+    body = resp.json()
+    assert body["items"] == []
+    assert body["data_status"] == "degraded"
+    assert body["error"] == "leaderboard_recent_query_failed"
+    assert body["error_type"] == "TimeoutError"
+
+
+def test_leaderboard_recent_small_limit_uses_materialized_snapshot_when_live_query_fails(monkeypatch):
+    app = _make_client(monkeypatch, enabled=True)
+    base = datetime(2026, 6, 29, tzinfo=timezone.utc)
+    rows = []
+    for i in range(5):
+        rows.append({
+            "id": f"row-{i}",
+            "ran_at": (base + timedelta(seconds=i)).isoformat().replace("+00:00", "Z"),
+            "miner_hotkey": f"hk-{i}",
+            "cathedral_signature": f"sig-{i}",
+        })
+
+    original_recent_rows = app.state.store.recent_rows
+
+    def seeded_recent_rows(*args, **kwargs):
+        return rows
+
+    app.state.store.recent_rows = seeded_recent_rows
+    assert app.state.leaderboard_recent_snapshot.refresh_once()
+
+    def boom(*args, **kwargs):
+        raise TimeoutError("statement timeout")
+
+    app.state.store.recent_rows = boom
+    with TestClient(app) as c:
+        resp = c.get("/v1/leaderboard/recent?limit=2")
+
+    app.state.store.recent_rows = original_recent_rows
+    assert resp.status_code == 200
+    assert resp.headers["X-Cathedral-Cache"] == "materialized"
+    assert resp.headers["X-Cathedral-Snapshot"] == "leaderboard-recent"
+    body = resp.json()
+    assert [row["id"] for row in body["items"]] == ["row-0", "row-1"]
+    assert body["requested_limit"] == 2
+    assert body["next_since_id"] == "row-1"

@@ -18,6 +18,7 @@ const checks = [
   { name: "active", path: "/v1/synthetic-boolean/active-challenges", statuses: [200], edge: "cache" },
   { name: "recent", path: "/v1/leaderboard/recent?limit=2", statuses: [200], edge: "cache" },
   { name: "weights", path: "/v1/validator/weights/next", statuses: [200], edge: "cache" },
+  { name: "vsat_status", path: "/v1/verifiable-sat/coinbase/status", statuses: [200], edge: "BYPASS" },
   {
     name: "submit",
     path: "/v1/agents/submit",

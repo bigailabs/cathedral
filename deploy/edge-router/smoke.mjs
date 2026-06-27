@@ -49,7 +49,7 @@ const active1 = await request("/v1/synthetic-boolean/active-challenges");
 line(active1);
 assert.equal(active1.status, 200);
 if (expectWorker) {
-  assert.match(active1.headers.get("cache-control") || "", /s-maxage=60/);
+  assert.match(active1.headers.get("cache-control") || "", /s-maxage=900/);
   assert.ok(active1.headers.get("x-cathedral-edge-cache"));
 }
 
@@ -87,6 +87,20 @@ assert.match(weights.body, /"weights"/);
 const submitPm = await request("/v1/synthetic-boolean/per-miner/challenges");
 line(submitPm);
 assert.ok([422, 429].includes(submitPm.status));
+
+const verifiableSatStatus = await request("/v1/verifiable-sat/coinbase/status");
+line(verifiableSatStatus);
+assert.equal(verifiableSatStatus.status, 200);
+if (expectWorker) {
+  assert.equal(verifiableSatStatus.headers.get("x-cathedral-edge-cache"), "BYPASS");
+}
+
+const verifiableSatChallenge = await request("/v1/verifiable-sat/coinbase/challenge");
+line(verifiableSatChallenge);
+assert.ok([422, 429].includes(verifiableSatChallenge.status));
+if (expectWorker) {
+  assert.equal(verifiableSatChallenge.headers.get("x-cathedral-edge-cache"), "BYPASS");
+}
 
 const cacheBust = await request("/v1/leaderboard/top?x=random");
 line(cacheBust);

@@ -18,10 +18,11 @@
 //   - SUBMIT-role paths          -> SUBMIT_ORIGIN       (submit origin; NOT a read origin)
 //
 // CRITICAL: the submit-role paths (active-cnf, per-miner/challenges,
-// per-miner/cnf, /v1/challenges/*, POST /v1/agents/submit) are served in prod by
-// the SUBMIT origin. A read-role origin 404s them. They must go to SUBMIT_ORIGIN
-// (default submit.cathedral.computer) -- never the read/board origin -- or board
-// failover would break per-miner CNF delivery and submit.
+// per-miner/cnf, verifiable-SAT issue/proof routes, /v1/challenges/*, POST
+// /v1/agents/submit) are served in prod by the SUBMIT origin. A read-role origin
+// 404s them. They must go to SUBMIT_ORIGIN (default submit.cathedral.computer)
+// -- never the read/board origin -- or board failover would break miner CNF
+// delivery, verifiable-SAT, and submit.
 //
 // The slow leaderboard stays isolated on its own origin and can saturate only
 // itself; it can no longer take the board down with it. The board origin is the
@@ -130,6 +131,7 @@ const SUBMIT_GET_PATHS = new Set([
   "/v1/synthetic-boolean/active-cnf",
   "/v1/synthetic-boolean/per-miner/challenges",
   "/v1/synthetic-boolean/per-miner/cnf",
+  "/v1/verifiable-sat/coinbase/challenge",
 ]);
 
 // Submit-role GET prefixes (private challenge fetch), kept in sync with the main
@@ -141,6 +143,8 @@ const SUBMIT_GET_PREFIXES = [
 // Submit-role POSTs, kept in sync with the main router's SUBMIT_POST_PATHS.
 const SUBMIT_POST_PATHS = new Set([
   "/v1/agents/submit",
+  "/v1/verifiable-sat/coinbase/verify",
+  "/v1/verifiable-sat/coinbase/submit",
 ]);
 
 function envUrl(env, key, fallback) {

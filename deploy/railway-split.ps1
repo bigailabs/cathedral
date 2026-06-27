@@ -28,6 +28,12 @@
 #                                         whole read origin down. 4s bounds any
 #                                         single query so one slow board scan cannot
 #                                         pin pool connections.
+#   CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED=1 (read service) -> read-heavy
+#                                         board/leaderboard surfaces are built on
+#                                         a timer and can serve the last good
+#                                         snapshot when the live query path is
+#                                         degraded. This is load-shedding, not a
+#                                         scoring change.
 #   CATHEDRAL_CNF_TOKEN_SECRET         -> MUST be the same value on every service so
 #                                         active-cnf (issued on one replica/service)
 #                                         and CNF fetch (served on another) agree on
@@ -62,6 +68,11 @@ $ReadVars = [ordered]@{
     "WEB_CONCURRENCY"                  = "2"
     "CATHEDRAL_PM_READ_HARD_CAP"       = "128"
     "CATHEDRAL_PG_STATEMENT_TIMEOUT_MS" = "4000"
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED" = "1"
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_REFRESH_SECS" = "60"
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_MAX_STALE_SECS" = "900"
+    "CATHEDRAL_RECENT_SNAPSHOT_LIMIT"  = "50"
+    "CATHEDRAL_RECENT_NO_CURSOR_MAX_LIMIT" = "50"
 }
 
 $SubmitVars = [ordered]@{
@@ -137,4 +148,4 @@ if ($Apply) {
     Write-Host "Dry-run only. Re-run with -Apply to set these live, then redeploy each service and verify:" -ForegroundColor Green
 }
 Write-Host "  GET /v1/admin/synthetic-boolean/submit-metrics  -> hard_cap: 8"
-Write-Host "  GET /v1/leaderboard/recent                      -> fast (no 30-46s scans)"
+Write-Host "  GET /v1/leaderboard/recent?limit=2              -> fast, materialized when warm, structured 503 on live-query failure"

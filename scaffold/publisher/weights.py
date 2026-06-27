@@ -194,7 +194,7 @@ def mode() -> str:
 def row_score_task_types() -> set[str]:
     raw = os.environ.get(
         ROW_SCORE_TASK_TYPES_ENV,
-        "synthetic_boolean_v1,solver_attestation_v1,audit_replay_v1,audit_arena_v1",
+        "synthetic_boolean_v1,solver_attestation_v1,audit_replay_v1,audit_arena_v1,verifiable_sat_v1",
     )
     return {
         item.strip()
@@ -206,7 +206,7 @@ def row_score_task_types() -> set[str]:
 def audit_replay_task_types() -> set[str]:
     raw = os.environ.get(
         AUDIT_REPLAY_TASK_TYPES_ENV,
-        "audit_replay_v1,audit_arena_v1",
+        "audit_replay_v1,audit_arena_v1,verifiable_sat_v1",
     )
     return {
         item.strip()
@@ -747,7 +747,7 @@ def _compose_audit_replay_scores(
         return {}
     require_attestation = audit_replay_require_attestation()
     rows = store.query(
-        "SELECT miner_hotkey, task_type, row_json FROM eval_runs "
+        "SELECT miner_hotkey, task_type, row_json, attested FROM eval_runs "
         "WHERE ran_at > ? AND eval_output_schema_version=6"
         + (" AND attested=1" if require_attestation else ""),
         (since,),
@@ -757,6 +757,8 @@ def _compose_audit_replay_scores(
     for r in rows:
         task_type = str(r["task_type"])
         if task_type not in allowed_task_types:
+            continue
+        if task_type == "verifiable_sat_v1" and int(r["attested"] or 0) != 1:
             continue
         score = _positive_row_weighted_score(r["row_json"])
         if score is None:
@@ -795,7 +797,8 @@ def _apply_audit_replay_bonus(
 
 
 def _non_audit_eval_hotkeys(store: Store, since: str) -> set[str]:
-    audit_types = audit_replay_task_types()
+    audit_types = set(audit_replay_task_types())
+    audit_types.add("verifiable_sat_v1")
     if not audit_types:
         rows = store.query(
             "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?",
@@ -1321,6 +1324,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "task_types": sorted(audit_replay_task_types()),
             "bonus_multiplier": audit_replay_bonus_multiplier(),
             "require_attestation": audit_replay_require_attestation(),
+            "verifiable_sat_requires_attestation": "verifiable_sat_v1" in audit_replay_task_types(),
         },
         "payable_hotkeys": payable_meta,
         "hotkeys": sorted(scores), "scores": [scores[k] for k in sorted(scores)],
@@ -1349,6 +1353,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
                 "task_types": sorted(audit_replay_task_types()),
                 "bonus_multiplier": audit_replay_bonus_multiplier(),
                 "require_attestation": audit_replay_require_attestation(),
+                "verifiable_sat_requires_attestation": "verifiable_sat_v1" in audit_replay_task_types(),
             },
             "requested_mode": requested_mode,
             "effective_mode": effective_mode,

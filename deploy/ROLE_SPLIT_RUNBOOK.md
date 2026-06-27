@@ -43,6 +43,11 @@ CATHEDRAL_SEED_ON_BOOT=false
 WEB_CONCURRENCY=2
 CATHEDRAL_PM_READ_HARD_CAP=128
 CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000
+CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED=1
+CATHEDRAL_MATERIALIZED_SNAPSHOT_REFRESH_SECS=60
+CATHEDRAL_MATERIALIZED_SNAPSHOT_MAX_STALE_SECS=900
+CATHEDRAL_RECENT_SNAPSHOT_LIMIT=50
+CATHEDRAL_RECENT_NO_CURSOR_MAX_LIMIT=50
 ```
 
 `CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000` is mandatory on every read-serving
@@ -51,6 +56,13 @@ service. With no statement timeout, `/v1/leaderboard/recent` was observed runnin
 ceiling bounds any single query so one slow board scan cannot pin pool
 connections. The app logs a loud startup `WARNING` if a read-serving role
 (`read` or `all`) boots with this value unset or `0`; do not ignore it.
+
+Materialized snapshots must be enabled on the read service. Board,
+leaderboard-top, and no-cursor leaderboard-recent are then built on a background
+timer. Small no-cursor recent reads such as `/v1/leaderboard/recent?limit=2`
+can be served by slicing the last good `50`-row snapshot instead of touching the
+database. If the live query path fails and no warm snapshot exists, the route
+returns a structured retryable `503` rather than a plain `500`.
 
 Guarded knob (off by default): if a slow `/v1/leaderboard/recent` is
 head-of-line-blocking the cheap board reads, you may raise `WEB_CONCURRENCY` so
@@ -80,11 +92,15 @@ Allowed traffic:
 - `GET /v1/leaderboard/recent`
 - `GET /v1/leaderboard/top`
 - `GET /v1/leaderboard/explain`
+- `GET /v1/verifiable-sat/coinbase/status`
 - `GET /v1/audit-scanner/*`
 
 Must reject:
 
 - `POST /v1/agents/submit`
+- `GET /v1/verifiable-sat/coinbase/challenge`
+- `POST /v1/verifiable-sat/coinbase/verify`
+- `POST /v1/verifiable-sat/coinbase/submit`
 - PM CNF hot path if it belongs to the submit service.
 
 ### 2. Submit Service
@@ -122,7 +138,11 @@ Allowed traffic:
 - `GET /v1/synthetic-boolean/per-miner/challenges`
 - `GET /v1/synthetic-boolean/per-miner/cnf`
 - `GET /v1/challenges/{challenge_id}/cnf`
+- `GET /v1/verifiable-sat/coinbase/status`
+- `GET /v1/verifiable-sat/coinbase/challenge`
 - `POST /v1/agents/submit`
+- `POST /v1/verifiable-sat/coinbase/verify`
+- `POST /v1/verifiable-sat/coinbase/submit`
 
 Must reject:
 
@@ -190,6 +210,8 @@ Read service:
 ```text
 GET  /health/live                         -> 200, service_role=read
 GET  /v1/synthetic-boolean/active-challenges -> 200
+GET  /v1/verifiable-sat/coinbase/status   -> 200
+GET  /v1/verifiable-sat/coinbase/challenge -> 404 route_not_served_by_read_role
 POST /v1/agents/submit                    -> 404 route_not_served_by_read_role
 ```
 
@@ -199,6 +221,9 @@ Submit service:
 GET  /health/live                         -> 200, service_role=submit
 GET  /v1/leaderboard/top                  -> 404 route_not_served_by_submit_role
 GET  /v1/synthetic-boolean/active-cnf     -> reaches auth validation, not role guard
+GET  /v1/verifiable-sat/coinbase/challenge -> reaches auth validation, not role guard
+POST /v1/verifiable-sat/coinbase/verify   -> reaches auth/body validation, not role guard
+POST /v1/verifiable-sat/coinbase/submit   -> reaches auth/body validation, not role guard
 POST /v1/agents/submit                    -> accepts/rejects by normal submit logic
 ```
 
@@ -217,6 +242,16 @@ No request over 5s on /health/live, active board, weights, recent, or explain.
 Submit overload returns fast 429 submit_busy_retry, not timeouts.
 Exactly one worker holds each singleton lock at a time.
 ```
+
+Executable split-origin smoke:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -SkipValidatorReleaseGate -SkipEdgeSmoke -SkipRouteMap -SkipSoak -SkipLiveSmoke
+```
+
+This must pass before moving `api.cathedral.computer` onto the Cloudflare edge
+router. It proves the direct read origin cannot accept submit traffic and the
+direct submit origin cannot serve leaderboard reads.
 
 ## Rollback
 
@@ -293,7 +328,7 @@ Do not enable retention before the volume has enough headroom for normal
 Postgres maintenance. Railway supports live volume resize from the volume
 settings UI.
 
-## Durable Submit Admission (Phase 3/4/5) — default OFF
+## Durable Submit Admission (Phase 3/4/5) -- default OFF
 
 Async/durable submit admission is implemented and ships **off**. With every flag
 unset the submit endpoint keeps its exact legacy behaviour: synchronous
@@ -302,9 +337,9 @@ change is required and the public contract is unchanged.
 
 ### What it does when enabled
 
-- `POST /v1/agents/submit` (PUBLIC lane only) does cheap work — parse, verify
+- `POST /v1/agents/submit` (PUBLIC lane only) does cheap work: parse, verify
   hotkey signature, sha256, persist a durable pending receipt keyed by
-  `idempotency_key = sha256(hotkey + challenge_id + dimacs_solution_sha256)` — and
+  `idempotency_key = sha256(hotkey + challenge_id + dimacs_solution_sha256)`, and
   returns `202` with a `cathedral.submit_receipt.v2` body and `receipt_url`.
 - A background worker claims pending attempts in `received_at` order
   (`FOR UPDATE SKIP LOCKED` on Postgres), runs the existing DIMACS verification,
@@ -339,7 +374,7 @@ to bounce a miner. Set `0` to restore the old instant-429 behaviour.
    logs `[verify] singleton_lock_acquired` and drains an empty queue without error.
 3. Only then turn on `CATHEDRAL_SUBMIT_ASYNC_ENABLED` so 202s start flowing into a
    worker that is already running. (If you flip submit async on with no worker,
-   receipts stay `pending` forever — verify the worker first.)
+  receipts stay `pending` forever; verify the worker first.)
 4. Per-request escape hatch: a client can force the legacy synchronous path with
    header `X-Cathedral-Submit-Mode: sync` even while async is enabled.
 

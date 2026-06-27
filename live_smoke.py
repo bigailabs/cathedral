@@ -35,6 +35,15 @@ def _get(path: str, headers: dict | None = None):
         return r.status, r.read()
 
 
+def _get_allow_http_error(path: str, headers: dict | None = None):
+    req = urllib.request.Request(_url(path), headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
 def _post_form(path: str, headers: dict, form: dict):
     body = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in form.items()).encode()
     h = {**headers, "Content-Type": "application/x-www-form-urlencoded"}
@@ -51,6 +60,13 @@ def _url(path: str) -> str:
     if path.startswith("http://") or path.startswith("https://"):
         return path
     return BASE + path
+
+
+def _json_or_empty(raw: bytes) -> dict:
+    try:
+        return json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 def now_iso() -> str:
@@ -72,6 +88,9 @@ def main() -> int:
     ck("/health 200", st == 200)
     ck("sr25519_backend=bittensor (prod backend, not stub)",
        health.get("sr25519_backend") == "bittensor")
+    st, raw = _get("/health/ready")
+    ready = json.loads(raw)
+    ck("/health/ready 200 with db ok", st == 200 and ready.get("db") == "ok")
 
     st, raw = _get("/v1/synthetic-boolean/active-challenges")
     board = json.loads(raw)
@@ -100,17 +119,44 @@ def main() -> int:
     miner = Keypair.create_from_uri("//SmokeMiner")
     bh = _blake3.blake3(b"").hexdigest()
 
+    def signed_read_headers():
+        submitted_at = now_iso()
+        claim = canonical_claim_bytes(
+            bundle_hash=bh, card_id="synthetic_boolean_v1",
+            miner_hotkey=miner.ss58_address, submitted_at=submitted_at,
+            challenge_id="", dimacs_solution_sha256="")
+        signature = base64.b64encode(miner.sign(claim)).decode()
+        return {
+            "X-Cathedral-Hotkey": miner.ss58_address,
+            "X-Cathedral-Signature": signature,
+            "X-Cathedral-Submitted-At": submitted_at,
+        }
+
+    st_pm, raw_pm = _get_allow_http_error(
+        "/v1/synthetic-boolean/per-miner/status",
+        headers=signed_read_headers(),
+    )
+    pm_status = _json_or_empty(raw_pm)
+    ck("per-miner status is reachable or explicitly disabled",
+       st_pm == 200 or (st_pm == 404 and pm_status.get("detail") == "per_miner_not_enabled"))
+    if st_pm == 200:
+        ck("per-miner status exposes scoring context",
+           pm_status.get("kind") == "per_miner" and "scoring" in pm_status)
+
+    st, raw = _get("/v1/verifiable-sat/coinbase/status")
+    vsat_status = json.loads(raw)
+    ck("verifiable-SAT status endpoint served",
+       st == 200 and vsat_status.get("schema") == "cathedral.verifiable_sat.status.v1")
+    ck("verifiable-SAT status exposes payment policy",
+       isinstance(vsat_status.get("payment"), dict)
+       and "payment_weights" in vsat_status.get("payment", {}))
+    st_vsat_challenge, _ = _get_allow_http_error("/v1/verifiable-sat/coinbase/challenge")
+    ck("verifiable-SAT challenge route fails closed without signed request",
+       st_vsat_challenge in (401, 403, 422, 429))
+
     # active-cnf token fetch (hotkey-signed, empty challenge/sol fields)
-    sa = now_iso()
-    cnf_claim = canonical_claim_bytes(
-        bundle_hash=bh, card_id="synthetic_boolean_v1",
-        miner_hotkey=miner.ss58_address, submitted_at=sa,
-        challenge_id="", dimacs_solution_sha256="")
-    cnf_sig = base64.b64encode(miner.sign(cnf_claim)).decode()
     st, raw = _get("/v1/synthetic-boolean/active-cnf?challenge_id=" + cid,
-                   headers={"X-Cathedral-Hotkey": miner.ss58_address,
-                            "X-Cathedral-Signature": cnf_sig,
-                            "X-Cathedral-Submitted-At": sa})
+                   headers=signed_read_headers())
     acnf = json.loads(raw)
     ck("active-cnf returns tokenized cnf_url", st == 200 and "?t=" in acnf["cnf_url"])
     cnf_url = acnf["cnf_url"]

@@ -11,10 +11,12 @@ export function apiHotPathExpression(host = DEFAULT_HOST) {
     `http.request.uri.path eq "/.well-known/cathedral-jwks.json" or ` +
     `starts_with(http.request.uri.path, "/v1/synthetic-boolean/") or ` +
     `starts_with(http.request.uri.path, "/v1/agents/submit") or ` +
+    `starts_with(http.request.uri.path, "/v1/verifiable-sat/") or ` +
     `starts_with(http.request.uri.path, "/v1/leaderboard/") or ` +
     `starts_with(http.request.uri.path, "/v1/validator/weights/next") or ` +
     `starts_with(http.request.uri.path, "/api/cathedral/v1/synthetic-boolean/") or ` +
     `starts_with(http.request.uri.path, "/api/cathedral/v1/agents/submit") or ` +
+    `starts_with(http.request.uri.path, "/api/cathedral/v1/verifiable-sat/") or ` +
     `starts_with(http.request.uri.path, "/api/cathedral/v1/leaderboard/") or ` +
     `starts_with(http.request.uri.path, "/api/cathedral/v1/validator/weights/next")` +
   `))`;

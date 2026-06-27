@@ -38,6 +38,7 @@ cathedral-arena-verify = "game.arena.bundle:main"
 cathedral-arena-playthrough = "game.arena.playthrough:main"
 cathedral-arena-round-verify = "game.arena.verify:main"
 cathedral-audit-scanner-smoke = "game.arena.audit_scanner_smoke:main"
+cathedral-coinbase-encoder-agent = "game.arena.coinbase_encoder_agent:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "game*"]

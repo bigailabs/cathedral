@@ -36,6 +36,9 @@ origin:
 - `GET /v1/synthetic-boolean/active-cnf`
 - `GET /v1/synthetic-boolean/per-miner/challenges`
 - `GET /v1/synthetic-boolean/per-miner/cnf`
+- `GET /v1/verifiable-sat/coinbase/challenge`
+- `POST /v1/verifiable-sat/coinbase/verify`
+- `POST /v1/verifiable-sat/coinbase/submit`
 - `GET /v1/challenges/*` (private challenge fetch)
 - `POST /v1/agents/submit`
 
@@ -61,8 +64,8 @@ SUBMIT-role paths              -> SUBMIT_ORIGIN       (submit origin; never a re
 The slow leaderboard stays on its own origin and can saturate only itself. It
 can no longer take the board down with it. The board origin is the publisher
 service that already serves these snapshots from in-memory caches. The submit
-origin keeps serving CNF/submit so board failover does not break per-miner CNF
-delivery.
+origin keeps serving CNF/submit/verifiable-SAT so board failover does not break
+per-miner CNF delivery or proof discharge.
 
 This worker is **separate** from `../worker.mjs` on purpose: it can be attached
 to only the board/submit hot paths during an incident and detached on rollback
@@ -104,7 +107,7 @@ catch-all at the current default-deny worker.
 | --- | --- | --- |
 | `BOARD_ORIGIN` | `https://read.cathedral.computer` | Healthy publisher (read) origin for Tier-1 board reads. Point at a publisher/read service that is **not** carrying the slow leaderboard load. |
 | `LEADERBOARD_ORIGIN` | `https://read.cathedral.computer` | Existing read service. The slow leaderboard hog stays here, isolated. |
-| `SUBMIT_ORIGIN` | `https://submit.cathedral.computer` | Submit service. Submit-role paths (active-cnf, per-miner/challenges, per-miner/cnf, `/v1/challenges/*`, POST submit) go here. A read origin 404s them. |
+| `SUBMIT_ORIGIN` | `https://submit.cathedral.computer` | Submit service. Submit-role paths (active-cnf, per-miner/challenges, per-miner/cnf, verifiable-SAT issue/proof, `/v1/challenges/*`, POST submit) go here. A read origin 404s them. |
 | `BOARD_ORIGIN_HOST` | (empty) | Optional `Host` override for `BOARD_ORIGIN`. |
 | `LEADERBOARD_ORIGIN_HOST` | (empty) | Optional `Host` override for `LEADERBOARD_ORIGIN`. |
 | `SUBMIT_ORIGIN_HOST` | (empty) | Optional `Host` override for `SUBMIT_ORIGIN`. |
@@ -151,12 +154,15 @@ https://submit.cathedral.computer/v1/synthetic-boolean/per-miner/cnf?challenge_i
    api.cathedral.computer/v1/synthetic-boolean/active-cnf*
    api.cathedral.computer/v1/synthetic-boolean/per-miner/challenges*
    api.cathedral.computer/v1/synthetic-boolean/per-miner/cnf*
+   api.cathedral.computer/v1/verifiable-sat/coinbase/challenge*
+   api.cathedral.computer/v1/verifiable-sat/coinbase/verify*
+   api.cathedral.computer/v1/verifiable-sat/coinbase/submit*
    api.cathedral.computer/v1/challenges/*
    api.cathedral.computer/v1/agents/submit*
    ```
 
-   Plus the legacy `/api/cathedral/...` form of the synthetic-boolean paths
-   (also in `wrangler.toml`).
+   Plus the legacy `/api/cathedral/...` form of the synthetic-boolean and
+   verifiable-SAT paths (also in `wrangler.toml`).
 3. Deploy:
 
    ```bash

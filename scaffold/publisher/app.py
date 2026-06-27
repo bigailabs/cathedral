@@ -63,6 +63,7 @@ from .store import Store, new_uuid
 
 _FAMILY = "synthetic_boolean_v1"
 _AUDIT_SCANNER_CARD = "cathedral_audit_scanner_v1"
+_VERIFIABLE_SAT_CARD = "cathedral_verifiable_sat_v1"
 _SKEW_SECS = 300
 # Public, non-scored readiness probe: a tiny satisfiable toy CNF miners fetch to
 # self-test their solve pipeline before mining. Byte-identical to the monolith's
@@ -1152,6 +1153,7 @@ def build_app(
             "/v1/leaderboard/recent",
             "/v1/leaderboard/top",
             "/v1/leaderboard/explain",
+            "/v1/verifiable-sat/coinbase/status",
             # Operator/observability surface for the weight feed. Admin-token
             # gated at the handler; routed here so it stays reachable on the
             # read service that actually serves the Tier 0 weight feed.
@@ -1170,6 +1172,8 @@ def build_app(
             "/v1/synthetic-boolean/active-cnf",
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",
+            "/v1/verifiable-sat/coinbase/challenge",
+            "/v1/verifiable-sat/coinbase/status",
             "/v1/admin/synthetic-boolean/submit-metrics",
         }
         _SUBMIT_GET_PREFIXES = {
@@ -1182,6 +1186,8 @@ def build_app(
             "/v1/agents/submit",
             "/v1/audit-scanner/replay",
             "/v1/audit-scanner/submit",
+            "/v1/verifiable-sat/coinbase/verify",
+            "/v1/verifiable-sat/coinbase/submit",
         }
 
         def __init__(self, asgi_app):
@@ -2280,6 +2286,39 @@ def build_app(
             "requested_limit": int(limit),
         }
 
+    def _recent_degraded_payload(limit: int, exc: Exception) -> dict[str, Any]:
+        payload = _recent_warming_payload(limit)
+        payload.update({
+            "explanation": "Recent visibility is temporarily unavailable; retry shortly.",
+            "current_weights_status": "degraded",
+            "visibility_cache_status": "degraded",
+            "data_status": "degraded",
+            "error": "leaderboard_recent_query_failed",
+            "error_type": type(exc).__name__,
+        })
+        return payload
+
+    def _etag_for_payload(payload: dict[str, Any]) -> str:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+        return 'W/"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+
+    def _limit_recent_snapshot_payload(payload: dict[str, Any], limit: int) -> dict[str, Any]:
+        out = dict(payload)
+        items = list(out.get("items") or [])
+        if len(items) > limit:
+            items = items[:limit]
+        out["items"] = items
+        out["requested_limit"] = int(limit)
+        if items:
+            last = items[-1]
+            nxt_ran_at, nxt_id = last.get("ran_at"), last.get("id")
+        else:
+            nxt_ran_at, nxt_id = None, None
+        out["next_since"] = nxt_ran_at
+        out["next_since_ran_at"] = nxt_ran_at
+        out["next_since_id"] = nxt_id
+        return out
+
     recent_snapshot_limit = _env_int("CATHEDRAL_RECENT_SNAPSHOT_LIMIT", 50)
     recent_no_cursor_max_limit = _env_int(
         "CATHEDRAL_RECENT_NO_CURSOR_MAX_LIMIT", recent_snapshot_limit
@@ -2296,6 +2335,21 @@ def build_app(
     materialized_snapshot_mod.register(recent_snapshot)
     app.state.leaderboard_recent_snapshot = recent_snapshot
 
+    def _recent_snapshot_response(request: Request, effective_limit: int):
+        if not materialized_snapshot_mod.enabled():
+            return None
+        served = recent_snapshot.get()
+        if served is None:
+            return None
+        payload, etag, meta = served
+        if effective_limit != recent_snapshot_limit:
+            payload = _limit_recent_snapshot_payload(payload, effective_limit)
+            etag = _etag_for_payload(payload)
+        headers = snapshot_headers(etag, meta)
+        headers["Access-Control-Allow-Origin"] = "*"
+        headers["X-Cathedral-Cache"] = "materialized"
+        return _conditional_response(payload, etag, headers, request)
+
     # ---- M1: feed ---------------------------------------------------------
     @app.get("/v1/leaderboard/recent")
     async def leaderboard_recent(
@@ -2311,14 +2365,9 @@ def build_app(
         cache_status = "cursor"
         if cur_ran_at is None and cur_id is None:
             effective_limit = min(int(limit), max(1, recent_no_cursor_max_limit))
-            if materialized_snapshot_mod.enabled() and effective_limit == recent_snapshot_limit:
-                served = recent_snapshot.get()
-                if served is not None:
-                    payload, etag, meta = served
-                    headers = snapshot_headers(etag, meta)
-                    headers["Access-Control-Allow-Origin"] = "*"
-                    headers["X-Cathedral-Cache"] = "materialized"
-                    return _conditional_response(payload, etag, headers, request)
+            snapshot_response = _recent_snapshot_response(request, effective_limit)
+            if snapshot_response is not None:
+                return snapshot_response
             # The no-cursor cold build is synchronous when recent_cold_async is
             # off; a DB error/timeout in _recent_payload would otherwise raise out
             # of the handler as a 500. Degrade to a warming payload (bounded, 200)
@@ -2915,6 +2964,675 @@ def build_app(
             "rejection_reason": None if check.ok else check.rejection_reason,
             "clause_count": 3, "weighted_score": 0.0, "emissions_eligible": False,
         }
+
+    # ---- M2b: Verifiable SAT oracle publisher ------------------------------
+    # This is the canonical agent-published SAT/UNSAT proof path for the
+    # Subtensor coinbase childkey conservation invariant. Accepted discharges
+    # emit task_type=verifiable_sat_v1 rows, composed by weights.py through the
+    # same audit replay bonus path.
+    def _verifiable_sat_enabled() -> bool:
+        return _env_bool("CATHEDRAL_VERIFIABLE_SAT_ENABLED", True)
+
+    def _verifiable_sat_task_type() -> str:
+        return os.environ.get("CATHEDRAL_VERIFIABLE_SAT_TASK_TYPE", "verifiable_sat_v1").strip() or "verifiable_sat_v1"
+
+    def _verifiable_sat_payment_weights_enabled() -> bool:
+        return (
+            _verifiable_sat_enabled()
+            and _verifiable_sat_task_type() in weights_mod.audit_replay_task_types()
+        )
+
+    def _verifiable_sat_require_attestation() -> bool:
+        return _env_bool("CATHEDRAL_VERIFIABLE_SAT_REQUIRE_ATTESTATION", True)
+
+    def _verifiable_sat_allow_report_data_only() -> bool:
+        return _env_bool("CATHEDRAL_VERIFIABLE_SAT_ALLOW_REPORT_DATA_ONLY", False)
+
+    def _verifiable_sat_require_system_replay() -> bool:
+        return _env_bool("CATHEDRAL_VERIFIABLE_SAT_REQUIRE_SYSTEM_REPLAY", True)
+
+    def _verifiable_sat_reward_unsat() -> bool:
+        return _env_bool("CATHEDRAL_VERIFIABLE_SAT_REWARD_UNSAT", False)
+
+    def _verifiable_sat_require_tdx_measurement() -> bool:
+        return _env_bool("CATHEDRAL_VERIFIABLE_SAT_REQUIRE_TDX_MEASUREMENT", True)
+
+    def _verifiable_sat_replay_command() -> str:
+        return os.environ.get("CATHEDRAL_VERIFIABLE_SAT_REPLAY_CMD", "").strip()
+
+    def _verifiable_sat_replay_allowed_runners() -> set[str]:
+        raw = os.environ.get("CATHEDRAL_VERIFIABLE_SAT_REPLAY_ALLOWED_RUNNERS", "subtensor_clone_rust_v1")
+        runners = {part.strip() for part in raw.split(",") if part.strip()}
+        return runners or {"subtensor_clone_rust_v1"}
+
+    def _verifiable_sat_replay_timeout_s() -> float:
+        try:
+            return max(1.0, min(300.0, float(os.environ.get("CATHEDRAL_VERIFIABLE_SAT_REPLAY_TIMEOUT_S", "30"))))
+        except ValueError:
+            return 30.0
+
+    def _require_verifiable_sat_enabled() -> None:
+        if not _verifiable_sat_enabled():
+            raise HTTPException(404, "verifiable_sat_not_enabled")
+
+    def _verifiable_sat_width(raw: int) -> int:
+        return max(2, min(64, int(raw)))
+
+    def _verifiable_sat_min_payment_width() -> int:
+        try:
+            return _verifiable_sat_width(int(os.environ.get("CATHEDRAL_VERIFIABLE_SAT_MIN_PAYMENT_WIDTH", "64")))
+        except ValueError:
+            return 64
+
+    def _verifiable_sat_allowed_agent_digests() -> set[str]:
+        raw = os.environ.get("CATHEDRAL_VERIFIABLE_SAT_AGENT_IMAGE_DIGESTS", "")
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    def _verifiable_sat_allowed_agent_ids() -> set[str]:
+        raw = os.environ.get("CATHEDRAL_VERIFIABLE_SAT_AGENT_IDS", "hermes-coinbase-encoder-v1")
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    def _require_verifiable_sat_agent_digest(agent_image_digest: str) -> None:
+        allowed = _verifiable_sat_allowed_agent_digests()
+        if not allowed:
+            raise HTTPException(503, "verifiable_sat_agent_digest_allowlist_not_configured")
+        if agent_image_digest not in allowed:
+            raise HTTPException(403, "verifiable_sat_agent_digest_not_allowed")
+
+    def _require_verifiable_sat_agent_id(agent_id: str) -> None:
+        allowed = _verifiable_sat_allowed_agent_ids()
+        if agent_id not in allowed:
+            raise HTTPException(403, "verifiable_sat_agent_id_not_allowed")
+
+    def _verifiable_sat_issue_digest(*, ckb_enabled: bool, width: int, agent_image_digest: str, agent_id: str) -> str:
+        basis = {
+            "ckb_enabled": bool(ckb_enabled),
+            "width": _verifiable_sat_width(width),
+            "agent_image_digest": agent_image_digest,
+            "agent_id": agent_id,
+        }
+        return sha256_hex(json.dumps(basis, sort_keys=True, separators=(",", ":")))
+
+    def _verifiable_sat_server_nonce(
+        *,
+        ckb_enabled: bool,
+        width: int,
+        agent_image_digest: str,
+        agent_id: str,
+        miner_hotkey: str,
+    ) -> str:
+        basis = {
+            "ckb_enabled": bool(ckb_enabled),
+            "width": _verifiable_sat_width(width),
+            "agent_image_digest": agent_image_digest,
+            "agent_id": agent_id,
+            "miner_hotkey": miner_hotkey,
+        }
+        return sha256_hex(token_secret.hex() + ":" + json.dumps(basis, sort_keys=True, separators=(",", ":")))[:40]
+
+    def _verifiable_sat_challenge(
+        *,
+        ckb_enabled: bool,
+        width: int,
+        body: dict[str, Any] | None = None,
+        issue: bool = False,
+        miner_hotkey: str = "",
+    ):
+        from ..lanes.coinbase_oracle import build_coinbase_challenge
+
+        body = body or {}
+        agent_image_digest = str(body.get("agent_image_digest") or "")
+        agent_id = str(body.get("agent_id") or "hermes-coinbase-encoder-v1")
+        _require_verifiable_sat_agent_digest(agent_image_digest)
+        _require_verifiable_sat_agent_id(agent_id)
+        work_nonce = (
+            _verifiable_sat_server_nonce(
+                ckb_enabled=ckb_enabled,
+                width=width,
+                agent_image_digest=agent_image_digest,
+                agent_id=agent_id,
+                miner_hotkey=miner_hotkey,
+            )
+            if issue
+            else str(body.get("work_nonce") or "")
+        )
+        return build_coinbase_challenge(
+            ckb_enabled=ckb_enabled,
+            width=_verifiable_sat_width(width),
+            agent_image_digest=agent_image_digest,
+            agent_id=agent_id,
+            work_nonce=work_nonce,
+        )
+
+    def _verifiable_sat_dimacs_shape(cnf_text: str) -> tuple[int, int]:
+        for line in cnf_text.splitlines():
+            if line.startswith("p cnf "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    return int(parts[2]), int(parts[3])
+        return 0, 0
+
+    def _issue_verifiable_sat_challenge(challenge: Any, *, miner_hotkey: str) -> None:
+        num_vars, num_clauses = _verifiable_sat_dimacs_shape(challenge.cnf_text)
+        now_iso = _now_iso_ms()
+        miner_digest = sha256_hex(miner_hotkey)
+
+        def _insert(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO lane_challenges "
+                "(challenge_id, family_id, tier, cnf_text, cnf_sha256, cnf_bytes, "
+                "num_vars, num_clauses, status, score_multiplier, difficulty_label, "
+                "designated_solver_digest, created_at_iso) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+                (
+                    challenge.artifact_sha256,
+                    "verifiable_sat_v1",
+                    3,
+                    challenge.cnf_text,
+                    challenge.cnf_sha256,
+                    len(challenge.cnf_text.encode("utf-8")),
+                    num_vars,
+                    num_clauses,
+                    1.0,
+                    f"coinbase:{int(bool(challenge.ckb_enabled))}:w{challenge.width}",
+                    miner_digest,
+                    now_iso,
+                ),
+            )
+
+        store.write(_insert)
+
+    def _require_issued_verifiable_sat_challenge(challenge: Any, *, miner_hotkey: str) -> None:
+        rows_ = store.query(
+            "SELECT cnf_sha256, status, designated_solver_digest FROM lane_challenges WHERE challenge_id=? AND family_id=?",
+            (challenge.artifact_sha256, "verifiable_sat_v1"),
+        )
+        if not rows_:
+            raise HTTPException(409, "verifiable_sat_challenge_not_issued")
+        if rows_[0]["cnf_sha256"] != challenge.cnf_sha256:
+            raise HTTPException(409, "verifiable_sat_challenge_cnf_mismatch")
+        if rows_[0]["status"] != "active":
+            raise HTTPException(409, "verifiable_sat_challenge_not_active")
+        expected_miner = sha256_hex(miner_hotkey)
+        if rows_[0]["designated_solver_digest"] != expected_miner:
+            raise HTTPException(403, "verifiable_sat_challenge_assigned_to_different_hotkey")
+
+    def _verify_verifiable_sat_issue_signature(
+        *,
+        ckb_enabled: bool,
+        width: int,
+        agent_image_digest: str,
+        agent_id: str,
+        x_cathedral_hotkey: str,
+        x_cathedral_signature: str,
+        x_cathedral_submitted_at: str | None,
+    ) -> str:
+        if x_cathedral_submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        issue_digest = _verifiable_sat_issue_digest(
+            ckb_enabled=ckb_enabled,
+            width=width,
+            agent_image_digest=agent_image_digest,
+            agent_id=agent_id,
+        )
+        return _verify_hotkey_claim(
+            x_cathedral_hotkey,
+            x_cathedral_signature,
+            x_cathedral_submitted_at,
+            challenge_id=f"issue:{issue_digest}",
+            dimacs_solution_sha256=issue_digest,
+            allow_fallback_shapes=False,
+            card_id=_VERIFIABLE_SAT_CARD,
+        )
+
+    def _solver_artifact_from_body(body: dict[str, Any]):
+        from .solver_artifacts import SolverArtifact
+
+        artifact_body = body.get("solver_artifact")
+        if isinstance(artifact_body, dict):
+            return SolverArtifact.from_dict(artifact_body)
+        return SolverArtifact.from_dict(body)
+
+    def _solver_artifact_claim_hash(artifact: Any) -> str:
+        encoded = json.dumps(
+            artifact.hashes(),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return sha256_hex(encoded)
+
+    def _verifiable_sat_canonical_discharge_hash(challenge: Any, verdict: Any) -> str:
+        key = {
+            "schema": "cathedral.verifiable_sat.canonical_discharge.v1",
+            "cnf_sha256": challenge.cnf_sha256,
+            "invariant_id": challenge.invariant_id,
+            "outcome": verdict.outcome,
+        }
+        return sha256_hex(json.dumps(key, sort_keys=True, separators=(",", ":"), default=str))
+
+    def _verify_verifiable_sat_signature(
+        *,
+        challenge: Any,
+        solver_artifact: Any,
+        x_cathedral_hotkey: str,
+        x_cathedral_signature: str,
+        x_cathedral_submitted_at: str | None,
+    ) -> str:
+        if x_cathedral_submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        return _verify_hotkey_claim(
+            x_cathedral_hotkey,
+            x_cathedral_signature,
+            x_cathedral_submitted_at,
+            challenge_id=challenge.artifact_sha256,
+            dimacs_solution_sha256=_solver_artifact_claim_hash(solver_artifact),
+            allow_fallback_shapes=False,
+            card_id=_VERIFIABLE_SAT_CARD,
+        )
+
+    def _verifiable_sat_payment_metadata() -> dict[str, Any]:
+        return {
+            "payment_weights": _verifiable_sat_payment_weights_enabled(),
+            "task_type": _verifiable_sat_task_type(),
+            "tier": 3,
+            "row_score_cap": 1.0,
+            "attestation_required": _verifiable_sat_require_attestation(),
+            "attestation_report_data_only": _verifiable_sat_allow_report_data_only(),
+            "system_replay_required": _verifiable_sat_require_system_replay(),
+            "system_replay_configured": bool(_verifiable_sat_replay_command()),
+            "system_replay_allowed_runners": sorted(_verifiable_sat_replay_allowed_runners()),
+            "unsat_reward_enabled": _verifiable_sat_reward_unsat(),
+            "tdx_measurement_required": _verifiable_sat_require_tdx_measurement(),
+            "agent_image_digest_allowlist_configured": bool(_verifiable_sat_allowed_agent_digests()),
+            "agent_id_allowlist": sorted(_verifiable_sat_allowed_agent_ids()),
+            "min_payment_width": _verifiable_sat_min_payment_width(),
+            "audit_replay_bonus_multiplier": weights_mod.audit_replay_bonus_multiplier(),
+            "audit_replay_task_types": sorted(weights_mod.audit_replay_task_types()),
+            "degraded_reason": (
+                None
+                if _verifiable_sat_task_type() in weights_mod.audit_replay_task_types()
+                else "verifiable_sat_task_type_not_in_weight_policy"
+            ),
+        }
+
+    def _emit_verifiable_sat_row(
+        *,
+        miner_hotkey: str,
+        challenge: Any,
+        solver_artifact: Any,
+        verdict: Any,
+        verified_at: str,
+        real_attestation_verified: bool = False,
+    ) -> dict[str, Any] | None:
+        if not _verifiable_sat_payment_weights_enabled():
+            return None
+        if not bool(verdict.accepted and verdict.rewardable):
+            return None
+        if int(getattr(challenge, "width", 0) or 0) < _verifiable_sat_min_payment_width():
+            return None
+        solver_hash = _solver_artifact_claim_hash(solver_artifact)
+        canonical_discharge_hash = _verifiable_sat_canonical_discharge_hash(challenge, verdict)
+        row_uuid = "vsat-" + sha256_hex(
+            f"{canonical_discharge_hash}:{verdict.outcome}"
+        )[:32]
+        verifier_details = {
+            "schema": "cathedral.verifiable_sat.payment_verifier.v1",
+            "card_id": _VERIFIABLE_SAT_CARD,
+            "challenge_artifact_sha256": challenge.artifact_sha256,
+            "cnf_sha256": challenge.cnf_sha256,
+            "mapping_sha256": challenge.mapping_sha256,
+            "invariant_id": challenge.invariant_id,
+            "outcome": verdict.outcome,
+            "global_dedupe_key": row_uuid,
+            "solver_artifact_hash": solver_hash,
+            "canonical_discharge_hash": canonical_discharge_hash,
+            "real_attestation_verified": bool(real_attestation_verified),
+            "gates": dict(verdict.gates),
+            "reasons": list(verdict.reasons),
+            "signature_verified_at": verified_at,
+        }
+        emitted = rows.build_solve_rows(
+            row_uuid=row_uuid,
+            miner_hotkey=miner_hotkey,
+            agent_id=new_uuid(),
+            challenge_id=challenge.artifact_sha256,
+            tier=3,
+            weighted_score=round(min(1.0, max(0.0, float(verdict.score))), 6),
+            answer_hash=canonical_discharge_hash,
+            verifier_details_hash=sha256_hex(json.dumps(
+                verifier_details,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )),
+            ran_at=_now_iso_ms(),
+            epoch_salt=f"verifiable_sat:{challenge.artifact_sha256}",
+            solve_rank=1,
+            solved=True,
+            private_key_hex=key_hex,
+            task_type=_verifiable_sat_task_type(),
+            agent_display_prefix="AL-VSAT",
+        )
+        for row in emitted:
+            if isinstance(row.get("output_card"), dict):
+                row["output_card"]["verifiable_sat"] = {
+                    "card_id": _VERIFIABLE_SAT_CARD,
+                    "invariant_id": challenge.invariant_id,
+                    "cnf_sha256": challenge.cnf_sha256,
+                    "mapping_sha256": challenge.mapping_sha256,
+                    "challenge_artifact_sha256": challenge.artifact_sha256,
+                    "outcome": verdict.outcome,
+                    "attestation_required": _verifiable_sat_require_attestation(),
+                    "system_replay_required": _verifiable_sat_require_system_replay(),
+                }
+
+        def _insert(conn):
+            inserted = 0
+            for row in emitted:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json, attested) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["id"],
+                        row["ran_at"],
+                        int(row["eval_output_schema_version"]),
+                        row["miner_hotkey"],
+                        row["task_type"],
+                        json.dumps(row),
+                        1 if real_attestation_verified else 0,
+                    ),
+                )
+                inserted += int(cur.rowcount or 0)
+            return inserted
+
+        inserted = int(store.write(_insert) or 0)
+
+        def _consume(conn):
+            conn.execute(
+                "UPDATE lane_challenges SET status='solved' WHERE challenge_id=? AND family_id=? AND status='active'",
+                (challenge.artifact_sha256, "verifiable_sat_v1"),
+            )
+
+        store.write(_consume)
+        meta = _verifiable_sat_payment_metadata()
+        meta.update({
+            "eval_run_id": row_uuid,
+            "weighted_score": round(min(1.0, max(0.0, float(verdict.score))), 6),
+            "signature_verified_at": verified_at,
+            "row_inserted": inserted > 0,
+        })
+        return meta
+
+    def _verified_verifiable_sat_report_data(
+        body: dict[str, Any],
+        challenge: Any,
+        *,
+        miner_hotkey: str,
+        solver_artifact: Any,
+    ) -> tuple[str, str, bool]:
+        from ..lanes.coinbase_oracle import attestation_report_data
+
+        expected = attestation_report_data(
+            challenge,
+            miner_hotkey=miner_hotkey,
+            solver_artifact_hash=_solver_artifact_claim_hash(solver_artifact),
+        )
+        if not _verifiable_sat_require_attestation():
+            return "", expected, False
+        if _verifiable_sat_allow_report_data_only():
+            from . import attest
+
+            if attest._production_mode():
+                raise HTTPException(503, "tdx_report_data_only_forbidden_in_production")
+            return str(body.get("tdx_report_data_hex") or ""), expected, False
+        quote_b64 = str(body.get("tdx_quote_b64") or "")
+        if not quote_b64:
+            raise HTTPException(400, "tdx_quote_required")
+        try:
+            import base64
+
+            quote = base64.b64decode(quote_b64, validate=False)
+        except Exception:
+            raise HTTPException(400, "tdx_quote_malformed")
+        if len(quote) < 632:
+            raise HTTPException(400, "tdx_quote_too_short")
+        if not hmac.compare_digest(quote[568:632].hex(), expected):
+            raise HTTPException(400, "tdx_report_data_mismatch")
+        from . import attest
+
+        intel = attest.configured_intel_verifier()
+        if intel is None:
+            raise HTTPException(503, "tdx_verifier_not_configured")
+        if not intel.verify_intel(quote, body.get("tdx_collateral") or body.get("collateral")):
+            raise HTTPException(400, "tdx_intel_verification_failed")
+        if _verifiable_sat_require_tdx_measurement() and not _verifiable_sat_measurement_bound(
+            intel,
+            str(challenge.provenance.get("agent_image_digest") or ""),
+        ):
+            raise HTTPException(400, "tdx_measurement_not_bound_to_agent_image")
+        return expected, expected, True
+
+    def _verifiable_sat_measurement_bound(intel: Any, expected_agent_image_digest: str) -> bool:
+        result = getattr(intel, "last_result", None)
+        if not isinstance(result, dict):
+            return False
+        for flag in (
+            "agent_image_digest_match",
+        ):
+            if result.get(flag) is True:
+                return True
+        expected = expected_agent_image_digest.strip()
+        for key in (
+            "agent_image_digest",
+            "container_image_digest",
+            "measured_image_digest",
+        ):
+            if expected and str(result.get(key) or "").strip() == expected:
+                return True
+        return False
+
+    @app.get("/v1/verifiable-sat/coinbase/status")
+    def verifiable_sat_coinbase_status():
+        return {
+            "schema": "cathedral.verifiable_sat.status.v1",
+            "enabled": _verifiable_sat_enabled(),
+            "card_id": _VERIFIABLE_SAT_CARD,
+            "payment": _verifiable_sat_payment_metadata(),
+            "invariant_id": "subtensor.run_coinbase.childkey_conservation.v1",
+            "oracle": "CKBurn>0 SAT, CKBurn=0 UNSAT",
+            "proofs": {
+                "sat": "DIMACS assignment plus canonical arithmetic replay plus operator clone replay receipt",
+                "unsat": "DRAT proof verified by drat-trim",
+            },
+        }
+
+    @app.get("/v1/verifiable-sat/coinbase/challenge")
+    def verifiable_sat_coinbase_challenge(
+        ckb_enabled: bool = Query(True),
+        width: int = Query(64, ge=2, le=64),
+        include_cnf: bool = Query(True),
+        agent_image_digest: str = Query(...),
+        agent_id: str = Query("hermes-coinbase-encoder-v1"),
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        _require_verifiable_sat_enabled()
+        issued_at = _verify_verifiable_sat_issue_signature(
+            ckb_enabled=ckb_enabled,
+            width=width,
+            agent_image_digest=agent_image_digest,
+            agent_id=agent_id,
+            x_cathedral_hotkey=x_cathedral_hotkey,
+            x_cathedral_signature=x_cathedral_signature,
+            x_cathedral_submitted_at=x_cathedral_submitted_at,
+        )
+        challenge = _verifiable_sat_challenge(
+            ckb_enabled=ckb_enabled,
+            width=width,
+            body={"agent_image_digest": agent_image_digest, "agent_id": agent_id},
+            issue=True,
+            miner_hotkey=x_cathedral_hotkey,
+        )
+        _issue_verifiable_sat_challenge(challenge, miner_hotkey=x_cathedral_hotkey)
+        out = challenge.to_public_artifact()
+        out.update({
+            "schema": "cathedral.verifiable_sat.challenge.v1",
+            "card_id": _VERIFIABLE_SAT_CARD,
+            "artifact_sha256": challenge.artifact_sha256,
+            "issued": True,
+            "issued_to_hotkey": x_cathedral_hotkey,
+            "signature_verified_at": issued_at,
+            "work_nonce": challenge.provenance.get("work_nonce", ""),
+            "payment": _verifiable_sat_payment_metadata(),
+            "answer_format": {
+                "schema_version": "cathedral.solver_artifact.v1",
+                "sat": ["outcome=SAT", "dimacs_solution"],
+                "unsat": ["outcome=UNSAT", "drat_proof"],
+            },
+            "signature_contract": {
+                "card_id": _VERIFIABLE_SAT_CARD,
+                "challenge_id": "challenge.artifact_sha256",
+                "dimacs_solution_sha256": "sha256(solver_artifact.hashes())",
+            },
+            "issue_signature_contract": {
+                "card_id": _VERIFIABLE_SAT_CARD,
+                "challenge_id": "issue:sha256({ckb_enabled,width,agent_image_digest,agent_id})",
+                "dimacs_solution_sha256": "same issue sha256",
+            },
+        })
+        if include_cnf:
+            out["cnf_text"] = challenge.cnf_text
+        return out
+
+    @app.post("/v1/verifiable-sat/coinbase/verify")
+    async def verifiable_sat_coinbase_verify(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        _require_verifiable_sat_enabled()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        challenge = _verifiable_sat_challenge(
+            ckb_enabled=bool(body.get("ckb_enabled")),
+            width=int(body.get("width", 64)),
+            body=body,
+        )
+        _require_issued_verifiable_sat_challenge(challenge, miner_hotkey=x_cathedral_hotkey)
+        solver_artifact = _solver_artifact_from_body(body)
+        verified_at = _verify_verifiable_sat_signature(
+            challenge=challenge,
+            solver_artifact=solver_artifact,
+            x_cathedral_hotkey=x_cathedral_hotkey,
+            x_cathedral_signature=x_cathedral_signature,
+            x_cathedral_submitted_at=x_cathedral_submitted_at,
+        )
+        from ..lanes.verifiable_sat_pipeline import verify_coinbase_pipeline
+
+        observed_report_data, expected_report_data, real_attestation_verified = _verified_verifiable_sat_report_data(
+            body,
+            challenge,
+            miner_hotkey=x_cathedral_hotkey,
+            solver_artifact=solver_artifact,
+        )
+        verdict = verify_coinbase_pipeline(
+            challenge,
+            solver_artifact,
+            require_attestation=_verifiable_sat_require_attestation(),
+            observed_report_data_hex=observed_report_data,
+            expected_report_data_hex=expected_report_data,
+            require_system_replay=_verifiable_sat_require_system_replay(),
+            system_replay_command=_verifiable_sat_replay_command(),
+            allowed_replay_runner_kinds=_verifiable_sat_replay_allowed_runners(),
+            system_replay_timeout_s=_verifiable_sat_replay_timeout_s(),
+            allow_unsat_reward=_verifiable_sat_reward_unsat(),
+        )
+        out = verdict.to_dict()
+        out.update({
+            "ledger_written": False,
+            "scored": False,
+            "signature_verified_at": verified_at,
+            "card_id": _VERIFIABLE_SAT_CARD,
+            "real_attestation_verified": real_attestation_verified,
+            "payment": _verifiable_sat_payment_metadata(),
+        })
+        return out
+
+    @app.post("/v1/verifiable-sat/coinbase/submit")
+    async def verifiable_sat_coinbase_submit(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        _require_verifiable_sat_enabled()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        challenge = _verifiable_sat_challenge(
+            ckb_enabled=bool(body.get("ckb_enabled")),
+            width=int(body.get("width", 64)),
+            body=body,
+        )
+        _require_issued_verifiable_sat_challenge(challenge, miner_hotkey=x_cathedral_hotkey)
+        solver_artifact = _solver_artifact_from_body(body)
+        verified_at = _verify_verifiable_sat_signature(
+            challenge=challenge,
+            solver_artifact=solver_artifact,
+            x_cathedral_hotkey=x_cathedral_hotkey,
+            x_cathedral_signature=x_cathedral_signature,
+            x_cathedral_submitted_at=x_cathedral_submitted_at,
+        )
+        from ..lanes.verifiable_sat_pipeline import verify_coinbase_pipeline
+
+        observed_report_data, expected_report_data, real_attestation_verified = _verified_verifiable_sat_report_data(
+            body,
+            challenge,
+            miner_hotkey=x_cathedral_hotkey,
+            solver_artifact=solver_artifact,
+        )
+        verdict = verify_coinbase_pipeline(
+            challenge,
+            solver_artifact,
+            require_attestation=_verifiable_sat_require_attestation(),
+            observed_report_data_hex=observed_report_data,
+            expected_report_data_hex=expected_report_data,
+            require_system_replay=_verifiable_sat_require_system_replay(),
+            system_replay_command=_verifiable_sat_replay_command(),
+            allowed_replay_runner_kinds=_verifiable_sat_replay_allowed_runners(),
+            system_replay_timeout_s=_verifiable_sat_replay_timeout_s(),
+            allow_unsat_reward=_verifiable_sat_reward_unsat(),
+        )
+        payment = _emit_verifiable_sat_row(
+            miner_hotkey=x_cathedral_hotkey,
+            challenge=challenge,
+            solver_artifact=solver_artifact,
+            verdict=verdict,
+            verified_at=verified_at,
+            real_attestation_verified=real_attestation_verified,
+        )
+        payment_row_inserted = bool(payment and payment.get("row_inserted"))
+        out = verdict.to_dict()
+        out.update({
+            "ledger_written": payment_row_inserted,
+            "scored": payment_row_inserted,
+            "signature_verified_at": verified_at,
+            "card_id": _VERIFIABLE_SAT_CARD,
+            "real_attestation_verified": real_attestation_verified,
+            "payment": payment or _verifiable_sat_payment_metadata(),
+            "eval_run_id": (payment or {}).get("eval_run_id"),
+            "payment_row_emitted": payment_row_inserted,
+        })
+        return out
 
     # ---- M2c: Audit scanner bridge (replay-scored, weight-bonus capable) ---
     # This is the production-style bridge for the local Subnet Breaker scanner

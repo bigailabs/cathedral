@@ -37,6 +37,26 @@ assert.deepEqual(
   { role: "submit", path: "/v1/agents/submit" },
 );
 assert.deepEqual(
+  classifyRequest("GET", "/v1/verifiable-sat/coinbase/status"),
+  { role: "read", path: "/v1/verifiable-sat/coinbase/status" },
+);
+assert.deepEqual(
+  classifyRequest("GET", "/v1/verifiable-sat/coinbase/challenge"),
+  { role: "submit", path: "/v1/verifiable-sat/coinbase/challenge" },
+);
+assert.deepEqual(
+  classifyRequest("GET", "/api/cathedral/v1/verifiable-sat/coinbase/challenge"),
+  { role: "submit", path: "/v1/verifiable-sat/coinbase/challenge" },
+);
+assert.deepEqual(
+  classifyRequest("POST", "/v1/verifiable-sat/coinbase/verify"),
+  { role: "submit", path: "/v1/verifiable-sat/coinbase/verify" },
+);
+assert.deepEqual(
+  classifyRequest("POST", "/v1/verifiable-sat/coinbase/submit"),
+  { role: "submit", path: "/v1/verifiable-sat/coinbase/submit" },
+);
+assert.deepEqual(
   classifyRequest("GET", "/v1/unknown"),
   { role: "none", path: "/v1/unknown" },
 );

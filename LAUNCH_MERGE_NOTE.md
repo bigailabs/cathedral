@@ -51,6 +51,17 @@ Result:
 PUBLISHER VERIFY: PASS all 98 checks
 ```
 
+Validator release safety tests now run in CI:
+
+```bash
+python -m pytest -q \
+  scaffold/publisher/tests/test_validator_release_gate.py \
+  scaffold/publisher/tests/test_validator_health_endpoint.py
+```
+
+These cover the read-only validator release gate and the admin
+`/v1/admin/validator-health` surface used to protect the weight feed.
+
 Postgres E2E used an ephemeral PostgreSQL 16 server unpacked under `/tmp` from
 Ubuntu packages and a local `DATABASE_URL`:
 
@@ -101,11 +112,25 @@ Post-deploy smoke:
 BASE_URL=https://api.cathedral.computer uv run --with-requirements deploy/requirements.txt python live_smoke.py
 ```
 
+Preferred controlled-v0 post-deploy gate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1
+```
+
+This gate runs the read-only validator release gate first, then checks direct
+read/submit origin health and role isolation before the edge route map, short
+soak, and publisher live smoke. Use `-SkipValidatorReleaseGate` only for
+non-mainnet staging. Use `-SkipSplitOriginSmoke` only for pre-split staging, not
+for the final controlled v0 gate.
+
 Result against current production: expected fail before deploy. Current prod does
 not yet expose board `generator` / `scoring` / `distribution` or
-`/v1/leaderboard/explain`, and one submit attempt hit `429 submit_busy_retry`.
-Rerun this after Railway deploy before claiming the deployed miner experience is
-live.
+`/v1/leaderboard/explain`, one submit attempt hit `429 submit_busy_retry`, and
+the validator release gate currently reports fresh but divergent signed-vector
+bytes between `api.cathedral.computer` and `read.cathedral.computer`. Rerun this
+after Railway deploy before claiming the deployed miner experience or payment
+feed is live.
 
 ## Not Claimable Yet
 

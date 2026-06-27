@@ -35,18 +35,45 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Build SAT proof tools
+        run: |
+          set -eux
+          mkdir -p "$HOME/.cache/cathedral-tools"
+          cd "$HOME/.cache/cathedral-tools"
+          git clone https://github.com/arminbiere/cadical.git
+          cd cadical
+          git checkout 7b99c07f0bcab5824a5a3ce62c7066554017f641
+          ./configure
+          make -j2
+          cd "$HOME/.cache/cathedral-tools"
+          git clone https://github.com/marijnheule/drat-trim.git
+          cd drat-trim
+          git checkout 2e3b2dc0ecf938addbd779d42877b6ed69d9a985
+          make -j2
+
       - name: Install publisher dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[publisher]"
+          python -m pip install pytest
+
+      - name: Run validator release safety tests
+        run: |
+          python -m pytest -q \
+            scaffold/publisher/tests/test_validator_release_gate.py \
+            scaffold/publisher/tests/test_validator_health_endpoint.py
 
       - name: Run launch verifier suite
+        env:
+          CADICAL_BIN: /home/runner/.cache/cathedral-tools/cadical/build/cadical
+          DRAT_TRIM_BIN: /home/runner/.cache/cathedral-tools/drat-trim/drat-trim
         run: |
           python publisher_verify.py
           python tee_gpu_verify.py
           python attest_verify.py
           python weights_verify.py
           python audit_arena_verify.py
+          python coinbase_oracle_verify.py
           python distillation_verify.py
           python arena_runner_verify.py
           python launch_readiness_verify.py

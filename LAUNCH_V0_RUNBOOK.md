@@ -100,6 +100,14 @@ CATHEDRAL_PUBLISHER_SEED_SECRET=<long-random-seed-secret>
 CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_SECONDS=3600
 CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS=256
 
+# Read-service reliability. Keep these on for controlled v0 so board/top/recent
+# can serve timer-built snapshots and degrade cleanly under DB pressure.
+CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED=1
+CATHEDRAL_MATERIALIZED_SNAPSHOT_REFRESH_SECS=60
+CATHEDRAL_MATERIALIZED_SNAPSHOT_MAX_STALE_SECS=900
+CATHEDRAL_RECENT_SNAPSHOT_LIMIT=50
+CATHEDRAL_RECENT_NO_CURSOR_MAX_LIMIT=50
+
 # Per-miner unique assignments are beta. Keep off for controlled v0 unless
 # running an explicit shadow/economic rollout.
 CATHEDRAL_PERMINER_ENABLED=
@@ -127,6 +135,23 @@ Checks:
 - `/v1/attest/nonce` returns 404.
 - `/v1/tee-gpu/offers` returns 404.
 - Chutes execution is disabled.
+
+Run the bundled post-deploy smoke gate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1
+```
+
+This verifies the validator weight-feed release gate, direct read and submit
+origins, edge routing, short edge soak, and publisher live smoke. Use
+`-PlanOnly` before deploy to print the exact commands without hitting the live
+service. If this Windows shell only has the Microsoft Store `python` stub, pass
+`-Python <path-to-real-python>` or run the equivalent command from WSL. If you
+are smoke-testing before `read.cathedral.computer` and
+`submit.cathedral.computer` exist, add `-SkipSplitOriginSmoke`; do not use that
+skip for the final controlled-v0 gate. Use `-ValidatorReleaseNoChain` only for
+feed-only staging checks. Use `-SkipValidatorReleaseGate` only when intentionally
+testing non-mainnet staging.
 
 Rollback:
 

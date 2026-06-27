@@ -126,6 +126,77 @@ v 1 -2 3 0
   - `invariant_number_must_be_finite`: observed invariant input is not a finite number.
 - This remains a shadow/offline seam. It does not yet clone real Subtensor state, execute extrinsics, attest runtime output, score live miners, or pay emissions.
 
+## Coinbase Conservation SAT Oracle
+
+- Canonical invariant id:
+  - `subtensor.run_coinbase.childkey_conservation.v1`
+- Source target:
+  - `pallets/subtensor/src/coinbase/run_coinbase.rs:1027-1039`
+- Files:
+  - `game/arena/coinbase_encoder_agent.py`
+  - `scaffold/lanes/coinbase_oracle.py`
+  - `scaffold/lanes/clone_replay.py`
+  - `scaffold/lanes/verifiable_sat_pipeline.py`
+  - `scaffold/publisher/solver_artifacts.py`
+  - `coinbase_oracle_verify.py`
+- What it models:
+  - `parent_emission = floor(validating_emission * parent_factor / u64::MAX)`
+  - `burn_take = floor(parent_emission * ck_burn_rate / u64::MAX)`
+  - `child_take = floor(parent_emission * child_take_rate / u16::MAX)`
+  - `parent_left = parent_emission.saturating_sub(burn_take).saturating_sub(child_take)`
+  - violation iff `burn_take + child_take + parent_left > parent_emission`
+  - `child_take_rate <= 11796 / 65535`, matching the runtime default `SubtensorInitialMaxChildKeyTake` cap.
+  - CI uses width-scaled denominators for small bounded proofs; launch-width challenges use u64 parent/CKBurn rates and capped u16 child-take rates.
+- Oracle:
+  - `CKBurn>0` side: SAT. A decoded assignment must replay as a real conservation break.
+  - `CKBurn=0` side: UNSAT. A solver must return a DRAT proof and `drat-trim` must verify it.
+- Anti-gaming gates:
+  - canonical invariant required
+  - clause/source map required
+  - decode map required
+  - SAT assignment must satisfy the CNF and replay against the real arithmetic
+  - challenges must be signed, server-issued, assigned to the submitting hotkey, and present in `lane_challenges`; body-minted challenge artifacts are rejected
+  - agent image digests must be allowlisted by `CATHEDRAL_VERIFIABLE_SAT_AGENT_IMAGE_DIGESTS`
+  - SAT payment requires an operator-configured clone replay receipt when `CATHEDRAL_VERIFIABLE_SAT_REQUIRE_SYSTEM_REPLAY=1` (default)
+  - UNSAT proof must pass `drat-trim`; UNSAT is accepted but not paid by default unless `CATHEDRAL_VERIFIABLE_SAT_REWARD_UNSAT=1`
+  - TDX quote verification is required by default via `CATHEDRAL_VERIFIABLE_SAT_REQUIRE_ATTESTATION=1`; report-data-only checks require explicit `CATHEDRAL_VERIFIABLE_SAT_ALLOW_REPORT_DATA_ONLY=1` and are shadow/CI only
+  - accepted payment rows are marked attested only after a real TDX quote verifies; report-data-only shadow rows are not scored
+  - real TDX verification must also bind the measured agent image to the allowlisted digest (`CATHEDRAL_VERIFIABLE_SAT_REQUIRE_TDX_MEASUREMENT=1` by default)
+  - SAT payment rows dedupe globally by CNF hash and outcome; this is one bounty per canonical bug/challenge, not one payment per alternate witness
+  - `agent_id` is allowlisted by `CATHEDRAL_VERIFIABLE_SAT_AGENT_IDS` (`hermes-coinbase-encoder-v1` by default); miners cannot mint fresh payable artifacts by varying agent ids
+  - payment requires `width >= CATHEDRAL_VERIFIABLE_SAT_MIN_PAYMENT_WIDTH` (`64` by default); small CI widths are verification smoke only
+- Challenge issuance:
+  - `GET /v1/verifiable-sat/coinbase/challenge?ckb_enabled=true&width=64&agent_image_digest=sha256:<digest>`
+  - requires `X-Cathedral-Hotkey`, `X-Cathedral-Signature`, and `X-Cathedral-Submitted-At`
+  - the issue signature signs `card_id=cathedral_verifiable_sat_v1`, `challenge_id=issue:sha256({ckb_enabled,width,agent_image_digest,agent_id})`, and `dimacs_solution_sha256` equal to the same issue hash
+  - returns a server-derived miner-bound `work_nonce` and `artifact_sha256`
+  - submit/verify reconstruct the artifact and reject it unless the artifact was issued by this publisher instance/database for the submitting hotkey
+- Clone replay controls:
+  - `CATHEDRAL_VERIFIABLE_SAT_REQUIRE_SYSTEM_REPLAY=1` rejects SAT payouts unless a clone replay receipt verifies.
+  - `CATHEDRAL_VERIFIABLE_SAT_REPLAY_CMD="..."` points to an operator-controlled command, not miner input.
+  - The command receives `cathedral.subtensor_clone_replay_request.v1` JSON on stdin and returns `cathedral.subtensor_clone_replay_receipt.v1` JSON on stdout.
+  - `CATHEDRAL_VERIFIABLE_SAT_REPLAY_ALLOWED_RUNNERS=subtensor_clone_rust_v1` is the production default.
+  - CI uses `subtensor_clone_shadow_v1` only as a deterministic fixture; it is not a launch substitute for a real Rust/Subtensor clone runner.
+- Encoder-agent command:
+
+```bash
+echo '{"schema_version":"cathedral.hermes_encoder_packet.v1","agent_id":"hermes-coinbase-encoder-v1","agent_image_digest":"sha256:<allowlisted-image-digest>","work_nonce":"<server-issued-nonce>","ckb_enabled":true,"width":64}' \
+  | python -m game.arena.coinbase_encoder_agent
+```
+
+- The output includes:
+  - `cnf_text`
+  - `decode_map`
+  - `clause_source_map`
+  - `public_artifact`
+  - `tdx_report_data_hex`
+- Current limitation:
+  - the oracle now derives takes from bounded fixed-point rates; it is still a focused one-parent model of the bug-bearing childkey split, not full `run_coinbase.rs` node execution.
+  - the CI smoke uses small bit widths for tractability; the encoder is width-parametric up to u64.
+  - the payment path now fails closed when system replay is required but no clone runner is configured.
+  - the payment path now fails closed when TDX attestation is required but no real DCAP verifier/quote is configured.
+  - report-data-only mode and `subtensor_clone_shadow_v1` are CI/shadow fixtures, not production launch evidence.
+
 ## Scoring Ladder
 
 - Live scanner v0 earning policy: `accepted deterministic replay -> audit_replay_v1 row -> signed-vector audit bonus`.
