@@ -443,6 +443,27 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_kind_status_received
             ON per_miner_attempts(challenge_kind, status, received_at_iso);
     """),
+    # 0032: repair old live SQLite volumes whose schema_migrations table says
+    # 0002_lane_challenges was applied, but whose lane_challenges table predates
+    # the current miner-facing shape. Duplicate-column errors are ignored by
+    # _sqlite_exec_migration, so this is safe on healthy databases too.
+    ("0032_lane_challenges_shape_repair", """
+        ALTER TABLE lane_challenges ADD COLUMN family_id TEXT NOT NULL DEFAULT 'synthetic_boolean_v1';
+        ALTER TABLE lane_challenges ADD COLUMN tier INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE lane_challenges ADD COLUMN cnf_text TEXT NOT NULL DEFAULT '';
+        ALTER TABLE lane_challenges ADD COLUMN cnf_sha256 TEXT NOT NULL DEFAULT '';
+        ALTER TABLE lane_challenges ADD COLUMN cnf_bytes INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE lane_challenges ADD COLUMN num_vars INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE lane_challenges ADD COLUMN num_clauses INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE lane_challenges ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+        ALTER TABLE lane_challenges ADD COLUMN score_multiplier REAL NOT NULL DEFAULT 1.0;
+        ALTER TABLE lane_challenges ADD COLUMN difficulty_label TEXT;
+        ALTER TABLE lane_challenges ADD COLUMN designated_solver_digest TEXT;
+        ALTER TABLE lane_challenges ADD COLUMN created_at_iso TEXT NOT NULL DEFAULT '';
+        ALTER TABLE lane_challenges ADD COLUMN cnf_source TEXT NOT NULL DEFAULT 'local';
+        ALTER TABLE lane_challenges ADD COLUMN cnf_url TEXT;
+        ALTER TABLE lane_challenges ADD COLUMN updated_at_iso TEXT;
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -813,6 +834,23 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS shadow_rejection_reason TEXT;
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_kind_status_received
             ON per_miner_attempts(challenge_kind, status, received_at_iso);
+    """),
+    ("0032_lane_challenges_shape_repair", """
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS family_id TEXT NOT NULL DEFAULT 'synthetic_boolean_v1';
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS tier INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_text TEXT NOT NULL DEFAULT '';
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_sha256 TEXT NOT NULL DEFAULT '';
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_bytes BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS num_vars INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS num_clauses INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS score_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS difficulty_label TEXT;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS designated_solver_digest TEXT;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS created_at_iso TEXT NOT NULL DEFAULT '';
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_source TEXT NOT NULL DEFAULT 'local';
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_url TEXT;
+        ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS updated_at_iso TEXT;
     """),
 ]
 
