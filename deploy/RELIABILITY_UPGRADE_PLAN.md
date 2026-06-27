@@ -55,7 +55,7 @@ section is first below because it is the highest-priority surface for mainnet.
 > Added after review. The miner-facing submit/read work above is necessary but
 > **not sufficient for a stable mainnet release.** The single most important
 > surface is the validator weight feed. If it fails, validators cannot set
-> weights — worse than any dashboard, leaderboard, or even submit outage.
+> weights - worse than any dashboard, leaderboard, or even submit outage.
 
 ### The canonical surface
 
@@ -70,27 +70,32 @@ route in the system.**
 ### Why it is currently at risk (verified in code)
 
 - `validator_weights_next` (`scaffold/publisher/app.py:1955`) is `async` and reads
-  `weights_mod.current_vector(...)` from an in-memory cache filled by a background
-  refresh thread — so it is *partially* shielded (it does not use the thread pool
-  and survives submit/read saturation **within a live process**).
-- **But** `current_vector` builds from the DB/store and **raises `503 "no vector
-  available"` if that build fails**, and the route sits behind the **same read
-  origin that was observed returning `504` for ~10s** (see "Read Origin Outage").
-  So on an origin crash/restart/OOM, validators get `503`/`504` and **there is no
-  durable last-known-good to fall back to.**
-- Net: today the weight feed is only as available as the live app process. That
-  is not enough for mainnet.
+  the **cached** signed vector via `weights_mod.current_vector(...)`
+  (`scaffold/publisher/weights.py:1244`). That cache (`_vector_cache`) is rebuilt
+  by a **background refresh thread every `_CACHE_TTL_SECS = 60s`**
+  (`weights.py:1208`). So steady-state reads return in microseconds and the route
+  is *partially* shielded: it never uses the thread pool and survives submit/read
+  saturation **within a live process**.
+- **But the cache is in-memory and not persisted.** On a cold process
+  (restart / redeploy / OOM), the cache is empty and the first call must build
+  synchronously from the DB (a 5-30s build); if that build fails the handler
+  **raises `503 "no vector available"`**. The route also sits behind the **same
+  read origin observed returning `504` for ~10s** (see "Read Origin Outage").
+- Net: today the weight feed is only as available as the live app process, and a
+  restart or origin failure leaves validators with `503`/`504` and **no durable
+  last-known-good to fall back to.** That is not enough for mainnet.
 
 ### Required protections (the gap this plan must close)
 
 1. **Tier read recovery by criticality** (do not treat "reads" as one blob):
    | Tier | Surface | Requirement |
    |---|---|---|
-   | **0 — critical** | `/v1/validator/weights/next` | must *always* answer, even when the app/DB is down — serve last-known-good |
-   | **1 — important** | active-board / current-challenge / CNF | should work; degrade to edge cache/stale |
-   | **2 — non-critical** | leaderboard, recent feed, dashboard | best-effort; may fail without paging |
+   | **0 - critical** | `/v1/validator/weights/next` | must *always* answer, even when the app/DB is down - serve last-known-good |
+   | **1 - important** | active-board / current-challenge / CNF | should work; degrade to edge cache/stale |
+   | **2 - non-critical** | leaderboard, recent feed, dashboard | best-effort; may fail without paging |
 
-2. **Durable last-known-good signed vector (P1 → promote to P0 for mainnet).**
+2. **Durable last-known-good signed vector (P0 for mainnet).**
+   A durable last-known-good signed vector is **P0 for mainnet**, not a nice-to-have.
    On every successful vector refresh, mirror the *signed* vector to a store that
    is **independent of the live read app**: Cloudflare KV / R2 / Durable Object, or
    a static object-store/Railway artifact. If the origin fails, the edge serves the
@@ -99,14 +104,14 @@ route in the system.**
    { "...signed vector...": "...", "source": "stale_fallback", "generated_at": "<iso>", "age_seconds": 123 }
    ```
    The vector is already signed, so a stale copy is still cryptographically
-   verifiable — validators (and the on-chain consumer) can decide whether to accept
+   verifiable - validators (and the on-chain consumer) can decide whether to accept
    by age. Never serve an *unsigned* or re-signed-stale vector; serve the original
    signed bytes verbatim.
 
 3. **Validator-specific release gates (must pass before/with any mainnet deploy):**
-   - weights endpoint: **0× 5xx across 3 consecutive tempos**
-   - signed-vector **age under target window** (define per tempo length)
-   - **UID200 update age under threshold** (our own validator is refreshing)
+   - weights endpoint: **0x 5xx across 3 consecutive tempos**
+   - signed-vector **age <= 5 min** (see Vector Freshness Thresholds below)
+   - **UID200 update age <= 10 min** (our own validator is refreshing)
    - **major validators refreshing** (not stuck on a stale vector)
    - **burn snapshot matches intended policy** (no accidental burn/emission shift)
 
@@ -114,9 +119,69 @@ route in the system.**
    pool; additionally ensure the background refresh thread and its DB query have
    their own pool budget so submit/read saturation can never starve the refresh.
 
+### Vector Freshness Thresholds (concrete)
+
+The background thread rebuilds the cache every **60s** (`_CACHE_TTL_SECS`). Thresholds
+are set off that cadence and the chain tempo. **Assumption: SN39 tempo ~= 360 blocks x
+12s = ~72 min** (confirm against the live chain tempo; if it differs, scale the "hard
+stale ceiling" to one tempo).
+
+| Signal | Healthy | Warn (alert) | Critical (page) |
+|---|---|---|---|
+| Signed-vector age (now - `generated_at`) | <= 2 min | > 5 min | > 10 min |
+| Hard stale ceiling (validators should distrust) | n/a | n/a | > 1 tempo (~72 min) |
+| `stale_fallback` being served | never (steady state) | any stale serve | stale age > 1 tempo |
+| UID200 update age | <= 5 min | > 10 min | > 20 min |
+
+- Healthy `<= 2 min` allows one missed 60s refresh cycle without alarm.
+- Page the moment **any** `stale_fallback` is served (it means the origin is down),
+  even while the stale vector is still inside the acceptable age ceiling.
+
 Operational ordering consequence: in Phase 0, **restore the weight feed first**,
 then active board, then everything else (the generic "restore read origin" step is
 split accordingly below).
+
+### Validator URL Compatibility (all three must keep working)
+
+Validators in the wild fetch the weight feed from more than one URL. **No validator
+should ever need a URL change or a binary/config change to keep setting weights.**
+All of the following must stay live and return the same signed-vector semantics and
+a compatible response shape:
+
+| URL | Role | How it routes (verified in code) |
+|---|---|---|
+| `https://api.cathedral.computer/v1/validator/weights/next` | **Canonical** | primary public route -> `validator_weights_next` (`app.py:1955`) |
+| `https://api.cathedral.computer/api/cathedral/v1/validator/weights/next` | **Legacy-prefixed alias** | ASGI middleware strips `_LEGACY_PREFIX = "/api/cathedral"` (`app.py:572-588`) so it reaches the same handler |
+| `https://read.cathedral.computer/v1/validator/weights/next` | **Direct read-service URL** | read-service domain (`read.cathedral.computer`) hitting the same app/handler |
+
+Policy:
+
+- `api.cathedral.computer/v1/validator/weights/next` is **canonical**.
+- `/api/cathedral/...` is the **legacy-prefixed alias** and must remain routed to the
+  same handler (do not drop the prefix-strip middleware).
+- `read.cathedral.computer/...` is the **direct read-service URL** and must remain a
+  valid path to the same signed vector.
+- **Validators must not need a URL or binary change.** Backward compatibility for all
+  three is a hard requirement, not best-effort.
+- **All three return the same signed-vector semantics and a compatible response shape.**
+  The signed bytes must be identical regardless of which URL served them.
+- **All three are covered by smoke tests, monitors, and the validator release gate.**
+  A monitor/probe and a freshness check run against each URL, not just the canonical one.
+- **Edge durability applies to both `api.cathedral.computer` routes:** if the read
+  origin is unhealthy, `api.cathedral.computer/v1/validator/weights/next` **and**
+  `api.cathedral.computer/api/cathedral/v1/validator/weights/next` must still serve the
+  durable last-known-good signed vector (`source: stale_fallback`) from the edge.
+  (The `read.cathedral.computer` direct URL may legitimately depend on read-service
+  health; the canonical `api.` host is the one that must survive an origin outage.)
+
+Compatibility test matrix (smoke + monitor + release gate):
+
+| Check | api canonical | api legacy-prefixed | read-service direct |
+|---|---|---|---|
+| Returns 200 + signed vector | required | required | required |
+| Same signed bytes for same tempo | required | required | required |
+| Freshness within thresholds | required | required | required |
+| Serves `stale_fallback` when origin down | required | required | not required |
 
 ## Confirmed Problems
 
@@ -231,14 +296,14 @@ Goal: restore the live miner path without changing scoring semantics.
 
 Before the miner-facing read paths, confirm the chain's payment surface is alive:
 
-- Probe `GET /v1/validator/weights/next` — it must return `200` with a fresh,
+- Probe `GET /v1/validator/weights/next` - it must return `200` with a fresh,
   signed vector (not `503 no vector available`, not `504`).
-- Check the signed-vector `generated_at`/age is within the target window.
+- Check the signed-vector `generated_at`/age is <= 2 min (healthy; see Vector Freshness Thresholds).
 - Confirm UID200 (our validator) is consuming a fresh vector.
 - If it is `503`/`504`: this is the top incident. Restoring it may share a cause
   with the read origin below, but it is verified/closed on its own before moving on.
-- If the durable last-known-good fallback (P0 §2) is not yet built, **build/enable
-  it as part of this triage** — it is the difference between "origin blip" and
+- If the durable last-known-good fallback (P0 section 2) is not yet built, **build/enable
+  it as part of this triage** - it is the difference between "origin blip" and
   "validators can't set weights".
 
 ### 0a. Restore Read Origin (Tier 1 board reads)
@@ -455,7 +520,7 @@ verified_at
 
 Rank/order by `received_at`, not worker completion time.
 
-### Durable attempts table (reconcile with existing code — not greenfield)
+### Durable attempts table (reconcile with existing code - not greenfield)
 
 **Verified in code:** the service already has a `/v1/agents/receipts/{receipt_id}`
 endpoint (`scaffold/publisher/app.py:3819`) and a `per_miner_attempts` table that
@@ -464,7 +529,7 @@ standing up a parallel system:
 
 - Reuse / evolve `per_miner_attempts` (and the existing receipts endpoint) instead
   of adding a second, divergent attempts table. If a rename to `submit_attempts`
-  is preferred, migrate the existing table — do not run both.
+  is preferred, migrate the existing table - do not run both.
 - The fields below are the target shape to converge on; treat columns the current
   table already has as "keep", and the rest as "add".
 - Goal: one attempts table is the source of truth for both admission and
@@ -682,8 +747,8 @@ Read metrics:
 
 Critical alerts (page immediately):
 
-- **`/v1/validator/weights/next` returns any 5xx, or serves `stale_fallback` past the age window** (highest severity — weight setting at risk)
-- **signed-vector age exceeds target window**
+- **`/v1/validator/weights/next` returns any 5xx, or serves `stale_fallback` aged > 1 tempo (~72 min)** (highest severity - weight setting at risk)
+- **signed-vector age > 10 min (page); > 5 min (warn)**
 - **UID200 vector age exceeds threshold** (our validator stopped refreshing)
 - `/health/ready` not `200` for more than 60s
 - oldest pending age exceeds SLO
@@ -694,10 +759,10 @@ Critical alerts (page immediately):
 - worker success rate drops
 - receipts stuck in `verifying` past lock timeout
 
-Validator weight-feed metrics (Tier 0 — watch first):
+Validator weight-feed metrics (Tier 0 - watch first):
 
 - weights endpoint success rate and 5xx count per tempo
-- signed-vector age (now − `generated_at`)
+- signed-vector age (now - `generated_at`)
 - `stale_fallback` serve rate (should be ~0 in steady state)
 - UID200 update age; count of major validators refreshing
 - burn snapshot vs intended policy
@@ -706,7 +771,7 @@ Suggested SLOs:
 
 ```text
 Validator weight feed: 99.99% availability; 0x 5xx across any 3 consecutive tempos.
-Signed-vector freshness: age under target window every tempo.
+Signed-vector freshness: age <= 2 min healthy, page if > 10 min, hard ceiling 1 tempo (~72 min).
 Last-known-good: weight feed answers even when app/DB is down (stale_fallback, signed).
 Read availability: 99.5% or better.
 Challenge fetch p95: under 2s.
@@ -720,11 +785,12 @@ Retry: same idempotency key returns same receipt/result.
 
 ```text
 [ ] weights endpoint: 0x 5xx across 3 consecutive tempos
-[ ] signed-vector age under target window
-[ ] UID200 update age under threshold
+[ ] signed-vector age <= 5 min
+[ ] UID200 update age <= 10 min
 [ ] major validators refreshing (not stuck on a stale vector)
 [ ] burn snapshot matches intended policy
 [ ] last-known-good fallback verified (kill app, feed still serves signed stale vector)
+[ ] all three validator URLs pass (canonical + legacy-prefixed + read-service direct): 200, same signed bytes, fresh; both api.* routes serve stale_fallback when origin down
 ```
 
 ## Miner-Facing Error Contract
@@ -760,8 +826,8 @@ Edge timeouts should be tuned only after origin is healthy.
 
 Verify after Phase 0:
 
-1. `GET /v1/validator/weights/next` returns `200` with a fresh signed vector (Tier 0 — check first).
-2. Kill/restart the app and confirm the weight feed still serves the last-known-good signed vector (`source: stale_fallback`) within the age window.
+1. `GET /v1/validator/weights/next` returns `200` with a fresh signed vector (Tier 0 - check first).
+2. Kill/restart the app and confirm the weight feed still serves the last-known-good signed vector (`source: stale_fallback`) aged within 1 tempo (~72 min).
 3. `GET /health/ready` returns `200`.
 4. `GET /v1/synthetic-boolean/current-challenge` returns `200`.
 5. `GET /v1/synthetic-boolean/active-challenges` returns `200`.
@@ -827,6 +893,7 @@ Rollback:
 - [ ] **P0: durable last-known-good signed vector serving `stale_fallback` when origin down**
 - [ ] **P0: read recovery tiered (weights > board > leaderboard/recent)**
 - [ ] **P0: validator release gate added (5xx/age/UID200/burn checks)**
+- [ ] **P0: all three validator weight-feed URLs compatible (canonical + legacy-prefixed + read-service direct)**
 - [ ] P0a: read origin restored
 - [ ] P0b: submit cap raised and verified
 - [ ] P1: split deploy config fixed
@@ -842,7 +909,7 @@ Rollback:
 
 The coherent plan is:
 
-1. **Protect weight setting first** — the validator feed must always answer, with a durable last-known-good signed vector and validator-specific release gates. This is what makes the plan safe for mainnet, not just for miners.
+1. **Protect weight setting first** - the validator feed must always answer, with a durable last-known-good signed vector and validator-specific release gates. This is what makes the plan safe for mainnet, not just for miners.
 2. Restore reads.
 3. Raise submit capacity to a sane bounded value.
 4. Make that config stick.
