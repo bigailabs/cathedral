@@ -428,6 +428,21 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_status_received
             ON per_miner_attempts(status, received_at_iso);
     """),
+    # 0031: per-miner (pm-*) durable async admission (TRACK 1). The pm-* submit
+    # lane regenerates its own CNF deterministically from the miner's mapped
+    # scoring identity (NOT the raw hotkey, which may be a delegated child key),
+    # so the worker needs that identity to re-materialize the instance off the
+    # request path. assignment_identity is additive + nullable: the inline pm
+    # writers never set it, and the public lane never needs it. shadow_* hold the
+    # terminal verdict the SHADOW worker WOULD have written (the live ledger is
+    # untouched in shadow) so go-live can prove async-vs-inline parity.
+    ("0031_pm_submit_admission", """
+        ALTER TABLE per_miner_attempts ADD COLUMN assignment_identity TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN shadow_status TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN shadow_rejection_reason TEXT;
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_kind_status_received
+            ON per_miner_attempts(challenge_kind, status, received_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -788,6 +803,16 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON per_miner_attempts(idempotency_key);
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_status_received
             ON per_miner_attempts(status, received_at_iso);
+    """),
+    # 0031: per-miner (pm-*) durable async admission - see SQLite 0031. Columns
+    # are additive + nullable so the inline pm writers (which never name them)
+    # keep working; the async pm lane is purely opt-in (CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED).
+    ("0031_pm_submit_admission", """
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS assignment_identity TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS shadow_status TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS shadow_rejection_reason TEXT;
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_kind_status_received
+            ON per_miner_attempts(challenge_kind, status, received_at_iso);
     """),
 ]
 

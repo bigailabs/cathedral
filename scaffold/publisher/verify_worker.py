@@ -18,6 +18,29 @@ def async_verify_enabled() -> bool:
         "CATHEDRAL_ASYNC_VERIFY_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def pm_async_enabled() -> bool:
+    """Per-miner (pm-*) durable async admission. Default OFF.
+
+    When OFF the pm-* submit branch keeps its byte-for-byte inline synchronous
+    contract. When ON (and the shared async-verify worker flag is also on) the
+    pm-* branch persists a pending receipt and the worker verifies it later, the
+    same way the public lane already does. SHADOW mode (below) lets the async
+    path run in parallel without changing payout, to prove parity before cutover.
+    """
+    return os.environ.get(
+        "CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def pm_async_shadow() -> bool:
+    """Shadow de-risk for pm-* async: persist + worker-verify in parallel, but the
+    INLINE synchronous result stays authoritative for payout. Any async-vs-inline
+    accept/reject divergence is logged so go-live can prove parity first. No payout
+    change while shadow is on (the worker writes its terminal status to a shadow
+    column, never to the live solve/payout ledger)."""
+    return os.environ.get(
+        "CATHEDRAL_PM_ASYNC_SHADOW", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def poll_secs() -> float:
     try:
         return max(0.05, float(os.environ.get("CATHEDRAL_ASYNC_VERIFY_POLL_SECS", "0.5")))
