@@ -51,6 +51,18 @@ routes = [
   # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
 ]
 
+# OPT-IN durable last-known-good (LKG) for the cheap board reads, mirroring the
+# weights-failover pattern. When this KV namespace is bound, healthy board-tier
+# responses are mirrored to KV and served as last-known-good if the board origin
+# is unhealthy (5xx / timeout / network error). DEFAULT-OFF: leave this commented
+# and the worker behaves exactly as before (origin failure returns 504); only the
+# board tier ever participates (submit/leaderboard are never mirrored).
+# Create with: wrangler kv:namespace create BOARD_LKG
+# then paste the returned id below and uncomment.
+# kv_namespaces = [
+#   { binding = "BOARD_LKG", id = "<paste-BOARD_LKG-kv-namespace-id>" },
+# ]
+
 [vars]
 # BOARD_ORIGIN: the healthy publisher (read) origin that serves the cheap board
 # snapshots. Point this at a publisher/read service that is NOT carrying the

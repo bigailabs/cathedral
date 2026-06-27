@@ -41,6 +41,68 @@ const DEFAULT_SUBMIT_ORIGIN = "https://submit.cathedral.computer";
 
 const LEGACY_PREFIX = "/api/cathedral";
 
+// --- OPT-IN: durable last-known-good (LKG) for the cheap board reads ---------
+//
+// Mirrors the weights-failover pattern (deploy/edge-router/weights-failover/):
+// when a BOARD_LKG KV namespace is bound, healthy board-tier (Tier-1) responses
+// are mirrored to KV and served as last-known-good if the board origin is
+// unhealthy (5xx / timeout / network error). The board is a materialized
+// snapshot (publisher-side scaffold/publisher/materialized_snapshot.py), so the
+// last-good body is a safe thing to re-serve briefly during an origin blip.
+//
+// DEFAULT-OFF by construction: with no BOARD_LKG binding (the committed
+// wrangler.toml leaves it commented), boardLkgEnabled() is false and the worker
+// behaves byte-identically to before — origin failure still returns 504. Only
+// the board tier participates; leaderboard/submit tiers are never mirrored
+// (submit must never serve a stale body, and the leaderboard is the slow hog we
+// deliberately do not cache here).
+const BOARD_LKG_KEY_PREFIX = "lkg:board:";
+
+function boardLkgEnabled(env) {
+  return !!(
+    env &&
+    env.BOARD_LKG &&
+    typeof env.BOARD_LKG.getWithMetadata === "function" &&
+    typeof env.BOARD_LKG.put === "function"
+  );
+}
+
+// Per-path KV key — the board tier serves several distinct paths
+// (active-challenges, challenge-broadcast, current-challenge, per-miner/*), each
+// with its own body, so each gets its own last-known-good entry.
+export function boardLkgKey(path) {
+  return BOARD_LKG_KEY_PREFIX + path;
+}
+
+// Serve the last-known-good board body from KV, or null if KV was never
+// populated for this path (caller then falls through to the existing 504).
+export async function serveBoardStale(env, path, reason) {
+  if (!boardLkgEnabled(env)) return null;
+  let lkg;
+  try {
+    lkg = await env.BOARD_LKG.getWithMetadata(boardLkgKey(path));
+  } catch (_e) {
+    return null;
+  }
+  if (!lkg || !lkg.value) return null;
+  const storedAt = (lkg.metadata && lkg.metadata.stored_at) || "";
+  const contentType =
+    (lkg.metadata && lkg.metadata.content_type) || "application/json";
+  return new Response(lkg.value, {
+    status: 200,
+    headers: {
+      "content-type": contentType,
+      "access-control-allow-origin": "*",
+      // Never let a stale fallback be re-cached at the edge as if fresh.
+      "cache-control": "no-store",
+      "x-cathedral-board-source": "stale_fallback",
+      "x-cathedral-fallback-reason": reason,
+      "x-cathedral-board-stored-at": storedAt,
+      "X-Cathedral-Board-Tier": "board",
+    },
+  });
+}
+
 // Tier-1: cheap miner board reads served by the READ role. These must stay
 // healthy. They move to the publisher/board origin so the slow leaderboard
 // cannot starve them. These are exactly the READ-role board GETs from the main
@@ -254,6 +316,9 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
 
   const origin = originForTier(env, route.tier);
   const originReq = originRequest(request, origin.base, { hostHeader: origin.host });
+  const isBoard = route.tier === "board";
+  const waitUntil =
+    ctx && typeof ctx.waitUntil === "function" ? ctx.waitUntil.bind(ctx) : () => {};
 
   let resp;
   try {
@@ -261,6 +326,11 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
       resolveOverride: origin.resolveOverride,
     });
   } catch (error) {
+    // Board tier only: serve the durable last-known-good if KV has one.
+    if (isBoard) {
+      const stale = await serveBoardStale(env, route.path, "origin_error");
+      if (stale) return stale;
+    }
     return Response.json(
       {
         error: `${route.tier}_origin_unavailable`,
@@ -268,6 +338,30 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
       },
       { status: 504, headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  // Board tier: on an origin 5xx, prefer the last-known-good snapshot over
+  // propagating the error (degrade to stale, not to error). On a healthy
+  // response with a non-trivial body, mirror it to KV as the new LKG.
+  if (isBoard && boardLkgEnabled(env)) {
+    if (resp.status >= 500) {
+      const stale = await serveBoardStale(env, route.path, "origin_status_" + resp.status);
+      if (stale) return stale;
+    } else if (resp.ok) {
+      const mirror = resp.clone();
+      waitUntil(
+        mirror.text().then((body) => {
+          if (body && body.length > 2) {
+            return env.BOARD_LKG.put(boardLkgKey(route.path), body, {
+              metadata: {
+                stored_at: new Date().toISOString(),
+                content_type: resp.headers.get("content-type") || "application/json",
+              },
+            });
+          }
+        }).catch(() => {}),
+      );
+    }
   }
 
   return responseWithEdgeHeaders(resp, {
