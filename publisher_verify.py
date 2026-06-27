@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from scaffold import wire
@@ -1361,6 +1362,24 @@ with TestClient(app) as client:
     # SIGNED FINAL-SCORES VECTOR (the v4 scoring interface). One number per
     # miner + burn, Ed25519-signed — validators verify and apply, no local
     # averaging. Both e2e miners solved sat-e2e-1 above, so both appear.
+    _weights._reset_vector_cache()
+    _orig_build_signed_vector = _weights.build_signed_vector
+    def _slow_build_signed_vector(*args, **kwargs):
+        time.sleep(1.0)
+        return _orig_build_signed_vector(*args, **kwargs)
+    _weights.build_signed_vector = _slow_build_signed_vector
+    try:
+        _warm_started = time.monotonic()
+        warming_resp = client.get("/v1/validator/weights/next")
+        warming_elapsed = time.monotonic() - _warm_started
+        ck("weights/next cold cache returns fast warming response",
+           warming_resp.status_code == 503
+           and warming_resp.json().get("detail") == "weights_warming"
+           and warming_elapsed < 0.5)
+    finally:
+        _weights.build_signed_vector = _orig_build_signed_vector
+        _weights._reset_vector_cache()
+    _weights.current_vector(store, signing_key_hex=key_hex)
     vec_resp = client.get("/v1/validator/weights/next")
     ck("weights/next serves the signed vector", vec_resp.status_code == 200)
     vec = vec_resp.json()
@@ -1478,6 +1497,7 @@ with TestClient(app) as client:
     os.environ[_weights.BURN_PERCENTAGE_ENV] = "50.0"
     _weights._reset_vector_cache()
     try:
+        _weights.current_vector(store, signing_key_hex=key_hex)
         vec50 = client.get("/v1/validator/weights/next").json()
         ck("burn change is one env flip, signed into the next vector",
            vec50["burn_snapshot"]["forced_burn_percentage"] == 50.0)

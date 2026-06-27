@@ -755,6 +755,19 @@ def build_app(
         except Exception as exc:
             print(f"[runtime] threadpool_config_failed error={exc!r}")
 
+    @app.on_event("startup")
+    async def _start_weights_refresh():
+        if not _role_runs_read_background(service_role):
+            print(f"[weights] skipped service_role={service_role}")
+            return
+        # Start only; the build itself runs in the daemon thread.
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        try:
+            weights_mod.start_background_refresh(store, signing_key_hex=weight_key)
+            print(f"[weights] bg_refresh_started service_role={service_role}")
+        except Exception as exc:
+            print(f"[weights] bg_refresh_start_failed error={exc!r}")
+
     async def _run_singleton_background(label: str, lock_name: str, coro_factory):
         import asyncio
 
@@ -1171,14 +1184,17 @@ def build_app(
         """Current payment weights for display-only leaderboard annotations."""
         weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
-            vec = weights_mod.current_vector(store, signing_key_hex=weight_key)
+            vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
         except Exception as exc:
             print(f"[leaderboard] weight context unavailable: {exc!r}")
+            vec = None
+        if vec is None:
             return {
                 "generated_at": None,
                 "policy_reason": None,
                 "ranked": [],
                 "by_hotkey": {},
+                "status": "warming",
             }
         ranked = [
             {
@@ -1842,13 +1858,20 @@ def build_app(
         # microseconds — a plain dict lookup + brief lock acquire.  Making the
         # handler async means concurrent refill fork-gen threads never starve it
         # even when the thread pool is saturated (fork poll holds pool slots).
+        # Cold vector builds must never run here; they stall read-origin health.
         weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
-            vec = weights_mod.current_vector(store, signing_key_hex=weight_key)
+            vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
         except Exception:
             import traceback
-            print("[weights] vector build failed:\n" + traceback.format_exc())
+            print("[weights] vector cache read failed:\n" + traceback.format_exc())
             raise HTTPException(status_code=503, detail="no vector available")
+        if vec is None:
+            return JSONResponse(
+                {"detail": "weights_warming", "status": "warming"},
+                status_code=503,
+                headers={"Retry-After": "2", "Cache-Control": "no-store"},
+            )
         return JSONResponse(vec)
 
     @app.get("/.well-known/cathedral-jwks.json")

@@ -1232,6 +1232,23 @@ def _ensure_bg_started(store: Store, signing_key_hex: str) -> None:
         _bg_started = True
 
 
+def start_background_refresh(store: Store, *, signing_key_hex: str) -> None:
+    """Public startup hook: begin refreshing the signed vector in the background."""
+    _ensure_bg_started(store, signing_key_hex)
+
+
+def cached_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any] | None:
+    """Return the latest signed vector if warm; never build on the request path."""
+    _ensure_bg_started(store, signing_key_hex)
+    with _build_lock:
+        hit = _vector_cache.get("v")
+    if hit is None:
+        return None
+    return hit[1]
+
+
+# Public read endpoints should prefer cached_vector(). This synchronous helper
+# is for explicit callers that intentionally accept a cold-build DB cost.
 def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
     """Serve the latest signed vector from the in-memory cache.
 
@@ -1249,13 +1266,9 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
     wins; the second's result is discarded.  This wastes one extra build at
     most once at startup and is far better than starving all callers.
     """
-    # Ensure the background thread is running so the cache stays fresh.
-    _ensure_bg_started(store, signing_key_hex)
-
-    with _build_lock:
-        hit = _vector_cache.get("v")
+    hit = cached_vector(store, signing_key_hex=signing_key_hex)
     if hit is not None:
-        return hit[1]
+        return hit
 
     # First call with an empty cache: build synchronously WITHOUT holding the
     # lock (a slow build inside the lock starves every concurrent request).
