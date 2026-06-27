@@ -341,6 +341,63 @@ def build_app(
                 "recent": list(submit_metrics["recent"]),
             }
 
+    # ---- HTTP status telemetry (5xx rates) --------------------------------
+    # Process-wide response-status counters, fed by a cheap ASGI middleware that
+    # only reads the http.response.start status (no body buffering). Surfaced on
+    # the validator-health endpoint so an operator/release gate can see the 5xx
+    # rate without scraping logs. Per-class totals are cumulative since process
+    # start; the weight-feed route is tracked separately because a single 5xx
+    # there is the highest-severity signal in the system.
+    http_status_lock = threading.Lock()
+    _WEIGHTS_FEED_SUFFIX = "/v1/validator/weights/next"
+    http_status_metrics: dict[str, Any] = {
+        "started_at_iso": _now_iso_ms(),
+        "total": 0,
+        "by_class": {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0},
+        "weights_feed_total": 0,
+        "weights_feed_5xx": 0,
+        "recent_5xx": [],
+    }
+
+    def _record_http_status(path: str, status: int | None) -> None:
+        if not isinstance(status, int):
+            return
+        klass = f"{status // 100}xx"
+        is_weights_feed = path.endswith(_WEIGHTS_FEED_SUFFIX)
+        with http_status_lock:
+            http_status_metrics["total"] = int(http_status_metrics["total"]) + 1
+            by_class = http_status_metrics["by_class"]
+            by_class[klass] = int(by_class.get(klass, 0)) + 1
+            if is_weights_feed:
+                http_status_metrics["weights_feed_total"] = (
+                    int(http_status_metrics["weights_feed_total"]) + 1)
+                if status >= 500:
+                    http_status_metrics["weights_feed_5xx"] = (
+                        int(http_status_metrics["weights_feed_5xx"]) + 1)
+            if status >= 500:
+                recent = http_status_metrics["recent_5xx"]
+                recent.append({"ts": _now_iso_ms(), "path": path, "status": status})
+                del recent[:-25]
+
+    def _http_status_snapshot() -> dict[str, Any]:
+        with http_status_lock:
+            by_class = dict(http_status_metrics["by_class"])
+            total = int(http_status_metrics["total"])
+            count_5xx = int(by_class.get("5xx", 0))
+            wf_total = int(http_status_metrics["weights_feed_total"])
+            wf_5xx = int(http_status_metrics["weights_feed_5xx"])
+            recent_5xx = list(http_status_metrics["recent_5xx"])
+        return {
+            "started_at_iso": http_status_metrics["started_at_iso"],
+            "total": total,
+            "by_class": by_class,
+            "rate_5xx": round(count_5xx / total, 6) if total else 0.0,
+            "weights_feed_total": wf_total,
+            "weights_feed_5xx": wf_5xx,
+            "weights_feed_rate_5xx": round(wf_5xx / wf_total, 6) if wf_total else 0.0,
+            "recent_5xx": recent_5xx,
+        }
+
     def _submit_slot():
         if submit_gate is None:
             yield
@@ -560,6 +617,45 @@ def build_app(
                         f"elapsed={elapsed:.3f}s"
                     )
 
+    class _StatusCounterMiddleware:
+        """Pure ASGI middleware: tally response status classes (5xx rates).
+
+        Reads only http.response.start status — no body buffering, no extra
+        thread-pool work — so it is safe in front of every route, including the
+        Tier 0 weight feed. Feeds the validator-health endpoint and release gate.
+        """
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self._app(scope, receive, send)
+                return
+            path = scope.get("path", "")
+            status = None
+
+            async def _send(message):
+                nonlocal status
+                if message.get("type") == "http.response.start":
+                    status = message.get("status")
+                await send(message)
+
+            try:
+                await self._app(scope, receive, _send)
+            except Exception:
+                # Unhandled error: the app never sent http.response.start, so
+                # `status` is still None. The ASGI server turns this into a 500
+                # for the client, so record a synthetic 500 here (before
+                # re-raising) — otherwise the highest-severity faults would be
+                # invisible to the 5xx counter.
+                _record_http_status(path, 500)
+                raise
+            else:
+                # Normal completion. If the app somehow never sent a
+                # response-start status (misbehaving handler), the server still
+                # returns a 500 to the client, so count it as one.
+                _record_http_status(path, status if status is not None else 500)
+
     class _HotPathBackpressureMiddleware:
         """Reject excess heavy requests before body parsing/threadpool work."""
 
@@ -662,6 +758,10 @@ def build_app(
             "/v1/leaderboard/recent",
             "/v1/leaderboard/top",
             "/v1/leaderboard/explain",
+            # Operator/observability surface for the weight feed. Admin-token
+            # gated at the handler; routed here so it stays reachable on the
+            # read service that actually serves the Tier 0 weight feed.
+            "/v1/admin/validator-health",
         }
         _READ_GET_PREFIXES = {
             "/v1/audit-scanner/",
@@ -762,6 +862,10 @@ def build_app(
     # Role guard is now the true outer edge: role-mismatched traffic fails before
     # rate-limit state, request body parsing, or expensive route work.
     app.add_middleware(_ServiceRoleGuardMiddleware)
+    # Outermost observability layer: count every final response status (incl.
+    # role-guard/backpressure rejections) so the 5xx rate is complete. Cheap —
+    # reads only the response-start status, no body buffering.
+    app.add_middleware(_StatusCounterMiddleware)
 
     app.state.store = store
     app.state.cnf_store = cnf_store
@@ -3168,6 +3272,57 @@ def build_app(
         _require_publisher_admin(authorization)
         return JSONResponse(
             _submit_metrics_snapshot(),
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v1/admin/validator-health")
+    async def validator_health(authorization: str | None = Header(None)):
+        """Read-only operator surface: weight-feed freshness + 5xx + submit.
+
+        Single pane the validator release gate (and an operator dashboard) can
+        poll. It does NOT build the signed vector — it peeks the warm cache via
+        weights_mod.cached_vector(), so this probe can never add load to, or
+        stall behind, the Tier 0 weight-feed build path. Returns whatever signal
+        is available; a cold process (no cached vector) surfaces level=unknown
+        rather than failing.
+        """
+        _require_publisher_admin(authorization)
+
+        from . import health_thresholds as ht
+
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        vec_generated_at: str | None = None
+        vec_age: float | None = None
+        vector_present = False
+        try:
+            vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
+        except Exception as exc:  # never let the health probe raise
+            vec = None
+            print(f"[validator-health] cached_vector_failed error={exc!r}")
+        if isinstance(vec, dict):
+            vector_present = True
+            vec_generated_at = vec.get("generated_at")
+            vec_age = _age_seconds(vec_generated_at)
+
+        http_snapshot = _http_status_snapshot()
+        payload = {
+            "schema": "cathedral.validator_health.v1",
+            "checked_at": _now_iso_ms(),
+            "service_role": service_role,
+            "weights_feed": {
+                "vector_present": vector_present,
+                "generated_at": vec_generated_at,
+                "freshness": ht.vector_status(vec_age),
+                "feed_total_requests": http_snapshot["weights_feed_total"],
+                "feed_5xx": http_snapshot["weights_feed_5xx"],
+                "feed_rate_5xx": http_snapshot["weights_feed_rate_5xx"],
+            },
+            "http_status": http_snapshot,
+            "submit": _submit_metrics_snapshot(),
+            "tempo_seconds": ht.TEMPO_SECONDS,
+        }
+        return JSONResponse(
+            payload,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
