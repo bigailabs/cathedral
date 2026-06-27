@@ -135,7 +135,7 @@ is therefore 72 min.
 > Live check (2026-06-27, block 8498665): only **5 of 11** permitted validators had set
 > weights within one tempo, and **UID200 (Cathedral) was STALE at ~963 blocks (~192 min,
 > ~2.7 tempos)** since its last on-chain update. This is the exact failure the gate above
-> is meant to catch — see the incident note, not just the threshold.
+> is meant to catch - see the incident note, not just the threshold.
 
 | Signal | Healthy | Warn (alert) | Critical (page) |
 |---|---|---|---|
