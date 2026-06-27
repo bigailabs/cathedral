@@ -89,15 +89,30 @@ def test_origin_unavailable_documented():
     assert "read_origin_unavailable" in doc
 
 
-def test_no_fabricated_receipt_not_found():
-    """receipt_not_found was a doc-only fabrication: there is no miner-facing
-    receipt-by-id lookup route. It must stay out of both source and doc."""
+def test_receipt_not_found_real_and_documented():
+    """receipt_not_found is now a REAL miner-facing 404 emitted by the durable
+    submit-receipt lookup route GET /v1/agents/receipts/{receipt_id} (added by
+    the submit-redesign slice). Source and doc must stay in lock-step: if the
+    code emits it, the contract documents it; if the code drops it, the doc
+    must not fabricate it.
+
+    (Previously this guarded the OPPOSITE — that receipt_not_found was a doc-only
+    fabrication with no backing route. The submit-redesign integration made the
+    lookup route real, so the contract now documents its real shape.)"""
     app_src = APP.read_text(encoding="utf-8")
-    assert "receipt_not_found" not in app_src, (
-        "receipt_not_found now exists in app.py -- document its real shape"
+    in_src = "receipt_not_found" in app_src
+    in_doc = "receipt_not_found" in _doc()
+    assert in_src, (
+        "receipt_not_found is no longer emitted by app.py -- remove the row from "
+        "docs/MINER_ERROR_CONTRACT.md so the doc stops fabricating it"
     )
-    assert "receipt_not_found" not in _doc(), (
-        "receipt_not_found is fabricated; remove it from the contract"
+    # The backing route must be the durable receipt lookup, not something else.
+    assert "/v1/agents/receipts/{receipt_id}" in app_src, (
+        "receipt_not_found is emitted but the durable receipt lookup route is gone"
+    )
+    assert in_doc, (
+        "app.py emits receipt_not_found (durable receipt lookup 404) but it is "
+        "undocumented in the miner error contract"
     )
 
 
