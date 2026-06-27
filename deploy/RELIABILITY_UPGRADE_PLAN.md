@@ -46,6 +46,78 @@ These are not competing plans. The acute plan stops the bleeding; the durable
 architecture removes the class of failure where miners lose work because the
 request path was busy.
 
+There is also a third layer, and it outranks both: **protect weight setting**.
+Submit/read failures hurt miners; a weight-feed failure hurts the chain. That
+section is first below because it is the highest-priority surface for mainnet.
+
+## P0 (highest priority): Protect Weight Setting
+
+> Added after review. The miner-facing submit/read work above is necessary but
+> **not sufficient for a stable mainnet release.** The single most important
+> surface is the validator weight feed. If it fails, validators cannot set
+> weights — worse than any dashboard, leaderboard, or even submit outage.
+
+### The canonical surface
+
+```text
+GET https://api.cathedral.computer/v1/validator/weights/next
+```
+
+Returns the signed final-scores + burn vector validators consume to set weights
+on chain. **This is the payment source of truth and must be the most protected
+route in the system.**
+
+### Why it is currently at risk (verified in code)
+
+- `validator_weights_next` (`scaffold/publisher/app.py:1955`) is `async` and reads
+  `weights_mod.current_vector(...)` from an in-memory cache filled by a background
+  refresh thread — so it is *partially* shielded (it does not use the thread pool
+  and survives submit/read saturation **within a live process**).
+- **But** `current_vector` builds from the DB/store and **raises `503 "no vector
+  available"` if that build fails**, and the route sits behind the **same read
+  origin that was observed returning `504` for ~10s** (see "Read Origin Outage").
+  So on an origin crash/restart/OOM, validators get `503`/`504` and **there is no
+  durable last-known-good to fall back to.**
+- Net: today the weight feed is only as available as the live app process. That
+  is not enough for mainnet.
+
+### Required protections (the gap this plan must close)
+
+1. **Tier read recovery by criticality** (do not treat "reads" as one blob):
+   | Tier | Surface | Requirement |
+   |---|---|---|
+   | **0 — critical** | `/v1/validator/weights/next` | must *always* answer, even when the app/DB is down — serve last-known-good |
+   | **1 — important** | active-board / current-challenge / CNF | should work; degrade to edge cache/stale |
+   | **2 — non-critical** | leaderboard, recent feed, dashboard | best-effort; may fail without paging |
+
+2. **Durable last-known-good signed vector (P1 → promote to P0 for mainnet).**
+   On every successful vector refresh, mirror the *signed* vector to a store that
+   is **independent of the live read app**: Cloudflare KV / R2 / Durable Object, or
+   a static object-store/Railway artifact. If the origin fails, the edge serves the
+   last good vector with an explicit marker:
+   ```json
+   { "...signed vector...": "...", "source": "stale_fallback", "generated_at": "<iso>", "age_seconds": 123 }
+   ```
+   The vector is already signed, so a stale copy is still cryptographically
+   verifiable — validators (and the on-chain consumer) can decide whether to accept
+   by age. Never serve an *unsigned* or re-signed-stale vector; serve the original
+   signed bytes verbatim.
+
+3. **Validator-specific release gates (must pass before/with any mainnet deploy):**
+   - weights endpoint: **0× 5xx across 3 consecutive tempos**
+   - signed-vector **age under target window** (define per tempo length)
+   - **UID200 update age under threshold** (our own validator is refreshing)
+   - **major validators refreshing** (not stuck on a stale vector)
+   - **burn snapshot matches intended policy** (no accidental burn/emission shift)
+
+4. **Keep the feed independent of submit/read load.** It already avoids the thread
+   pool; additionally ensure the background refresh thread and its DB query have
+   their own pool budget so submit/read saturation can never starve the refresh.
+
+Operational ordering consequence: in Phase 0, **restore the weight feed first**,
+then active board, then everything else (the generic "restore read origin" step is
+split accordingly below).
+
 ## Confirmed Problems
 
 ### P0: Read Origin Outage
@@ -155,9 +227,23 @@ POST /v1/agents/submit returns 202 pending in under 1 second, backed by a durabl
 
 Goal: restore the live miner path without changing scoring semantics.
 
-### 0a. Restore Read Origin
+### 0a-0. Restore the validator weight feed FIRST (Tier 0)
 
-Do this first.
+Before the miner-facing read paths, confirm the chain's payment surface is alive:
+
+- Probe `GET /v1/validator/weights/next` — it must return `200` with a fresh,
+  signed vector (not `503 no vector available`, not `504`).
+- Check the signed-vector `generated_at`/age is within the target window.
+- Confirm UID200 (our validator) is consuming a fresh vector.
+- If it is `503`/`504`: this is the top incident. Restoring it may share a cause
+  with the read origin below, but it is verified/closed on its own before moving on.
+- If the durable last-known-good fallback (P0 §2) is not yet built, **build/enable
+  it as part of this triage** — it is the difference between "origin blip" and
+  "validators can't set weights".
+
+### 0a. Restore Read Origin (Tier 1 board reads)
+
+Do this second (after the weight feed).
 
 Actions:
 
@@ -594,8 +680,11 @@ Read metrics:
 - edge cache hit/stale/error rate
 - origin timeout rate
 
-Critical alerts:
+Critical alerts (page immediately):
 
+- **`/v1/validator/weights/next` returns any 5xx, or serves `stale_fallback` past the age window** (highest severity — weight setting at risk)
+- **signed-vector age exceeds target window**
+- **UID200 vector age exceeds threshold** (our validator stopped refreshing)
 - `/health/ready` not `200` for more than 60s
 - oldest pending age exceeds SLO
 - admission returns emergency failures
@@ -605,15 +694,37 @@ Critical alerts:
 - worker success rate drops
 - receipts stuck in `verifying` past lock timeout
 
+Validator weight-feed metrics (Tier 0 — watch first):
+
+- weights endpoint success rate and 5xx count per tempo
+- signed-vector age (now − `generated_at`)
+- `stale_fallback` serve rate (should be ~0 in steady state)
+- UID200 update age; count of major validators refreshing
+- burn snapshot vs intended policy
+
 Suggested SLOs:
 
 ```text
+Validator weight feed: 99.99% availability; 0x 5xx across any 3 consecutive tempos.
+Signed-vector freshness: age under target window every tempo.
+Last-known-good: weight feed answers even when app/DB is down (stale_fallback, signed).
 Read availability: 99.5% or better.
 Challenge fetch p95: under 2s.
 Submit admission: 99.9% of valid submits receive a receipt within 1s.
 Verification: 95% within 30s, 99% within 5m.
 Durability: no accepted submit receipt is lost after 202.
 Retry: same idempotency key returns same receipt/result.
+```
+
+### Validator release gate (must pass before/with any mainnet-affecting deploy)
+
+```text
+[ ] weights endpoint: 0x 5xx across 3 consecutive tempos
+[ ] signed-vector age under target window
+[ ] UID200 update age under threshold
+[ ] major validators refreshing (not stuck on a stale vector)
+[ ] burn snapshot matches intended policy
+[ ] last-known-good fallback verified (kill app, feed still serves signed stale vector)
 ```
 
 ## Miner-Facing Error Contract
@@ -649,12 +760,14 @@ Edge timeouts should be tuned only after origin is healthy.
 
 Verify after Phase 0:
 
-1. `GET /health/ready` returns `200`.
-2. `GET /v1/synthetic-boolean/current-challenge` returns `200`.
-3. `GET /v1/synthetic-boolean/active-challenges` returns `200`.
-4. `GET /v1/admin/synthetic-boolean/submit-metrics` shows `hard_cap: 8`.
-5. `submit_busy_retry` trends down.
-6. A real miner round completes submit without normal-load `429`.
+1. `GET /v1/validator/weights/next` returns `200` with a fresh signed vector (Tier 0 — check first).
+2. Kill/restart the app and confirm the weight feed still serves the last-known-good signed vector (`source: stale_fallback`) within the age window.
+3. `GET /health/ready` returns `200`.
+4. `GET /v1/synthetic-boolean/current-challenge` returns `200`.
+5. `GET /v1/synthetic-boolean/active-challenges` returns `200`.
+6. `GET /v1/admin/synthetic-boolean/submit-metrics` shows `hard_cap: 8`.
+7. `submit_busy_retry` trends down.
+8. A real miner round completes submit without normal-load `429`.
 
 Rollback:
 
@@ -667,11 +780,12 @@ Rollback:
 
 ### Now: Stop Bleeding
 
-1. Restore read origin.
-2. Raise submit cap to `8`.
-3. Fix split deploy config on a side branch.
-4. Wire submit metrics into operator dashboard.
-5. Publish miner error contract.
+1. **Protect the validator weight feed (Tier 0): confirm it serves, add durable last-known-good signed-vector fallback, add the validator release gate.**
+2. Restore read origin (board reads).
+3. Raise submit cap to `8`.
+4. Fix split deploy config on a side branch.
+5. Wire submit + weight-feed metrics into operator dashboard.
+6. Publish miner error contract.
 
 ### Next: Harden The Current Request Path
 
@@ -709,6 +823,10 @@ Rollback:
 
 ## Status Checklist
 
+- [ ] **P0 (weight setting): validator feed `/v1/validator/weights/next` protected (Tier 0)**
+- [ ] **P0: durable last-known-good signed vector serving `stale_fallback` when origin down**
+- [ ] **P0: read recovery tiered (weights > board > leaderboard/recent)**
+- [ ] **P0: validator release gate added (5xx/age/UID200/burn checks)**
 - [ ] P0a: read origin restored
 - [ ] P0b: submit cap raised and verified
 - [ ] P1: split deploy config fixed
@@ -724,11 +842,14 @@ Rollback:
 
 The coherent plan is:
 
-1. Restore reads.
-2. Raise submit capacity to a sane bounded value.
-3. Make that config stick.
-4. Root-cause the read origin.
-5. Replace inline submit verification with durable `202` receipts and async workers.
+1. **Protect weight setting first** — the validator feed must always answer, with a durable last-known-good signed vector and validator-specific release gates. This is what makes the plan safe for mainnet, not just for miners.
+2. Restore reads.
+3. Raise submit capacity to a sane bounded value.
+4. Make that config stick.
+5. Root-cause the read origin.
+6. Replace inline submit verification with durable `202` receipts and async workers.
 
-Once submit admission is durable and idempotent, verification can be slow or
-bursty without breaking the miner experience.
+Weight setting is the chain's source of truth; miner submit/read is the product
+experience. Protect the first absolutely, make the second durable. Once submit
+admission is durable and idempotent, verification can be slow or bursty without
+breaking the miner experience.
