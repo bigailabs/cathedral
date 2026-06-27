@@ -43,8 +43,8 @@ routes = [
 ]
 
 [vars]
-READ_ORIGIN = "https://api.cathedral.computer"
-READ_ORIGIN_RESOLVE_OVERRIDE = "2rdrh9ax.up.railway.app"
+READ_ORIGIN = "https://read.cathedral.computer"
+READ_ORIGIN_RESOLVE_OVERRIDE = ""
 SUBMIT_ORIGIN = "https://submit.cathedral.computer"
 READ_ORIGIN_TIMEOUT_MS = "10000"
 READ_HEALTH_ORIGIN_TIMEOUT_MS = "9000"
