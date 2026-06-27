@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1383,6 +1384,19 @@ with TestClient(app) as client:
     vec_resp = client.get("/v1/validator/weights/next")
     ck("weights/next serves the signed vector", vec_resp.status_code == 200)
     vec = vec_resp.json()
+    _weights._reset_vector_cache()
+    def _fail_request_path_rebuild(*args, **kwargs):
+        if threading.current_thread().name == "weights-bg-refresh":
+            return _orig_build_signed_vector(*args, **kwargs)
+        raise AssertionError("request path rebuilt signed vector")
+    _weights.build_signed_vector = _fail_request_path_rebuild
+    try:
+        persisted_resp = client.get("/v1/validator/weights/next")
+        ck("weights/next serves persisted vector without rebuilding",
+           persisted_resp.status_code == 200
+           and int(persisted_resp.json()["policy_version"]) == int(vec["policy_version"]))
+    finally:
+        _weights.build_signed_vector = _orig_build_signed_vector
     vec_hotkeys = {w["miner_hotkey"] for w in vec["weights"]}
     ck("vector contains exactly the miners who solved in-window",
        vec_hotkeys == {miner.ss58_address, miner2.ss58_address})
@@ -1497,7 +1511,7 @@ with TestClient(app) as client:
     os.environ[_weights.BURN_PERCENTAGE_ENV] = "50.0"
     _weights._reset_vector_cache()
     try:
-        _weights.current_vector(store, signing_key_hex=key_hex)
+        _weights.current_vector(store, signing_key_hex=key_hex, force_rebuild=True)
         vec50 = client.get("/v1/validator/weights/next").json()
         ck("burn change is one env flip, signed into the next vector",
            vec50["burn_snapshot"]["forced_burn_percentage"] == 50.0)

@@ -389,6 +389,17 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
             ON metagraph_hotkeys(network, netuid, updated_at_iso);
     """),
+    ("0029_signed_weight_vectors", """
+        CREATE TABLE IF NOT EXISTS signed_weight_vectors (
+            id TEXT PRIMARY KEY,
+            generated_at_iso TEXT NOT NULL,
+            policy_version INTEGER NOT NULL,
+            vector_json TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_signed_weight_vectors_updated_at
+            ON signed_weight_vectors(updated_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -718,6 +729,17 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
             ON metagraph_hotkeys(network, netuid, updated_at_iso);
     """),
+    ("0029_signed_weight_vectors", """
+        CREATE TABLE IF NOT EXISTS signed_weight_vectors (
+            id TEXT PRIMARY KEY,
+            generated_at_iso TEXT NOT NULL,
+            policy_version BIGINT NOT NULL,
+            vector_json TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_signed_weight_vectors_updated_at
+            ON signed_weight_vectors(updated_at_iso);
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -741,6 +763,7 @@ _PK_BY_TABLE: dict[str, str] = {
     "audit_challenge_manifests": "challenge_id",
     "coldkey_map": "hotkey",
     "metagraph_hotkeys": "network, netuid, hotkey",
+    "signed_weight_vectors": "id",
     "tee_gpu_capacity": "capacity_id",
     "tee_gpu_capacity_events": "id",
     "attest_nonces": "nonce",

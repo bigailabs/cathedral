@@ -87,6 +87,8 @@ PAYABLE_HOTKEYS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS"  # off | mark | filter
 PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS_MAX_AGE_SECS"
 
 _CACHE_TTL_SECS = 60.0
+_PERSISTED_VECTOR_ID = "latest"
+_REFRESH_LOCK_NAME = "cathedral:weights:refresh"
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # Serializes the cache-miss build so concurrent misses can't each call
 # next_policy_version() and emit two different vectors with the same
@@ -99,6 +101,41 @@ _build_lock = threading.Lock()
 _bg_started = False
 _bg_lock = threading.Lock()
 _bg_generation = 0
+
+
+def _cache_write(vec: dict[str, Any]) -> None:
+    with _build_lock:
+        _vector_cache["v"] = (time.time(), vec)
+
+
+def _load_persisted_vector(store: Store) -> dict[str, Any] | None:
+    rows = store.query(
+        "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
+        (_PERSISTED_VECTOR_ID,),
+    )
+    if not rows:
+        return None
+    raw = rows[0]["vector_json"]
+    return json.loads(raw)
+
+
+def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
+    generated_at = str(vec.get("generated_at") or "")
+    policy_version = int(vec.get("policy_version") or 0)
+    payload = json.dumps(vec, sort_keys=True, separators=(",", ":"))
+    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + (
+        f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
+    )
+
+    def _write(conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO signed_weight_vectors"
+            "(id, generated_at_iso, policy_version, vector_json, updated_at_iso) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (_PERSISTED_VECTOR_ID, generated_at, policy_version, payload, updated_at),
+        )
+
+    store.write(_write)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1205,11 +1242,9 @@ def _bg_refresh_loop(store: Store, signing_key_hex: str, generation: int) -> Non
         if generation != _bg_generation:
             return
         try:
-            vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
-            with _build_lock:
-                if generation != _bg_generation:
-                    return
-                _vector_cache["v"] = (time.time(), vec)
+            vec = _refresh_once(store, signing_key_hex=signing_key_hex)
+            if vec is not None and generation == _bg_generation:
+                _cache_write(vec)
         except Exception as exc:
             print(f"[weights] bg_refresh error (will retry): {exc!r}")
         time.sleep(_CACHE_TTL_SECS)
@@ -1237,19 +1272,41 @@ def start_background_refresh(store: Store, *, signing_key_hex: str) -> None:
     _ensure_bg_started(store, signing_key_hex)
 
 
+def _refresh_once(store: Store, *, signing_key_hex: str) -> dict[str, Any] | None:
+    """Refresh once without allowing every process to rebuild at once."""
+    with store.advisory_lock(_REFRESH_LOCK_NAME) as acquired:
+        if acquired:
+            vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
+            _persist_vector(store, vec)
+            return vec
+    return _load_persisted_vector(store)
+
+
 def cached_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any] | None:
     """Return the latest signed vector if warm; never build on the request path."""
     _ensure_bg_started(store, signing_key_hex)
     with _build_lock:
         hit = _vector_cache.get("v")
     if hit is None:
-        return None
+        try:
+            vec = _load_persisted_vector(store)
+        except Exception as exc:
+            print(f"[weights] persisted_vector_load_failed error={exc!r}")
+            return None
+        if vec is not None:
+            _cache_write(vec)
+        return vec
     return hit[1]
 
 
 # Public read endpoints should prefer cached_vector(). This synchronous helper
 # is for explicit callers that intentionally accept a cold-build DB cost.
-def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
+def current_vector(
+    store: Store,
+    *,
+    signing_key_hex: str,
+    force_rebuild: bool = False,
+) -> dict[str, Any]:
     """Serve the latest signed vector from the in-memory cache.
 
     The background refresh thread (started on first call) rebuilds the vector
@@ -1266,22 +1323,18 @@ def current_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any]:
     wins; the second's result is discarded.  This wastes one extra build at
     most once at startup and is far better than starving all callers.
     """
-    hit = cached_vector(store, signing_key_hex=signing_key_hex)
-    if hit is not None:
-        return hit
+    if not force_rebuild:
+        hit = cached_vector(store, signing_key_hex=signing_key_hex)
+        if hit is not None:
+            return hit
 
-    # First call with an empty cache: build synchronously WITHOUT holding the
-    # lock (a slow build inside the lock starves every concurrent request).
-    vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
-    with _build_lock:
-        # Another thread may have written the cache while we built.
-        # Prefer the existing entry (avoids a duplicate policy_version bump),
-        # but if it is still empty write ours.
-        existing = _vector_cache.get("v")
-        if existing is None:
-            _vector_cache["v"] = (time.time(), vec)
-        else:
-            vec = existing[1]
+    # Explicit sync callers accept a DB cost, but still use the cluster-wide
+    # advisory lock so only one process rebuilds the vector.
+    vec = _refresh_once(store, signing_key_hex=signing_key_hex)
+    if vec is None:
+        vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
+        _persist_vector(store, vec)
+    _cache_write(vec)
     return vec
 
 
