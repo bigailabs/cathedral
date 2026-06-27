@@ -238,3 +238,60 @@ Default retained windows:
 Do not enable retention before the volume has enough headroom for normal
 Postgres maintenance. Railway supports live volume resize from the volume
 settings UI.
+
+## Durable Submit Admission (Phase 3/4/5) — default OFF
+
+Async/durable submit admission is implemented and ships **off**. With every flag
+unset the submit endpoint keeps its exact legacy behaviour: synchronous
+verification returning `200 {status: ranked|rejected, ...}`. No miner or validator
+change is required and the public contract is unchanged.
+
+### What it does when enabled
+
+- `POST /v1/agents/submit` (PUBLIC lane only) does cheap work — parse, verify
+  hotkey signature, sha256, persist a durable pending receipt keyed by
+  `idempotency_key = sha256(hotkey + challenge_id + dimacs_solution_sha256)` — and
+  returns `202` with a `cathedral.submit_receipt.v2` body and `receipt_url`.
+- A background worker claims pending attempts in `received_at` order
+  (`FOR UPDATE SKIP LOCKED` on Postgres), runs the existing DIMACS verification,
+  and records `ranked`/`rejected` + the signed feed rows in the SAME atomic
+  transaction the synchronous path uses (identical scoring/payout semantics).
+- `GET /v1/agents/receipts/{receipt_id}` resolves the receipt; status advances
+  `pending -> ranked | rejected`. Idempotent replays of the same solution return
+  the same receipt (no second attempt, no double payout).
+
+### Backpressure (Phase 3, safe to enable independently)
+
+`CATHEDRAL_SUBMIT_BUSY_WAIT_SECS` (default `0.35`) adds a short bounded wait before
+`429 submit_busy_retry` on both the dependency gate and the ASGI backpressure
+middleware. The hard ceiling is preserved; transient overlaps are far less likely
+to bounce a miner. Set `0` to restore the old instant-429 behaviour.
+
+### Flags
+
+| Env | Default | Effect |
+|---|---|---|
+| `CATHEDRAL_SUBMIT_BUSY_WAIT_SECS` | `0.35` | bounded wait (s) before submit_busy_retry; `0` = legacy instant 429 |
+| `CATHEDRAL_SUBMIT_ASYNC_ENABLED` | `false` | PUBLIC submit returns 202 + durable receipt instead of inline 200 |
+| `CATHEDRAL_ASYNC_VERIFY_ENABLED` | `false` | run the background verification worker (worker role) |
+| `CATHEDRAL_ASYNC_VERIFY_POLL_SECS` | `0.5` | idle poll interval when the queue is empty |
+| `CATHEDRAL_ASYNC_VERIFY_BATCH` | `8` | attempts claimed per worker tick |
+| `CATHEDRAL_ASYNC_VERIFY_LOCK_SECS` | `120` | claim lock TTL; a crashed worker's row is reclaimable after this |
+
+### Safe enable order
+
+1. Enable `CATHEDRAL_SUBMIT_BUSY_WAIT_SECS` first (lowest risk; pure backpressure).
+2. Turn on `CATHEDRAL_ASYNC_VERIFY_ENABLED` on the worker role and confirm the loop
+   logs `[verify] singleton_lock_acquired` and drains an empty queue without error.
+3. Only then turn on `CATHEDRAL_SUBMIT_ASYNC_ENABLED` so 202s start flowing into a
+   worker that is already running. (If you flip submit async on with no worker,
+   receipts stay `pending` forever — verify the worker first.)
+4. Per-request escape hatch: a client can force the legacy synchronous path with
+   header `X-Cathedral-Submit-Mode: sync` even while async is enabled.
+
+### Scope / not-yet
+
+- Only the PUBLIC SAT lane uses durable admission. The per-miner (`pm-`) lane keeps
+  its existing inline path. Do not assume `pm-` submits return 202.
+- The raw solution body is held in `per_miner_attempts.solution_body` until verified,
+  then nulled on accept. Object-storage offload (Phase 6) is not wired yet.

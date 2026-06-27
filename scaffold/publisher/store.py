@@ -400,6 +400,34 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_signed_weight_vectors_updated_at
             ON signed_weight_vectors(updated_at_iso);
     """),
+    # 0030: durable submit admission (RELIABILITY_UPGRADE_PLAN Phase 4/5). Extend
+    # the EXISTING per_miner_attempts ledger in place (do NOT stand up a parallel
+    # submit_attempts table). All columns are additive + nullable/defaulted so the
+    # legacy inline writes (which only name the original columns) keep working and
+    # the durable-admission path is purely opt-in (CATHEDRAL_SUBMIT_ASYNC_ENABLED).
+    #   idempotency_key  = sha256(hotkey + challenge_id + dimacs_solution_sha256)
+    #   received_at_iso  = server time at submit handler entry (fairness order)
+    #   verified_at_iso  = worker completion time (NOT the fairness clock)
+    #   solution_body    = raw DIMACS held until verified (retention job compacts)
+    #   lock_*/attempt_count = FOR UPDATE SKIP LOCKED worker claim bookkeeping
+    ("0030_submit_admission", """
+        ALTER TABLE per_miner_attempts ADD COLUMN idempotency_key TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN received_at_iso TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN verified_at_iso TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN challenge_kind TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN solution_body TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN solve_rank INTEGER;
+        ALTER TABLE per_miner_attempts ADD COLUMN weighted_score REAL;
+        ALTER TABLE per_miner_attempts ADD COLUMN eval_run_id TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE per_miner_attempts ADD COLUMN next_attempt_at_iso TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN locked_by TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN locked_until_iso TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_per_miner_attempts_idem
+            ON per_miner_attempts(idempotency_key);
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_status_received
+            ON per_miner_attempts(status, received_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -739,6 +767,27 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_signed_weight_vectors_updated_at
             ON signed_weight_vectors(updated_at_iso);
+    """),
+    # 0030: durable submit admission — see SQLite 0030. NULL idempotency_key on
+    # legacy rows is fine: Postgres unique indexes treat NULLs as distinct, so the
+    # inline writers that never set the column never collide.
+    ("0030_submit_admission", """
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS received_at_iso TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS verified_at_iso TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS challenge_kind TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS solution_body TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS solve_rank INTEGER;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS weighted_score DOUBLE PRECISION;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS eval_run_id TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS next_attempt_at_iso TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS locked_by TEXT;
+        ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS locked_until_iso TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_per_miner_attempts_idem
+            ON per_miner_attempts(idempotency_key);
+        CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_status_received
+            ON per_miner_attempts(status, received_at_iso);
     """),
 ]
 
