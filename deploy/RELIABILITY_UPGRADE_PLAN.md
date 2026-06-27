@@ -84,6 +84,12 @@ route in the system.**
 - Net: today the weight feed is only as available as the live app process, and a
   restart or origin failure leaves validators with `503`/`504` and **no durable
   last-known-good to fall back to.** That is not enough for mainnet.
+- **This is not hypothetical - confirmed live 2026-06-27:**
+  `api.cathedral.computer/v1/validator/weights/next` returned `504` and
+  `read.cathedral.computer/...` did not respond, while on finney **UID200
+  (Cathedral, vtrust 0.99998) had not set weights for ~971 blocks (~194 min,
+  ~2.7 tempos)** and only 5/11 permitted validators were fresh. Feed down ->
+  validators stall is happening, not theoretical.
 
 ### Required protections (the gap this plan must close)
 
@@ -122,9 +128,14 @@ route in the system.**
 ### Vector Freshness Thresholds (concrete)
 
 The background thread rebuilds the cache every **60s** (`_CACHE_TTL_SECS`). Thresholds
-are set off that cadence and the chain tempo. **Assumption: SN39 tempo ~= 360 blocks x
-12s = ~72 min** (confirm against the live chain tempo; if it differs, scale the "hard
-stale ceiling" to one tempo).
+are set off that cadence and the chain tempo. **Verified on finney (2026-06-27): SN39
+tempo = 360 blocks = exactly 72 min @ 12s/block.** The "hard stale ceiling" of 1 tempo
+is therefore 72 min.
+
+> Live check (2026-06-27, block 8498665): only **5 of 11** permitted validators had set
+> weights within one tempo, and **UID200 (Cathedral) was STALE at ~963 blocks (~192 min,
+> ~2.7 tempos)** since its last on-chain update. This is the exact failure the gate above
+> is meant to catch — see the incident note, not just the threshold.
 
 | Signal | Healthy | Warn (alert) | Critical (page) |
 |---|---|---|---|
