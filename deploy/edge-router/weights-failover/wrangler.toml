@@ -1,0 +1,37 @@
+name = "cathedral-weights-failover"
+main = "worker.js"
+compatibility_date = "2026-06-25"
+workers_dev = true
+preview_urls = true
+
+# weights-failover fronts ONLY the validator weight feed
+# (/v1/validator/weights/next, plus its legacy /api/cathedral alias). It is the
+# Tier-0 durable last-known-good edge for the payment source of truth: on origin
+# failure it serves the last signed vector from the WEIGHTS_LKG KV namespace.
+#
+# Attaching these routes moves the weight feed OFF cathedral-edge-router and onto
+# this worker. Do it deliberately (during/after a weight-feed outage, with
+# PUBLISHER_ORIGIN confirmed reachable). Leave commented until cutover. See
+# README.md for cutover + rollback.
+routes = [
+  # { pattern = "api.cathedral.computer/v1/validator/weights/next*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/validator/weights/next*", zone_name = "cathedral.computer" },
+]
+
+# Durable last-known-good store. Independent of the live read/publisher app, so a
+# cold process / origin outage still has a signed vector to fall back to.
+# Create with: wrangler kv:namespace create WEIGHTS_LKG
+# then paste the returned id below.
+kv_namespaces = [
+  { binding = "WEIGHTS_LKG", id = "<paste-WEIGHTS_LKG-kv-namespace-id>" },
+]
+
+[vars]
+# PUBLISHER_ORIGIN: base URL of the publisher origin that serves the signed
+# weight vector. Trailing slashes are trimmed. This is the only origin this
+# worker talks to.
+PUBLISHER_ORIGIN = "https://read.cathedral.computer"
+
+# Origin timeout for the weight-feed GET (ms). On timeout the worker falls back
+# to the LKG vector in KV.
+WEIGHTS_ORIGIN_TIMEOUT_MS = "8000"
