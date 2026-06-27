@@ -309,6 +309,24 @@ def build_app(
     # verify_worker). Older clients can still force the legacy path per-request
     # with `X-Cathedral-Submit-Mode: sync`.
     submit_async_enabled = _env_bool("CATHEDRAL_SUBMIT_ASYNC_ENABLED", False)
+    # TRACK 1 durable admission for the PRIVATE (pm-*) lane. DEFAULT OFF and gated
+    # behind BOTH this flag AND the shared async-verify worker flag — when either is
+    # unset the pm-* submit branch keeps its byte-for-byte inline synchronous
+    # contract. When on, the pm-* branch does only cheap checks inline (signature,
+    # body-size, ownership/recovery, idempotency) and returns 202 + a receipt; the
+    # async worker re-materializes the miner's own CNF, runs the DIMACS + anti-copy
+    # checks, and writes the terminal accept/reject to the SAME ledger scoring reads.
+    #   SHADOW (CATHEDRAL_PM_ASYNC_SHADOW): the inline path stays authoritative for
+    #   payout and the async path runs in parallel into shadow_* columns only, so
+    #   go-live can prove async-vs-inline parity before cutover (no payout change).
+    from . import verify_worker as _vw_flags
+    pm_submit_async_enabled = (
+        submit_async_enabled and _vw_flags.pm_async_enabled())
+    pm_async_shadow_enabled = (
+        pm_submit_async_enabled and _vw_flags.pm_async_shadow())
+    # Body-size limit for the cheap inline check (chars of the DIMACS solution).
+    pm_submit_max_solution_bytes = _env_int(
+        "CATHEDRAL_PM_SUBMIT_MAX_SOLUTION_BYTES", 1_000_000)
     # Phase 3: short bounded wait before returning submit_busy_retry (seconds).
     submit_busy_wait_secs = max(
         0.0, min(2.0, float(os.environ.get("CATHEDRAL_SUBMIT_BUSY_WAIT_SECS", "0.35") or "0")))
@@ -1035,7 +1053,30 @@ def build_app(
                 f"[verify] WARNING: async admission on (service_role="
                 f"{service_role}) but this role does not run the verify worker; "
                 "ensure a worker/all role is deployed or 202 receipts go UNPAID.")
-        if not (submit_async_enabled and verify_on):
+        # TRACK 1: the same drain worker handles pm-* rows (claim is kind-agnostic,
+        # ordered by received_at). Warn loudly if the pm-* async lane was turned on
+        # without a drain worker — pm 202 receipts would otherwise never pay out.
+        if pm_submit_async_enabled and not verify_on:
+            print(
+                "[verify] WARNING: CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED is on but "
+                "CATHEDRAL_ASYNC_VERIFY_ENABLED is not set — pm-* 202 receipts will "
+                "NEVER drain and miners go UNPAID. Enable the worker, or leave "
+                "pm-async off (the inline synchronous path stays in effect).")
+        elif (pm_submit_async_enabled and verify_on
+              and not _role_runs_worker(service_role)):
+            print(
+                f"[verify] WARNING: pm-* async admission on (service_role="
+                f"{service_role}) but this role does not run the verify worker; "
+                "ensure a worker/all role is deployed or pm-* 202 receipts go UNPAID.")
+        if pm_async_shadow_enabled:
+            print(
+                "[verify] pm-* async SHADOW mode ON: inline result stays "
+                "authoritative for payout; async verdict is recorded to shadow_* "
+                "columns and divergence is logged (no payout change).")
+        # The worker loop still runs when ONLY the public async flag is on; but if
+        # pm-async is on while the public flag is off the worker would not start, so
+        # treat pm-async as also requiring the worker loop to run.
+        if not ((submit_async_enabled or pm_submit_async_enabled) and verify_on):
             return
         if not _role_runs_worker(service_role):
             print(f"[verify] skipped service_role={service_role}")
@@ -2966,7 +3007,11 @@ def build_app(
         epoch: int | None = None,
         since_iso: str | None = None,
     ) -> list[dict[str, Any]]:
-        clauses = ["status != 'ranked'"]
+        # Exclude pm-* async SHADOW twins so the (default-off) shadow diagnostic
+        # never alters miner-facing attempt/reason stats. When shadow is off there
+        # are no such rows and this clause is a no-op.
+        clauses = ["status != 'ranked'",
+                   "(challenge_kind IS NULL OR challenge_kind != 'per_miner_shadow')"]
         params: list[Any] = []
         if miner_hotkey is not None:
             clauses.append("miner_hotkey=?")
@@ -3046,7 +3091,9 @@ def build_app(
                 "rejected_attempts": 0,
                 "rejection_reasons": [],
             }
-        clauses = ["miner_hotkey=?"]
+        # Exclude pm-* async SHADOW twins (default-off diagnostic) — see _reason_counts_for.
+        clauses = ["miner_hotkey=?",
+                   "(challenge_kind IS NULL OR challenge_kind != 'per_miner_shadow')"]
         params: list[Any] = [miner_hotkey]
         if epoch is not None:
             clauses.append("epoch=?")
@@ -3308,12 +3355,47 @@ def build_app(
             },
         )
 
+    # ---- TRACK 1: async submit-queue visibility ---------------------------
+    # Drain-queue health for the durable admission lanes (public + pm-*). Surfaces
+    # pending count, oldest-pending age, worker lag (now - oldest received_at), and
+    # accepted/sec + rejected/sec over a short window so an operator can confirm the
+    # drain worker is keeping up before/at cutover. Reads the ledger directly so it
+    # works on any role; returns zeros when nothing is queued.
+    def _async_queue_metrics(window_secs: float = 60.0) -> dict[str, Any]:
+        now_iso = _now_iso_ms()
+        q = submit_admission.queue_metrics(store, now_iso=now_iso)
+        since_iso = _now_iso_ms_plus(-window_secs)
+        rates = store.query(
+            "SELECT status, COUNT(*) AS n FROM per_miner_attempts "
+            "WHERE verified_at_iso IS NOT NULL AND verified_at_iso > ? "
+            "AND challenge_kind IS NOT NULL "
+            "GROUP BY status", (since_iso,))
+        accepted = rejected = 0
+        for r in rates:
+            st = str(r["status"])
+            if st == submit_admission.STATUS_RANKED:
+                accepted = int(r["n"] or 0)
+            elif st == submit_admission.STATUS_REJECTED:
+                rejected = int(r["n"] or 0)
+        win = max(1.0, float(window_secs))
+        q["window_secs"] = win
+        q["accepted_per_sec"] = round(accepted / win, 4)
+        q["rejected_per_sec"] = round(rejected / win, 4)
+        q["accepted_in_window"] = accepted
+        q["rejected_in_window"] = rejected
+        q["pm_async_enabled"] = pm_submit_async_enabled
+        q["pm_async_shadow"] = pm_async_shadow_enabled
+        q["public_async_enabled"] = submit_async_enabled
+        return q
+
     @app.get("/v1/admin/synthetic-boolean/submit-metrics")
     def submit_metrics_admin(authorization: str | None = Header(None)):
         """Operator-only submit pressure and rejection telemetry."""
         _require_publisher_admin(authorization)
+        snapshot = _submit_metrics_snapshot()
+        snapshot["queue"] = _async_queue_metrics()
         return JSONResponse(
-            _submit_metrics_snapshot(),
+            snapshot,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
@@ -3473,6 +3555,44 @@ def build_app(
                                                  "X-Perminer-Epoch": str(epoch)})
         raise HTTPException(404, "assignment_required_fetch_challenges_first")
 
+    # ---- TRACK 1: pm-* async SHADOW admission helper ----------------------
+    # Persist a SHADOW pending row (challenge_kind=per_miner_shadow) carrying the
+    # inline verify verdict in `rejection_reason` ("__ranked__" for an inline accept,
+    # else the inline reject reason). The async worker re-verifies it independently
+    # and writes the result to shadow_* columns only — never to the live payout
+    # ledger — so go-live can prove async-vs-inline parity before cutover. Idempotent
+    # on idempotency_key so replays do not create a second shadow row.
+    def _admit_pm_shadow(
+        *, challenge_id, miner_hotkey, signature, submitted_at, received_at_iso,
+        sol_sha, dimacs_solution, epoch, assignment_identity, inline_marker,
+    ):
+        idem = submit_admission.idempotency_key(miner_hotkey, challenge_id, sol_sha)
+        receipt_id = "shd_" + new_uuid().replace("-", "")
+        now_iso = _now_iso_ms()
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT id FROM per_miner_attempts WHERE idempotency_key=? LIMIT 1",
+                (idem,)).fetchone()
+            if existing is not None:
+                return  # idempotent: shadow twin already queued
+            conn.execute(
+                "INSERT OR IGNORE INTO per_miner_attempts("
+                "id, challenge_id, miner_hotkey, epoch, status, rejection_reason, "
+                "dimacs_solution_sha256, submitted_at, recorded_at_iso, signature, "
+                "idempotency_key, received_at_iso, challenge_kind, solution_body, "
+                "assignment_identity, attempt_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (receipt_id, challenge_id, miner_hotkey, epoch,
+                 submit_admission.STATUS_PENDING, inline_marker, sol_sha,
+                 submitted_at, now_iso, signature, idem, received_at_iso,
+                 submit_admission.KIND_PER_MINER_SHADOW, dimacs_solution,
+                 assignment_identity))
+        try:
+            store.write(_do)
+        except Exception as exc:  # shadow must never break the authoritative inline path
+            print(f"[verify] pm_shadow_admit_failed error={exc!r}")
+
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
     @app.post("/v1/agents/submit")
     def agents_submit(
@@ -3541,6 +3661,66 @@ def build_app(
             tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
             if tier_seq is None:
                 tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
+
+            # ---- TRACK 1: pm-* durable async admission (default-off) ----
+            # CHEAP inline checks already ran above: signature (_verify_hotkey_claim),
+            # body-size, and challenge ownership/recovery (tier_seq). The HEAVY work
+            # (CNF re-materialization + DIMACS verify + anti-copy witness check) moves
+            # to the async worker. We persist a pending receipt keyed by idempotency
+            # and return 202 immediately; the worker re-derives the miner's own CNF
+            # from assignment_identity and records the terminal accept/reject into the
+            # SAME ledger scoring reads. Replays of the same solution return the SAME
+            # receipt (no second attempt / no double payout). The signature is NOT
+            # burned at admission — the worker's atomic accept/reject burns it, keeping
+            # exactly-once replay semantics identical to the inline path.
+            want_sync_pm = x_cathedral_submit_mode.strip().lower() == "sync"
+            if (pm_submit_async_enabled and not pm_async_shadow_enabled
+                    and not want_sync_pm and tier_seq is not None):
+                # Body-size limit (cheap inline check). A pathological body is a hard
+                # 413 here — never persisted, never queued.
+                if len(dimacs_solution) > pm_submit_max_solution_bytes:
+                    _record_submit_event(
+                        "rejected", "solution_too_large",
+                        challenge_id=challenge_id, status_code=413, log=True)
+                    raise HTTPException(
+                        413, "solution_too_large",
+                        headers={"X-Cathedral-Rejection-Reason": "solution_too_large"})
+                # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
+                # so the worker can recover tier/seq even if the read replica is behind.
+                _record_one_perminer_assignment(
+                    assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
+                idem = submit_admission.idempotency_key(
+                    x_cathedral_hotkey, challenge_id, sol_sha)
+                receipt_id = "sub_" + new_uuid().replace("-", "")
+                outcome, row = submit_admission.admit_pending(
+                    store,
+                    receipt_id=receipt_id,
+                    idem_key=idem,
+                    miner_hotkey=x_cathedral_hotkey,
+                    challenge_id=challenge_id,
+                    dimacs_solution_sha256=sol_sha,
+                    dimacs_solution=dimacs_solution,
+                    submitted_at=submitted_at,
+                    received_at_iso=received_at_iso,
+                    signature=x_cathedral_signature,
+                    epoch=epoch,
+                    assignment_identity=assignment_identity,
+                )
+                receipt = submit_admission.receipt_from_row(row)
+                if outcome == "replayed":
+                    _record_submit_event(
+                        "accepted", "idempotent_replay",
+                        challenge_id=challenge_id, status_code=200)
+                    return JSONResponse(status_code=200, content=receipt)
+                _record_submit_event(
+                    "accepted", "admitted_pending",
+                    challenge_id=challenge_id, status_code=202)
+                return JSONResponse(status_code=202, content=receipt)
+            # When ownership/recovery failed (tier_seq is None) async mode falls
+            # through to the inline reject below — it is a cheap check, no heavy work
+            # runs, and the error contract stays byte-for-byte the synchronous one.
+            # ---- End pm-* durable async admission; inline path continues below ----
+
             if tier_seq is None:
                 check = None
                 ok, reason = False, "assignment_required_fetch_challenges_first"
@@ -3562,6 +3742,29 @@ def build_app(
                         ok, reason = pm.verify_miner_submission_for(
                             assignment_identity, epoch, tier_seq[0], tier_seq[1],
                             challenge_id, check.assignment)
+
+            # ---- TRACK 1: pm-* async SHADOW (default-off) ----
+            # The inline result above stays authoritative for payout. When shadow is
+            # on we ALSO persist a pending shadow row stamped with the inline verify
+            # verdict; the worker independently re-verifies it into the shadow_*
+            # columns and logs any async-vs-inline divergence. NO payout change: the
+            # shadow row never touches per_miner_solves / agent_submissions / eval_runs.
+            if pm_async_shadow_enabled and tier_seq is not None:
+                if len(dimacs_solution) <= pm_submit_max_solution_bytes:
+                    inline_marker = "__ranked__" if ok else (reason or "rejected")
+                    _admit_pm_shadow(
+                        challenge_id=challenge_id,
+                        miner_hotkey=x_cathedral_hotkey,
+                        signature=x_cathedral_signature,
+                        submitted_at=submitted_at,
+                        received_at_iso=received_at_iso,
+                        sol_sha=sol_sha,
+                        dimacs_solution=dimacs_solution,
+                        epoch=epoch,
+                        assignment_identity=assignment_identity,
+                        inline_marker=inline_marker,
+                    )
+
             sub_id = new_uuid()
 
             def _record_pm_attempt(reason: str) -> None:
@@ -4077,23 +4280,154 @@ def build_app(
             "SELECT cnf_text FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
         return rows_[0]["cnf_text"] if rows_ else None
 
+    # ---- TRACK 1: pm-* worker resolve+verify and atomic accept ------------
+    # The HEAVY pm-* work the inline handler used to do on the request path: from
+    # the durable attempt row, re-derive the miner's OWN CNF off assignment_identity,
+    # run the DIMACS satisfaction check, then the anti-copy ownership/witness check.
+    # Returns (ok, reason, check) where `check` carries the verified assignment and
+    # the resolved (tier, seq) used to build the witness — same logic as inline.
+    def _pm_resolve_and_verify(attempt_row):
+        from . import per_miner as pm
+        challenge_id = str(attempt_row["challenge_id"])
+        identity = attempt_row["assignment_identity"] or str(attempt_row["miner_hotkey"])
+        epoch = int(attempt_row["epoch"] or 0)
+        body = attempt_row["solution_body"]
+        tier_seq = _lookup_perminer_assignment(identity, epoch, challenge_id)
+        if tier_seq is None:
+            tier_seq = pm.recover_tier_seq_for(identity, epoch, challenge_id)
+        if tier_seq is None:
+            return (False, "assignment_required_fetch_challenges_first", None)
+        cnf = pm.get_miner_cnf(identity, epoch, tier_seq[0], tier_seq[1])
+        if cnf is None:
+            return (False, "challenge_id_not_in_miner_set", None)
+        _cid, cnf_text = cnf
+        check = verify_dimacs_solution(cnf_text, body)
+        if not check.ok:
+            return (False, check.rejection_reason, None)
+        ok, reason = pm.verify_miner_submission_for(
+            identity, epoch, tier_seq[0], tier_seq[1], challenge_id, check.assignment)
+        if not ok:
+            return (False, reason, None)
+        # Stash tier/seq on the check so the accept path needs no second lookup.
+        return (True, None, (check, tier_seq[0], tier_seq[1], identity, epoch))
+
+    # Mirror of the inline `_pm_accept`: one atomic txn that burns the signature,
+    # claims the distinct per-miner solve (NO double payout), writes the submission,
+    # witness, and signed feed rows, and advances the receipt to its terminal ranked
+    # result. Reused by the worker so the async pm path has IDENTICAL payout/scoring
+    # semantics to the synchronous one — only the timing differs.
+    def _accept_pm_async(receipt_id, attempt_row, resolved, now_iso):
+        from . import per_miner as pm
+        check, tier, seq, _identity, epoch = resolved
+        challenge_id = str(attempt_row["challenge_id"])
+        miner_hotkey = str(attempt_row["miner_hotkey"])
+        signature = str(attempt_row["signature"])
+        submitted_at = attempt_row["submitted_at"]
+        sol_sha = str(attempt_row["dimacs_solution_sha256"])
+        dimacs_solution = attempt_row["solution_body"]
+        pm_weight = pm.weight_for(tier)
+        row_uuid = new_uuid()
+        answer_hash = sha256_hex(",".join(str(x) for x in check.assignment))
+        verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
+
+        def _accept(conn):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                (signature, now_iso))
+            if not cur.rowcount:
+                return "replayed_signature"
+            solved = conn.execute(
+                "INSERT OR IGNORE INTO per_miner_solves"
+                "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, "
+                "verified, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (challenge_id, miner_hotkey, epoch, tier, seq, pm_weight, 1, now_iso))
+            if not solved.rowcount:
+                return "already_solved"
+            conn.execute(
+                "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
+                "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
+                "VALUES (?, ?, ?, 'ranked', NULL, ?, 1, ?, ?)",
+                (receipt_id, miner_hotkey, challenge_id, pm_weight, submitted_at,
+                 signature))
+            conn.execute(
+                "INSERT INTO per_miner_witnesses(challenge_id, miner_hotkey, epoch, "
+                "tier, seq, dimacs_solution_sha256, answer_hash, dimacs_solution, "
+                "recorded_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (challenge_id, miner_hotkey, epoch, tier, seq, sol_sha,
+                 answer_hash, dimacs_solution, now_iso))
+            emitted = rows.build_solve_rows(
+                row_uuid=row_uuid, miner_hotkey=miner_hotkey,
+                agent_id=new_uuid(), challenge_id=challenge_id, tier=tier,
+                weighted_score=pm_weight, answer_hash=answer_hash,
+                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                epoch_salt=epoch_salt, solve_rank=1, solved=True,
+                private_key_hex=key_hex,
+            )
+            for r in emitted:
+                conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
+                     r["miner_hotkey"], r["task_type"], json.dumps(r)))
+            # Advance the receipt to its terminal ranked result in the SAME txn so a
+            # crash between feed rows and receipt update cannot exist.
+            conn.execute(
+                "UPDATE per_miner_attempts SET status='ranked', rejection_reason=NULL, "
+                "verified_at_iso=?, recorded_at_iso=?, solve_rank=1, weighted_score=?, "
+                "eval_run_id=?, solution_body=NULL, locked_by=NULL, locked_until_iso=NULL "
+                "WHERE id=?",
+                (now_iso, now_iso, pm_weight, row_uuid, receipt_id))
+            return None
+
+        return store.write(_accept)
+
+    def _pm_log_divergence(*, challenge_id, receipt_id, inline_status,
+                           async_status, async_reason):
+        print("[verify] pm_shadow_divergence " + json.dumps({
+            "challenge_id": challenge_id, "receipt_id": receipt_id,
+            "inline": inline_status, "async": async_status,
+            "async_reason": async_reason,
+        }, sort_keys=True))
+        _record_submit_event(
+            "shadow_divergence", str(async_reason or async_status),
+            challenge_id=challenge_id)
+
     def _async_verify_tick(*, worker_id, batch_size=8, lock_secs=120):
         """Claim and verify up to `batch_size` pending attempts. Returns the count
-        processed. Safe to call from a loop or a test."""
+        processed. Safe to call from a loop or a test. The claim is kind-agnostic and
+        ordered by received_at (fairness); each row is dispatched to the finalizer for
+        its challenge_kind — public, per_miner (authoritative), or per_miner_shadow."""
         now_iso = _now_iso_ms()
         deadline = _now_iso_ms_plus(lock_secs)
         claimed = submit_admission.claim_pending(
             store, worker_id=worker_id, now_iso=now_iso,
             lock_deadline_iso=deadline, batch_size=batch_size)
         for attempt in claimed:
-            submit_admission.finalize_attempt(
-                store, attempt, now_iso=_now_iso_ms(),
-                load_cnf=_async_verify_load_cnf,
-                verify_dimacs=verify_dimacs_solution,
-                accept_public=_accept_public_async,
-                record_event=lambda outcome, reason, challenge_id=None: _record_submit_event(
-                    outcome, reason, challenge_id=challenge_id),
-            )
+            kind = attempt["challenge_kind"]
+            rec = (lambda outcome, reason, challenge_id=None:
+                   _record_submit_event(outcome, reason, challenge_id=challenge_id))
+            if kind == submit_admission.KIND_PER_MINER_SHADOW:
+                submit_admission.finalize_pm_shadow(
+                    store, attempt, now_iso=_now_iso_ms(),
+                    resolve_and_verify=_pm_resolve_and_verify,
+                    log_divergence=_pm_log_divergence,
+                )
+            elif kind == submit_admission.KIND_PER_MINER:
+                submit_admission.finalize_pm_attempt(
+                    store, attempt, now_iso=_now_iso_ms(),
+                    resolve_and_verify=_pm_resolve_and_verify,
+                    accept_pm=_accept_pm_async,
+                    record_event=rec,
+                )
+            else:
+                submit_admission.finalize_attempt(
+                    store, attempt, now_iso=_now_iso_ms(),
+                    load_cnf=_async_verify_load_cnf,
+                    verify_dimacs=verify_dimacs_solution,
+                    accept_public=_accept_public_async,
+                    record_event=rec,
+                )
         return len(claimed)
 
     app.state.async_verify_tick = _async_verify_tick

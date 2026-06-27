@@ -52,6 +52,15 @@ _OPEN_STATES = (STATUS_PENDING, STATUS_VERIFYING, STATUS_FAILED_RETRYABLE)
 
 RECEIPT_SCHEMA = "cathedral.submit_receipt.v2"
 
+# challenge_kind values. "public" / "per_miner" route a claimed pending row to the
+# matching authoritative finalizer. "per_miner_shadow" rows are written by the
+# pm-* SHADOW path: the worker verifies them and records what it WOULD have done in
+# the shadow_* columns, but NEVER touches the live solve/payout ledger — the inline
+# synchronous result stays authoritative until go-live proves parity.
+KIND_PUBLIC = "public"
+KIND_PER_MINER = "per_miner"
+KIND_PER_MINER_SHADOW = "per_miner_shadow"
+
 
 def idempotency_key(
     miner_hotkey: str, challenge_id: str, dimacs_solution_sha256: str
@@ -121,6 +130,7 @@ def admit_pending(
     received_at_iso: str,
     signature: str,
     epoch: int = 0,
+    assignment_identity: str | None = None,
 ) -> tuple[str, Any]:
     """Insert a pending attempt or return the existing one for the same idem key.
 
@@ -131,7 +141,11 @@ def admit_pending(
 
     The whole thing is one transaction so concurrent identical submits cannot both
     create a row (the UNIQUE idempotency index is the backstop on top of the
-    in-txn existence check)."""
+    in-txn existence check).
+
+    ``assignment_identity`` is only set on the pm-* lane: the worker regenerates
+    that miner's own CNF from it (the public lane leaves it NULL and loads the CNF
+    from lane_challenges instead)."""
     kind = challenge_kind(challenge_id)
 
     def _do(conn) -> tuple[str, Any]:
@@ -143,11 +157,11 @@ def admit_pending(
             "id, challenge_id, miner_hotkey, epoch, status, rejection_reason, "
             "dimacs_solution_sha256, submitted_at, recorded_at_iso, signature, "
             "idempotency_key, received_at_iso, challenge_kind, solution_body, "
-            "attempt_count) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            "assignment_identity, attempt_count) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
             (receipt_id, challenge_id, miner_hotkey, epoch, STATUS_PENDING,
              dimacs_solution_sha256, submitted_at, received_at_iso, signature,
-             idem_key, received_at_iso, kind, dimacs_solution),
+             idem_key, received_at_iso, kind, dimacs_solution, assignment_identity),
         )
         if not cur.rowcount:
             # Lost an admission race on the UNIQUE idempotency_key. Re-read the
@@ -313,3 +327,192 @@ def _mark_rejected(store, receipt_id: str, reason: str, now_iso: str) -> None:
             "locked_until_iso=NULL WHERE id=?",
             (STATUS_REJECTED, reason, now_iso, now_iso, receipt_id))
     store.write(_do)
+
+
+# ---------------------------------------------------------------------------
+# Per-miner (pm-*) worker finalize.
+# ---------------------------------------------------------------------------
+def finalize_pm_attempt(
+    store,
+    row: Any,
+    *,
+    now_iso: str,
+    resolve_and_verify: Callable[[Any], tuple[bool, str | None, Any]],
+    accept_pm: Callable[..., str | None],
+    record_event: Callable[..., None] | None = None,
+) -> dict[str, Any]:
+    """Verify one claimed pm-* ``verifying`` attempt and record ranked/rejected.
+
+    The pm-* lane regenerates the miner's OWN CNF (it is not stored in
+    lane_challenges) and runs both the DIMACS satisfaction check and the
+    anti-copy ownership check. Both are injected so this module stays free of the
+    per_miner/app coupling:
+      * resolve_and_verify(attempt_row)
+            -> (ok, reason, check) where check carries the verified assignment
+               used to build the witness/answer hashes. A False ok is a terminal
+               reject (bad solution / not this miner's instance / expired epoch).
+      * accept_pm(receipt_id, attempt_row, check, now_iso)
+            -> None on success, or a legacy pm reject vocabulary string
+               (replayed_signature / already_solved). The accept itself is one
+               atomic txn (signature burn + distinct-solver claim) so a reclaim of
+               a crashed attempt can NEVER double-pay.
+
+    Returns a small result dict for metrics/logging. The live ledger is the single
+    source of truth scoring already reads — this only moves WHEN it is written."""
+    receipt_id = row["id"]
+    challenge_id = str(row["challenge_id"])
+
+    if row["solution_body"] is None:
+        _mark_rejected(store, receipt_id, "missing_solution_body", now_iso)
+        return {"receipt_id": receipt_id, "outcome": "rejected",
+                "reason": "missing_solution_body"}
+
+    ok, reason, check = resolve_and_verify(row)
+    if not ok:
+        _mark_rejected(store, receipt_id, reason, now_iso)
+        if record_event is not None:
+            record_event("rejected", reason, challenge_id=challenge_id)
+        return {"receipt_id": receipt_id, "outcome": "rejected", "reason": reason}
+
+    err = accept_pm(receipt_id, row, check, now_iso)
+    if err is not None:
+        _mark_rejected(store, receipt_id, err, now_iso)
+        if record_event is not None:
+            record_event("rejected", err, challenge_id=challenge_id)
+        return {"receipt_id": receipt_id, "outcome": "rejected", "reason": err}
+
+    if record_event is not None:
+        record_event("accepted", "ranked", challenge_id=challenge_id)
+    return {"receipt_id": receipt_id, "outcome": "ranked"}
+
+
+def finalize_pm_shadow(
+    store,
+    row: Any,
+    *,
+    now_iso: str,
+    resolve_and_verify: Callable[[Any], tuple[bool, str | None, Any]],
+    log_divergence: Callable[..., None] | None = None,
+) -> dict[str, Any]:
+    """Shadow finalize for a pm-* attempt: compute the async terminal verdict and
+    record it in the ``shadow_*`` columns ONLY. The inline synchronous path already
+    paid (or rejected) this submission authoritatively; this never writes to the
+    live solve/payout ledger and never emits feed rows.
+
+    Divergence (async verdict != inline verdict) is logged so go-live can prove the
+    async path reaches byte-identical accept/reject decisions before cutover."""
+    receipt_id = row["id"]
+    challenge_id = str(row["challenge_id"])
+
+    if row["solution_body"] is None:
+        shadow_status, shadow_reason = STATUS_REJECTED, "missing_solution_body"
+    else:
+        ok, reason, _check = resolve_and_verify(row)
+        if ok:
+            shadow_status, shadow_reason = STATUS_RANKED, None
+        else:
+            shadow_status, shadow_reason = STATUS_REJECTED, reason
+
+    inline_status = str(row["status"])  # the verdict the inline path recorded
+    # The inline path may have stored a non-terminal status if the row is the
+    # shadow twin; for shadow rows the inline verdict is carried on the twin's
+    # source row. We compare against the inline verdict the caller stamped on the
+    # shadow row's rejection_reason / via the inline_outcome closure instead.
+    diverged = _shadow_diverges(row, shadow_status, shadow_reason)
+
+    def _do(conn):
+        conn.execute(
+            "UPDATE per_miner_attempts SET shadow_status=?, shadow_rejection_reason=?, "
+            "status=?, verified_at_iso=?, recorded_at_iso=?, solution_body=NULL, "
+            "locked_by=NULL, locked_until_iso=NULL WHERE id=?",
+            (shadow_status, shadow_reason, STATUS_RANKED if shadow_status == STATUS_RANKED
+             else STATUS_REJECTED, now_iso, now_iso, receipt_id))
+    store.write(_do)
+
+    if diverged and log_divergence is not None:
+        log_divergence(
+            challenge_id=challenge_id, receipt_id=receipt_id,
+            inline_status=str(row["rejection_reason"] or "ranked"),
+            async_status=shadow_status, async_reason=shadow_reason)
+    return {"receipt_id": receipt_id, "outcome": "shadow",
+            "shadow_status": shadow_status, "diverged": diverged}
+
+
+def _shadow_diverges(row: Any, async_status: str, async_reason: str | None) -> bool:
+    """Compare the async shadow verdict to the inline verdict the submit handler
+    stamped on the shadow row. The shadow row stores the inline outcome in
+    ``rejection_reason`` ("__ranked__" for an inline accept, else the inline reject
+    reason). Divergence = different accept/reject decision OR different reason."""
+    inline_marker = row["rejection_reason"]
+    inline_accepted = inline_marker == "__ranked__"
+    async_accepted = async_status == STATUS_RANKED
+    if inline_accepted != async_accepted:
+        return True
+    if not async_accepted:
+        # both rejected: a different reason is still a (soft) divergence worth logging
+        return (inline_marker or "") != (async_reason or "")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Queue visibility (admin metrics).
+# ---------------------------------------------------------------------------
+def queue_metrics(store, *, now_iso: str, kinds: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Pending-queue snapshot for the submit-metrics admin surface.
+
+    Returns pending count, the oldest pending received_at, and worker lag (seconds
+    between now and the oldest pending received_at) per challenge_kind, so an
+    operator can see whether the drain worker is keeping up before/at cutover."""
+    where_kind = ""
+    params: list[Any] = [STATUS_PENDING, STATUS_VERIFYING, STATUS_FAILED_RETRYABLE]
+    if kinds:
+        where_kind = " AND challenge_kind IN (%s)" % ",".join("?" for _ in kinds)
+        params.extend(kinds)
+    rows = store.query(
+        "SELECT challenge_kind AS kind, COUNT(*) AS pending, "
+        "MIN(received_at_iso) AS oldest "
+        "FROM per_miner_attempts WHERE status IN (?, ?, ?)" + where_kind +
+        " GROUP BY challenge_kind",
+        tuple(params))
+    by_kind: dict[str, Any] = {}
+    total_pending = 0
+    overall_oldest: str | None = None
+    for r in rows:
+        kind = str(r["kind"]) if r["kind"] is not None else "unknown"
+        pending = int(r["pending"] or 0)
+        oldest = r["oldest"]
+        total_pending += pending
+        if oldest is not None and (overall_oldest is None or oldest < overall_oldest):
+            overall_oldest = oldest
+        by_kind[kind] = {
+            "pending": pending,
+            "oldest_received_at": oldest,
+            "worker_lag_secs": _age_secs(oldest, now_iso),
+        }
+    return {
+        "total_pending": total_pending,
+        "oldest_received_at": overall_oldest,
+        "worker_lag_secs": _age_secs(overall_oldest, now_iso),
+        "by_kind": by_kind,
+    }
+
+
+def _age_secs(then_iso: str | None, now_iso: str) -> float | None:
+    if not then_iso:
+        return None
+    a = _parse_iso(then_iso)
+    b = _parse_iso(now_iso)
+    if a is None or b is None:
+        return None
+    return max(0.0, round(b - a, 3))
+
+
+def _parse_iso(ts: str) -> float | None:
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
