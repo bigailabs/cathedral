@@ -37,10 +37,18 @@ from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
 from . import keys, rows, scoring, top_cache as top_cache_mod, weights as weights_mod
+from . import materialized_snapshot as materialized_snapshot_mod
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
+from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
 from .sat_solution import verify_dimacs_solution
+from . import submit_admission
+from .per_hotkey_limit import (
+    ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
+    PerHotkeyLimiter,
+    config_from_env as per_hotkey_config_from_env,
+)
 from .store import Store, new_uuid
 
 _FAMILY = "synthetic_boolean_v1"
@@ -70,6 +78,22 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)) or default)
     except ValueError:
         return default
+
+
+def _scope_header(scope, name: bytes) -> str | None:
+    """Extract a single header value from a raw ASGI scope (latin-1 decoded)."""
+    name_lower = name.lower()
+    for k, v in scope.get("headers", []):
+        if k.lower() == name_lower:
+            return v.decode("latin-1", errors="replace")
+    return None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _cnf_token_secret() -> bytes:
@@ -170,6 +194,11 @@ def _now_iso_ms() -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+def _now_iso_ms_plus(secs: float) -> str:
+    dt = datetime.now(timezone.utc) + timedelta(seconds=secs)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
 def _parse_iso(ts: str) -> float | None:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -199,6 +228,47 @@ def _role_runs_read_background(role: str) -> bool:
     return role in {"all", "read"}
 
 
+def _role_serves_reads(role: str) -> bool:
+    # "read" serves the public board/leaderboard/weights surface; "all" still
+    # serves the same routes in the single-service deploy. Both must run with a
+    # bounded Postgres statement timeout so a single slow board query (the
+    # /v1/leaderboard/recent 30-46s scans seen in prod) cannot pin a pool
+    # connection and starve every other reader.
+    return role in {"all", "read"}
+
+
+def _statement_timeout_guard_warning(role: str, raw_value: str | None) -> str | None:
+    """Return a loud warning string if a read-serving role boots without a
+    positive CATHEDRAL_PG_STATEMENT_TIMEOUT_MS, else None.
+
+    Unset or 0 (Postgres' "no timeout" sentinel) is the exact missing value that
+    let /v1/leaderboard/recent run 30-46s and exhaust the connection pool. We
+    warn rather than hard-fail so an operator can still boot in an emergency.
+    """
+    if not _role_serves_reads(role):
+        return None
+    try:
+        value = int((raw_value or "0").strip() or "0")
+    except ValueError:
+        value = 0
+    if value > 0:
+        return None
+    return (
+        "[runtime] WARNING: CATHEDRAL_PG_STATEMENT_TIMEOUT_MS is unset/0 for "
+        f"read-serving role {role!r}. A single slow board query (e.g. "
+        "/v1/leaderboard/recent at 30-46s) can pin pool connections and take "
+        "the read origin down. Set CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000."
+    )
+
+
+def _check_read_statement_timeout(role: str) -> None:
+    warning = _statement_timeout_guard_warning(
+        role, os.environ.get("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS")
+    )
+    if warning:
+        print(warning)
+
+
 def build_app(
     *,
     database_path: str = ":memory:",
@@ -210,6 +280,7 @@ def build_app(
     jwks_doc = rows.jwks_from_key(key_hex)
     store = Store(database_path)
     service_role = _service_role_from_env()
+    _check_read_statement_timeout(service_role)
     verifier = default_verifier()
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
@@ -233,7 +304,13 @@ def build_app(
     except ValueError:
         submit_hard_cap = 8
     submit_max_concurrency = configured_submit_max_concurrency
-    if submit_hard_cap > 0 and submit_max_concurrency > 0:
+    # Track 2 (item 7): the global concurrency cap is a *saturation* gate, not a
+    # fairness throttle. Once admission is cheap (async verify) it can be raised
+    # high, with the per-hotkey limiter (below) preventing any single miner from
+    # starving the rest. DEFAULT OFF: the legacy hard-cap clamp stays in force
+    # unless an operator explicitly lifts it, so live behaviour is unchanged.
+    submit_hard_cap_bypass = _env_bool("CATHEDRAL_SUBMIT_HARD_CAP_BYPASS", False)
+    if submit_hard_cap > 0 and submit_max_concurrency > 0 and not submit_hard_cap_bypass:
         submit_max_concurrency = min(submit_max_concurrency, submit_hard_cap)
     submit_gate = (
         threading.BoundedSemaphore(submit_max_concurrency)
@@ -247,6 +324,39 @@ def build_app(
     )
     submit_log_events = os.environ.get("CATHEDRAL_SUBMIT_LOG_EVENTS", "").strip().lower() in {
         "1", "true", "yes", "on"}
+    # Phase 4/5 durable admission. DEFAULT OFF: when off, /v1/agents/submit keeps
+    # its legacy synchronous 200 ranked/rejected contract verbatim (no behaviour
+    # change for live miners/validators). When on, the PUBLIC lane returns 202 +
+    # a durable receipt and an async worker verifies later (see submit_admission /
+    # verify_worker). Older clients can still force the legacy path per-request
+    # with `X-Cathedral-Submit-Mode: sync`.
+    submit_async_enabled = _env_bool("CATHEDRAL_SUBMIT_ASYNC_ENABLED", False)
+    # TRACK 1 durable admission for the PRIVATE (pm-*) lane. DEFAULT OFF and gated
+    # behind BOTH this flag AND the shared async-verify worker flag — when either is
+    # unset the pm-* submit branch keeps its byte-for-byte inline synchronous
+    # contract. When on, the pm-* branch does only cheap checks inline (signature,
+    # body-size, ownership/recovery, idempotency) and returns 202 + a receipt; the
+    # async worker re-materializes the miner's own CNF, runs the DIMACS + anti-copy
+    # checks, and writes the terminal accept/reject to the SAME ledger scoring reads.
+    #   SHADOW (CATHEDRAL_PM_ASYNC_SHADOW): the inline path stays authoritative for
+    #   payout and the async path runs in parallel into shadow_* columns only, so
+    #   go-live can prove async-vs-inline parity before cutover (no payout change).
+    from . import verify_worker as _vw_flags
+    pm_submit_async_enabled = (
+        submit_async_enabled and _vw_flags.pm_async_enabled())
+    pm_async_shadow_enabled = (
+        pm_submit_async_enabled and _vw_flags.pm_async_shadow())
+    # Body-size limit for the cheap inline check (chars of the DIMACS solution).
+    pm_submit_max_solution_bytes = _env_int(
+        "CATHEDRAL_PM_SUBMIT_MAX_SOLUTION_BYTES", 1_000_000)
+    # Track 2 (item 7): per-hotkey fairness limiter — abuse control distinct from
+    # the global saturation gate. DEFAULT OFF (see per_hotkey_limit.py); when off
+    # `allow()` is a no-op so live behaviour is unchanged. Rejections from this
+    # limiter use the distinct reason `abuse_rate_limited`.
+    per_hotkey_limiter = PerHotkeyLimiter(per_hotkey_config_from_env())
+    # Phase 3: short bounded wait before returning submit_busy_retry (seconds).
+    submit_busy_wait_secs = max(
+        0.0, min(2.0, float(os.environ.get("CATHEDRAL_SUBMIT_BUSY_WAIT_SECS", "0.35") or "0")))
     submit_metrics_lock = threading.Lock()
     submit_metrics: dict[str, Any] = {
         "started_at_iso": _now_iso_ms(),
@@ -318,11 +428,75 @@ def build_app(
                 "recent": list(submit_metrics["recent"]),
             }
 
+    # ---- HTTP status telemetry (5xx rates) --------------------------------
+    # Process-wide response-status counters, fed by a cheap ASGI middleware that
+    # only reads the http.response.start status (no body buffering). Surfaced on
+    # the validator-health endpoint so an operator/release gate can see the 5xx
+    # rate without scraping logs. Per-class totals are cumulative since process
+    # start; the weight-feed route is tracked separately because a single 5xx
+    # there is the highest-severity signal in the system.
+    http_status_lock = threading.Lock()
+    _WEIGHTS_FEED_SUFFIX = "/v1/validator/weights/next"
+    http_status_metrics: dict[str, Any] = {
+        "started_at_iso": _now_iso_ms(),
+        "total": 0,
+        "by_class": {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0},
+        "weights_feed_total": 0,
+        "weights_feed_5xx": 0,
+        "recent_5xx": [],
+    }
+
+    def _record_http_status(path: str, status: int | None) -> None:
+        if not isinstance(status, int):
+            return
+        klass = f"{status // 100}xx"
+        is_weights_feed = path.endswith(_WEIGHTS_FEED_SUFFIX)
+        with http_status_lock:
+            http_status_metrics["total"] = int(http_status_metrics["total"]) + 1
+            by_class = http_status_metrics["by_class"]
+            by_class[klass] = int(by_class.get(klass, 0)) + 1
+            if is_weights_feed:
+                http_status_metrics["weights_feed_total"] = (
+                    int(http_status_metrics["weights_feed_total"]) + 1)
+                if status >= 500:
+                    http_status_metrics["weights_feed_5xx"] = (
+                        int(http_status_metrics["weights_feed_5xx"]) + 1)
+            if status >= 500:
+                recent = http_status_metrics["recent_5xx"]
+                recent.append({"ts": _now_iso_ms(), "path": path, "status": status})
+                del recent[:-25]
+
+    def _http_status_snapshot() -> dict[str, Any]:
+        with http_status_lock:
+            by_class = dict(http_status_metrics["by_class"])
+            total = int(http_status_metrics["total"])
+            count_5xx = int(by_class.get("5xx", 0))
+            wf_total = int(http_status_metrics["weights_feed_total"])
+            wf_5xx = int(http_status_metrics["weights_feed_5xx"])
+            recent_5xx = list(http_status_metrics["recent_5xx"])
+        return {
+            "started_at_iso": http_status_metrics["started_at_iso"],
+            "total": total,
+            "by_class": by_class,
+            "rate_5xx": round(count_5xx / total, 6) if total else 0.0,
+            "weights_feed_total": wf_total,
+            "weights_feed_5xx": wf_5xx,
+            "weights_feed_rate_5xx": round(wf_5xx / wf_total, 6) if wf_total else 0.0,
+            "recent_5xx": recent_5xx,
+        }
+
     def _submit_slot():
         if submit_gate is None:
             yield
             return
-        if not submit_gate.acquire(blocking=False):
+        # Phase 3: a brief bounded wait turns most transient overlaps into an
+        # accepted submit instead of an instant miner-facing 429. The hard ceiling
+        # is preserved — we still reject after the wait, just less often.
+        acquired = (
+            submit_gate.acquire(timeout=submit_busy_wait_secs)
+            if submit_busy_wait_secs > 0 else submit_gate.acquire(blocking=False)
+        )
+        if not acquired:
             _record_submit_event(
                 "rate_limited",
                 "submit_busy_retry",
@@ -429,14 +603,34 @@ def build_app(
     board_cache = BoardCache(_build_board)
     board_cache_mod.register(board_cache)
 
-    def _serve_board_snapshot(request: Request):
-        payload, etag = board_cache.get()
-        headers = board_cache_headers(etag)
-        headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
+    # Track 3 / item 6: timer-built materialized snapshot of the rendered board.
+    # DEFAULT-OFF — only started/served when the feature flag is on (see
+    # materialized_snapshot.enabled()). When on, the read is served from the last
+    # timer-materialized payload (never builds on the request path); when the
+    # snapshot is cold or too stale, get() returns None and the route falls back
+    # to the live board_cache path below — degrade to stale-then-live, not error.
+    board_snapshot = MaterializedSnapshot("board", _build_board)
+    materialized_snapshot_mod.register(board_snapshot)
+
+    def _conditional_response(payload, etag, headers, request: Request):
         inm = request.headers.get("if-none-match")
         if inm and etag in [t.strip() for t in inm.split(",")]:
             return Response(status_code=304, headers=headers)
         return JSONResponse(payload, headers=headers)
+
+    def _serve_board_snapshot(request: Request):
+        if materialized_snapshot_mod.enabled():
+            served = board_snapshot.get()
+            if served is not None:
+                payload, etag, meta = served
+                headers = snapshot_headers(etag, meta)
+                headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
+                return _conditional_response(payload, etag, headers, request)
+        # Flag off, or snapshot cold/too-stale: live cache-backed path (unchanged).
+        payload, etag = board_cache.get()
+        headers = board_cache_headers(etag)
+        headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
+        return _conditional_response(payload, etag, headers, request)
 
     top_cache = top_cache_mod.TopCache()
     if _role_runs_read_background(service_role):
@@ -530,6 +724,45 @@ def build_app(
                         f"elapsed={elapsed:.3f}s"
                     )
 
+    class _StatusCounterMiddleware:
+        """Pure ASGI middleware: tally response status classes (5xx rates).
+
+        Reads only http.response.start status — no body buffering, no extra
+        thread-pool work — so it is safe in front of every route, including the
+        Tier 0 weight feed. Feeds the validator-health endpoint and release gate.
+        """
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self._app(scope, receive, send)
+                return
+            path = scope.get("path", "")
+            status = None
+
+            async def _send(message):
+                nonlocal status
+                if message.get("type") == "http.response.start":
+                    status = message.get("status")
+                await send(message)
+
+            try:
+                await self._app(scope, receive, _send)
+            except Exception:
+                # Unhandled error: the app never sent http.response.start, so
+                # `status` is still None. The ASGI server turns this into a 500
+                # for the client, so record a synthetic 500 here (before
+                # re-raising) — otherwise the highest-severity faults would be
+                # invisible to the 5xx counter.
+                _record_http_status(path, 500)
+                raise
+            else:
+                # Normal completion. If the app somehow never sent a
+                # response-start status (misbehaving handler), the server still
+                # returns a 500 to the client, so count it as one.
+                _record_http_status(path, status if status is not None else 500)
+
     class _HotPathBackpressureMiddleware:
         """Reject excess heavy requests before body parsing/threadpool work."""
 
@@ -563,17 +796,62 @@ def build_app(
             path = scope.get("path", "")
             gate = None
             reason = ""
-            if method == "POST" and path in self._SUBMIT_PATHS:
+            is_submit = method == "POST" and path in self._SUBMIT_PATHS
+            if is_submit:
                 gate = self._submit_gate
                 reason = "submit_busy_retry"
             elif method == "GET" and path in self._PM_READ_PATHS:
                 gate = self._pm_read_gate
                 reason = "per_miner_busy_retry"
+
+            # Track 2 (item 7): per-hotkey fairness check BEFORE the global gate.
+            # A single hotkey over its budget is rejected with the distinct
+            # `abuse_rate_limited` reason; well-behaved miners and the saturation
+            # gate are untouched. No-op when the limiter is disabled (default).
+            if is_submit and per_hotkey_limiter.active:
+                hotkey = _scope_header(scope, b"x-cathedral-hotkey")
+                if not per_hotkey_limiter.allow(hotkey):
+                    cfg = per_hotkey_limiter.config
+                    abuse_body = _PER_HOTKEY_ABUSE_REASON.encode("utf-8")
+                    _record_submit_event(
+                        "rate_limited",
+                        _PER_HOTKEY_ABUSE_REASON,
+                        challenge_id=None,
+                        status_code=429,
+                        log=True,
+                    )
+                    await send({
+                        "type": "http.response.start",
+                        "status": 429,
+                        "headers": [
+                            (b"content-type", b"text/plain; charset=utf-8"),
+                            (b"content-length", str(len(abuse_body)).encode()),
+                            (b"retry-after", str(cfg.retry_after_secs).encode()),
+                            (b"x-cathedral-rejection-reason", abuse_body),
+                        ],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": abuse_body,
+                        "more_body": False,
+                    })
+                    return
+
             if gate is None:
                 await self._app(scope, receive, send)
                 return
 
-            if not gate.acquire(blocking=False):
+            # Phase 3: bounded non-blocking wait before rejecting. We poll the
+            # semaphore with short asyncio sleeps rather than a blocking acquire so
+            # the event loop is never stalled while we wait for a slot to free.
+            acquired = gate.acquire(blocking=False)
+            if not acquired and submit_busy_wait_secs > 0:
+                import asyncio
+                deadline = time.monotonic() + submit_busy_wait_secs
+                while not acquired and time.monotonic() < deadline:
+                    await asyncio.sleep(0.02)
+                    acquired = gate.acquire(blocking=False)
+            if not acquired:
                 _record_submit_event(
                     "rate_limited",
                     reason,
@@ -622,9 +900,16 @@ def build_app(
             "/v1/leaderboard/recent",
             "/v1/leaderboard/top",
             "/v1/leaderboard/explain",
+            # Operator/observability surface for the weight feed. Admin-token
+            # gated at the handler; routed here so it stays reachable on the
+            # read service that actually serves the Tier 0 weight feed.
+            "/v1/admin/validator-health",
         }
         _READ_GET_PREFIXES = {
             "/v1/audit-scanner/",
+            # Durable submit receipts (Phase 4): a read of durable state, safe to
+            # serve from the read role as well as submit (miners poll their receipt).
+            "/v1/agents/receipts/",
         }
         _SUBMIT_GET_PATHS = {
             "/v1/synthetic-boolean/active-cnf",
@@ -633,6 +918,9 @@ def build_app(
         }
         _SUBMIT_GET_PREFIXES = {
             "/v1/challenges/",
+            # The submit role returns 202 + receipt_url; let the same host resolve
+            # that receipt so miners don't need a second host for status polling.
+            "/v1/agents/receipts/",
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
@@ -716,11 +1004,16 @@ def build_app(
     # Role guard is now the true outer edge: role-mismatched traffic fails before
     # rate-limit state, request body parsing, or expensive route work.
     app.add_middleware(_ServiceRoleGuardMiddleware)
+    # Outermost observability layer: count every final response status (incl.
+    # role-guard/backpressure rejections) so the 5xx rate is complete. Cheap —
+    # reads only the response-start status, no body buffering.
+    app.add_middleware(_StatusCounterMiddleware)
 
     app.state.store = store
     app.state.cnf_store = cnf_store
     app.state.board_cache = board_cache
     app.state.top_cache = top_cache
+    app.state.board_snapshot = board_snapshot
     app.state.recent_cache = recent_cache
     app.state.explain_cache = explain_cache
     app.state.pm_summary_cache = pm_summary_cache
@@ -731,6 +1024,7 @@ def build_app(
     app.state.seed_task = None
     app.state.arena_eval_task = None
     app.state.arena_payout_task = None
+    app.state.async_verify_task = None
     # Lane S champion machine + registry persist across eval ticks on app.state
     # (the validator constructs ONE lane and reuses it so the champion survives).
     from ..lanes.solver_arena import SolverArenaLane
@@ -778,6 +1072,24 @@ def build_app(
         except Exception as exc:
             print(f"[board] warm_start_failed error={exc!r}")
 
+    @app.on_event("startup")
+    async def _start_materialized_snapshots():
+        # Track 3 / item 6: start the timer that re-materializes the board +
+        # leaderboard-top read payloads off the request path. DEFAULT-OFF —
+        # start_all() is a no-op unless CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED is
+        # set, so live behavior is unchanged when the flag is unset. Only the
+        # read-background role runs the builders (same gate as board/top caches).
+        if not _role_runs_read_background(service_role):
+            return
+        if not materialized_snapshot_mod.enabled():
+            return
+        try:
+            board_snapshot.start()
+            leaderboard_top_snapshot.start()
+            print(f"[materialized_snapshot] started service_role={service_role}")
+        except Exception as exc:
+            print(f"[materialized_snapshot] start_failed error={exc!r}")
+
     async def _run_singleton_background(label: str, lock_name: str, coro_factory):
         import asyncio
 
@@ -814,6 +1126,72 @@ def build_app(
                     "cathedral:publisher:refill",
                     lambda: refill.refill_loop(store, log=loop_log),
                 ))
+
+    # ---- Phase 5: async SAT verification worker (env-gated) ---------------
+    # Drains pending durable-admission attempts off the request path. Default OFF;
+    # only runs on a worker-capable role AND when both durable admission and the
+    # worker flag are enabled. The singleton advisory lock keeps exactly one loop
+    # active across replicas (claim is already crash-safe via locked_until_iso).
+    @app.on_event("startup")
+    async def _start_async_verify():
+        from . import verify_worker
+        verify_on = verify_worker.async_verify_enabled()
+        # Loud WARNING for the foot-gun: async admission returns 202 receipts, but
+        # if NO process is configured to run the drain worker those receipts stay
+        # `pending` forever and the miners that earned them never get paid. Two
+        # ways this happens: (a) CATHEDRAL_ASYNC_VERIFY_ENABLED was never turned on
+        # (no worker anywhere); (b) this is the only role and it is not worker-
+        # capable (e.g. a single submit/read role with no companion worker role).
+        if submit_async_enabled and not verify_on:
+            print(
+                "[verify] WARNING: CATHEDRAL_SUBMIT_ASYNC_ENABLED is on but "
+                "CATHEDRAL_ASYNC_VERIFY_ENABLED is not set — 202 receipts will "
+                "NEVER drain to ranked and miners go UNPAID. Enable the worker "
+                "(see deploy/ROLE_SPLIT_RUNBOOK.md 'Safe enable order').")
+        elif (submit_async_enabled and verify_on
+              and not _role_runs_worker(service_role)):
+            print(
+                f"[verify] WARNING: async admission on (service_role="
+                f"{service_role}) but this role does not run the verify worker; "
+                "ensure a worker/all role is deployed or 202 receipts go UNPAID.")
+        # TRACK 1: the same drain worker handles pm-* rows (claim is kind-agnostic,
+        # ordered by received_at). Warn loudly if the pm-* async lane was turned on
+        # without a drain worker — pm 202 receipts would otherwise never pay out.
+        if pm_submit_async_enabled and not verify_on:
+            print(
+                "[verify] WARNING: CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED is on but "
+                "CATHEDRAL_ASYNC_VERIFY_ENABLED is not set — pm-* 202 receipts will "
+                "NEVER drain and miners go UNPAID. Enable the worker, or leave "
+                "pm-async off (the inline synchronous path stays in effect).")
+        elif (pm_submit_async_enabled and verify_on
+              and not _role_runs_worker(service_role)):
+            print(
+                f"[verify] WARNING: pm-* async admission on (service_role="
+                f"{service_role}) but this role does not run the verify worker; "
+                "ensure a worker/all role is deployed or pm-* 202 receipts go UNPAID.")
+        if pm_async_shadow_enabled:
+            print(
+                "[verify] pm-* async SHADOW mode ON: inline result stays "
+                "authoritative for payout; async verdict is recorded to shadow_* "
+                "columns and divergence is logged (no payout change).")
+        # The worker loop still runs when ONLY the public async flag is on; but if
+        # pm-async is on while the public flag is off the worker would not start, so
+        # treat pm-async as also requiring the worker loop to run.
+        if not ((submit_async_enabled or pm_submit_async_enabled) and verify_on):
+            return
+        if not _role_runs_worker(service_role):
+            print(f"[verify] skipped service_role={service_role}")
+            return
+        import asyncio
+        worker_id = f"{service_role}:{new_uuid()[:8]}"
+        app.state.async_verify_task = asyncio.create_task(
+            _run_singleton_background(
+                "verify",
+                "cathedral:publisher:async_verify",
+                lambda: verify_worker.verify_loop(
+                    app.state.async_verify_tick, worker_id=worker_id,
+                    log=lambda evt, **kw: print(f"[verify] {evt} {kw}")),
+            ))
 
     # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
     # Periodically scores registered pending solvers and, on a record-fall,
@@ -958,6 +1336,13 @@ def build_app(
                     pass
         if hasattr(app.state, "top_cache"):
             app.state.top_cache.stop()
+        for attr in ("board_snapshot", "leaderboard_top_snapshot"):
+            snap = getattr(app.state, attr, None)
+            if snap is not None:
+                try:
+                    snap.stop()
+                except Exception:
+                    pass
 
     # ---- helpers ----------------------------------------------------------
     def _challenge_public(r: Any) -> dict[str, Any]:
@@ -1632,16 +2017,7 @@ def build_app(
             },
         )
 
-    @app.get("/v1/leaderboard/top")
-    async def leaderboard_top(
-        window: str = Query("24h"),
-        view: str = Query("weights"),
-    ):
-        """Fast pre-aggregated miner ranking. Cached ~45s in-process.
-        Defaults to current earning weights. Use view=receipts for the old
-        top 100 miners ranked by total weighted_score over the window.
-        window=24h only for now (others fall back to 24h).
-        """
+    def _leaderboard_top_payload(view: str) -> dict[str, Any]:
         rows_, built_at, window_h = top_cache.get()
         weight_ctx = _current_weight_context()
         receipt_by_hotkey = {
@@ -1707,48 +2083,89 @@ def build_app(
                     "visibility": visibility,
                 })
             rank_kind = "receipt_total_score_24h"
-        return JSONResponse(
-            {
-                "miners": miners,
-                "view": normalized_view,
-                "rank_kind": rank_kind,
-                "default_view": "weights",
-                "views": {
-                    "weights": "current Cathedral payment weights; closest API view to Taostats emission",
-                    "receipts": "24h solve receipt activity; audit/activity view, not payment order",
-                },
-                "explanation": (
-                    "Weights show the current payment order. Receipts show recent solve activity. "
-                    "They can differ during migration and when scoring uses the solve ledger."
-                ),
-                "earning_weight_source": "v1/validator/weights/next",
-                "earning_weights_generated_at": weight_ctx["generated_at"],
-                "visibility_schema": "cathedral_miner_truth_v1",
-                "sources": {
-                    "payment": {
-                        "path": "v1/validator/weights/next",
-                        "status": "available" if weight_ctx.get("generated_at") else "unavailable",
-                        "generated_at": weight_ctx.get("generated_at"),
-                        "note": "signed Cathedral weight; validator input",
-                    },
-                    "recent_activity": {
-                        "path": "v1/leaderboard/recent",
-                        "status": "activity_only_not_payment",
-                    },
-                    "chain": {
-                        "status": "upstream_annotation_only",
-                        "note": "uid/registered/payable/incentive/emission are null unless a chain feed annotates rows",
-                    },
-                    "perminer": {
-                        "path": "v1/synthetic-boolean/per-miner/summary",
-                        "status": "summary",
-                    },
-                },
-                "window_hours": window_h,
-                "built_at": built_at,
-                "count": len(miners),
-                "cache_ttl_secs": 45,
+        return {
+            "miners": miners,
+            "view": normalized_view,
+            "rank_kind": rank_kind,
+            "default_view": "weights",
+            "views": {
+                "weights": "current Cathedral payment weights; closest API view to Taostats emission",
+                "receipts": "24h solve receipt activity; audit/activity view, not payment order",
             },
+            "explanation": (
+                "Weights show the current payment order. Receipts show recent solve activity. "
+                "They can differ during migration and when scoring uses the solve ledger."
+            ),
+            "earning_weight_source": "v1/validator/weights/next",
+            "earning_weights_generated_at": weight_ctx["generated_at"],
+            "visibility_schema": "cathedral_miner_truth_v1",
+            "sources": {
+                "payment": {
+                    "path": "v1/validator/weights/next",
+                    "status": "available" if weight_ctx.get("generated_at") else "unavailable",
+                    "generated_at": weight_ctx.get("generated_at"),
+                    "note": "signed Cathedral weight; validator input",
+                },
+                "recent_activity": {
+                    "path": "v1/leaderboard/recent",
+                    "status": "activity_only_not_payment",
+                },
+                "chain": {
+                    "status": "upstream_annotation_only",
+                    "note": "uid/registered/payable/incentive/emission are null unless a chain feed annotates rows",
+                },
+                "perminer": {
+                    "path": "v1/synthetic-boolean/per-miner/summary",
+                    "status": "summary",
+                },
+            },
+            "window_hours": window_h,
+            "built_at": built_at,
+            "count": len(miners),
+            "cache_ttl_secs": 45,
+        }
+
+    # Track 3 / item 6: timer-built materialized snapshot of the default
+    # leaderboard-top read (view=weights, the dashboard hot path). DEFAULT-OFF —
+    # only served when materialized_snapshot.enabled(); otherwise the route builds
+    # inline exactly as before. The builder pins view=weights because that is the
+    # canonical materialized payload; other views fall through to the live build.
+    leaderboard_top_snapshot = MaterializedSnapshot(
+        "leaderboard-top", lambda: _leaderboard_top_payload("weights")
+    )
+    materialized_snapshot_mod.register(leaderboard_top_snapshot)
+    app.state.leaderboard_top_snapshot = leaderboard_top_snapshot
+
+    def _leaderboard_top_default_view(view: str) -> bool:
+        return (view or "weights").strip().lower() in {
+            "weight", "weights", "earning", "earnings"
+        }
+
+    @app.get("/v1/leaderboard/top")
+    async def leaderboard_top(
+        request: Request,
+        window: str = Query("24h"),
+        view: str = Query("weights"),
+    ):
+        """Fast pre-aggregated miner ranking. Cached ~45s in-process.
+        Defaults to current earning weights. Use view=receipts for the old
+        top 100 miners ranked by total weighted_score over the window.
+        window=24h only for now (others fall back to 24h).
+        """
+        # Materialized-snapshot fast path (flag-gated): serve the timer-built
+        # default-view payload without touching the per-request build. Only the
+        # canonical default view is materialized; receipts/other views fall to live.
+        if materialized_snapshot_mod.enabled() and _leaderboard_top_default_view(view):
+            served = leaderboard_top_snapshot.get()
+            if served is not None:
+                payload, etag, meta = served
+                headers = snapshot_headers(etag, meta)
+                headers["Access-Control-Allow-Origin"] = "*"
+                return _conditional_response(payload, etag, headers, request)
+        # Flag off, non-default view, or snapshot cold/too-stale: live build path
+        # (unchanged) — degrade to live, never to an error.
+        return JSONResponse(
+            _leaderboard_top_payload(view),
             headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
         )
 
@@ -2730,7 +3147,11 @@ def build_app(
         epoch: int | None = None,
         since_iso: str | None = None,
     ) -> list[dict[str, Any]]:
-        clauses = ["status != 'ranked'"]
+        # Exclude pm-* async SHADOW twins so the (default-off) shadow diagnostic
+        # never alters miner-facing attempt/reason stats. When shadow is off there
+        # are no such rows and this clause is a no-op.
+        clauses = ["status != 'ranked'",
+                   "(challenge_kind IS NULL OR challenge_kind != 'per_miner_shadow')"]
         params: list[Any] = []
         if miner_hotkey is not None:
             clauses.append("miner_hotkey=?")
@@ -2810,7 +3231,9 @@ def build_app(
                 "rejected_attempts": 0,
                 "rejection_reasons": [],
             }
-        clauses = ["miner_hotkey=?"]
+        # Exclude pm-* async SHADOW twins (default-off diagnostic) — see _reason_counts_for.
+        clauses = ["miner_hotkey=?",
+                   "(challenge_kind IS NULL OR challenge_kind != 'per_miner_shadow')"]
         params: list[Any] = [miner_hotkey]
         if epoch is not None:
             clauses.append("epoch=?")
@@ -3072,12 +3495,122 @@ def build_app(
             },
         )
 
+    # ---- TRACK 1: async submit-queue visibility ---------------------------
+    # Drain-queue health for the durable admission lanes (public + pm-*). Surfaces
+    # pending count, oldest-pending age, worker lag (now - oldest received_at), and
+    # accepted/sec + rejected/sec over a short window so an operator can confirm the
+    # drain worker is keeping up before/at cutover. Reads the ledger directly so it
+    # works on any role; returns zeros when nothing is queued.
+    def _async_queue_metrics(window_secs: float = 60.0) -> dict[str, Any]:
+        now_iso = _now_iso_ms()
+        q = submit_admission.queue_metrics(store, now_iso=now_iso)
+        since_iso = _now_iso_ms_plus(-window_secs)
+        # P2 fix: split the drain rates by LIVE vs SHADOW kind. A shadow drain
+        # also stamps status + verified_at_iso (into shadow_* + a terminal status),
+        # so counting all kinds together let an operator running shadow-ONLY mode
+        # believe LIVE pm was draining when only the (default-off) shadow diagnostic
+        # was. The headline accepted/rejected rates now count LIVE async kinds
+        # (public + per_miner) only; shadow is reported separately so it stays
+        # visible without inflating the live numbers.
+        rates = store.query(
+            "SELECT challenge_kind AS kind, status, COUNT(*) AS n "
+            "FROM per_miner_attempts "
+            "WHERE verified_at_iso IS NOT NULL AND verified_at_iso > ? "
+            "AND challenge_kind IS NOT NULL "
+            "GROUP BY challenge_kind, status", (since_iso,))
+        accepted = rejected = 0
+        shadow_accepted = shadow_rejected = 0
+        for r in rates:
+            st = str(r["status"])
+            kind = str(r["kind"])
+            n = int(r["n"] or 0)
+            is_shadow = kind == submit_admission.KIND_PER_MINER_SHADOW
+            if st == submit_admission.STATUS_RANKED:
+                if is_shadow:
+                    shadow_accepted += n
+                else:
+                    accepted += n
+            elif st == submit_admission.STATUS_REJECTED:
+                if is_shadow:
+                    shadow_rejected += n
+                else:
+                    rejected += n
+        win = max(1.0, float(window_secs))
+        q["window_secs"] = win
+        # LIVE async drain rates (public + per_miner) — shadow excluded.
+        q["accepted_per_sec"] = round(accepted / win, 4)
+        q["rejected_per_sec"] = round(rejected / win, 4)
+        q["accepted_in_window"] = accepted
+        q["rejected_in_window"] = rejected
+        # Shadow drain reported separately so it never inflates the live rates.
+        q["shadow_accepted_in_window"] = shadow_accepted
+        q["shadow_rejected_in_window"] = shadow_rejected
+        q["shadow_accepted_per_sec"] = round(shadow_accepted / win, 4)
+        q["shadow_rejected_per_sec"] = round(shadow_rejected / win, 4)
+        q["pm_async_enabled"] = pm_submit_async_enabled
+        q["pm_async_shadow"] = pm_async_shadow_enabled
+        q["public_async_enabled"] = submit_async_enabled
+        return q
+
     @app.get("/v1/admin/synthetic-boolean/submit-metrics")
     def submit_metrics_admin(authorization: str | None = Header(None)):
         """Operator-only submit pressure and rejection telemetry."""
         _require_publisher_admin(authorization)
+        snapshot = _submit_metrics_snapshot()
+        snapshot["queue"] = _async_queue_metrics()
         return JSONResponse(
-            _submit_metrics_snapshot(),
+            snapshot,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v1/admin/validator-health")
+    async def validator_health(authorization: str | None = Header(None)):
+        """Read-only operator surface: weight-feed freshness + 5xx + submit.
+
+        Single pane the validator release gate (and an operator dashboard) can
+        poll. It does NOT build the signed vector — it peeks the warm cache via
+        weights_mod.cached_vector(), so this probe can never add load to, or
+        stall behind, the Tier 0 weight-feed build path. Returns whatever signal
+        is available; a cold process (no cached vector) surfaces level=unknown
+        rather than failing.
+        """
+        _require_publisher_admin(authorization)
+
+        from . import health_thresholds as ht
+
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        vec_generated_at: str | None = None
+        vec_age: float | None = None
+        vector_present = False
+        try:
+            vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
+        except Exception as exc:  # never let the health probe raise
+            vec = None
+            print(f"[validator-health] cached_vector_failed error={exc!r}")
+        if isinstance(vec, dict):
+            vector_present = True
+            vec_generated_at = vec.get("generated_at")
+            vec_age = _age_seconds(vec_generated_at)
+
+        http_snapshot = _http_status_snapshot()
+        payload = {
+            "schema": "cathedral.validator_health.v1",
+            "checked_at": _now_iso_ms(),
+            "service_role": service_role,
+            "weights_feed": {
+                "vector_present": vector_present,
+                "generated_at": vec_generated_at,
+                "freshness": ht.vector_status(vec_age),
+                "feed_total_requests": http_snapshot["weights_feed_total"],
+                "feed_5xx": http_snapshot["weights_feed_5xx"],
+                "feed_rate_5xx": http_snapshot["weights_feed_rate_5xx"],
+            },
+            "http_status": http_snapshot,
+            "submit": _submit_metrics_snapshot(),
+            "tempo_seconds": ht.TEMPO_SECONDS,
+        }
+        return JSONResponse(
+            payload,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
@@ -3186,6 +3719,50 @@ def build_app(
                                                  "X-Perminer-Epoch": str(epoch)})
         raise HTTPException(404, "assignment_required_fetch_challenges_first")
 
+    # ---- TRACK 1: pm-* async SHADOW admission helper ----------------------
+    # Persist a SHADOW pending row (challenge_kind=per_miner_shadow) carrying the
+    # inline verify verdict in `rejection_reason` ("__ranked__" for an inline accept,
+    # else the inline reject reason). The async worker re-verifies it independently
+    # and writes the result to shadow_* columns only — never to the live payout
+    # ledger — so go-live can prove async-vs-inline parity before cutover. Idempotent
+    # on idempotency_key so replays do not create a second shadow row.
+    def _admit_pm_shadow(
+        *, challenge_id, miner_hotkey, signature, submitted_at, received_at_iso,
+        sol_sha, dimacs_solution, epoch, assignment_identity, inline_marker,
+    ):
+        # P1 fix: the shadow twin MUST use a namespaced idempotency key so it can
+        # never collide with the LIVE pm-async key for the same payload. Without
+        # this, a miner retrying the same solution after cutover (shadow off, live
+        # on) would have admit_pending() match the stale shadow row and replay its
+        # receipt instead of creating the live authoritative pm receipt.
+        idem = submit_admission.shadow_idempotency_key(
+            miner_hotkey, challenge_id, sol_sha)
+        receipt_id = "shd_" + new_uuid().replace("-", "")
+        now_iso = _now_iso_ms()
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT id FROM per_miner_attempts WHERE idempotency_key=? LIMIT 1",
+                (idem,)).fetchone()
+            if existing is not None:
+                return  # idempotent: shadow twin already queued
+            conn.execute(
+                "INSERT OR IGNORE INTO per_miner_attempts("
+                "id, challenge_id, miner_hotkey, epoch, status, rejection_reason, "
+                "dimacs_solution_sha256, submitted_at, recorded_at_iso, signature, "
+                "idempotency_key, received_at_iso, challenge_kind, solution_body, "
+                "assignment_identity, attempt_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (receipt_id, challenge_id, miner_hotkey, epoch,
+                 submit_admission.STATUS_PENDING, inline_marker, sol_sha,
+                 submitted_at, now_iso, signature, idem, received_at_iso,
+                 submit_admission.KIND_PER_MINER_SHADOW, dimacs_solution,
+                 assignment_identity))
+        try:
+            store.write(_do)
+        except Exception as exc:  # shadow must never break the authoritative inline path
+            print(f"[verify] pm_shadow_admit_failed error={exc!r}")
+
     # ---- M2: Lane A submit (solve-on-submit) ------------------------------
     @app.post("/v1/agents/submit")
     def agents_submit(
@@ -3198,8 +3775,11 @@ def build_app(
         x_cathedral_hotkey: str = Header(...),
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
+        x_cathedral_submit_mode: str = Header(default="", alias="X-Cathedral-Submit-Mode"),
         _slot: None = Depends(_submit_slot),
     ):
+        # Fairness clock: server time at handler entry, BEFORE any verification.
+        received_at_iso = _now_iso_ms()
         if card_id != _FAMILY:
             raise HTTPException(400, f"only card_id={_FAMILY} accepted (see skill.md)")
         if not dimacs_solution or not challenge_id:
@@ -3251,6 +3831,66 @@ def build_app(
             tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
             if tier_seq is None:
                 tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
+
+            # ---- TRACK 1: pm-* durable async admission (default-off) ----
+            # CHEAP inline checks already ran above: signature (_verify_hotkey_claim),
+            # body-size, and challenge ownership/recovery (tier_seq). The HEAVY work
+            # (CNF re-materialization + DIMACS verify + anti-copy witness check) moves
+            # to the async worker. We persist a pending receipt keyed by idempotency
+            # and return 202 immediately; the worker re-derives the miner's own CNF
+            # from assignment_identity and records the terminal accept/reject into the
+            # SAME ledger scoring reads. Replays of the same solution return the SAME
+            # receipt (no second attempt / no double payout). The signature is NOT
+            # burned at admission — the worker's atomic accept/reject burns it, keeping
+            # exactly-once replay semantics identical to the inline path.
+            want_sync_pm = x_cathedral_submit_mode.strip().lower() == "sync"
+            if (pm_submit_async_enabled and not pm_async_shadow_enabled
+                    and not want_sync_pm and tier_seq is not None):
+                # Body-size limit (cheap inline check). A pathological body is a hard
+                # 413 here — never persisted, never queued.
+                if len(dimacs_solution) > pm_submit_max_solution_bytes:
+                    _record_submit_event(
+                        "rejected", "solution_too_large",
+                        challenge_id=challenge_id, status_code=413, log=True)
+                    raise HTTPException(
+                        413, "solution_too_large",
+                        headers={"X-Cathedral-Rejection-Reason": "solution_too_large"})
+                # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
+                # so the worker can recover tier/seq even if the read replica is behind.
+                _record_one_perminer_assignment(
+                    assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
+                idem = submit_admission.idempotency_key(
+                    x_cathedral_hotkey, challenge_id, sol_sha)
+                receipt_id = "sub_" + new_uuid().replace("-", "")
+                outcome, row = submit_admission.admit_pending(
+                    store,
+                    receipt_id=receipt_id,
+                    idem_key=idem,
+                    miner_hotkey=x_cathedral_hotkey,
+                    challenge_id=challenge_id,
+                    dimacs_solution_sha256=sol_sha,
+                    dimacs_solution=dimacs_solution,
+                    submitted_at=submitted_at,
+                    received_at_iso=received_at_iso,
+                    signature=x_cathedral_signature,
+                    epoch=epoch,
+                    assignment_identity=assignment_identity,
+                )
+                receipt = submit_admission.receipt_from_row(row)
+                if outcome == "replayed":
+                    _record_submit_event(
+                        "accepted", "idempotent_replay",
+                        challenge_id=challenge_id, status_code=200)
+                    return JSONResponse(status_code=200, content=receipt)
+                _record_submit_event(
+                    "accepted", "admitted_pending",
+                    challenge_id=challenge_id, status_code=202)
+                return JSONResponse(status_code=202, content=receipt)
+            # When ownership/recovery failed (tier_seq is None) async mode falls
+            # through to the inline reject below — it is a cheap check, no heavy work
+            # runs, and the error contract stays byte-for-byte the synchronous one.
+            # ---- End pm-* durable async admission; inline path continues below ----
+
             if tier_seq is None:
                 check = None
                 ok, reason = False, "assignment_required_fetch_challenges_first"
@@ -3272,6 +3912,29 @@ def build_app(
                         ok, reason = pm.verify_miner_submission_for(
                             assignment_identity, epoch, tier_seq[0], tier_seq[1],
                             challenge_id, check.assignment)
+
+            # ---- TRACK 1: pm-* async SHADOW (default-off) ----
+            # The inline result above stays authoritative for payout. When shadow is
+            # on we ALSO persist a pending shadow row stamped with the inline verify
+            # verdict; the worker independently re-verifies it into the shadow_*
+            # columns and logs any async-vs-inline divergence. NO payout change: the
+            # shadow row never touches per_miner_solves / agent_submissions / eval_runs.
+            if pm_async_shadow_enabled and tier_seq is not None:
+                if len(dimacs_solution) <= pm_submit_max_solution_bytes:
+                    inline_marker = "__ranked__" if ok else (reason or "rejected")
+                    _admit_pm_shadow(
+                        challenge_id=challenge_id,
+                        miner_hotkey=x_cathedral_hotkey,
+                        signature=x_cathedral_signature,
+                        submitted_at=submitted_at,
+                        received_at_iso=received_at_iso,
+                        sol_sha=sol_sha,
+                        dimacs_solution=dimacs_solution,
+                        epoch=epoch,
+                        assignment_identity=assignment_identity,
+                        inline_marker=inline_marker,
+                    )
+
             sub_id = new_uuid()
 
             def _record_pm_attempt(reason: str) -> None:
@@ -3462,6 +4125,47 @@ def build_app(
 
         _remember_submit(rl_key, now)  # consume the slot only past the gates
 
+        # ---- Phase 4: durable admission (public lane, default-off) ----
+        # When CATHEDRAL_SUBMIT_ASYNC_ENABLED is on AND the client did not force
+        # the legacy path (X-Cathedral-Submit-Mode: sync), do only cheap work here:
+        # persist a pending receipt keyed by idempotency and return 202. The async
+        # verify_worker loads the CNF, runs verify_dimacs_solution, and records the
+        # ranked/rejected result + signed feed rows in received_at order. Replays of
+        # the same solution return the SAME receipt (no second attempt / no double
+        # payout). The signature is NOT burned at admission — burn happens in the
+        # worker's atomic accept/reject, preserving exactly-once replay semantics.
+        want_sync = x_cathedral_submit_mode.strip().lower() == "sync"
+        if submit_async_enabled and not want_sync:
+            idem = submit_admission.idempotency_key(
+                x_cathedral_hotkey, challenge_id, sol_sha)
+            receipt_id = "sub_" + new_uuid().replace("-", "")
+            outcome, row = submit_admission.admit_pending(
+                store,
+                receipt_id=receipt_id,
+                idem_key=idem,
+                miner_hotkey=x_cathedral_hotkey,
+                challenge_id=challenge_id,
+                dimacs_solution_sha256=sol_sha,
+                dimacs_solution=dimacs_solution,
+                submitted_at=submitted_at,
+                received_at_iso=received_at_iso,
+                signature=x_cathedral_signature,
+                epoch=0,
+            )
+            receipt = submit_admission.receipt_from_row(row)
+            if outcome == "replayed":
+                # Idempotent replay: echo the existing receipt with its current
+                # status. 200 (not 202) signals "already known" to the client.
+                _record_submit_event(
+                    "accepted", "idempotent_replay",
+                    challenge_id=challenge_id, status_code=200)
+                return JSONResponse(status_code=200, content=receipt)
+            _record_submit_event(
+                "accepted", "admitted_pending",
+                challenge_id=challenge_id, status_code=202)
+            return JSONResponse(status_code=202, content=receipt)
+        # ---- End durable admission; fall through to legacy synchronous path ----
+
         check = verify_dimacs_solution(chal["cnf_text"], dimacs_solution)
         sub_id = new_uuid()
         if not check.ok:
@@ -3642,6 +4346,261 @@ def build_app(
             "challenge_id": challenge_id, "weighted_score": ws,
             "solve_rank": rank, "attestation_status": "pending",
         }
+
+    # ---- Durable submit receipts (Phase 4) --------------------------------
+    @app.get("/v1/agents/receipts/{receipt_id}")
+    def agents_receipt(receipt_id: str):
+        """Look up a durable submit receipt by id. Returns the same receipt shape
+        the 202 admission returned, with `status` advancing pending -> ranked/
+        rejected as the async worker verifies. 404 if unknown."""
+        receipt = submit_admission.get_receipt(store, receipt_id)
+        if receipt is None:
+            raise HTTPException(404, "receipt_not_found")
+        return receipt
+
+    # ---- Async verification finalize (Phase 5) ----------------------------
+    # Mirror of the legacy inline public-lane _accept: one atomic txn that burns
+    # the signature, claims the distinct-solver slot, writes the submission row and
+    # the signed feed rows. Reused by the worker so the async path has IDENTICAL
+    # scoring/payout semantics to the synchronous path — only the timing differs.
+    def _accept_public_async(receipt_id, attempt_row, check, now_iso):
+        challenge_id = str(attempt_row["challenge_id"])
+        miner_hotkey = str(attempt_row["miner_hotkey"])
+        signature = str(attempt_row["signature"])
+        submitted_at = attempt_row["submitted_at"]
+        chal_rows = store.query(
+            "SELECT * FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
+        if not chal_rows:
+            return ("challenge_not_active", None, None, None)
+        chal = chal_rows[0]
+        if chal["status"] not in ("active", "locked"):
+            return ("challenge_not_active", None, None, None)
+        row_uuid = new_uuid()
+        answer_hash = sha256_hex(",".join(str(x) for x in check.assignment))
+        sol_sha = str(attempt_row["dimacs_solution_sha256"])
+        verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
+        lock_wins = scoring.submit_mode() == "lock_wins"
+
+        def _accept(conn):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                (signature, now_iso))
+            if not cur.rowcount:
+                return ("replayed_signature", None, None, None)
+            if lock_wins:
+                locked = conn.execute(
+                    "UPDATE lane_challenges SET status='locked' "
+                    "WHERE challenge_id=? AND status='active'", (challenge_id,))
+                if locked.rowcount != 1:
+                    return ("challenge_already_locked", None, None, None)
+                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso) or 1
+            else:
+                active = conn.execute(
+                    "UPDATE lane_challenges SET updated_at_iso=? "
+                    "WHERE challenge_id=? AND status='active'", (now_iso, challenge_id))
+                if active.rowcount != 1:
+                    return ("challenge_not_active", None, None, None)
+                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso)
+                if rank is None:
+                    return ("already_solved", None, None, None)
+            score_multiplier = float(chal["score_multiplier"])
+            ws = (
+                scoring.weighted_score_for(store, miner_hotkey)
+                * score_multiplier
+                * _public_row_score_multiplier()
+            )
+            conn.execute(
+                "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
+                "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
+                "VALUES (?, ?, ?, 'ranked', NULL, ?, ?, ?, ?)",
+                (receipt_id, miner_hotkey, challenge_id, ws, rank,
+                 submitted_at, signature))
+            emitted = rows.build_solve_rows(
+                row_uuid=row_uuid, miner_hotkey=miner_hotkey,
+                agent_id=new_uuid(), challenge_id=challenge_id, tier=chal["tier"],
+                weighted_score=ws, answer_hash=answer_hash,
+                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                epoch_salt=epoch_salt, solve_rank=rank, solved=True,
+                private_key_hex=key_hex,
+            )
+            for r in emitted:
+                conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
+                     r["miner_hotkey"], r["task_type"], json.dumps(r)))
+            # Advance the receipt to its terminal ranked result in the SAME txn so a
+            # crash between feed rows and receipt update cannot exist.
+            conn.execute(
+                "UPDATE per_miner_attempts SET status='ranked', rejection_reason=NULL, "
+                "verified_at_iso=?, recorded_at_iso=?, solve_rank=?, weighted_score=?, "
+                "eval_run_id=?, solution_body=NULL, locked_by=NULL, locked_until_iso=NULL "
+                "WHERE id=?",
+                (now_iso, now_iso, rank, ws, row_uuid, receipt_id))
+            return (None, rank, ws, row_uuid)
+
+        err, rank, ws, eval_run_id = store.write(_accept)
+        if err is None and lock_wins:
+            board_cache_mod.invalidate_all()
+        return (err, rank, ws, eval_run_id)
+
+    def _async_verify_load_cnf(challenge_id):
+        rows_ = store.query(
+            "SELECT cnf_text FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
+        return rows_[0]["cnf_text"] if rows_ else None
+
+    # ---- TRACK 1: pm-* worker resolve+verify and atomic accept ------------
+    # The HEAVY pm-* work the inline handler used to do on the request path: from
+    # the durable attempt row, re-derive the miner's OWN CNF off assignment_identity,
+    # run the DIMACS satisfaction check, then the anti-copy ownership/witness check.
+    # Returns (ok, reason, check) where `check` carries the verified assignment and
+    # the resolved (tier, seq) used to build the witness — same logic as inline.
+    def _pm_resolve_and_verify(attempt_row):
+        from . import per_miner as pm
+        challenge_id = str(attempt_row["challenge_id"])
+        identity = attempt_row["assignment_identity"] or str(attempt_row["miner_hotkey"])
+        epoch = int(attempt_row["epoch"] or 0)
+        body = attempt_row["solution_body"]
+        tier_seq = _lookup_perminer_assignment(identity, epoch, challenge_id)
+        if tier_seq is None:
+            tier_seq = pm.recover_tier_seq_for(identity, epoch, challenge_id)
+        if tier_seq is None:
+            return (False, "assignment_required_fetch_challenges_first", None)
+        cnf = pm.get_miner_cnf(identity, epoch, tier_seq[0], tier_seq[1])
+        if cnf is None:
+            return (False, "challenge_id_not_in_miner_set", None)
+        _cid, cnf_text = cnf
+        check = verify_dimacs_solution(cnf_text, body)
+        if not check.ok:
+            return (False, check.rejection_reason, None)
+        ok, reason = pm.verify_miner_submission_for(
+            identity, epoch, tier_seq[0], tier_seq[1], challenge_id, check.assignment)
+        if not ok:
+            return (False, reason, None)
+        # Stash tier/seq on the check so the accept path needs no second lookup.
+        return (True, None, (check, tier_seq[0], tier_seq[1], identity, epoch))
+
+    # Mirror of the inline `_pm_accept`: one atomic txn that burns the signature,
+    # claims the distinct per-miner solve (NO double payout), writes the submission,
+    # witness, and signed feed rows, and advances the receipt to its terminal ranked
+    # result. Reused by the worker so the async pm path has IDENTICAL payout/scoring
+    # semantics to the synchronous one — only the timing differs.
+    def _accept_pm_async(receipt_id, attempt_row, resolved, now_iso):
+        from . import per_miner as pm
+        check, tier, seq, _identity, epoch = resolved
+        challenge_id = str(attempt_row["challenge_id"])
+        miner_hotkey = str(attempt_row["miner_hotkey"])
+        signature = str(attempt_row["signature"])
+        submitted_at = attempt_row["submitted_at"]
+        sol_sha = str(attempt_row["dimacs_solution_sha256"])
+        dimacs_solution = attempt_row["solution_body"]
+        pm_weight = pm.weight_for(tier)
+        row_uuid = new_uuid()
+        answer_hash = sha256_hex(",".join(str(x) for x in check.assignment))
+        verifier_details_hash = sha256_hex(f"{challenge_id}:{sol_sha}")
+
+        def _accept(conn):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO submit_signatures(signature, seen_at) VALUES (?, ?)",
+                (signature, now_iso))
+            if not cur.rowcount:
+                return "replayed_signature"
+            solved = conn.execute(
+                "INSERT OR IGNORE INTO per_miner_solves"
+                "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, "
+                "verified, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (challenge_id, miner_hotkey, epoch, tier, seq, pm_weight, 1, now_iso))
+            if not solved.rowcount:
+                return "already_solved"
+            conn.execute(
+                "INSERT INTO agent_submissions(id, miner_hotkey, sat_challenge_id, "
+                "status, rejection_reason, current_score, seq_no, submitted_at, signature) "
+                "VALUES (?, ?, ?, 'ranked', NULL, ?, 1, ?, ?)",
+                (receipt_id, miner_hotkey, challenge_id, pm_weight, submitted_at,
+                 signature))
+            conn.execute(
+                "INSERT INTO per_miner_witnesses(challenge_id, miner_hotkey, epoch, "
+                "tier, seq, dimacs_solution_sha256, answer_hash, dimacs_solution, "
+                "recorded_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (challenge_id, miner_hotkey, epoch, tier, seq, sol_sha,
+                 answer_hash, dimacs_solution, now_iso))
+            emitted = rows.build_solve_rows(
+                row_uuid=row_uuid, miner_hotkey=miner_hotkey,
+                agent_id=new_uuid(), challenge_id=challenge_id, tier=tier,
+                weighted_score=pm_weight, answer_hash=answer_hash,
+                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                epoch_salt=epoch_salt, solve_rank=1, solved=True,
+                private_key_hex=key_hex,
+            )
+            for r in emitted:
+                conn.execute(
+                    "INSERT OR IGNORE INTO eval_runs "
+                    "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
+                     r["miner_hotkey"], r["task_type"], json.dumps(r)))
+            # Advance the receipt to its terminal ranked result in the SAME txn so a
+            # crash between feed rows and receipt update cannot exist.
+            conn.execute(
+                "UPDATE per_miner_attempts SET status='ranked', rejection_reason=NULL, "
+                "verified_at_iso=?, recorded_at_iso=?, solve_rank=1, weighted_score=?, "
+                "eval_run_id=?, solution_body=NULL, locked_by=NULL, locked_until_iso=NULL "
+                "WHERE id=?",
+                (now_iso, now_iso, pm_weight, row_uuid, receipt_id))
+            return None
+
+        return store.write(_accept)
+
+    def _pm_log_divergence(*, challenge_id, receipt_id, inline_status,
+                           async_status, async_reason):
+        print("[verify] pm_shadow_divergence " + json.dumps({
+            "challenge_id": challenge_id, "receipt_id": receipt_id,
+            "inline": inline_status, "async": async_status,
+            "async_reason": async_reason,
+        }, sort_keys=True))
+        _record_submit_event(
+            "shadow_divergence", str(async_reason or async_status),
+            challenge_id=challenge_id)
+
+    def _async_verify_tick(*, worker_id, batch_size=8, lock_secs=120):
+        """Claim and verify up to `batch_size` pending attempts. Returns the count
+        processed. Safe to call from a loop or a test. The claim is kind-agnostic and
+        ordered by received_at (fairness); each row is dispatched to the finalizer for
+        its challenge_kind — public, per_miner (authoritative), or per_miner_shadow."""
+        now_iso = _now_iso_ms()
+        deadline = _now_iso_ms_plus(lock_secs)
+        claimed = submit_admission.claim_pending(
+            store, worker_id=worker_id, now_iso=now_iso,
+            lock_deadline_iso=deadline, batch_size=batch_size)
+        for attempt in claimed:
+            kind = attempt["challenge_kind"]
+            rec = (lambda outcome, reason, challenge_id=None:
+                   _record_submit_event(outcome, reason, challenge_id=challenge_id))
+            if kind == submit_admission.KIND_PER_MINER_SHADOW:
+                submit_admission.finalize_pm_shadow(
+                    store, attempt, now_iso=_now_iso_ms(),
+                    resolve_and_verify=_pm_resolve_and_verify,
+                    log_divergence=_pm_log_divergence,
+                )
+            elif kind == submit_admission.KIND_PER_MINER:
+                submit_admission.finalize_pm_attempt(
+                    store, attempt, now_iso=_now_iso_ms(),
+                    resolve_and_verify=_pm_resolve_and_verify,
+                    accept_pm=_accept_pm_async,
+                    record_event=rec,
+                )
+            else:
+                submit_admission.finalize_attempt(
+                    store, attempt, now_iso=_now_iso_ms(),
+                    load_cnf=_async_verify_load_cnf,
+                    verify_dimacs=verify_dimacs_solution,
+                    accept_public=_accept_public_async,
+                    record_event=rec,
+                )
+        return len(claimed)
+
+    app.state.async_verify_tick = _async_verify_tick
 
     # ---- M3: Lane S registry ----------------------------------------------
     @app.post("/v1/arena/solvers")

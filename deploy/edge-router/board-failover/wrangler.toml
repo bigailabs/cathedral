@@ -1,0 +1,96 @@
+name = "cathedral-board-failover"
+main = "worker.js"
+compatibility_date = "2026-06-25"
+workers_dev = true
+preview_urls = true
+
+# Board-failover routes the cheap Tier-1 board reads (BOARD_ORIGIN, a read
+# origin) AND, because it shares the api.cathedral.computer hot paths, the
+# submit-role paths (SUBMIT_ORIGIN). It deliberately does NOT claim
+# /v1/leaderboard/recent or /v1/leaderboard/top: those stay on the main edge
+# router / existing read service so the slow leaderboard hog cannot starve the
+# board.
+#
+# ROLE SPLIT (must match worker.js classifyBoardRequest + the main edge router):
+#   - read-role board reads  -> BOARD_ORIGIN  (default read.cathedral.computer)
+#   - submit-role paths       -> SUBMIT_ORIGIN (default submit.cathedral.computer)
+# Submit-role paths (active-cnf, per-miner/challenges, per-miner/cnf,
+# /v1/challenges/*, POST /v1/agents/submit) are served by the SUBMIT origin in
+# prod; a read origin 404s them. They are routed here so that, when board
+# failover owns these api.cathedral.computer paths, submit still reaches the
+# submit origin. Do NOT point them at BOARD_ORIGIN/LEADERBOARD_ORIGIN.
+#
+# Attach these routes ONLY during/after a board 504 incident, after the board
+# origin (BOARD_ORIGIN) is confirmed green. Attaching a route here moves that
+# exact path off the main edge router. See README.md for cutover + rollback.
+#
+# Leave commented until you are deliberately cutting the board over.
+#
+# !!! NEVER ATTACH THIS WORKER AS A CATCH-ALL !!!
+# This worker DEFAULT-DENIES (404) any path it does not explicitly classify
+# (worker.js classifyBoardRequest -> tier "none"). That is safe ONLY because the
+# routes below are exact hot paths. A catch-all pattern such as
+#   { pattern = "api.cathedral.computer/*", zone_name = "cathedral.computer" }
+# would 404 EVERY unrelated API (health, jwks, /v1/validator/weights/next, admin,
+# leaderboard/explain, ...) and take the whole surface down. Only ever uncomment
+# the per-path patterns listed here. See README.md "NEVER attach as catch-all".
+routes = [
+  # --- READ-role board reads -> BOARD_ORIGIN ---
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-challenges*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/challenge-broadcast*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/current-challenge*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/status*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/summary*", zone_name = "cathedral.computer" },
+
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/active-challenges*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/challenge-broadcast*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/current-challenge*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/status*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/summary*", zone_name = "cathedral.computer" },
+
+  # --- SUBMIT-role paths -> SUBMIT_ORIGIN (NOT a read origin) ---
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-cnf*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/challenges*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/challenges/*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
+
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/active-cnf*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/challenges*", zone_name = "cathedral.computer" },
+  # { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
+]
+
+# OPT-IN durable last-known-good (LKG) for the cheap board reads, mirroring the
+# weights-failover pattern. When this KV namespace is bound, healthy board-tier
+# responses are mirrored to KV and served as last-known-good if the board origin
+# is unhealthy (5xx / timeout / network error). DEFAULT-OFF: leave this commented
+# and the worker behaves exactly as before (origin failure returns 504); only the
+# board tier ever participates (submit/leaderboard are never mirrored).
+# Create with: wrangler kv:namespace create BOARD_LKG
+# then paste the returned id below and uncomment.
+# kv_namespaces = [
+#   { binding = "BOARD_LKG", id = "<paste-BOARD_LKG-kv-namespace-id>" },
+# ]
+
+[vars]
+# BOARD_ORIGIN: the healthy publisher (read) origin that serves the cheap board
+# snapshots. Point this at a publisher/read service that is NOT carrying the
+# slow /v1/leaderboard/recent load. During the acute incident this can stay on
+# read.cathedral.computer if (and only if) the leaderboard load has been moved
+# off it; the durable fix is to give the board its own origin.
+BOARD_ORIGIN = "https://read.cathedral.computer"
+BOARD_ORIGIN_RESOLVE_OVERRIDE = ""
+
+# LEADERBOARD_ORIGIN: the existing read service. The slow leaderboard hog stays
+# here, isolated, so it can saturate only itself.
+LEADERBOARD_ORIGIN = "https://read.cathedral.computer"
+
+# SUBMIT_ORIGIN: the submit service. Submit-role paths (active-cnf,
+# per-miner/challenges, per-miner/cnf, /v1/challenges/*, POST submit) are served
+# here in prod. A read origin 404s them, so this MUST be the submit origin.
+SUBMIT_ORIGIN = "https://submit.cathedral.computer"
+SUBMIT_ORIGIN_RESOLVE_OVERRIDE = ""
+
+BOARD_ORIGIN_TIMEOUT_MS = "4500"
+LEADERBOARD_ORIGIN_TIMEOUT_MS = "9000"
+SUBMIT_ORIGIN_TIMEOUT_MS = "10000"
