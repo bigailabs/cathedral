@@ -10,6 +10,24 @@ without changing SAT scoring semantics or interrupting current miner earnings.
 - This is backward-compatible for miners, but it couples dashboard reads,
   submit verification, PM CNF generation, and refill/scoring background work.
 
+## Shared Config (all services)
+
+These must be identical on every service:
+
+```text
+CATHEDRAL_CNF_TOKEN_SECRET=<one shared value>
+```
+
+`CATHEDRAL_CNF_TOKEN_SECRET` is the HMAC secret for CNF fetch tokens. The
+active-cnf token may be issued on one replica/service and redeemed on another, so
+the secret must be the same everywhere or CNF fetch fails across replicas. Never
+let it drift between services.
+
+The per-service env below is also encoded in `deploy/railway-split.ps1`, which is
+a dry-run by default (`-Apply` to set live). Re-running that script restores the
+safe defaults and cannot quietly reset submit to cap `1` or drop the read
+statement timeout.
+
 ## Target Services
 
 ### 1. Read Service
@@ -23,7 +41,16 @@ CATHEDRAL_SERVICE_ROLE=read
 CATHEDRAL_REFILL_ENABLED=false
 CATHEDRAL_SEED_ON_BOOT=false
 WEB_CONCURRENCY=2
+CATHEDRAL_PM_READ_HARD_CAP=128
+CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000
 ```
+
+`CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000` is mandatory on every read-serving
+service. With no statement timeout, `/v1/leaderboard/recent` was observed running
+30-46s and exhausting the connection pool, which took the read origin down. A 4s
+ceiling bounds any single query so one slow board scan cannot pin pool
+connections. The app logs a loud startup `WARNING` if a read-serving role
+(`read` or `all`) boots with this value unset or `0`; do not ignore it.
 
 Guarded knob (off by default): if a slow `/v1/leaderboard/recent` is
 head-of-line-blocking the cheap board reads, you may raise `WEB_CONCURRENCY` so
@@ -70,11 +97,22 @@ Required env:
 CATHEDRAL_SERVICE_ROLE=submit
 CATHEDRAL_REFILL_ENABLED=false
 CATHEDRAL_SEED_ON_BOOT=false
-CATHEDRAL_SUBMIT_HARD_CAP=1
-CATHEDRAL_PM_READ_HARD_CAP=1
-CATHEDRAL_THREADPOOL_TOKENS=16
-CATHEDRAL_PG_POOL_MAX=16
+CATHEDRAL_SUBMIT_HARD_CAP=8
+CATHEDRAL_SUBMIT_MAX_CONCURRENCY=24
+WEB_CONCURRENCY=2
+CATHEDRAL_PM_READ_HARD_CAP=128
+CATHEDRAL_THREADPOOL_TOKENS=32
+CATHEDRAL_PG_POOL_MAX=32
+CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000
 ```
+
+Do NOT set `CATHEDRAL_SUBMIT_HARD_CAP=1` here. A hard cap of `1` serializes the
+whole submit lane: two overlapping submits make one miner get
+`429 submit_busy_retry`. The effective cap is `min(CATHEDRAL_SUBMIT_MAX_CONCURRENCY,
+CATHEDRAL_SUBMIT_HARD_CAP)`. Start at `8` and only test `16` after the service is
+proven stable at `8`. Likewise do not set `CATHEDRAL_PM_READ_HARD_CAP=1`; `128` is
+the safe per-miner read gate. The submit service also serves `active-cnf` reads, so
+it carries the same `CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000` ceiling.
 
 Allowed traffic:
 

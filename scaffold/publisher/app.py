@@ -212,6 +212,47 @@ def _role_runs_read_background(role: str) -> bool:
     return role in {"all", "read"}
 
 
+def _role_serves_reads(role: str) -> bool:
+    # "read" serves the public board/leaderboard/weights surface; "all" still
+    # serves the same routes in the single-service deploy. Both must run with a
+    # bounded Postgres statement timeout so a single slow board query (the
+    # /v1/leaderboard/recent 30-46s scans seen in prod) cannot pin a pool
+    # connection and starve every other reader.
+    return role in {"all", "read"}
+
+
+def _statement_timeout_guard_warning(role: str, raw_value: str | None) -> str | None:
+    """Return a loud warning string if a read-serving role boots without a
+    positive CATHEDRAL_PG_STATEMENT_TIMEOUT_MS, else None.
+
+    Unset or 0 (Postgres' "no timeout" sentinel) is the exact missing value that
+    let /v1/leaderboard/recent run 30-46s and exhaust the connection pool. We
+    warn rather than hard-fail so an operator can still boot in an emergency.
+    """
+    if not _role_serves_reads(role):
+        return None
+    try:
+        value = int((raw_value or "0").strip() or "0")
+    except ValueError:
+        value = 0
+    if value > 0:
+        return None
+    return (
+        "[runtime] WARNING: CATHEDRAL_PG_STATEMENT_TIMEOUT_MS is unset/0 for "
+        f"read-serving role {role!r}. A single slow board query (e.g. "
+        "/v1/leaderboard/recent at 30-46s) can pin pool connections and take "
+        "the read origin down. Set CATHEDRAL_PG_STATEMENT_TIMEOUT_MS=4000."
+    )
+
+
+def _check_read_statement_timeout(role: str) -> None:
+    warning = _statement_timeout_guard_warning(
+        role, os.environ.get("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS")
+    )
+    if warning:
+        print(warning)
+
+
 def build_app(
     *,
     database_path: str = ":memory:",
@@ -223,6 +264,7 @@ def build_app(
     jwks_doc = rows.jwks_from_key(key_hex)
     store = Store(database_path)
     service_role = _service_role_from_env()
+    _check_read_statement_timeout(service_role)
     verifier = default_verifier()
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
