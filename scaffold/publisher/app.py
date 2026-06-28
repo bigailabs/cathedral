@@ -1985,6 +1985,9 @@ def build_app(
         }
 
     recent_snapshot_limit = _env_int("CATHEDRAL_RECENT_SNAPSHOT_LIMIT", 50)
+    recent_no_cursor_max_limit = _env_int(
+        "CATHEDRAL_RECENT_NO_CURSOR_MAX_LIMIT", recent_snapshot_limit
+    )
     recent_snapshot = MaterializedSnapshot(
         "leaderboard-recent",
         lambda: _recent_payload(None, None, recent_snapshot_limit),
@@ -2006,7 +2009,8 @@ def build_app(
         cur_id = since_id
         cache_status = "cursor"
         if cur_ran_at is None and cur_id is None:
-            if materialized_snapshot_mod.enabled() and int(limit) == recent_snapshot_limit:
+            effective_limit = min(int(limit), max(1, recent_no_cursor_max_limit))
+            if materialized_snapshot_mod.enabled() and effective_limit == recent_snapshot_limit:
                 served = recent_snapshot.get()
                 if served is not None:
                     payload, etag, meta = served
@@ -2015,8 +2019,8 @@ def build_app(
                     headers["X-Cathedral-Cache"] = "materialized"
                     return _conditional_response(payload, etag, headers, request)
             payload, cache_status = recent_cache.get(
-                int(limit),
-                lambda: _recent_payload(None, None, limit),
+                effective_limit,
+                lambda: _recent_payload(None, None, effective_limit),
                 # This endpoint is a validator compatibility contract, not just
                 # dashboard visibility. Older validators may call it without a
                 # cursor, so the first response must contain signed rows instead
