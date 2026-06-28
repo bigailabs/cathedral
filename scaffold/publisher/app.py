@@ -73,6 +73,24 @@ _CNF_TOKEN_SECRET_ENV = "CATHEDRAL_CNF_TOKEN_SECRET"
 _CNF_PUBLIC_BASE_URL_ENV = "CATHEDRAL_CNF_PUBLIC_BASE_URL"
 
 
+def _retry_after_payload(reason: str, retry_after_secs: int) -> dict[str, Any]:
+    retry_after_secs = max(1, int(retry_after_secs))
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=retry_after_secs)
+    return {
+        "detail": reason,
+        "reason": reason,
+        "retry_after_seconds": retry_after_secs,
+        "retry_at": retry_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    }
+
+
+def _retry_after_body(reason: str, retry_after_secs: int) -> bytes:
+    return json.dumps(
+        _retry_after_payload(reason, retry_after_secs),
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, str(default)) or default)
@@ -615,7 +633,7 @@ def build_app(
             )
             raise HTTPException(
                 429,
-                "submit_busy_retry",
+                _retry_after_payload("submit_busy_retry", 1),
                 headers={
                     "Retry-After": "1",
                     "X-Cathedral-Rejection-Reason": "submit_busy_retry",
@@ -969,15 +987,16 @@ def build_app(
                     status_code=429,
                     log=True,
                 )
-                body = reason.encode("utf-8")
+                retry_after_secs = 1
+                body = _retry_after_body(reason, retry_after_secs)
                 await send({
                     "type": "http.response.start",
                     "status": 429,
                     "headers": [
-                        (b"content-type", b"text/plain; charset=utf-8"),
+                        (b"content-type", b"application/json"),
                         (b"content-length", str(len(body)).encode()),
-                        (b"retry-after", b"1"),
-                        (b"x-cathedral-rejection-reason", body),
+                        (b"retry-after", str(retry_after_secs).encode()),
+                        (b"x-cathedral-rejection-reason", reason.encode("utf-8")),
                     ],
                 })
                 await send({

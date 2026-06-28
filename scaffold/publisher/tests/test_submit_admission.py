@@ -564,6 +564,12 @@ def test_backpressure_bounded_wait_then_429_when_gate_exhausted(tmp_path, monkey
 
     assert r2.status_code == 429, r2.text
     assert r2.headers.get("retry-after") is not None
+    assert r2.headers.get("x-cathedral-rejection-reason") == "submit_busy_retry"
+    assert r2.headers.get("content-type") == "application/json"
+    retry_payload = r2.json()
+    assert retry_payload["detail"] == "submit_busy_retry"
+    assert retry_payload["retry_after_seconds"] >= 1
+    assert retry_payload["retry_at"].endswith("Z")
     assert elapsed >= 0.3, f"did not wait the bounded window (elapsed={elapsed:.3f}s)"
     # the held request still succeeded once it got the slot
     assert results["hold"].status_code == 200
