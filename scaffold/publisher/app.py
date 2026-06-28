@@ -1988,6 +1988,7 @@ def build_app(
     recent_no_cursor_max_limit = _env_int(
         "CATHEDRAL_RECENT_NO_CURSOR_MAX_LIMIT", recent_snapshot_limit
     )
+    recent_cold_async = _env_bool("CATHEDRAL_RECENT_COLD_ASYNC", True)
     recent_snapshot = MaterializedSnapshot(
         "leaderboard-recent",
         lambda: _recent_payload(None, None, recent_snapshot_limit),
@@ -2021,11 +2022,8 @@ def build_app(
             payload, cache_status = recent_cache.get(
                 effective_limit,
                 lambda: _recent_payload(None, None, effective_limit),
-                # This endpoint is a validator compatibility contract, not just
-                # dashboard visibility. Older validators may call it without a
-                # cursor, so the first response must contain signed rows instead
-                # of an empty warming placeholder.
-                cold_async=False,
+                cold_async=recent_cold_async,
+                cold_value=lambda: _recent_warming_payload(effective_limit),
             )
         else:
             payload = _recent_payload(cur_ran_at, cur_id, limit)
