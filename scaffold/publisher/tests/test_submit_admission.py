@@ -7,6 +7,7 @@ bounded wait, and the per-request sync override.
 """
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -68,8 +69,11 @@ def _submit(client, kp, *, challenge_id, solution, extra_headers=None,
 
 
 def _build(tmp_path, monkeypatch, *, async_on=False, verify_on=None, busy_wait="0.0",
-           max_conc="24", hard_cap="8", service_role=None):
+           max_conc="24", hard_cap="8", service_role=None, require_worker=False):
     monkeypatch.setenv("CATHEDRAL_SUBMIT_ASYNC_ENABLED", "true" if async_on else "false")
+    monkeypatch.setenv(
+        "CATHEDRAL_SUBMIT_ASYNC_REQUIRE_WORKER",
+        "true" if require_worker else "false")
     monkeypatch.setenv("CATHEDRAL_SUBMIT_BUSY_WAIT_SECS", busy_wait)
     monkeypatch.setenv("CATHEDRAL_SUBMIT_MAX_CONCURRENCY", max_conc)
     monkeypatch.setenv("CATHEDRAL_SUBMIT_HARD_CAP", hard_cap)
@@ -265,15 +269,31 @@ def test_public_async_oversized_body_is_413_never_queued(tmp_path, monkeypatch):
     assert n == 0
 
 
+def test_public_async_fails_closed_without_worker_heartbeat(tmp_path, monkeypatch):
+    app, store = _build(tmp_path, monkeypatch, async_on=True, require_worker=True)
+    kp = _keypair()
+    with TestClient(app) as client:
+        r = _submit(client, kp, challenge_id="c-1", solution=SOLUTION)
+    assert r.status_code == 503, r.text
+    assert r.headers["X-Cathedral-Rejection-Reason"] == "async_worker_unavailable"
+    n = store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
+                    "WHERE idempotency_key IS NOT NULL")[0]["n"]
+    assert n == 0
+
+
 # ---------------------------------------------------------------------------
 # Worker verification: accept emits signed rows, no double payout
 # ---------------------------------------------------------------------------
 def test_worker_verifies_pending_to_ranked_and_emits_one_feed_pair(tmp_path, monkeypatch):
     app, store = _build(tmp_path, monkeypatch, async_on=True)
     kp = _keypair()
+    received_at = "2026-06-27T00:00:01.000Z"
     with TestClient(app) as client:
         r = _submit(client, kp, challenge_id="c-1", solution=SOLUTION)
         rid = r.json()["receipt_id"]
+        store.write(lambda conn: conn.execute(
+            "UPDATE per_miner_attempts SET received_at_iso=? WHERE id=?",
+            (received_at, rid)))
         # drive the worker tick manually (same closure the bg loop uses)
         processed = app.state.async_verify_tick(worker_id="t", batch_size=8)
         assert processed == 1
@@ -295,6 +315,13 @@ def test_worker_verifies_pending_to_ranked_and_emits_one_feed_pair(tmp_path, mon
     solves = store.query("SELECT COUNT(*) AS n FROM lane_challenge_solves "
                          "WHERE challenge_id='c-1'")[0]["n"]
     assert solves == 1
+    solved_at = store.query(
+        "SELECT solved_at_iso FROM lane_challenge_solves WHERE challenge_id='c-1'"
+    )[0]["solved_at_iso"]
+    assert solved_at == received_at
+    feed_rows = store.query("SELECT row_json FROM eval_runs WHERE miner_hotkey=?",
+                            (kp.ss58_address,))
+    assert {json.loads(r["row_json"])["ran_at"] for r in feed_rows} == {received_at}
 
 
 def test_replay_after_verification_does_not_double_pay(tmp_path, monkeypatch):
