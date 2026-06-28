@@ -126,6 +126,19 @@ def _submit(client, kp, *, challenge_id, solution, extra_headers=None,
     )
 
 
+def _pm_read_headers(kp, *, submitted_at=None):
+    ts = submitted_at or _now_iso()
+    msg = canonical_claim_bytes(
+        bundle_hash=_EMPTY_BUNDLE, card_id=_FAMILY, miner_hotkey=kp.ss58_address,
+        submitted_at=ts, challenge_id="", dimacs_solution_sha256="")
+    sig = base64.b64encode(kp.sign(msg)).decode("ascii")
+    return {
+        "X-Cathedral-Hotkey": kp.ss58_address,
+        "X-Cathedral-Signature": sig,
+        "X-Cathedral-Submitted-At": ts,
+    }
+
+
 def _metrics(client):
     r = client.get(
         "/v1/admin/synthetic-boolean/submit-metrics",
@@ -179,6 +192,44 @@ def test_pm_legacy_reject_contract_unchanged_when_off(tmp_path, monkeypatch):
         "solution_unsatisfied", "witness_check_failed"}
     assert _solves(store, cid, kp.ss58_address) == 0
     assert _feed_pairs(store, kp.ss58_address) == 0
+
+
+def test_pm_cnf_fetch_recovers_without_assignment_row_or_legacy_scan_flag(
+        tmp_path, monkeypatch):
+    app, store = _build(tmp_path, monkeypatch, pm_async=False)
+    monkeypatch.setenv("CATHEDRAL_PERMINER_LEGACY_ID_SCAN", "0")
+    kp = _keypair("//PMFetchNoAssignment")
+
+    with TestClient(app) as client:
+        headers = _pm_read_headers(kp)
+        listed = client.get(
+            "/v1/synthetic-boolean/per-miner/challenges",
+            headers=headers,
+        )
+        assert listed.status_code == 200, listed.text
+        item = listed.json()["items"][-1]
+        before = store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_assignments "
+            "WHERE challenge_id=?",
+            (item["challenge_id"],),
+        )[0]["n"]
+
+        cnf = client.get(
+            "/v1/synthetic-boolean/per-miner/cnf",
+            params={"challenge_id": item["challenge_id"]},
+            headers=headers,
+        )
+
+    assert before == 0
+    assert cnf.status_code == 200, cnf.text
+    assert cnf.headers["X-Perminer-Challenge-Id"] == item["challenge_id"]
+    assert int(cnf.headers["X-Perminer-Tier"]) == int(item["tier"])
+    assert int(cnf.headers["X-Perminer-Seq"]) == int(item["seq"])
+    after = store.query(
+        "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE challenge_id=?",
+        (item["challenge_id"],),
+    )[0]["n"]
+    assert after == 1
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +465,9 @@ def test_queue_metrics_populate(tmp_path, monkeypatch):
         _submit(client, kp, challenge_id=cid, solution=body)
         q1 = _metrics(client)["queue"]
         assert q1["total_pending"] == 1
+        assert q1["by_status"]["pending"] == 1
+        assert q1["admitted_in_window"] >= 1
+        assert q1["admitted_per_sec"] > 0.0
         assert q1["oldest_received_at"] is not None
         assert q1["worker_lag_secs"] is not None and q1["worker_lag_secs"] >= 0.0
         assert "per_miner" in q1["by_kind"]
@@ -423,6 +477,8 @@ def test_queue_metrics_populate(tmp_path, monkeypatch):
         q2 = _metrics(client)["queue"]
         assert q2["total_pending"] == 0
         assert q2["accepted_in_window"] >= 1
+        assert q2["ranked_in_window"] >= 1
+        assert q2["ranked_per_sec"] > 0.0
 
 
 def test_queue_metrics_worker_lag_grows_with_oldest_pending(tmp_path, monkeypatch):

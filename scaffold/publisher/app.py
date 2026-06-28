@@ -38,6 +38,7 @@ from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
 from . import keys, rows, scoring, top_cache as top_cache_mod, weights as weights_mod
 from . import materialized_snapshot as materialized_snapshot_mod
+from . import dashboard_snapshot as dashboard_snapshot_mod
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
 from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
@@ -48,6 +49,12 @@ from .per_hotkey_limit import (
     ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
     PerHotkeyLimiter,
     config_from_env as per_hotkey_config_from_env,
+)
+from .pressure_telemetry import (
+    PressureTelemetry,
+    PressureTelemetryMiddleware,
+    config_from_env as pressure_config_from_env,
+    mark_verified_hotkey,
 )
 from .store import Store, new_uuid
 
@@ -346,9 +353,26 @@ def build_app(
         submit_async_enabled and _vw_flags.pm_async_enabled())
     pm_async_shadow_enabled = (
         pm_submit_async_enabled and _vw_flags.pm_async_shadow())
-    # Body-size limit for the cheap inline check (chars of the DIMACS solution).
+    # Body-size limits for the cheap async admission checks.
+    submit_max_solution_bytes = _env_int(
+        "CATHEDRAL_SUBMIT_MAX_SOLUTION_BYTES", 1_000_000)
     pm_submit_max_solution_bytes = _env_int(
         "CATHEDRAL_PM_SUBMIT_MAX_SOLUTION_BYTES", 1_000_000)
+    submit_queue_backpressure_enabled = _env_bool(
+        "CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED", False)
+    submit_queue_backpressure = (
+        {
+            "max_pending": _env_int("CATHEDRAL_SUBMIT_QUEUE_MAX_PENDING", 0),
+            "max_worker_lag_secs": _env_float(
+                "CATHEDRAL_SUBMIT_QUEUE_MAX_WORKER_LAG_SECS", 0.0),
+            "worker_stale_secs": _env_float(
+                "CATHEDRAL_SUBMIT_QUEUE_WORKER_STALE_SECS",
+                max(10.0, float(_vw_flags.lock_secs()))),
+        }
+        if submit_queue_backpressure_enabled else None
+    )
+    submit_queue_backpressure_retry_after = max(
+        1, _env_int("CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_RETRY_AFTER_SECS", 5))
     # Track 2 (item 7): per-hotkey fairness limiter — abuse control distinct from
     # the global saturation gate. DEFAULT OFF (see per_hotkey_limit.py); when off
     # `allow()` is a no-op so live behaviour is unchanged. Rejections from this
@@ -409,6 +433,31 @@ def build_app(
             del recent[:-25]
         if log and submit_log_events:
             print("[submit] " + json.dumps(event, sort_keys=True))
+
+    def _raise_submit_queue_backpressure(
+        challenge_id: str, decision: dict[str, Any]
+    ) -> None:
+        reason = str(decision.get("reason") or "submit_queue_backpressure")
+        _record_submit_event(
+            "rate_limited",
+            reason,
+            challenge_id=challenge_id,
+            status_code=503,
+            log=True,
+        )
+        raise HTTPException(
+            503,
+            {
+                "detail": "submit_queue_backpressure",
+                "reason": reason,
+                "pending": decision.get("pending"),
+                "worker_lag_secs": decision.get("worker_lag_secs"),
+            },
+            headers={
+                "Retry-After": str(submit_queue_backpressure_retry_after),
+                "X-Cathedral-Rejection-Reason": "submit_queue_backpressure",
+            },
+        )
 
     def _submit_metrics_snapshot() -> dict[str, Any]:
         with submit_metrics_lock:
@@ -648,6 +697,7 @@ def build_app(
         "per-miner-summary",
         _env_float("CATHEDRAL_PM_SUMMARY_CACHE_TTL_SECS", 5.0),
     )
+    pressure_telemetry = PressureTelemetry(pressure_config_from_env())
     _visibility_cold_async_raw = os.environ.get("CATHEDRAL_VISIBILITY_COLD_ASYNC")
     visibility_cold_async = (
         (_visibility_cold_async_raw.strip().lower() not in {"0", "false", "no", "off"})
@@ -897,6 +947,7 @@ def build_app(
             "/v1/synthetic-boolean/per-miner/status",
             "/v1/synthetic-boolean/per-miner/summary",
             "/v1/validator/weights/next",
+            "/v1/dashboard/state",
             "/v1/leaderboard/recent",
             "/v1/leaderboard/top",
             "/v1/leaderboard/explain",
@@ -904,6 +955,7 @@ def build_app(
             # gated at the handler; routed here so it stays reachable on the
             # read service that actually serves the Tier 0 weight feed.
             "/v1/admin/validator-health",
+            "/v1/admin/synthetic-boolean/submit-metrics",
         }
         _READ_GET_PREFIXES = {
             "/v1/audit-scanner/",
@@ -915,6 +967,7 @@ def build_app(
             "/v1/synthetic-boolean/active-cnf",
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",
+            "/v1/admin/synthetic-boolean/submit-metrics",
         }
         _SUBMIT_GET_PREFIXES = {
             "/v1/challenges/",
@@ -996,11 +1049,15 @@ def build_app(
     # endpoints.  Validators (/health, /v1/validator/weights/next) are exempt.
     # Default 120 req/min/key; set CATHEDRAL_RATELIMIT_RPM=0 to disable.
     # Also pure ASGI (no BaseHTTPMiddleware) for the same buffering reason.
-    from .ratelimit import RateLimitMiddleware
+    from .ratelimit import AbuseLimitMiddleware, RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
-    # Add this last so it is the outermost ASGI layer: overloaded submit/PM-read
-    # requests should get a cheap 429 before rate-limit state or route handling.
+    # Keep this inside the service-role and abuse guards: role-mismatched or
+    # actor-limited requests should not consume submit/read gate slots.
     app.add_middleware(_HotPathBackpressureMiddleware)
+    # Opt-in pre-auth abuse shedding for the hottest SAT paths. Starlette wraps
+    # later middleware outside earlier middleware, so this runs before the
+    # saturation gate and does not consume a slot.
+    app.add_middleware(AbuseLimitMiddleware)
     # Role guard is now the true outer edge: role-mismatched traffic fails before
     # rate-limit state, request body parsing, or expensive route work.
     app.add_middleware(_ServiceRoleGuardMiddleware)
@@ -1008,12 +1065,17 @@ def build_app(
     # role-guard/backpressure rejections) so the 5xx rate is complete. Cheap —
     # reads only the response-start status, no body buffering.
     app.add_middleware(_StatusCounterMiddleware)
+    app.add_middleware(PressureTelemetryMiddleware, telemetry=pressure_telemetry)
 
     app.state.store = store
     app.state.cnf_store = cnf_store
     app.state.board_cache = board_cache
     app.state.top_cache = top_cache
     app.state.board_snapshot = board_snapshot
+    dashboard_state_snapshot = dashboard_snapshot_mod.DashboardStateSnapshot(
+        lambda: _dashboard_state_payload()
+    )
+    app.state.dashboard_state_snapshot = dashboard_state_snapshot
     app.state.recent_cache = recent_cache
     app.state.explain_cache = explain_cache
     app.state.pm_summary_cache = pm_summary_cache
@@ -1025,6 +1087,7 @@ def build_app(
     app.state.arena_eval_task = None
     app.state.arena_payout_task = None
     app.state.async_verify_task = None
+    app.state.pressure_telemetry = pressure_telemetry
     # Lane S champion machine + registry persist across eval ticks on app.state
     # (the validator constructs ONE lane and reuses it so the champion survives).
     from ..lanes.solver_arena import SolverArenaLane
@@ -1089,6 +1152,18 @@ def build_app(
             print(f"[materialized_snapshot] started service_role={service_role}")
         except Exception as exc:
             print(f"[materialized_snapshot] start_failed error={exc!r}")
+
+    @app.on_event("startup")
+    async def _start_dashboard_state_snapshot():
+        if not _role_runs_read_background(service_role):
+            return
+        if not dashboard_snapshot_mod.enabled():
+            return
+        try:
+            dashboard_state_snapshot.start()
+            print(f"[dashboard_snapshot] started service_role={service_role}")
+        except Exception as exc:
+            print(f"[dashboard_snapshot] start_failed error={exc!r}")
 
     async def _run_singleton_background(label: str, lock_name: str, coro_factory):
         import asyncio
@@ -1184,13 +1259,29 @@ def build_app(
             return
         import asyncio
         worker_id = f"{service_role}:{new_uuid()[:8]}"
+
+        def _verify_heartbeat(event, **kw):
+            try:
+                submit_admission.record_worker_heartbeat(
+                    store,
+                    worker_id=worker_id,
+                    service_role=service_role,
+                    now_iso=_now_iso_ms(),
+                    event=event,
+                    processed=int(kw.get("processed") or 0),
+                    error=kw.get("error"),
+                )
+            except Exception as exc:
+                print(f"[verify] heartbeat_failed error={exc!r}")
+
         app.state.async_verify_task = asyncio.create_task(
             _run_singleton_background(
                 "verify",
                 "cathedral:publisher:async_verify",
                 lambda: verify_worker.verify_loop(
                     app.state.async_verify_tick, worker_id=worker_id,
-                    log=lambda evt, **kw: print(f"[verify] {evt} {kw}")),
+                    log=lambda evt, **kw: print(f"[verify] {evt} {kw}"),
+                    heartbeat=_verify_heartbeat),
             ))
 
     # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
@@ -1988,7 +2079,11 @@ def build_app(
     recent_no_cursor_max_limit = _env_int(
         "CATHEDRAL_RECENT_NO_CURSOR_MAX_LIMIT", recent_snapshot_limit
     )
-    recent_cold_async = _env_bool("CATHEDRAL_RECENT_COLD_ASYNC", True)
+    # Old validators may still consume /leaderboard/recent directly. A cold
+    # warming payload is safe for dashboards, but it looks like "no rows" to
+    # validator-style clients, so keep the no-cursor compatibility path
+    # synchronous unless an operator explicitly opts back into cold async.
+    recent_cold_async = _env_bool("CATHEDRAL_RECENT_COLD_ASYNC", False)
     recent_snapshot = MaterializedSnapshot(
         "leaderboard-recent",
         lambda: _recent_payload(None, None, recent_snapshot_limit),
@@ -3032,11 +3127,6 @@ def build_app(
             "CATHEDRAL_PERMINER_RECORD_LISTING_ASSIGNMENTS", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
 
-    def _perminer_legacy_id_scan_enabled() -> bool:
-        return os.environ.get(
-            "CATHEDRAL_PERMINER_LEGACY_ID_SCAN", "1"
-        ).strip().lower() not in {"0", "false", "no", "off"}
-
     def _record_one_perminer_assignment(
         hotkey: str,
         epoch: int,
@@ -3086,15 +3176,6 @@ def build_app(
                 recorded_pm_assignment_pages.clear()
             recorded_pm_assignment_pages.add(page_key)
 
-    def _lookup_perminer_assignment(hotkey: str, epoch: int, challenge_id: str) -> tuple[int, int] | None:
-        found = store.query(
-            "SELECT tier, seq FROM per_miner_assignments "
-            "WHERE challenge_id=? AND miner_hotkey=? AND epoch=?",
-            (challenge_id, hotkey, epoch))
-        if found:
-            return int(found[0]["tier"]), int(found[0]["seq"])
-        return None
-
     def _resolve_perminer_tier_seq(
         pm,
         hotkey: str,
@@ -3103,17 +3184,8 @@ def build_app(
         tier: int | None,
         seq: int | None,
     ) -> tuple[int, int] | None:
-        if tier is not None and seq is not None:
-            if tier not in pm.TIERS:
-                return None
-            if seq < 0 or seq >= pm.allotment_for(tier):
-                return None
-            cid = pm.instance_id(hotkey, epoch, tier, seq)
-            return (tier, seq) if cid == challenge_id else None
-        found = _lookup_perminer_assignment(hotkey, epoch, challenge_id)
-        if found is not None or not _perminer_legacy_id_scan_enabled():
-            return found
-        return pm.recover_tier_seq_for(hotkey, epoch, challenge_id)
+        return pm.resolve_tier_seq_for(
+            hotkey, epoch, challenge_id, tier=tier, seq=seq)
 
     def _require_perminer_ready(pm) -> None:
         try:
@@ -3531,6 +3603,8 @@ def build_app(
         # was. The headline accepted/rejected rates now count LIVE async kinds
         # (public + per_miner) only; shadow is reported separately so it stays
         # visible without inflating the live numbers.
+        rate_snapshot = submit_admission.queue_rates(
+            store, since_iso=since_iso, window_secs=window_secs)
         rates = store.query(
             "SELECT challenge_kind AS kind, status, COUNT(*) AS n "
             "FROM per_miner_attempts "
@@ -3566,10 +3640,175 @@ def build_app(
         q["shadow_rejected_in_window"] = shadow_rejected
         q["shadow_accepted_per_sec"] = round(shadow_accepted / win, 4)
         q["shadow_rejected_per_sec"] = round(shadow_rejected / win, 4)
+        q.update(rate_snapshot)
+        q["workers"] = submit_admission.worker_metrics(
+            store, now_iso=now_iso,
+            stale_secs=max(10.0, float(_vw_flags.lock_secs())),
+        )
+        q["backpressure"] = {
+            "enabled": submit_queue_backpressure_enabled,
+            "max_pending": (
+                int(submit_queue_backpressure.get("max_pending") or 0)
+                if submit_queue_backpressure else 0
+            ),
+            "max_worker_lag_secs": (
+                float(submit_queue_backpressure.get("max_worker_lag_secs") or 0.0)
+                if submit_queue_backpressure else 0.0
+            ),
+            "worker_stale_secs": (
+                float(submit_queue_backpressure.get("worker_stale_secs") or 0.0)
+                if submit_queue_backpressure else 0.0
+            ),
+            "retry_after_secs": submit_queue_backpressure_retry_after,
+        }
         q["pm_async_enabled"] = pm_submit_async_enabled
         q["pm_async_shadow"] = pm_async_shadow_enabled
         q["public_async_enabled"] = submit_async_enabled
         return q
+
+    def _dashboard_weight_freshness() -> dict[str, Any]:
+        from . import health_thresholds as ht
+
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        try:
+            vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
+        except Exception as exc:
+            print(f"[dashboard_snapshot] cached_vector_failed error={exc!r}")
+            vec = None
+        generated_at = vec.get("generated_at") if isinstance(vec, dict) else None
+        age = _age_seconds(generated_at)
+        metadata = vec.get("policy_metadata", {}) if isinstance(vec, dict) else {}
+        return {
+            "data_status": "available" if isinstance(vec, dict) else "warming",
+            "vector_present": isinstance(vec, dict),
+            "vector_id": vec.get("vector_id") if isinstance(vec, dict) else None,
+            "generated_at": generated_at,
+            "expires_at": vec.get("expires_at") if isinstance(vec, dict) else None,
+            "network": vec.get("network") if isinstance(vec, dict) else None,
+            "netuid": vec.get("netuid") if isinstance(vec, dict) else None,
+            "policy_reason": vec.get("policy_reason") if isinstance(vec, dict) else None,
+            "policy_version": vec.get("policy_version") if isinstance(vec, dict) else None,
+            "freshness": ht.vector_status(age),
+            "source_block": (
+                vec.get("source_block")
+                or vec.get("block")
+                or (metadata.get("source_block") if isinstance(metadata, dict) else None)
+                or (metadata.get("block") if isinstance(metadata, dict) else None)
+            ) if isinstance(vec, dict) else None,
+        }
+
+    def _dashboard_rejection_reasons() -> dict[str, Any]:
+        submit_snapshot = _submit_metrics_snapshot()
+        submit_reasons = [
+            {"reason": str(reason), "count": int(count or 0)}
+            for reason, count in sorted(
+                submit_snapshot.get("by_reason", {}).items(),
+                key=lambda item: (-int(item[1] or 0), str(item[0])),
+            )
+        ]
+        return {
+            "data_status": "available",
+            "submit_reasons_since_start": submit_reasons,
+            "pm_attempt_reasons": dashboard_snapshot_mod.rejection_reason_counts(store),
+        }
+
+    def _dashboard_state_payload() -> dict[str, Any]:
+        errors: list[dict[str, str]] = []
+        leaderboard = dashboard_snapshot_mod.section(
+            "earnings_leaderboard",
+            lambda: _leaderboard_top_payload("weights"),
+            {"data_status": "unavailable", "miners": []},
+            errors,
+        )
+        pm_health = dashboard_snapshot_mod.section(
+            "pm_health",
+            lambda: _perminer_summary(_env_int("CATHEDRAL_DASHBOARD_PM_LIMIT", 100)),
+            {"data_status": "unavailable", "miners": []},
+            errors,
+        )
+        queue_lag = dashboard_snapshot_mod.section(
+            "queue_lag",
+            _async_queue_metrics,
+            {"data_status": "unavailable", "total_pending": None, "worker_lag_secs": None},
+            errors,
+        )
+        weights_freshness = dashboard_snapshot_mod.section(
+            "weights_freshness",
+            _dashboard_weight_freshness,
+            {"data_status": "unavailable", "freshness": {"level": "unknown"}},
+            errors,
+        )
+        endpoint_pressure = dashboard_snapshot_mod.section(
+            "endpoint_pressure",
+            lambda: {
+                "http": _http_status_snapshot(),
+                "submit": _submit_metrics_snapshot(),
+                "pressure": pressure_telemetry.snapshot(),
+            },
+            {"data_status": "unavailable"},
+            errors,
+        )
+        rejection_reasons = dashboard_snapshot_mod.section(
+            "rejection_reasons",
+            _dashboard_rejection_reasons,
+            {"data_status": "unavailable", "items": []},
+            errors,
+        )
+        return {
+            "schema": dashboard_snapshot_mod.SCHEMA,
+            "data_status": "partial" if errors else "ok",
+            "source_epoch": (
+                pm_health.get("current_epoch")
+                if isinstance(pm_health, dict) else None
+            ),
+            "source_block": (
+                weights_freshness.get("source_block")
+                if isinstance(weights_freshness, dict) else None
+            ),
+            "earnings_leaderboard": leaderboard,
+            "pm_health": pm_health,
+            "queue_lag": queue_lag,
+            "weights_freshness": weights_freshness,
+            "endpoint_pressure": endpoint_pressure,
+            "rejection_reasons": rejection_reasons,
+            "sources": {
+                "earnings_leaderboard": "/v1/leaderboard/top?view=weights",
+                "pm_health": "/v1/synthetic-boolean/per-miner/summary",
+                "queue_lag": "/v1/admin/synthetic-boolean/submit-metrics",
+                "weights_freshness": "/v1/validator/weights/next",
+                "endpoint_pressure": "in-process status/pressure telemetry",
+                "rejection_reasons": "submit metrics + per_miner_attempts aggregate",
+            },
+            "errors": errors,
+        }
+
+    @app.get("/v1/dashboard/state")
+    async def dashboard_state():
+        if not dashboard_snapshot_mod.enabled():
+            payload = dashboard_snapshot_mod.unavailable_payload(
+                "disabled",
+                reason="set CATHEDRAL_DASHBOARD_SNAPSHOT_ENABLED=true",
+            )
+            return JSONResponse(
+                payload,
+                status_code=503,
+                headers=dashboard_snapshot_mod.response_headers(payload),
+            )
+        payload = dashboard_state_snapshot.get()
+        if payload is None:
+            payload = dashboard_snapshot_mod.unavailable_payload(
+                "warming",
+                reason="dashboard snapshot is cold or stale",
+            )
+            return JSONResponse(
+                payload,
+                status_code=503,
+                headers=dashboard_snapshot_mod.response_headers(payload),
+            )
+        return JSONResponse(
+            dashboard_snapshot_mod.public_payload(payload),
+            headers=dashboard_snapshot_mod.response_headers(payload),
+        )
 
     @app.get("/v1/admin/synthetic-boolean/submit-metrics")
     def submit_metrics_admin(authorization: str | None = Header(None)):
@@ -3577,6 +3816,7 @@ def build_app(
         _require_publisher_admin(authorization)
         snapshot = _submit_metrics_snapshot()
         snapshot["queue"] = _async_queue_metrics()
+        snapshot["pressure"] = pressure_telemetry.snapshot()
         return JSONResponse(
             snapshot,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
@@ -3626,6 +3866,7 @@ def build_app(
             },
             "http_status": http_snapshot,
             "submit": _submit_metrics_snapshot(),
+            "pressure": pressure_telemetry.snapshot(),
             "tempo_seconds": ht.TEMPO_SECONDS,
         }
         return JSONResponse(
@@ -3635,6 +3876,7 @@ def build_app(
 
     @app.get("/v1/synthetic-boolean/per-miner/challenges")
     def per_miner_challenges(
+        request: Request,
         offset: int = Query(0, ge=0),
         limit: int = Query(50, ge=1, le=500),
         x_cathedral_hotkey: str = Header(...),
@@ -3660,6 +3902,7 @@ def build_app(
             x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
             challenge_id="", dimacs_solution_sha256="",
         )
+        mark_verified_hotkey(request, x_cathedral_hotkey)
         epoch = _perminer_epoch_for(pm)
         assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
         effective_limit = pm.assignment_page_limit(limit)
@@ -3697,6 +3940,7 @@ def build_app(
 
     @app.get("/v1/synthetic-boolean/per-miner/cnf")
     def per_miner_cnf(
+        request: Request,
         challenge_id: str = Query(...),
         tier: int | None = Query(None, ge=1),
         seq: int | None = Query(None, ge=0),
@@ -3721,6 +3965,7 @@ def build_app(
             x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
             challenge_id="", dimacs_solution_sha256="",
         )
+        mark_verified_hotkey(request, x_cathedral_hotkey)
         epoch = _perminer_epoch_for(pm, challenge_id)
         assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
         tier_seq = _resolve_perminer_tier_seq(
@@ -3804,6 +4049,25 @@ def build_app(
         if not dimacs_solution or not challenge_id:
             raise HTTPException(400, "this publisher requires solve-on-submit "
                                      "(challenge_id + dimacs_solution); see skill.md")
+        want_sync_submit = x_cathedral_submit_mode.strip().lower() == "sync"
+        from . import per_miner as pm
+        is_pm_challenge = challenge_id.startswith("pm-") and pm.perminer_enabled()
+        async_admission_would_queue = (
+            (not is_pm_challenge and submit_async_enabled)
+            or (is_pm_challenge and pm_submit_async_enabled and not pm_async_shadow_enabled)
+        )
+        if async_admission_would_queue and not want_sync_submit:
+            limit = (
+                pm_submit_max_solution_bytes if is_pm_challenge
+                else submit_max_solution_bytes
+            )
+            if limit > 0 and len(dimacs_solution.encode("utf-8")) > limit:
+                _record_submit_event(
+                    "rejected", "solution_too_large",
+                    challenge_id=challenge_id, status_code=413, log=True)
+                raise HTTPException(
+                    413, "solution_too_large",
+                    headers={"X-Cathedral-Rejection-Reason": "solution_too_large"})
         # The miner may have signed the timestamp it sent in the form field or
         # the X-Cathedral-Submitted-At header — fall back across both.
         submitted_at = submitted_at or x_cathedral_submitted_at or _now_iso_ms()
@@ -3835,6 +4099,7 @@ def build_app(
             alt_submitted_at=x_cathedral_submitted_at or None,
             allow_fallback_shapes=False,
         )
+        mark_verified_hotkey(request, x_cathedral_hotkey)
 
         # ---- Per-miner submit path (CATHEDRAL_PERMINER_ENABLED) ----
         # Detected by challenge_id prefix "pm-". Flag-off: this block is never
@@ -3847,9 +4112,8 @@ def build_app(
 
             epoch = _perminer_epoch_for(pm, challenge_id)
             assignment_identity = _assignment_identity_for_hotkey(x_cathedral_hotkey)
-            tier_seq = _lookup_perminer_assignment(assignment_identity, epoch, challenge_id)
-            if tier_seq is None:
-                tier_seq = pm.recover_tier_seq_for(assignment_identity, epoch, challenge_id)
+            tier_seq = _resolve_perminer_tier_seq(
+                pm, assignment_identity, epoch, challenge_id, None, None)
 
             # ---- TRACK 1: pm-* durable async admission (default-off) ----
             # CHEAP inline checks already ran above: signature (_verify_hotkey_claim),
@@ -3862,7 +4126,7 @@ def build_app(
             # receipt (no second attempt / no double payout). The signature is NOT
             # burned at admission — the worker's atomic accept/reject burns it, keeping
             # exactly-once replay semantics identical to the inline path.
-            want_sync_pm = x_cathedral_submit_mode.strip().lower() == "sync"
+            want_sync_pm = want_sync_submit
             if (pm_submit_async_enabled and not pm_async_shadow_enabled
                     and not want_sync_pm and tier_seq is not None):
                 # Body-size limit (cheap inline check). A pathological body is a hard
@@ -3894,7 +4158,10 @@ def build_app(
                     signature=x_cathedral_signature,
                     epoch=epoch,
                     assignment_identity=assignment_identity,
+                    queue_backpressure=submit_queue_backpressure,
                 )
+                if outcome == "backpressure":
+                    _raise_submit_queue_backpressure(challenge_id, row)
                 receipt = submit_admission.receipt_from_row(row)
                 if outcome == "replayed":
                     _record_submit_event(
@@ -3914,8 +4181,8 @@ def build_app(
                 check = None
                 ok, reason = False, "assignment_required_fetch_challenges_first"
             else:
-                # The assignment row is a ledger/cache entry, not the authority.
-                # Re-materialize it when submit beats read-replica visibility.
+                # The assignment row is a ledger/cache entry, not the authority;
+                # deterministic recovery above is the ownership check.
                 _record_one_perminer_assignment(
                     assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
                 cnf = pm.get_miner_cnf(assignment_identity, epoch, tier_seq[0], tier_seq[1])
@@ -4153,7 +4420,7 @@ def build_app(
         # the same solution return the SAME receipt (no second attempt / no double
         # payout). The signature is NOT burned at admission — burn happens in the
         # worker's atomic accept/reject, preserving exactly-once replay semantics.
-        want_sync = x_cathedral_submit_mode.strip().lower() == "sync"
+        want_sync = want_sync_submit
         if submit_async_enabled and not want_sync:
             idem = submit_admission.idempotency_key(
                 x_cathedral_hotkey, challenge_id, sol_sha)
@@ -4170,7 +4437,10 @@ def build_app(
                 received_at_iso=received_at_iso,
                 signature=x_cathedral_signature,
                 epoch=0,
+                queue_backpressure=submit_queue_backpressure,
             )
+            if outcome == "backpressure":
+                _raise_submit_queue_backpressure(challenge_id, row)
             receipt = submit_admission.receipt_from_row(row)
             if outcome == "replayed":
                 # Idempotent replay: echo the existing receipt with its current
@@ -4481,9 +4751,7 @@ def build_app(
         identity = attempt_row["assignment_identity"] or str(attempt_row["miner_hotkey"])
         epoch = int(attempt_row["epoch"] or 0)
         body = attempt_row["solution_body"]
-        tier_seq = _lookup_perminer_assignment(identity, epoch, challenge_id)
-        if tier_seq is None:
-            tier_seq = pm.recover_tier_seq_for(identity, epoch, challenge_id)
+        tier_seq = pm.resolve_tier_seq_for(identity, epoch, challenge_id)
         if tier_seq is None:
             return (False, "assignment_required_fetch_challenges_first", None)
         cnf = pm.get_miner_cnf(identity, epoch, tier_seq[0], tier_seq[1])

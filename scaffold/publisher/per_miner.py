@@ -392,6 +392,40 @@ def recover_tier_seq_for(hotkey: str, epoch: int, challenge_id: str) -> tuple[in
     return None
 
 
+def resolve_tier_seq_for(
+    hotkey: str,
+    epoch: int,
+    challenge_id: str,
+    *,
+    tier: int | None = None,
+    seq: int | None = None,
+) -> tuple[int, int] | None:
+    """Resolve ownership without depending on the assignment ledger.
+
+    If tier+seq are supplied by the client, validation is a single deterministic
+    id check. Challenge-id-only clients fall back to the bounded cached index
+    used by recover_tier_seq_for().
+    """
+    parsed = parse_challenge_id(challenge_id)
+    if not parsed or parsed["epoch"] != int(epoch):
+        return None
+    if tier is not None or seq is not None:
+        if tier is None or seq is None:
+            return None
+        try:
+            tier_i = int(tier)
+            seq_i = int(seq)
+        except (TypeError, ValueError):
+            return None
+        if tier_i != parsed["tier"] or tier_i not in TIERS:
+            return None
+        if seq_i < 0 or seq_i >= allotment_for(tier_i):
+            return None
+        cid = instance_id(hotkey, epoch, tier_i, seq_i)
+        return (tier_i, seq_i) if cid == challenge_id else None
+    return recover_tier_seq_for(hotkey, epoch, challenge_id)
+
+
 def _recover_index_key(hotkey: str, epoch: int, tier: int) -> tuple[str, int, int, int, str]:
     return hotkey, int(epoch), int(tier), allotment_for(tier), _seed_secret_fingerprint()
 

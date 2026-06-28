@@ -5,7 +5,8 @@ submit/fetch client) can receive from the Cathedral SAT publisher and its edge
 router, what each one means, and the **correct client action** for each.
 
 Every code here is emitted by real code paths in
-`scaffold/publisher/app.py` (submit / challenge / CNF routes), the edge router
+`scaffold/publisher/app.py` (submit / challenge / CNF routes),
+`scaffold/publisher/ratelimit.py` (pre-auth abuse shedding), the edge router
 `deploy/edge-router/worker.mjs` (`*_origin_unavailable`), or is the
 **planned** durable-admission code from the reliability plan (`503
 submit_admission_unavailable`, marked below). Codes that exist purely for
@@ -30,6 +31,9 @@ not listed.
 |---|---|---|---|
 | **429** | `submit_busy_retry` | Global submit concurrency gate is full; the request was shed before any work. Sent with `Retry-After: 1`. | Sleep `Retry-After` + jitter, then retry the **same** solution with a **fresh signature** (re-sign with a current `submitted_at`). Use exponential backoff if it persists. |
 | **429** | `rate_limited` | Per-`(hotkey, challenge)` minimum-interval limit; you submitted to the same challenge too fast. `Retry-After` = configured min interval (seconds). | Wait `Retry-After` + jitter before re-submitting to that challenge. Do not spin. |
+| **429** | `ip_rate_limited` | Optional pre-auth abuse limiter shed this IP across hot SAT submit / per-miner CNF/listing paths. `Retry-After` escalates while the IP keeps exceeding the window. | Honor `Retry-After` + jitter. Slow the client globally; do not switch endpoints in a tight loop. |
+| **429** | `actor_rate_limited` | Optional pre-auth abuse limiter shed the claimed `X-Cathedral-Hotkey` across hot SAT submit / per-miner CNF/listing paths. The claimed hotkey is only an abuse hint before signature verification, not a payout/fairness identity. | Honor `Retry-After` + jitter. Slow that actor's fetch/submit loop; re-sign submit retries. |
+| **503** | `submit_queue_backpressure` | Optional durable-admission queue guard is shedding new submits because pending receipts or worker lag exceeded configured limits. Idempotent receipt replays may still be served. | Honor `Retry-After` + jitter and slow intake. This is server backpressure, not a solution bug. Re-sign submit retries. |
 | **503** | `submit_admission_unavailable` | **Planned (Phase 4 durable admission, not yet emitted by current code).** Admission layer is in emergency shedding; the server cannot durably accept submits right now. | Treat like `429` but back off harder: exponential backoff with jitter, re-sign on retry. Not a solution bug. |
 | **409** | `challenge_not_active` | No active lane challenge matches `challenge_id` (unknown or rotated out). | Refetch the current challenge (`current-challenge` / `active-challenges`) and solve the new one. Do not retry the old id. |
 | **409** | `challenge_already_locked` | The challenge exists but is no longer `active` (window closed / locked). | Refetch the current challenge and move on. Retrying this id will keep failing. |
