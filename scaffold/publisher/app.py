@@ -1984,9 +1984,18 @@ def build_app(
             "requested_limit": int(limit),
         }
 
+    recent_snapshot_limit = _env_int("CATHEDRAL_RECENT_SNAPSHOT_LIMIT", 50)
+    recent_snapshot = MaterializedSnapshot(
+        "leaderboard-recent",
+        lambda: _recent_payload(None, None, recent_snapshot_limit),
+    )
+    materialized_snapshot_mod.register(recent_snapshot)
+    app.state.leaderboard_recent_snapshot = recent_snapshot
+
     # ---- M1: feed ---------------------------------------------------------
     @app.get("/v1/leaderboard/recent")
     async def leaderboard_recent(
+        request: Request,
         since: str | None = Query(None),
         since_ran_at: str | None = Query(None),
         since_id: str | None = Query(None),
@@ -1997,6 +2006,14 @@ def build_app(
         cur_id = since_id
         cache_status = "cursor"
         if cur_ran_at is None and cur_id is None:
+            if materialized_snapshot_mod.enabled() and int(limit) == recent_snapshot_limit:
+                served = recent_snapshot.get()
+                if served is not None:
+                    payload, etag, meta = served
+                    headers = snapshot_headers(etag, meta)
+                    headers["Access-Control-Allow-Origin"] = "*"
+                    headers["X-Cathedral-Cache"] = "materialized"
+                    return _conditional_response(payload, etag, headers, request)
             payload, cache_status = recent_cache.get(
                 int(limit),
                 lambda: _recent_payload(None, None, limit),
