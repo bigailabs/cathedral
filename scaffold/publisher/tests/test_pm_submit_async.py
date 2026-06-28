@@ -22,6 +22,7 @@ hard guarantees the orchestrator named:
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 from starlette.testclient import TestClient
@@ -51,7 +52,7 @@ def _now_iso():
 
 
 def _pm_env(monkeypatch, *, pm_async=False, shadow=False, verify_on=True,
-            service_role="all"):
+            service_role="all", require_worker=False):
     """Enable per-miner + (optionally) pm-async / shadow. The submit-async flag is
     the public gate the pm flag rides on top of, so it is always set when pm-async
     is requested."""
@@ -72,6 +73,9 @@ def _pm_env(monkeypatch, *, pm_async=False, shadow=False, verify_on=True,
         "CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED", "true" if pm_chain_on else "false")
     monkeypatch.setenv("CATHEDRAL_PM_ASYNC_SHADOW", "true" if shadow else "false")
     monkeypatch.setenv("CATHEDRAL_ASYNC_VERIFY_ENABLED", "true" if verify_on else "false")
+    monkeypatch.setenv(
+        "CATHEDRAL_SUBMIT_ASYNC_REQUIRE_WORKER",
+        "true" if require_worker else "false")
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", service_role)
 
 
@@ -239,10 +243,14 @@ def test_pm_async_admission_returns_202_then_worker_ranks(tmp_path, monkeypatch)
     app, store = _build(tmp_path, monkeypatch, pm_async=True)
     kp = _keypair()
     cid, body = _pm_solution_for(kp)
+    received_at = "2026-06-27T00:00:01.000Z"
     with TestClient(app) as client:
         r = _submit(client, kp, challenge_id=cid, solution=body)
         assert r.status_code == 202, r.text
         rec = r.json()
+        store.write(lambda conn: conn.execute(
+            "UPDATE per_miner_attempts SET received_at_iso=? WHERE id=?",
+            (received_at, rec["receipt_id"])))
         assert rec["schema"] == "cathedral.submit_receipt.v2"
         assert rec["status"] == "pending"
         assert rec["receipt_id"].startswith("sub_")
@@ -258,6 +266,26 @@ def test_pm_async_admission_returns_202_then_worker_ranks(tmp_path, monkeypatch)
     # exactly one distinct-solver claim + one signed feed pair (v6 + v5 mirror)
     assert _solves(store, cid, kp.ss58_address) == 1
     assert _feed_pairs(store, kp.ss58_address) == 2
+    solved_at = store.query(
+        "SELECT solved_at_iso FROM per_miner_solves WHERE challenge_id=?",
+        (cid,))[0]["solved_at_iso"]
+    assert solved_at == received_at
+    feed_rows = store.query("SELECT row_json FROM eval_runs WHERE miner_hotkey=?",
+                            (kp.ss58_address,))
+    assert {json.loads(r["row_json"])["ran_at"] for r in feed_rows} == {received_at}
+
+
+def test_pm_async_fails_closed_without_worker_heartbeat(tmp_path, monkeypatch):
+    app, store = _build(
+        tmp_path, monkeypatch, pm_async=True, verify_on=False, require_worker=True)
+    kp = _keypair()
+    cid, body = _pm_solution_for(kp)
+    with TestClient(app) as client:
+        r = _submit(client, kp, challenge_id=cid, solution=body)
+    assert r.status_code == 503, r.text
+    assert r.headers["X-Cathedral-Rejection-Reason"] == "async_worker_unavailable"
+    assert store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
+                       "WHERE idempotency_key IS NOT NULL")[0]["n"] == 0
 
 
 def test_pm_async_idempotent_replay_same_receipt_no_second_attempt(tmp_path, monkeypatch):
@@ -479,6 +507,22 @@ def test_queue_metrics_populate(tmp_path, monkeypatch):
         assert q2["accepted_in_window"] >= 1
         assert q2["ranked_in_window"] >= 1
         assert q2["ranked_per_sec"] > 0.0
+
+
+def test_submit_metrics_degrades_when_queue_queries_fail(tmp_path, monkeypatch):
+    app, _store = _build(tmp_path, monkeypatch, pm_async=True)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated queue query failure")
+
+    monkeypatch.setattr(submit_admission, "queue_metrics", _boom)
+    monkeypatch.setattr(submit_admission, "queue_rates", _boom)
+    with TestClient(app) as client:
+        q = _metrics(client)["queue"]
+    assert q["metrics_status"] == "degraded"
+    assert q["metrics_error"] == "queue_metrics_failed"
+    assert q["rates_status"] == "degraded"
+    assert q["total_pending"] is None
 
 
 def test_queue_metrics_worker_lag_grows_with_oldest_pending(tmp_path, monkeypatch):
