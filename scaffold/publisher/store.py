@@ -50,6 +50,23 @@ import threading
 import uuid
 from typing import Any
 
+
+def _postgres_statement_timeout_ms() -> int:
+    """Bound pathological read queries when configured.
+
+    This intentionally returns only a validated integer so the caller can use a
+    tiny f-string for the PostgreSQL SET statement without carrying user text
+    into SQL.
+    """
+    raw = (os.environ.get("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Migrations.
 #
@@ -1087,6 +1104,9 @@ class Store:
             raw = self._pool.getconn()
             try:
                 cur = raw.cursor()
+                timeout_ms = _postgres_statement_timeout_ms()
+                if timeout_ms > 0:
+                    cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
                 cur.execute(_translate_sql(sql), params)
                 rows = cur.fetchall()
                 raw.commit()  # release any read snapshot promptly
