@@ -275,17 +275,19 @@ def test_pm_async_admission_returns_202_then_worker_ranks(tmp_path, monkeypatch)
     assert {json.loads(r["row_json"])["ran_at"] for r in feed_rows} == {received_at}
 
 
-def test_pm_async_fails_closed_without_worker_heartbeat(tmp_path, monkeypatch):
+def test_pm_async_falls_back_to_sync_without_worker_heartbeat(tmp_path, monkeypatch):
     app, store = _build(
         tmp_path, monkeypatch, pm_async=True, verify_on=False, require_worker=True)
     kp = _keypair()
     cid, body = _pm_solution_for(kp)
     with TestClient(app) as client:
         r = _submit(client, kp, challenge_id=cid, solution=body)
-    assert r.status_code == 503, r.text
-    assert r.headers["X-Cathedral-Rejection-Reason"] == "async_worker_unavailable"
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ranked"
+    assert r.json()["solve_rank"] == 1
     assert store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
                        "WHERE idempotency_key IS NOT NULL")[0]["n"] == 0
+    assert _solves(store, cid, kp.ss58_address) == 1
 
 
 def test_pm_async_idempotent_replay_same_receipt_no_second_attempt(tmp_path, monkeypatch):

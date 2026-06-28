@@ -4250,7 +4250,6 @@ def build_app(
             want_sync_pm = want_sync_submit
             if (pm_submit_async_enabled and not pm_async_shadow_enabled
                     and not want_sync_pm and tier_seq is not None):
-                _require_async_worker_ready(challenge_id)
                 # Body-size limit (cheap inline check). A pathological body is a hard
                 # 413 here — never persisted, never queued.
                 if len(dimacs_solution) > pm_submit_max_solution_bytes:
@@ -4260,40 +4259,53 @@ def build_app(
                     raise HTTPException(
                         413, "solution_too_large",
                         headers={"X-Cathedral-Rejection-Reason": "solution_too_large"})
-                # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
-                # so the worker can recover tier/seq even if the read replica is behind.
-                _record_one_perminer_assignment(
-                    assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
-                idem = submit_admission.idempotency_key(
-                    x_cathedral_hotkey, challenge_id, sol_sha)
-                receipt_id = "sub_" + new_uuid().replace("-", "")
-                outcome, row = submit_admission.admit_pending(
-                    store,
-                    receipt_id=receipt_id,
-                    idem_key=idem,
-                    miner_hotkey=x_cathedral_hotkey,
-                    challenge_id=challenge_id,
-                    dimacs_solution_sha256=sol_sha,
-                    dimacs_solution=dimacs_solution,
-                    submitted_at=submitted_at,
-                    received_at_iso=received_at_iso,
-                    signature=x_cathedral_signature,
-                    epoch=epoch,
-                    assignment_identity=assignment_identity,
-                    queue_backpressure=submit_queue_backpressure,
-                )
-                if outcome == "backpressure":
-                    _raise_submit_queue_backpressure(challenge_id, row)
-                receipt = submit_admission.receipt_from_row(row)
-                if outcome == "replayed":
+                worker_ready, _worker_metrics = _async_worker_ready()
+                if not worker_ready:
+                    # PM challenges are small and deterministic. If async workers
+                    # are down, keep miners earning by using the legacy sync verifier
+                    # instead of failing the private lane closed.
                     _record_submit_event(
-                        "accepted", "idempotent_replay",
-                        challenge_id=challenge_id, status_code=200)
-                    return JSONResponse(status_code=200, content=receipt)
-                _record_submit_event(
-                    "accepted", "admitted_pending",
-                    challenge_id=challenge_id, status_code=202)
-                return JSONResponse(status_code=202, content=receipt)
+                        "fallback",
+                        "pm_async_worker_unavailable_sync",
+                        challenge_id=challenge_id,
+                        log=True,
+                    )
+                    want_sync_pm = True
+                if not want_sync_pm:
+                    # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
+                    # so the worker can recover tier/seq even if the read replica is behind.
+                    _record_one_perminer_assignment(
+                        assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
+                    idem = submit_admission.idempotency_key(
+                        x_cathedral_hotkey, challenge_id, sol_sha)
+                    receipt_id = "sub_" + new_uuid().replace("-", "")
+                    outcome, row = submit_admission.admit_pending(
+                        store,
+                        receipt_id=receipt_id,
+                        idem_key=idem,
+                        miner_hotkey=x_cathedral_hotkey,
+                        challenge_id=challenge_id,
+                        dimacs_solution_sha256=sol_sha,
+                        dimacs_solution=dimacs_solution,
+                        submitted_at=submitted_at,
+                        received_at_iso=received_at_iso,
+                        signature=x_cathedral_signature,
+                        epoch=epoch,
+                        assignment_identity=assignment_identity,
+                        queue_backpressure=submit_queue_backpressure,
+                    )
+                    if outcome == "backpressure":
+                        _raise_submit_queue_backpressure(challenge_id, row)
+                    receipt = submit_admission.receipt_from_row(row)
+                    if outcome == "replayed":
+                        _record_submit_event(
+                            "accepted", "idempotent_replay",
+                            challenge_id=challenge_id, status_code=200)
+                        return JSONResponse(status_code=200, content=receipt)
+                    _record_submit_event(
+                        "accepted", "admitted_pending",
+                        challenge_id=challenge_id, status_code=202)
+                    return JSONResponse(status_code=202, content=receipt)
             # When ownership/recovery failed (tier_seq is None) async mode falls
             # through to the inline reject below — it is a cheap check, no heavy work
             # runs, and the error contract stays byte-for-byte the synchronous one.
