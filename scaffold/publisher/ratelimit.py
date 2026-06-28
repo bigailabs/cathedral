@@ -25,11 +25,14 @@ serializes concurrent requests and causes 20-30s stalls under load.  A pure
 ASGI middleware calls the downstream app directly with the original send
 callable — zero buffering, zero concurrency overhead.
 
-Security note: current implementation keys pre-auth rate limiting by client IP,
-not claimed hotkey, because signatures are verified later in endpoint handlers.
+Security note: RateLimitMiddleware keys pre-auth rate limiting by client IP, not
+claimed hotkey, because signatures are verified later in endpoint handlers.
+AbuseLimitMiddleware has an optional claimed-hotkey bucket, but treats it only
+as an abuse hint, never as verified identity or fairness.
 
 Usage (in build_app):
-    from .ratelimit import RateLimitMiddleware
+    from .ratelimit import AbuseLimitMiddleware, RateLimitMiddleware
+    app.add_middleware(AbuseLimitMiddleware)
     app.add_middleware(RateLimitMiddleware)
 """
 from __future__ import annotations
@@ -48,6 +51,8 @@ _WINDOW_SECS = 60
 _EXEMPT_SUFFIXES: tuple[str, ...] = (
     "/health",
     "/v1/validator/weights/next",
+    "/v1/admin/validator-health",
+    "/v1/admin/synthetic-boolean/submit-metrics",
     "/.well-known/cathedral-jwks.json",
     # Per-miner assignment reads are hot-path signed GETs.  They have their
     # own bounded concurrency gate in app.py; the coarse per-IP RPM limiter
@@ -133,6 +138,127 @@ class _RateLimiterState:
 _state = _RateLimiterState()
 
 
+# ---------------------------------------------------------------------------
+# Cheap pre-auth abuse limiter for the hottest SAT endpoints.
+#
+# This is deliberately separate from RateLimitMiddleware and the submit
+# per-hotkey fairness limiter:
+#   * IP and claimed-hotkey are pre-auth hints only; no fairness semantics.
+#   * It only protects paths that can get hammered before expensive work.
+#   * Default off so rollout is an operator decision.
+# ---------------------------------------------------------------------------
+IP_ABUSE_REASON = "ip_rate_limited"
+ACTOR_ABUSE_REASON = "actor_rate_limited"
+_ABUSE_DEFAULT_IP_RPM = 600
+_ABUSE_DEFAULT_ACTOR_RPM = 240
+_ABUSE_DEFAULT_RETRY_BASE_SECS = 2
+_ABUSE_DEFAULT_RETRY_MAX_SECS = 60
+_ABUSE_TARGETS: set[tuple[str, str]] = {
+    ("POST", "/v1/agents/submit"),
+    ("GET", "/v1/synthetic-boolean/per-miner/cnf"),
+    ("GET", "/v1/synthetic-boolean/per-miner/challenges"),
+}
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or str(default))
+    except ValueError:
+        return default
+
+
+def _abuse_enabled() -> bool:
+    return _env_bool("CATHEDRAL_ABUSE_LIMIT_ENABLED", False)
+
+
+def _canonical_path(path: str) -> str:
+    if path == _LEGACY_PREFIX:
+        return "/"
+    if path.startswith(_LEGACY_PREFIX + "/"):
+        return path[len(_LEGACY_PREFIX):]
+    return path
+
+
+class _AbuseEntry:
+    __slots__ = ("window_start", "count", "limited_count", "last_seen")
+
+    def __init__(self, now: float) -> None:
+        self.window_start = now
+        self.count = 0
+        self.limited_count = 0
+        self.last_seen = now
+
+    def tick(self, now: float) -> int:
+        if now - self.window_start >= _WINDOW_SECS:
+            self.window_start = now
+            self.count = 0
+            self.limited_count = 0
+        self.count += 1
+        self.last_seen = now
+        return self.count
+
+
+class _AbuseLimiterState:
+    _GC_EVERY_N = 500
+    _GC_IDLE_TTL = _WINDOW_SECS * 4
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _AbuseEntry] = {}
+        self._lock = threading.Lock()
+        self._req_count = 0
+
+    def check(
+        self,
+        key: str,
+        limit: int,
+        *,
+        retry_base: int,
+        retry_max: int,
+    ) -> tuple[bool, int]:
+        if limit <= 0:
+            return True, 0
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = _AbuseEntry(now)
+                self._entries[key] = entry
+            count = entry.tick(now)
+            self._req_count += 1
+            if self._req_count >= self._GC_EVERY_N:
+                self._gc(now)
+                self._req_count = 0
+            if count <= limit:
+                return True, 0
+            entry.limited_count += 1
+            retry_after = self._retry_after(
+                entry.limited_count, retry_base=retry_base, retry_max=retry_max)
+            return False, retry_after
+
+    @staticmethod
+    def _retry_after(strikes: int, *, retry_base: int, retry_max: int) -> int:
+        base = max(1, retry_base)
+        cap = max(base, retry_max)
+        step = min(max(0, strikes - 1), 10)
+        return min(cap, base * (2 ** step))
+
+    def _gc(self, now: float) -> None:
+        cutoff = now - self._GC_IDLE_TTL
+        stale = [k for k, e in self._entries.items() if e.last_seen < cutoff]
+        for k in stale:
+            del self._entries[k]
+
+
+_abuse_state = _AbuseLimiterState()
+
+
 def _get_header(headers: list, name: bytes) -> str | None:
     """Extract a header value from raw ASGI headers list."""
     name_lower = name.lower()
@@ -145,6 +271,12 @@ def _get_header(headers: list, name: bytes) -> str | None:
 def _client_ip_from_scope(scope: Scope) -> str:
     """Best-effort client IP from ASGI scope headers or direct connection."""
     headers = scope.get("headers", [])
+    cf_ip = _get_header(headers, b"cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+    real_ip = _get_header(headers, b"x-real-ip")
+    if real_ip:
+        return real_ip.strip()
     xff = _get_header(headers, b"x-forwarded-for")
     if xff:
         return xff.split(",")[0].strip()
@@ -208,3 +340,79 @@ class RateLimitMiddleware:
             return
 
         await self.app(scope, receive, send)
+
+
+class AbuseLimitMiddleware:
+    """Opt-in pre-auth limiter for high-volume SAT submit/CNF endpoints.
+
+    The actor key is the claimed ``X-Cathedral-Hotkey`` header. That value is
+    untrusted until the downstream route verifies the signature, so this limiter
+    only treats it as an abuse hint. It must not be used for payout or fairness.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not _abuse_enabled():
+            await self.app(scope, receive, send)
+            return
+
+        method = str(scope.get("method") or "GET").upper()
+        path = _canonical_path(str(scope.get("path") or ""))
+        if (method, path) not in _ABUSE_TARGETS:
+            await self.app(scope, receive, send)
+            return
+
+        retry_base = _env_int(
+            "CATHEDRAL_ABUSE_RETRY_BASE_SECS", _ABUSE_DEFAULT_RETRY_BASE_SECS)
+        retry_max = _env_int(
+            "CATHEDRAL_ABUSE_RETRY_MAX_SECS", _ABUSE_DEFAULT_RETRY_MAX_SECS)
+
+        ip = _client_ip_from_scope(scope)
+        ip_limit = _env_int("CATHEDRAL_ABUSE_IP_RPM", _ABUSE_DEFAULT_IP_RPM)
+        allowed, retry_after = _abuse_state.check(
+            f"ip:{ip}", ip_limit, retry_base=retry_base, retry_max=retry_max)
+        if not allowed:
+            await self._reject(send, IP_ABUSE_REASON, retry_after)
+            return
+
+        actor = (_get_header(scope.get("headers", []), b"x-cathedral-hotkey")
+                 or "").strip()
+        if actor:
+            actor_limit = _env_int(
+                "CATHEDRAL_ABUSE_ACTOR_RPM", _ABUSE_DEFAULT_ACTOR_RPM)
+            allowed, retry_after = _abuse_state.check(
+                f"actor:{ip}:{actor}",
+                actor_limit,
+                retry_base=retry_base,
+                retry_max=retry_max,
+            )
+            if not allowed:
+                await self._reject(send, ACTOR_ABUSE_REASON, retry_after)
+                return
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _reject(send: Send, reason: str, retry_after: int) -> None:
+        body = reason.encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 429,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", str(max(1, retry_after)).encode()),
+                (b"x-cathedral-rejection-reason", body),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+            "more_body": False,
+        })

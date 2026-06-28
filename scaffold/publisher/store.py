@@ -481,6 +481,22 @@ _MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE lane_challenges ADD COLUMN cnf_url TEXT;
         ALTER TABLE lane_challenges ADD COLUMN updated_at_iso TEXT;
     """),
+    ("0033_async_verify_workers", """
+        CREATE TABLE IF NOT EXISTS async_verify_workers (
+            worker_id TEXT PRIMARY KEY,
+            service_role TEXT NOT NULL DEFAULT '',
+            started_at_iso TEXT NOT NULL,
+            last_seen_at_iso TEXT NOT NULL,
+            last_tick_at_iso TEXT,
+            last_processed_at_iso TEXT,
+            last_error TEXT,
+            processed_total INTEGER NOT NULL DEFAULT 0,
+            last_batch_size INTEGER NOT NULL DEFAULT 0,
+            running INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_async_verify_workers_seen
+            ON async_verify_workers(last_seen_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -868,6 +884,22 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_source TEXT NOT NULL DEFAULT 'local';
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_url TEXT;
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS updated_at_iso TEXT;
+    """),
+    ("0033_async_verify_workers", """
+        CREATE TABLE IF NOT EXISTS async_verify_workers (
+            worker_id TEXT PRIMARY KEY,
+            service_role TEXT NOT NULL DEFAULT '',
+            started_at_iso TEXT NOT NULL,
+            last_seen_at_iso TEXT NOT NULL,
+            last_tick_at_iso TEXT,
+            last_processed_at_iso TEXT,
+            last_error TEXT,
+            processed_total INTEGER NOT NULL DEFAULT 0,
+            last_batch_size INTEGER NOT NULL DEFAULT 0,
+            running INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_async_verify_workers_seen
+            ON async_verify_workers(last_seen_at_iso);
     """),
 ]
 

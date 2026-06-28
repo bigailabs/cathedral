@@ -1,123 +1,185 @@
-# Cathedral Reliability Session Summary
+# Cathedral Reliability Merge Packet
 
-**Date:** 2026-06-27
-**Branch:** `reliability-integrated`
-**Reviewed code head:** `9279629` before this docs-only summary correction.
-**Status:** Code-complete for review. Nothing in this branch has been merged to
-`main` by this document, and no production flag should be flipped without an
-explicit go-live approval.
+**Date:** 2026-06-28
+**Worktree:** `C:\Users\fred\code\cathedral-review-reliability-9279629`
+**Status:** merge-ready after local verification and adversarial Claude review.
+**Production status:** not deployed by this document.
 
-This branch contains the reliability plan plus the integrated submit/read tracks:
+This packet records the reliability work completed across the six-agent review
+loop. The goal was to harden Cathedral's SAT submit/read surfaces without
+breaking legacy validator paths.
 
-- Validator weight-feed protection and release-gate tooling.
-- Publisher role split hardening for read, submit, and worker services.
-- Durable submit admission and async verification, default-off.
-- PM/private challenge async admission, shadow mode, and queue visibility,
-  default-off.
-- Per-hotkey abuse limiter, default-off.
-- Materialized board and leaderboard snapshots, default-off.
-- Board-failover and weights-failover Cloudflare worker code, routes commented
-  unless explicitly cut over.
-- Miner-facing error contract and observability docs.
+## Current Merge Scope
 
-## Review Status
+The merge scope is the reliability patch only:
 
-I reviewed the integrated branch in a clean worktree at:
+- pressure telemetry for submit and PM-read failure attribution
+- opt-in pre-gate abuse limiter
+- deterministic PM challenge recovery that tolerates replica lag
+- async submit queue states, metrics, worker heartbeat, and safe backpressure
+- fast prebuilt dashboard state with public telemetry sanitized
+- validator/read/submit compatibility protections
+- miner error contract and deploy env documentation
+
+Intentionally excluded from the merge:
+
+- `logs/`
+- `scripts/cathedral_endpoint_monitor.ps1`
+
+Those were local monitoring artifacts, not product code.
+
+## Six-Agent Completion
+
+| Agent | Area | Result |
+| --- | --- | --- |
+| Kuhn | Pressure telemetry | Complete. Added bounded 429/5xx pressure attribution without raw IPs, signatures, query strings, full UAs, or raw hotkeys. |
+| Bacon | Abuse limiter | Complete. Added default-off pre-gate IP and IP-scoped claimed-hotkey limiter for submit and PM-read hot paths. |
+| Kepler | PM assignment/CNF stability | Complete. Added deterministic hotkey-bound `pm-*` recovery so replica-lagged submits do not false-reject. |
+| Aristotle | Async submit/queue health | Complete. Added explicit receipt states, queue metrics, worker heartbeat, and default-off safe backpressure. |
+| Aquinas | Dashboard/read snapshot | Complete. Added `/v1/dashboard/state` backed only by prebuilt snapshot data; public response strips operational pressure/queue timing. |
+| Gauss | Validator compatibility | Complete. Verified `weights/next` compatibility and found/fixed `/leaderboard/recent` cold async risk for old validator-style clients. |
+
+## Adversarial Review
+
+Claude reviewed the actual worktree and relevant untracked files.
+
+Initial verdict:
 
 ```text
-C:\Users\fred\code\cathedral-review-reliability-9279629
+MERGE READY
 ```
 
-The branch is based on current `origin/main`:
+Claude identified rollout cautions before enabling:
 
-- `origin/main` is an ancestor of `9279629`.
-- GitHub remote `refs/heads/reliability-integrated` pointed at `9279629` when
-  this review started.
-- There is currently no open PR for this branch.
+- public dashboard exposure of endpoint pressure and queue lag
+- spoofable actor-level abuse limiting
+- leftmost `X-Forwarded-For` IP precedence
+- queue backpressure shedding on stalled workers and shadow rows
+- missing env documentation
+- stale middleware-order comment
 
-Relative to `main`, the branch changes 35 files:
+Fixes applied after review:
+
+- public `/v1/dashboard/state` now returns `admin_only` for `endpoint_pressure`
+  and `queue_lag`
+- rich pressure and queue telemetry remain on auth-gated admin submit metrics
+- abuse actor bucket is now scoped by `IP + claimed hotkey`
+- client IP precedence is `CF-Connecting-IP`, then `X-Real-IP`, then
+  `X-Forwarded-For`
+- queue backpressure ignores `per_miner_shadow` rows
+- queue backpressure only sheds new work when an active worker heartbeat exists
+- admin health and admin submit metrics are exempt from coarse RPM limiting but
+  still token-gated
+- deploy env example documents new reliability flags
+- middleware-order comment fixed
+- regression tests added
+
+Final Claude delta review:
 
 ```text
-35 files changed, 8617 insertions(+), 82 deletions(-)
+MERGE READY
 ```
 
-## Verified Locally
+No blockers remained.
 
-Python checks were run with the WSL venv:
+## Verification Evidence
+
+Commands passed in this worktree:
 
 ```text
-/mnt/c/Users/fred/code/cathedral/.venv/bin/python
-pytest 9.1.1
+PYTHONPATH=$PWD python3 -m pytest -q scaffold/publisher/tests
 ```
 
-Passing checks:
+Result:
 
-- `pytest scaffold -q`: 142 passed.
-- Targeted reliability/submit pytest set: 139 passed.
-- `pytest game/tests -q`: 15 passed.
-- `publisher_verify.py`: 152 checks passed.
-- `assigned_lane_verify.py`: 15 checks passed.
-- `weights_verify.py`: 32 checks passed.
-- `python -m compileall -q scaffold scripts`: passed.
-- `deploy/edge-router/worker.test.mjs`: passed.
-- `deploy/edge-router/weights-failover/worker.test.mjs`: passed.
-- `deploy/edge-router/board-failover/worker.test.mjs`: passed.
-- `git diff --check origin/main..HEAD`: passed.
+```text
+165 passed
+```
 
-Full `pytest -q` collected 520 tests but exceeded a 3-minute local cap before
-returning useful output. Treat the bounded checks above as the verified local
-evidence for this review.
+```text
+PYTHONPATH=$PWD python3 publisher_verify.py
+```
 
-## Review Fixes Included
+Result:
 
-The integrated head includes the three review fixes:
+```text
+PUBLISHER VERIFY: PASS all 152 checks
+```
 
-1. Shadow/live PM idempotency collision fixed:
-   - Shadow keys use a `shadow\x00...` namespace.
-   - Live `admit_pending()` excludes `per_miner_shadow` rows as defense in depth.
-   - Tests cover shadow -> drain -> live cutover -> same payload retry -> fresh
-     live `sub_` receipt -> ranked -> no double-pay.
+```text
+PYTHONPATH=$PWD python3 weights_verify.py
+```
 
-2. Queue metrics split live from shadow:
-   - Live accepted/rejected rates exclude shadow rows.
-   - Shadow accepted/rejected counters are reported separately.
+Result:
 
-3. Board worker catch-all risk documented:
-   - Worker remains default-deny.
-   - `worker.js`, `wrangler.toml`, and `README.md` warn not to attach it as a
-     catch-all route.
-   - Routes remain commented by default.
+```text
+OK: 32 checks
+```
 
-## Go-Live Gates
+```text
+python3 -m compileall -q scaffold/publisher
+git diff --check
+```
 
-Before any production impact:
+Result:
 
-1. Validate async submit SQL against real Postgres, especially `FOR UPDATE SKIP
-   LOCKED`, `ON CONFLICT DO NOTHING`, and idempotent terminal updates.
-2. Deploy a worker-role service and prove pending PM receipts drain to terminal
-   ranked/rejected before enabling PM async live.
-3. Run PM async in shadow first and compare divergence counters.
-4. Do not attach board-failover as a catch-all Cloudflare route.
-5. Keep all three validator weight URLs working:
-   - `https://api.cathedral.computer/v1/validator/weights/next`
-   - `https://api.cathedral.computer/api/cathedral/v1/validator/weights/next`
-   - `https://read.cathedral.computer/v1/validator/weights/next`
-6. Run `scripts/validator_release_gate.py` against live finney before any
-   validator-facing cutover.
+```text
+pass
+```
 
-## Rollback
+`git diff --check` only emitted CRLF warnings.
 
-- Async submit rollback: set `CATHEDRAL_SUBMIT_ASYNC_ENABLED=false` and
-  `CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED=false`.
-- PM shadow rollback: set `CATHEDRAL_PM_ASYNC_SHADOW=false`.
-- Materialized snapshots rollback:
-  `CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED=false`.
-- Per-hotkey limiter rollback:
-  `CATHEDRAL_PER_HOTKEY_LIMIT_ENABLED=false`.
-- Board/weights worker rollback: remove or revert the specific Cloudflare route
-  bindings; do not alter unrelated routes.
+## Compatibility Gates
 
-## Current Recommendation
+The following outward surfaces must keep working:
 
-Open a PR from `reliability-integrated` to `main` for GitHub checks and review.
-Do not merge or flip live flags until the go-live gates above pass.
+- `GET /v1/validator/weights/next`
+- `GET /api/cathedral/v1/validator/weights/next`
+- `GET /v1/leaderboard/recent`
+- `POST /v1/agents/submit`
+- `POST /api/cathedral/v1/agents/submit`
+- `GET /v1/synthetic-boolean/per-miner/challenges`
+- `GET /v1/synthetic-boolean/per-miner/cnf`
+
+Regression coverage now includes:
+
+- legacy prefixed submit reaches the submit handler
+- cold `/leaderboard/recent` returns rows synchronously by default
+- PM CNF fetch recovers without assignment-row visibility
+- foreign miner PM challenge IDs are rejected
+- queue backpressure does not block idempotent receipt replay
+- queue backpressure does not shed without active workers
+- shadow queue rows do not trigger live backpressure
+- public dashboard state does not expose pressure/queue timing
+- abuse actor limiter cannot cross-IP lock out a victim hotkey
+- Cloudflare client IP takes precedence over spoofable XFF
+
+## Go-Live Notes
+
+All new behavior that changes runtime pressure handling is gated.
+
+Recommended production order:
+
+1. Deploy code with behavior-changing flags off.
+2. Confirm `weights/next`, `/leaderboard/recent`, and submit aliases are healthy.
+3. Enable pressure telemetry if not already enabled.
+4. Enable dashboard snapshot only after confirming public sanitized output.
+5. Enable abuse limiting conservatively.
+6. Enable async submit only with a live worker role and queue metrics visible.
+7. Enable queue backpressure only after worker heartbeat is confirmed.
+
+Rollback flags:
+
+```text
+CATHEDRAL_ABUSE_LIMIT_ENABLED=false
+CATHEDRAL_DASHBOARD_SNAPSHOT_ENABLED=false
+CATHEDRAL_SUBMIT_ASYNC_ENABLED=false
+CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED=false
+CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED=false
+```
+
+## Conclusion
+
+The six-agent reliability work is complete, the review is coherent, the known
+review findings were patched, and the current code is merge-ready pending normal
+GitHub checks.

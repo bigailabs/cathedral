@@ -47,7 +47,8 @@ def _now_iso():
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def _submit(client, kp, *, challenge_id, solution, extra_headers=None):
+def _submit(client, kp, *, challenge_id, solution, extra_headers=None,
+            path="/v1/agents/submit"):
     sol_sha = sha256_hex(solution)
     ts = _now_iso()
     sig = _sign(kp, challenge_id=challenge_id, sol_sha=sol_sha, submitted_at=ts)
@@ -59,7 +60,7 @@ def _submit(client, kp, *, challenge_id, solution, extra_headers=None):
     if extra_headers:
         headers.update(extra_headers)
     return client.post(
-        "/v1/agents/submit",
+        path,
         data={"card_id": _FAMILY, "challenge_id": challenge_id,
               "dimacs_solution": solution, "submitted_at": ts},
         headers=headers,
@@ -104,6 +105,22 @@ def test_legacy_sync_path_unchanged_when_async_off(tmp_path, monkeypatch):
     assert body["solve_rank"] == 1
     assert "eval_run_id" in body
     # legacy path does NOT create a durable receipt row
+    assert store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
+                       "WHERE idempotency_key IS NOT NULL")[0]["n"] == 0
+
+
+def test_legacy_prefixed_submit_path_still_reaches_submit_handler(
+        tmp_path, monkeypatch):
+    app, store = _build(tmp_path, monkeypatch, async_on=False)
+    kp = _keypair()
+    with TestClient(app) as client:
+        r = _submit(
+            client, kp, challenge_id="c-1", solution=SOLUTION,
+            path="/api/cathedral/v1/agents/submit")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ranked"
+    assert body["solve_rank"] == 1
     assert store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
                        "WHERE idempotency_key IS NOT NULL")[0]["n"] == 0
 
@@ -178,6 +195,28 @@ def test_async_admission_returns_202_pending_receipt(tmp_path, monkeypatch):
         assert g.status_code == 200
         assert g.json()["receipt_id"] == rec["receipt_id"]
         assert g.json()["status"] == "pending"
+        assert g.json()["open"] is True
+        assert g.json()["terminal"] is False
+
+
+def test_receipt_exposes_verifying_state_after_worker_claim(tmp_path, monkeypatch):
+    app, store = _build(tmp_path, monkeypatch, async_on=True)
+    kp = _keypair()
+    with TestClient(app) as client:
+        r = _submit(client, kp, challenge_id="c-1", solution=SOLUTION)
+        rid = r.json()["receipt_id"]
+        claimed = submit_admission.claim_pending(
+            store,
+            worker_id="w",
+            now_iso="2026-06-27T00:00:00.000Z",
+            lock_deadline_iso="2026-06-27T00:02:00.000Z",
+            batch_size=1,
+        )
+        assert [row["id"] for row in claimed] == [rid]
+        g = client.get(f"/v1/agents/receipts/{rid}").json()
+    assert g["status"] == "verifying"
+    assert g["open"] is True
+    assert g["terminal"] is False
 
 
 def test_idempotent_replay_returns_same_receipt_no_second_attempt(tmp_path, monkeypatch):
@@ -211,6 +250,19 @@ def test_sync_override_forces_legacy_200_even_when_async_on(tmp_path, monkeypatc
                     extra_headers={"X-Cathedral-Submit-Mode": "sync"})
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "ranked"
+
+
+def test_public_async_oversized_body_is_413_never_queued(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_MAX_SOLUTION_BYTES", "10")
+    app, store = _build(tmp_path, monkeypatch, async_on=True)
+    kp = _keypair()
+    with TestClient(app) as client:
+        r = _submit(client, kp, challenge_id="c-1", solution=SOLUTION)
+    assert r.status_code == 413, r.text
+    assert r.headers["X-Cathedral-Rejection-Reason"] == "solution_too_large"
+    n = store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
+                    "WHERE idempotency_key IS NOT NULL")[0]["n"]
+    assert n == 0
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +327,93 @@ def test_worker_rejects_bad_solution(tmp_path, monkeypatch):
     assert g["rejection_reason"] == "solution_unsatisfied"
     # rejected -> no feed rows, no solve claim
     assert store.query("SELECT COUNT(*) AS n FROM eval_runs")[0]["n"] == 0
+
+
+def test_queue_backpressure_rejects_new_admission_but_allows_replay(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_QUEUE_MAX_PENDING", "1")
+    app, store = _build(tmp_path, monkeypatch, async_on=True)
+    kp1 = _keypair()
+    from bittensor_wallet import Keypair
+    kp2 = Keypair.create_from_seed("0x" + "cd" * 32)
+    submit_admission.record_worker_heartbeat(
+        store, worker_id="worker:bp", service_role="worker",
+        now_iso=_now_iso(), event="started")
+    with TestClient(app) as client:
+        r1 = _submit(client, kp1, challenge_id="c-1", solution=SOLUTION)
+        assert r1.status_code == 202, r1.text
+        rid = r1.json()["receipt_id"]
+        replay = _submit(client, kp1, challenge_id="c-1", solution=SOLUTION)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["receipt_id"] == rid
+        r2 = _submit(client, kp2, challenge_id="c-1", solution=SOLUTION)
+    assert r2.status_code == 503, r2.text
+    assert r2.headers["X-Cathedral-Rejection-Reason"] == "submit_queue_backpressure"
+    n = store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
+                    "WHERE idempotency_key IS NOT NULL")[0]["n"]
+    assert n == 1
+
+
+def test_queue_backpressure_does_not_shed_without_active_worker(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_SUBMIT_QUEUE_MAX_PENDING", "1")
+    app, store = _build(tmp_path, monkeypatch, async_on=True)
+    kp1 = _keypair()
+    from bittensor_wallet import Keypair
+    kp2 = Keypair.create_from_seed("0x" + "ef" * 32)
+    with TestClient(app) as client:
+        r1 = _submit(client, kp1, challenge_id="c-1", solution=SOLUTION)
+        r2 = _submit(client, kp2, challenge_id="c-1", solution=SOLUTION)
+    assert r1.status_code == 202, r1.text
+    assert r2.status_code == 202, r2.text
+    n = store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
+                    "WHERE idempotency_key IS NOT NULL")[0]["n"]
+    assert n == 2
+
+
+def test_queue_backpressure_ignores_shadow_rows(tmp_path, monkeypatch):
+    app, store = _build(tmp_path, monkeypatch, async_on=True)
+    now = _now_iso()
+    submit_admission.record_worker_heartbeat(
+        store, worker_id="worker:shadow", service_role="worker",
+        now_iso=now, event="started")
+
+    def _do(conn):
+        conn.execute(
+            "INSERT INTO per_miner_attempts(id, challenge_id, miner_hotkey, "
+            "epoch, status, dimacs_solution_sha256, submitted_at, recorded_at_iso, "
+            "signature, idempotency_key, received_at_iso, challenge_kind, "
+            "solution_body, attempt_count) "
+            "VALUES ('shadow-row', 'pm-test', 'hk', 0, 'pending', 'sha', ?, ?, "
+            "'sig', 'shadow-key', ?, ?, ?, 0)",
+            (now, now, now, submit_admission.KIND_PER_MINER_SHADOW, SOLUTION))
+        return submit_admission.queue_backpressure_decision(
+            conn, now_iso=now, max_pending=1, max_worker_lag_secs=1,
+            worker_stale_secs=120)
+
+    decision = store.write(_do)
+    assert decision["active_workers"] == 1
+    assert decision["pending"] == 0
+    assert decision["limited"] is False
+
+
+def test_worker_heartbeat_metrics_are_visible(tmp_path, monkeypatch):
+    _app, store = _build(tmp_path, monkeypatch, async_on=True)
+    now = "2026-06-27T00:00:00.000Z"
+    submit_admission.record_worker_heartbeat(
+        store, worker_id="worker:1", service_role="worker",
+        now_iso=now, event="started")
+    submit_admission.record_worker_heartbeat(
+        store, worker_id="worker:1", service_role="worker",
+        now_iso="2026-06-27T00:00:01.000Z", event="tick", processed=3)
+    metrics = submit_admission.worker_metrics(
+        store, now_iso="2026-06-27T00:00:02.000Z", stale_secs=120)
+    assert metrics["active_workers"] == 1
+    assert metrics["workers"][0]["worker_id"] == "worker:1"
+    assert metrics["workers"][0]["processed_total"] == 3
+    assert metrics["workers"][0]["last_batch_size"] == 3
 
 
 # ---------------------------------------------------------------------------

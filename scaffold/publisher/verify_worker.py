@@ -62,7 +62,7 @@ def lock_secs() -> int:
         return 120
 
 
-async def verify_loop(tick, *, worker_id: str, log=None) -> None:
+async def verify_loop(tick, *, worker_id: str, log=None, heartbeat=None) -> None:
     """Run `tick(worker_id=..., batch_size=..., lock_secs=...)` forever.
 
     `tick` is the closure built in app.py (app.state.async_verify_tick). When the
@@ -73,15 +73,24 @@ async def verify_loop(tick, *, worker_id: str, log=None) -> None:
     bs = batch_size()
     ls = lock_secs()
     idle_sleep = poll_secs()
+    if heartbeat:
+        heartbeat("started", processed=0)
     while True:
         try:
             processed = tick(worker_id=worker_id, batch_size=bs, lock_secs=ls)
         except asyncio.CancelledError:
+            if heartbeat:
+                heartbeat("cancelled", processed=0)
             raise
         except Exception as exc:  # never let one bad row kill the loop
             if log:
                 log("verify_tick_error", error=repr(exc))
+            if heartbeat:
+                heartbeat("error", processed=0, error=repr(exc))
             processed = 0
+        else:
+            if heartbeat:
+                heartbeat("tick", processed=processed)
         if not processed:
             await asyncio.sleep(idle_sleep)
         else:
