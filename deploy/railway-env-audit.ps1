@@ -77,6 +77,23 @@ function Resolve-RailwayCli {
     return $null
 }
 
+function Add-RailwayStatusFailures {
+    param([string]$Text)
+
+    $matched = $false
+    if ($Text -match "invalid_grant|Unauthorized|railway login") {
+        Add-Failure "Railway CLI auth is expired or unauthorized. Run 'railway login'."
+        $matched = $true
+    }
+    if ($Text -match "No linked project|railway link") {
+        Add-Failure "This checkout is not linked to a Railway project. Run 'railway link'."
+        $matched = $true
+    }
+    if (-not $matched) {
+        Add-Failure "Railway status failed. Run 'railway status' for details."
+    }
+}
+
 function Convert-RailwayVars {
     param($Json)
 
@@ -216,7 +233,7 @@ if ([string]::IsNullOrWhiteSpace($railway)) {
     Add-Pass "Found Railway CLI"
     $status = Invoke-Capture $railway @("status")
     if ($status.Code -ne 0) {
-        Add-Failure "Railway CLI is not authenticated or this checkout is not linked. Run 'railway login' and 'railway link'."
+        Add-RailwayStatusFailures $status.Text
     } else {
         Add-Pass "Railway CLI authenticated and project-linked"
 

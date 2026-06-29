@@ -13,6 +13,8 @@ assert.match(script, /raw values/, "audit must document that Railway returns raw
 assert.match(script, /CATHEDRAL_CNF_TOKEN_SECRET equal across read\/submit\/worker/, "audit must check shared CNF token equality");
 assert.match(script, /CATHEDRAL_PG_STATEMENT_TIMEOUT_MS\s*=\s*"4000"/, "audit must require statement timeout");
 assert.match(script, /CATHEDRAL_SUBMIT_HARD_CAP\s*=\s*"8"/, "audit must require submit cap 8");
+assert.match(script, /Railway CLI auth is expired or unauthorized/, "audit must distinguish stale Railway auth");
+assert.match(script, /This checkout is not linked to a Railway project/, "audit must distinguish missing Railway link");
 assert.doesNotMatch(script, /variable", "set"/, "audit must not mutate Railway variables");
 assert.doesNotMatch(script, /railway deploy/, "audit must not deploy Railway services");
 assert.match(preflight, /railway-env-audit\.ps1/, "launch preflight must run the Railway env audit");
@@ -61,6 +63,11 @@ const worker = {
 };
 
 if (args[0] === "status") {
+  if (scenario === "expired-auth") {
+    console.error("Warning: failed to refresh OAuth token: invalid_grant. Please run railway login again.");
+    console.error("No linked project found. Run railway link to connect to a project.");
+    process.exit(1);
+  }
   console.log("Project: cathedral");
   process.exit(0);
 }
@@ -124,5 +131,10 @@ assert.doesNotMatch(mismatch.stdout + mismatch.stderr, /different-fake-value|fak
 const missing = runAudit("missing-timeout");
 assert.notEqual(missing.status, 0, missing.stdout + missing.stderr);
 assert.match(missing.stdout, /cathedral-read missing CATHEDRAL_PG_STATEMENT_TIMEOUT_MS/);
+
+const expired = runAudit("expired-auth");
+assert.notEqual(expired.status, 0, expired.stdout + expired.stderr);
+assert.match(expired.stdout, /Railway CLI auth is expired or unauthorized/);
+assert.match(expired.stdout, /This checkout is not linked to a Railway project/);
 
 console.log("railway env audit tests passed");

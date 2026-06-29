@@ -89,6 +89,23 @@ function Resolve-RailwayCli {
     return $null
 }
 
+function Add-RailwayStatusFailures {
+    param([string]$Text)
+
+    $matched = $false
+    if ($Text -match "invalid_grant|Unauthorized|railway login") {
+        Add-Failure "Railway CLI auth is expired or unauthorized. Run 'railway login'."
+        $matched = $true
+    }
+    if ($Text -match "No linked project|railway link") {
+        Add-Failure "This checkout is not linked to a Railway project. Run 'railway link'."
+        $matched = $true
+    }
+    if (-not $matched) {
+        Add-Failure "Railway status failed. Run 'railway status' for details."
+    }
+}
+
 Write-Host "Cathedral launch preflight (read-only)" -ForegroundColor Cyan
 
 $git = Require-Command "git"
@@ -176,7 +193,7 @@ if ($SkipRailway) {
         Add-Pass "Found Railway CLI at $railway"
         $railwayStatus = Invoke-Capture $railway @("status")
         if ($railwayStatus.Code -ne 0) {
-            Add-Failure "Railway CLI is not authenticated or this checkout is not linked. Run 'railway login' and 'railway link'."
+            Add-RailwayStatusFailures $railwayStatus.Text
         } else {
             Add-Pass "Railway CLI is authenticated and project-linked"
             if ($SkipRailwayEnvAudit) {

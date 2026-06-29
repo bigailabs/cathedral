@@ -5,7 +5,8 @@ const text = fs.readFileSync("deploy/launch-preflight.ps1", "utf8");
 
 assert.match(text, /gh" @\(\s*"pr", "view"/s, "preflight must inspect PR state");
 assert.match(text, /rev-list", "--left-right", "--count", "origin\/main\.\.\.HEAD"/, "preflight must compare against origin/main");
-assert.match(text, /Railway CLI is not authenticated/, "preflight must fail clearly on stale Railway auth/link");
+assert.match(text, /Railway CLI auth is expired or unauthorized/, "preflight must fail clearly on stale Railway auth");
+assert.match(text, /This checkout is not linked to a Railway project/, "preflight must fail clearly on missing Railway link");
 assert.match(text, /railway login/, "preflight must tell operator to refresh Railway auth");
 assert.match(text, /railway link/, "preflight must tell operator to link the project");
 assert.match(text, /post-deploy-smoke\.ps1/, "preflight must validate the final smoke command");
