@@ -3698,15 +3698,19 @@ def build_app(
             clauses.append("solved_at_iso > ?")
             params.append(since_iso)
         where = " AND ".join(clauses)
+        # per_miner_solves is keyed by (challenge_id, miner_hotkey), so COUNT(*)
+        # is already the unique solve count for this miner/window. Avoid
+        # COUNT(DISTINCT ...) here; this endpoint is dashboard visibility, not a
+        # place to spend DB CPU under load.
         totals = store.query(
-            "SELECT COUNT(DISTINCT challenge_id) AS unique_solves, "
+            "SELECT COUNT(*) AS unique_solves, "
             "COUNT(*) AS verified_solves, SUM(difficulty_weight) AS units, "
             "MAX(solved_at_iso) AS last_solved_at "
             "FROM per_miner_solves WHERE " + where,
             tuple(params),
         )
         tiers = store.query(
-            "SELECT tier, COUNT(DISTINCT challenge_id) AS solves, "
+            "SELECT tier, COUNT(*) AS solves, "
             "SUM(difficulty_weight) AS units FROM per_miner_solves "
             "WHERE " + where + " GROUP BY tier ORDER BY tier",
             tuple(params),
@@ -3848,19 +3852,21 @@ def build_app(
         enabled = pm.perminer_enabled()
         epoch = pm.current_epoch() if enabled else None
         since_24h = _since_24h_iso()
+        # per_miner_solves is keyed by (challenge_id, miner_hotkey), so COUNT(*)
+        # is equivalent to unique challenges per miner and is much cheaper than
+        # COUNT(DISTINCT challenge_id) on the hot 24h PM summary path.
         rows_ = store.query(
-            "SELECT miner_hotkey, COUNT(DISTINCT challenge_id) AS unique_solves, "
-            "COUNT(*) AS verified_solves, SUM(difficulty_weight) AS units, "
-            "MAX(solved_at_iso) AS last_solved_at "
-            "FROM per_miner_solves WHERE solved_at_iso > ? AND verified=1 "
-            "GROUP BY miner_hotkey ORDER BY units DESC, unique_solves DESC, miner_hotkey "
-            "LIMIT ?",
+            "SELECT miner_hotkey, unique_solves, verified_solves, units, "
+            "last_solved_at, COUNT(*) OVER () AS active_miners "
+            "FROM ("
+            "  SELECT miner_hotkey, COUNT(*) AS unique_solves, "
+            "  COUNT(*) AS verified_solves, SUM(difficulty_weight) AS units, "
+            "  MAX(solved_at_iso) AS last_solved_at "
+            "  FROM per_miner_solves WHERE solved_at_iso > ? AND verified=1 "
+            "  GROUP BY miner_hotkey"
+            ") AS pm_summary "
+            "ORDER BY units DESC, unique_solves DESC, miner_hotkey LIMIT ?",
             (since_24h, limit),
-        )
-        active_miners = store.query(
-            "SELECT COUNT(DISTINCT miner_hotkey) AS n FROM per_miner_solves "
-            "WHERE solved_at_iso > ? AND verified=1",
-            (since_24h,),
         )
         assigned_miners = []
         assignment_accounting = (
@@ -3869,8 +3875,10 @@ def build_app(
         )
         if epoch is not None and _perminer_record_listing_assignments():
             assigned_miners = store.query(
-                "SELECT COUNT(DISTINCT miner_hotkey) AS n, COUNT(*) AS assignments "
-                "FROM per_miner_assignments WHERE epoch=?",
+                "SELECT COUNT(*) AS n, SUM(assignments) AS assignments FROM ("
+                "  SELECT miner_hotkey, COUNT(*) AS assignments "
+                "  FROM per_miner_assignments WHERE epoch=? GROUP BY miner_hotkey"
+                ") AS assignment_summary",
                 (epoch,),
             )
         # PM-primary honesty: never imply PM is contributing when it isn't.
@@ -3878,7 +3886,7 @@ def build_app(
         # in the trailing 24h; under pm_primary those solves are what feed the
         # vector, so 0 verified == not contributing (degraded), stated explicitly.
         _pm_mode = weights_mod.perminer_scoring_mode()
-        _pm_verified_count = int(active_miners[0]["n"] or 0) if active_miners else 0
+        _pm_verified_count = int(rows_[0]["active_miners"] or 0) if rows_ else 0
         _pm_primary_configured = _pm_mode == "pm_primary"
         _pm_primary_contributing = _pm_primary_configured and _pm_verified_count > 0
         return {
@@ -3903,7 +3911,7 @@ def build_app(
             "assignment_accounting": assignment_accounting,
             "current_epoch_assignment_miners": int(assigned_miners[0]["n"] or 0) if assigned_miners else 0,
             "current_epoch_assigned_challenges": int(assigned_miners[0]["assignments"] or 0) if assigned_miners else 0,
-            "active_miners_24h": int(active_miners[0]["n"] or 0) if active_miners else 0,
+            "active_miners_24h": _pm_verified_count,
             "miners": [
                 {
                     "miner_hotkey": str(r["miner_hotkey"]),

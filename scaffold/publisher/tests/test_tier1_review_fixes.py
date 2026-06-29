@@ -94,6 +94,7 @@ def test_perminer_score_window_index_exists(tmp_path):
     names = {str(r["name"]) for r in rows}
 
     assert "idx_per_miner_solves_verified_time_hotkey" in names
+    assert "idx_per_miner_solves_hotkey_verified_time" in names
 
 
 def test_pm_primary_score_query_failure_does_not_fall_back_to_public(monkeypatch):
