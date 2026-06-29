@@ -139,7 +139,7 @@ Checks:
 Run the bundled post-deploy smoke gate:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate
 ```
 
 This verifies the validator weight-feed release gate, direct read and submit

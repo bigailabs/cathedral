@@ -254,8 +254,12 @@ router. It proves the direct read origin cannot accept submit traffic and the
 direct submit origin cannot serve leaderboard reads.
 
 This skip-heavy command is not a final launch gate. After DNS/edge cutover, run
-the full post-deploy smoke without these skips before claiming the miner
-experience, assigned scoring, or validator payment feed is live.
+the full post-deploy smoke with `-RequireFinalGate` before claiming the miner
+experience, assigned scoring, or validator payment feed is live:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate
+```
 
 ## Rollback
 

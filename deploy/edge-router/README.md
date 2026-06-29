@@ -119,8 +119,12 @@ powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -SkipValid
 
 This only proves the direct read/submit origins are isolated. It intentionally
 skips the validator release gate, edge checks, soak, and live submit rejection
-test. After Worker cutover, run `deploy/post-deploy-smoke.ps1` without those
-skips before claiming production live.
+test. After Worker cutover, run the enforced final gate before claiming
+production live:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate
+```
 
 ## Test
 

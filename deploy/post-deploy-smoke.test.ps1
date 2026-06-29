@@ -77,6 +77,40 @@ if ($fullPlan.Text -notmatch "full final controlled-v0 gate" -or
     throw "Full PlanOnly did not clearly identify the final gate. Output: $($fullPlan.Text)"
 }
 
+$requiredFinalPlan = Invoke-ChildPowerShell @(
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    $scriptPath,
+    "-PlanOnly",
+    "-RequireFinalGate"
+)
+if ($requiredFinalPlan.Code -ne 0) {
+    throw "RequireFinalGate should allow a full no-skip plan. Output: $($requiredFinalPlan.Text)"
+}
+if ($requiredFinalPlan.Text -notmatch "full final controlled-v0 gate") {
+    throw "RequireFinalGate full plan did not identify the final gate. Output: $($requiredFinalPlan.Text)"
+}
+
+$requiredFinalWithSkip = Invoke-ChildPowerShell @(
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    $scriptPath,
+    "-PlanOnly",
+    "-RequireFinalGate",
+    "-SkipLiveSmoke"
+)
+if ($requiredFinalWithSkip.Code -eq 0) {
+    throw "RequireFinalGate should fail when any final gate is skipped."
+}
+if ($requiredFinalWithSkip.Text -notmatch "RequireFinalGate forbids" -or
+    $requiredFinalWithSkip.Text -notmatch "SkipLiveSmoke") {
+    throw "RequireFinalGate skip failure was not actionable. Output: $($requiredFinalWithSkip.Text)"
+}
+
 $missingPython = Invoke-ChildPowerShell @(
     "-NoProfile",
     "-ExecutionPolicy",

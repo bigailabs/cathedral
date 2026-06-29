@@ -22,6 +22,7 @@ param(
     [switch]$SkipRouteMap,
     [switch]$SkipSoak,
     [switch]$SkipLiveSmoke,
+    [switch]$RequireFinalGate,
     [switch]$PlanOnly
 )
 
@@ -39,6 +40,9 @@ if ($SkipEdgeSmoke) { $FinalGateBlockers += "SkipEdgeSmoke" }
 if ($SkipRouteMap) { $FinalGateBlockers += "SkipRouteMap" }
 if ($SkipSoak) { $FinalGateBlockers += "SkipSoak" }
 if ($SkipLiveSmoke) { $FinalGateBlockers += "SkipLiveSmoke" }
+if ($RequireFinalGate -and $FinalGateBlockers.Count -gt 0) {
+    throw ("RequireFinalGate forbids relaxed/skipped gates: {0}" -f ($FinalGateBlockers -join ", "))
+}
 
 $script:SmokeToolPreflight = @{}
 

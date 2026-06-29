@@ -119,7 +119,7 @@ check the validator weight feed, direct split origins, edge route map, or soak.
 Preferred controlled-v0 post-deploy gate:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate
 ```
 
 This gate runs the read-only validator release gate first, then checks direct
@@ -146,7 +146,7 @@ Do not post that the new miner path or payment feed is live until all of this is
 true against production:
 
 - PR merged and Railway/edge deployment completed.
-- `deploy/post-deploy-smoke.ps1` passes without `-SkipLiveSmoke`.
+- `deploy/post-deploy-smoke.ps1 -RequireFinalGate` passes.
 - `-SkipValidatorReleaseGate`, `-SkipSplitOriginSmoke`, `-SkipEdgeSmoke`,
   `-SkipRouteMap`, and `-SkipSoak` were not used for the final gate.
 - `/v1/validator/weights/next` converges across canonical, legacy-prefixed, and
