@@ -9,6 +9,7 @@ const expectWorker = isWorkersDev || !allowBypass;
 const iterations = Number(process.env.CATHEDRAL_EDGE_SOAK_ITERATIONS || 12);
 const intervalMs = Number(process.env.CATHEDRAL_EDGE_SOAK_INTERVAL_MS || 5000);
 const timeoutMs = Number(process.env.CATHEDRAL_EDGE_TIMEOUT_MS || 10000);
+const maxHotMs = Number(process.env.CATHEDRAL_EDGE_MAX_HOT_MS || 5000);
 const includeTop = process.env.CATHEDRAL_EDGE_INCLUDE_TOP === "1";
 
 const EDGE_VALUES = new Set(["BYPASS", "HIT", "MISS", "REFRESH", "STALE", "STALE-REFRESH"]);
@@ -98,6 +99,8 @@ function validate(result) {
   }
   if (result.ms > timeoutMs) {
     errors.push(`slow_over_timeout:${result.ms}`);
+  } else if (result.ms > maxHotMs) {
+    errors.push(`slow_hot_path:${result.ms}`);
   }
   return errors;
 }
@@ -111,7 +114,7 @@ function printSummary(results, errors) {
 
   console.log("");
   console.log(`edge-soak base=${base} expectWorker=${expectWorker} allowBypass=${allowBypass}`);
-  console.log(`iterations=${iterations} intervalMs=${intervalMs} timeoutMs=${timeoutMs} checks=${checks.length}`);
+  console.log(`iterations=${iterations} intervalMs=${intervalMs} timeoutMs=${timeoutMs} maxHotMs=${maxHotMs} checks=${checks.length}`);
   console.log("name      count  ok  p50ms  p95ms  maxms  edge");
   for (const [name, rows] of byName) {
     const times = rows.map((row) => row.ms);

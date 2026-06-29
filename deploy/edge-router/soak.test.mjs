@@ -31,10 +31,14 @@ function statusFor(method, url) {
   return 200;
 }
 
-async function serve({ staleWeights = false } = {}) {
+async function serve({ staleWeights = false, slowReadyMs = 0 } = {}) {
   const server = createServer((req, res) => {
     const method = req.method || "GET";
     const url = req.url || "";
+    if (slowReadyMs && url === "/health/ready") {
+      setTimeout(() => json(res, statusFor(method, url), { ok: true }, headersFor(method, url, staleWeights)), slowReadyMs);
+      return;
+    }
     json(res, statusFor(method, url), { ok: true }, headersFor(method, url, staleWeights));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -45,7 +49,7 @@ async function serve({ staleWeights = false } = {}) {
   };
 }
 
-function runSoak(baseUrl) {
+function runSoak(baseUrl, envOverrides = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["deploy/edge-router/soak.mjs"], {
       env: {
@@ -54,6 +58,8 @@ function runSoak(baseUrl) {
         CATHEDRAL_EDGE_SOAK_ITERATIONS: "1",
         CATHEDRAL_EDGE_SOAK_INTERVAL_MS: "10",
         CATHEDRAL_EDGE_TIMEOUT_MS: "2000",
+        CATHEDRAL_EDGE_MAX_HOT_MS: "1000",
+        ...envOverrides,
       },
       cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -77,6 +83,17 @@ for (const staleWeights of [false, true]) {
       assert.equal(result.code, 0, result.stderr || result.stdout);
       assert.match(result.stdout, /edge-soak base=/);
     }
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const server = await serve({ slowReadyMs: 75 });
+  try {
+    const result = await runSoak(server.url, { CATHEDRAL_EDGE_MAX_HOT_MS: "25" });
+    assert.notEqual(result.code, 0, "soak should fail when a hot endpoint is too slow");
+    assert.match(result.stdout + result.stderr, /slow_hot_path/);
   } finally {
     await server.close();
   }
