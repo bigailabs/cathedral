@@ -505,6 +505,47 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_hotkey_verified_time
             ON per_miner_solves(miner_hotkey, verified, solved_at_iso);
     """),
+    # 0036: V2 off-chain solution manifest intake. Miners submit a tiny signed
+    # manifest pointing at a decentralized/blob solution artifact; workers verify
+    # the blob asynchronously in later phases. This table is isolated from the
+    # current payout ledger so phase 1/2 can be tested without reward impact.
+    ("0036_solution_manifests", """
+        CREATE TABLE IF NOT EXISTS solution_manifests (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            assignment_encoding TEXT NOT NULL,
+            solution_cid TEXT NOT NULL,
+            solution_sha256 TEXT NOT NULL,
+            solution_bytes INTEGER NOT NULL DEFAULT 0,
+            cnf_sha256 TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'received',
+            rejection_reason TEXT,
+            submitted_at TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            verified_at_iso TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at_iso TEXT,
+            locked_by TEXT,
+            locked_until_iso TEXT,
+            epoch INTEGER,
+            tier INTEGER,
+            seq INTEGER,
+            assignment_identity TEXT,
+            weighted_score REAL,
+            answer_hash TEXT,
+            verifier_details_hash TEXT,
+            last_error TEXT,
+            signature TEXT NOT NULL,
+            manifest_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_solution_manifests_status_received
+            ON solution_manifests(status, received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_solution_manifests_hotkey_challenge
+            ON solution_manifests(miner_hotkey, challenge_id);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -917,6 +958,43 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_hotkey_verified_time
             ON per_miner_solves(miner_hotkey, verified, solved_at_iso);
     """),
+    ("0036_solution_manifests", """
+        CREATE TABLE IF NOT EXISTS solution_manifests (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            assignment_encoding TEXT NOT NULL,
+            solution_cid TEXT NOT NULL,
+            solution_sha256 TEXT NOT NULL,
+            solution_bytes BIGINT NOT NULL DEFAULT 0,
+            cnf_sha256 TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'received',
+            rejection_reason TEXT,
+            submitted_at TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            verified_at_iso TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at_iso TEXT,
+            locked_by TEXT,
+            locked_until_iso TEXT,
+            epoch BIGINT,
+            tier INTEGER,
+            seq INTEGER,
+            assignment_identity TEXT,
+            weighted_score DOUBLE PRECISION,
+            answer_hash TEXT,
+            verifier_details_hash TEXT,
+            last_error TEXT,
+            signature TEXT NOT NULL,
+            manifest_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_solution_manifests_status_received
+            ON solution_manifests(status, received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_solution_manifests_hotkey_challenge
+            ON solution_manifests(miner_hotkey, challenge_id);
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -941,6 +1019,7 @@ _PK_BY_TABLE: dict[str, str] = {
     "coldkey_map": "hotkey",
     "metagraph_hotkeys": "network, netuid, hotkey",
     "signed_weight_vectors": "id",
+    "solution_manifests": "id",
     "tee_gpu_capacity": "capacity_id",
     "tee_gpu_capacity_events": "id",
     "attest_nonces": "nonce",
@@ -1065,11 +1144,13 @@ class Store:
     string: a postgres[ql]:// DSN (passed as `path` or via DATABASE_URL) selects
     Postgres; anything else is a SQLite file path."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, prefer_env_database_url: bool = True) -> None:
         # DATABASE_URL wins when set and looks like Postgres — that is how the
         # deployed publisher (server.py passes CATHEDRAL_DB_PATH) flips to PG
-        # without changing app construction.
-        env_url = os.environ.get("DATABASE_URL")
+        # without changing app construction. V2/beta stacks can pass
+        # prefer_env_database_url=False so a separate explicit path/DSN cannot
+        # accidentally fall back to the live DATABASE_URL.
+        env_url = os.environ.get("DATABASE_URL") if prefer_env_database_url else None
         dsn = path if _is_postgres_dsn(path) else (env_url if _is_postgres_dsn(env_url) else None)
         self.backend = "postgres" if dsn else "sqlite"
         self.path = dsn or path
