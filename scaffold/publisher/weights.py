@@ -73,9 +73,9 @@ ROW_SCORE_TASK_TYPES_ENV = "CATHEDRAL_WEIGHTS_ROW_SCORE_TASK_TYPES"
 # existing launch default: tier 1 = 1.0, tier 2 = CATHEDRAL_WEIGHTS_TIER2_MULT.
 TIER_WEIGHTS_ENV = "CATHEDRAL_WEIGHTS_TIER_WEIGHTS"
 TIER2_MULT_ENV = "CATHEDRAL_WEIGHTS_TIER2_MULT"
-# Transitional per-miner incentive. When >0, shared-board scoring remains the
-# base and verified per-miner solves add a bounded normalized bonus. This lets
-# miners migrate without replacing the live scorer in one step.
+# Transitional per-miner incentive controls. In pm_primary / assigned_only the
+# shared public board is compatibility/debug only and contributes zero score.
+# Bonus mode remains available for staged rollouts, but is not the paying lane.
 PERMINER_BONUS_MULT_ENV = "CATHEDRAL_PERMINER_BONUS_MULT"
 PERMINER_REQUIRE_COLDKEY_ENV = "CATHEDRAL_PERMINER_REQUIRE_COLDKEY"
 PERMINER_HISTORY_FLOOR_ENV = "CATHEDRAL_PERMINER_HISTORY_FLOOR"
@@ -307,7 +307,7 @@ def perminer_scoring_mode() -> str:
     """How verified per-miner solves affect the live vector.
 
     bonus: keep shared SAT scoring as base, then add a bounded assigned bonus.
-    pm_primary: make assigned solves primary, with a small shared-board baseline.
+    pm_primary: make assigned solves primary. Public-board baseline is zero.
     assigned_only: replace shared scoring with the assigned-only vector.
     """
     raw = os.environ.get(PERMINER_SCORING_MODE_ENV, "bonus").strip().lower()
@@ -315,8 +315,13 @@ def perminer_scoring_mode() -> str:
 
 
 def perminer_public_baseline() -> float:
-    """Shared-board score share when per-miner work is the primary lane."""
-    return min(1.0, max(0.0, _env_float(PERMINER_PUBLIC_BASELINE_ENV, 0.05)))
+    """Shared-board score share when per-miner work is the primary lane.
+
+    The public-board lane is legacy compatibility/debug only. Keep the function
+    and metadata field for API compatibility, but hard-zero the value so stale
+    env cannot accidentally keep paying public-board solves.
+    """
+    return 0.0
 
 
 def coldkey_collapse_enabled() -> bool:
@@ -503,16 +508,18 @@ def _perminer_compose_scores(
         # Shadow: log the vector for comparison but don't serve it.
         print(f"[per_miner] shadow_vector window_hours={window_hours()} scores={scores}")
         return None  # fall through to live scoring
-    return scores if scores else None
+    if scores:
+        return scores
+    if perminer_scoring_mode() in {"pm_primary", "assigned_only"}:
+        return {}
+    return None
 
 
 def _apply_perminer_primary(
     base: dict[str, float],
     pm_scores: dict[str, float] | None,
 ) -> dict[str, float]:
-    """Make PM solves primary while keeping a small public-board baseline."""
-    if not pm_scores:
-        return base
+    """Make PM solves primary; public board pays zero."""
     baseline = perminer_public_baseline()
     pm_share = 1.0 - baseline
 
@@ -528,7 +535,7 @@ def _apply_perminer_primary(
         }
 
     combined: dict[str, float] = {}
-    for part in (budgeted(base, baseline), budgeted(pm_scores, pm_share)):
+    for part in (budgeted(base, baseline), budgeted(pm_scores or {}, pm_share)):
         for hk, score in part.items():
             combined[hk] = combined.get(hk, 0.0) + score
     top = max(combined.values()) if combined else 0.0

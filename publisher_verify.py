@@ -1276,10 +1276,10 @@ with TestClient(app) as client:
                 "sat-pm-primary-compat:1".encode("utf-8")
             ).hexdigest()[:16]
         ]
-        ck("pm-primary public-board rows are baseline-weighted for old validators",
+        ck("pm-primary public-board rows score zero for old validators",
            compat_resp.status_code == 200
            and len(compat_public_rows) == 2
-           and all(abs(float(r.get("weighted_score", 0.0)) - 0.05) < 1e-9
+           and all(abs(float(r.get("weighted_score", 0.0)) - 0.0) < 1e-9
                    for r in compat_public_rows)
            and all(wire.verify_row(r, pub_hex) for r in compat_public_rows))
         old_public = rowmod.build_solve_rows(
@@ -1342,7 +1342,7 @@ with TestClient(app) as client:
         ck("pm-primary recent feed rewrites legacy public rows but preserves PM rows",
            len(legacy_public) == 2
            and len(legacy_pm) == 2
-           and all(abs(float(r.get("weighted_score", 0.0)) - 0.05) < 1e-9
+           and all(abs(float(r.get("weighted_score", 0.0)) - 0.0) < 1e-9
                    and wire.verify_row(r, pub_hex)
                    for r in legacy_public)
            and all(abs(float(r.get("weighted_score", 0.0)) - 1.0) < 1e-9
