@@ -6,6 +6,13 @@ const submitBase = (process.env.CATHEDRAL_SUBMIT_BASE_URL ||
   "https://submit.cathedral.computer").replace(/\/+$/, "");
 const workerBase = (process.env.CATHEDRAL_WORKER_BASE_URL || "").replace(/\/+$/, "");
 const timeoutMs = Number(process.env.CATHEDRAL_SPLIT_TIMEOUT_MS || 10000);
+const retryAttempts = Math.max(1, Number(process.env.CATHEDRAL_SPLIT_ATTEMPTS || 5));
+const retryDelayMs = Math.max(0, Number(process.env.CATHEDRAL_SPLIT_RETRY_DELAY_MS || 1000));
+const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function request(base, path, init = {}) {
   const started = Date.now();
@@ -39,6 +46,33 @@ function assertStatus(result, statuses) {
     statuses.includes(result.status),
     `${result.base}${result.path} returned ${result.status}, expected ${statuses.join("/")}`,
   );
+}
+
+async function requestEventually(base, path, init = {}, statuses = [200]) {
+  let lastError;
+  for (let attempt = 1; attempt <= retryAttempts; attempt += 1) {
+    try {
+      const result = await request(base, path, init);
+      if (
+        statuses.includes(result.status) ||
+        !TRANSIENT_STATUSES.has(result.status) ||
+        attempt === retryAttempts
+      ) {
+        return result;
+      }
+      console.log(
+        `retry ${attempt}/${retryAttempts} ${result.status} ${path} after ${retryDelayMs}ms`,
+      );
+    } catch (err) {
+      lastError = err;
+      if (attempt === retryAttempts) throw err;
+      console.log(
+        `retry ${attempt}/${retryAttempts} ${path} error=${err.message} after ${retryDelayMs}ms`,
+      );
+    }
+    await sleep(retryDelayMs);
+  }
+  throw lastError;
 }
 
 function json(result) {
@@ -82,7 +116,7 @@ async function checkReadOrigin() {
     "/v1/leaderboard/explain?miner_hotkey=5test",
     "/v1/verifiable-sat/coinbase/status",
   ]) {
-    const result = await request(readBase, path);
+    const result = await requestEventually(readBase, path);
     line(result, "read");
     assertStatus(result, [200]);
   }

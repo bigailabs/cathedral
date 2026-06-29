@@ -51,6 +51,7 @@ jobs:
           node deploy/edge-router/cloudflare-api-bypass.test.mjs
           node deploy/edge-router/board-failover/worker.test.mjs
           node deploy/edge-router/route-config.test.mjs
+          node deploy/edge-router/route-map.test.mjs
           node deploy/railway-split.test.mjs
           node deploy/split-origin-smoke.test.mjs
           pwsh -NoProfile -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.test.ps1

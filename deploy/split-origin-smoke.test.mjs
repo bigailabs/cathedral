@@ -39,7 +39,8 @@ async function serve(handler) {
   };
 }
 
-function makeReadServer({ acceptSubmit = false } = {}) {
+function makeReadServer({ acceptSubmit = false, transientRecentOnce = false } = {}) {
+  let recentHits = 0;
   return serve((req, res) => {
     if (req.url === "/health/live") return json(res, 200, { service_role: "read", db: "not_checked" });
     if (req.url === "/health/ready") return json(res, 200, { service_role: "read", db: "ok" });
@@ -47,10 +48,16 @@ function makeReadServer({ acceptSubmit = false } = {}) {
       if (acceptSubmit) return json(res, 200, { status: "accepted_by_wrong_origin" });
       return roleReject(res, "read");
     }
+    if (req.url === "/v1/leaderboard/recent?limit=2") {
+      recentHits += 1;
+      if (transientRecentOnce && recentHits === 1) {
+        return json(res, 503, { error: "warming" });
+      }
+      return json(res, 200, { ok: true });
+    }
     if ([
       "/v1/synthetic-boolean/active-challenges",
       "/v1/validator/weights/next",
-      "/v1/leaderboard/recent?limit=2",
       "/v1/leaderboard/top?window=1h",
       "/v1/leaderboard/explain?miner_hotkey=5test",
       "/v1/verifiable-sat/coinbase/status",
@@ -97,6 +104,8 @@ async function runSmoke(env) {
         ...process.env,
         ...env,
         CATHEDRAL_SPLIT_TIMEOUT_MS: "2000",
+        CATHEDRAL_SPLIT_ATTEMPTS: "3",
+        CATHEDRAL_SPLIT_RETRY_DELAY_MS: "10",
       },
       cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -138,6 +147,17 @@ await withServers({ acceptSubmit: true }, async ({ read, submit, worker }) => {
   });
   assert.notEqual(result.code, 0, "smoke should fail when read origin accepts submit traffic");
   assert.match(result.stderr + result.stdout, /returned 200, expected 404/);
+});
+
+await withServers({ transientRecentOnce: true }, async ({ read, submit, worker }) => {
+  const result = await runSmoke({
+    CATHEDRAL_READ_BASE_URL: read.url,
+    CATHEDRAL_SUBMIT_BASE_URL: submit.url,
+    CATHEDRAL_WORKER_BASE_URL: worker.url,
+  });
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /retry 1\/3 503 \/v1\/leaderboard\/recent\?limit=2/);
+  assert.match(result.stdout, /split-origin smoke passed/);
 });
 
 await withServers({ serveLeaderboard: true }, async ({ read, submit, worker }) => {

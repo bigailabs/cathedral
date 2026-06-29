@@ -7,9 +7,12 @@ const isWorkersDev = host.endsWith(".workers.dev");
 const allowBypass = process.env.CATHEDRAL_EDGE_ALLOW_BYPASS === "1";
 const expectWorker = isWorkersDev || !allowBypass;
 const timeoutMs = Number(process.env.CATHEDRAL_EDGE_TIMEOUT_MS || 10000);
+const retryAttempts = Math.max(1, Number(process.env.CATHEDRAL_ROUTE_MAP_ATTEMPTS || 5));
+const retryDelayMs = Math.max(0, Number(process.env.CATHEDRAL_ROUTE_MAP_RETRY_DELAY_MS || 1000));
 
 const EDGE_VALUES = new Set(["BYPASS", "HIT", "MISS", "REFRESH", "STALE", "STALE-REFRESH"]);
 const CACHE_VALUES = new Set(["HIT", "MISS", "REFRESH", "STALE", "STALE-REFRESH"]);
+const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
 
 const routed = [
   { path: "/health/ready", statuses: [200], expectedEdge: "BYPASS", bodyPattern: /"service_role":"read"/ },
@@ -100,11 +103,46 @@ function print(result, group) {
 }
 
 function assertStatus(result) {
-  const statuses = (!expectWorker && result.bypassStatuses) ? result.bypassStatuses : result.statuses;
+  const statuses = expectedStatuses(result);
   assert.ok(
     statuses.includes(result.status),
     `${result.path} returned ${result.status}, expected ${statuses.join("/")}`,
   );
+}
+
+function expectedStatuses(check) {
+  return (!expectWorker && check.bypassStatuses) ? check.bypassStatuses : check.statuses;
+}
+
+function shouldRetry(check, result) {
+  return check.expectedEdge === "cache" && TRANSIENT_STATUSES.has(result.status);
+}
+
+async function requestEventually(check) {
+  let lastError;
+  for (let attempt = 1; attempt <= retryAttempts; attempt += 1) {
+    try {
+      const result = await request(check);
+      if (
+        expectedStatuses(check).includes(result.status) ||
+        !shouldRetry(check, result) ||
+        attempt === retryAttempts
+      ) {
+        return result;
+      }
+      console.log(
+        `retry ${attempt}/${retryAttempts} ${result.status} ${check.path} after ${retryDelayMs}ms`,
+      );
+    } catch (err) {
+      lastError = err;
+      if (attempt === retryAttempts) throw err;
+      console.log(
+        `retry ${attempt}/${retryAttempts} ${check.path} error=${err.message} after ${retryDelayMs}ms`,
+      );
+    }
+    await sleep(retryDelayMs);
+  }
+  throw lastError;
 }
 
 function assertRouted(result) {
@@ -148,7 +186,7 @@ async function run() {
 
   const results = [];
   for (const check of routed) {
-    let result = await request(check);
+    let result = await requestEventually(check);
     print(result, "routed");
     if (expectWorker && check.expectedEdge === "cache" && !CACHE_VALUES.has(result.edge)) {
       assertStatus(result);
