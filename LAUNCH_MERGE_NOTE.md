@@ -119,8 +119,19 @@ check the validator weight feed, direct split origins, edge route map, or soak.
 Preferred controlled-v0 post-deploy gate:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate -Python deploy\python-wsl.cmd
 ```
+
+Before merging/deploying from this workstation, run the read-only operator
+preflight:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/launch-preflight.ps1 -RailwayExe "$env:USERPROFILE\bin\railway.exe" -Python deploy\python-wsl.cmd
+```
+
+It checks PR state, local branch state, Railway CLI auth/link, and the final
+smoke plan. It does not merge, deploy, mutate Railway variables, or touch
+production.
 
 This gate runs the read-only validator release gate first, then checks direct
 read/submit origin health and role isolation before the edge route map, short
@@ -146,7 +157,7 @@ Do not post that the new miner path or payment feed is live until all of this is
 true against production:
 
 - PR merged and Railway/edge deployment completed.
-- `deploy/post-deploy-smoke.ps1 -RequireFinalGate` passes.
+- `deploy/post-deploy-smoke.ps1 -RequireFinalGate -Python deploy\python-wsl.cmd` passes.
 - `-SkipValidatorReleaseGate`, `-SkipSplitOriginSmoke`, `-SkipEdgeSmoke`,
   `-SkipRouteMap`, and `-SkipSoak` were not used for the final gate.
 - `/v1/validator/weights/next` converges across canonical, legacy-prefixed, and

@@ -138,8 +138,19 @@ Checks:
 
 Run the bundled post-deploy smoke gate:
 
+Pre-merge/pre-deploy operator preflight:
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate
+powershell -ExecutionPolicy Bypass -File deploy/launch-preflight.ps1 -RailwayExe "$env:USERPROFILE\bin\railway.exe" -Python deploy\python-wsl.cmd
+```
+
+This is read-only. It checks PR state, local branch state, Railway CLI auth/link,
+and the final smoke plan before any merge/deploy attempt.
+
+Post-deploy final gate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -RequireFinalGate -Python deploy\python-wsl.cmd
 ```
 
 This verifies the validator weight-feed release gate, direct read and submit
