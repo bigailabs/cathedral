@@ -76,6 +76,24 @@ _CNF_TOKEN_SECRET_ENV = "CATHEDRAL_CNF_TOKEN_SECRET"
 _CNF_PUBLIC_BASE_URL_ENV = "CATHEDRAL_CNF_PUBLIC_BASE_URL"
 
 
+def _retry_after_payload(reason: str, retry_after_secs: int) -> dict[str, Any]:
+    retry_after_secs = max(1, int(retry_after_secs))
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=retry_after_secs)
+    return {
+        "detail": reason,
+        "reason": reason,
+        "retry_after_seconds": retry_after_secs,
+        "retry_at": retry_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    }
+
+
+def _retry_after_body(reason: str, retry_after_secs: int) -> bytes:
+    return json.dumps(
+        _retry_after_payload(reason, retry_after_secs),
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, str(default)) or default)
@@ -106,17 +124,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _cnf_token_secret(service_role: str) -> bytes:
+def _cnf_token_secret() -> bytes:
     raw = (
         os.environ.get(_CNF_TOKEN_SECRET_ENV, "").lstrip("\ufeff").strip()
         or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").lstrip("\ufeff").strip()
     )
     if raw:
         return hashlib.sha256(raw.encode("utf-8")).digest()
-    if service_role == "submit":
-        raise RuntimeError(
-            f"{_CNF_TOKEN_SECRET_ENV} is required when CATHEDRAL_SERVICE_ROLE=submit"
-        )
     # Local/dev fallback. Production split roles must set a stable secret.
     print(f"[cnf] WARNING: {_CNF_TOKEN_SECRET_ENV} is unset; "
           "active-cnf tokens are process-local and unsafe for split replicas")
@@ -385,7 +399,7 @@ def build_app(
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
     # Shared HMAC secret lets active-cnf and CNF fetch land on different replicas.
-    token_secret = _cnf_token_secret(service_role)
+    token_secret = _cnf_token_secret()
     min_interval = (
         submit_min_interval_secs
         if submit_min_interval_secs is not None
@@ -466,6 +480,22 @@ def build_app(
     )
     submit_queue_backpressure_retry_after = max(
         1, _env_int("CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_RETRY_AFTER_SECS", 5))
+    # Async admission is only safe when at least one verifier worker is alive.
+    # Otherwise miners get durable 202 receipts that never drain to payout.
+    submit_async_require_worker = _env_bool(
+        "CATHEDRAL_SUBMIT_ASYNC_REQUIRE_WORKER", True)
+    submit_async_worker_stale_secs = _env_float(
+        "CATHEDRAL_SUBMIT_ASYNC_WORKER_STALE_SECS",
+        max(10.0, float(_vw_flags.lock_secs())))
+    submit_async_worker_ready_cache_secs = max(
+        0.1, _env_float("CATHEDRAL_SUBMIT_ASYNC_WORKER_READY_CACHE_SECS", 1.0))
+    submit_async_worker_retry_after = max(
+        1, _env_int("CATHEDRAL_SUBMIT_ASYNC_WORKER_RETRY_AFTER_SECS", 5))
+    submit_async_worker_cache: dict[str, Any] = {
+        "expires_at": 0.0,
+        "ready": False,
+        "metrics": {"active_workers": 0},
+    }
     # Track 2 (item 7): per-hotkey fairness limiter — abuse control distinct from
     # the global saturation gate. DEFAULT OFF (see per_hotkey_limit.py); when off
     # `allow()` is a no-op so live behaviour is unchanged. Rejections from this
@@ -549,6 +579,51 @@ def build_app(
             headers={
                 "Retry-After": str(submit_queue_backpressure_retry_after),
                 "X-Cathedral-Rejection-Reason": "submit_queue_backpressure",
+            },
+        )
+
+    def _async_worker_ready() -> tuple[bool, dict[str, Any]]:
+        if not submit_async_require_worker:
+            return True, {"active_workers": "not_required"}
+        now_mono = time.monotonic()
+        cached_until = float(submit_async_worker_cache.get("expires_at") or 0.0)
+        if now_mono < cached_until:
+            return (
+                bool(submit_async_worker_cache.get("ready")),
+                dict(submit_async_worker_cache.get("metrics") or {}),
+            )
+        metrics = submit_admission.worker_metrics(
+            store, now_iso=_now_iso_ms(),
+            stale_secs=submit_async_worker_stale_secs)
+        ready = int(metrics.get("active_workers") or 0) > 0
+        submit_async_worker_cache.update({
+            "expires_at": now_mono + submit_async_worker_ready_cache_secs,
+            "ready": ready,
+            "metrics": metrics,
+        })
+        return ready, metrics
+
+    def _require_async_worker_ready(challenge_id: str) -> None:
+        ready, metrics = _async_worker_ready()
+        if ready:
+            return
+        _record_submit_event(
+            "rate_limited",
+            "async_worker_unavailable",
+            challenge_id=challenge_id,
+            status_code=503,
+            log=True,
+        )
+        raise HTTPException(
+            503,
+            {
+                "detail": "async_worker_unavailable",
+                "active_workers": int(metrics.get("active_workers") or 0),
+                "stale_after_secs": metrics.get("stale_after_secs"),
+            },
+            headers={
+                "Retry-After": str(submit_async_worker_retry_after),
+                "X-Cathedral-Rejection-Reason": "async_worker_unavailable",
             },
         )
 
@@ -647,7 +722,7 @@ def build_app(
             )
             raise HTTPException(
                 429,
-                "submit_busy_retry",
+                _retry_after_payload("submit_busy_retry", 1),
                 headers={
                     "Retry-After": "1",
                     "X-Cathedral-Rejection-Reason": "submit_busy_retry",
@@ -1096,15 +1171,16 @@ def build_app(
                     status_code=429,
                     log=True,
                 )
-                body = reason.encode("utf-8")
+                retry_after_secs = 1
+                body = _retry_after_body(reason, retry_after_secs)
                 await send({
                     "type": "http.response.start",
                     "status": 429,
                     "headers": [
-                        (b"content-type", b"text/plain; charset=utf-8"),
+                        (b"content-type", b"application/json"),
                         (b"content-length", str(len(body)).encode()),
-                        (b"retry-after", b"1"),
-                        (b"x-cathedral-rejection-reason", body),
+                        (b"retry-after", str(retry_after_secs).encode()),
+                        (b"x-cathedral-rejection-reason", reason.encode("utf-8")),
                     ],
                 })
                 await send({
@@ -3954,7 +4030,21 @@ def build_app(
     # works on any role; returns zeros when nothing is queued.
     def _async_queue_metrics(window_secs: float = 60.0) -> dict[str, Any]:
         now_iso = _now_iso_ms()
-        q = submit_admission.queue_metrics(store, now_iso=now_iso)
+        try:
+            q = submit_admission.queue_metrics(store, now_iso=now_iso)
+            q["metrics_status"] = "ok"
+        except Exception as exc:
+            print(f"[submit_metrics] queue_metrics_failed error={exc!r}")
+            q = {
+                "metrics_status": "degraded",
+                "metrics_error": "queue_metrics_failed",
+                "total_pending": None,
+                "by_status": {},
+                "oldest_by_status": {},
+                "oldest_received_at": None,
+                "worker_lag_secs": None,
+                "by_kind": {},
+            }
         since_iso = _now_iso_ms_plus(-window_secs)
         # P2 fix: split the drain rates by LIVE vs SHADOW kind. A shadow drain
         # also stamps status + verified_at_iso (into shadow_* + a terminal status),
@@ -3963,14 +4053,31 @@ def build_app(
         # was. The headline accepted/rejected rates now count LIVE async kinds
         # (public + per_miner) only; shadow is reported separately so it stays
         # visible without inflating the live numbers.
-        rate_snapshot = submit_admission.queue_rates(
-            store, since_iso=since_iso, window_secs=window_secs)
-        rates = store.query(
-            "SELECT challenge_kind AS kind, status, COUNT(*) AS n "
-            "FROM per_miner_attempts "
-            "WHERE verified_at_iso IS NOT NULL AND verified_at_iso > ? "
-            "AND challenge_kind IS NOT NULL "
-            "GROUP BY challenge_kind, status", (since_iso,))
+        try:
+            rate_snapshot = submit_admission.queue_rates(
+                store, since_iso=since_iso, window_secs=window_secs)
+            rates = store.query(
+                "SELECT challenge_kind AS kind, status, COUNT(*) AS n "
+                "FROM per_miner_attempts "
+                "WHERE verified_at_iso IS NOT NULL AND verified_at_iso > ? "
+                "AND challenge_kind IS NOT NULL "
+                "GROUP BY challenge_kind, status", (since_iso,))
+            rates_status = "ok"
+        except Exception as exc:
+            print(f"[submit_metrics] queue_rates_failed error={exc!r}")
+            rate_snapshot = {
+                "admitted_in_window": None,
+                "terminal_in_window": None,
+                "ranked_in_window": None,
+                "rejected_terminal_in_window": None,
+                "admitted_per_sec": None,
+                "terminal_per_sec": None,
+                "ranked_per_sec": None,
+                "rejected_terminal_per_sec": None,
+                "rates_by_kind": {},
+            }
+            rates = []
+            rates_status = "degraded"
         accepted = rejected = 0
         shadow_accepted = shadow_rejected = 0
         for r in rates:
@@ -4001,10 +4108,20 @@ def build_app(
         q["shadow_accepted_per_sec"] = round(shadow_accepted / win, 4)
         q["shadow_rejected_per_sec"] = round(shadow_rejected / win, 4)
         q.update(rate_snapshot)
-        q["workers"] = submit_admission.worker_metrics(
-            store, now_iso=now_iso,
-            stale_secs=max(10.0, float(_vw_flags.lock_secs())),
-        )
+        q["rates_status"] = rates_status
+        try:
+            q["workers"] = submit_admission.worker_metrics(
+                store, now_iso=now_iso,
+                stale_secs=max(10.0, float(_vw_flags.lock_secs())),
+            )
+        except Exception as exc:
+            print(f"[submit_metrics] worker_metrics_failed error={exc!r}")
+            q["workers"] = {
+                "active_workers": None,
+                "workers": [],
+                "stale_after_secs": max(10.0, float(_vw_flags.lock_secs())),
+                "metrics_status": "degraded",
+            }
         q["backpressure"] = {
             "enabled": submit_queue_backpressure_enabled,
             "max_pending": (
@@ -4498,40 +4615,53 @@ def build_app(
                     raise HTTPException(
                         413, "solution_too_large",
                         headers={"X-Cathedral-Rejection-Reason": "solution_too_large"})
-                # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
-                # so the worker can recover tier/seq even if the read replica is behind.
-                _record_one_perminer_assignment(
-                    assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
-                idem = submit_admission.idempotency_key(
-                    x_cathedral_hotkey, challenge_id, sol_sha)
-                receipt_id = "sub_" + new_uuid().replace("-", "")
-                outcome, row = submit_admission.admit_pending(
-                    store,
-                    receipt_id=receipt_id,
-                    idem_key=idem,
-                    miner_hotkey=x_cathedral_hotkey,
-                    challenge_id=challenge_id,
-                    dimacs_solution_sha256=sol_sha,
-                    dimacs_solution=dimacs_solution,
-                    submitted_at=submitted_at,
-                    received_at_iso=received_at_iso,
-                    signature=x_cathedral_signature,
-                    epoch=epoch,
-                    assignment_identity=assignment_identity,
-                    queue_backpressure=submit_queue_backpressure,
-                )
-                if outcome == "backpressure":
-                    _raise_submit_queue_backpressure(challenge_id, row)
-                receipt = submit_admission.receipt_from_row(row)
-                if outcome == "replayed":
+                worker_ready, _worker_metrics = _async_worker_ready()
+                if not worker_ready:
+                    # PM challenges are small and deterministic. If async workers
+                    # are down, keep miners earning by using the legacy sync verifier
+                    # instead of failing the private lane closed.
                     _record_submit_event(
-                        "accepted", "idempotent_replay",
-                        challenge_id=challenge_id, status_code=200)
-                    return JSONResponse(status_code=200, content=receipt)
-                _record_submit_event(
-                    "accepted", "admitted_pending",
-                    challenge_id=challenge_id, status_code=202)
-                return JSONResponse(status_code=202, content=receipt)
+                        "fallback",
+                        "pm_async_worker_unavailable_sync",
+                        challenge_id=challenge_id,
+                        log=True,
+                    )
+                    want_sync_pm = True
+                if not want_sync_pm:
+                    # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
+                    # so the worker can recover tier/seq even if the read replica is behind.
+                    _record_one_perminer_assignment(
+                        assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
+                    idem = submit_admission.idempotency_key(
+                        x_cathedral_hotkey, challenge_id, sol_sha)
+                    receipt_id = "sub_" + new_uuid().replace("-", "")
+                    outcome, row = submit_admission.admit_pending(
+                        store,
+                        receipt_id=receipt_id,
+                        idem_key=idem,
+                        miner_hotkey=x_cathedral_hotkey,
+                        challenge_id=challenge_id,
+                        dimacs_solution_sha256=sol_sha,
+                        dimacs_solution=dimacs_solution,
+                        submitted_at=submitted_at,
+                        received_at_iso=received_at_iso,
+                        signature=x_cathedral_signature,
+                        epoch=epoch,
+                        assignment_identity=assignment_identity,
+                        queue_backpressure=submit_queue_backpressure,
+                    )
+                    if outcome == "backpressure":
+                        _raise_submit_queue_backpressure(challenge_id, row)
+                    receipt = submit_admission.receipt_from_row(row)
+                    if outcome == "replayed":
+                        _record_submit_event(
+                            "accepted", "idempotent_replay",
+                            challenge_id=challenge_id, status_code=200)
+                        return JSONResponse(status_code=200, content=receipt)
+                    _record_submit_event(
+                        "accepted", "admitted_pending",
+                        challenge_id=challenge_id, status_code=202)
+                    return JSONResponse(status_code=202, content=receipt)
             # When ownership/recovery failed (tier_seq is None) async mode falls
             # through to the inline reject below — it is a cheap check, no heavy work
             # runs, and the error contract stays byte-for-byte the synchronous one.
@@ -4782,6 +4912,7 @@ def build_app(
         # worker's atomic accept/reject, preserving exactly-once replay semantics.
         want_sync = want_sync_submit
         if submit_async_enabled and not want_sync:
+            _require_async_worker_ready(challenge_id)
             idem = submit_admission.idempotency_key(
                 x_cathedral_hotkey, challenge_id, sol_sha)
             receipt_id = "sub_" + new_uuid().replace("-", "")
@@ -5038,6 +5169,7 @@ def build_app(
         miner_hotkey = str(attempt_row["miner_hotkey"])
         signature = str(attempt_row["signature"])
         submitted_at = attempt_row["submitted_at"]
+        received_at_iso = str(attempt_row["received_at_iso"] or now_iso)
         chal_rows = store.query(
             "SELECT * FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
         if not chal_rows:
@@ -5063,14 +5195,19 @@ def build_app(
                     "WHERE challenge_id=? AND status='active'", (challenge_id,))
                 if locked.rowcount != 1:
                     return ("challenge_already_locked", None, None, None)
-                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso) or 1
+                rank = (
+                    scoring.claim_solve(
+                        conn, challenge_id, miner_hotkey, received_at_iso)
+                    or 1
+                )
             else:
                 active = conn.execute(
                     "UPDATE lane_challenges SET updated_at_iso=? "
                     "WHERE challenge_id=? AND status='active'", (now_iso, challenge_id))
                 if active.rowcount != 1:
                     return ("challenge_not_active", None, None, None)
-                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso)
+                rank = scoring.claim_solve(
+                    conn, challenge_id, miner_hotkey, received_at_iso)
                 if rank is None:
                     return ("already_solved", None, None, None)
             score_multiplier = float(chal["score_multiplier"])
@@ -5089,7 +5226,7 @@ def build_app(
                 row_uuid=row_uuid, miner_hotkey=miner_hotkey,
                 agent_id=new_uuid(), challenge_id=challenge_id, tier=chal["tier"],
                 weighted_score=ws, answer_hash=answer_hash,
-                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                verifier_details_hash=verifier_details_hash, ran_at=received_at_iso,
                 epoch_salt=epoch_salt, solve_rank=rank, solved=True,
                 private_key_hex=key_hex,
             )
@@ -5161,6 +5298,7 @@ def build_app(
         miner_hotkey = str(attempt_row["miner_hotkey"])
         signature = str(attempt_row["signature"])
         submitted_at = attempt_row["submitted_at"]
+        received_at_iso = str(attempt_row["received_at_iso"] or now_iso)
         sol_sha = str(attempt_row["dimacs_solution_sha256"])
         dimacs_solution = attempt_row["solution_body"]
         pm_weight = pm.weight_for(tier)
@@ -5178,7 +5316,8 @@ def build_app(
                 "INSERT OR IGNORE INTO per_miner_solves"
                 "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, "
                 "verified, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (challenge_id, miner_hotkey, epoch, tier, seq, pm_weight, 1, now_iso))
+                (challenge_id, miner_hotkey, epoch, tier, seq, pm_weight, 1,
+                 received_at_iso))
             if not solved.rowcount:
                 return "already_solved"
             conn.execute(
@@ -5197,7 +5336,7 @@ def build_app(
                 row_uuid=row_uuid, miner_hotkey=miner_hotkey,
                 agent_id=new_uuid(), challenge_id=challenge_id, tier=tier,
                 weighted_score=pm_weight, answer_hash=answer_hash,
-                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
+                verifier_details_hash=verifier_details_hash, ran_at=received_at_iso,
                 epoch_salt=epoch_salt, solve_rank=1, solved=True,
                 private_key_hex=key_hex,
             )
