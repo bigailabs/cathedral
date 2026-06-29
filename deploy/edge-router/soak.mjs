@@ -60,6 +60,7 @@ async function probe(check) {
     status: res.status,
     ms: Date.now() - started,
     edge: res.headers.get("x-cathedral-edge-cache") || "",
+    staleFallback: res.headers.get("x-cathedral-stale-fallback") || "",
     server: res.headers.get("server") || "",
     okStatus: check.statuses.includes(res.status),
     expectedEdge: check.edge,
@@ -88,6 +89,9 @@ function validate(result) {
       }
     } else if (result.expectedEdge !== "none" && result.edge !== result.expectedEdge) {
       errors.push(`bad_edge:${result.edge || "missing"}`);
+    }
+    if (result.name === "weights" && (result.edge === "STALE" || result.staleFallback === "1")) {
+      errors.push("stale_weight_fallback");
     }
   } else if (result.edge) {
     errors.push(`unexpected_edge_in_bypass:${result.edge}`);
