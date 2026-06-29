@@ -230,6 +230,10 @@ def evaluate_url_compat(label: str, fetched: dict[str, Any]) -> dict[str, Any]:
     if status != 200:
         return {"name": name, "passed": False,
                 "detail": f"status={status} (require 200 + signed vector)"}
+    headers = fetched.get("headers") if isinstance(fetched.get("headers"), dict) else {}
+    if str(headers.get("x-cathedral-stale-fallback") or "").strip() == "1":
+        return {"name": name, "passed": False,
+                "detail": "serving stale fallback (origin unhealthy; launch gate requires live origin)"}
     body = fetched.get("body") if isinstance(fetched.get("body"), dict) else None
     if not body or not body.get("signature"):
         return {"name": name, "passed": False,
@@ -297,7 +301,7 @@ def gate_passed(checks: list[dict[str, Any]]) -> bool:
 # I/O layer (network) — kept thin so the logic above stays testable
 # --------------------------------------------------------------------------
 def fetch_feed(url: str, *, timeout: float = 10.0) -> dict[str, Any]:
-    """GET the weight feed. Returns {status, body(dict|None), error}. No raise."""
+    """GET the weight feed. Returns {status, body(dict|None), headers, error}. No raise."""
     req = urllib.request.Request(url, method="GET",
                                  headers={"User-Agent": "cathedral-release-gate"})
     try:
@@ -307,15 +311,17 @@ def fetch_feed(url: str, *, timeout: float = 10.0) -> dict[str, Any]:
                 body = json.loads(raw.decode("utf-8"))
             except Exception:
                 body = None
-            return {"status": int(resp.status), "body": body, "error": None}
+            headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+            return {"status": int(resp.status), "body": body, "headers": headers, "error": None}
     except urllib.error.HTTPError as e:
         try:
             body = json.loads(e.read().decode("utf-8"))
         except Exception:
             body = None
-        return {"status": int(e.code), "body": body, "error": None}
+        headers = {str(k).lower(): str(v) for k, v in e.headers.items()}
+        return {"status": int(e.code), "body": body, "headers": headers, "error": None}
     except Exception as e:
-        return {"status": None, "body": None, "error": f"{type(e).__name__}: {e}"}
+        return {"status": None, "body": None, "headers": {}, "error": f"{type(e).__name__}: {e}"}
 
 
 def check_bittensor_major(version: str | None,
@@ -409,6 +415,10 @@ def fetch_url_compat_snapshot(
             canonical_feed = fetched
         urls_context[label] = {
             "url": url, "status": fetched["status"], "error": fetched["error"],
+            "stale_fallback": (
+                fetched.get("headers", {}).get("x-cathedral-stale-fallback")
+                if isinstance(fetched.get("headers"), dict) else None
+            ),
         }
         compat = evaluate_url_compat(label, fetched)
         signatures_by_label[label] = compat.get("signature")

@@ -83,6 +83,10 @@ const weights = await request("/v1/validator/weights/next");
 line(weights);
 assert.equal(weights.status, 200);
 assert.match(weights.body, /"weights"/);
+if (expectWorker) {
+  assert.notEqual(weights.headers.get("x-cathedral-stale-fallback"), "1");
+  assert.notEqual(weights.headers.get("x-cathedral-edge-cache"), "STALE");
+}
 
 const submitPm = await request("/v1/synthetic-boolean/per-miner/challenges");
 line(submitPm);

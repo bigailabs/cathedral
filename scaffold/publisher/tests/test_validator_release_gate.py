@@ -227,6 +227,18 @@ def test_url_compat_stale_vector_fails():
     assert res["passed"] is False
 
 
+def test_url_compat_stale_fallback_header_fails_even_if_fresh():
+    res = gate.evaluate_url_compat(
+        "canonical", {
+            "status": 200,
+            "error": None,
+            "headers": {"x-cathedral-stale-fallback": "1"},
+            "body": {"signature": "S", "generated_at": _iso(datetime.now(timezone.utc))},
+        })
+    assert res["passed"] is False
+    assert "stale fallback" in res["detail"]
+
+
 def test_same_signed_bytes_match_passes():
     res = gate.evaluate_same_signed_bytes(
         {"canonical": "S", "legacy_prefixed": "S", "read_service": "S"})
