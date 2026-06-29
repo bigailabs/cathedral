@@ -98,9 +98,9 @@ _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # policy_version (the orchestrator is single-instance — a process lock suffices).
 _build_lock = threading.Lock()
 # Background refresh state.  A single daemon thread rebuilds the vector every
-# _CACHE_TTL_SECS; all request handlers read from _vector_cache without ever
-# blocking on the DB query.  _bg_started tracks whether the thread is running
-# so we only ever spawn one.
+# _CACHE_TTL_SECS; request handlers never rebuild, and prefer the shared
+# persisted row so separate read roles converge on the same signature.
+# _bg_started tracks whether the thread is running so we only ever spawn one.
 _bg_started = False
 _bg_lock = threading.Lock()
 _bg_generation = 0
@@ -1567,24 +1567,33 @@ def _refresh_once(store: Store, *, signing_key_hex: str) -> dict[str, Any] | Non
 
 
 def cached_vector(store: Store, *, signing_key_hex: str) -> dict[str, Any] | None:
-    """Return the latest signed vector if warm; never build on the request path."""
+    """Return the latest signed vector without rebuilding on the request path.
+
+    Every read role keeps its own in-memory cache, but all roles share the
+    persisted ``signed_weight_vectors.latest`` row.  Prefer that shared row on
+    reads so canonical, legacy-prefixed, and direct read-service URLs converge
+    on identical signed bytes.  If the DB read fails, fall back to the local
+    process cache rather than taking the validator feed down.
+    """
     _ensure_bg_started(store, signing_key_hex)
     with _build_lock:
         hit = _vector_cache.get("v")
-    if hit is None:
-        try:
-            vec = _load_persisted_vector(store)
-        except Exception as exc:
-            print(f"[weights] persisted_vector_load_failed error={exc!r}")
-            return None
-        if vec is not None:
+    try:
+        vec = _load_persisted_vector(store)
+    except Exception as exc:
+        print(f"[weights] persisted_vector_load_failed error={exc!r}")
+        return hit[1] if hit is not None else None
+    if vec is not None:
+        if hit is None or hit[1].get("signature") != vec.get("signature"):
             _cache_write(vec)
         return vec
-    return hit[1]
+    return hit[1] if hit is not None else None
 
 
-# Public read endpoints should prefer cached_vector(). This synchronous helper
-# is for explicit callers that intentionally accept a cold-build DB cost.
+# Public read endpoints should prefer cached_vector(). It may read the shared
+# persisted vector row, but it never composes/signs a new vector on the request
+# path. This synchronous helper is for explicit callers that intentionally
+# accept a cold-build DB cost.
 def current_vector(
     store: Store,
     *,

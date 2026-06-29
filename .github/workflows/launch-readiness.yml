@@ -60,6 +60,7 @@ jobs:
       - name: Run validator release safety tests
         run: |
           python -m pytest -q \
+            scaffold/publisher/tests/test_weights_cached_vector.py \
             scaffold/publisher/tests/test_validator_release_gate.py \
             scaffold/publisher/tests/test_validator_health_endpoint.py
 
