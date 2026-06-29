@@ -15,6 +15,8 @@ assert.match(script, /CATHEDRAL_PG_STATEMENT_TIMEOUT_MS\s*=\s*"4000"/, "audit mu
 assert.match(script, /CATHEDRAL_SUBMIT_HARD_CAP\s*=\s*"8"/, "audit must require submit cap 8");
 assert.match(script, /Railway CLI auth is expired or unauthorized/, "audit must distinguish stale Railway auth");
 assert.match(script, /This checkout is not linked to a Railway project/, "audit must distinguish missing Railway link");
+assert.match(script, /whoami/, "audit must allow explicit project mode without requiring railway link");
+assert.match(script, /--project/, "audit must pass explicit project through to variable list");
 assert.doesNotMatch(script, /variable", "set"/, "audit must not mutate Railway variables");
 assert.doesNotMatch(script, /railway deploy/, "audit must not deploy Railway services");
 assert.match(preflight, /railway-env-audit\.ps1/, "launch preflight must run the Railway env audit");
@@ -63,12 +65,25 @@ const worker = {
 };
 
 if (args[0] === "status") {
+  if (scenario === "project-mode") {
+    console.error("No linked project found. Run railway link to connect to a project.");
+    process.exit(1);
+  }
   if (scenario === "expired-auth") {
     console.error("Warning: failed to refresh OAuth token: invalid_grant. Please run railway login again.");
     console.error("No linked project found. Run railway link to connect to a project.");
     process.exit(1);
   }
   console.log("Project: cathedral");
+  process.exit(0);
+}
+
+if (args[0] === "whoami") {
+  if (scenario === "expired-auth") {
+    console.error("Unauthorized. Please run railway login again.");
+    process.exit(1);
+  }
+  console.log("cathedral-operator@example.invalid");
   process.exit(0);
 }
 
@@ -104,13 +119,14 @@ function powershellBin() {
   return "powershell";
 }
 
-function runAudit(scenario) {
+function runAudit(scenario, extraArgs = []) {
   const ps = powershellBin();
   return spawnSync(ps, [
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", "deploy/railway-env-audit.ps1",
     "-RailwayExe", fakeRailway,
+    ...extraArgs,
   ], {
     cwd: root,
     encoding: "utf8",
@@ -136,5 +152,10 @@ const expired = runAudit("expired-auth");
 assert.notEqual(expired.status, 0, expired.stdout + expired.stderr);
 assert.match(expired.stdout, /Railway CLI auth is expired or unauthorized/);
 assert.match(expired.stdout, /This checkout is not linked to a Railway project/);
+
+const projectMode = runAudit("project-mode", ["-Project", "cathedral-project", "-Environment", "production"]);
+assert.equal(projectMode.status, 0, projectMode.stdout + projectMode.stderr);
+assert.match(projectMode.stdout, /Using explicit Railway project/);
+assert.match(projectMode.stdout, /Railway env audit passed/);
 
 console.log("railway env audit tests passed");

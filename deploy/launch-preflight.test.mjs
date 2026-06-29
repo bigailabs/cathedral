@@ -7,6 +7,9 @@ assert.match(text, /gh" @\(\s*"pr", "view"/s, "preflight must inspect PR state")
 assert.match(text, /rev-list", "--left-right", "--count", "origin\/main\.\.\.HEAD"/, "preflight must compare against origin/main");
 assert.match(text, /Railway CLI auth is expired or unauthorized/, "preflight must fail clearly on stale Railway auth");
 assert.match(text, /This checkout is not linked to a Railway project/, "preflight must fail clearly on missing Railway link");
+assert.match(text, /RailwayProject/, "preflight must support an explicit Railway project");
+assert.match(text, /RailwayEnvironment/, "preflight must pass Railway environment through to env audit");
+assert.match(text, /whoami/, "preflight must allow explicit project mode without requiring railway link");
 assert.match(text, /railway login/, "preflight must tell operator to refresh Railway auth");
 assert.match(text, /railway link/, "preflight must tell operator to link the project");
 assert.match(text, /post-deploy-smoke\.ps1/, "preflight must validate the final smoke command");

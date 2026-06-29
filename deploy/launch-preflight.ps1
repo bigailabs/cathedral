@@ -9,6 +9,8 @@
 param(
     [int]$PrNumber = 317,
     [string]$RailwayExe = $env:RAILWAY_CLI,
+    [string]$RailwayProject = "",
+    [string]$RailwayEnvironment = "",
     [string]$Python = "python",
     [string]$Node = "node",
     [switch]$SkipRailway,
@@ -98,12 +100,35 @@ function Add-RailwayStatusFailures {
         $matched = $true
     }
     if ($Text -match "No linked project|railway link") {
-        Add-Failure "This checkout is not linked to a Railway project. Run 'railway link'."
+        Add-Failure "This checkout is not linked to a Railway project. Run 'railway link' or pass -RailwayProject."
         $matched = $true
     }
     if (-not $matched) {
         Add-Failure "Railway status failed. Run 'railway status' for details."
     }
+}
+
+function Test-RailwayAccess {
+    param([string]$Railway)
+
+    if (-not [string]::IsNullOrWhiteSpace($RailwayProject)) {
+        $whoami = Invoke-Capture $Railway @("whoami")
+        if ($whoami.Code -ne 0) {
+            Add-RailwayStatusFailures $whoami.Text
+            return $false
+        }
+        Add-Pass "Railway CLI is authenticated"
+        Add-Pass "Using explicit Railway project"
+        return $true
+    }
+
+    $railwayStatus = Invoke-Capture $Railway @("status")
+    if ($railwayStatus.Code -ne 0) {
+        Add-RailwayStatusFailures $railwayStatus.Text
+        return $false
+    }
+    Add-Pass "Railway CLI is authenticated and project-linked"
+    return $true
 }
 
 Write-Host "Cathedral launch preflight (read-only)" -ForegroundColor Cyan
@@ -191,20 +216,23 @@ if ($SkipRailway) {
         Add-Failure "Railway CLI not found. Pass -RailwayExe <path> or set RAILWAY_CLI."
     } else {
         Add-Pass "Found Railway CLI at $railway"
-        $railwayStatus = Invoke-Capture $railway @("status")
-        if ($railwayStatus.Code -ne 0) {
-            Add-RailwayStatusFailures $railwayStatus.Text
-        } else {
-            Add-Pass "Railway CLI is authenticated and project-linked"
+        if (Test-RailwayAccess $railway) {
             if ($SkipRailwayEnvAudit) {
                 Write-Host "WARN: Skipping Railway env audit; this is not final launch evidence." -ForegroundColor Yellow
             } else {
-                $envAudit = Invoke-Capture "powershell" @(
+                $auditArgs = @(
                     "-NoProfile",
                     "-ExecutionPolicy", "Bypass",
                     "-File", "deploy/railway-env-audit.ps1",
                     "-RailwayExe", $railway
                 )
+                if (-not [string]::IsNullOrWhiteSpace($RailwayProject)) {
+                    $auditArgs += @("-Project", $RailwayProject)
+                }
+                if (-not [string]::IsNullOrWhiteSpace($RailwayEnvironment)) {
+                    $auditArgs += @("-Environment", $RailwayEnvironment)
+                }
+                $envAudit = Invoke-Capture "powershell" $auditArgs
                 if ($envAudit.Code -ne 0) {
                     Add-Failure "Railway env audit failed. Run deploy/railway-env-audit.ps1 directly for service-level details."
                 } else {

@@ -50,6 +50,13 @@ read/submit/worker service roles, read query timeout, materialized snapshot
 settings, submit concurrency caps, worker refill ownership, and that
 `CATHEDRAL_CNF_TOKEN_SECRET` is present and equal across all services.
 
+If you do not want to persist a local `.railway` link in this checkout, pass the
+project/environment explicitly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/launch-preflight.ps1 -RailwayExe "$env:USERPROFILE\bin\railway.exe" -RailwayProject "<project-id-or-name>" -RailwayEnvironment "production" -Python deploy\python-wsl.cmd
+```
+
 ## Target Services
 
 ### 1. Read Service

@@ -86,12 +86,35 @@ function Add-RailwayStatusFailures {
         $matched = $true
     }
     if ($Text -match "No linked project|railway link") {
-        Add-Failure "This checkout is not linked to a Railway project. Run 'railway link'."
+        Add-Failure "This checkout is not linked to a Railway project. Run 'railway link' or pass -Project."
         $matched = $true
     }
     if (-not $matched) {
         Add-Failure "Railway status failed. Run 'railway status' for details."
     }
+}
+
+function Test-RailwayAccess {
+    param([string]$Railway)
+
+    if (-not [string]::IsNullOrWhiteSpace($Project)) {
+        $whoami = Invoke-Capture $Railway @("whoami")
+        if ($whoami.Code -ne 0) {
+            Add-RailwayStatusFailures $whoami.Text
+            return $false
+        }
+        Add-Pass "Railway CLI authenticated"
+        Add-Pass "Using explicit Railway project"
+        return $true
+    }
+
+    $status = Invoke-Capture $Railway @("status")
+    if ($status.Code -ne 0) {
+        Add-RailwayStatusFailures $status.Text
+        return $false
+    }
+    Add-Pass "Railway CLI authenticated and project-linked"
+    return $true
 }
 
 function Convert-RailwayVars {
@@ -231,12 +254,7 @@ if ([string]::IsNullOrWhiteSpace($railway)) {
     Add-Failure "Railway CLI not found. Pass -RailwayExe <path> or set RAILWAY_CLI."
 } else {
     Add-Pass "Found Railway CLI"
-    $status = Invoke-Capture $railway @("status")
-    if ($status.Code -ne 0) {
-        Add-RailwayStatusFailures $status.Text
-    } else {
-        Add-Pass "Railway CLI authenticated and project-linked"
-
+    if (Test-RailwayAccess $railway) {
         $readVars = Get-ServiceVars -Railway $railway -Service $ReadService
         $submitVars = Get-ServiceVars -Railway $railway -Service $SubmitService
         $workerVars = Get-ServiceVars -Railway $railway -Service $WorkerService
