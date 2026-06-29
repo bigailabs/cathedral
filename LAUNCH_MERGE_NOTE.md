@@ -106,11 +106,15 @@ python -m compileall scaffold publisher_verify.py weights_verify.py tee_gpu_veri
 
 Result: pass.
 
-Post-deploy smoke:
+Publisher-only live smoke:
 
 ```bash
 BASE_URL=https://api.cathedral.computer uv run --with-requirements deploy/requirements.txt python live_smoke.py
 ```
+
+This is only the publisher referee check. It is useful when debugging submit
+behavior, but it is not the final controlled-v0 launch gate because it does not
+check the validator weight feed, direct split origins, edge route map, or soak.
 
 Preferred controlled-v0 post-deploy gate:
 
@@ -135,6 +139,21 @@ convergence across `api.cathedral.computer`, the legacy-prefixed alias, and
 `read.cathedral.computer`; persistent divergence after those retries remains a
 payment-feed launch blocker. Rerun this after Railway deploy before claiming the
 deployed miner experience or payment feed is live.
+
+## Claim Live Checklist
+
+Do not post that the new miner path or payment feed is live until all of this is
+true against production:
+
+- PR merged and Railway/edge deployment completed.
+- `deploy/post-deploy-smoke.ps1` passes without `-SkipLiveSmoke`.
+- `-SkipValidatorReleaseGate`, `-SkipSplitOriginSmoke`, `-SkipEdgeSmoke`,
+  `-SkipRouteMap`, and `-SkipSoak` were not used for the final gate.
+- `/v1/validator/weights/next` converges across canonical, legacy-prefixed, and
+  direct read-service URLs with no stale fallback in steady state.
+- `/v1/leaderboard/explain` is available and uses the deployed scoring path.
+- Publisher live smoke rejected and persisted the deliberately wrong signed SAT
+  assignment.
 
 ## Not Claimable Yet
 

@@ -111,11 +111,16 @@ https://read.cathedral.computer/health/ready
 https://submit.cathedral.computer/health/ready
 ```
 
-Or run the executable split-origin smoke from the repo root:
+Or run the executable split-origin preflight from the repo root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -SkipValidatorReleaseGate -SkipEdgeSmoke -SkipRouteMap -SkipSoak -SkipLiveSmoke
 ```
+
+This only proves the direct read/submit origins are isolated. It intentionally
+skips the validator release gate, edge checks, soak, and live submit rejection
+test. After Worker cutover, run `deploy/post-deploy-smoke.ps1` without those
+skips before claiming production live.
 
 ## Test
 

@@ -243,7 +243,7 @@ Submit overload returns fast 429 submit_busy_retry, not timeouts.
 Exactly one worker holds each singleton lock at a time.
 ```
 
-Executable split-origin smoke:
+Executable split-origin preflight:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -SkipValidatorReleaseGate -SkipEdgeSmoke -SkipRouteMap -SkipSoak -SkipLiveSmoke
@@ -252,6 +252,10 @@ powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1 -SkipValid
 This must pass before moving `api.cathedral.computer` onto the Cloudflare edge
 router. It proves the direct read origin cannot accept submit traffic and the
 direct submit origin cannot serve leaderboard reads.
+
+This skip-heavy command is not a final launch gate. After DNS/edge cutover, run
+the full post-deploy smoke without these skips before claiming the miner
+experience, assigned scoring, or validator payment feed is live.
 
 ## Rollback
 
