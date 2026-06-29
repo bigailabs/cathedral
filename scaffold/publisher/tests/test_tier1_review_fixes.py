@@ -6,8 +6,11 @@
 """
 import time
 
+import pytest
+
 from scaffold.publisher.app import _SoftTtlCache
 from scaffold.publisher import weights
+from scaffold.publisher.store import Store
 
 
 def test_hung_builder_respawns_after_max_inflight():
@@ -58,3 +61,40 @@ def test_try_adopt_persisted_bounded_on_hang(monkeypatch):
     weights._try_adopt_persisted(None, weights._bg_generation, timeout=0.2)
     assert time.monotonic() - start < 2.0   # returned at timeout, not after 5s
     assert wrote["n"] == 0                   # nothing cached on a timed-out load
+
+
+def test_perminer_window_scores_aggregate_in_sql(tmp_path):
+    store = Store(str(tmp_path / "publisher.sqlite"))
+
+    def add(challenge_id, hotkey, weight):
+        def write(conn):
+            conn.execute(
+                "INSERT INTO per_miner_solves("
+                "challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, "
+                "verified, solved_at_iso"
+                ") VALUES (?, ?, 1, 1, 0, ?, 1, ?)",
+                (challenge_id, hotkey, weight, "2026-06-29T00:00:00.000Z"),
+            )
+        store.write(write)
+
+    add("pm-a", "hk-a", 1.0)
+    add("pm-b", "hk-a", 3.0)
+    add("pm-c", "hk-b", 2.0)
+
+    scores = weights._perminer_window_scores(
+        store, since="2026-06-28T00:00:00.000Z")
+
+    assert scores == {"hk-a": 1.0, "hk-b": 0.5}
+
+
+def test_pm_primary_score_query_failure_does_not_fall_back_to_public(monkeypatch):
+    class BrokenStore:
+        def query(self, *_args, **_kwargs):
+            raise RuntimeError("pm query failed")
+
+    monkeypatch.setenv("CATHEDRAL_PERMINER_ENABLED", "true")
+    monkeypatch.setenv(weights.PERMINER_SCORING_MODE_ENV, "pm_primary")
+
+    with pytest.raises(RuntimeError, match="pm query failed"):
+        weights._perminer_compose_scores(
+            BrokenStore(), since="2026-06-28T00:00:00.000Z")

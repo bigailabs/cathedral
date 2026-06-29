@@ -428,26 +428,20 @@ def _perminer_window_scores(
     ident=lambda hk: hk,
 ) -> dict[str, float]:
     """Trailing-window normalized per-miner scores."""
-    try:
-        rows = store.query(
-            "SELECT miner_hotkey, challenge_id, difficulty_weight "
-            "FROM per_miner_solves WHERE solved_at_iso > ? AND verified=1",
-            (since,),
-        )
-    except Exception:
-        rows = []
+    rows = store.query(
+        "SELECT miner_hotkey, SUM(difficulty_weight) AS total "
+        "FROM per_miner_solves "
+        "WHERE solved_at_iso > ? AND verified=1 AND difficulty_weight > 0 "
+        "GROUP BY miner_hotkey",
+        (since,),
+    )
     hk_totals: dict[str, float] = {}
-    hk_seen: dict[str, set[str]] = {}
     for r in rows:
         hk = str(r["miner_hotkey"])
-        cid = str(r["challenge_id"])
-        score = float(r["difficulty_weight"] or 0.0)
-        if score <= 0.0:
+        total = float(r["total"] or 0.0)
+        if total <= 0.0:
             continue
-        if cid in hk_seen.get(hk, set()):
-            continue
-        hk_seen.setdefault(hk, set()).add(cid)
-        hk_totals[hk] = hk_totals.get(hk, 0.0) + score
+        hk_totals[hk] = total
     identity_best: dict[str, float] = {}
     hks: dict[str, set[str]] = {}
     for hk, total in hk_totals.items():
@@ -498,7 +492,13 @@ def _perminer_compose_scores(
     if not pm.perminer_enabled():
         return None  # flag off: zero change
     since = since or _ms_iso(datetime.now(timezone.utc) - timedelta(hours=window_hours()))
-    scores = _perminer_window_scores(store, since=since, ident=ident)
+    try:
+        scores = _perminer_window_scores(store, since=since, ident=ident)
+    except Exception:
+        if perminer_scoring_mode() in {"pm_primary", "assigned_only"}:
+            raise
+        print("[per_miner] bonus score query failed; continuing with base vector")
+        return None
     if pm.perminer_shadow():
         # Shadow: log the vector for comparison but don't serve it.
         print(f"[per_miner] shadow_vector window_hours={window_hours()} scores={scores}")
