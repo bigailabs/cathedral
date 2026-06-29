@@ -381,4 +381,54 @@ assert.match(await cacheBust.text(), /unsupported_cache_query_param/);
   }
 }
 
+{
+  const originalCaches = globalThis.caches;
+  const originalFetch = globalThis.fetch;
+  const cacheKey = "https://api.cathedral.computer/v1/validator/weights/next";
+  const signedVector = {
+    generated_at: "2026-06-29T09:00:00.000Z",
+    signature: "signed-by-origin",
+    weights: [{ miner_hotkey: "5abc", weight: 1 }],
+  };
+  const store = new Map([
+    [cacheKey, new Response(JSON.stringify(signedVector), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=1",
+        "X-Cathedral-Edge-Fresh-Until": "1",
+      },
+    })],
+  ]);
+  globalThis.caches = {
+    default: {
+      async match(request) {
+        const cached = store.get(request.url);
+        return cached ? cached.clone() : undefined;
+      },
+      async put(request, response) {
+        store.set(request.url, response.clone());
+      },
+    },
+  };
+  globalThis.fetch = async () => {
+    throw new Error("origin down");
+  };
+  try {
+    const response = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"),
+      {},
+      { waitUntil() {} },
+    );
+    const body = await response.json();
+    assert.deepEqual(body, signedVector);
+    assert.equal(response.headers.get("X-Cathedral-Edge-Cache"), "STALE");
+    assert.equal(response.headers.get("X-Cathedral-Stale-Fallback"), "1");
+    assert.match(response.headers.get("Warning"), /origin fetch failed/);
+  } finally {
+    globalThis.caches = originalCaches;
+    globalThis.fetch = originalFetch;
+  }
+}
+
 console.log("edge-router worker tests passed");

@@ -11,7 +11,7 @@ Runs the plan's validator release-gate checks (deploy/RELIABILITY_UPGRADE_PLAN.m
     validators fresh within one tempo (360 blocks / 72 min).
 
 Two required gate items cannot be verified by a read-only probe (burn-snapshot
-matches intended policy; stale_fallback served when origin is down). They are
+matches intended policy; stale fallback headers served when origin is down). They are
 emitted as explicit MANUAL items for an operator to confirm out-of-band — not
 silently passed, not dead code — and do not flip the automated exit code.
 
@@ -504,8 +504,9 @@ def run_gate(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, 
     checks.append(manual_check(
         "stale_fallback_when_origin_down",
         "kill/restart the read origin and confirm BOTH api.* routes still serve "
-        "source=stale_fallback aged within 1 tempo (~72 min); read.* may depend "
-        "on read-service health. Cannot be exercised from a read-only probe.",
+        "the cached signed vector body unchanged with X-Cathedral-Edge-Cache=STALE "
+        "and X-Cathedral-Stale-Fallback=1; read.* may depend on read-service "
+        "health. Cannot be exercised from a read-only probe.",
     ))
 
     return checks, context

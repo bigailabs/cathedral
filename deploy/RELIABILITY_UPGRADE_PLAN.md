@@ -105,14 +105,16 @@ route in the system.**
    On every successful vector refresh, mirror the *signed* vector to a store that
    is **independent of the live read app**: Cloudflare KV / R2 / Durable Object, or
    a static object-store/Railway artifact. If the origin fails, the edge serves the
-   last good vector with an explicit marker:
-   ```json
-   { "...signed vector...": "...", "source": "stale_fallback", "generated_at": "<iso>", "age_seconds": 123 }
+   last good vector with explicit response headers:
+   ```text
+   X-Cathedral-Edge-Cache: STALE
+   X-Cathedral-Stale-Fallback: 1
    ```
    The vector is already signed, so a stale copy is still cryptographically
    verifiable - validators (and the on-chain consumer) can decide whether to accept
-   by age. Never serve an *unsigned* or re-signed-stale vector; serve the original
-   signed bytes verbatim.
+   by age. Never serve an *unsigned*, mutated, or re-signed-stale vector; serve
+   the original signed JSON body verbatim and expose fallback state only through
+   headers.
 
 3. **Validator-specific release gates (must pass before/with any mainnet deploy):**
    - weights endpoint: **0x 5xx across 3 consecutive tempos**
@@ -141,11 +143,11 @@ is therefore 72 min.
 |---|---|---|---|
 | Signed-vector age (now - `generated_at`) | <= 2 min | > 5 min | > 10 min |
 | Hard stale ceiling (validators should distrust) | n/a | n/a | > 1 tempo (~72 min) |
-| `stale_fallback` being served | never (steady state) | any stale serve | stale age > 1 tempo |
+| `X-Cathedral-Stale-Fallback: 1` being served | never (steady state) | any stale serve | stale age > 1 tempo |
 | UID200 update age | <= 5 min | > 10 min | > 20 min |
 
 - Healthy `<= 2 min` allows one missed 60s refresh cycle without alarm.
-- Page the moment **any** `stale_fallback` is served (it means the origin is down),
+- Page the moment **any** `X-Cathedral-Stale-Fallback: 1` is served (it means the origin is down),
   even while the stale vector is still inside the acceptable age ceiling.
 
 Operational ordering consequence: in Phase 0, **restore the weight feed first**,
@@ -184,7 +186,8 @@ Policy:
 - **Edge durability applies to both `api.cathedral.computer` routes:** if the read
   origin is unhealthy, `api.cathedral.computer/v1/validator/weights/next` **and**
   `api.cathedral.computer/api/cathedral/v1/validator/weights/next` must still serve the
-  durable last-known-good signed vector (`source: stale_fallback`) from the edge.
+  durable last-known-good signed vector from the edge with
+  `X-Cathedral-Stale-Fallback: 1`.
   (The `read.cathedral.computer` direct URL may legitimately depend on read-service
   health; the canonical `api.` host is the one that must survive an origin outage.)
 
@@ -195,7 +198,7 @@ Compatibility test matrix (smoke + monitor + release gate):
 | Returns 200 + signed vector | required | required | required |
 | Same signed bytes for same tempo | required | required | required |
 | Freshness within thresholds | required | required | required |
-| Serves `stale_fallback` when origin down | required | required | not required |
+| Serves stale signed vector with `X-Cathedral-Stale-Fallback: 1` when origin down | required | required | not required |
 
 ## Confirmed Problems
 
@@ -761,7 +764,7 @@ Read metrics:
 
 Critical alerts (page immediately):
 
-- **`/v1/validator/weights/next` returns any 5xx, or serves `stale_fallback` aged > 1 tempo (~72 min)** (highest severity - weight setting at risk)
+- **`/v1/validator/weights/next` returns any 5xx, or serves stale fallback aged > 1 tempo (~72 min)** (highest severity - weight setting at risk)
 - **signed-vector age > 10 min (page); > 5 min (warn)**
 - **UID200 vector age exceeds threshold** (our validator stopped refreshing)
 - `/health/ready` not `200` for more than 60s
@@ -777,7 +780,7 @@ Validator weight-feed metrics (Tier 0 - watch first):
 
 - weights endpoint success rate and 5xx count per tempo
 - signed-vector age (now - `generated_at`)
-- `stale_fallback` serve rate (should be ~0 in steady state)
+- `X-Cathedral-Stale-Fallback` serve rate (should be ~0 in steady state)
 - UID200 update age; count of major validators refreshing
 - burn snapshot vs intended policy
 
@@ -786,7 +789,7 @@ Suggested SLOs:
 ```text
 Validator weight feed: 99.99% availability; 0x 5xx across any 3 consecutive tempos.
 Signed-vector freshness: age <= 2 min healthy, page if > 10 min, hard ceiling 1 tempo (~72 min).
-Last-known-good: weight feed answers even when app/DB is down (stale_fallback, signed).
+Last-known-good: weight feed answers even when app/DB is down (signed body unchanged; `X-Cathedral-Stale-Fallback: 1`).
 Read availability: 99.5% or better.
 Challenge fetch p95: under 2s.
 Submit admission: 99.9% of valid submits receive a receipt within 1s.
@@ -804,7 +807,7 @@ Retry: same idempotency key returns same receipt/result.
 [ ] major validators refreshing (not stuck on a stale vector)
 [ ] burn snapshot matches intended policy
 [ ] last-known-good fallback verified (kill app, feed still serves signed stale vector)
-[ ] all three validator URLs pass (canonical + legacy-prefixed + read-service direct): 200, same signed bytes, fresh; both api.* routes serve stale_fallback when origin down
+[ ] all three validator URLs pass (canonical + legacy-prefixed + read-service direct): 200, same signed bytes, fresh; both api.* routes serve stale signed JSON unchanged with `X-Cathedral-Stale-Fallback: 1` when origin down
 ```
 
 ## Miner-Facing Error Contract
@@ -841,7 +844,7 @@ Edge timeouts should be tuned only after origin is healthy.
 Verify after Phase 0:
 
 1. `GET /v1/validator/weights/next` returns `200` with a fresh signed vector (Tier 0 - check first).
-2. Kill/restart the app and confirm the weight feed still serves the last-known-good signed vector (`source: stale_fallback`) aged within 1 tempo (~72 min).
+2. Kill/restart the app and confirm the weight feed still serves the last-known-good signed vector body unchanged, with `X-Cathedral-Stale-Fallback: 1`, aged within 1 tempo (~72 min).
 3. `GET /health/ready` returns `200`.
 4. `GET /v1/synthetic-boolean/current-challenge` returns `200`.
 5. `GET /v1/synthetic-boolean/active-challenges` returns `200`.
@@ -904,7 +907,7 @@ Rollback:
 ## Status Checklist
 
 - [ ] **P0 (weight setting): validator feed `/v1/validator/weights/next` protected (Tier 0)**
-- [ ] **P0: durable last-known-good signed vector serving `stale_fallback` when origin down**
+- [ ] **P0: durable last-known-good signed vector served unchanged with `X-Cathedral-Stale-Fallback: 1` when origin down**
 - [ ] **P0: read recovery tiered (weights > board > leaderboard/recent)**
 - [ ] **P0: validator release gate added (5xx/age/UID200/burn checks)**
 - [ ] **P0: all three validator weight-feed URLs compatible (canonical + legacy-prefixed + read-service direct)**

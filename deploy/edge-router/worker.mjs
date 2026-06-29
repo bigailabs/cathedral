@@ -323,6 +323,7 @@ async function fetchReadThroughCache(
     if (cachedCanServe) {
       return responseWithEdgeHeaders(cached, {
         "X-Cathedral-Edge-Cache": "STALE",
+        "X-Cathedral-Stale-Fallback": "1",
         "Warning": `110 - "origin fetch failed: ${String(error && error.message || error)}"`,
       });
     }
