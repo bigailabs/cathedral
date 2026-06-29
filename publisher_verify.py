@@ -252,6 +252,40 @@ with TestClient(app) as client:
         headers={"If-None-Match": bc.headers.get("etag", "")},
     )
     ck("challenge-broadcast supports ETag 304", bc_304.status_code == 304)
+    latest = client.get("/sat/latest.json")
+    latest_json = latest.json()
+    latest_etag = latest.headers.get("etag", "")
+    latest_seq = str(latest_json.get("sequence"))
+    ck("sat latest pointer exposes signed snapshot artifacts",
+       latest.status_code == 200
+       and latest_json.get("schema") == "cathedral.sat.latest.v1"
+       and latest_json.get("signature")
+       and latest_json.get("artifacts", {}).get("board", {}).get("url")
+       == f"/sat/sequences/{latest_seq}/board.json"
+       and latest_json.get("artifacts", {}).get("weights", {}).get("url")
+       == f"/sat/sequences/{latest_seq}/weights.json"
+       and latest_json.get("artifacts", {}).get("board", {}).get("hash", "").startswith("sha256:"))
+    latest_304 = client.get("/sat/latest.json", headers={"If-None-Match": latest_etag})
+    ck("sat latest pointer supports ETag 304", latest_304.status_code == 304)
+    sat_board = client.get(f"/sat/sequences/{latest_seq}/board.json")
+    ck("sat board snapshot matches active-challenges",
+       sat_board.status_code == 200
+       and sat_board.json()["items"][0]["challenge_id"] == ac["items"][0]["challenge_id"]
+       and sat_board.headers.get("x-cathedral-sequence") == latest_seq)
+    sat_weights = client.get(f"/sat/sequences/{latest_seq}/weights.json")
+    ck("sat weights snapshot preserves signed vector shape",
+       sat_weights.status_code == 200
+       and sat_weights.json().get("signature")
+       and isinstance(sat_weights.json().get("weights"), list)
+       and sat_weights.headers.get("x-cathedral-sequence") == latest_seq)
+    stale_snapshot = client.get("/sat/sequences/stale-test-sequence/board.json")
+    ck("sat stale sequence fails closed", stale_snapshot.status_code == 404)
+    sat_events = client.get("/sat/events", params={"once": "true"})
+    ck("sat events emits latest pointer hint only",
+       sat_events.status_code == 200
+       and "event: cathedral.sat.snapshot" in sat_events.text
+       and '"latest_url":"/sat/latest.json"' in sat_events.text
+       and '"sequence":"' in sat_events.text)
     old_rpm = os.environ.get("CATHEDRAL_RATELIMIT_RPM")
     os.environ["CATHEDRAL_RATELIMIT_RPM"] = "1"
     try:
@@ -274,8 +308,22 @@ with TestClient(app) as client:
     old_role_env = {
         "CATHEDRAL_SERVICE_ROLE": os.environ.get("CATHEDRAL_SERVICE_ROLE"),
         "CATHEDRAL_REFILL_ENABLED": os.environ.get("CATHEDRAL_REFILL_ENABLED"),
+        "CATHEDRAL_CNF_TOKEN_SECRET": os.environ.get("CATHEDRAL_CNF_TOKEN_SECRET"),
+        "CATHEDRAL_PM_READ_HARD_CAP": os.environ.get("CATHEDRAL_PM_READ_HARD_CAP"),
+        "CATHEDRAL_PM_READ_MIN_CAP": os.environ.get("CATHEDRAL_PM_READ_MIN_CAP"),
+        "CATHEDRAL_PUBLISHER_ADMIN_TOKEN": os.environ.get("CATHEDRAL_PUBLISHER_ADMIN_TOKEN"),
     }
     try:
+        os.environ["CATHEDRAL_SERVICE_ROLE"] = "typo"
+        try:
+            build_app(database_path=":memory:", signing_key_hex=key_hex,
+                      submit_min_interval_secs=0)
+            invalid_role_failed_closed = False
+        except RuntimeError as exc:
+            invalid_role_failed_closed = "invalid CATHEDRAL_SERVICE_ROLE" in str(exc)
+        ck("invalid service role fails startup",
+           invalid_role_failed_closed)
+
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "read"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "true"
         role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
@@ -290,15 +338,46 @@ with TestClient(app) as client:
                read_submit.status_code == 404
                and read_submit.text == "route_not_served_by_read_role"
                and read_submit.headers.get("x-cathedral-service-role") == "read")
+            read_latest = role_client.get("/sat/latest.json")
+            read_seq = str(read_latest.json().get("sequence")) if read_latest.status_code == 200 else ""
+            read_snapshot = role_client.get(f"/sat/sequences/{read_seq}/board.json")
+            read_events = role_client.get("/sat/events", params={"once": "true"})
+            ck("read role serves scalable SAT snapshot endpoints",
+               read_latest.status_code == 200
+               and read_snapshot.status_code == 200
+               and read_events.status_code == 200)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "submit"
         os.environ["CATHEDRAL_REFILL_ENABLED"] = "false"
+        os.environ.pop("CATHEDRAL_CNF_TOKEN_SECRET", None)
+        try:
+            build_app(database_path=":memory:", signing_key_hex=key_hex,
+                      submit_min_interval_secs=0)
+            missing_submit_secret_failed_closed = False
+        except RuntimeError as exc:
+            missing_submit_secret_failed_closed = "CATHEDRAL_CNF_TOKEN_SECRET" in str(exc)
+        ck("submit role requires stable CNF token secret",
+           missing_submit_secret_failed_closed)
+        os.environ["CATHEDRAL_CNF_TOKEN_SECRET"] = "test-cnf-value"
+        admin_value = "test-admin-value"
+        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = admin_value
+        os.environ["CATHEDRAL_PM_READ_HARD_CAP"] = "1"
+        os.environ["CATHEDRAL_PM_READ_MIN_CAP"] = "128"
         submit_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
                                     submit_min_interval_secs=0)
         with TestClient(submit_role_app) as submit_role_client:
             submit_role_health = submit_role_client.get("/health/live").json()
             ck("submit role appears in health",
                submit_role_health["service_role"] == "submit")
+            submit_metrics = submit_role_client.get(
+                "/v1/admin/synthetic-boolean/submit-metrics",
+                headers={"Authorization": f"Bearer {admin_value}"},
+            )
+            ck("PM read hard cap is a hard cap",
+               submit_metrics.status_code == 200
+               and submit_metrics.json()["pm_read_hard_cap"] == 1
+               and submit_metrics.json()["configured_pm_read_hard_cap"] == 1
+               and submit_metrics.json()["pm_read_min_cap"] == 128)
             submit_read = submit_role_client.get("/v1/leaderboard/top")
             ck("submit role rejects leaderboard traffic before route work",
                submit_read.status_code == 404
@@ -307,6 +386,10 @@ with TestClient(app) as client:
             submit_cnf = submit_role_client.get("/v1/synthetic-boolean/active-cnf")
             ck("submit role allows miner CNF route to reach auth validation",
                submit_cnf.status_code == 422)
+            submit_receipt = submit_role_client.get("/v1/agents/receipts/not-real")
+            ck("submit role serves receipt status route",
+               submit_receipt.status_code == 404
+               and submit_receipt.headers.get("x-cathedral-service-role") is None)
 
         os.environ["CATHEDRAL_SERVICE_ROLE"] = "worker"
         worker_role_app = build_app(database_path=":memory:", signing_key_hex=key_hex,
@@ -667,7 +750,7 @@ with TestClient(app) as client:
     old_cnf_token_secret = os.environ.get("CATHEDRAL_CNF_TOKEN_SECRET")
     cnf_db_path = ""
     try:
-        os.environ["CATHEDRAL_CNF_TOKEN_SECRET"] = "publisher-verify-shared-cnf-token-secret"
+        os.environ["CATHEDRAL_CNF_TOKEN_SECRET"] = "test-shared-cnf-value"
         with _cnf_tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as _cnf_db:
             cnf_db_path = _cnf_db.name
         token_app_a = build_app(
@@ -732,6 +815,18 @@ with TestClient(app) as client:
 
     ck("first solve gets open-window rank 1", resp.json().get("solve_rank") == 1)
     ck("submit row emits base weighted_score 1.0", resp.json().get("weighted_score") == 1.0)
+    receipt = client.get(f"/v1/agents/receipts/{resp.json().get('id')}")
+    receipt_json = receipt.json() if receipt.status_code == 200 else {}
+    ck("submit receipt endpoint returns durable accepted status",
+       receipt.status_code == 200
+       and receipt_json.get("schema") == "cathedral.submit_receipt.v1"
+       and receipt_json.get("challenge_id") == "sat-e2e-1"
+       and receipt_json.get("miner_hotkey") == miner.ss58_address
+       and receipt_json.get("status") == "ranked"
+       and receipt.headers.get("cache-control") == "no-store")
+    missing_receipt = client.get("/v1/agents/receipts/not-a-real-receipt")
+    ck("submit receipt endpoint fails closed for missing IDs",
+       missing_receipt.status_code == 404)
     explain = client.get(
         "/v1/leaderboard/explain",
         params={"miner_hotkey": miner.ss58_address},
@@ -1090,21 +1185,21 @@ with TestClient(app) as client:
            and "rejection_reasons_24h" not in pm_summary_json
            and all("assignment_identity" not in item for item in pm_summary_json.get("miners", []))
            and all("rejection_reasons" not in item for item in pm_summary_json.get("miners", [])))
-        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = "publisher-admin-secret"
+        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = "test-admin-value"
         pm_submit_metrics = client.get(
             "/v1/admin/synthetic-boolean/submit-metrics",
-            headers={"Authorization": "Bearer publisher-admin-secret"},
+            headers={"Authorization": "Bearer test-admin-value"},
         )
         pm_submit_metrics_bad = client.get(
             "/v1/admin/synthetic-boolean/submit-metrics",
-            headers={"Authorization": "Bearer wrong-token"},
+            headers={"Authorization": "Bearer wrong-value"},
         )
         os.environ.pop("CATHEDRAL_PUBLISHER_ADMIN_TOKEN", None)
         pm_submit_metrics_missing = client.get(
             "/v1/admin/synthetic-boolean/submit-metrics",
-            headers={"Authorization": "Bearer publisher-admin-secret"},
+            headers={"Authorization": "Bearer test-admin-value"},
         )
-        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = "publisher-admin-secret"
+        os.environ["CATHEDRAL_PUBLISHER_ADMIN_TOKEN"] = "test-admin-value"
         ck("submit metrics are admin-gated and include PM rejection reasons",
            pm_submit_metrics.status_code == 200
            and pm_submit_metrics.json().get("by_reason", {}).get("solution_missing_status") == 1

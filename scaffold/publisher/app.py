@@ -19,6 +19,8 @@ service is one module + the auth/store/rows/sat_solution helpers, well under the
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -30,7 +32,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .. import wire
 from ..contract import GenerateCtx
@@ -73,24 +76,6 @@ _CNF_TOKEN_SECRET_ENV = "CATHEDRAL_CNF_TOKEN_SECRET"
 _CNF_PUBLIC_BASE_URL_ENV = "CATHEDRAL_CNF_PUBLIC_BASE_URL"
 
 
-def _retry_after_payload(reason: str, retry_after_secs: int) -> dict[str, Any]:
-    retry_after_secs = max(1, int(retry_after_secs))
-    retry_at = datetime.now(timezone.utc) + timedelta(seconds=retry_after_secs)
-    return {
-        "detail": reason,
-        "reason": reason,
-        "retry_after_seconds": retry_after_secs,
-        "retry_at": retry_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-    }
-
-
-def _retry_after_body(reason: str, retry_after_secs: int) -> bytes:
-    return json.dumps(
-        _retry_after_payload(reason, retry_after_secs),
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, str(default)) or default)
@@ -121,13 +106,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _cnf_token_secret() -> bytes:
+def _cnf_token_secret(service_role: str) -> bytes:
     raw = (
         os.environ.get(_CNF_TOKEN_SECRET_ENV, "").lstrip("\ufeff").strip()
         or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").lstrip("\ufeff").strip()
     )
     if raw:
         return hashlib.sha256(raw.encode("utf-8")).digest()
+    if service_role == "submit":
+        raise RuntimeError(
+            f"{_CNF_TOKEN_SECRET_ENV} is required when CATHEDRAL_SERVICE_ROLE=submit"
+        )
     # Local/dev fallback. Production split roles must set a stable secret.
     print(f"[cnf] WARNING: {_CNF_TOKEN_SECRET_ENV} is unset; "
           "active-cnf tokens are process-local and unsafe for split replicas")
@@ -139,14 +128,88 @@ def _public_cnf_url(path: str) -> str:
     return f"{base}{path}" if base else path
 
 
-class _SoftTtlCache:
-    """Serve stale cached visibility payloads while one background refresh runs."""
+def _weights_vector_expired(vec: Any, now_epoch_ms: float | None = None) -> bool:
+    """Fail-closed expiry check for the signed weight vector.
 
-    def __init__(self, name: str, ttl_secs: float) -> None:
+    Returns True (do NOT serve as 200) when the vector is missing a usable,
+    future ``expires_at`` — i.e. expired, absent, or unparseable. Used by the
+    origin ``/v1/validator/weights/next`` handler so a wedged refresh can never
+    serve an expired signed vector as success (the edge worker enforces the same
+    rule; this is origin-side defense-in-depth).
+    """
+    from datetime import datetime, timezone
+
+    exp = vec.get("expires_at") if isinstance(vec, dict) else None
+    if not isinstance(exp, str) or not exp:
+        return True
+    try:
+        exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return True
+    now_dt = (
+        datetime.now(timezone.utc) if now_epoch_ms is None
+        else datetime.fromtimestamp(now_epoch_ms / 1000.0, timezone.utc))
+    return now_dt >= exp_dt
+
+
+class _SoftTtlCache:
+    """Serve stale cached visibility payloads while one background refresh runs.
+
+    States returned by get(): ``hit`` (fresh successful value), ``stale``
+    (serving a previously-successful value while a refresh runs), ``warming``
+    (cold placeholder, first real build in progress), ``degraded`` (refresh is
+    failing and backing off — serving last-known-good if any, else the cold
+    placeholder), ``cold`` (synchronous first build).
+
+    Failure handling (the 2026-06-29 fix): a failed background refresh must NOT
+    (a) freeze a cold ``warming`` placeholder forever, nor (b) re-trigger a build
+    on every request. On failure we preserve the last-known-good value and stamp
+    ``last_attempt_at`` so the next refresh is gated behind ``retry_backoff_secs``;
+    the status flips ``warming -> degraded`` so callers can report honest state
+    instead of an eternal "warming".
+    """
+
+    def __init__(
+        self, name: str, ttl_secs: float, retry_backoff_secs: float | None = None
+    ) -> None:
         self.name = name
         self.ttl_secs = max(0.0, ttl_secs)
+        # Don't hammer the DB on every request when a build keeps failing.
+        self.retry_backoff_secs = (
+            max(self.ttl_secs * 2.0, 10.0)
+            if retry_backoff_secs is None else max(0.0, retry_backoff_secs))
+        # A refresh thread that hangs (never returns AND never raises) would leave
+        # refreshing=True forever and block all future refreshes. After this long
+        # in-flight we abandon the (daemon) thread and allow a new attempt.
+        self.max_inflight_secs = max(self.retry_backoff_secs * 3.0, 30.0)
         self._lock = threading.Lock()
         self._entries: dict[Any, dict[str, Any]] = {}
+
+    def _maybe_spawn(self, key: Any, builder, entry: dict[str, Any], now: float) -> None:
+        """Spawn a refresh iff not already running and past the backoff window.
+        Caller must hold self._lock."""
+        if entry.get("refreshing"):
+            # Block a concurrent refresh — unless the in-flight one has been
+            # running long enough to be considered hung, in which case we abandon
+            # it (daemon) and allow a fresh attempt.
+            started = float(entry.get("refresh_started_at", 0.0))
+            if (now - started) < self.max_inflight_secs:
+                return
+        # Healthy stale->refresh is immediate (preserves normal SWR cadence).
+        # Backoff only applies once a build has started failing, so a failing
+        # refresh can't be retried on every single request.
+        if int(entry.get("failures", 0)) > 0 and \
+                (now - float(entry.get("last_attempt_at", 0.0))) < self.retry_backoff_secs:
+            return
+        entry["refreshing"] = True
+        entry["last_attempt_at"] = now
+        entry["refresh_started_at"] = now
+        threading.Thread(
+            target=self._refresh, args=(key, builder),
+            name=f"{self.name}-refresh", daemon=True,
+        ).start()
 
     def get(
         self,
@@ -160,18 +223,18 @@ class _SoftTtlCache:
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None:
-                age = now - float(entry["built_at"])
-                if self.ttl_secs <= 0 or age <= self.ttl_secs:
+                fresh = entry.get("has_success") and (
+                    self.ttl_secs <= 0
+                    or (now - float(entry["built_at"])) <= self.ttl_secs)
+                if fresh:
                     return entry["value"], "hit"
-                if not entry.get("refreshing"):
-                    entry["refreshing"] = True
-                    threading.Thread(
-                        target=self._refresh,
-                        args=(key, builder),
-                        name=f"{self.name}-refresh",
-                        daemon=True,
-                    ).start()
-                return entry["value"], "stale"
+                # Not fresh: try to refresh (gated by backoff), serve current value.
+                self._maybe_spawn(key, builder, entry, now)
+                if entry.get("has_success"):
+                    status = "stale" if entry.get("refreshing") else "degraded"
+                else:
+                    status = "warming" if entry.get("refreshing") else "degraded"
+                return entry["value"], status
 
             if cold_async:
                 value = cold_value() if callable(cold_value) else cold_value
@@ -179,12 +242,14 @@ class _SoftTtlCache:
                     "value": value,
                     "built_at": 0.0,
                     "refreshing": True,
+                    "last_attempt_at": now,
+                    "refresh_started_at": now,
+                    "failures": 0,
+                    "has_success": False,
                 }
                 threading.Thread(
-                    target=self._refresh,
-                    args=(key, builder),
-                    name=f"{self.name}-cold-refresh",
-                    daemon=True,
+                    target=self._refresh, args=(key, builder),
+                    name=f"{self.name}-cold-refresh", daemon=True,
                 ).start()
                 return value, "warming"
 
@@ -194,6 +259,9 @@ class _SoftTtlCache:
                 "value": value,
                 "built_at": time.monotonic(),
                 "refreshing": False,
+                "last_attempt_at": time.monotonic(),
+                "failures": 0,
+                "has_success": True,
             }
         return value, "cold"
 
@@ -205,13 +273,21 @@ class _SoftTtlCache:
                     "value": value,
                     "built_at": time.monotonic(),
                     "refreshing": False,
+                    "last_attempt_at": time.monotonic(),
+                    "failures": 0,
+                    "has_success": True,
                 }
         except Exception as exc:
             print(f"[visibility_cache] refresh_failed name={self.name} key={key!r} error={exc!r}")
             with self._lock:
                 entry = self._entries.get(key)
                 if entry is not None:
+                    # Preserve last-known-good value/built_at/has_success; just
+                    # clear the in-flight flag and stamp the attempt so the next
+                    # refresh is gated by retry_backoff_secs (no per-request storm).
                     entry["refreshing"] = False
+                    entry["failures"] = int(entry.get("failures", 0)) + 1
+                    entry["last_attempt_at"] = time.monotonic()
 
 
 def _now_iso_ms() -> str:
@@ -240,8 +316,7 @@ _SERVICE_ROLES = {"all", "read", "submit", "worker"}
 def _service_role_from_env() -> str:
     raw = os.environ.get("CATHEDRAL_SERVICE_ROLE", "all").strip().lower() or "all"
     if raw not in _SERVICE_ROLES:
-        print(f"[runtime] invalid CATHEDRAL_SERVICE_ROLE={raw!r}; using all")
-        return "all"
+        raise RuntimeError(f"invalid CATHEDRAL_SERVICE_ROLE={raw!r}")
     return raw
 
 
@@ -310,7 +385,7 @@ def build_app(
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
     # Shared HMAC secret lets active-cnf and CNF fetch land on different replicas.
-    token_secret = _cnf_token_secret()
+    token_secret = _cnf_token_secret(service_role)
     min_interval = (
         submit_min_interval_secs
         if submit_min_interval_secs is not None
@@ -345,7 +420,7 @@ def build_app(
     pm_read_min_cap = _env_int("CATHEDRAL_PM_READ_MIN_CAP", 128)
     pm_read_hard_cap = (
         0 if configured_pm_read_hard_cap <= 0
-        else max(configured_pm_read_hard_cap, pm_read_min_cap)
+        else configured_pm_read_hard_cap
     )
     submit_log_events = os.environ.get("CATHEDRAL_SUBMIT_LOG_EVENTS", "").strip().lower() in {
         "1", "true", "yes", "on"}
@@ -391,22 +466,6 @@ def build_app(
     )
     submit_queue_backpressure_retry_after = max(
         1, _env_int("CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_RETRY_AFTER_SECS", 5))
-    # Async admission is only safe when at least one verifier worker is alive.
-    # Otherwise miners get durable 202 receipts that never drain to payout.
-    submit_async_require_worker = _env_bool(
-        "CATHEDRAL_SUBMIT_ASYNC_REQUIRE_WORKER", True)
-    submit_async_worker_stale_secs = _env_float(
-        "CATHEDRAL_SUBMIT_ASYNC_WORKER_STALE_SECS",
-        max(10.0, float(_vw_flags.lock_secs())))
-    submit_async_worker_ready_cache_secs = max(
-        0.1, _env_float("CATHEDRAL_SUBMIT_ASYNC_WORKER_READY_CACHE_SECS", 1.0))
-    submit_async_worker_retry_after = max(
-        1, _env_int("CATHEDRAL_SUBMIT_ASYNC_WORKER_RETRY_AFTER_SECS", 5))
-    submit_async_worker_cache: dict[str, Any] = {
-        "expires_at": 0.0,
-        "ready": False,
-        "metrics": {"active_workers": 0},
-    }
     # Track 2 (item 7): per-hotkey fairness limiter — abuse control distinct from
     # the global saturation gate. DEFAULT OFF (see per_hotkey_limit.py); when off
     # `allow()` is a no-op so live behaviour is unchanged. Rejections from this
@@ -490,51 +549,6 @@ def build_app(
             headers={
                 "Retry-After": str(submit_queue_backpressure_retry_after),
                 "X-Cathedral-Rejection-Reason": "submit_queue_backpressure",
-            },
-        )
-
-    def _async_worker_ready() -> tuple[bool, dict[str, Any]]:
-        if not submit_async_require_worker:
-            return True, {"active_workers": "not_required"}
-        now_mono = time.monotonic()
-        cached_until = float(submit_async_worker_cache.get("expires_at") or 0.0)
-        if now_mono < cached_until:
-            return (
-                bool(submit_async_worker_cache.get("ready")),
-                dict(submit_async_worker_cache.get("metrics") or {}),
-            )
-        metrics = submit_admission.worker_metrics(
-            store, now_iso=_now_iso_ms(),
-            stale_secs=submit_async_worker_stale_secs)
-        ready = int(metrics.get("active_workers") or 0) > 0
-        submit_async_worker_cache.update({
-            "expires_at": now_mono + submit_async_worker_ready_cache_secs,
-            "ready": ready,
-            "metrics": metrics,
-        })
-        return ready, metrics
-
-    def _require_async_worker_ready(challenge_id: str) -> None:
-        ready, metrics = _async_worker_ready()
-        if ready:
-            return
-        _record_submit_event(
-            "rate_limited",
-            "async_worker_unavailable",
-            challenge_id=challenge_id,
-            status_code=503,
-            log=True,
-        )
-        raise HTTPException(
-            503,
-            {
-                "detail": "async_worker_unavailable",
-                "active_workers": int(metrics.get("active_workers") or 0),
-                "stale_after_secs": metrics.get("stale_after_secs"),
-            },
-            headers={
-                "Retry-After": str(submit_async_worker_retry_after),
-                "X-Cathedral-Rejection-Reason": "async_worker_unavailable",
             },
         )
 
@@ -633,7 +647,7 @@ def build_app(
             )
             raise HTTPException(
                 429,
-                _retry_after_payload("submit_busy_retry", 1),
+                "submit_busy_retry",
                 headers={
                     "Retry-After": "1",
                     "X-Cathedral-Rejection-Reason": "submit_busy_retry",
@@ -759,6 +773,101 @@ def build_app(
         headers = board_cache_headers(etag)
         headers["X-Cathedral-Board-Rebuilds"] = str(board_cache.rebuild_count)
         return _conditional_response(payload, etag, headers, request)
+
+    def _snapshot_bytes(payload: dict[str, Any]) -> bytes:
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+
+    def _snapshot_hash(payload: dict[str, Any]) -> str:
+        return "sha256:" + hashlib.sha256(_snapshot_bytes(payload)).hexdigest()
+
+    def _snapshot_etag(payload: dict[str, Any]) -> str:
+        return '"' + hashlib.sha256(_snapshot_bytes(payload)).hexdigest() + '"'
+
+    def _sign_latest_pointer(payload: dict[str, Any]) -> dict[str, Any]:
+        signed = dict(payload)
+        signed["key_id"] = os.environ.get(
+            weights_mod.KEY_ID_ENV, "cathedral-weight-policy")
+        signing_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key.strip()))
+        signed["signature"] = base64.b64encode(
+            sk.sign(weights_mod.canonical_bytes(signed))
+        ).decode()
+        return signed
+
+    def _sat_snapshot_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+        board_payload, board_etag = board_cache.get()
+        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
+        weights_payload = weights_mod.current_vector(store, signing_key_hex=weight_key)
+        board_hash = _snapshot_hash(board_payload)
+        weights_hash = _snapshot_hash(weights_payload)
+        policy_version = str(weights_payload.get("policy_version") or int(time.time() * 1000))
+        sequence_digest = hashlib.sha256(
+            f"{policy_version}:{board_hash}:{weights_hash}".encode("utf-8")
+        ).hexdigest()[:12]
+        sequence = f"{policy_version}-{sequence_digest}"
+        created_at = str(weights_payload.get("generated_at") or _now_iso_ms())
+        board_url = f"/sat/sequences/{sequence}/board.json"
+        weights_url = f"/sat/sequences/{sequence}/weights.json"
+        pointer = {
+            "schema": "cathedral.sat.latest.v1",
+            "lane": "sat",
+            "sequence": sequence,
+            "created_at": created_at,
+            "publisher_generation_id": os.environ.get(
+                "CATHEDRAL_PUBLISHER_GENERATION_ID", "default"),
+            "storage": "in_process_current_snapshot",
+            "trust_root": "signed_latest_pointer_and_artifact_hashes",
+            "artifacts": {
+                "board": {
+                    "url": board_url,
+                    "content_type": "application/json",
+                    "hash": board_hash,
+                    "size_bytes": len(_snapshot_bytes(board_payload)),
+                    "etag": board_etag,
+                },
+                "weights": {
+                    "url": weights_url,
+                    "content_type": "application/json",
+                    "hash": weights_hash,
+                    "size_bytes": len(_snapshot_bytes(weights_payload)),
+                    "signature": "embedded",
+                    "generated_at": weights_payload.get("generated_at"),
+                    "expires_at": weights_payload.get("expires_at"),
+                },
+            },
+            "miner_paths": {
+                "latest": "/sat/latest.json",
+                "events": "/sat/events",
+                "public_board": board_url,
+                "public_compat": "/v1/synthetic-boolean/active-challenges",
+                "private_assignments": "/v1/synthetic-boolean/per-miner/challenges",
+                "private_cnf": "/v1/synthetic-boolean/per-miner/cnf",
+                "submit": "/v1/agents/submit",
+                "receipt_status": "/v1/agents/receipts/{receipt_id}",
+            },
+            "compatibility": {
+                "legacy_read_endpoints_kept": True,
+                "legacy_validator_weights_kept": True,
+                "historical_sequence_storage": "not_yet_published",
+            },
+        }
+        signed_pointer = _sign_latest_pointer(pointer)
+        return signed_pointer, board_payload, weights_payload, _snapshot_etag(signed_pointer)
+
+    def _sat_snapshot_headers(etag: str, sequence: str, *, immutable: bool = False) -> dict[str, str]:
+        cache_control = (
+            "public, max-age=31536000, immutable"
+            if immutable
+            else "public, max-age=5, must-revalidate"
+        )
+        return {
+            "Cache-Control": cache_control,
+            "ETag": etag,
+            "X-Cathedral-Sequence": sequence,
+            "Access-Control-Allow-Origin": "*",
+        }
 
     top_cache = top_cache_mod.TopCache()
     if _role_runs_read_background(service_role):
@@ -987,16 +1096,15 @@ def build_app(
                     status_code=429,
                     log=True,
                 )
-                retry_after_secs = 1
-                body = _retry_after_body(reason, retry_after_secs)
+                body = reason.encode("utf-8")
                 await send({
                     "type": "http.response.start",
                     "status": 429,
                     "headers": [
-                        (b"content-type", b"application/json"),
+                        (b"content-type", b"text/plain; charset=utf-8"),
                         (b"content-length", str(len(body)).encode()),
-                        (b"retry-after", str(retry_after_secs).encode()),
-                        (b"x-cathedral-rejection-reason", reason.encode("utf-8")),
+                        (b"retry-after", b"1"),
+                        (b"x-cathedral-rejection-reason", body),
                     ],
                 })
                 await send({
@@ -1021,6 +1129,8 @@ def build_app(
             "/.well-known/cathedral-jwks.json",
         }
         _READ_GET_PATHS = {
+            "/sat/latest.json",
+            "/sat/events",
             "/v1/synthetic-boolean/active-challenges",
             "/v1/synthetic-boolean/challenge-broadcast",
             "/v1/synthetic-boolean/current-challenge",
@@ -1038,12 +1148,14 @@ def build_app(
             "/v1/admin/synthetic-boolean/submit-metrics",
         }
         _READ_GET_PREFIXES = {
+            "/sat/sequences/",
             "/v1/audit-scanner/",
             # Durable submit receipts (Phase 4): a read of durable state, safe to
             # serve from the read role as well as submit (miners poll their receipt).
             "/v1/agents/receipts/",
         }
         _SUBMIT_GET_PATHS = {
+            "/v1/admin/synthetic-boolean/submit-metrics",
             "/v1/synthetic-boolean/active-cnf",
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",
@@ -2194,14 +2306,38 @@ def build_app(
                     headers["Access-Control-Allow-Origin"] = "*"
                     headers["X-Cathedral-Cache"] = "materialized"
                     return _conditional_response(payload, etag, headers, request)
-            payload, cache_status = recent_cache.get(
-                effective_limit,
-                lambda: _recent_payload(None, None, effective_limit),
-                cold_async=recent_cold_async,
-                cold_value=lambda: _recent_warming_payload(effective_limit),
-            )
+            # The no-cursor cold build is synchronous when recent_cold_async is
+            # off; a DB error/timeout in _recent_payload would otherwise raise out
+            # of the handler as a 500. Degrade to a warming payload (bounded, 200)
+            # so a stalled live scan never 500s the public leaderboard — mirrors
+            # the cursor path below.
+            try:
+                payload, cache_status = recent_cache.get(
+                    effective_limit,
+                    lambda: _recent_payload(None, None, effective_limit),
+                    cold_async=recent_cold_async,
+                    cold_value=lambda: _recent_warming_payload(effective_limit),
+                )
+            except Exception as exc:
+                print(f"[leaderboard_recent] no-cursor build failed: {exc!r}")
+                payload = _recent_warming_payload(effective_limit)
+                cache_status = "error_warming"
         else:
-            payload = _recent_payload(cur_ran_at, cur_id, limit)
+            # The cursor path hits Postgres on every call (validators poll it
+            # continuously). store.recent_rows() is blocking psycopg2, so run it
+            # off the event loop — otherwise a single slow scan freezes this
+            # worker and starves the hot path (active-challenges, health),
+            # cascading to edge 504s. A bounded statement_timeout (see store.py)
+            # surfaces as an exception here; degrade to a warming payload so the
+            # validator retries instead of receiving a 500.
+            try:
+                payload = await asyncio.to_thread(
+                    _recent_payload, cur_ran_at, cur_id, limit
+                )
+            except Exception as exc:
+                print(f"[leaderboard_recent] cursor pull failed: {exc!r}")
+                payload = _recent_warming_payload(limit)
+                cache_status = "error_warming"
         return JSONResponse(
             payload,
             headers={
@@ -2356,11 +2492,21 @@ def build_app(
                 headers = snapshot_headers(etag, meta)
                 headers["Access-Control-Allow-Origin"] = "*"
                 return _conditional_response(payload, etag, headers, request)
-        # Flag off, non-default view, or snapshot cold/too-stale: live build path
-        # (unchanged) — degrade to live, never to an error.
+        # Flag off, non-default view, or snapshot cold/too-stale: live build path.
+        # Degrade to a bounded payload, never a 500, if the live aggregation fails.
+        try:
+            payload = _leaderboard_top_payload(view)
+            cache_status = "live"
+        except Exception as exc:
+            print(f"[leaderboard_top] live build failed: {exc!r}")
+            payload = {"kind": "leaderboard_top", "view": view,
+                       "data_status": "degraded", "miners": []}
+            cache_status = "error_degraded"
         return JSONResponse(
-            _leaderboard_top_payload(view),
-            headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
+            payload,
+            headers={"Cache-Control": "public, max-age=30",
+                     "Access-Control-Allow-Origin": "*",
+                     "X-Cathedral-Cache": cache_status},
         )
 
     def _leaderboard_explain_payload(miner_hotkey: str) -> dict[str, Any]:
@@ -2493,6 +2639,24 @@ def build_app(
                 status_code=503,
                 headers={"Retry-After": "2", "Cache-Control": "no-store"},
             )
+        # Origin-side fail-closed: never serve an expired signed vector as 200.
+        # Default-on; flip CATHEDRAL_WEIGHTS_ORIGIN_FAILCLOSED=0 to revert to the
+        # prior always-serve behavior. Under healthy operation the vector is
+        # refreshed every ~60s and expires in ~30min, so this only fires when the
+        # refresh is genuinely wedged — exactly when validators must get a retry,
+        # not stale consensus.
+        if _env_bool("CATHEDRAL_WEIGHTS_ORIGIN_FAILCLOSED", True) and \
+                _weights_vector_expired(vec):
+            return JSONResponse(
+                {
+                    "detail": "weights_expired",
+                    "status": "expired",
+                    "generated_at": vec.get("generated_at") if isinstance(vec, dict) else None,
+                    "expires_at": vec.get("expires_at") if isinstance(vec, dict) else None,
+                },
+                status_code=503,
+                headers={"Retry-After": "2", "Cache-Control": "no-store"},
+            )
         return JSONResponse(vec)
 
     @app.get("/.well-known/cathedral-jwks.json")
@@ -2544,6 +2708,97 @@ def build_app(
         # Explicit alias for miners/dashboards that want the cache/CDN board
         # broadcast rather than a per-request active-set query.
         return _serve_board_snapshot(request)
+
+    @app.get("/sat/latest.json")
+    async def sat_latest(request: Request):
+        latest, _board, _weights, etag = _sat_snapshot_bundle()
+        headers = _sat_snapshot_headers(etag, str(latest["sequence"]))
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(latest, headers=headers)
+
+    @app.get("/sat/sequences/{sequence}/board.json")
+    async def sat_sequence_board(sequence: str, request: Request):
+        latest, board_payload, _weights, _latest_etag = _sat_snapshot_bundle()
+        current_sequence = str(latest["sequence"])
+        if sequence != current_sequence:
+            raise HTTPException(
+                404,
+                {
+                    "detail": "snapshot_sequence_not_available",
+                    "current_sequence": current_sequence,
+                },
+            )
+        etag = _snapshot_etag(board_payload)
+        headers = _sat_snapshot_headers(etag, sequence, immutable=True)
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(board_payload, headers=headers)
+
+    @app.get("/sat/sequences/{sequence}/weights.json")
+    async def sat_sequence_weights(sequence: str, request: Request):
+        latest, _board, weights_payload, _latest_etag = _sat_snapshot_bundle()
+        current_sequence = str(latest["sequence"])
+        if sequence != current_sequence:
+            raise HTTPException(
+                404,
+                {
+                    "detail": "snapshot_sequence_not_available",
+                    "current_sequence": current_sequence,
+                },
+            )
+        etag = _snapshot_etag(weights_payload)
+        headers = _sat_snapshot_headers(etag, sequence, immutable=True)
+        inm = request.headers.get("if-none-match")
+        if inm and etag in [t.strip() for t in inm.split(",")]:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(weights_payload, headers=headers)
+
+    @app.get("/sat/events")
+    async def sat_events(request: Request, once: bool = Query(False)):
+        heartbeat_secs = max(1.0, _env_float("CATHEDRAL_SSE_HEARTBEAT_SECS", 30.0))
+
+        def _snapshot_event_frame(latest: dict[str, Any]) -> str:
+            event = {
+                "kind": "cathedral.sat.snapshot.ready",
+                "sequence": latest["sequence"],
+                "lane": "sat",
+                "type": "snapshot",
+                "latest_url": "/sat/latest.json",
+                "artifact_hash": _snapshot_hash(latest),
+            }
+            return (
+                "retry: 30000\n"
+                f"id: {latest['sequence']}\n"
+                "event: cathedral.sat.snapshot\n"
+                f"data: {json.dumps(event, sort_keys=True, separators=(',', ':'))}\n\n"
+            )
+
+        async def _stream():
+            last_sequence = request.headers.get("last-event-id", "")
+            while True:
+                latest, _board, _weights, _latest_etag = _sat_snapshot_bundle()
+                sequence = str(latest["sequence"])
+                if sequence != last_sequence:
+                    yield _snapshot_event_frame(latest)
+                    last_sequence = sequence
+                else:
+                    yield ": keepalive\n\n"
+                if once or await request.is_disconnected():
+                    return
+                await asyncio.sleep(heartbeat_secs)
+
+        return StreamingResponse(
+            _stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
     @app.get("/v1/synthetic-boolean/current-challenge")
     async def current_challenge(tier: int | None = Query(None), difficulty: str | None = Query(None)):
@@ -3538,12 +3793,27 @@ def build_app(
                 "FROM per_miner_assignments WHERE epoch=?",
                 (epoch,),
             )
+        # PM-primary honesty: never imply PM is contributing when it isn't.
+        # "verified scores" proxy = distinct miners with verified per-miner solves
+        # in the trailing 24h; under pm_primary those solves are what feed the
+        # vector, so 0 verified == not contributing (degraded), stated explicitly.
+        _pm_mode = weights_mod.perminer_scoring_mode()
+        _pm_verified_count = int(active_miners[0]["n"] or 0) if active_miners else 0
+        _pm_primary_configured = _pm_mode == "pm_primary"
+        _pm_primary_contributing = _pm_primary_configured and _pm_verified_count > 0
         return {
             "kind": "per_miner_summary",
             "enabled": enabled,
             "shadow": pm.perminer_shadow() if enabled else False,
             "current_epoch": epoch,
             "last_24h_since": since_24h,
+            "pm_scoring_mode": _pm_mode,
+            "pm_primary_configured": _pm_primary_configured,
+            "pm_primary_contributing": _pm_primary_contributing,
+            "pm_verified_scores_count": _pm_verified_count,
+            "pm_primary_degraded_reason": (
+                None if (not _pm_primary_configured or _pm_primary_contributing)
+                else "no_verified_per_miner_scores"),
             "scoring": {
                 "mode": weights_mod.perminer_scoring_mode(),
                 "bonus_multiplier": weights_mod.perminer_bonus_multiplier(),
@@ -3587,6 +3857,11 @@ def build_app(
             "visibility_cache_status": "warming",
             "data_status": "warming",
             "metrics_status": "unavailable",
+            "pm_scoring_mode": weights_mod.perminer_scoring_mode(),
+            "pm_primary_configured": weights_mod.perminer_scoring_mode() == "pm_primary",
+            "pm_primary_contributing": None,
+            "pm_verified_scores_count": None,
+            "pm_primary_degraded_reason": None,
             "scoring": {
                 "mode": weights_mod.perminer_scoring_mode(),
                 "bonus_multiplier": weights_mod.perminer_bonus_multiplier(),
@@ -3657,6 +3932,11 @@ def build_app(
             cold_async=visibility_cold_async,
             cold_value=lambda: _perminer_summary_warming(limit),
         )
+        # Honest state: if the background build keeps failing we serve the cold
+        # placeholder/last-known-good as "degraded", never an eternal "warming".
+        if cache_status == "degraded" and isinstance(payload, dict) \
+                and payload.get("data_status") in (None, "warming"):
+            payload = {**payload, "data_status": "degraded"}
         return JSONResponse(
             payload,
             headers={
@@ -3674,21 +3954,7 @@ def build_app(
     # works on any role; returns zeros when nothing is queued.
     def _async_queue_metrics(window_secs: float = 60.0) -> dict[str, Any]:
         now_iso = _now_iso_ms()
-        try:
-            q = submit_admission.queue_metrics(store, now_iso=now_iso)
-            q["metrics_status"] = "ok"
-        except Exception as exc:
-            print(f"[submit_metrics] queue_metrics_failed error={exc!r}")
-            q = {
-                "metrics_status": "degraded",
-                "metrics_error": "queue_metrics_failed",
-                "total_pending": None,
-                "by_status": {},
-                "oldest_by_status": {},
-                "oldest_received_at": None,
-                "worker_lag_secs": None,
-                "by_kind": {},
-            }
+        q = submit_admission.queue_metrics(store, now_iso=now_iso)
         since_iso = _now_iso_ms_plus(-window_secs)
         # P2 fix: split the drain rates by LIVE vs SHADOW kind. A shadow drain
         # also stamps status + verified_at_iso (into shadow_* + a terminal status),
@@ -3697,31 +3963,14 @@ def build_app(
         # was. The headline accepted/rejected rates now count LIVE async kinds
         # (public + per_miner) only; shadow is reported separately so it stays
         # visible without inflating the live numbers.
-        try:
-            rate_snapshot = submit_admission.queue_rates(
-                store, since_iso=since_iso, window_secs=window_secs)
-            rates = store.query(
-                "SELECT challenge_kind AS kind, status, COUNT(*) AS n "
-                "FROM per_miner_attempts "
-                "WHERE verified_at_iso IS NOT NULL AND verified_at_iso > ? "
-                "AND challenge_kind IS NOT NULL "
-                "GROUP BY challenge_kind, status", (since_iso,))
-            rates_status = "ok"
-        except Exception as exc:
-            print(f"[submit_metrics] queue_rates_failed error={exc!r}")
-            rate_snapshot = {
-                "admitted_in_window": None,
-                "terminal_in_window": None,
-                "ranked_in_window": None,
-                "rejected_terminal_in_window": None,
-                "admitted_per_sec": None,
-                "terminal_per_sec": None,
-                "ranked_per_sec": None,
-                "rejected_terminal_per_sec": None,
-                "rates_by_kind": {},
-            }
-            rates = []
-            rates_status = "degraded"
+        rate_snapshot = submit_admission.queue_rates(
+            store, since_iso=since_iso, window_secs=window_secs)
+        rates = store.query(
+            "SELECT challenge_kind AS kind, status, COUNT(*) AS n "
+            "FROM per_miner_attempts "
+            "WHERE verified_at_iso IS NOT NULL AND verified_at_iso > ? "
+            "AND challenge_kind IS NOT NULL "
+            "GROUP BY challenge_kind, status", (since_iso,))
         accepted = rejected = 0
         shadow_accepted = shadow_rejected = 0
         for r in rates:
@@ -3752,20 +4001,10 @@ def build_app(
         q["shadow_accepted_per_sec"] = round(shadow_accepted / win, 4)
         q["shadow_rejected_per_sec"] = round(shadow_rejected / win, 4)
         q.update(rate_snapshot)
-        q["rates_status"] = rates_status
-        try:
-            q["workers"] = submit_admission.worker_metrics(
-                store, now_iso=now_iso,
-                stale_secs=max(10.0, float(_vw_flags.lock_secs())),
-            )
-        except Exception as exc:
-            print(f"[submit_metrics] worker_metrics_failed error={exc!r}")
-            q["workers"] = {
-                "active_workers": None,
-                "workers": [],
-                "stale_after_secs": max(10.0, float(_vw_flags.lock_secs())),
-                "metrics_status": "degraded",
-            }
+        q["workers"] = submit_admission.worker_metrics(
+            store, now_iso=now_iso,
+            stale_secs=max(10.0, float(_vw_flags.lock_secs())),
+        )
         q["backpressure"] = {
             "enabled": submit_queue_backpressure_enabled,
             "max_pending": (
@@ -4259,53 +4498,40 @@ def build_app(
                     raise HTTPException(
                         413, "solution_too_large",
                         headers={"X-Cathedral-Rejection-Reason": "solution_too_large"})
-                worker_ready, _worker_metrics = _async_worker_ready()
-                if not worker_ready:
-                    # PM challenges are small and deterministic. If async workers
-                    # are down, keep miners earning by using the legacy sync verifier
-                    # instead of failing the private lane closed.
+                # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
+                # so the worker can recover tier/seq even if the read replica is behind.
+                _record_one_perminer_assignment(
+                    assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
+                idem = submit_admission.idempotency_key(
+                    x_cathedral_hotkey, challenge_id, sol_sha)
+                receipt_id = "sub_" + new_uuid().replace("-", "")
+                outcome, row = submit_admission.admit_pending(
+                    store,
+                    receipt_id=receipt_id,
+                    idem_key=idem,
+                    miner_hotkey=x_cathedral_hotkey,
+                    challenge_id=challenge_id,
+                    dimacs_solution_sha256=sol_sha,
+                    dimacs_solution=dimacs_solution,
+                    submitted_at=submitted_at,
+                    received_at_iso=received_at_iso,
+                    signature=x_cathedral_signature,
+                    epoch=epoch,
+                    assignment_identity=assignment_identity,
+                    queue_backpressure=submit_queue_backpressure,
+                )
+                if outcome == "backpressure":
+                    _raise_submit_queue_backpressure(challenge_id, row)
+                receipt = submit_admission.receipt_from_row(row)
+                if outcome == "replayed":
                     _record_submit_event(
-                        "fallback",
-                        "pm_async_worker_unavailable_sync",
-                        challenge_id=challenge_id,
-                        log=True,
-                    )
-                    want_sync_pm = True
-                if not want_sync_pm:
-                    # Re-materialize the assignment ledger row (cheap; cid->tier/seq only)
-                    # so the worker can recover tier/seq even if the read replica is behind.
-                    _record_one_perminer_assignment(
-                        assignment_identity, epoch, challenge_id, tier_seq[0], tier_seq[1])
-                    idem = submit_admission.idempotency_key(
-                        x_cathedral_hotkey, challenge_id, sol_sha)
-                    receipt_id = "sub_" + new_uuid().replace("-", "")
-                    outcome, row = submit_admission.admit_pending(
-                        store,
-                        receipt_id=receipt_id,
-                        idem_key=idem,
-                        miner_hotkey=x_cathedral_hotkey,
-                        challenge_id=challenge_id,
-                        dimacs_solution_sha256=sol_sha,
-                        dimacs_solution=dimacs_solution,
-                        submitted_at=submitted_at,
-                        received_at_iso=received_at_iso,
-                        signature=x_cathedral_signature,
-                        epoch=epoch,
-                        assignment_identity=assignment_identity,
-                        queue_backpressure=submit_queue_backpressure,
-                    )
-                    if outcome == "backpressure":
-                        _raise_submit_queue_backpressure(challenge_id, row)
-                    receipt = submit_admission.receipt_from_row(row)
-                    if outcome == "replayed":
-                        _record_submit_event(
-                            "accepted", "idempotent_replay",
-                            challenge_id=challenge_id, status_code=200)
-                        return JSONResponse(status_code=200, content=receipt)
-                    _record_submit_event(
-                        "accepted", "admitted_pending",
-                        challenge_id=challenge_id, status_code=202)
-                    return JSONResponse(status_code=202, content=receipt)
+                        "accepted", "idempotent_replay",
+                        challenge_id=challenge_id, status_code=200)
+                    return JSONResponse(status_code=200, content=receipt)
+                _record_submit_event(
+                    "accepted", "admitted_pending",
+                    challenge_id=challenge_id, status_code=202)
+                return JSONResponse(status_code=202, content=receipt)
             # When ownership/recovery failed (tier_seq is None) async mode falls
             # through to the inline reject below — it is a cheap check, no heavy work
             # runs, and the error contract stays byte-for-byte the synchronous one.
@@ -4556,7 +4782,6 @@ def build_app(
         # worker's atomic accept/reject, preserving exactly-once replay semantics.
         want_sync = want_sync_submit
         if submit_async_enabled and not want_sync:
-            _require_async_worker_ready(challenge_id)
             idem = submit_admission.idempotency_key(
                 x_cathedral_hotkey, challenge_id, sol_sha)
             receipt_id = "sub_" + new_uuid().replace("-", "")
@@ -4778,9 +5003,30 @@ def build_app(
         the 202 admission returned, with `status` advancing pending -> ranked/
         rejected as the async worker verifies. 404 if unknown."""
         receipt = submit_admission.get_receipt(store, receipt_id)
-        if receipt is None:
+        if receipt is not None:
+            return JSONResponse(receipt, headers={"Cache-Control": "no-store"})
+        rows = store.query(
+            "SELECT id, miner_hotkey, sat_challenge_id, status, rejection_reason "
+            "FROM agent_submissions WHERE id=?",
+            (receipt_id,),
+        )
+        if not rows:
             raise HTTPException(404, "receipt_not_found")
-        return receipt
+        row = rows[0]
+        status = str(row["status"])
+        payload = {
+            "schema": "cathedral.submit_receipt.v1",
+            "status": status,
+            "open": False,
+            "terminal": True,
+            "receipt_id": str(row["id"]),
+            "challenge_id": str(row["sat_challenge_id"]),
+            "miner_hotkey": str(row["miner_hotkey"]),
+            "receipt_url": f"/v1/agents/receipts/{row['id']}",
+        }
+        if row["rejection_reason"] is not None:
+            payload["rejection_reason"] = row["rejection_reason"]
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     # ---- Async verification finalize (Phase 5) ----------------------------
     # Mirror of the legacy inline public-lane _accept: one atomic txn that burns
@@ -4792,7 +5038,6 @@ def build_app(
         miner_hotkey = str(attempt_row["miner_hotkey"])
         signature = str(attempt_row["signature"])
         submitted_at = attempt_row["submitted_at"]
-        received_at_iso = str(attempt_row["received_at_iso"] or now_iso)
         chal_rows = store.query(
             "SELECT * FROM lane_challenges WHERE challenge_id=?", (challenge_id,))
         if not chal_rows:
@@ -4818,19 +5063,14 @@ def build_app(
                     "WHERE challenge_id=? AND status='active'", (challenge_id,))
                 if locked.rowcount != 1:
                     return ("challenge_already_locked", None, None, None)
-                rank = (
-                    scoring.claim_solve(
-                        conn, challenge_id, miner_hotkey, received_at_iso)
-                    or 1
-                )
+                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso) or 1
             else:
                 active = conn.execute(
                     "UPDATE lane_challenges SET updated_at_iso=? "
                     "WHERE challenge_id=? AND status='active'", (now_iso, challenge_id))
                 if active.rowcount != 1:
                     return ("challenge_not_active", None, None, None)
-                rank = scoring.claim_solve(
-                    conn, challenge_id, miner_hotkey, received_at_iso)
+                rank = scoring.claim_solve(conn, challenge_id, miner_hotkey, now_iso)
                 if rank is None:
                     return ("already_solved", None, None, None)
             score_multiplier = float(chal["score_multiplier"])
@@ -4849,7 +5089,7 @@ def build_app(
                 row_uuid=row_uuid, miner_hotkey=miner_hotkey,
                 agent_id=new_uuid(), challenge_id=challenge_id, tier=chal["tier"],
                 weighted_score=ws, answer_hash=answer_hash,
-                verifier_details_hash=verifier_details_hash, ran_at=received_at_iso,
+                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
                 epoch_salt=epoch_salt, solve_rank=rank, solved=True,
                 private_key_hex=key_hex,
             )
@@ -4921,7 +5161,6 @@ def build_app(
         miner_hotkey = str(attempt_row["miner_hotkey"])
         signature = str(attempt_row["signature"])
         submitted_at = attempt_row["submitted_at"]
-        received_at_iso = str(attempt_row["received_at_iso"] or now_iso)
         sol_sha = str(attempt_row["dimacs_solution_sha256"])
         dimacs_solution = attempt_row["solution_body"]
         pm_weight = pm.weight_for(tier)
@@ -4939,8 +5178,7 @@ def build_app(
                 "INSERT OR IGNORE INTO per_miner_solves"
                 "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, "
                 "verified, solved_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (challenge_id, miner_hotkey, epoch, tier, seq, pm_weight, 1,
-                 received_at_iso))
+                (challenge_id, miner_hotkey, epoch, tier, seq, pm_weight, 1, now_iso))
             if not solved.rowcount:
                 return "already_solved"
             conn.execute(
@@ -4959,7 +5197,7 @@ def build_app(
                 row_uuid=row_uuid, miner_hotkey=miner_hotkey,
                 agent_id=new_uuid(), challenge_id=challenge_id, tier=tier,
                 weighted_score=pm_weight, answer_hash=answer_hash,
-                verifier_details_hash=verifier_details_hash, ran_at=received_at_iso,
+                verifier_details_hash=verifier_details_hash, ran_at=now_iso,
                 epoch_salt=epoch_salt, solve_rank=1, solved=True,
                 private_key_hex=key_hex,
             )
