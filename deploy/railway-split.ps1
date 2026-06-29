@@ -51,10 +51,56 @@ param(
 
     # Shared HMAC secret for CNF tokens. MUST be identical across all services.
     # Provide via -CnfTokenSecret or the CATHEDRAL_CNF_TOKEN_SECRET env var.
-    [string]$CnfTokenSecret = $env:CATHEDRAL_CNF_TOKEN_SECRET
+    [string]$CnfTokenSecret = $env:CATHEDRAL_CNF_TOKEN_SECRET,
+
+    # Optional Railway CLI path. Defaults to $env:RAILWAY_CLI, PATH lookup, then
+    # the common local install locations used on this workstation.
+    [string]$RailwayExe = $env:RAILWAY_CLI
 )
 
 $ErrorActionPreference = "Stop"
+
+function Resolve-RailwayCli {
+    param([string]$Requested)
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($Requested)) {
+        $candidates += $Requested
+    }
+    $cmd = Get-Command railway -ErrorAction SilentlyContinue
+    if ($null -ne $cmd) {
+        $candidates += $cmd.Source
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $candidates += (Join-Path $env:USERPROFILE "bin\railway.exe")
+        $candidates += (Join-Path $env:USERPROFILE ".railway\staged-update\railway.exe")
+    }
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        $resolved = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($null -ne $resolved) {
+            return $resolved.Source
+        }
+        if (Test-Path -LiteralPath $candidate) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    throw "Railway CLI not found. Install it, add it to PATH, pass -RailwayExe <path>, or set RAILWAY_CLI."
+}
+
+$script:RailwayCli = $null
+if ($Apply) {
+    $script:RailwayCli = Resolve-RailwayCli -Requested $RailwayExe
+    Write-Host ("Using Railway CLI: {0}" -f $script:RailwayCli) -ForegroundColor DarkGray
+    & $script:RailwayCli status
+    if ($LASTEXITCODE -ne 0) {
+        throw "Railway CLI is not authenticated or this checkout is not linked to a Railway project. Run 'railway login' and 'railway link', then re-run with -Apply."
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($CnfTokenSecret)) {
     Write-Warning "CATHEDRAL_CNF_TOKEN_SECRET is not set. It MUST be the same value on every service or CNF fetch will fail across replicas. Pass -CnfTokenSecret or set the env var before -Apply."
@@ -125,7 +171,7 @@ function Set-ServiceVars {
 
     if ($Apply) {
         Write-Host "    applying via railway CLI..." -ForegroundColor Yellow
-        & railway variables --service $ServiceName @setArgs
+        & $script:RailwayCli variables --service $ServiceName @setArgs
         if ($LASTEXITCODE -ne 0) {
             throw "railway variables failed for service '$ServiceName' (exit $LASTEXITCODE)"
         }

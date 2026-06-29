@@ -28,6 +28,15 @@ a dry-run by default (`-Apply` to set live). Re-running that script restores the
 safe defaults and cannot quietly reset submit to cap `1` or drop the read
 statement timeout.
 
+If `railway` is not on `PATH`, pass the CLI explicitly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/railway-split.ps1 -RailwayExe "$env:USERPROFILE\bin\railway.exe"
+```
+
+The `-Apply` path preflights `railway status` before mutating variables. If auth
+or project linking is stale, run `railway login` and `railway link` first.
+
 ## Target Services
 
 ### 1. Read Service

@@ -48,5 +48,9 @@ assertVar(worker, "CATHEDRAL_PG_POOL_MAX", "8", "worker service");
 
 assert.match(text, /CATHEDRAL_CNF_TOKEN_SECRET/, "shared CNF token warning/apply path must stay present");
 assert.match(text, /structured 503 on live-query failure/, "post-apply verification message must mention recent degraded fallback");
+assert.match(text, /RailwayExe/, "script must support an explicit Railway CLI path");
+assert.match(text, /Resolve-RailwayCli/, "script must resolve Railway CLI outside PATH");
+assert.match(text, /railway login/, "apply path must fail clearly when Railway auth is stale");
+assert.match(text, /railway link/, "apply path must fail clearly when checkout is not linked");
 
 console.log("railway split config tests passed");
