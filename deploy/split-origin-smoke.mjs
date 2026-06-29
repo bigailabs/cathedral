@@ -6,6 +6,7 @@ const submitBase = (process.env.CATHEDRAL_SUBMIT_BASE_URL ||
   "https://submit.cathedral.computer").replace(/\/+$/, "");
 const workerBase = (process.env.CATHEDRAL_WORKER_BASE_URL || "").replace(/\/+$/, "");
 const timeoutMs = Number(process.env.CATHEDRAL_SPLIT_TIMEOUT_MS || 10000);
+const maxHotMs = Number(process.env.CATHEDRAL_SPLIT_MAX_HOT_MS || 5000);
 const retryAttempts = Math.max(1, Number(process.env.CATHEDRAL_SPLIT_ATTEMPTS || 5));
 const retryDelayMs = Math.max(0, Number(process.env.CATHEDRAL_SPLIT_RETRY_DELAY_MS || 1000));
 const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
@@ -45,6 +46,13 @@ function assertStatus(result, statuses) {
   assert.ok(
     statuses.includes(result.status),
     `${result.base}${result.path} returned ${result.status}, expected ${statuses.join("/")}`,
+  );
+}
+
+function assertHotLatency(result) {
+  assert.ok(
+    result.ms <= maxHotMs,
+    `${result.base}${result.path} took ${result.ms}ms, above hot-path ceiling ${maxHotMs}ms`,
   );
 }
 
@@ -100,11 +108,13 @@ async function checkReadOrigin() {
   const live = await request(readBase, "/health/live");
   line(live, "read");
   assertStatus(live, [200]);
+  assertHotLatency(live);
   assertRole(live, "read");
 
   const ready = await request(readBase, "/health/ready");
   line(ready, "read");
   assertStatus(ready, [200]);
+  assertHotLatency(ready);
   const readyPayload = assertRole(ready, "read");
   assert.equal(readyPayload.db, "ok");
 
@@ -119,6 +129,7 @@ async function checkReadOrigin() {
     const result = await requestEventually(readBase, path);
     line(result, "read");
     assertStatus(result, [200]);
+    assertHotLatency(result);
   }
 
   const badSubmit = await request(readBase, "/v1/agents/submit", {
@@ -128,17 +139,20 @@ async function checkReadOrigin() {
   });
   line(badSubmit, "read");
   assertRejectedByRole(badSubmit, "read");
+  assertHotLatency(badSubmit);
 }
 
 async function checkSubmitOrigin() {
   const live = await request(submitBase, "/health/live");
   line(live, "submit");
   assertStatus(live, [200]);
+  assertHotLatency(live);
   assertRole(live, "submit");
 
   const ready = await request(submitBase, "/health/ready");
   line(ready, "submit");
   assertStatus(ready, [200]);
+  assertHotLatency(ready);
   const readyPayload = assertRole(ready, "submit");
   assert.equal(readyPayload.db, "ok");
 
@@ -150,11 +164,13 @@ async function checkSubmitOrigin() {
     const result = await request(submitBase, path);
     line(result, "submit");
     assertStatus(result, [422, 429]);
+    assertHotLatency(result);
   }
 
   const status = await request(submitBase, "/v1/verifiable-sat/coinbase/status");
   line(status, "submit");
   assertStatus(status, [200]);
+  assertHotLatency(status);
 
   const badSubmit = await request(submitBase, "/v1/agents/submit", {
     method: "POST",
@@ -163,10 +179,12 @@ async function checkSubmitOrigin() {
   });
   line(badSubmit, "submit");
   assertStatus(badSubmit, [422, 429]);
+  assertHotLatency(badSubmit);
 
   const leaderboard = await request(submitBase, "/v1/leaderboard/top?window=1h");
   line(leaderboard, "submit");
   assertRejectedByRole(leaderboard, "submit");
+  assertHotLatency(leaderboard);
 }
 
 async function checkWorkerOrigin() {
@@ -175,14 +193,16 @@ async function checkWorkerOrigin() {
   const live = await request(workerBase, "/health/live");
   line(live, "worker");
   assertStatus(live, [200]);
+  assertHotLatency(live);
   assertRole(live, "worker");
 
   const active = await request(workerBase, "/v1/synthetic-boolean/active-challenges");
   line(active, "worker");
   assertRejectedByRole(active, "worker");
+  assertHotLatency(active);
 }
 
-console.log(`split-origin smoke read=${readBase} submit=${submitBase}${workerBase ? ` worker=${workerBase}` : ""}`);
+console.log(`split-origin smoke read=${readBase} submit=${submitBase}${workerBase ? ` worker=${workerBase}` : ""} max_hot_ms=${maxHotMs}`);
 await checkReadOrigin();
 await checkSubmitOrigin();
 await checkWorkerOrigin();

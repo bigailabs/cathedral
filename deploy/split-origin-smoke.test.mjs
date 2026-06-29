@@ -39,11 +39,19 @@ async function serve(handler) {
   };
 }
 
-function makeReadServer({ acceptSubmit = false, transientRecentOnce = false } = {}) {
+function delayed(ms, fn) {
+  if (!ms) {
+    fn();
+    return;
+  }
+  setTimeout(fn, ms);
+}
+
+function makeReadServer({ acceptSubmit = false, transientRecentOnce = false, slowReadyMs = 0 } = {}) {
   let recentHits = 0;
   return serve((req, res) => {
     if (req.url === "/health/live") return json(res, 200, { service_role: "read", db: "not_checked" });
-    if (req.url === "/health/ready") return json(res, 200, { service_role: "read", db: "ok" });
+    if (req.url === "/health/ready") return delayed(slowReadyMs, () => json(res, 200, { service_role: "read", db: "ok" }));
     if (req.method === "POST" && req.url === "/v1/agents/submit") {
       if (acceptSubmit) return json(res, 200, { status: "accepted_by_wrong_origin" });
       return roleReject(res, "read");
@@ -102,10 +110,11 @@ async function runSmoke(env) {
     const child = spawn(process.execPath, ["deploy/split-origin-smoke.mjs"], {
       env: {
         ...process.env,
-        ...env,
         CATHEDRAL_SPLIT_TIMEOUT_MS: "2000",
+        CATHEDRAL_SPLIT_MAX_HOT_MS: "1000",
         CATHEDRAL_SPLIT_ATTEMPTS: "3",
         CATHEDRAL_SPLIT_RETRY_DELAY_MS: "10",
+        ...env,
       },
       cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -168,6 +177,17 @@ await withServers({ serveLeaderboard: true }, async ({ read, submit, worker }) =
   });
   assert.notEqual(result.code, 0, "smoke should fail when submit origin serves leaderboard reads");
   assert.match(result.stderr + result.stdout, /returned 200, expected 404/);
+});
+
+await withServers({ slowReadyMs: 75 }, async ({ read, submit, worker }) => {
+  const result = await runSmoke({
+    CATHEDRAL_READ_BASE_URL: read.url,
+    CATHEDRAL_SUBMIT_BASE_URL: submit.url,
+    CATHEDRAL_WORKER_BASE_URL: worker.url,
+    CATHEDRAL_SPLIT_MAX_HOT_MS: "25",
+  });
+  assert.notEqual(result.code, 0, "smoke should fail when a hot read endpoint is too slow");
+  assert.match(result.stderr + result.stdout, /above hot-path ceiling 25ms/);
 });
 
 console.log("split-origin smoke tests passed");
