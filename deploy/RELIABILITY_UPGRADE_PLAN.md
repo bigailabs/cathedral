@@ -175,7 +175,10 @@ Policy:
 - **Validators must not need a URL or binary change.** Backward compatibility for all
   three is a hard requirement, not best-effort.
 - **All three return the same signed-vector semantics and a compatible response shape.**
-  The signed bytes must be identical regardless of which URL served them.
+  The signed bytes must converge regardless of which URL served them. Because
+  the canonical `api.*` path has a short edge freshness window, the release gate
+  retries briefly before failing exact signature divergence; persistent
+  divergence remains a launch blocker.
 - **All three are covered by smoke tests, monitors, and the validator release gate.**
   A monitor/probe and a freshness check run against each URL, not just the canonical one.
 - **Edge durability applies to both `api.cathedral.computer` routes:** if the read

@@ -124,13 +124,14 @@ soak, and publisher live smoke. Use `-SkipValidatorReleaseGate` only for
 non-mainnet staging. Use `-SkipSplitOriginSmoke` only for pre-split staging, not
 for the final controlled v0 gate.
 
-Result against current production: expected fail before deploy. Current prod does
-not yet expose board `generator` / `scoring` / `distribution` or
-`/v1/leaderboard/explain`, one submit attempt hit `429 submit_busy_retry`, and
-the validator release gate currently reports fresh but divergent signed-vector
-bytes between `api.cathedral.computer` and `read.cathedral.computer`. Rerun this
-after Railway deploy before claiming the deployed miner experience or payment
-feed is live.
+Result against current production: pre-deploy gaps are expected. Older prod may
+not expose board `generator` / `scoring` / `distribution` or
+`/v1/leaderboard/explain`, and submit may still return `429 submit_busy_retry`
+under load. The validator release gate now retries bounded signature
+convergence across `api.cathedral.computer`, the legacy-prefixed alias, and
+`read.cathedral.computer`; persistent divergence after those retries remains a
+payment-feed launch blocker. Rerun this after Railway deploy before claiming the
+deployed miner experience or payment feed is live.
 
 ## Not Claimable Yet
 

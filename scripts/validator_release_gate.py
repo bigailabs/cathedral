@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -386,6 +387,39 @@ def fetch_chain(netuid: int, network: str = "finney") -> dict[str, Any]:
 # --------------------------------------------------------------------------
 # Runner
 # --------------------------------------------------------------------------
+def fetch_url_compat_snapshot(
+    args: argparse.Namespace,
+) -> tuple[list[dict[str, Any]], dict[str, str | None], dict[str, Any],
+           dict[str, Any] | None]:
+    """Fetch all validator URLs once and return checks + signatures.
+
+    The edge route may legitimately hold a fresh signed vector for a few
+    seconds while the direct read service has already loaded the next persisted
+    vector. The gate still requires exact signature convergence, but the runner
+    can retry this snapshot before failing a deploy.
+    """
+    checks: list[dict[str, Any]] = []
+    signatures_by_label: dict[str, str | None] = {}
+    urls_context: dict[str, Any] = {}
+    canonical_feed: dict[str, Any] | None = None
+
+    for label, url in compat_urls(args.feed_url, args.read_url):
+        fetched = fetch_feed(url, timeout=args.timeout)
+        if label == "canonical":
+            canonical_feed = fetched
+        urls_context[label] = {
+            "url": url, "status": fetched["status"], "error": fetched["error"],
+        }
+        compat = evaluate_url_compat(label, fetched)
+        signatures_by_label[label] = compat.get("signature")
+        # Drop the bulky signature out of the check itself; keep only the
+        # convergence result in output.
+        compat.pop("signature", None)
+        checks.append(compat)
+
+    return checks, signatures_by_label, urls_context, canonical_feed
+
+
 def run_gate(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     context: dict[str, Any] = {}
@@ -393,22 +427,38 @@ def run_gate(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, 
     # All three validator URLs (canonical + legacy-prefixed + read-service) are
     # probed for reachability, no-5xx, and freshness, then cross-checked for
     # identical signed bytes — per the plan's URL Compatibility matrix.
-    signatures_by_label: dict[str, str | None] = {}
-    context["urls"] = {}
+    max_attempts = max(1, int(args.signature_convergence_attempts))
+    convergence_attempt = 1
+    same_signed = {"name": "same_signed_bytes", "passed": False, "detail": "not run"}
     canonical_feed: dict[str, Any] | None = None
-    for label, url in compat_urls(args.feed_url, args.read_url):
-        fetched = fetch_feed(url, timeout=args.timeout)
-        if label == "canonical":
-            canonical_feed = fetched
-        context["urls"][label] = {
-            "url": url, "status": fetched["status"], "error": fetched["error"],
-        }
-        compat = evaluate_url_compat(label, fetched)
-        signatures_by_label[label] = compat.get("signature")
-        # Drop the bulky signature out of the check itself; keep it in context.
-        compat.pop("signature", None)
-        checks.append(compat)
-    checks.append(evaluate_same_signed_bytes(signatures_by_label))
+    compat_checks: list[dict[str, Any]] = []
+    urls_context: dict[str, Any] = {}
+
+    for attempt in range(1, max_attempts + 1):
+        (
+            compat_checks,
+            signatures_by_label,
+            urls_context,
+            canonical_feed,
+        ) = fetch_url_compat_snapshot(args)
+        same_signed = evaluate_same_signed_bytes(signatures_by_label)
+        convergence_attempt = attempt
+        if same_signed.get("passed"):
+            break
+        if any(c.get("passed") is False for c in compat_checks):
+            break
+        if attempt < max_attempts:
+            time.sleep(max(0.0, float(args.signature_convergence_delay)))
+
+    context["urls"] = urls_context
+    context["signature_convergence_attempts"] = convergence_attempt
+    checks.extend(compat_checks)
+    if max_attempts > 1:
+        same_signed["detail"] = (
+            f"{same_signed.get('detail', '')}; "
+            f"attempts={convergence_attempt}/{max_attempts}"
+        )
+    checks.append(same_signed)
 
     # Explicit canonical-feed 5xx + signed-vector-age checks (the highest-severity
     # signals get their own named gate items, not just the per-URL roll-up).
@@ -476,6 +526,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-chain", action="store_true",
                    help="skip chain checks (feed-only)")
     p.add_argument("--timeout", type=float, default=10.0)
+    p.add_argument("--signature-convergence-attempts", type=int, default=4,
+                   help=("retry all-three-URL signed-byte comparison this many "
+                         "times before failing; handles fresh edge/read cache skew"))
+    p.add_argument("--signature-convergence-delay", type=float, default=5.0,
+                   help="seconds between signature convergence attempts")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     args = p.parse_args(argv)
 

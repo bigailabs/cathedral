@@ -45,6 +45,8 @@ cache key.
 Cached read routes serve stale data while refreshing in the background, except
 `/v1/validator/weights/next`, which refreshes synchronously so validators do not
 receive an intentionally stale signed vector unless the origin errors.
+The validator release gate retries exact signature convergence briefly to ride
+through normal edge/read cache skew, but persistent divergence blocks launch.
 
 ## Origin timeouts
 

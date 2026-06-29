@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from scaffold.publisher import health_thresholds as ht
 
@@ -243,6 +244,84 @@ def test_same_signed_bytes_one_url_passes_vacuously():
     # an unreachable URL contributes no signature; <2 sigs = nothing to compare.
     res = gate.evaluate_same_signed_bytes({"canonical": "S", "read_service": None})
     assert res["passed"] is True
+
+
+def _gate_args(**overrides):
+    base = {
+        "feed_url": "https://api.cathedral.computer",
+        "read_url": "https://read.cathedral.computer",
+        "timeout": 1.0,
+        "signature_convergence_attempts": 3,
+        "signature_convergence_delay": 0.0,
+        "no_chain": True,
+        "netuid": 39,
+        "network": "finney",
+        "uid": 200,
+        "min_fresh_validators": 1,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_run_gate_retries_transient_signature_skew(monkeypatch):
+    signatures_by_attempt = [
+        {"canonical": "SIG1", "legacy_prefixed": "SIG1", "read_service": "SIG2"},
+        {"canonical": "SIG2", "legacy_prefixed": "SIG2", "read_service": "SIG2"},
+    ]
+    calls = {"n": 0}
+
+    def fake_fetch(url, *, timeout):
+        label = "read_service" if "read.cathedral" in url else (
+            "legacy_prefixed" if "/api/cathedral/" in url else "canonical")
+        attempt = min(calls["n"] // 3, len(signatures_by_attempt) - 1)
+        calls["n"] += 1
+        return {
+            "status": 200,
+            "error": None,
+            "body": {
+                "signature": signatures_by_attempt[attempt][label],
+                "generated_at": _iso(datetime.now(timezone.utc)),
+                "burn_snapshot": {"burn_uid": 204, "forced_burn_percentage": 0.0},
+            },
+        }
+
+    monkeypatch.setattr(gate, "fetch_feed", fake_fetch)
+    monkeypatch.setattr(gate.time, "sleep", lambda _seconds: None)
+
+    checks, context = gate.run_gate(_gate_args())
+    same = next(c for c in checks if c["name"] == "same_signed_bytes")
+
+    assert same["passed"] is True
+    assert "attempts=2/3" in same["detail"]
+    assert context["signature_convergence_attempts"] == 2
+
+
+def test_run_gate_fails_persistent_signature_skew(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_fetch(url, *, timeout):
+        calls["n"] += 1
+        sig = "READ" if "read.cathedral" in url else "API"
+        return {
+            "status": 200,
+            "error": None,
+            "body": {
+                "signature": sig,
+                "generated_at": _iso(datetime.now(timezone.utc)),
+                "burn_snapshot": {"burn_uid": 204, "forced_burn_percentage": 0.0},
+            },
+        }
+
+    monkeypatch.setattr(gate, "fetch_feed", fake_fetch)
+    monkeypatch.setattr(gate.time, "sleep", lambda _seconds: None)
+
+    checks, context = gate.run_gate(_gate_args(signature_convergence_attempts=2))
+    same = next(c for c in checks if c["name"] == "same_signed_bytes")
+
+    assert same["passed"] is False
+    assert "DIVERGED" in same["detail"]
+    assert "attempts=2/2" in same["detail"]
+    assert context["signature_convergence_attempts"] == 2
 
 
 # ---- manual checks + gate aggregation -------------------------------------

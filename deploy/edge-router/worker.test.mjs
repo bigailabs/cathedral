@@ -75,7 +75,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   cachePolicyForPath("/v1/validator/weights/next"),
-  { freshTtl: 15, edgeTtl: 300, swr: true, params: [] },
+  { freshTtl: 15, edgeTtl: 300, swr: false, params: [] },
 );
 assert.equal(cachePolicyForPath("/v1/synthetic-boolean/per-miner/cnf"), null);
 
@@ -329,5 +329,56 @@ const cacheBust = await handleRequest(new Request(
 ));
 assert.equal(cacheBust.status, 400);
 assert.match(await cacheBust.text(), /unsupported_cache_query_param/);
+
+{
+  const originalCaches = globalThis.caches;
+  const originalFetch = globalThis.fetch;
+  const cacheKey = "https://api.cathedral.computer/v1/validator/weights/next";
+  const store = new Map();
+  globalThis.caches = {
+    default: {
+      async match(request) {
+        const cached = store.get(request.url);
+        return cached ? cached.clone() : undefined;
+      },
+      async put(request, response) {
+        store.set(request.url, response.clone());
+      },
+    },
+  };
+  store.set(cacheKey, new Response(JSON.stringify({ signature: "old" }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "public, max-age=1",
+      "X-Cathedral-Edge-Fresh-Until": "1",
+    },
+  }));
+  let originFetches = 0;
+  globalThis.fetch = async () => {
+    originFetches += 1;
+    return new Response(JSON.stringify({ signature: "new" }), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=1",
+      },
+    });
+  };
+  try {
+    const response = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"),
+      {},
+      { waitUntil() {} },
+    );
+    const body = await response.json();
+    assert.equal(originFetches, 1);
+    assert.equal(body.signature, "new");
+    assert.equal(response.headers.get("X-Cathedral-Edge-Cache"), "REFRESH");
+  } finally {
+    globalThis.caches = originalCaches;
+    globalThis.fetch = originalFetch;
+  }
+}
 
 console.log("edge-router worker tests passed");
