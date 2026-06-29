@@ -497,6 +497,10 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_async_verify_workers_seen
             ON async_verify_workers(last_seen_at_iso);
     """),
+    ("0034_per_miner_score_window_index", """
+        CREATE INDEX IF NOT EXISTS idx_per_miner_solves_verified_time_hotkey
+            ON per_miner_solves(verified, solved_at_iso, miner_hotkey);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -900,6 +904,10 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_async_verify_workers_seen
             ON async_verify_workers(last_seen_at_iso);
+    """),
+    ("0034_per_miner_score_window_index", """
+        CREATE INDEX IF NOT EXISTS idx_per_miner_solves_verified_time_hotkey
+            ON per_miner_solves(verified, solved_at_iso, miner_hotkey);
     """),
 ]
 
