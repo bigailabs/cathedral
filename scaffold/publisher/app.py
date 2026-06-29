@@ -1999,9 +1999,9 @@ def build_app(
 
         New validators use the signed vector from /v1/validator/weights/next.
         Older validators still aggregate signed receipt rows from /leaderboard/recent.
-        When PM is primary, public-board receipt rows must therefore carry only
-        the configured baseline value; otherwise old validators keep paying the
-        retired public-board lane as if nothing changed.
+        When PM is primary, public-board receipt rows must therefore carry zero
+        score; otherwise old validators keep paying the retired public-board
+        lane as if nothing changed.
         """
         try:
             from . import per_miner as pm

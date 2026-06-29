@@ -270,8 +270,8 @@ try:
         insert_solve(pm_primary_store, "sat-t2-public-only", "5PublicOnly", recent)
         no_pm_scores = weights.compose_scores(pm_primary_store, now=now)
         ck(
-            "pm_primary falls back to public scoring until accepted PM solves exist",
-            no_pm_scores == {"5PublicOnly": 1.0},
+            "pm_primary pays no public-board scores before accepted PM solves exist",
+            no_pm_scores == {},
         )
         insert_perminer_solve(
             pm_primary_store,
@@ -303,7 +303,7 @@ try:
         coldkey_blocked_scores = weights.compose_scores(pm_primary_store, now=now)
         ck(
             "pm_primary falls back to hotkey identity without coldkey map",
-            coldkey_blocked_scores == {"5Private": 1.0, "5PublicOnly": 0.052632},
+            coldkey_blocked_scores == {"5Private": 1.0},
         )
         coldkey_blocked_vec = weights.build_signed_vector(
             pm_primary_store,
@@ -321,7 +321,7 @@ try:
         primary_scores = weights.compose_scores(pm_primary_store, now=now)
         ck(
             "pm_primary makes private assigned work the paying path",
-            primary_scores == {"5Private": 1.0, "5PublicOnly": 0.052632},
+            primary_scores == {"5Private": 1.0},
         )
         primary_vec = weights.build_signed_vector(
             pm_primary_store,
@@ -332,7 +332,7 @@ try:
             "pm_primary signed vector exposes the live score source and baseline",
             primary_vec["policy_metadata"]["score_source"] == "pm_primary"
             and primary_vec["policy_metadata"]["perminer"]["primary_live"] is True
-            and primary_vec["policy_metadata"]["perminer"]["public_baseline"] == 0.05,
+            and primary_vec["policy_metadata"]["perminer"]["public_baseline"] == 0.0,
         )
         primary_explain = weights.explain_miner_score(
             pm_primary_store,
@@ -413,8 +413,8 @@ try:
             "pm_primary uses coldkey map opportunistically and falls back for unmapped PM hotkeys",
             mapped_scores.get("5UnmappedHuge") == 1.0
             and 0.02 < mapped_scores.get("5PrivateMapped", 0.0) < 0.04
-            and 0.02 < mapped_scores.get("5PublicOnly", 0.0) < 0.04
-            and 0.02 < mapped_scores.get("5UnmappedPublic", 0.0) < 0.04,
+            and "5PublicOnly" not in mapped_scores
+            and "5UnmappedPublic" not in mapped_scores,
         )
         mapped_vec = weights.build_signed_vector(
             pm_mapped_store,
@@ -429,8 +429,8 @@ try:
             and "5UnmappedHuge" in mapped_hotkeys,
         )
         ck(
-            "pm_primary signed vector includes unmapped public baseline hotkeys",
-            "5UnmappedPublic" in mapped_hotkeys,
+            "pm_primary signed vector excludes public-board-only hotkeys",
+            "5UnmappedPublic" not in mapped_hotkeys,
         )
     finally:
         pm_mapped_store.close()
@@ -491,8 +491,8 @@ try:
             if hk.startswith("5BudgetPublic")
         ), 6)
         ck(
-            "pm_primary public baseline is a total budget, not per-hotkey",
-            budget_scores.get("5BudgetPrivate") == 1.0 and public_total < 0.03,
+            "pm_primary public baseline is disabled even with stale env",
+            budget_scores.get("5BudgetPrivate") == 1.0 and public_total == 0.0,
         )
     finally:
         pm_budget_store.close()
