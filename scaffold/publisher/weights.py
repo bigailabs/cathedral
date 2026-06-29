@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .store import Store
+from . import external_scores
 # Shared verify surface lives in the dependency-light module so a validator
 # install doesn't drag in FastAPI/store; re-exported here for the orchestrator's
 # callers and the gates (one import surface).
@@ -85,6 +86,14 @@ PERMINER_PUBLIC_BASELINE_ENV = "CATHEDRAL_PERMINER_PUBLIC_BASELINE"
 # removes non-payable hotkeys from the signed weights when a fresh snapshot exists.
 PAYABLE_HOTKEYS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS"  # off | mark | filter
 PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS_MAX_AGE_SECS"
+# External score-source controls. Disabled by default; when enabled, source
+# scores are blended publisher-side before Cathedral signs the one validator feed.
+EXTERNAL_SCORES_ENABLED_ENV = "CATHEDRAL_EXTERNAL_SCORES_ENABLED"
+EXTERNAL_SCORES_SOURCE_ENV = "CATHEDRAL_EXTERNAL_SCORES_SOURCE"
+EXTERNAL_SCORES_MODE_ENV = "CATHEDRAL_EXTERNAL_SCORES_MODE"  # blend | external_primary
+EXTERNAL_SCORES_WEIGHT_ENV = "CATHEDRAL_EXTERNAL_SCORES_WEIGHT"
+EXTERNAL_SCORES_BASE_WEIGHT_ENV = "CATHEDRAL_EXTERNAL_SCORES_BASE_WEIGHT"
+EXTERNAL_SCORES_WINDOW_SECS_ENV = "CATHEDRAL_EXTERNAL_SCORES_WINDOW_SECS"
 
 _CACHE_TTL_SECS = 60.0
 _PERSISTED_VECTOR_ID = "latest"
@@ -170,6 +179,13 @@ def _env_float(name: str, default: float) -> float:
         return float(os.environ.get(name, "") or default)
     except ValueError:
         return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def window_hours() -> float:
@@ -705,6 +721,146 @@ def _compose_row_score_recent(
     return result
 
 
+def external_scores_enabled() -> bool:
+    return _env_bool(EXTERNAL_SCORES_ENABLED_ENV, False)
+
+
+def external_scores_source() -> str:
+    raw = (os.environ.get(EXTERNAL_SCORES_SOURCE_ENV, "violet_audio") or "violet_audio").strip()
+    return raw or "violet_audio"
+
+
+def external_scores_mode() -> str:
+    raw = os.environ.get(EXTERNAL_SCORES_MODE_ENV, "blend").strip().lower()
+    return raw if raw in {"blend", "external_primary"} else "blend"
+
+
+def external_scores_window_secs() -> float:
+    return max(1.0, _env_float(EXTERNAL_SCORES_WINDOW_SECS_ENV, 3600.0))
+
+
+def _normalize_positive_scores(scores: dict[str, float]) -> dict[str, float]:
+    clean: dict[str, float] = {}
+    for hk, raw in scores.items():
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            clean[str(hk)] = value
+    if not clean:
+        return {}
+    top = max(clean.values())
+    if top <= 0.0:
+        return {}
+    return {hk: round(v / top, 6) for hk, v in clean.items()}
+
+
+def _identity_collapse_scores(
+    raw: dict[str, float], *, ident=lambda hk: hk
+) -> dict[str, float]:
+    """Normalize hotkey scores and split one identity's score across its hotkeys."""
+    groups: dict[str, set[str]] = {}
+    group_scores: dict[str, float] = {}
+    for hk, raw_score in raw.items():
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(score) or score <= 0.0:
+            continue
+        idk = str(ident(str(hk)))
+        groups.setdefault(idk, set()).add(str(hk))
+        # External reports are score vectors, not event ledgers. Use max per
+        # identity so cloning the same coldkey across hotkeys cannot sum rewards.
+        group_scores[idk] = max(group_scores.get(idk, 0.0), score)
+    if not group_scores:
+        return {}
+    top = max(group_scores.values())
+    if top <= 0.0:
+        return {}
+    out: dict[str, float] = {}
+    for idk, score in group_scores.items():
+        members = groups[idk]
+        per = round((score / top) / len(members), 6)
+        for hk in members:
+            out[hk] = per
+    return out
+
+
+def _compose_external_scores(
+    store: Store,
+    *,
+    now: datetime,
+    ident=lambda hk: hk,
+) -> dict[str, float]:
+    if not external_scores_enabled():
+        return {}
+    since = _ms_iso(now - timedelta(seconds=external_scores_window_secs()))
+    try:
+        raw = external_scores.recent_scores(
+            store, source=external_scores_source(), since_iso=since)
+    except Exception as exc:
+        print(f"[weights] external_scores compose failed: {exc!r}")
+        return {}
+    return _identity_collapse_scores(raw, ident=ident)
+
+
+def _apply_external_scores(
+    store: Store,
+    base: dict[str, float],
+    *,
+    now: datetime,
+    ident=lambda hk: hk,
+) -> dict[str, float]:
+    if not external_scores_enabled():
+        return base
+    ext = _compose_external_scores(store, now=now, ident=ident)
+    if not ext:
+        return base
+    if external_scores_mode() == "external_primary":
+        return ext
+    base_norm = _normalize_positive_scores(base)
+    base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
+    external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))
+    if base_weight <= 0.0 and external_weight <= 0.0:
+        return base
+    hotkeys = set(base_norm) | set(ext)
+    blended = {
+        hk: (base_norm.get(hk, 0.0) * base_weight) + (ext.get(hk, 0.0) * external_weight)
+        for hk in hotkeys
+    }
+    return _normalize_positive_scores(blended)
+
+
+def _external_scores_policy_status(
+    store: Store | None,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    enabled = external_scores_enabled()
+    source = external_scores_source()
+    window_secs = external_scores_window_secs()
+    status: dict[str, Any] = {
+        "enabled": enabled,
+        "source": source,
+        "mode": external_scores_mode(),
+        "window_secs": window_secs,
+        "base_weight": max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0)),
+        "external_weight": max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0)),
+        "has_scores": False,
+    }
+    if not enabled or store is None:
+        return status
+    since = _ms_iso(now - timedelta(seconds=window_secs))
+    try:
+        status.update(external_scores.status(store, source=source, since_iso=since))
+        status["has_scores"] = int(status.get("active_score_count") or 0) > 0
+    except Exception as exc:
+        status["error"] = repr(exc)
+    return status
+
+
 def _proportional_ledger_has_rows(store: Store, since: str) -> bool:
     rows = store.query(
         "SELECT 1 FROM lane_challenge_solves s "
@@ -1100,12 +1256,14 @@ def compose_scores(
 
     pm_scores = _perminer_compose_scores(store, ident=pm_ident, since=since)
     if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
-        return pm_scores
+        return _apply_external_scores(store, pm_scores, now=now, ident=ident)
 
     def finish_base(base: dict[str, float]) -> dict[str, float]:
         if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
-            return _apply_perminer_primary(base, pm_scores)
-        return _apply_perminer_bonus(store, base, coldkey_of, now=now)
+            base = _apply_perminer_primary(base, pm_scores)
+        else:
+            base = _apply_perminer_bonus(store, base, coldkey_of, now=now)
+        return _apply_external_scores(store, base, now=now, ident=ident)
 
     if mode() == "row_score_recent":
         return finish_base(_compose_row_score_recent(store, since, ident=ident))
@@ -1202,11 +1360,16 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
     pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
+    external_status = _external_scores_policy_status(store, now=now)
     score_source = pm_status["score_source"] or effective_mode
+    if external_status.get("enabled") and external_status.get("has_scores"):
+        ext_source = f"external:{external_status.get('source')}"
+        score_source = ext_source if external_scores_mode() == "external_primary" else f"{score_source}+{ext_source}"
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
     policy_inputs = {
         "mode": requested_mode, "effective_mode": effective_mode,
         "score_source": score_source,
+        "external_scores": external_status,
         "window_hours": window_hours(),
         "burn": burn_percentage(), "burn_uid": burn_uid(),
         "tier_weights": tier_weights(),
@@ -1239,6 +1402,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "proportional_ledger_empty": proportional_ledger_empty,
             "coldkey_map_loaded": bool(coldkey_of),
             "payable_hotkeys": payable_meta,
+            "external_scores": external_status,
             "perminer_scoring_mode": pm_status["scoring_mode"],
             "perminer": {
                 "enabled": pm_status["perminer_enabled"],

@@ -47,7 +47,7 @@ from .board_cache import BoardCache, board_cache_headers
 from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
 from .sat_solution import verify_dimacs_solution
-from . import submit_admission
+from . import external_scores, submit_admission
 from .per_hotkey_limit import (
     ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
     PerHotkeyLimiter,
@@ -1249,6 +1249,7 @@ def build_app(
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
+            "/v1/external-scores/violet",
         }
 
         def __init__(self, asgi_app):
@@ -2690,6 +2691,48 @@ def build_app(
                 "Access-Control-Allow-Origin": "*",
                 "X-Cathedral-Cache": cache_status,
             },
+        )
+
+    # ---- External score intake (publisher-side only) ----------------------
+    @app.post("/v1/external-scores/violet")
+    async def external_scores_violet(
+        request: Request,
+        authorization: str | None = Header(None),
+        x_cathedral_external_token: str | None = Header(None),
+        x_cathedral_external_signature: str | None = Header(None),
+    ):
+        """Accept Violet's signed/authenticated score report for composition.
+
+        This endpoint never sets weights directly. It stores source scores for
+        weights.py to blend into the single Cathedral-signed vector that thin
+        validators already verify and apply.
+        """
+        if not external_scores.ingest_enabled():
+            raise HTTPException(404, "external_scores_ingest_not_enabled")
+        body = await request.body()
+        if not external_scores.bearer_authorized(authorization, x_cathedral_external_token):
+            raise HTTPException(401, "invalid_external_scores_token")
+        if not external_scores.verify_hmac(body, x_cathedral_external_signature):
+            raise HTTPException(401, "invalid_external_scores_signature")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            raise HTTPException(400, "invalid_json_report")
+        try:
+            report = external_scores.normalize_report(payload, default_source="violet_audio")
+        except external_scores.ExternalScoreError as exc:
+            raise HTTPException(400, exc.reason)
+        if report["source"] != "violet_audio":
+            raise HTTPException(400, "invalid_source_for_violet_endpoint")
+        try:
+            accepted = external_scores.store_report(store, report)
+        except Exception as exc:
+            print(f"[external_scores] store failed: {exc!r}")
+            raise HTTPException(503, "external_scores_store_failed")
+        return JSONResponse(
+            accepted,
+            status_code=202,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
     # ---- M1b: signed final-scores vector (the v4 scoring interface) -------

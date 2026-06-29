@@ -53,6 +53,8 @@ attack with solvers, solver agents, and new search systems.
 
 Validators apply one Cathedral-signed weight vector: a final score per miner plus the signed burn snapshot, verified against a pinned key. Scoring (recency window, multi-challenge composition, burn rate) is composed on the publisher and signed, so validators relay the signed number rather than recomputing it locally. The per-solve feed (`/v1/leaderboard/recent`) stays public as an independently re-checkable audit trail.
 
+External mechanisms can feed Cathedral without changing validators. For example, Violet posts normalized audio miner scores to `POST /v1/external-scores/violet`; Cathedral stores/blends those publisher-side and still emits the single signed `/v1/validator/weights/next` vector. See [`docs/VIOLET_EXTERNAL_SCORES.md`](docs/VIOLET_EXTERNAL_SCORES.md).
+
 SAT scoring:
 
 - A valid satisfying assignment records a verified solve for that hotkey and challenge.
