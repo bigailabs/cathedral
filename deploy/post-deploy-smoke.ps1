@@ -184,6 +184,8 @@ if (-not $SkipSoak) {
 }
 
 if (-not $SkipLiveSmoke) {
+    Write-Host ""
+    Write-Host "NOTE: publisher live smoke submits one deliberately wrong signed SAT assignment and expects it to be rejected/persisted." -ForegroundColor Yellow
     Invoke-SmokeStep `
         -Name "publisher live smoke" `
         -Exe $Python `

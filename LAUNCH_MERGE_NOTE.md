@@ -120,7 +120,10 @@ powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1
 
 This gate runs the read-only validator release gate first, then checks direct
 read/submit origin health and role isolation before the edge route map, short
-soak, and publisher live smoke. Use `-SkipValidatorReleaseGate` only for
+soak, and publisher live smoke. The publisher live smoke intentionally submits
+one deliberately wrong signed SAT assignment and expects the deployed referee to
+reject and persist it; use `-SkipLiveSmoke` only for read-only preflight, not
+for the final controlled v0 gate. Use `-SkipValidatorReleaseGate` only for
 non-mainnet staging. Use `-SkipSplitOriginSmoke` only for pre-split staging, not
 for the final controlled v0 gate.
 

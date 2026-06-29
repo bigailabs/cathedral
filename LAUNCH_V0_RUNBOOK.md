@@ -143,11 +143,16 @@ powershell -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.ps1
 ```
 
 This verifies the validator weight-feed release gate, direct read and submit
-origins, edge routing, short edge soak, and publisher live smoke. Use
-`-PlanOnly` before deploy to print the exact commands without hitting the live
-service. If this Windows shell only has the Microsoft Store `python` stub, pass
-`-Python <path-to-real-python>` or run the equivalent command from WSL. If you
-are smoke-testing before `read.cathedral.computer` and
+origins, edge routing, short edge soak, and publisher live smoke. The final
+publisher live smoke is intentionally not read-only: it submits one deliberately
+wrong signed SAT assignment and expects the deployed referee to reject and
+persist the replay guard.
+
+Use `-PlanOnly` before deploy to print the exact commands without hitting the
+live service. Use `-SkipLiveSmoke` only for read-only preflight; do not use it
+for the final controlled-v0 gate. If this Windows shell only has the Microsoft
+Store `python` stub, pass `-Python <path-to-real-python>` or run the equivalent
+command from WSL. If you are smoke-testing before `read.cathedral.computer` and
 `submit.cathedral.computer` exist, add `-SkipSplitOriginSmoke`; do not use that
 skip for the final controlled-v0 gate. Use `-ValidatorReleaseNoChain` only for
 feed-only staging checks. Use `-SkipValidatorReleaseGate` only when intentionally
