@@ -222,6 +222,17 @@ def test_flag_on_leaderboard_top_nondefault_view_uses_live(monkeypatch):
     assert resp.json()["view"] == "receipts"
 
 
+def test_startup_starts_and_shutdown_stops_recent_snapshot_timer(monkeypatch):
+    app = _make_client(monkeypatch, enabled=True)
+    snap = app.state.leaderboard_recent_snapshot
+
+    with TestClient(app):
+        assert snap._thread is not None  # type: ignore[attr-defined]
+        assert snap._thread.is_alive()  # type: ignore[attr-defined]
+
+    assert snap._thread is None  # type: ignore[attr-defined]
+
+
 def test_leaderboard_recent_query_failure_is_structured_retryable(monkeypatch):
     app = _make_client(monkeypatch, enabled=False)
 

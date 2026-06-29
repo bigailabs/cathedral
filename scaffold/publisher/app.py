@@ -1360,6 +1360,7 @@ def build_app(
         try:
             board_snapshot.start()
             leaderboard_top_snapshot.start()
+            recent_snapshot.start()
             print(f"[materialized_snapshot] started service_role={service_role}")
         except Exception as exc:
             print(f"[materialized_snapshot] start_failed error={exc!r}")
@@ -1638,7 +1639,7 @@ def build_app(
                     pass
         if hasattr(app.state, "top_cache"):
             app.state.top_cache.stop()
-        for attr in ("board_snapshot", "leaderboard_top_snapshot"):
+        for attr in ("board_snapshot", "leaderboard_top_snapshot", "leaderboard_recent_snapshot"):
             snap = getattr(app.state, attr, None)
             if snap is not None:
                 try:
