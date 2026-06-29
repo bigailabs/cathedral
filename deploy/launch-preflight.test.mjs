@@ -10,6 +10,8 @@ assert.match(text, /railway login/, "preflight must tell operator to refresh Rai
 assert.match(text, /railway link/, "preflight must tell operator to link the project");
 assert.match(text, /post-deploy-smoke\.ps1/, "preflight must validate the final smoke command");
 assert.match(text, /RequireFinalGate/, "preflight must use the enforced final gate");
+assert.match(text, /railway-env-audit\.ps1/, "preflight must validate split Railway env before launch");
+assert.match(text, /SkipRailwayEnvAudit/, "preflight must make env-audit skipping explicit and visible");
 assert.match(text, /Microsoft Store stub/, "preflight must reject Windows Store Python stub");
 assert.ok(fs.existsSync("deploy/python-wsl.cmd"), "Windows WSL Python wrapper must exist for post-deploy smoke");
 

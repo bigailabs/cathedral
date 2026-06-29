@@ -37,6 +37,19 @@ powershell -ExecutionPolicy Bypass -File deploy/railway-split.ps1 -RailwayExe "$
 The `-Apply` path preflights `railway status` before mutating variables. If auth
 or project linking is stale, run `railway login` and `railway link` first.
 
+Before merge/deploy, run the read-only env audit. Railway returns raw variable
+values to the CLI, but this script prints only pass/fail and never prints secret
+values:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/railway-env-audit.ps1 -RailwayExe "$env:USERPROFILE\bin\railway.exe"
+```
+
+This must pass before treating the role split as launch-ready. It checks the
+read/submit/worker service roles, read query timeout, materialized snapshot
+settings, submit concurrency caps, worker refill ownership, and that
+`CATHEDRAL_CNF_TOKEN_SECRET` is present and equal across all services.
+
 ## Target Services
 
 ### 1. Read Service

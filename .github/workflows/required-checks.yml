@@ -54,6 +54,7 @@ jobs:
           node deploy/edge-router/route-map.test.mjs
           node deploy/edge-router/soak.test.mjs
           node deploy/launch-preflight.test.mjs
+          node deploy/railway-env-audit.test.mjs
           node deploy/railway-split.test.mjs
           node deploy/split-origin-smoke.test.mjs
           pwsh -NoProfile -ExecutionPolicy Bypass -File deploy/post-deploy-smoke.test.ps1

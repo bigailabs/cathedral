@@ -11,7 +11,8 @@ param(
     [string]$RailwayExe = $env:RAILWAY_CLI,
     [string]$Python = "python",
     [string]$Node = "node",
-    [switch]$SkipRailway
+    [switch]$SkipRailway,
+    [switch]$SkipRailwayEnvAudit
 )
 
 $ErrorActionPreference = "Stop"
@@ -178,6 +179,21 @@ if ($SkipRailway) {
             Add-Failure "Railway CLI is not authenticated or this checkout is not linked. Run 'railway login' and 'railway link'."
         } else {
             Add-Pass "Railway CLI is authenticated and project-linked"
+            if ($SkipRailwayEnvAudit) {
+                Write-Host "WARN: Skipping Railway env audit; this is not final launch evidence." -ForegroundColor Yellow
+            } else {
+                $envAudit = Invoke-Capture "powershell" @(
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-File", "deploy/railway-env-audit.ps1",
+                    "-RailwayExe", $railway
+                )
+                if ($envAudit.Code -ne 0) {
+                    Add-Failure "Railway env audit failed. Run deploy/railway-env-audit.ps1 directly for service-level details."
+                } else {
+                    Add-Pass "Railway read/submit/worker env audit passed"
+                }
+            }
         }
     }
 }
