@@ -31,6 +31,61 @@ if ([string]::IsNullOrWhiteSpace($EdgeBaseUrl)) {
     $EdgeBaseUrl = $BaseUrl
 }
 
+$script:SmokeToolPreflight = @{}
+
+function Get-SmokeToolKind {
+    param([string]$Exe)
+
+    $leaf = [System.IO.Path]::GetFileName($Exe).ToLowerInvariant()
+    if ($leaf -match "^python(\.exe)?$" -or $leaf -match "^py(\.exe)?$") {
+        return "Python"
+    }
+    if ($leaf -match "^node(\.exe)?$") {
+        return "Node"
+    }
+    return "Tool"
+}
+
+function Assert-SmokeExecutable {
+    param(
+        [string]$Exe,
+        [string]$Name
+    )
+
+    if ($script:SmokeToolPreflight.ContainsKey($Exe)) {
+        return
+    }
+
+    $kind = Get-SmokeToolKind -Exe $Exe
+    $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) {
+        throw "$Name requires $kind executable '$Exe', but it was not found on PATH. Pass -$kind <path> or run from an environment where it is installed."
+    }
+
+    $resolved = [string]$cmd.Path
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        $resolved = [string]$cmd.Source
+    }
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        $resolved = [string]$cmd.Definition
+    }
+    if ($kind -eq "Python" -and $resolved -match "\\WindowsApps\\python(\.exe)?$") {
+        throw "$Name requires a real Python, but '$Exe' resolves to the Microsoft Store stub at '$resolved'. Pass -Python <real-python.exe>, or run the smoke from WSL with the repo virtualenv."
+    }
+
+    try {
+        $versionOutput = & $Exe "--version" 2>&1
+        $exit = $LASTEXITCODE
+    } catch {
+        throw "$Name could not execute $kind '$Exe --version': $($_.Exception.Message)"
+    }
+    if ($exit -ne 0) {
+        throw "$Name requires usable $kind '$Exe'; '$Exe --version' exited $exit. Output: $versionOutput"
+    }
+
+    $script:SmokeToolPreflight[$Exe] = $true
+}
+
 function Invoke-SmokeStep {
     param(
         [string]$Name,
@@ -49,6 +104,8 @@ function Invoke-SmokeStep {
     if ($PlanOnly) {
         return
     }
+
+    Assert-SmokeExecutable -Exe $Exe -Name $Name
 
     $old = @{}
     foreach ($key in $Env.Keys) {
