@@ -43,6 +43,31 @@ if ($plan.Text -notmatch "validator release gate" -or
     throw "PlanOnly did not print the expected smoke steps. Output: $($plan.Text)"
 }
 
+$fullPlan = Invoke-ChildPowerShell @(
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    $scriptPath,
+    "-PlanOnly"
+)
+if ($fullPlan.Code -ne 0) {
+    throw "Full PlanOnly should not require Python/Node preflight. Output: $($fullPlan.Text)"
+}
+foreach ($expected in @(
+    "validator release gate",
+    "split origin smoke",
+    "edge smoke",
+    "edge route map",
+    "edge short soak",
+    "publisher live smoke",
+    "deliberately wrong signed SAT assignment"
+)) {
+    if ($fullPlan.Text -notmatch [regex]::Escape($expected)) {
+        throw "Full PlanOnly did not print expected final-gate item '$expected'. Output: $($fullPlan.Text)"
+    }
+}
+
 $missingPython = Invoke-ChildPowerShell @(
     "-NoProfile",
     "-ExecutionPolicy",
