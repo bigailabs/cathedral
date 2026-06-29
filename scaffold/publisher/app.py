@@ -124,13 +124,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _cnf_token_secret() -> bytes:
+def _cnf_token_secret(service_role: str) -> bytes:
     raw = (
         os.environ.get(_CNF_TOKEN_SECRET_ENV, "").lstrip("\ufeff").strip()
         or os.environ.get("CATHEDRAL_PUBLISHER_SEED_SECRET", "").lstrip("\ufeff").strip()
     )
     if raw:
         return hashlib.sha256(raw.encode("utf-8")).digest()
+    if service_role == "submit":
+        raise RuntimeError(
+            f"{_CNF_TOKEN_SECRET_ENV} is required when CATHEDRAL_SERVICE_ROLE=submit"
+        )
     # Local/dev fallback. Production split roles must set a stable secret.
     print(f"[cnf] WARNING: {_CNF_TOKEN_SECRET_ENV} is unset; "
           "active-cnf tokens are process-local and unsafe for split replicas")
@@ -399,7 +403,7 @@ def build_app(
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
     arena_registry = SolverRegistry()
     # Shared HMAC secret lets active-cnf and CNF fetch land on different replicas.
-    token_secret = _cnf_token_secret()
+    token_secret = _cnf_token_secret(service_role)
     min_interval = (
         submit_min_interval_secs
         if submit_min_interval_secs is not None
