@@ -31,6 +31,15 @@ if ([string]::IsNullOrWhiteSpace($EdgeBaseUrl)) {
     $EdgeBaseUrl = $BaseUrl
 }
 
+$FinalGateBlockers = @()
+if ($SkipValidatorReleaseGate) { $FinalGateBlockers += "SkipValidatorReleaseGate" }
+if ($ValidatorReleaseNoChain) { $FinalGateBlockers += "ValidatorReleaseNoChain" }
+if ($SkipSplitOriginSmoke) { $FinalGateBlockers += "SkipSplitOriginSmoke" }
+if ($SkipEdgeSmoke) { $FinalGateBlockers += "SkipEdgeSmoke" }
+if ($SkipRouteMap) { $FinalGateBlockers += "SkipRouteMap" }
+if ($SkipSoak) { $FinalGateBlockers += "SkipSoak" }
+if ($SkipLiveSmoke) { $FinalGateBlockers += "SkipLiveSmoke" }
+
 $script:SmokeToolPreflight = @{}
 
 function Get-SmokeToolKind {
@@ -195,7 +204,15 @@ if (-not $SkipLiveSmoke) {
 
 Write-Host ""
 if ($PlanOnly) {
-    Write-Host "Plan only. Re-run without -PlanOnly after deploy." -ForegroundColor Green
+    if ($FinalGateBlockers.Count -gt 0) {
+        Write-Host ("Plan only for partial/preflight smoke. NOT final launch evidence. Relaxed/skipped: {0}" -f ($FinalGateBlockers -join ", ")) -ForegroundColor Yellow
+    } else {
+        Write-Host "Plan only for full final controlled-v0 gate. Re-run without -PlanOnly after deploy." -ForegroundColor Green
+    }
 } else {
-    Write-Host "Post-deploy smoke passed." -ForegroundColor Green
+    if ($FinalGateBlockers.Count -gt 0) {
+        Write-Host ("Partial post-deploy smoke passed. NOT final launch evidence. Relaxed/skipped: {0}" -f ($FinalGateBlockers -join ", ")) -ForegroundColor Yellow
+    } else {
+        Write-Host "Final controlled-v0 post-deploy smoke passed." -ForegroundColor Green
+    }
 }

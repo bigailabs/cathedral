@@ -42,6 +42,11 @@ if ($plan.Text -notmatch "validator release gate" -or
     $plan.Text -notmatch "edge smoke") {
     throw "PlanOnly did not print the expected smoke steps. Output: $($plan.Text)"
 }
+if ($plan.Text -notmatch "NOT final launch evidence" -or
+    $plan.Text -notmatch "SkipSoak" -or
+    $plan.Text -notmatch "SkipLiveSmoke") {
+    throw "Partial PlanOnly did not clearly mark itself as non-final. Output: $($plan.Text)"
+}
 
 $fullPlan = Invoke-ChildPowerShell @(
     "-NoProfile",
@@ -66,6 +71,10 @@ foreach ($expected in @(
     if ($fullPlan.Text -notmatch [regex]::Escape($expected)) {
         throw "Full PlanOnly did not print expected final-gate item '$expected'. Output: $($fullPlan.Text)"
     }
+}
+if ($fullPlan.Text -notmatch "full final controlled-v0 gate" -or
+    $fullPlan.Text -match "NOT final launch evidence") {
+    throw "Full PlanOnly did not clearly identify the final gate. Output: $($fullPlan.Text)"
 }
 
 $missingPython = Invoke-ChildPowerShell @(
