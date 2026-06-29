@@ -45,6 +45,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from ..dimacs import gen_planted_3sat
+from . import external_cnf_provider
 from .app import seed_challenge
 from .store import Store
 
@@ -180,6 +181,8 @@ _pregen_lock = _threading.Lock()
 
 
 def _pregen_enabled() -> bool:
+    if external_cnf_provider.enabled():
+        return False
     raw = os.environ.get("CATHEDRAL_PREGEN_ENABLED", "").strip().lower()
     if raw:
         return _PREGEN_QUEUE_SIZE > 0 and raw in {"1", "true", "yes", "on"}
@@ -299,11 +302,21 @@ def generator_config() -> dict:
     external_requested = generator_requested()
     external_configured = generator_configured()
     external_enabled = external_requested and external_configured
+    active_external = _active_external_cnf()
+    if active_external is not None:
+        kind = "external_active_cnf"
+        source = "scaffold.publisher.external_cnf_provider"
+    elif external_enabled:
+        kind = "external_sat_generator"
+        source = "scaffold.publisher.refill"
+    else:
+        kind = "local_refill"
+        source = "scaffold.publisher.refill"
     return {
         "enabled": refill_enabled(),
         "family_id": _FAMILY,
-        "kind": "external_sat_generator" if external_enabled else "local_refill",
-        "source": "scaffold.publisher.refill",
+        "kind": kind,
+        "source": source,
         "interval_seconds": _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
                                      _DEFAULT_INTERVAL_SECONDS),
         "retire_after_seconds": retire_after_seconds(),
@@ -323,6 +336,7 @@ def generator_config() -> dict:
             "local_fallback": _env_bool("CATHEDRAL_SAT_GENERATOR_LOCAL_FALLBACK", False),
             "timeout_seconds": _generator_timeout(),
         },
+        "external_cnf": external_cnf_provider.status(),
         "seed": {
             "kind": "server_hmac",
             "secret_configured": bool(
@@ -337,9 +351,18 @@ def generator_config() -> dict:
                 "n_vars": shape_for(tier)[0],
                 "n_clauses": shape_for(tier)[1],
                 "method": method_for(tier),
-                "generator_kind": generator_kind_for(tier),
+                "generator_kind": (
+                    "external_active_cnf"
+                    if active_external is not None and tier == external_cnf_provider.tier()
+                    else generator_kind_for(tier)
+                ),
+                "external_cnf": (
+                    active_external.public_dict()
+                    if active_external is not None and tier == external_cnf_provider.tier()
+                    else None
+                ),
             }
-            for tier in sorted(_DEFAULT_TARGETS)
+            for tier in configured_tiers()
         ],
     }
 
@@ -478,13 +501,28 @@ def retire_after_distinct_solvers() -> int:
                     _DEFAULT_RETIRE_AFTER_DISTINCT_SOLVERS)
 
 
+def _active_external_cnf() -> external_cnf_provider.ProviderCnf | None:
+    return external_cnf_provider.active_metadata() if external_cnf_provider.enabled() else None
+
+
+def configured_tiers() -> list[int]:
+    if external_cnf_provider.enabled():
+        return [external_cnf_provider.tier()]
+    return sorted(_DEFAULT_TARGETS)
+
+
 def target_for(tier: int) -> int:
+    if external_cnf_provider.enabled() and int(tier) == external_cnf_provider.tier():
+        return external_cnf_provider.target_active()
     return _env_int(f"CATHEDRAL_REFILL_TARGET_T{tier}", _DEFAULT_TARGETS.get(tier, 0))
 
 
 def shape_for(tier: int) -> tuple[int, int]:
     """(n_vars, n_clauses) for a tier — live shape unless env-overridden (a
     documented divergence used only when gen is too slow on the host)."""
+    active_external = _active_external_cnf()
+    if active_external is not None and int(tier) == external_cnf_provider.tier():
+        return active_external.num_vars, active_external.num_clauses
     base_n, base_m = _TIER_SHAPE.get(tier, (6000, 25560))
     n = _env_int(f"CATHEDRAL_REFILL_NVARS_T{tier}", base_n)
     m = _env_int(f"CATHEDRAL_REFILL_NCLAUSES_T{tier}", base_m)
@@ -495,6 +533,8 @@ def method_for(tier: int) -> str:
     """Planting method for a tier — env CATHEDRAL_REFILL_METHOD_T{N} overrides.
     Default: tier1='biased' (unchanged), tier2='ajm' (unbiased AJM planting).
     Setting CATHEDRAL_REFILL_METHOD_T2=biased reverts tier2 to biased planting."""
+    if external_cnf_provider.enabled() and int(tier) == external_cnf_provider.tier():
+        return "external"
     default = _TIER_METHOD.get(tier, "biased")
     return os.environ.get(f"CATHEDRAL_REFILL_METHOD_T{tier}", default).strip().lower() or default
 
@@ -613,10 +653,18 @@ def reclaim_retired_cnf(store: Store) -> int:
 
 
 def _plan_tier(store: Store, tier: int, seed_input: str, mint_cap: int,
-               log=lambda *a, **k: None) -> tuple[int, list[tuple[str, int, int, int, str]]]:
+               log=lambda *a, **k: None) -> tuple[int, list[tuple[str, int, int, int, str, str | None]]]:
     """Retire stale challenges + plan mints for this pass. Returns (retired, work).
-    work = list of (cid, seed, n_vars, n_clauses, method). Called in a thread."""
+    work = list of (cid, seed, n_vars, n_clauses, method, difficulty_label).
+    Called in a thread."""
     retired = retire_ready(store, tier)
+    active_external = _active_external_cnf()
+    is_external = active_external is not None and int(tier) == external_cnf_provider.tier()
+    external_waiting = (
+        active_external is None
+        and external_cnf_provider.enabled()
+        and int(tier) == external_cnf_provider.tier()
+    )
     target = target_for(tier)
     n_vars, n_clauses = shape_for(tier)
     planting_method = method_for(tier)
@@ -627,7 +675,39 @@ def _plan_tier(store: Store, tier: int, seed_input: str, mint_cap: int,
     seq = store.query(
         "SELECT COUNT(*) AS n FROM lane_challenges WHERE family_id=? AND tier=? AND cnf_source='local'",
         (_FAMILY, tier))[0]["n"]
-    work: list[tuple[str, int, int, int, str]] = []
+    work: list[tuple[str, int, int, int, str, str | None]] = []
+    if external_waiting:
+        log("external_cnf_waiting_for_active_metadata", tier=tier)
+        return retired, work
+    if is_external and active_external is not None:
+        now = _now_iso()
+
+        def _retire_stale_external(conn):
+            cur = conn.execute(
+                "UPDATE lane_challenges SET status='retired', cnf_text='', updated_at_iso=? "
+                "WHERE family_id=? AND tier=? AND status='active' "
+                "AND difficulty_label LIKE 'external_cnf:%' AND challenge_id<>?",
+                (now, _FAMILY, tier, active_external.challenge_id),
+            )
+            return int(cur.rowcount or 0)
+
+        retired += store.write(_retire_stale_external)
+        if not store.query(
+            "SELECT status FROM lane_challenges WHERE challenge_id=?",
+            (active_external.challenge_id,),
+        ):
+            work.append(
+                (
+                    active_external.challenge_id,
+                    mint_seed(seed_input, tier, seq),
+                    n_vars,
+                    n_clauses,
+                    planting_method,
+                    active_external.difficulty_label,
+                )
+            )
+        return retired, work
+
     guard = 0
     while active_local_count(store, tier) < target and guard < target * 4 + 8:
         guard += 1
@@ -638,13 +718,27 @@ def _plan_tier(store: Store, tier: int, seed_input: str, mint_cap: int,
         if store.query("SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,)):
             continue
         seed = mint_seed(seed_input, tier, seq - 1)
-        work.append((cid, seed, n_vars, n_clauses, planting_method))
+        work.append((cid, seed, n_vars, n_clauses, planting_method, None))
     return retired, work
 
 
-def _commit_challenge(store: Store, cid: str, tier: int, cnf_text: str) -> None:
+def _commit_challenge(
+    store: Store,
+    cid: str,
+    tier: int,
+    cnf_text: str,
+    *,
+    difficulty_label: str | None = None,
+) -> None:
     """Write one minted challenge. Called in a thread."""
-    seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text, status="active")
+    seed_challenge(
+        store,
+        challenge_id=cid,
+        tier=tier,
+        cnf_text=cnf_text,
+        status="active",
+        difficulty_label=difficulty_label,
+    )
     def _stamp(conn, cid=cid):
         conn.execute(
             "UPDATE lane_challenges SET updated_at_iso=created_at_iso WHERE challenge_id=?", (cid,))
@@ -659,11 +753,13 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
     mint_cap = generator_max_mints() if generator_enabled() else (
         MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
     retired, work = _plan_tier(store, tier, seed_input, mint_cap, log)
-    n_vars_hint = _TIER_SHAPE.get(tier, (6000, 25560))[0]
-    n_clauses_hint = _TIER_SHAPE.get(tier, (6000, 25560))[1]
+    n_vars_hint, n_clauses_hint = shape_for(tier)
     minted = 0
-    for cid, seed, n_vars, n_clauses, method in work:
-        _mint_one(store, cid, tier, seed, n_vars, n_clauses, method)
+    for cid, seed, n_vars, n_clauses, method, difficulty_label in work:
+        _mint_one(
+            store, cid, tier, seed, n_vars, n_clauses, method,
+            difficulty_label=difficulty_label,
+        )
         minted += 1
     return {"tier": tier, "retired": retired, "minted": minted,
             "active": active_local_count(store, tier), "target": target_for(tier),
@@ -673,11 +769,12 @@ def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
 def refill_once(store: Store, *, seed_input: str | None = None, log=lambda *a, **k: None) -> list[dict]:
     """Synchronous refill (used in tests). Production uses refill_once_async."""
     return [refill_tier(store, tier, seed_input=seed_input, log=log)
-            for tier in sorted(_DEFAULT_TARGETS)]
+            for tier in configured_tiers()]
 
 
 def _mint_one(store: Store, cid: str, tier: int, seed: int,
-              n_vars: int, n_clauses: int, method: str) -> str:
+              n_vars: int, n_clauses: int, method: str,
+              *, difficulty_label: str | None = None) -> str:
     """Generate + commit one challenge.  Called in a thread via to_thread.
 
     Tries the pre-generation queue first (O(1), no CPU spike).  Falls back to
@@ -687,10 +784,25 @@ def _mint_one(store: Store, cid: str, tier: int, seed: int,
     if generator_requested() and not generator_configured():
         raise RuntimeError("sat_generator_enabled_but_missing_url_or_token")
 
+    active_external = _active_external_cnf()
+    if active_external is not None and int(tier) == external_cnf_provider.tier():
+        if cid != active_external.challenge_id:
+            raise RuntimeError("external_cnf_challenge_id_mismatch")
+        cnf_text = external_cnf_provider.download_cnf(active_external)
+        _commit_challenge(
+            store, cid, tier, cnf_text, difficulty_label=difficulty_label)
+        print(
+            "[refill] minted "
+            f"tier={tier} cid={cid[:20]}... source=external_cnf "
+            f"provider={active_external.provider_id} iter={active_external.iter_id}"
+        )
+        return cnf_text
+
     if generator_enabled():
         try:
             cnf_text = _lease_generator_cnf(cid, tier)
-            _commit_challenge(store, cid, tier, cnf_text)
+            _commit_challenge(
+                store, cid, tier, cnf_text, difficulty_label=difficulty_label)
             print(f"[refill] minted tier={tier} cid={cid[:20]}... source=generator")
             return cnf_text
         except Exception as exc:
@@ -703,7 +815,7 @@ def _mint_one(store: Store, cid: str, tier: int, seed: int,
     if cnf_text is None:
         source = "fork" if _FORK_OK else "inproc"
         cnf_text = _gen_cnf(seed, n_vars, n_clauses, method)
-    _commit_challenge(store, cid, tier, cnf_text)
+    _commit_challenge(store, cid, tier, cnf_text, difficulty_label=difficulty_label)
     print(f"[refill] minted tier={tier} cid={cid[:20]}... source={source}")
     return cnf_text
 
@@ -717,7 +829,7 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
        falls back to fork gen (GIL-free via Pipe.poll). One at a time.
     4. sleep(0): yield to event loop between mints.
     """
-    if not generator_enabled():
+    if not generator_enabled() and _active_external_cnf() is None:
         _ensure_pregen_started()   # idempotent; starts bg gen threads on first call
     seed_input = seed_input or default_seed_input()
     mint_cap = generator_max_mints() if generator_enabled() else (
@@ -728,9 +840,19 @@ async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None =
 
     minted = 0
     failed = 0
-    for cid, seed, n_vars, n_clauses, method in work:
+    for cid, seed, n_vars, n_clauses, method, difficulty_label in work:
         try:
-            await asyncio.to_thread(_mint_one, store, cid, tier, seed, n_vars, n_clauses, method)
+            await asyncio.to_thread(
+                _mint_one,
+                store,
+                cid,
+                tier,
+                seed,
+                n_vars,
+                n_clauses,
+                method,
+                difficulty_label=difficulty_label,
+            )
         except Exception as exc:
             failed += 1
             log("refill_mint_failed", tier=tier, cid=cid[:20], error=str(exc))
@@ -749,7 +871,7 @@ async def refill_once_async(store: Store, *, seed_input: str | None = None,
                             log=lambda *a, **k: None) -> list[dict]:
     """One full async refill+retire pass across all configured tiers."""
     return [await refill_tier_async(store, tier, seed_input=seed_input, log=log)
-            for tier in sorted(_DEFAULT_TARGETS)]
+            for tier in configured_tiers()]
 
 
 async def refill_loop(store: Store, *, interval_seconds: int | None = None,
@@ -762,7 +884,8 @@ async def refill_loop(store: Store, *, interval_seconds: int | None = None,
     """
     interval = interval_seconds or _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
                                             _DEFAULT_INTERVAL_SECONDS)
-    log("refill_loop_start", interval=interval, targets=_DEFAULT_TARGETS,
+    targets = {tier: target_for(tier) for tier in configured_tiers()}
+    log("refill_loop_start", interval=interval, targets=targets,
         fork_ok=_FORK_OK,
         mint_cap=generator_max_mints() if generator_enabled() else (
             MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),

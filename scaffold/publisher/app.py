@@ -40,6 +40,7 @@ from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
 from . import keys, rows, scoring, top_cache as top_cache_mod, weights as weights_mod
+from . import external_cnf_provider
 from . import materialized_snapshot as materialized_snapshot_mod
 from . import dashboard_snapshot as dashboard_snapshot_mod
 from .auth import canonical_claim_bytes, default_verifier, sha256_hex
@@ -4990,6 +4991,8 @@ def build_app(
                 headers={"X-Cathedral-Rejection-Reason": "already_solved"},
             )
         _record_submit_event("accepted", "ranked", challenge_id=challenge_id, status_code=200)
+        external_cnf_provider.submit_solution_async(
+            challenge_id, dimacs_solution, solve_rank=rank)
         return {
             "status": "ranked", "id": sub_id, "eval_run_id": row_uuid,
             "challenge_id": challenge_id, "weighted_score": ws,
@@ -5113,6 +5116,9 @@ def build_app(
         err, rank, ws, eval_run_id = store.write(_accept)
         if err is None and lock_wins:
             board_cache_mod.invalidate_all()
+        if err is None:
+            external_cnf_provider.submit_solution_async(
+                challenge_id, str(attempt_row["solution_body"] or ""), solve_rank=rank)
         return (err, rank, ws, eval_run_id)
 
     def _async_verify_load_cnf(challenge_id):
