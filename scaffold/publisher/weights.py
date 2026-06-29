@@ -102,6 +102,33 @@ _bg_started = False
 _bg_lock = threading.Lock()
 _bg_generation = 0
 
+# Self-heal watchdog. Each background refresh is wall-clock bounded so one hung
+# DB call can no longer freeze a publisher replica's served vector (previously a
+# stuck rebuild left a replica serving a 68-min-stale vector). On timeout the
+# cycle is abandoned and retried next tick; a healthy leader's persisted vector
+# is then picked up via _load_persisted_vector. Set <=0 to disable the watchdog
+# (direct call) — used by tests. Default 90s is well above a normal 5-30s build
+# and far below the multi-minute freeze we are guarding against.
+_REFRESH_TIMEOUT_SECS = float(
+    os.environ.get("CATHEDRAL_WEIGHTS_REFRESH_TIMEOUT_SECS", "90") or "90")
+# At most one in-flight refresh attempt at a time, so sustained hangs cannot leak
+# an unbounded number of threads/DB connections (one attempt per 60s tick).
+_refresh_attempt_lock = threading.Lock()
+_refresh_attempt: "threading.Thread | None" = None
+# Refresh liveness, for observability + future /health wiring.
+_refresh_health_lock = threading.Lock()
+_refresh_health: dict[str, Any] = {
+    "last_ok_ts": 0.0,
+    "last_status": "init",
+    "last_error": None,
+    "last_timeout_ts": 0.0,
+    "consecutive_failures": 0,
+}
+
+
+class _RefreshTimeout(Exception):
+    """Raised when a single background refresh exceeds _REFRESH_TIMEOUT_SECS."""
+
 
 def _cache_write(vec: dict[str, Any]) -> None:
     with _build_lock:
@@ -1232,21 +1259,149 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     return payload
 
 
+def _mark_refresh(status: str, error: "BaseException | None" = None) -> None:
+    with _refresh_health_lock:
+        _refresh_health["last_status"] = status
+        if status == "ok":
+            _refresh_health["last_ok_ts"] = time.time()
+            _refresh_health["last_error"] = None
+            _refresh_health["consecutive_failures"] = 0
+        else:
+            if status == "timeout":
+                _refresh_health["last_timeout_ts"] = time.time()
+            if error is not None:
+                _refresh_health["last_error"] = repr(error)
+            _refresh_health["consecutive_failures"] += 1
+
+
+def refresh_health() -> dict[str, Any]:
+    """Snapshot of background-refresh liveness (for /health wiring and tests).
+
+    ``age_seconds`` is time since the last *successful* refresh, or None if one
+    has never completed in this process.
+    """
+    with _refresh_health_lock:
+        snap = dict(_refresh_health)
+    last_ok = snap.get("last_ok_ts") or 0.0
+    snap["age_seconds"] = (time.time() - last_ok) if last_ok else None
+    snap["timeout_secs"] = _REFRESH_TIMEOUT_SECS
+    return snap
+
+
+def _refresh_once_with_timeout(
+    store: Store, *, signing_key_hex: str, timeout: float
+) -> dict[str, Any] | None:
+    """Run _refresh_once in a worker thread, bounded by ``timeout`` seconds.
+
+    Returns the vector (or None) on completion; raises _RefreshTimeout if the
+    attempt is still running after ``timeout``, or if a prior attempt is still
+    wedged (we never run two at once). The orphaned attempt is a daemon thread
+    and cannot block process exit; it is abandoned and the next cycle retries —
+    picking up a healthy leader's persisted vector if this build is stuck. Any
+    exception inside the attempt is re-raised to the caller.
+    """
+    global _refresh_attempt
+    with _refresh_attempt_lock:
+        prev = _refresh_attempt
+        if prev is not None and prev.is_alive():
+            raise _RefreshTimeout("previous refresh attempt still running")
+
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["vec"] = _refresh_once(store, signing_key_hex=signing_key_hex)
+        except BaseException as exc:  # surfaced to the loop's handler below
+            box["err"] = exc
+
+    t = threading.Thread(
+        target=_run, name="weights-refresh-attempt", daemon=True)
+    with _refresh_attempt_lock:
+        _refresh_attempt = t
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise _RefreshTimeout(f"weight refresh exceeded {timeout}s")
+    if "err" in box:
+        raise box["err"]
+    return box.get("vec")
+
+
+def _try_adopt_persisted(store: Store, generation: int, timeout: float = 10.0) -> None:
+    """Best-effort freshness recovery after a refresh timeout.
+
+    Adopt the persisted ``latest`` vector (a cheap PK lookup) that a healthy
+    sibling leader may have written, so a replica whose own build is wedged stops
+    serving a stale cache. Bounded by ``timeout`` so it can never itself re-wedge
+    the background loop. Never raises.
+    """
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["vec"] = _load_persisted_vector(store)
+        except BaseException as exc:
+            box["err"] = exc
+
+    t = threading.Thread(target=_run, name="weights-adopt-persisted", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        print("[weights] persisted adopt timed out; skipping")
+        return
+    if "err" in box:
+        print(f"[weights] persisted adopt failed: {box['err']!r}")
+        return
+    vec = box.get("vec")
+    if vec is not None and generation == _bg_generation:
+        _cache_write(vec)
+
+
+def _run_refresh_cycle(
+    store: Store, signing_key_hex: str, generation: int
+) -> str:
+    """One refresh iteration. Never raises; returns a status string.
+
+    Identical behavior to the historical loop body on the happy path (build →
+    cache); the only additions are the wall-clock bound and liveness marking.
+    """
+    try:
+        if _REFRESH_TIMEOUT_SECS > 0:
+            vec = _refresh_once_with_timeout(
+                store, signing_key_hex=signing_key_hex,
+                timeout=_REFRESH_TIMEOUT_SECS)
+        else:
+            vec = _refresh_once(store, signing_key_hex=signing_key_hex)
+        if vec is not None and generation == _bg_generation:
+            _cache_write(vec)
+        _mark_refresh("ok")
+        return "ok"
+    except _RefreshTimeout as exc:
+        _mark_refresh("timeout", exc)
+        print(
+            f"[weights] bg_refresh TIMED OUT after {_REFRESH_TIMEOUT_SECS}s; "
+            "abandoning cycle, will retry next tick")
+        # Freshness recovery: adopt a sibling leader's persisted vector (bounded).
+        _try_adopt_persisted(store, generation)
+        return "timeout"
+    except Exception as exc:
+        _mark_refresh("error", exc)
+        print(f"[weights] bg_refresh error (will retry): {exc!r}")
+        return "error"
+
+
 def _bg_refresh_loop(store: Store, signing_key_hex: str, generation: int) -> None:
     """Background daemon thread: rebuild the vector every _CACHE_TTL_SECS.
 
-    Never raises — a transient DB error is logged and retried next cycle.
+    Never raises — a transient DB error OR a hung rebuild is logged and retried
+    next cycle. Each attempt is wall-clock bounded (_REFRESH_TIMEOUT_SECS) so a
+    single stuck DB call can no longer freeze this replica's served vector.
     Runs forever; the process exiting is the only exit condition (daemon=True).
     """
     while True:
         if generation != _bg_generation:
             return
-        try:
-            vec = _refresh_once(store, signing_key_hex=signing_key_hex)
-            if vec is not None and generation == _bg_generation:
-                _cache_write(vec)
-        except Exception as exc:
-            print(f"[weights] bg_refresh error (will retry): {exc!r}")
+        _run_refresh_cycle(store, signing_key_hex, generation)
         time.sleep(_CACHE_TTL_SECS)
 
 

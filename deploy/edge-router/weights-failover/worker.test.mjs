@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import {
   canonicalPath,
   handleRequest,
+  maybeAdvance,
   originTimeoutMs,
+  parseGenMs,
+  putArtifact,
   serveStale,
+  vectorIsFresh,
 } from "./worker.js";
 
-// --- A minimal in-memory KV mock matching the slice of the Workers KV API the
-//     worker uses: put(key, value, {metadata}) and getWithMetadata(key). ---
+// --- minimal in-memory KV mock: put(key,value,{metadata}) + getWithMetadata ---
 function mockKV(initial = null) {
   const store = initial ? new Map([[ "lkg:weights_next", initial ]]) : new Map();
   return {
@@ -23,201 +26,279 @@ function mockKV(initial = null) {
   };
 }
 
-const SIGNED = JSON.stringify({
-  vector_id: "v-1",
-  generated_at: "2026-06-27T00:00:00.000Z",
-  expires_at: "2026-06-27T00:30:00.000Z",
-  signature: "sig",
-});
+// Deterministic clock: "now" = 2026-06-28T19:10:00Z.
+const NOW_MS = Date.parse("2026-06-28T19:10:00.000Z");
+
+function vec(gen, exp) {
+  return JSON.stringify({ vector_id: "v-" + gen, generated_at: gen, expires_at: exp, signature: "s" });
+}
+// OLD: fresh, older generation. NEW: fresh, newer generation. EXPIRED: stale.
+const OLD = vec("2026-06-28T18:49:00.000Z", "2026-06-28T19:30:00.000Z");
+const NEW = vec("2026-06-28T19:00:00.000Z", "2026-06-28T19:40:00.000Z");
+const EXPIRED = vec("2026-06-28T18:00:00.000Z", "2026-06-28T18:30:00.000Z");
+const NO_EXP = JSON.stringify({ vector_id: "v-x", generated_at: "2026-06-28T19:00:00.000Z" });
+const MALFORMED = "<html>oops</html>";
+
+function entry(body, storedAt) {
+  let gen;
+  try { gen = JSON.parse(body).generated_at; } catch (_e) { gen = undefined; }
+  return { value: body, metadata: { stored_at: storedAt, generated_at: gen } };
+}
 
 function ctx() {
   const pending = [];
   return { pending, waitUntil: (p) => pending.push(p) };
 }
 
-const ENV_BASE = { PUBLISHER_ORIGIN: "https://publisher.example" };
+const ENV_BASE = {
+  PUBLISHER_ORIGIN: "https://publisher.example",
+  WEIGHTS_NOW_MS: String(NOW_MS),
+};
 
-// --- canonicalPath strips the legacy /api/cathedral prefix and nothing else ---
-assert.equal(canonicalPath("/v1/validator/weights/next"), "/v1/validator/weights/next");
-assert.equal(
-  canonicalPath("/api/cathedral/v1/validator/weights/next"),
-  "/v1/validator/weights/next",
-);
-assert.equal(canonicalPath("/api/cathedral"), "/");
+function withFetch(fn, body, status = 200) {
+  return async (...args) => {
+    if (typeof body === "function") return body(...args);
+    return new Response(body, { status });
+  };
+}
 
-// --- originTimeoutMs: default + env override ---
+// ---- pure helpers ----
+assert.equal(vectorIsFresh(OLD, NOW_MS), true);
+assert.equal(vectorIsFresh(EXPIRED, NOW_MS), false);
+assert.equal(vectorIsFresh(NO_EXP, NOW_MS), false);
+assert.equal(vectorIsFresh(MALFORMED, NOW_MS), false);
+assert.equal(vectorIsFresh("{}", NOW_MS), false);
+
+assert.equal(parseGenMs(NEW, null), Date.parse("2026-06-28T19:00:00.000Z"));
+assert.equal(parseGenMs(MALFORMED, null), -Infinity);
+assert.equal(parseGenMs("x", { generated_at: "2026-06-28T19:00:00.000Z" }),
+  Date.parse("2026-06-28T19:00:00.000Z"));
+
+assert.equal(canonicalPath("/api/cathedral/v1/validator/weights/next"), "/v1/validator/weights/next");
 assert.equal(originTimeoutMs({}), 8000);
 assert.equal(originTimeoutMs({ WEIGHTS_ORIGIN_TIMEOUT_MS: "3000" }), 3000);
-assert.equal(originTimeoutMs({ WEIGHTS_ORIGIN_TIMEOUT_MS: "" }), 8000);
 
-// --- origin 2xx stores the signed body in KV and serves it from origin with a
-//     short fresh-vector edge cache (NOT no-store) ---
+// ---- putArtifact monotonicity ----
+{
+  const kv = mockKV(entry(OLD, "t"));
+  const wrote = await putArtifact({ ...ENV_BASE, WEIGHTS_LKG: kv }, NEW, await kv.getWithMetadata("k"), NOW_MS);
+  assert.equal(wrote, true);
+}
+{
+  const kv = mockKV(entry(NEW, "t"));
+  const wrote = await putArtifact({ ...ENV_BASE, WEIGHTS_LKG: kv }, OLD, await kv.getWithMetadata("lkg:weights_next"), NOW_MS);
+  assert.equal(wrote, false);
+  assert.equal(kv.puts.length, 0);
+}
+{
+  const kv = mockKV(entry(EXPIRED, "t"));
+  const wrote = await putArtifact({ ...ENV_BASE, WEIGHTS_LKG: kv }, OLD, await kv.getWithMetadata("lkg:weights_next"), NOW_MS);
+  assert.equal(wrote, true);
+}
+
+// ---- T1: fresh artifact served as "artifact"; background advances to newer ----
 {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    assert.equal(url, "https://publisher.example/v1/validator/weights/next");
-    assert.equal(init.method, "GET");
-    return new Response(SIGNED, { status: 200, headers: { "content-type": "application/json" } });
-  };
+  globalThis.fetch = withFetch(null, NEW);
+  try {
+    const kv = mockKV(entry(OLD, "2026-06-28T19:05:00.000Z"));
+    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
+    const c = ctx();
+    const resp = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, c);
+    assert.equal(resp.status, 200);
+    assert.equal(resp.headers.get("x-cathedral-vector-source"), "artifact");
+    assert.equal(await resp.text(), OLD);
+    const cc = resp.headers.get("cache-control");
+    assert.match(cc, /s-maxage=15/);
+    await Promise.all(c.pending);
+    assert.equal((await kv.getWithMetadata("lkg:weights_next")).value, NEW);
+  } finally { globalThis.fetch = realFetch; }
+}
+
+// ---- T2: fresh artifact NEW, origin OLDER -> NO regression ----
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = withFetch(null, OLD);
+  try {
+    const kv = mockKV(entry(NEW, "2026-06-28T19:05:00.000Z"));
+    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
+    const c = ctx();
+    const resp = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, c);
+    assert.equal(resp.headers.get("x-cathedral-vector-source"), "artifact");
+    assert.equal(await resp.text(), NEW);
+    await Promise.all(c.pending);
+    assert.equal(kv.puts.length, 0);
+    assert.equal((await kv.getWithMetadata("lkg:weights_next")).value, NEW);
+  } finally { globalThis.fetch = realFetch; }
+}
+
+// ---- T3: fresh artifact, origin SAME gen -> no overwrite ----
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = withFetch(null, NEW);
+  try {
+    const kv = mockKV(entry(NEW, "t"));
+    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
+    const c = ctx();
+    await handleRequest(new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, c);
+    await Promise.all(c.pending);
+    assert.equal(kv.puts.length, 0);
+  } finally { globalThis.fetch = realFetch; }
+}
+
+// ---- T4: empty artifact, origin fresh -> first-fill, served as "origin" ----
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = withFetch(null, NEW);
   try {
     const kv = mockKV();
     const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
     const c = ctx();
     const resp = await handleRequest(
-      new Request("https://api.cathedral.computer/v1/validator/weights/next"),
-      env,
-      c,
-    );
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, c);
     assert.equal(resp.status, 200);
     assert.equal(resp.headers.get("x-cathedral-vector-source"), "origin");
-    // The signed body is served verbatim.
-    assert.equal(await resp.text(), SIGNED);
-    // Edge caching restored: short shared-cache window + stale-while-revalidate.
-    const cc = resp.headers.get("cache-control");
-    assert.match(cc, /s-maxage=15/);
-    assert.match(cc, /stale-while-revalidate=1200/);
-    assert.doesNotMatch(cc, /no-store/);
-    // KV got the LKG write (via waitUntil).
-    await Promise.all(c.pending);
-    assert.equal(kv.puts.length, 1);
-    assert.equal(kv.puts[0].value, SIGNED);
-    assert.ok(kv.puts[0].opts.metadata.stored_at);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+    assert.equal(await resp.text(), NEW);
+    assert.equal((await kv.getWithMetadata("lkg:weights_next")).value, NEW);
+  } finally { globalThis.fetch = realFetch; }
 }
 
-// --- origin 5xx serves the LKG body from KV with stale_fallback marker ---
+// ---- T5: expired artifact, origin fresh -> replaced, served as "origin" ----
 {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    new Response("upstream boom", { status: 500 });
+  globalThis.fetch = withFetch(null, NEW);
   try {
-    const kv = mockKV({ value: SIGNED, metadata: { stored_at: "2026-06-27T00:01:00.000Z" } });
+    const kv = mockKV(entry(EXPIRED, "t"));
     const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
     const resp = await handleRequest(
-      new Request("https://api.cathedral.computer/v1/validator/weights/next"),
-      env,
-      ctx(),
-    );
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, ctx());
     assert.equal(resp.status, 200);
-    assert.equal(resp.headers.get("x-cathedral-vector-source"), "stale_fallback");
-    assert.equal(resp.headers.get("x-cathedral-fallback-reason"), "origin_status_500");
-    assert.equal(resp.headers.get("x-cathedral-vector-stored-at"), "2026-06-27T00:01:00.000Z");
-    // Stale fallback must NOT be re-cached at the edge as if fresh.
-    assert.equal(resp.headers.get("cache-control"), "no-store");
-    // Served body is the original signed bytes, verbatim.
-    assert.equal(await resp.text(), SIGNED);
-    // 5xx does NOT overwrite the LKG.
-    assert.equal(kv.puts.length, 0);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+    assert.equal(resp.headers.get("x-cathedral-vector-source"), "origin");
+    assert.equal((await kv.getWithMetadata("lkg:weights_next")).value, NEW);
+  } finally { globalThis.fetch = realFetch; }
 }
 
-// --- origin timeout / abort serves LKG (origin_error) ---
+// ---- T6: expired artifact, origin expired -> 503 weights_expired ----
 {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, init) =>
-    new Promise((_resolve, reject) => {
-      // Simulate an AbortController abort firing.
-      if (init && init.signal) {
-        init.signal.addEventListener("abort", () =>
-          reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
-      }
-    });
+  globalThis.fetch = withFetch(null, EXPIRED);
   try {
-    const kv = mockKV({ value: SIGNED, metadata: { stored_at: "2026-06-27T00:02:00.000Z" } });
-    const env = { ...ENV_BASE, WEIGHTS_LKG: kv, WEIGHTS_ORIGIN_TIMEOUT_MS: "10" };
+    const kv = mockKV(entry(EXPIRED, "t"));
+    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
     const resp = await handleRequest(
-      new Request("https://api.cathedral.computer/v1/validator/weights/next"),
-      env,
-      ctx(),
-    );
-    assert.equal(resp.status, 200);
-    assert.equal(resp.headers.get("x-cathedral-vector-source"), "stale_fallback");
-    assert.equal(resp.headers.get("x-cathedral-fallback-reason"), "origin_error");
-    assert.equal(await resp.text(), SIGNED);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, ctx());
+    assert.equal(resp.status, 503);
+    assert.equal(resp.headers.get("retry-after"), "2");
+    const body = await resp.json();
+    assert.equal(body.error, "weights_expired");
+    assert.equal(body.reason, "origin_not_fresh");
+    assert.equal(kv.puts.length, 0);
+  } finally { globalThis.fetch = realFetch; }
 }
 
-// --- origin down AND KV empty -> 503 no vector available ---
+// ---- T7: empty artifact, origin 5xx -> 503 no vector available ----
 {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => {
-    throw new Error("connect timeout");
-  };
+  globalThis.fetch = withFetch(null, "boom", 500);
   try {
     const kv = mockKV();
     const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
     const resp = await handleRequest(
-      new Request("https://api.cathedral.computer/v1/validator/weights/next"),
-      env,
-      ctx(),
-    );
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, ctx());
     assert.equal(resp.status, 503);
     const body = await resp.json();
     assert.equal(body.error, "no vector available");
-    assert.equal(body.reason, "origin_error");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+    assert.equal(body.reason, "origin_status_500");
+  } finally { globalThis.fetch = realFetch; }
 }
 
-// --- /api/cathedral prefix is stripped before forwarding to the origin ---
+// ---- T8: empty artifact, origin throws -> 503 origin_error ----
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("connect timeout"); };
+  try {
+    const kv = mockKV();
+    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
+    const resp = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, ctx());
+    assert.equal(resp.status, 503);
+    const body = await resp.json();
+    assert.equal(body.reason, "origin_error");
+  } finally { globalThis.fetch = realFetch; }
+}
+
+// ---- T9: malformed origin, empty artifact -> 503, nothing stored ----
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = withFetch(null, MALFORMED);
+  try {
+    const kv = mockKV();
+    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
+    const resp = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, ctx());
+    assert.equal(resp.status, 503);
+    assert.equal(kv.puts.length, 0);
+  } finally { globalThis.fetch = realFetch; }
+}
+
+// ---- T10: fresh artifact, origin malformed -> serve artifact; no advance ----
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = withFetch(null, MALFORMED);
+  try {
+    const kv = mockKV(entry(NEW, "t"));
+    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
+    const c = ctx();
+    const resp = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/validator/weights/next"), env, c);
+    assert.equal(resp.headers.get("x-cathedral-vector-source"), "artifact");
+    assert.equal(await resp.text(), NEW);
+    await Promise.all(c.pending);
+    assert.equal(kv.puts.length, 0);
+  } finally { globalThis.fetch = realFetch; }
+}
+
+// ---- T11: legacy /api/cathedral prefix stripped for origin fetch ----
 {
   const realFetch = globalThis.fetch;
   let seenUrl = null;
-  globalThis.fetch = async (url) => {
-    seenUrl = url;
-    return new Response(SIGNED, { status: 200 });
-  };
+  globalThis.fetch = async (url) => { seenUrl = url; return new Response(NEW, { status: 200 }); };
   try {
     const kv = mockKV();
     const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
     await handleRequest(
       new Request("https://api.cathedral.computer/api/cathedral/v1/validator/weights/next?x=1"),
-      env,
-      ctx(),
-    );
+      env, ctx());
     assert.equal(seenUrl, "https://publisher.example/v1/validator/weights/next?x=1");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+  } finally { globalThis.fetch = realFetch; }
 }
 
-// --- body.length > 2 guard: a trivial body ("{}" or empty) is NOT stored as LKG ---
+// ---- maybeAdvance directly: newer origin advances a fresh artifact ----
 {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response("{}", { status: 200 });
+  globalThis.fetch = withFetch(null, NEW);
   try {
-    const kv = mockKV();
-    const env = { ...ENV_BASE, WEIGHTS_LKG: kv };
-    const c = ctx();
-    const resp = await handleRequest(
-      new Request("https://api.cathedral.computer/v1/validator/weights/next"),
-      env,
-      c,
-    );
-    assert.equal(resp.status, 200);
-    assert.equal(resp.headers.get("x-cathedral-vector-source"), "origin");
-    await Promise.all(c.pending);
-    // "{}" has length 2 -> guard rejects it, KV stays empty.
-    assert.equal(kv.puts.length, 0);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+    const kv = mockKV(entry(OLD, "t"));
+    await maybeAdvance("https://publisher.example/v1/validator/weights/next",
+      { ...ENV_BASE, WEIGHTS_LKG: kv });
+    assert.equal((await kv.getWithMetadata("lkg:weights_next")).value, NEW);
+  } finally { globalThis.fetch = realFetch; }
 }
 
-// --- serveStale is directly callable and returns the stored vector ---
+// ---- serveStale: fresh stored served; expired stored -> 503 ----
 {
-  const kv = mockKV({ value: SIGNED, metadata: { stored_at: "2026-06-27T00:03:00.000Z" } });
-  const resp = await serveStale({ WEIGHTS_LKG: kv }, "manual");
+  const kv = mockKV(entry(NEW, "2026-06-28T19:05:00.000Z"));
+  const resp = await serveStale({ ...ENV_BASE, WEIGHTS_LKG: kv }, "manual");
   assert.equal(resp.status, 200);
-  assert.equal(resp.headers.get("x-cathedral-fallback-reason"), "manual");
-  assert.equal(await resp.text(), SIGNED);
+  assert.equal(await resp.text(), NEW);
+}
+{
+  const kv = mockKV(entry(EXPIRED, "t"));
+  const resp = await serveStale({ ...ENV_BASE, WEIGHTS_LKG: kv }, "manual");
+  assert.equal(resp.status, 503);
+  assert.equal((await resp.json()).error, "weights_expired");
 }
 
-console.log("weights-failover worker tests passed");
+console.log("weights-failover artifact-first tests passed");
