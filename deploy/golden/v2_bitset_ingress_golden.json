@@ -1,0 +1,62 @@
+{
+  "assignment": [
+    1,
+    -2,
+    3,
+    -4,
+    5,
+    -6,
+    7,
+    -8,
+    9,
+    -10
+  ],
+  "assignment_b64": "VQE=",
+  "assignment_raw_hex": "5501",
+  "assignment_sha256": "c12ca660361e98c88f281d41d282ffdbf3d45d8747caddbd15c07146dbe7cf9e",
+  "canonical_submit_json": "{\"assignment_b64\":\"VQE=\",\"assignment_encoding\":\"bitset/v1\",\"card_id\":\"synthetic_boolean_v1\",\"challenge_id\":\"pm-t2-e495232-s7-golden\",\"miner_hotkey\":\"5HgLDYYWFKVpBt5vdJEtLHciMn6YYAM6VB3TvabKGXao86no\",\"schema\":\"cathedral.v2.submit_bitset.v1\",\"submit_token\":\"v1.eyJjaGFsbGVuZ2VfaWQiOiJwbS10Mi1lNDk1MjMyLXM3LWdvbGRlbiIsImNuZl9zaGEyNTYiOiIyYmY5NmJhODI0NTI4MTEzNzljMjU3Y2QyYTY4M2Y4OTA0MWRkYzY1YmUyZDcyYmMxZjJhMzI0NWRjYzI1M2VhIiwiZXBvY2giOjQ5NTIzMiwiZXhwaXJlc19hdCI6IjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwWiIsIm1pbmVyX2hvdGtleSI6IjVIZ0xEWVlXRktWcEJ0NXZkSkV0TEhjaU1uNllZQU02VkIzVHZhYktHWGFvODZubyIsIm52YXJzIjoxMCwic2NoZW1hIjoiY2F0aGVkcmFsLnYyLnN1Ym1pdF90b2tlbi52MSIsInNlcSI6NywidGllciI6Mn0.pmLiyebb8TuqgjQn_iIrYk41lFJ9uICmoLMLgrzXZbw\",\"submitted_at\":\"2026-06-30T23:30:00.000Z\"}",
+  "canonical_submit_sha256": "7c76f4074d1d3161cbfa00c31192b0d1e974ba14e110d83c876cd5bc4a3d89d6",
+  "dev_key_uri": "//V2IngressGolden",
+  "fake_submit_token_secret": "golden-v2-submit-token-secret-not-live",
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Cathedral-Hotkey": "5HgLDYYWFKVpBt5vdJEtLHciMn6YYAM6VB3TvabKGXao86no",
+    "X-Cathedral-Signature": "4j5jy6L8iRZ+shit2jwEddgnDoT1ZKrs2bDusqY/BSkQeOvwx6VFH6oF2xQeq21vHSRVwajRL5AUGBYsmhftjQ==",
+    "X-Cathedral-Submitted-At": "2026-06-30T23:30:00.000Z"
+  },
+  "idempotency_key": "f9e0285d55cced5f3f76919ac7bed826043ddfe4d10a7fac837116eb3a91f50b",
+  "miner_hotkey": "5HgLDYYWFKVpBt5vdJEtLHciMn6YYAM6VB3TvabKGXao86no",
+  "normalized_submit_body": {
+    "assignment_b64": "VQE=",
+    "assignment_encoding": "bitset/v1",
+    "card_id": "synthetic_boolean_v1",
+    "challenge_id": "pm-t2-e495232-s7-golden",
+    "miner_hotkey": "5HgLDYYWFKVpBt5vdJEtLHciMn6YYAM6VB3TvabKGXao86no",
+    "schema": "cathedral.v2.submit_bitset.v1",
+    "submit_token": "v1.eyJjaGFsbGVuZ2VfaWQiOiJwbS10Mi1lNDk1MjMyLXM3LWdvbGRlbiIsImNuZl9zaGEyNTYiOiIyYmY5NmJhODI0NTI4MTEzNzljMjU3Y2QyYTY4M2Y4OTA0MWRkYzY1YmUyZDcyYmMxZjJhMzI0NWRjYzI1M2VhIiwiZXBvY2giOjQ5NTIzMiwiZXhwaXJlc19hdCI6IjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwWiIsIm1pbmVyX2hvdGtleSI6IjVIZ0xEWVlXRktWcEJ0NXZkSkV0TEhjaU1uNllZQU02VkIzVHZhYktHWGFvODZubyIsIm52YXJzIjoxMCwic2NoZW1hIjoiY2F0aGVkcmFsLnYyLnN1Ym1pdF90b2tlbi52MSIsInNlcSI6NywidGllciI6Mn0.pmLiyebb8TuqgjQn_iIrYk41lFJ9uICmoLMLgrzXZbw",
+    "submitted_at": "2026-06-30T23:30:00.000Z"
+  },
+  "notes": {
+    "assignment_bit_order": "variable i stored at bit i-1, LSB-first in each byte, 1=true",
+    "sr25519_signature_randomized": true,
+    "unused_trailing_bits": "must be zero"
+  },
+  "schema": "cathedral.v2.bitset_ingress_golden.v1",
+  "signature_b64": "4j5jy6L8iRZ+shit2jwEddgnDoT1ZKrs2bDusqY/BSkQeOvwx6VFH6oF2xQeq21vHSRVwajRL5AUGBYsmhftjQ==",
+  "submit_token": "v1.eyJjaGFsbGVuZ2VfaWQiOiJwbS10Mi1lNDk1MjMyLXM3LWdvbGRlbiIsImNuZl9zaGEyNTYiOiIyYmY5NmJhODI0NTI4MTEzNzljMjU3Y2QyYTY4M2Y4OTA0MWRkYzY1YmUyZDcyYmMxZjJhMzI0NWRjYzI1M2VhIiwiZXBvY2giOjQ5NTIzMiwiZXhwaXJlc19hdCI6IjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwWiIsIm1pbmVyX2hvdGtleSI6IjVIZ0xEWVlXRktWcEJ0NXZkSkV0TEhjaU1uNllZQU02VkIzVHZhYktHWGFvODZubyIsIm52YXJzIjoxMCwic2NoZW1hIjoiY2F0aGVkcmFsLnYyLnN1Ym1pdF90b2tlbi52MSIsInNlcSI6NywidGllciI6Mn0.pmLiyebb8TuqgjQn_iIrYk41lFJ9uICmoLMLgrzXZbw",
+  "token_payload": {
+    "challenge_id": "pm-t2-e495232-s7-golden",
+    "cnf_sha256": "2bf96ba82452811379c257cd2a683f89041ddc65be2d72bc1f2a3245dcc253ea",
+    "epoch": 495232,
+    "expires_at": "2099-01-01T00:00:00.000Z",
+    "miner_hotkey": "5HgLDYYWFKVpBt5vdJEtLHciMn6YYAM6VB3TvabKGXao86no",
+    "nvars": 10,
+    "schema": "cathedral.v2.submit_token.v1",
+    "seq": 7,
+    "tier": 2
+  },
+  "token_payload_canonical_json": "{\"challenge_id\":\"pm-t2-e495232-s7-golden\",\"cnf_sha256\":\"2bf96ba82452811379c257cd2a683f89041ddc65be2d72bc1f2a3245dcc253ea\",\"epoch\":495232,\"expires_at\":\"2099-01-01T00:00:00.000Z\",\"miner_hotkey\":\"5HgLDYYWFKVpBt5vdJEtLHciMn6YYAM6VB3TvabKGXao86no\",\"nvars\":10,\"schema\":\"cathedral.v2.submit_token.v1\",\"seq\":7,\"tier\":2}",
+  "token_payload_sha256": "92ada318ecf9021d47f076712f3f5e5c70aa41f4ba259e4a7f7ea241c5758b0e",
+  "token_signature_sha256": "74d82ed3731fb627d694b32de51488424a0b1f6bb8cfd557f596da9340d4fba0",
+  "warning": "Dev-only vector. Fake token secret and public dev key; no live secrets."
+}
