@@ -95,12 +95,35 @@ def _headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[str, st
     }
 
 
+def _v1_submit_headers(kp, *, challenge_id: str, solution: str,
+                       submitted_at: str | None = None) -> dict[str, str]:
+    ts = submitted_at or _now_iso()
+    sol_sha = hashlib.sha256(solution.encode("utf-8")).hexdigest()
+    msg = canonical_claim_bytes(
+        bundle_hash=_EMPTY_BUNDLE,
+        card_id=_FAMILY,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=ts,
+        challenge_id=challenge_id,
+        dimacs_solution_sha256=sol_sha,
+    )
+    sig = base64.b64encode(kp.sign(msg)).decode("ascii")
+    return {
+        "X-Cathedral-Hotkey": kp.ss58_address,
+        "X-Cathedral-Signature": sig,
+        "X-Cathedral-Submitted-At": ts,
+        "X-Cathedral-Shadow-Source": "test-mirror",
+    }
+
+
 def _build(tmp_path, monkeypatch, *, enabled: bool = True, role: str = "submit",
-           separate_v2: bool = False):
+           separate_v2: bool = False, shadow_v1: bool = False):
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", role)
     monkeypatch.setenv("CATHEDRAL_RATELIMIT_RPM", "0")
     monkeypatch.setenv("CATHEDRAL_V2_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv("CATHEDRAL_V2_SHADOW_V1_ENABLED", "true" if shadow_v1 else "false")
+    monkeypatch.setenv("CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", "1000000")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_DIR", str(tmp_path / "v2_blobs"))
     monkeypatch.setenv("CATHEDRAL_V2_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("CATHEDRAL_CNF_TOKEN_SECRET", "test-secret")
@@ -129,6 +152,78 @@ def test_solution_manifest_v2_default_off(tmp_path, monkeypatch):
     )
     assert r.status_code == 404
     assert r.json()["detail"] == "solution_manifest_v2_not_enabled"
+
+
+def test_solution_manifest_v2_shadow_v1_submit_default_off(tmp_path, monkeypatch):
+    app, _store = _build(tmp_path, monkeypatch, enabled=True, role="all", shadow_v1=False)
+    client = TestClient(app)
+    kp = _keypair("//ShadowV1DefaultOff")
+    solution = "s SATISFIABLE\nv 1 -2 3 0\n"
+    body = {
+        "card_id": _FAMILY,
+        "challenge_id": "pm-t1-e1-shadow",
+        "dimacs_solution": solution,
+        "submitted_at": _now_iso(),
+    }
+    r = client.post(
+        "/v2/shadow/v1/agents/submit",
+        data=body,
+        headers=_v1_submit_headers(kp, challenge_id=body["challenge_id"], solution=solution,
+                                   submitted_at=body["submitted_at"]),
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"] == "v2_shadow_v1_not_enabled"
+
+
+def test_solution_manifest_v2_shadow_v1_submit_admits_storage_only(tmp_path, monkeypatch):
+    app, main_store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True, shadow_v1=True)
+    client = TestClient(app)
+    kp = _keypair("//ShadowV1Mirror")
+    challenge_id = "pm-t1-e1-shadow"
+    submitted_at = _now_iso()
+    solution = "s SATISFIABLE\nv 1 -2 3 0\n"
+    body = {
+        "card_id": _FAMILY,
+        "challenge_id": challenge_id,
+        "dimacs_solution": solution,
+        "display_name": "mirror-test",
+        "submitted_at": submitted_at,
+    }
+    headers = _v1_submit_headers(
+        kp, challenge_id=challenge_id, solution=solution, submitted_at=submitted_at)
+
+    first = client.post("/v2/shadow/v1/agents/submit", data=body, headers=headers)
+    second = client.post("/v2/shadow/v1/agents/submit", data=body, headers=headers)
+
+    assert first.status_code == 202
+    assert second.status_code == 200
+    payload = first.json()
+    assert payload["schema"] == "cathedral.v2.shadow_v1_submit_receipt.v1"
+    assert payload["shadow"] is True
+    assert payload["status"] == "received"
+    assert payload["miner_hotkey"] == kp.ss58_address
+    assert payload["challenge_id"] == challenge_id
+    assert payload["solution_sha256"] == hashlib.sha256(solution.encode("utf-8")).hexdigest()
+    assert payload["solution_cid"].startswith("local://v1_submit_solution/")
+    assert second.json()["receipt_id"] == payload["receipt_id"]
+    assert second.json()["idempotent_replay"] is True
+
+    receipt = client.get(f"/v2/shadow/v1/agents/submit/receipts/{payload['receipt_id']}")
+    assert receipt.status_code == 200
+    assert receipt.json()["receipt_id"] == payload["receipt_id"]
+
+    metrics = client.get("/v2/shadow/v1/agents/submit/metrics")
+    assert metrics.status_code == 200
+    assert metrics.json()["total"]["count"] == 1
+    assert metrics.json()["total"]["bytes"] == len(solution.encode("utf-8"))
+    assert metrics.json()["windows"]["1h"]["count"] == 1
+
+    assert main_store.query("SELECT COUNT(*) AS n FROM v2_shadow_v1_submits")[0]["n"] == 0
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    rows = v2_store.query("SELECT * FROM v2_shadow_v1_submits")
+    assert len(rows) == 1
+    assert rows[0]["form_json"].find(solution) == -1
 
 
 def test_solution_manifest_v2_serves_prefixed_pm_challenges_and_cnf(tmp_path, monkeypatch):

@@ -513,6 +513,9 @@ def build_app(
         "CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", solution_manifest_enabled)
     solution_blob_upload_max_bytes = _env_int(
         "CATHEDRAL_V2_BLOB_UPLOAD_MAX_BYTES", 5_000_000)
+    v2_shadow_v1_enabled = _env_bool("CATHEDRAL_V2_SHADOW_V1_ENABLED", False)
+    v2_shadow_v1_max_solution_bytes = _env_int(
+        "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
     v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
     v2_worker_batch_size = max(1, _env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8))
     v2_worker_interval_secs = max(
@@ -1278,6 +1281,7 @@ def build_app(
             # read service that actually serves the Tier 0 weight feed.
             "/v1/admin/validator-health",
             "/v1/admin/synthetic-boolean/submit-metrics",
+            "/v2/shadow/v1/agents/submit/metrics",
         }
         _READ_GET_PREFIXES = {
             "/sat/sequences/",
@@ -1293,6 +1297,7 @@ def build_app(
         }
         _SUBMIT_GET_PATHS = {
             "/v1/admin/synthetic-boolean/submit-metrics",
+            "/v2/shadow/v1/agents/submit/metrics",
             "/v1/synthetic-boolean/active-cnf",
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",
@@ -1308,12 +1313,14 @@ def build_app(
             "/v2/synthetic-boolean/per-miner/cnf",
             "/v2/validator/weights/next",
             "/v2/audit/epochs/",
+            "/v2/shadow/v1/agents/submit/receipts/",
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
             "/v2/agents/submit-manifest",
             "/v2/blobs/solutions",
             "/v2/admin/verify/tick",
+            "/v2/shadow/v1/agents/submit",
         }
 
         def __init__(self, asgi_app):
@@ -5368,6 +5375,266 @@ def build_app(
                     "X-Perminer-Epoch": str(epoch),
                 },
             )
+
+    def _v2_shadow_row_dict(row: Any) -> dict[str, Any]:
+        try:
+            keys = row.keys()
+            return {k: row[k] for k in keys}
+        except Exception:
+            return dict(row)
+
+    def _v2_shadow_v1_receipt(row: dict[str, Any], *, inserted: bool | None = None) -> dict[str, Any]:
+        payload = {
+            "schema": "cathedral.v2.shadow_v1_submit_receipt.v1",
+            "shadow": True,
+            "status": str(row.get("status") or "received"),
+            "open": True,
+            "terminal": False,
+            "receipt_id": str(row["id"]),
+            "receipt_url": f"/v2/shadow/v1/agents/submit/receipts/{row['id']}",
+            "miner_hotkey": str(row["miner_hotkey"]),
+            "challenge_id": str(row["challenge_id"]),
+            "card_id": str(row["card_id"]),
+            "solution_sha256": str(row["solution_sha256"]),
+            "solution_bytes": int(row.get("solution_bytes") or 0),
+            "solution_cid": str(row["solution_cid"]),
+            "received_at": str(row["received_at_iso"]),
+            "source": str(row.get("source") or "mirror"),
+        }
+        if row.get("submitted_at"):
+            payload["submitted_at"] = str(row["submitted_at"])
+        if inserted is not None:
+            payload["idempotent_replay"] = not inserted
+        return payload
+
+    def _v2_shadow_v1_admit(
+        *,
+        miner_hotkey: str,
+        challenge_id: str,
+        card_id: str,
+        solution_sha256: str,
+        solution_bytes: int,
+        solution_cid: str,
+        request_sha256: str,
+        content_type: str,
+        submitted_at: str,
+        received_at_iso: str,
+        signature: str,
+        source: str,
+        form_json: str,
+        headers_json: str,
+    ) -> tuple[dict[str, Any], bool]:
+        idem_body = json.dumps(
+            {
+                "miner_hotkey": miner_hotkey,
+                "challenge_id": challenge_id,
+                "solution_sha256": solution_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        idem = hashlib.sha256(b"cathedral:v2:shadow-v1-submit:\0" + idem_body).hexdigest()
+        rid = "shv1_" + new_uuid().replace("-", "")
+
+        def _tx(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO v2_shadow_v1_submits("
+                "id, idempotency_key, miner_hotkey, challenge_id, card_id, "
+                "solution_sha256, solution_bytes, solution_cid, request_sha256, "
+                "content_type, status, submitted_at, received_at_iso, signature, "
+                "source, form_json, headers_json"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?)",
+                (
+                    rid,
+                    idem,
+                    miner_hotkey,
+                    challenge_id,
+                    card_id,
+                    solution_sha256,
+                    int(solution_bytes),
+                    solution_cid,
+                    request_sha256,
+                    content_type,
+                    submitted_at,
+                    received_at_iso,
+                    signature,
+                    source,
+                    form_json,
+                    headers_json,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM v2_shadow_v1_submits WHERE idempotency_key=? LIMIT 1",
+                (idem,),
+            ).fetchone()
+            try:
+                keys = row.keys()
+                out = {k: row[k] for k in keys}
+            except Exception:
+                out = dict(row)
+            return out, bool(out.get("id") == rid)
+
+        return v2_store.write(_tx)
+
+    @app.post("/v2/shadow/v1/agents/submit")
+    async def shadow_v1_submit_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
+    ):
+        """Storage-only mirror target for live V1 submit traffic.
+
+        This accepts the existing V1 submit form and V1 hotkey signature, stores
+        the solution body as a beta blob plus an idempotent receipt row in the
+        isolated V2 store, and returns quickly. It never writes V1 scoring,
+        rewards, payout, or validator-weight ledgers.
+        """
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        raw_body = await request.body()
+        request_sha = hashlib.sha256(raw_body).hexdigest()
+        try:
+            form = await request.form()
+        except Exception:
+            raise HTTPException(400, "invalid_v1_submit_form")
+
+        def _field(name: str, default: str = "") -> str:
+            value = form.get(name, default)
+            if value is None:
+                return default
+            if hasattr(value, "filename"):
+                raise HTTPException(400, f"invalid_{name}")
+            return str(value)
+
+        card_id = _field("card_id")
+        challenge_id = _field("challenge_id")
+        dimacs_solution = _field("dimacs_solution")
+        submitted_at = _field("submitted_at", x_cathedral_submitted_at or _now_iso_ms())
+        display_name = _field("display_name", "")
+        if card_id != _FAMILY:
+            raise HTTPException(400, f"only card_id={_FAMILY} accepted")
+        if not challenge_id or not dimacs_solution:
+            raise HTTPException(400, "missing_challenge_id_or_dimacs_solution")
+
+        solution_bytes = dimacs_solution.encode("utf-8")
+        if v2_shadow_v1_max_solution_bytes > 0 and len(solution_bytes) > v2_shadow_v1_max_solution_bytes:
+            raise HTTPException(413, "solution_too_large")
+        sol_sha = hashlib.sha256(solution_bytes).hexdigest()
+        submitted_at = _verify_hotkey_claim(
+            x_cathedral_hotkey,
+            x_cathedral_signature,
+            submitted_at,
+            challenge_id=challenge_id,
+            dimacs_solution_sha256=sol_sha,
+            alt_submitted_at=x_cathedral_submitted_at or None,
+            allow_fallback_shapes=False,
+        )
+        mark_verified_hotkey(request, x_cathedral_hotkey)
+
+        put = v2_blob_store.put(solution_bytes, kind="v1_submit_solution")
+        received_at_iso = _now_iso_ms()
+        source = (request.headers.get("x-cathedral-shadow-source") or "mirror").strip()[:64]
+        content_type = (request.headers.get("content-type") or "").strip()[:256]
+        form_json = json.dumps(
+            {
+                "card_id": card_id,
+                "challenge_id": challenge_id,
+                "display_name": display_name,
+                "submitted_at": submitted_at,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        headers_json = json.dumps(
+            {
+                "content_type": content_type,
+                "content_length": request.headers.get("content-length", ""),
+                "shadow_source": source,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        row, inserted = _v2_shadow_v1_admit(
+            miner_hotkey=x_cathedral_hotkey,
+            challenge_id=challenge_id,
+            card_id=card_id,
+            solution_sha256=put.sha256,
+            solution_bytes=put.size,
+            solution_cid=put.cid,
+            request_sha256=request_sha,
+            content_type=content_type,
+            submitted_at=submitted_at,
+            received_at_iso=received_at_iso,
+            signature=x_cathedral_signature,
+            source=source,
+            form_json=form_json,
+            headers_json=headers_json,
+        )
+        return JSONResponse(
+            _v2_shadow_v1_receipt(row, inserted=inserted),
+            status_code=202 if inserted else 200,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/shadow/v1/agents/submit/receipts/{receipt_id}")
+    def shadow_v1_submit_receipt_v2(receipt_id: str):
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        rows = v2_store.query(
+            "SELECT * FROM v2_shadow_v1_submits WHERE id=? LIMIT 1",
+            (receipt_id,),
+        )
+        if not rows:
+            raise HTTPException(404, "receipt_not_found")
+        return JSONResponse(
+            _v2_shadow_v1_receipt(_v2_shadow_row_dict(rows[0])),
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/shadow/v1/agents/submit/metrics")
+    def shadow_v1_submit_metrics_v2():
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        by_status = v2_store.query(
+            "SELECT status, COUNT(*) AS n, COALESCE(SUM(solution_bytes), 0) AS bytes "
+            "FROM v2_shadow_v1_submits GROUP BY status ORDER BY status"
+        )
+        totals = v2_store.query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(solution_bytes), 0) AS bytes, "
+            "MIN(received_at_iso) AS first_received_at, MAX(received_at_iso) AS last_received_at "
+            "FROM v2_shadow_v1_submits"
+        )[0]
+        recent = v2_store.query(
+            "SELECT id, miner_hotkey, challenge_id, solution_bytes, received_at_iso, source "
+            "FROM v2_shadow_v1_submits ORDER BY received_at_iso DESC LIMIT 25"
+        )
+        now = datetime.now(timezone.utc)
+        windows = {}
+        for label, secs in (("1m", 60), ("5m", 300), ("1h", 3600)):
+            since = (now - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%S.") + f"{(now - timedelta(seconds=secs)).microsecond // 1000:03d}Z"
+            row = v2_store.query(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(solution_bytes), 0) AS bytes "
+                "FROM v2_shadow_v1_submits WHERE received_at_iso > ?",
+                (since,),
+            )[0]
+            windows[label] = {"count": int(row["n"] or 0), "bytes": int(row["bytes"] or 0)}
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.shadow_v1_submit_metrics.v1",
+                "shadow": True,
+                "total": {"count": int(totals["n"] or 0), "bytes": int(totals["bytes"] or 0)},
+                "first_received_at": totals["first_received_at"],
+                "last_received_at": totals["last_received_at"],
+                "windows": windows,
+                "by_status": [
+                    {"status": str(r["status"]), "count": int(r["n"] or 0), "bytes": int(r["bytes"] or 0)}
+                    for r in by_status
+                ],
+                "recent": [_v2_shadow_row_dict(r) for r in recent],
+            },
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
 
     @app.post("/v2/blobs/solutions")
     async def upload_solution_blob_v2(

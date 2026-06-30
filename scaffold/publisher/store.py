@@ -546,6 +546,32 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_solution_manifests_hotkey_challenge
             ON solution_manifests(miner_hotkey, challenge_id);
     """),
+    ("0037_v2_shadow_v1_submits", """
+        CREATE TABLE IF NOT EXISTS v2_shadow_v1_submits (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            solution_sha256 TEXT NOT NULL,
+            solution_bytes INTEGER NOT NULL DEFAULT 0,
+            solution_cid TEXT NOT NULL,
+            request_sha256 TEXT NOT NULL DEFAULT '',
+            content_type TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'received',
+            rejection_reason TEXT,
+            submitted_at TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'mirror',
+            form_json TEXT NOT NULL DEFAULT '{}',
+            headers_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_received
+            ON v2_shadow_v1_submits(received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_hotkey_challenge
+            ON v2_shadow_v1_submits(miner_hotkey, challenge_id);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -994,6 +1020,32 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON solution_manifests(status, received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_solution_manifests_hotkey_challenge
             ON solution_manifests(miner_hotkey, challenge_id);
+    """),
+    ("0037_v2_shadow_v1_submits", """
+        CREATE TABLE IF NOT EXISTS v2_shadow_v1_submits (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            solution_sha256 TEXT NOT NULL,
+            solution_bytes BIGINT NOT NULL DEFAULT 0,
+            solution_cid TEXT NOT NULL,
+            request_sha256 TEXT NOT NULL DEFAULT '',
+            content_type TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'received',
+            rejection_reason TEXT,
+            submitted_at TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'mirror',
+            form_json TEXT NOT NULL DEFAULT '{}',
+            headers_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_received
+            ON v2_shadow_v1_submits(received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_hotkey_challenge
+            ON v2_shadow_v1_submits(miner_hotkey, challenge_id);
     """),
 ]
 
