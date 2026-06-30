@@ -310,4 +310,51 @@ const cacheBust = await handleRequest(new Request(
 assert.equal(cacheBust.status, 400);
 assert.match(await cacheBust.text(), /unsupported_cache_query_param/);
 
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (request) => {
+    calls.push({
+      url: request.url,
+      method: request.method,
+      body: request.method === "POST" ? await request.clone().text() : "",
+      shadowSource: request.headers.get("x-cathedral-shadow-source"),
+    });
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  };
+  try {
+    const waits = [];
+    const resp = await handleRequest(
+      new Request("https://api.cathedral.computer/v1/agents/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "card_id=synthetic_boolean_v1&challenge_id=pm-test&dimacs_solution=s+SATISFIABLE",
+      }),
+      {
+        SUBMIT_ORIGIN: "https://submit-origin.example",
+        SHADOW_V1_MIRROR_ENABLED: "true",
+        SHADOW_V1_MIRROR_ORIGIN: "https://v2-shadow.example",
+        SHADOW_V1_MIRROR_SAMPLE_PERCENT: "100",
+        SHADOW_V1_MIRROR_SOURCE: "test-edge-mirror",
+      },
+      { waitUntil(promise) { waits.push(promise); } },
+    );
+    assert.equal(resp.status, 200);
+    await Promise.all(waits);
+    assert.equal(calls.length, 2);
+    const originCall = calls.find((call) => call.url === "https://submit-origin.example/v1/agents/submit");
+    const shadowCall = calls.find((call) => call.url === "https://v2-shadow.example/v2/shadow/v1/agents/submit");
+    assert.ok(originCall);
+    assert.ok(shadowCall);
+    assert.equal(shadowCall.method, "POST");
+    assert.equal(shadowCall.body, originCall.body);
+    assert.equal(shadowCall.shadowSource, "test-edge-mirror");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 console.log("edge-router worker tests passed");

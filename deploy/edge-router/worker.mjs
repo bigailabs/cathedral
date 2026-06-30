@@ -229,6 +229,18 @@ function originTimeoutMs(env, key, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function envBool(env, key, fallback = false) {
+  const raw = env && env[key];
+  if (typeof raw === "boolean") return raw;
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(raw).trim().toLowerCase());
+}
+
+function envNumber(env, key, fallback) {
+  const value = Number(env && env[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 export function originTimeoutForRoute(env, role, path, cacheable = false) {
   if (role === "submit") {
     return originTimeoutMs(env, "SUBMIT_ORIGIN_TIMEOUT_MS", 10000);
@@ -244,6 +256,43 @@ export function originTimeoutForRoute(env, role, path, cacheable = false) {
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
+}
+
+function shouldMirrorV1Submit(env, route, request) {
+  if (!envBool(env, "SHADOW_V1_MIRROR_ENABLED", false)) return false;
+  if (!route || route.role !== "submit" || route.path !== "/v1/agents/submit") return false;
+  if (request.method !== "POST") return false;
+  if (!envUrl(env, "SHADOW_V1_MIRROR_ORIGIN", "")) return false;
+  const pct = Math.max(0, Math.min(100, envNumber(env, "SHADOW_V1_MIRROR_SAMPLE_PERCENT", 100)));
+  if (pct <= 0) return false;
+  if (pct >= 100) return true;
+  return Math.random() * 100 < pct;
+}
+
+function shadowV1MirrorRequest(request, env) {
+  const mirrorBase = envUrl(env, "SHADOW_V1_MIRROR_ORIGIN", "");
+  const url = new URL(mirrorBase);
+  url.pathname = "/v2/shadow/v1/agents/submit";
+  url.search = "";
+  const headers = cloneHeaders(request.headers);
+  headers.set("X-Cathedral-Shadow-Source", envUrl(env, "SHADOW_V1_MIRROR_SOURCE", "edge-mirror-v1"));
+  const init = {
+    method: "POST",
+    headers,
+    body: request.body,
+    redirect: "manual",
+  };
+  init.duplex = "half";
+  return new Request(url.toString(), init);
+}
+
+async function mirrorV1Submit(request, env) {
+  try {
+    const timeoutMs = originTimeoutMs(env, "SHADOW_V1_MIRROR_TIMEOUT_MS", 2500);
+    await fetchWithTimeout(shadowV1MirrorRequest(request, env), timeoutMs);
+  } catch {
+    // Shadow mirroring must never affect the authoritative submit response.
+  }
 }
 
 export function cachedFresh(response, now = nowSeconds()) {
@@ -392,7 +441,11 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
   const resolveOverride = route.role === "read"
     ? envUrl(env, "READ_ORIGIN_RESOLVE_OVERRIDE", "")
     : envUrl(env, "SUBMIT_ORIGIN_RESOLVE_OVERRIDE", "");
-  const originReq = originRequest(request, originBase, { hostHeader: originHost });
+  const mirrorSource = shouldMirrorV1Submit(env, route, request) ? request.clone() : null;
+  const originReq = originRequest(mirrorSource ? request.clone() : request, originBase, { hostHeader: originHost });
+  if (mirrorSource) {
+    ctx.waitUntil(mirrorV1Submit(mirrorSource, env));
+  }
 
   if (route.role === "read" && isCacheableRead(request, route.path)) {
     return fetchReadThroughCache(
