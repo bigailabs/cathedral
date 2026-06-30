@@ -2,8 +2,7 @@
 
 Prerelease candidate for Cathedral V2 PM-native bitset submit beta.
 
-Code commit deployed to V2 beta: `ed1b9ec Fix V2 bitset scoring review findings`  
-Release notes commit: `0f7d409 Document V2 bitset beta verification`
+Code commit deployed to V2 beta: `ed1b9ec Fix V2 bitset scoring review findings`
 
 ## Summary
 
