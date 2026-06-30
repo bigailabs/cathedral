@@ -6,6 +6,8 @@ Code commit deployed to V2 beta: `ed1b9ec Fix V2 bitset scoring review findings`
 
 ## Summary
 
+This prerelease is **preparation for the future V2 submit path**. It is ready for miner testing on the V2 beta service, but it does **not** change current rewards, payouts, or V1 validator weights.
+
 This release adds an isolated V2 submit path for PM SAT that avoids full DIMACS solution bodies in the hot path.
 
 ```text
@@ -18,6 +20,32 @@ V2 shadow weights include the verified event
 ```
 
 No current V1 rewards, payouts, or validator weights are affected.
+
+## Ready for testing
+
+Miner-facing test note:
+
+```text
+docs/V2_BITSET_READY_FOR_TESTING.md
+```
+
+Quick smoke:
+
+```bash
+python3 scripts/v2_bitset_miner_e2e.py \
+  --base https://v2-beta.cathedral.computer \
+  --limit 1
+```
+
+Expected success:
+
+```text
+E2E_OK
+status=verified
+shadow_weight=1.0
+```
+
+This is a V2 shadow/beta protocol test only. It prepares miners and Cathedral for future V2 work submission, but it is not yet a production reward path.
 
 ## New beta endpoints
 
