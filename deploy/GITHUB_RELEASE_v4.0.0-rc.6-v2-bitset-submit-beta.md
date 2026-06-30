@@ -2,6 +2,8 @@
 
 Prerelease candidate for Cathedral V2 PM-native bitset submit beta.
 
+Release commit: `ed1b9ec Fix V2 bitset scoring review findings`
+
 ## Summary
 
 This release adds an isolated V2 submit path for PM SAT that avoids full DIMACS solution bodies in the hot path.
@@ -60,6 +62,12 @@ V2 bitset submit admits only cheap-valid submissions:
 
 Invalid shape/token/signature/witness submissions are rejected before a `v2_submit_events` row is written.
 
+Review-fix notes:
+
+- V2 shadow scoring dedupes by `(miner_hotkey, challenge_id)` across manifest and bitset sources, preferring bitset events so one PM challenge cannot double-count.
+- V2 audit bundles include both manifest receipts and bitset events with source-tagged status counts.
+- `/v2/agents/submit-bitset` is covered by the submit hot-path gate and has an explicit small body cap before JSON parsing.
+
 ## Load-test finding carried forward
 
 Earlier V2 live-adjacent probes found:
@@ -77,18 +85,57 @@ scripts/v2_bitset_miner_e2e.py
 
 Runs the miner-facing bitset flow against V2 beta and verifies shadow weights.
 
-## Release gates
+## Verification
 
-Do not promote this prerelease until all pass:
+Review/fix loop completed for the reported scoring/audit/backpressure findings.
 
-- [ ] review/fix loop complete, including Claude review
-- [ ] focused V2 tests pass
-- [ ] broader submit regression tests pass
-- [ ] V2 beta deployed from clean commit
-- [ ] live V2 bitset miner E2E passes
-- [ ] V2 shadow weights include E2E miner
-- [ ] live V1 submit/weights remain healthy
-- [ ] shadow probes default disabled unless explicitly canarying
+Local checks:
+
+```text
+py_compile passed
+65 passed
+```
+
+Live beta E2E after review fixes:
+
+```text
+python3 scripts/v2_bitset_miner_e2e.py --base https://v2-beta.cathedral.computer --limit 1 --solver cadical153
+
+E2E_OK
+receipt_id=5134b754-acce-4645-a73e-75d902e4ee80
+status=verified
+shadow_weight=1.0
+raw_score=1.0
+admit_ms=193.0
+```
+
+Live audit check:
+
+```text
+/v2/audit/epochs/495232
+count=1
+status_counts={"bitset:verified": 1}
+has_receipt=true
+```
+
+Live health after deploy:
+
+```text
+V1 submit: 200
+V1 api_ready: 200
+V1 weights: 200
+V2 live: 200
+V2 shadow metadata probe: last_1m.count=0
+```
+
+Config verified on `cathedral-v2-beta`:
+
+```text
+CATHEDRAL_V2_DATABASE_URL: set
+CATHEDRAL_V2_SUBMIT_TOKEN_SECRET: set
+CATHEDRAL_V2_SUBMIT_BITSET_ENABLED=true
+CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS=300
+```
 
 ## Non-goals
 
