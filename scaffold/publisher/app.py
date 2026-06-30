@@ -50,6 +50,7 @@ from .sat_solution import verify_dimacs_solution
 from . import submit_admission
 from . import solution_manifest
 from . import v2_pipeline
+from . import v2_bitset_submit
 from . import blob_store as blob_store_mod
 from .per_hotkey_limit import (
     ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
@@ -516,6 +517,9 @@ def build_app(
     v2_shadow_v1_enabled = _env_bool("CATHEDRAL_V2_SHADOW_V1_ENABLED", False)
     v2_shadow_v1_max_solution_bytes = _env_int(
         "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
+    v2_submit_bitset_enabled = _env_bool("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", False)
+    v2_submit_token_secret = os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip()
+    v2_submit_token_ttl_secs = max(1, _env_int("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", 300))
     v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
     v2_worker_batch_size = max(1, _env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8))
     v2_worker_interval_secs = max(
@@ -1290,6 +1294,7 @@ def build_app(
             # serve from the read role as well as submit (miners poll their receipt).
             "/v1/agents/receipts/",
             "/v2/agents/submit-manifest/receipts/",
+            "/v2/agents/submit-bitset/receipts/",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
             "/v2/validator/weights/next",
@@ -1309,6 +1314,7 @@ def build_app(
             # that receipt so miners don't need a second host for status polling.
             "/v1/agents/receipts/",
             "/v2/agents/submit-manifest/receipts/",
+            "/v2/agents/submit-bitset/receipts/",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
             "/v2/validator/weights/next",
@@ -1318,6 +1324,7 @@ def build_app(
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
             "/v2/agents/submit-manifest",
+            "/v2/agents/submit-bitset",
             "/v2/blobs/solutions",
             "/v2/admin/verify/tick",
             "/v2/shadow/v1/agents/submit",
@@ -5310,6 +5317,32 @@ def build_app(
             effective_limit = pm.assignment_page_limit(limit)
             items = pm.miner_instance_set(
                 x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
+            if v2_submit_bitset_enabled:
+                if not v2_submit_token_secret:
+                    raise HTTPException(503, "v2_submit_token_secret_missing")
+                expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                for item in items:
+                    tier_i = int(item["tier"])
+                    seq_i = int(item["seq"])
+                    cid, cnf_text, _ = pm.generate_instance(
+                        x_cathedral_hotkey, epoch, tier_i, seq_i)
+                    if cid != item["challenge_id"]:
+                        raise HTTPException(500, "v2_challenge_generation_mismatch")
+                    cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                    item["cnf_sha256"] = cnf_sha
+                    item["assignment_encoding"] = "bitset/v1"
+                    item["submit_token"] = v2_bitset_submit.mint_submit_token(
+                        secret=v2_submit_token_secret,
+                        miner_hotkey=x_cathedral_hotkey,
+                        challenge_id=cid,
+                        epoch=epoch,
+                        tier=tier_i,
+                        seq=seq_i,
+                        nvars=int(item["n_vars"]),
+                        cnf_sha256=cnf_sha,
+                        expires_at=expires_at,
+                    )
+                    item["submit_token_expires_at"] = expires_at
             return {
                 "family_id": _FAMILY,
                 "kind": "per_miner_v2",
@@ -5323,7 +5356,9 @@ def build_app(
                 "next_offset": offset + effective_limit,
                 "count": len(items),
                 "items": items,
-                "submit_path": "/v2/agents/submit-manifest",
+                "submit_path": "/v2/agents/submit-bitset" if v2_submit_bitset_enabled else "/v2/agents/submit-manifest",
+                "submit_bitset_path": "/v2/agents/submit-bitset",
+                "manifest_submit_path": "/v2/agents/submit-manifest",
                 "blob_upload_path": "/v2/blobs/solutions",
                 "cnf_path": "/v2/synthetic-boolean/per-miner/cnf",
                 "cnf_params": ["challenge_id", "tier", "seq"],
@@ -5364,16 +5399,39 @@ def build_app(
                 x_cathedral_hotkey, epoch, tier_i, seq_i)
             if cid != challenge_id:
                 raise HTTPException(404, "challenge_id_not_in_miner_set")
+            headers = {
+                "X-Cathedral-V2": "true",
+                "X-Perminer-Challenge-Id": cid,
+                "X-Perminer-Tier": str(tier_i),
+                "X-Perminer-Seq": str(seq_i),
+                "X-Perminer-Epoch": str(epoch),
+            }
+            if v2_submit_bitset_enabled:
+                if not v2_submit_token_secret:
+                    raise HTTPException(503, "v2_submit_token_secret_missing")
+                cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                headers.update({
+                    "X-Cathedral-Submit-Path": "/v2/agents/submit-bitset",
+                    "X-Cathedral-Submit-Token": v2_bitset_submit.mint_submit_token(
+                        secret=v2_submit_token_secret,
+                        miner_hotkey=x_cathedral_hotkey,
+                        challenge_id=cid,
+                        epoch=epoch,
+                        tier=tier_i,
+                        seq=seq_i,
+                        nvars=pm.shape_for(tier_i)[0],
+                        cnf_sha256=cnf_sha,
+                        expires_at=expires_at,
+                    ),
+                    "X-Cathedral-Submit-Token-Expires-At": expires_at,
+                    "X-Cathedral-Assignment-Encoding": "bitset/v1",
+                    "X-Cathedral-CNF-Sha256": cnf_sha,
+                })
             return PlainTextResponse(
                 cnf_text,
                 media_type="text/plain; charset=utf-8",
-                headers={
-                    "X-Cathedral-V2": "true",
-                    "X-Perminer-Challenge-Id": cid,
-                    "X-Perminer-Tier": str(tier_i),
-                    "X-Perminer-Seq": str(seq_i),
-                    "X-Perminer-Epoch": str(epoch),
-                },
+                headers=headers,
             )
 
     def _v2_shadow_row_dict(row: Any) -> dict[str, Any]:
@@ -5855,6 +5913,137 @@ def build_app(
                 "sha256": put.sha256,
                 "bytes": put.size,
             },
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.post("/v2/agents/submit-bitset")
+    async def submit_bitset_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(...),
+    ):
+        """Tiny PM-native V2 submit path.
+
+        This path is beta/shadow-only. It admits only cheap-valid per-miner SAT
+        assignments: token-bound challenge, hotkey signature, exact bitset shape,
+        and SAT witness verification all pass before a durable event is written.
+        """
+        if not (solution_manifest_enabled and v2_submit_bitset_enabled):
+            raise HTTPException(404, "v2_submit_bitset_not_enabled")
+        if not v2_submit_token_secret:
+            raise HTTPException(503, "v2_submit_token_secret_missing")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "invalid_json_submit_bitset")
+        try:
+            submit = v2_bitset_submit.normalize_submit_body(
+                body,
+                miner_hotkey=x_cathedral_hotkey,
+                submitted_at=x_cathedral_submitted_at,
+                card_id=_FAMILY,
+            )
+        except v2_bitset_submit.BitsetSubmitError as exc:
+            raise HTTPException(400, exc.reason)
+
+        ts = _parse_iso(x_cathedral_submitted_at)
+        if ts is None or abs(time.time() - ts) > _SKEW_SECS:
+            raise HTTPException(400, "submitted_at outside acceptable clock-skew window")
+        msg = v2_bitset_submit.canonical_submit_bytes(submit)
+        if not verifier.verify(x_cathedral_hotkey, msg, x_cathedral_signature):
+            raise HTTPException(401, "invalid hotkey signature")
+        mark_verified_hotkey(request, x_cathedral_hotkey)
+
+        try:
+            token_payload = v2_bitset_submit.verify_submit_token(
+                submit["submit_token"],
+                secret=v2_submit_token_secret,
+                miner_hotkey=x_cathedral_hotkey,
+                challenge_id=submit["challenge_id"],
+            )
+        except v2_bitset_submit.BitsetSubmitError as exc:
+            raise HTTPException(400, exc.reason)
+
+        from . import per_miner as pm
+        with v2_pipeline.v2_pm_env():
+            if not pm.perminer_enabled():
+                raise HTTPException(404, "v2_per_miner_not_enabled")
+            _require_perminer_ready(pm)
+            tier_i = int(token_payload["tier"])
+            seq_i = int(token_payload["seq"])
+            epoch_i = int(token_payload["epoch"])
+            resolved = pm.resolve_tier_seq_for(
+                x_cathedral_hotkey,
+                epoch_i,
+                submit["challenge_id"],
+                tier=tier_i,
+                seq=seq_i,
+            )
+            if resolved is None:
+                raise HTTPException(400, "challenge_id_not_in_miner_set")
+            cid, cnf_text, _ = pm.generate_instance(
+                x_cathedral_hotkey, epoch_i, tier_i, seq_i)
+            if cid != submit["challenge_id"]:
+                raise HTTPException(400, "challenge_id_not_in_miner_set")
+            cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+            if cnf_sha != str(token_payload["cnf_sha256"]):
+                raise HTTPException(400, "submit_token_cnf_mismatch")
+            nvars = int(token_payload["nvars"])
+            if nvars != int(pm.shape_for(tier_i)[0]):
+                raise HTTPException(400, "submit_token_shape_mismatch")
+            try:
+                assignment_raw, assignment = v2_bitset_submit.decode_assignment_b64(
+                    submit["assignment_b64"], nvars=nvars)
+            except v2_bitset_submit.BitsetSubmitError as exc:
+                raise HTTPException(400, exc.reason)
+            ok, reason = v2_pipeline.verify_assignment_literals(cnf_text, assignment)
+            if not ok:
+                raise HTTPException(400, reason or "witness_check_failed")
+            weight = float(pm.weight_for(tier_i))
+
+        received_at = _now_iso_ms()
+        assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
+        details = {
+            "schema": "cathedral.v2.submit_bitset_verifier_details.v1",
+            "challenge_id": submit["challenge_id"],
+            "miner_hotkey": x_cathedral_hotkey,
+            "epoch": epoch_i,
+            "tier": tier_i,
+            "seq": seq_i,
+            "cnf_sha256": cnf_sha,
+            "assignment_sha256": assignment_sha,
+            "verified_at": received_at,
+        }
+        row, inserted = v2_bitset_submit.admit_verified_event(
+            v2_store,
+            submit=submit,
+            token_payload=token_payload,
+            signature=x_cathedral_signature,
+            assignment_raw=assignment_raw,
+            received_at_iso=received_at,
+            weighted_score=weight,
+            answer_hash=assignment_sha,
+            verifier_details_hash=hashlib.sha256(
+                json.dumps(details, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            eligibility_status="unknown_beta",
+        )
+        return JSONResponse(
+            v2_bitset_submit.receipt_payload(row, inserted=inserted),
+            status_code=202 if inserted else 200,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/agents/submit-bitset/receipts/{receipt_id}")
+    def submit_bitset_receipt_v2(receipt_id: str):
+        if not (solution_manifest_enabled and v2_submit_bitset_enabled):
+            raise HTTPException(404, "v2_submit_bitset_not_enabled")
+        row = v2_bitset_submit.get_receipt(v2_store, receipt_id)
+        if row is None:
+            raise HTTPException(404, "receipt_not_found")
+        return JSONResponse(
+            v2_bitset_submit.receipt_payload(row),
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 

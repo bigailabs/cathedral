@@ -341,27 +341,40 @@ def process_batch(
 
 
 def score_totals(store: Store, *, since_iso: str | None = None, epoch: int | None = None) -> dict[str, float]:
-    clauses = ["status=?"]
-    params: list[Any] = [STATUS_VERIFIED]
-    if since_iso:
-        clauses.append("verified_at_iso > ?")
-        params.append(since_iso)
-    if epoch is not None:
-        clauses.append("epoch=?")
-        params.append(int(epoch))
-    rows = store.query(
-        "SELECT miner_hotkey, SUM(weighted_score) AS score "
-        "FROM solution_manifests WHERE " + " AND ".join(clauses) +
-        " GROUP BY miner_hotkey",
-        tuple(params),
-    )
-    return {str(r["miner_hotkey"]): float(r["score"] or 0.0) for r in rows}
+    def _clauses() -> tuple[list[str], list[Any]]:
+        clauses = ["status=?"]
+        params: list[Any] = [STATUS_VERIFIED]
+        if since_iso:
+            clauses.append("verified_at_iso > ?")
+            params.append(since_iso)
+        if epoch is not None:
+            clauses.append("epoch=?")
+            params.append(int(epoch))
+        return clauses, params
+
+    totals: dict[str, float] = {}
+    for table in ("solution_manifests", "v2_submit_events"):
+        clauses, params = _clauses()
+        rows = store.query(
+            "SELECT miner_hotkey, SUM(weighted_score) AS score "
+            f"FROM {table} WHERE " + " AND ".join(clauses) +
+            " GROUP BY miner_hotkey",
+            tuple(params),
+        )
+        for r in rows:
+            hk = str(r["miner_hotkey"])
+            totals[hk] = totals.get(hk, 0.0) + float(r["score"] or 0.0)
+    return totals
 
 
 def receipt_counts(store: Store) -> dict[str, int]:
-    rows = store.query(
-        "SELECT status, COUNT(*) AS n FROM solution_manifests GROUP BY status")
-    return {str(r["status"]): int(r["n"] or 0) for r in rows}
+    counts: dict[str, int] = {}
+    for table, prefix in (("solution_manifests", "manifest"), ("v2_submit_events", "bitset")):
+        rows = store.query(f"SELECT status, COUNT(*) AS n FROM {table} GROUP BY status")
+        for r in rows:
+            key = f"{prefix}:{r['status']}"
+            counts[key] = int(r["n"] or 0)
+    return counts
 
 
 def build_shadow_weight_vector(

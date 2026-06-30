@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 
 from scaffold.publisher import solution_manifest
 from scaffold.publisher import v2_pipeline
+from scaffold.publisher import v2_bitset_submit
 from scaffold.publisher import per_miner as pm
 from scaffold.publisher.app import build_app
 from scaffold.publisher.auth import canonical_claim_bytes
@@ -95,6 +96,22 @@ def _headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[str, st
     }
 
 
+def _bitset_headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[str, str]:
+    ts = submitted_at or _now_iso()
+    submit = v2_bitset_submit.normalize_submit_body(
+        body,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=ts,
+        card_id="synthetic_boolean_v1",
+    )
+    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+    return {
+        "X-Cathedral-Hotkey": kp.ss58_address,
+        "X-Cathedral-Signature": sig,
+        "X-Cathedral-Submitted-At": ts,
+    }
+
+
 def _v1_submit_headers(kp, *, challenge_id: str, solution: str,
                        submitted_at: str | None = None) -> dict[str, str]:
     ts = submitted_at or _now_iso()
@@ -117,13 +134,17 @@ def _v1_submit_headers(kp, *, challenge_id: str, solution: str,
 
 
 def _build(tmp_path, monkeypatch, *, enabled: bool = True, role: str = "submit",
-           separate_v2: bool = False, shadow_v1: bool = False):
+           separate_v2: bool = False, shadow_v1: bool = False,
+           bitset_submit: bool = False):
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", role)
     monkeypatch.setenv("CATHEDRAL_RATELIMIT_RPM", "0")
     monkeypatch.setenv("CATHEDRAL_V2_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("CATHEDRAL_V2_SHADOW_V1_ENABLED", "true" if shadow_v1 else "false")
     monkeypatch.setenv("CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", "1000000")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", "true" if bitset_submit else "false")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", "300")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_DIR", str(tmp_path / "v2_blobs"))
     monkeypatch.setenv("CATHEDRAL_V2_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("CATHEDRAL_CNF_TOKEN_SECRET", "test-secret")
@@ -298,6 +319,114 @@ def test_solution_manifest_v2_serves_prefixed_pm_challenges_and_cnf(tmp_path, mo
     assert cnf.status_code == 200
     assert "p cnf" in cnf.text
     assert cnf.headers["x-cathedral-v2"] == "true"
+
+
+def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, monkeypatch):
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+    kp = _keypair("//BitsetSubmitE2E")
+
+    board = client.get(
+        "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+        headers=_read_headers(kp),
+    )
+    assert board.status_code == 200
+    payload = board.json()
+    assert payload["submit_path"] == "/v2/agents/submit-bitset"
+    item = payload["items"][0]
+    assert item["assignment_encoding"] == "bitset/v1"
+    assert item["submit_token"]
+    assert item["cnf_sha256"]
+
+    cnf = client.get(
+        f"/v2/synthetic-boolean/per-miner/cnf?challenge_id={item['challenge_id']}&tier={item['tier']}&seq={item['seq']}",
+        headers=_read_headers(kp),
+    )
+    assert cnf.status_code == 200
+    assert cnf.headers["x-cathedral-submit-path"] == "/v2/agents/submit-bitset"
+    assert cnf.headers["x-cathedral-assignment-encoding"] == "bitset/v1"
+
+    with v2_pipeline.v2_pm_env():
+        _cid, _cnf, assignment = pm.generate_instance(
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+    assignment_b64 = base64.b64encode(v2_pipeline.encode_bitset_assignment(assignment)).decode("ascii")
+    submitted_at = _now_iso()
+    body = {
+        "schema": v2_bitset_submit.SCHEMA,
+        "card_id": _FAMILY,
+        "challenge_id": item["challenge_id"],
+        "submit_token": item["submit_token"],
+        "assignment_encoding": "bitset/v1",
+        "assignment_b64": assignment_b64,
+    }
+    first = client.post(
+        "/v2/agents/submit-bitset",
+        json=body,
+        headers=_bitset_headers(kp, body, submitted_at=submitted_at),
+    )
+    second = client.post(
+        "/v2/agents/submit-bitset",
+        json=body,
+        headers=_bitset_headers(kp, body, submitted_at=submitted_at),
+    )
+    assert first.status_code == 202
+    assert second.status_code == 200
+    receipt = first.json()
+    assert receipt["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
+    assert receipt["status"] == "verified"
+    assert receipt["weighted_score"] == item["difficulty_weight"]
+    assert second.json()["receipt_id"] == receipt["receipt_id"]
+    assert second.json()["idempotent_replay"] is True
+
+    fetched = client.get(receipt["receipt_url"])
+    assert fetched.status_code == 200
+    assert fetched.json()["receipt_id"] == receipt["receipt_id"]
+
+    weights = client.get("/v2/validator/weights/next")
+    assert weights.status_code == 200
+    vector = weights.json()
+    row = next((w for w in vector["weights"] if w["miner_hotkey"] == kp.ss58_address), None)
+    assert row is not None
+    assert row["weight"] == 1.0
+    assert row["raw_score"] == item["difficulty_weight"]
+    assert vector["policy_metadata"]["receipt_counts"]["bitset:verified"] == 1
+
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    assert v2_store.query("SELECT COUNT(*) AS n FROM v2_submit_events")[0]["n"] == 1
+    assert v2_store.query("SELECT COUNT(*) AS n FROM solution_manifests")[0]["n"] == 0
+
+
+def test_solution_manifest_v2_submit_bitset_rejects_bad_shape_without_row(tmp_path, monkeypatch):
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+    kp = _keypair("//BitsetSubmitBadShape")
+    board = client.get(
+        "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+        headers=_read_headers(kp),
+    )
+    assert board.status_code == 200
+    item = board.json()["items"][0]
+    body = {
+        "schema": v2_bitset_submit.SCHEMA,
+        "card_id": _FAMILY,
+        "challenge_id": item["challenge_id"],
+        "submit_token": item["submit_token"],
+        "assignment_encoding": "bitset/v1",
+        "assignment_b64": base64.b64encode(b"short").decode("ascii"),
+    }
+    r = client.post(
+        "/v2/agents/submit-bitset",
+        json=body,
+        headers=_bitset_headers(kp, body),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "bitset_size_mismatch"
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    assert v2_store.query("SELECT COUNT(*) AS n FROM v2_submit_events")[0]["n"] == 0
 
 
 def test_solution_manifest_v2_accepts_signed_manifest_and_receipt(tmp_path, monkeypatch):

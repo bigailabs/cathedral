@@ -596,6 +596,39 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_hotkey_challenge
             ON v2_shadow_v1_submit_meta(miner_hotkey, challenge_id);
     """),
+    ("0039_v2_submit_events", """
+        CREATE TABLE IF NOT EXISTS v2_submit_events (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            cnf_sha256 TEXT NOT NULL,
+            assignment_encoding TEXT NOT NULL,
+            assignment_sha256 TEXT NOT NULL,
+            assignment_b64 TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'verified',
+            rejection_reason TEXT,
+            eligibility_status TEXT NOT NULL DEFAULT 'unknown_beta',
+            received_at_iso TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            verified_at_iso TEXT,
+            signature TEXT NOT NULL,
+            submit_token_id TEXT NOT NULL DEFAULT '',
+            weighted_score REAL NOT NULL DEFAULT 0.0,
+            answer_hash TEXT NOT NULL DEFAULT '',
+            verifier_details_hash TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_submit_events_status_received
+            ON v2_submit_events(status, received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_v2_submit_events_hotkey_challenge
+            ON v2_submit_events(miner_hotkey, challenge_id);
+        CREATE INDEX IF NOT EXISTS idx_v2_submit_events_epoch
+            ON v2_submit_events(epoch, status);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1094,6 +1127,39 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON v2_shadow_v1_submit_meta(received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_hotkey_challenge
             ON v2_shadow_v1_submit_meta(miner_hotkey, challenge_id);
+    """),
+    ("0039_v2_submit_events", """
+        CREATE TABLE IF NOT EXISTS v2_submit_events (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            miner_hotkey TEXT NOT NULL,
+            challenge_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            epoch BIGINT NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            cnf_sha256 TEXT NOT NULL,
+            assignment_encoding TEXT NOT NULL,
+            assignment_sha256 TEXT NOT NULL,
+            assignment_b64 TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'verified',
+            rejection_reason TEXT,
+            eligibility_status TEXT NOT NULL DEFAULT 'unknown_beta',
+            received_at_iso TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            verified_at_iso TEXT,
+            signature TEXT NOT NULL,
+            submit_token_id TEXT NOT NULL DEFAULT '',
+            weighted_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            answer_hash TEXT NOT NULL DEFAULT '',
+            verifier_details_hash TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_submit_events_status_received
+            ON v2_submit_events(status, received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_v2_submit_events_hotkey_challenge
+            ON v2_submit_events(miner_hotkey, challenge_id);
+        CREATE INDEX IF NOT EXISTS idx_v2_submit_events_epoch
+            ON v2_submit_events(epoch, status);
     """),
 ]
 
