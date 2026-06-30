@@ -572,6 +572,30 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_hotkey_challenge
             ON v2_shadow_v1_submits(miner_hotkey, challenge_id);
     """),
+    ("0038_v2_shadow_v1_submit_meta", """
+        CREATE TABLE IF NOT EXISTS v2_shadow_v1_submit_meta (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL DEFAULT '',
+            miner_hotkey TEXT NOT NULL DEFAULT '',
+            challenge_id TEXT NOT NULL DEFAULT '',
+            card_id TEXT NOT NULL DEFAULT '',
+            submitted_at TEXT NOT NULL DEFAULT '',
+            edge_received_at_iso TEXT NOT NULL DEFAULT '',
+            received_at_iso TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'mirror-meta',
+            original_content_length INTEGER NOT NULL DEFAULT 0,
+            original_body_bytes INTEGER NOT NULL DEFAULT 0,
+            dimacs_solution_bytes INTEGER NOT NULL DEFAULT 0,
+            field_count INTEGER NOT NULL DEFAULT 0,
+            signature_present INTEGER NOT NULL DEFAULT 0,
+            content_type TEXT NOT NULL DEFAULT '',
+            parse_error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_received
+            ON v2_shadow_v1_submit_meta(received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_hotkey_challenge
+            ON v2_shadow_v1_submit_meta(miner_hotkey, challenge_id);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1046,6 +1070,30 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON v2_shadow_v1_submits(received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_hotkey_challenge
             ON v2_shadow_v1_submits(miner_hotkey, challenge_id);
+    """),
+    ("0038_v2_shadow_v1_submit_meta", """
+        CREATE TABLE IF NOT EXISTS v2_shadow_v1_submit_meta (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL DEFAULT '',
+            miner_hotkey TEXT NOT NULL DEFAULT '',
+            challenge_id TEXT NOT NULL DEFAULT '',
+            card_id TEXT NOT NULL DEFAULT '',
+            submitted_at TEXT NOT NULL DEFAULT '',
+            edge_received_at_iso TEXT NOT NULL DEFAULT '',
+            received_at_iso TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'mirror-meta',
+            original_content_length BIGINT NOT NULL DEFAULT 0,
+            original_body_bytes BIGINT NOT NULL DEFAULT 0,
+            dimacs_solution_bytes BIGINT NOT NULL DEFAULT 0,
+            field_count INTEGER NOT NULL DEFAULT 0,
+            signature_present INTEGER NOT NULL DEFAULT 0,
+            content_type TEXT NOT NULL DEFAULT '',
+            parse_error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_received
+            ON v2_shadow_v1_submit_meta(received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_hotkey_challenge
+            ON v2_shadow_v1_submit_meta(miner_hotkey, challenge_id);
     """),
 ]
 

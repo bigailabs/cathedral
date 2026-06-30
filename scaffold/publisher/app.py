@@ -5476,6 +5476,182 @@ def build_app(
 
         return v2_store.write(_tx)
 
+    def _v2_shadow_v1_meta_admit(body: dict[str, Any], *, header_hotkey: str, source_header: str) -> dict[str, Any]:
+        rid = "shv1m_" + new_uuid().replace("-", "")
+
+        def _str_field(name: str, default: str = "") -> str:
+            value = body.get(name, default)
+            if value is None:
+                return default
+            return str(value)
+
+        def _int_field(name: str, default: int = 0) -> int:
+            value = body.get(name, default)
+            try:
+                return max(0, int(value or 0))
+            except Exception:
+                return default
+
+        miner_hotkey = (_str_field("miner_hotkey") or header_hotkey or "").strip()[:256]
+        challenge_id = _str_field("challenge_id").strip()[:256]
+        card_id = _str_field("card_id").strip()[:128]
+        submitted_at = _str_field("submitted_at").strip()[:64]
+        edge_received_at_iso = _str_field("edge_received_at_iso").strip()[:64]
+        request_id = _str_field("request_id").strip()[:128]
+        source = (_str_field("source") or source_header or "mirror-meta").strip()[:64]
+        content_type = _str_field("content_type").strip()[:256]
+        parse_error = _str_field("parse_error").strip()[:256]
+        signature_present = 1 if bool(body.get("signature_present")) else 0
+        received_at_iso = _now_iso_ms()
+
+        def _tx(conn):
+            conn.execute(
+                "INSERT INTO v2_shadow_v1_submit_meta("
+                "id, request_id, miner_hotkey, challenge_id, card_id, submitted_at, "
+                "edge_received_at_iso, received_at_iso, source, original_content_length, "
+                "original_body_bytes, dimacs_solution_bytes, field_count, signature_present, "
+                "content_type, parse_error"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    rid,
+                    request_id,
+                    miner_hotkey,
+                    challenge_id,
+                    card_id,
+                    submitted_at,
+                    edge_received_at_iso,
+                    received_at_iso,
+                    source,
+                    _int_field("original_content_length"),
+                    _int_field("original_body_bytes"),
+                    _int_field("dimacs_solution_bytes"),
+                    _int_field("field_count"),
+                    signature_present,
+                    content_type,
+                    parse_error,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM v2_shadow_v1_submit_meta WHERE id=? LIMIT 1",
+                (rid,),
+            ).fetchone()
+            try:
+                keys = row.keys()
+                return {k: row[k] for k in keys}
+            except Exception:
+                return dict(row)
+
+        return v2_store.write(_tx)
+
+    @app.post("/v2/shadow/v1/agents/submit/meta")
+    async def shadow_v1_submit_meta_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(default=""),
+        x_cathedral_shadow_source: str = Header(default=""),
+    ):
+        """Metadata-only live V1 submit mirror target for throughput probes.
+
+        This intentionally does not store the DIMACS solution body and does not
+        verify/sign/score anything. V1 remains authoritative. The row is an
+        isolated V2 shadow measurement of live submit metadata write pressure.
+        """
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("not_object")
+        except Exception:
+            raise HTTPException(400, "invalid_shadow_meta_json")
+        row = _v2_shadow_v1_meta_admit(
+            body,
+            header_hotkey=x_cathedral_hotkey,
+            source_header=x_cathedral_shadow_source,
+        )
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.shadow_v1_submit_meta_receipt.v1",
+                "shadow": True,
+                "metadata_only": True,
+                "solution_body_stored": False,
+                "status": "received",
+                "receipt_id": str(row["id"]),
+                "miner_hotkey": str(row.get("miner_hotkey") or ""),
+                "challenge_id": str(row.get("challenge_id") or ""),
+                "card_id": str(row.get("card_id") or ""),
+                "dimacs_solution_bytes": int(row.get("dimacs_solution_bytes") or 0),
+                "received_at": str(row.get("received_at_iso") or ""),
+                "edge_received_at": str(row.get("edge_received_at_iso") or ""),
+                "source": str(row.get("source") or "mirror-meta"),
+            },
+            status_code=202,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/shadow/v1/agents/submit/meta/metrics")
+    def shadow_v1_submit_meta_metrics_v2():
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        totals = v2_store.query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(original_body_bytes), 0) AS body_bytes, "
+            "COALESCE(SUM(dimacs_solution_bytes), 0) AS solution_bytes, "
+            "MIN(received_at_iso) AS first_received_at, MAX(received_at_iso) AS last_received_at "
+            "FROM v2_shadow_v1_submit_meta"
+        )[0]
+        by_source = v2_store.query(
+            "SELECT source, COUNT(*) AS n, COALESCE(SUM(original_body_bytes), 0) AS body_bytes, "
+            "COALESCE(SUM(dimacs_solution_bytes), 0) AS solution_bytes "
+            "FROM v2_shadow_v1_submit_meta GROUP BY source ORDER BY n DESC LIMIT 20"
+        )
+        recent = v2_store.query(
+            "SELECT id, miner_hotkey, challenge_id, card_id, original_body_bytes, "
+            "dimacs_solution_bytes, received_at_iso, edge_received_at_iso, source, parse_error "
+            "FROM v2_shadow_v1_submit_meta ORDER BY received_at_iso DESC LIMIT 25"
+        )
+        now = datetime.now(timezone.utc)
+        windows = {}
+        for label, secs in (("1m", 60), ("5m", 300), ("1h", 3600)):
+            since_dt = now - timedelta(seconds=secs)
+            since = since_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{since_dt.microsecond // 1000:03d}Z"
+            row = v2_store.query(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(original_body_bytes), 0) AS body_bytes, "
+                "COALESCE(SUM(dimacs_solution_bytes), 0) AS solution_bytes "
+                "FROM v2_shadow_v1_submit_meta WHERE received_at_iso > ?",
+                (since,),
+            )[0]
+            windows[label] = {
+                "count": int(row["n"] or 0),
+                "body_bytes": int(row["body_bytes"] or 0),
+                "solution_bytes": int(row["solution_bytes"] or 0),
+            }
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.shadow_v1_submit_meta_metrics.v1",
+                "shadow": True,
+                "metadata_only": True,
+                "solution_body_stored": False,
+                "total": {
+                    "count": int(totals["n"] or 0),
+                    "body_bytes": int(totals["body_bytes"] or 0),
+                    "solution_bytes": int(totals["solution_bytes"] or 0),
+                },
+                "first_received_at": totals["first_received_at"],
+                "last_received_at": totals["last_received_at"],
+                "windows": windows,
+                "by_source": [
+                    {
+                        "source": str(r["source"]),
+                        "count": int(r["n"] or 0),
+                        "body_bytes": int(r["body_bytes"] or 0),
+                        "solution_bytes": int(r["solution_bytes"] or 0),
+                    }
+                    for r in by_source
+                ],
+                "recent": [_v2_shadow_row_dict(r) for r in recent],
+            },
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
     @app.post("/v2/shadow/v1/agents/submit")
     async def shadow_v1_submit_v2(
         request: Request,

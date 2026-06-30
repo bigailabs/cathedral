@@ -36,6 +36,8 @@ READ_ORIGIN_TIMEOUT_MS = "10000"
 # Default-off optional V1 submit shadow mirror.
 SHADOW_V1_MIRROR_ENABLED = "false"
 SHADOW_V1_MIRROR_ORIGIN = "https://v2-beta.cathedral.computer"
+# full = forward full V1 body to V2 shadow; meta = drop dimacs_solution and send tiny metadata only.
+SHADOW_V1_MIRROR_MODE = "meta"
 SHADOW_V1_MIRROR_SAMPLE_PERCENT = "0.1"
 SHADOW_V1_MIRROR_TIMEOUT_MS = "1000"
 SHADOW_V1_MIRROR_SOURCE = "edge-mirror-v1-0p1pct"

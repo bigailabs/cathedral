@@ -269,7 +269,18 @@ function shouldMirrorV1Submit(env, route, request) {
   return Math.random() * 100 < pct;
 }
 
-function shadowV1MirrorRequest(request, env) {
+function textBytes(text) {
+  return new TextEncoder().encode(text || "").length;
+}
+
+function randomRequestId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function fullShadowV1MirrorRequest(request, env) {
   const mirrorBase = envUrl(env, "SHADOW_V1_MIRROR_ORIGIN", "");
   const url = new URL(mirrorBase);
   url.pathname = "/v2/shadow/v1/agents/submit";
@@ -286,10 +297,70 @@ function shadowV1MirrorRequest(request, env) {
   return new Request(url.toString(), init);
 }
 
+async function metaShadowV1MirrorRequest(request, env) {
+  const edgeReceivedAt = new Date().toISOString();
+  const mirrorBase = envUrl(env, "SHADOW_V1_MIRROR_ORIGIN", "");
+  const url = new URL(mirrorBase);
+  url.pathname = "/v2/shadow/v1/agents/submit/meta";
+  url.search = "";
+
+  const source = envUrl(env, "SHADOW_V1_MIRROR_SOURCE", "edge-mirror-v1-meta");
+  const contentType = request.headers.get("content-type") || "";
+  const contentLength = Number(request.headers.get("content-length") || "0");
+  const bodyText = await request.text();
+  const payload = {
+    schema: "cathedral.v2.shadow_v1_submit_meta.v1",
+    request_id: randomRequestId(),
+    source,
+    edge_received_at_iso: edgeReceivedAt,
+    miner_hotkey: request.headers.get("x-cathedral-hotkey") || "",
+    submitted_at: request.headers.get("x-cathedral-submitted-at") || "",
+    signature_present: request.headers.has("x-cathedral-signature"),
+    content_type: contentType,
+    original_content_length: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0,
+    original_body_bytes: textBytes(bodyText),
+    dimacs_solution_bytes: 0,
+    field_count: 0,
+    card_id: "",
+    challenge_id: "",
+    parse_error: "",
+  };
+
+  try {
+    const params = new URLSearchParams(bodyText);
+    payload.field_count = Array.from(params.keys()).length;
+    payload.card_id = params.get("card_id") || "";
+    payload.challenge_id = params.get("challenge_id") || "";
+    payload.submitted_at = params.get("submitted_at") || payload.submitted_at;
+    payload.dimacs_solution_bytes = textBytes(params.get("dimacs_solution") || "");
+  } catch (error) {
+    payload.parse_error = String(error && error.message || error).slice(0, 256);
+  }
+
+  const headers = new Headers();
+  headers.set("Content-Type", "application/json");
+  headers.set("X-Cathedral-Shadow-Source", source);
+  if (payload.miner_hotkey) headers.set("X-Cathedral-Hotkey", payload.miner_hotkey);
+  return new Request(url.toString(), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    redirect: "manual",
+  });
+}
+
+async function shadowV1MirrorRequest(request, env) {
+  const mode = envUrl(env, "SHADOW_V1_MIRROR_MODE", "full").toLowerCase();
+  if (mode === "meta" || mode === "metadata" || mode === "metadata_only") {
+    return metaShadowV1MirrorRequest(request, env);
+  }
+  return fullShadowV1MirrorRequest(request, env);
+}
+
 async function mirrorV1Submit(request, env) {
   try {
     const timeoutMs = originTimeoutMs(env, "SHADOW_V1_MIRROR_TIMEOUT_MS", 2500);
-    await fetchWithTimeout(shadowV1MirrorRequest(request, env), timeoutMs);
+    await fetchWithTimeout(await shadowV1MirrorRequest(request, env), timeoutMs);
   } catch {
     // Shadow mirroring must never affect the authoritative submit response.
   }

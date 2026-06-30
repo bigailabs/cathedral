@@ -219,11 +219,58 @@ def test_solution_manifest_v2_shadow_v1_submit_admits_storage_only(tmp_path, mon
     assert metrics.json()["total"]["bytes"] == len(solution.encode("utf-8"))
     assert metrics.json()["windows"]["1h"]["count"] == 1
 
-    assert main_store.query("SELECT COUNT(*) AS n FROM v2_shadow_v1_submits")[0]["n"] == 0
+
+def test_solution_manifest_v2_shadow_v1_submit_meta_admits_without_body(tmp_path, monkeypatch):
+    app, _main_store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True, shadow_v1=True)
+    client = TestClient(app)
+    kp = _keypair("//ShadowV1Meta")
+    payload = {
+        "schema": "cathedral.v2.shadow_v1_submit_meta.v1",
+        "request_id": "req-meta-1",
+        "source": "test-edge-meta",
+        "edge_received_at_iso": _now_iso(),
+        "miner_hotkey": kp.ss58_address,
+        "card_id": _FAMILY,
+        "challenge_id": "pm-t1-e1-meta",
+        "submitted_at": _now_iso(),
+        "signature_present": True,
+        "content_type": "application/x-www-form-urlencoded",
+        "original_content_length": 4096,
+        "original_body_bytes": 4096,
+        "dimacs_solution_bytes": 3500,
+        "field_count": 4,
+    }
+    r = client.post(
+        "/v2/shadow/v1/agents/submit/meta",
+        json=payload,
+        headers={"X-Cathedral-Hotkey": kp.ss58_address, "X-Cathedral-Shadow-Source": "test-edge-meta"},
+    )
+    assert r.status_code == 202
+    body = r.json()
+    assert body["schema"] == "cathedral.v2.shadow_v1_submit_meta_receipt.v1"
+    assert body["metadata_only"] is True
+    assert body["solution_body_stored"] is False
+    assert body["miner_hotkey"] == kp.ss58_address
+    assert body["challenge_id"] == "pm-t1-e1-meta"
+    assert body["dimacs_solution_bytes"] == 3500
+
+    metrics = client.get("/v2/shadow/v1/agents/submit/meta/metrics")
+    assert metrics.status_code == 200
+    data = metrics.json()
+    assert data["schema"] == "cathedral.v2.shadow_v1_submit_meta_metrics.v1"
+    assert data["metadata_only"] is True
+    assert data["solution_body_stored"] is False
+    assert data["total"]["count"] == 1
+    assert data["total"]["body_bytes"] == 4096
+    assert data["total"]["solution_bytes"] == 3500
+    assert data["windows"]["1h"]["count"] == 1
+
     v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
-    rows = v2_store.query("SELECT * FROM v2_shadow_v1_submits")
-    assert len(rows) == 1
-    assert rows[0]["form_json"].find(solution) == -1
+    meta_rows = v2_store.query("SELECT * FROM v2_shadow_v1_submit_meta")
+    assert len(meta_rows) == 1
+    assert meta_rows[0]["dimacs_solution_bytes"] == 3500
+    assert v2_store.query("SELECT COUNT(*) AS n FROM v2_shadow_v1_submits")[0]["n"] == 0
 
 
 def test_solution_manifest_v2_serves_prefixed_pm_challenges_and_cnf(tmp_path, monkeypatch):
