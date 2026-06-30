@@ -31,6 +31,15 @@ python3 -m pip install requests bittensor-wallet python-sat
 python3 scripts/v2_miner_e2e.py --base https://v2-beta.cathedral.computer
 ```
 
+Wallet-file style:
+
+```bash
+python3 scripts/v2_miner_e2e.py \
+  --base https://v2-beta.cathedral.computer \
+  --wallet-name <wallet> \
+  --hotkey <hotkey>
+```
+
 Expected final line:
 
 ```text
@@ -80,10 +89,11 @@ A live V2 E2E smoke succeeded against the beta Railway service:
 - V2 shadow weights included test hotkey with `weight=1.0`
 - V2 audit bundle included the receipt
 
-Example receipt from smoke:
+Example receipts from smoke tests:
 
 ```text
-0fdf891c-696e-4fb8-ad63-acf1c0b3f64d
+0fdf891c-696e-4fb8-ad63-acf1c0b3f64d  # ephemeral key
+bdb65013-9ca2-451e-ad07-d1657961c08a  # local wallet-file hotkey
 ```
 
 ## Safety notes
