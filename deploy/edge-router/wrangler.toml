@@ -48,3 +48,12 @@ READ_ORIGIN_RESOLVE_OVERRIDE = ""
 SUBMIT_ORIGIN = "https://submit.cathedral.computer"
 READ_ORIGIN_TIMEOUT_MS = "10000"
 READ_HEALTH_ORIGIN_TIMEOUT_MS = "9000"
+
+# Default-off live submit mirroring. When enabled, POST /v1/agents/submit still
+# returns the authoritative current V1 response, while a cloned request is sent
+# via waitUntil() to the isolated V2 shadow mirror target.
+SHADOW_V1_MIRROR_ENABLED = "false"
+SHADOW_V1_MIRROR_ORIGIN = "https://v2-beta.cathedral.computer"
+SHADOW_V1_MIRROR_SAMPLE_PERCENT = "1"
+SHADOW_V1_MIRROR_TIMEOUT_MS = "2500"
+SHADOW_V1_MIRROR_SOURCE = "edge-mirror-v1"
