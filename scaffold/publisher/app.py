@@ -520,6 +520,8 @@ def build_app(
     v2_submit_bitset_enabled = _env_bool("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", False)
     v2_submit_token_secret = os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip()
     v2_submit_token_ttl_secs = max(1, _env_int("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", 300))
+    v2_submit_bitset_max_body_bytes = max(
+        1024, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", 16_384))
     v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
     v2_worker_batch_size = max(1, _env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8))
     v2_worker_interval_secs = max(
@@ -1145,12 +1147,18 @@ def build_app(
         _SUBMIT_PATHS = {
             "/v1/agents/submit",
             f"{_LEGACY_PREFIX}/v1/agents/submit",
+            "/v2/agents/submit-bitset",
+            f"{_LEGACY_PREFIX}/v2/agents/submit-bitset",
         }
         _PM_READ_PATHS = {
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",
             f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/challenges",
             f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/challenges",
+            "/v2/synthetic-boolean/per-miner/cnf",
+            f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/challenges",
+            f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/cnf",
         }
 
         def __init__(self, asgi_app):
@@ -5933,8 +5941,18 @@ def build_app(
             raise HTTPException(404, "v2_submit_bitset_not_enabled")
         if not v2_submit_token_secret:
             raise HTTPException(503, "v2_submit_token_secret_missing")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > v2_submit_bitset_max_body_bytes:
+                    raise HTTPException(413, "submit_bitset_body_too_large")
+            except ValueError:
+                raise HTTPException(400, "invalid_content_length")
+        raw_body = await request.body()
+        if len(raw_body) > v2_submit_bitset_max_body_bytes:
+            raise HTTPException(413, "submit_bitset_body_too_large")
         try:
-            body = await request.json()
+            body = json.loads(raw_body.decode("utf-8"))
         except Exception:
             raise HTTPException(400, "invalid_json_submit_bitset")
         try:

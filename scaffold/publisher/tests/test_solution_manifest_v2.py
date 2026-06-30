@@ -393,9 +393,82 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     assert row["raw_score"] == item["difficulty_weight"]
     assert vector["policy_metadata"]["receipt_counts"]["bitset:verified"] == 1
 
+    audit = client.get(f"/v2/audit/epochs/{int(item['epoch'])}")
+    assert audit.status_code == 200
+    bundle = audit.json()
+    assert bundle["status_counts"]["bitset:verified"] == 1
+    assert any(r["id"] == receipt["receipt_id"] and r["source"] == "bitset" for r in bundle["receipts"])
+
     v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
     assert v2_store.query("SELECT COUNT(*) AS n FROM v2_submit_events")[0]["n"] == 1
     assert v2_store.query("SELECT COUNT(*) AS n FROM solution_manifests")[0]["n"] == 0
+
+
+def test_solution_manifest_v2_manifest_and_bitset_same_challenge_count_once(tmp_path, monkeypatch):
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+    kp = _keypair("//BitsetManifestDedupe")
+    board = client.get(
+        "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+        headers=_read_headers(kp),
+    )
+    assert board.status_code == 200
+    item = board.json()["items"][0]
+    with v2_pipeline.v2_pm_env():
+        _cid, _cnf, assignment = pm.generate_instance(
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+    blob = v2_pipeline.encode_bitset_assignment(assignment)
+    assignment_b64 = base64.b64encode(blob).decode("ascii")
+
+    uploaded = client.post("/v2/blobs/solutions", content=blob, headers=_upload_headers(kp, blob))
+    assert uploaded.status_code == 200
+    up = uploaded.json()
+    manifest_body = {
+        "schema": solution_manifest.SCHEMA,
+        "card_id": _FAMILY,
+        "challenge_id": item["challenge_id"],
+        "assignment_encoding": "bitset/v1",
+        "solution_cid": up["cid"],
+        "solution_sha256": up["sha256"],
+        "solution_bytes": int(up["bytes"]),
+        "cnf_sha256": item["cnf_sha256"],
+    }
+    manifest = client.post(
+        "/v2/agents/submit-manifest",
+        json=manifest_body,
+        headers=_headers(kp, manifest_body),
+    )
+    assert manifest.status_code == 202
+    tick = client.post("/v2/admin/verify/tick", headers={"Authorization": "Bearer test-admin-token"})
+    assert tick.status_code == 200
+    assert client.get(manifest.json()["receipt_url"]).json()["status"] == "verified"
+
+    bitset_body = {
+        "schema": v2_bitset_submit.SCHEMA,
+        "card_id": _FAMILY,
+        "challenge_id": item["challenge_id"],
+        "submit_token": item["submit_token"],
+        "assignment_encoding": "bitset/v1",
+        "assignment_b64": assignment_b64,
+    }
+    bitset = client.post(
+        "/v2/agents/submit-bitset",
+        json=bitset_body,
+        headers=_bitset_headers(kp, bitset_body),
+    )
+    assert bitset.status_code == 202
+
+    vector = client.get("/v2/validator/weights/next").json()
+    row = next(w for w in vector["weights"] if w["miner_hotkey"] == kp.ss58_address)
+    assert row["raw_score"] == item["difficulty_weight"]
+    assert vector["policy_metadata"]["receipt_counts"]["manifest:verified"] == 1
+    assert vector["policy_metadata"]["receipt_counts"]["bitset:verified"] == 1
+
+    audit = client.get(f"/v2/audit/epochs/{int(item['epoch'])}").json()
+    assert audit["status_counts"]["manifest:verified"] == 1
+    assert audit["status_counts"]["bitset:verified"] == 1
 
 
 def test_solution_manifest_v2_submit_bitset_rejects_bad_shape_without_row(tmp_path, monkeypatch):
@@ -425,6 +498,62 @@ def test_solution_manifest_v2_submit_bitset_rejects_bad_shape_without_row(tmp_pa
     )
     assert r.status_code == 400
     assert r.json()["detail"] == "bitset_size_mismatch"
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    assert v2_store.query("SELECT COUNT(*) AS n FROM v2_submit_events")[0]["n"] == 0
+
+
+def test_solution_manifest_v2_submit_bitset_rejects_auth_failures_without_rows(tmp_path, monkeypatch):
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+    kp = _keypair("//BitsetSubmitAuthFailures")
+    board = client.get(
+        "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+        headers=_read_headers(kp),
+    )
+    assert board.status_code == 200
+    item = board.json()["items"][0]
+    with v2_pipeline.v2_pm_env():
+        _cid, _cnf, assignment = pm.generate_instance(
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+    assignment_b64 = base64.b64encode(v2_pipeline.encode_bitset_assignment(assignment)).decode("ascii")
+    valid_body = {
+        "schema": v2_bitset_submit.SCHEMA,
+        "card_id": _FAMILY,
+        "challenge_id": item["challenge_id"],
+        "submit_token": item["submit_token"],
+        "assignment_encoding": "bitset/v1",
+        "assignment_b64": assignment_b64,
+    }
+
+    bad_sig_headers = _bitset_headers(kp, valid_body)
+    bad_sig_headers["X-Cathedral-Signature"] = base64.b64encode(b"0" * 64).decode("ascii")
+    bad_sig = client.post("/v2/agents/submit-bitset", json=valid_body, headers=bad_sig_headers)
+    assert bad_sig.status_code == 401
+    assert bad_sig.json()["detail"] == "invalid hotkey signature"
+
+    forged = {**valid_body, "submit_token": item["submit_token"][:-1] + ("A" if item["submit_token"][-1] != "A" else "B")}
+    forged_r = client.post("/v2/agents/submit-bitset", json=forged, headers=_bitset_headers(kp, forged))
+    assert forged_r.status_code == 400
+    assert forged_r.json()["detail"] == "invalid_submit_token"
+
+    expired_token = v2_bitset_submit.mint_submit_token(
+        secret="test-v2-submit-token-secret",
+        miner_hotkey=kp.ss58_address,
+        challenge_id=item["challenge_id"],
+        epoch=int(item["epoch"]),
+        tier=int(item["tier"]),
+        seq=int(item["seq"]),
+        nvars=int(item["n_vars"]),
+        cnf_sha256=item["cnf_sha256"],
+        expires_at="2000-01-01T00:00:00.000Z",
+    )
+    expired = {**valid_body, "submit_token": expired_token}
+    expired_r = client.post("/v2/agents/submit-bitset", json=expired, headers=_bitset_headers(kp, expired))
+    assert expired_r.status_code == 400
+    assert expired_r.json()["detail"] == "submit_token_expired"
+
     v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
     assert v2_store.query("SELECT COUNT(*) AS n FROM v2_submit_events")[0]["n"] == 0
 
@@ -561,8 +690,9 @@ def test_solution_manifest_v2_blob_to_verified_receipt_weights_and_audit(tmp_pat
     bundle = audit.json()
     assert bundle["schema"] == "cathedral.v2.audit_bundle.v1"
     assert bundle["count"] == 1
-    assert bundle["status_counts"] == {"verified": 1}
+    assert bundle["status_counts"] == {"manifest:verified": 1}
     assert bundle["receipts"][0]["id"] == receipt_id
+    assert bundle["receipts"][0]["source"] == "manifest"
     assert bundle.get("signature")
 
 

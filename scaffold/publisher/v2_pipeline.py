@@ -340,30 +340,45 @@ def process_batch(
     return [verify_one(store, row, blob_store, max_blob_bytes=max_blob_bytes) for row in rows]
 
 
-def score_totals(store: Store, *, since_iso: str | None = None, epoch: int | None = None) -> dict[str, float]:
-    def _clauses() -> tuple[list[str], list[Any]]:
-        clauses = ["status=?"]
-        params: list[Any] = [STATUS_VERIFIED]
-        if since_iso:
-            clauses.append("verified_at_iso > ?")
-            params.append(since_iso)
-        if epoch is not None:
-            clauses.append("epoch=?")
-            params.append(int(epoch))
-        return clauses, params
+def _score_rows(store: Store, table: str, *, since_iso: str | None = None,
+                epoch: int | None = None) -> list[dict[str, Any]]:
+    clauses = ["status=?"]
+    params: list[Any] = [STATUS_VERIFIED]
+    if since_iso:
+        clauses.append("verified_at_iso > ?")
+        params.append(since_iso)
+    if epoch is not None:
+        clauses.append("epoch=?")
+        params.append(int(epoch))
+    rows = store.query(
+        "SELECT id, miner_hotkey, challenge_id, weighted_score, verified_at_iso "
+        f"FROM {table} WHERE " + " AND ".join(clauses),
+        tuple(params),
+    )
+    return [_row_to_dict(r) for r in rows]
 
+
+def score_totals(store: Store, *, since_iso: str | None = None, epoch: int | None = None) -> dict[str, float]:
+    """Return V2 shadow scores with one score per miner/challenge.
+
+    During the beta transition the same PM challenge can be submitted via the
+    older manifest path and the new bitset path. Count it once, preferring the
+    bitset event because that is the PM-native scoring path under test.
+    """
+    by_key: dict[tuple[str, str], tuple[int, float]] = {}
+    for priority, table in ((0, "solution_manifests"), (1, "v2_submit_events")):
+        for row in _score_rows(store, table, since_iso=since_iso, epoch=epoch):
+            hk = str(row.get("miner_hotkey") or "")
+            cid = str(row.get("challenge_id") or "")
+            if not hk or not cid:
+                continue
+            score = float(row.get("weighted_score") or 0.0)
+            current = by_key.get((hk, cid))
+            if current is None or priority >= current[0]:
+                by_key[(hk, cid)] = (priority, score)
     totals: dict[str, float] = {}
-    for table in ("solution_manifests", "v2_submit_events"):
-        clauses, params = _clauses()
-        rows = store.query(
-            "SELECT miner_hotkey, SUM(weighted_score) AS score "
-            f"FROM {table} WHERE " + " AND ".join(clauses) +
-            " GROUP BY miner_hotkey",
-            tuple(params),
-        )
-        for r in rows:
-            hk = str(r["miner_hotkey"])
-            totals[hk] = totals.get(hk, 0.0) + float(r["score"] or 0.0)
+    for (hk, _cid), (_priority, score) in by_key.items():
+        totals[hk] = totals.get(hk, 0.0) + score
     return totals
 
 
@@ -428,11 +443,13 @@ def build_shadow_weight_vector(
 
 def _leaf_hash(row: dict[str, Any]) -> str:
     body = {
+        "source": row.get("source"),
         "id": row.get("id"),
         "miner_hotkey": row.get("miner_hotkey"),
         "challenge_id": row.get("challenge_id"),
         "solution_cid": row.get("solution_cid"),
         "solution_sha256": row.get("solution_sha256"),
+        "assignment_sha256": row.get("assignment_sha256"),
         "status": row.get("status"),
         "rejection_reason": row.get("rejection_reason"),
         "weighted_score": row.get("weighted_score"),
@@ -442,17 +459,45 @@ def _leaf_hash(row: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def _audit_receipt(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": row.get("source"),
+        "id": row.get("id"),
+        "miner_hotkey": row.get("miner_hotkey"),
+        "challenge_id": row.get("challenge_id"),
+        "solution_cid": row.get("solution_cid"),
+        "solution_sha256": row.get("solution_sha256"),
+        "assignment_sha256": row.get("assignment_sha256"),
+        "assignment_encoding": row.get("assignment_encoding"),
+        "status": row.get("status"),
+        "rejection_reason": row.get("rejection_reason"),
+        "weighted_score": row.get("weighted_score"),
+        "answer_hash": row.get("answer_hash"),
+        "received_at_iso": row.get("received_at_iso"),
+        "verified_at_iso": row.get("verified_at_iso"),
+    }
+
+
 def audit_bundle(store: Store, *, epoch: int, signing_key_hex: str, limit: int = 10_000) -> dict[str, Any]:
-    rows = [_row_to_dict(r) for r in store.query(
+    manifest_rows = [_row_to_dict(r) | {"source": "manifest"} for r in store.query(
         "SELECT * FROM solution_manifests WHERE epoch=? OR (epoch IS NULL AND challenge_id LIKE ?) "
         "ORDER BY received_at_iso ASC LIMIT ?",
         (int(epoch), f"pm-%-e{int(epoch)}-%", int(limit)),
     )]
+    bitset_rows = [_row_to_dict(r) | {"source": "bitset"} for r in store.query(
+        "SELECT * FROM v2_submit_events WHERE epoch=? ORDER BY received_at_iso ASC LIMIT ?",
+        (int(epoch), int(limit)),
+    )]
+    rows = sorted(
+        (manifest_rows + bitset_rows),
+        key=lambda r: str(r.get("received_at_iso") or ""),
+    )[: int(limit)]
     leaves = [_leaf_hash(r) for r in rows]
     root = hashlib.sha256("".join(sorted(leaves)).encode()).hexdigest() if leaves else hashlib.sha256(b"").hexdigest()
     counts: dict[str, int] = {}
     for r in rows:
-        counts[str(r.get("status") or "unknown")] = counts.get(str(r.get("status") or "unknown"), 0) + 1
+        key = f"{r.get('source') or 'unknown'}:{r.get('status') or 'unknown'}"
+        counts[key] = counts.get(key, 0) + 1
     now = _now_iso_ms()
     payload: dict[str, Any] = {
         "schema": "cathedral.v2.audit_bundle.v1",
@@ -462,22 +507,7 @@ def audit_bundle(store: Store, *, epoch: int, signing_key_hex: str, limit: int =
         "status_counts": counts,
         "merkle_root": "sha256:" + root,
         "leaves": leaves,
-        "receipts": [
-            {
-                "id": r.get("id"),
-                "miner_hotkey": r.get("miner_hotkey"),
-                "challenge_id": r.get("challenge_id"),
-                "solution_cid": r.get("solution_cid"),
-                "solution_sha256": r.get("solution_sha256"),
-                "status": r.get("status"),
-                "rejection_reason": r.get("rejection_reason"),
-                "weighted_score": r.get("weighted_score"),
-                "answer_hash": r.get("answer_hash"),
-                "received_at_iso": r.get("received_at_iso"),
-                "verified_at_iso": r.get("verified_at_iso"),
-            }
-            for r in rows
-        ],
+        "receipts": [_audit_receipt(r) for r in rows],
     }
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
