@@ -145,19 +145,7 @@ For the current beta shape of 400 variables, solution blobs are 50 bytes.
 
 ## Operator pre-publish DNS note
 
-Railway-side custom domain is configured for:
-
-```text
-v2-beta.cathedral.computer
-```
-
-DNS must point:
-
-```text
-CNAME v2-beta -> 9o2142yj.up.railway.app
-```
-
-After DNS is active, verify:
+Before announcing the beta broadly, operators should verify the clean domain is active:
 
 ```bash
 curl -sS https://v2-beta.cathedral.computer/health/live
