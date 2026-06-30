@@ -45,17 +45,30 @@ def now_iso() -> str:
     return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{d.microsecond // 1000:03d}Z"
 
 
-def make_keypair() -> Keypair:
+def make_keypair(args: argparse.Namespace) -> tuple[Keypair, str]:
+    wallet_name = (args.wallet_name or os.environ.get("BT_WALLET_NAME") or os.environ.get("BITTENSOR_WALLET_NAME") or "").strip()
+    wallet_hotkey = (args.hotkey or os.environ.get("BT_WALLET_HOTKEY") or os.environ.get("BITTENSOR_WALLET_HOTKEY") or "").strip()
+    wallet_path = (args.wallet_path or os.environ.get("BT_WALLET_PATH") or os.environ.get("BITTENSOR_WALLET_PATH") or "").strip()
+    if wallet_name and wallet_hotkey:
+        try:
+            from bittensor_wallet import Wallet
+        except Exception as exc:  # pragma: no cover - user environment guard
+            raise SystemExit("missing dependency: pip install bittensor-wallet") from exc
+        kwargs: dict[str, str] = {"name": wallet_name, "hotkey": wallet_hotkey}
+        if wallet_path:
+            kwargs["path"] = wallet_path
+        return Wallet(**kwargs).hotkey, f"wallet:{wallet_name}/{wallet_hotkey}"
+
     uri = os.environ.get("CATHEDRAL_MINER_URI", "").strip()
     seed = os.environ.get("CATHEDRAL_MINER_SEED_HEX", "").strip()
     if uri:
-        return Keypair.create_from_uri(uri)
+        return Keypair.create_from_uri(uri), "env:CATHEDRAL_MINER_URI"
     if seed:
         if seed.startswith("0x"):
             seed = seed[2:]
-        return Keypair.create_from_seed("0x" + seed)
+        return Keypair.create_from_seed("0x" + seed), "env:CATHEDRAL_MINER_SEED_HEX"
     # Ephemeral smoke-test key. The seed is intentionally not printed.
-    return Keypair.create_from_seed("0x" + os.urandom(32).hex())
+    return Keypair.create_from_seed("0x" + os.urandom(32).hex()), "ephemeral"
 
 
 def canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -232,16 +245,19 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=2)
     ap.add_argument("--solver", default=os.environ.get("CATHEDRAL_MINER_SOLVER", "cadical153"))
     ap.add_argument("--poll-secs", type=float, default=90.0)
+    ap.add_argument("--wallet-name", default="", help="Bittensor wallet name to sign with")
+    ap.add_argument("--hotkey", default="", help="Bittensor wallet hotkey name to sign with")
+    ap.add_argument("--wallet-path", default="", help="Optional Bittensor wallet path")
     ap.add_argument("--dry-run", action="store_true", help="fetch/solve but do not upload or submit")
     args = ap.parse_args()
 
     session = requests.Session()
-    kp = make_keypair()
+    kp, key_source = make_keypair(args)
     base = args.base.rstrip("/")
 
     print(f"base={base}")
     print(f"hotkey={kp.ss58_address}")
-    print("key_source=" + ("env" if os.environ.get("CATHEDRAL_MINER_URI") or os.environ.get("CATHEDRAL_MINER_SEED_HEX") else "ephemeral"))
+    print("key_source=" + key_source)
 
     r, body = get_json(session, base, "/health/live", timeout=20)
     print(f"health_live={r.status_code}")

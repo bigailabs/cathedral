@@ -56,9 +56,34 @@ E2E_OK {"audit_count":..., "hotkey":"...", "receipt_id":"...", "status":"verifie
 
 ## Run with your miner hotkey
 
-Use one of these environment variables.
+Wallet-file style:
 
-Mnemonic/dev URI style:
+```bash
+python3 scripts/v2_miner_e2e.py \
+  --base https://v2-beta.cathedral.computer \
+  --wallet-name <wallet> \
+  --hotkey <hotkey>
+```
+
+Optional custom wallet path:
+
+```bash
+python3 scripts/v2_miner_e2e.py \
+  --base https://v2-beta.cathedral.computer \
+  --wallet-path ~/.bittensor/wallets \
+  --wallet-name <wallet> \
+  --hotkey <hotkey>
+```
+
+Environment variable style:
+
+```bash
+export BT_WALLET_NAME='<wallet>'
+export BT_WALLET_HOTKEY='<hotkey>'
+python3 scripts/v2_miner_e2e.py --base https://v2-beta.cathedral.computer
+```
+
+Dev URI style:
 
 ```bash
 export CATHEDRAL_MINER_URI='//YourDevMiner'
