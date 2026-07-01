@@ -1452,6 +1452,17 @@ def build_app(
     app.state.arena_payout_task = None
     app.state.async_verify_task = None
     app.state.v2_verify_task = None
+    app.state.v2_verify_metrics = {
+        "worker_id": None,
+        "lock_held_by_self": False,
+        "last_lock_acquired_at": None,
+        "last_lock_contended_at": None,
+        "last_batch_at": None,
+        "last_batch_ms": None,
+        "last_batch_count": 0,
+        "recent_events": [],
+        "tick_errors": [],
+    }
     app.state.v2_store = v2_store
     app.state.v2_blob_store = v2_blob_store
     app.state.pressure_telemetry = pressure_telemetry
@@ -1655,19 +1666,31 @@ def build_app(
         import asyncio
 
         retry_secs = max(1, int(os.environ.get("CATHEDRAL_V2_SINGLETON_RETRY_SECS", "15")))
+        contended_log_secs = max(30, int(os.environ.get("CATHEDRAL_V2_SINGLETON_CONTENDED_LOG_SECS", "300")))
+        last_contended_log = 0.0
         while True:
             try:
                 with v2_store.advisory_lock(lock_name) as acquired:
                     if not acquired:
-                        print(f"[{label}] singleton_lock_held_elsewhere")
+                        now = time.time()
+                        app.state.v2_verify_metrics["lock_held_by_self"] = False
+                        app.state.v2_verify_metrics["last_lock_contended_at"] = _now_iso_ms()
+                        if now - last_contended_log >= contended_log_secs:
+                            print(f"[{label}] singleton_lock_held_elsewhere")
+                            last_contended_log = now
                     else:
+                        app.state.v2_verify_metrics["lock_held_by_self"] = True
+                        app.state.v2_verify_metrics["last_lock_acquired_at"] = _now_iso_ms()
                         print(f"[{label}] singleton_lock_acquired")
                         await coro_factory()
+                        app.state.v2_verify_metrics["lock_held_by_self"] = False
                         print(f"[{label}] singleton_task_exited")
             except asyncio.CancelledError:
+                app.state.v2_verify_metrics["lock_held_by_self"] = False
                 print(f"[{label}] singleton_task_cancelled")
                 raise
             except Exception as exc:
+                app.state.v2_verify_metrics["lock_held_by_self"] = False
                 print(f"[{label}] singleton_task_error error={exc!r}")
             await asyncio.sleep(retry_secs)
 
@@ -1682,8 +1705,10 @@ def build_app(
         worker_id = f"v2:{service_role}:{new_uuid()[:8]}"
 
         async def _loop():
+            app.state.v2_verify_metrics["worker_id"] = worker_id
             while True:
                 try:
+                    batch_started = time.time()
                     results = await asyncio.to_thread(
                         v2_pipeline.process_batch,
                         v2_store,
@@ -1693,14 +1718,35 @@ def build_app(
                         lock_secs=v2_worker_lock_secs,
                         max_blob_bytes=v2_worker_max_blob_bytes,
                     )
+                    batch_ms = (time.time() - batch_started) * 1000.0
                     if results:
                         counts = {}
                         for r in results:
                             counts[str(r.get("status") or "unknown")] = counts.get(str(r.get("status") or "unknown"), 0) + 1
-                        print(f"[v2_verify] processed={len(results)} counts={counts}")
+                        now_iso = _now_iso_ms()
+                        app.state.v2_verify_metrics["last_batch_at"] = now_iso
+                        app.state.v2_verify_metrics["last_batch_ms"] = round(batch_ms, 3)
+                        app.state.v2_verify_metrics["last_batch_count"] = len(results)
+                        events = app.state.v2_verify_metrics.get("recent_events") or []
+                        events.append({
+                            "ts": time.time(),
+                            "verified": int(counts.get(v2_pipeline.STATUS_VERIFIED, 0)),
+                            "rejected": int(counts.get(v2_pipeline.STATUS_REJECTED, 0)),
+                            "total": int(len(results)),
+                        })
+                        app.state.v2_verify_metrics["recent_events"] = events[-512:]
+                        print(
+                            "[v2_verify] batch "
+                            f"n_verified={counts.get(v2_pipeline.STATUS_VERIFIED, 0)} "
+                            f"n_rejected={counts.get(v2_pipeline.STATUS_REJECTED, 0)} "
+                            f"n_total={len(results)} batch_ms={batch_ms:.1f}"
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    errors = app.state.v2_verify_metrics.get("tick_errors") or []
+                    errors.append({"ts": time.time(), "error": repr(exc)})
+                    app.state.v2_verify_metrics["tick_errors"] = errors[-128:]
                     print(f"[v2_verify] tick_failed error={exc!r}")
                 await asyncio.sleep(v2_worker_interval_secs)
 
@@ -6133,6 +6179,78 @@ def build_app(
             raise HTTPException(404, "receipt_not_found")
         return JSONResponse(
             solution_manifest.receipt_payload(row),
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    def _v2_verify_pending_metrics() -> dict[str, Any]:
+        now_ts = time.time()
+        pending_count = 0
+        oldest_iso: str | None = None
+        tables = (
+            ("solution_manifests", "manifest"),
+            ("v2_submit_events", "bitset"),
+        )
+        by_source: dict[str, dict[str, Any]] = {}
+        for table, source in tables:
+            try:
+                rows = v2_store.query(
+                    f"SELECT COUNT(*) AS n, MIN(received_at_iso) AS oldest "
+                    f"FROM {table} WHERE status IN (?, ?)",
+                    (v2_pipeline.STATUS_RECEIVED, v2_pipeline.STATUS_RETRY),
+                )
+                n = int(rows[0]["n"] or 0) if rows else 0
+                oldest = str(rows[0]["oldest"] or "") if rows else ""
+            except Exception:
+                n = 0
+                oldest = ""
+            pending_count += n
+            if oldest and (oldest_iso is None or oldest < oldest_iso):
+                oldest_iso = oldest
+            by_source[source] = {"pending_count": n, "oldest_pending_at": oldest or None}
+        oldest_age = None
+        if oldest_iso:
+            ts = v2_bitset_submit.parse_iso(oldest_iso)
+            if ts is not None:
+                oldest_age = max(0.0, now_ts - ts)
+        return {
+            "pending_count": pending_count,
+            "oldest_pending_at": oldest_iso,
+            "oldest_pending_age_secs": round(oldest_age, 3) if oldest_age is not None else None,
+            "by_source": by_source,
+        }
+
+    @app.get("/v2/verify/metrics")
+    def v2_verify_metrics():
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        now = time.time()
+        metrics = dict(app.state.v2_verify_metrics)
+        recent = [e for e in (metrics.get("recent_events") or []) if now - float(e.get("ts") or 0.0) <= 60.0]
+        errors = [e for e in (metrics.get("tick_errors") or []) if now - float(e.get("ts") or 0.0) <= 60.0]
+        verified_last_60s = sum(int(e.get("verified") or 0) for e in recent)
+        rejected_last_60s = sum(int(e.get("rejected") or 0) for e in recent)
+        total_last_60s = sum(int(e.get("total") or 0) for e in recent)
+        pending = _v2_verify_pending_metrics()
+        payload = {
+            "schema": "cathedral.v2.verify_metrics.v1",
+            "enabled": bool(v2_worker_enabled),
+            "service_role": service_role,
+            "worker_id": metrics.get("worker_id"),
+            "lock_held_by_self": bool(metrics.get("lock_held_by_self")),
+            "last_lock_acquired_at": metrics.get("last_lock_acquired_at"),
+            "last_lock_contended_at": metrics.get("last_lock_contended_at"),
+            "last_batch_at": metrics.get("last_batch_at"),
+            "last_batch_ms": metrics.get("last_batch_ms"),
+            "last_batch_count": int(metrics.get("last_batch_count") or 0),
+            "verified_last_60s": verified_last_60s,
+            "rejected_last_60s": rejected_last_60s,
+            "processed_last_60s": total_last_60s,
+            "verify_rate_per_sec": round(total_last_60s / 60.0, 6),
+            "tick_errors_last_60s": len(errors),
+            **pending,
+        }
+        return JSONResponse(
+            payload,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 

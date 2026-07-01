@@ -321,6 +321,45 @@ def test_solution_manifest_v2_serves_prefixed_pm_challenges_and_cnf(tmp_path, mo
     assert cnf.headers["x-cathedral-v2"] == "true"
 
 
+def test_v2_verify_metrics_endpoint_reports_pending(tmp_path, monkeypatch):
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+    app.state.v2_store.write(lambda conn: conn.execute(
+        "INSERT INTO solution_manifests("
+        "id, idempotency_key, miner_hotkey, challenge_id, card_id, "
+        "assignment_encoding, solution_cid, solution_sha256, solution_bytes, "
+        "status, received_at_iso, submitted_at, signature, manifest_json"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "pending-metrics-1",
+            "idem-pending-metrics-1",
+            "5PendingMetricsHotkey",
+            "pm-t1-e1-metrics",
+            _FAMILY,
+            "dimacs/v1",
+            "local://missing",
+            hashlib.sha256(b"x").hexdigest(),
+            1,
+            "received",
+            "2026-07-01T00:00:00.000Z",
+            "2026-07-01T00:00:00.000Z",
+            "sig",
+            "{}",
+        ),
+    ))
+
+    r = client.get("/v2/verify/metrics")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["schema"] == "cathedral.v2.verify_metrics.v1"
+    assert payload["pending_count"] >= 1
+    assert payload["by_source"]["manifest"]["pending_count"] >= 1
+    assert "lock_held_by_self" in payload
+    assert "verify_rate_per_sec" in payload
+
+
 def test_v2_submit_token_allowlist_blocks_unlisted_hotkeys(tmp_path, monkeypatch):
     allowed = _keypair("//V2TokenAllowed")
     blocked = _keypair("//V2TokenBlocked")
