@@ -321,6 +321,30 @@ def test_solution_manifest_v2_serves_prefixed_pm_challenges_and_cnf(tmp_path, mo
     assert cnf.headers["x-cathedral-v2"] == "true"
 
 
+def test_v2_submit_token_allowlist_blocks_unlisted_hotkeys(tmp_path, monkeypatch):
+    allowed = _keypair("//V2TokenAllowed")
+    blocked = _keypair("//V2TokenBlocked")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST", allowed.ss58_address)
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+
+    blocked_r = client.get(
+        "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+        headers=_read_headers(blocked),
+    )
+    assert blocked_r.status_code == 403
+    assert blocked_r.json()["detail"] == "v2_submit_token_hotkey_not_allowlisted"
+
+    allowed_r = client.get(
+        "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+        headers=_read_headers(allowed),
+    )
+    assert allowed_r.status_code == 200
+    assert allowed_r.json()["items"][0]["submit_token"]
+
+
 def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, monkeypatch):
     app, _store = _build(
         tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,

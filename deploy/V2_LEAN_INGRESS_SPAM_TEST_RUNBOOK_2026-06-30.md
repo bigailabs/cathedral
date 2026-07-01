@@ -54,9 +54,10 @@ CATHEDRAL_V2_SUBMIT_TOKEN_SECRET=<same secret as v2-beta token minting>
 
 Do not expose the secret.
 
-Required safety env:
+Required safety env on the lean ingress host:
 
 ```text
+WEB_CONCURRENCY=1
 CATHEDRAL_V2_INGRESS_DB_PATH=/var/lib/cathedral/v2-ingress-test.sqlite3
 CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES=16384
 CATHEDRAL_V2_INGRESS_TIMESTAMP_SKEW_SECS=300
@@ -64,13 +65,27 @@ CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_EVENTS=100000
 CATHEDRAL_V2_INGRESS_MAX_STORAGE_BYTES=1000000000
 CATHEDRAL_V2_INGRESS_MIN_FREE_DISK_BYTES=100000000
 CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_AGE_SECS=0
+CATHEDRAL_V2_INGRESS_IP_RPM=6000
+CATHEDRAL_V2_INGRESS_METRICS_TOKEN=<operator-only-token>
+CATHEDRAL_V2_INGRESS_METRICS_TTL_SECS=1.0
 ```
+
+Required safety env on the V2 beta challenge/token-mint service for an open internet test:
+
+```text
+CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST=<comma-separated tester hotkeys>
+```
+
+If the allowlist is unset, current behavior is unchanged: any signed hotkey can fetch V2 bitset submit tokens. That is fine for closed testing but not for unrestricted public exposure.
 
 Notes:
 
 - `MAX_UNFLUSHED_EVENTS` stops new unique accepted rows once the local backlog reaches the cap.
 - Idempotent replay spam still returns the existing receipt even when the unique-row cap is reached.
 - `MAX_UNFLUSHED_AGE_SECS=0` is intentional for Phase 1 because there is no flusher yet.
+- Rejected requests are counted in memory by default, not written to SQLite, so pre-auth junk does not contend on the WAL write lock.
+- `/v2/ingress/metrics` should be token-gated for public tests.
+- The service asserts one worker via env and takes a process lock next to the SQLite DB.
 
 Run command example:
 
@@ -81,7 +96,7 @@ PYTHONPATH=. python3 -m uvicorn scaffold.publisher.v2_lean_ingress:app \
   --workers 1
 ```
 
-Use one worker for SQLite WAL Phase 1 unless/until multi-process write behavior is tested.
+Use one worker for SQLite WAL Phase 1. The service now fails closed if common worker-count env vars are greater than one, and it also takes a process lock on the SQLite DB path.
 
 ## DNS / Routing
 
@@ -199,6 +214,12 @@ GET https://v2-ingress-test.cathedral.computer/v2/ingress/metrics
 ```
 
 `/health/ready` must return `200` and `status=ok`.
+
+For metrics, include:
+
+```text
+Authorization: Bearer <CATHEDRAL_V2_INGRESS_METRICS_TOKEN>
+```
 
 Watch:
 

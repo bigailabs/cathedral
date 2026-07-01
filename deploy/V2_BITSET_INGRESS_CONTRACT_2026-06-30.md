@@ -211,29 +211,41 @@ X-Cathedral-Signature = standard base64 signature bytes
 
 ## Required Validation Order
 
-Recommended ingress order:
+Current lean-ingress order:
 
 ```text
 1. route/method check
-2. Content-Length <= max, if present
-3. read body with max-byte guard
-4. JSON parse
-5. normalize body from JSON + headers
-6. verify submit token HMAC + token/body/header binding
-7. verify timestamp skew
+2. per-IP rate-limit check, if enabled
+3. Content-Length <= max, if present
+4. read body with max-byte guard
+5. JSON parse
+6. normalize body from JSON + headers
+7. verify submitted_at timestamp skew
 8. verify hotkey signature over canonical submit bytes
-9. decode assignment_b64 and enforce byte length/trailing bits
-10. idempotency insert/lookup in local durable log
-11. return receipt
+9. exact replay lookup by miner_hotkey + challenge_id + submit_token_id
+10. if replay exists and is not rejected: return existing receipt
+11. otherwise verify submit token HMAC + token/body/header binding + expiry
+12. decode assignment_b64 and enforce byte length/trailing bits
+13. idempotency insert/update under local SQLite WAL
+14. return receipt
 ```
 
-Current Python implementation verifies hotkey signature before submit-token HMAC. The lean ingress may verify token first to reduce sr25519 work on junk traffic, provided accepted/rejected semantics remain compatible. If exact error-order parity is required, match Python order.
+Why replay lookup happens before token-HMAC verification:
+
+- it only returns an existing non-rejected row
+- it requires a valid fresh hotkey signature
+- it requires the same submit-token hash as the existing row
+- it does not admit new work after token expiry
+
+New unique submissions still require a valid unexpired HMAC submit token.
 
 ## Optional Inline SAT Verification
 
 Current Railway V2 endpoint verifies the SAT witness inline before DB write.
 
-Lean ingress Phase 1 may instead return `received` before SAT verification if the event is token/signature/shape valid and durable in the local log.
+Lean ingress Phase 1 may instead return `received` before SAT verification if the event is token/signature/shape valid and accepted into the local SQLite WAL.
+
+Durability caveat: the Phase-1 SQLite setting uses `synchronous=NORMAL`, which is a practical low-cost WAL durability/performance tradeoff for beta testing. It is not a replicated durable queue. Production scoring still requires the flusher/audit pipeline.
 
 If inline verification is enabled, ingress must also prove exact parity for:
 

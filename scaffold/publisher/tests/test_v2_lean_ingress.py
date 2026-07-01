@@ -33,7 +33,9 @@ def _keypair(uri: str = "//V2LeanIngressTest"):
 
 
 def _client(tmp_path, *, secret: str = SECRET, skew: int = 300,
-            max_unflushed_events: int = 100_000) -> TestClient:
+            max_unflushed_events: int = 100_000,
+            metrics_token: str = "",
+            ip_rpm: int = 6000) -> TestClient:
     store = LeanIngressStore(tmp_path / "ingress.sqlite3")
     app = build_ingress_app(
         store=store,
@@ -44,6 +46,9 @@ def _client(tmp_path, *, secret: str = SECRET, skew: int = 300,
         max_storage_bytes=0,
         min_free_disk_bytes=0,
         max_unflushed_age_secs=0,
+        metrics_token=metrics_token,
+        metrics_ttl_secs=1.0,
+        ip_rpm=ip_rpm,
     )
     return TestClient(app)
 
@@ -140,6 +145,43 @@ def test_lean_ingress_rejects_bad_token_before_event(tmp_path):
     metrics = client.get("/v2/ingress/metrics").json()
     assert metrics["total_events"] == 0
     assert metrics["rejects"]["invalid_submit_token"] == 1
+    with client.app.state.store._connect() as conn:
+        db_rejects = conn.execute("SELECT COUNT(*) AS n FROM reject_rollups_local").fetchone()["n"]
+    assert db_rejects == 0
+
+
+def test_lean_ingress_metrics_token_gate(tmp_path):
+    client = _client(tmp_path, metrics_token="metrics-secret")
+    denied = client.get("/v2/ingress/metrics")
+    assert denied.status_code == 401
+    allowed = client.get(
+        "/v2/ingress/metrics",
+        headers={"Authorization": "Bearer metrics-secret"},
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["schema"] == "cathedral.v2.lean_ingress_metrics.v1"
+
+
+def test_lean_ingress_ip_rate_limit_before_body_work(tmp_path):
+    client = _client(tmp_path, ip_rpm=1)
+    kp = _keypair()
+    body, headers = _submit_body(kp)
+    first = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert first.status_code == 202, first.text
+    limited = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert limited.status_code == 429
+    assert limited.json()["detail"] == "ingress_ip_rate_limited"
+
+
+def test_lean_ingress_rejects_multi_worker_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    store = LeanIngressStore(tmp_path / "ingress.sqlite3")
+    try:
+        import pytest
+        with pytest.raises(RuntimeError, match="WEB_CONCURRENCY=2"):
+            build_ingress_app(store=store, submit_token_secret=SECRET)
+    finally:
+        monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
 
 
 def test_lean_ingress_exact_replay_bypasses_later_token_expiry(tmp_path, monkeypatch):

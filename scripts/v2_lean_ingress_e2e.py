@@ -20,6 +20,7 @@ import base64
 import hashlib
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib import request as urllib_request
@@ -145,7 +146,14 @@ def main() -> None:
     if status3 != 200 or fetched.get("receipt_id") != rid:
         raise SystemExit(f"receipt fetch failed: {status3} {fetched}")
 
-    status4, metrics = _http_json("GET", f"{base}/v2/ingress/metrics")
+    metrics = {}
+    status4 = 0
+    deadline = datetime.now(timezone.utc).timestamp() + 3.0
+    while datetime.now(timezone.utc).timestamp() < deadline:
+        status4, metrics = _http_json("GET", f"{base}/v2/ingress/metrics")
+        if status4 == 200 and metrics.get("events", {}).get("received", 0) >= 1:
+            break
+        time.sleep(0.25)
     if status4 != 200 or metrics.get("events", {}).get("received", 0) < 1:
         raise SystemExit(f"metrics failed: {status4} {metrics}")
 

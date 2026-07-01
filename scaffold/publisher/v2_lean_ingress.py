@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -35,6 +36,8 @@ DEFAULT_MAX_UNFLUSHED_EVENTS = 100_000
 DEFAULT_MAX_STORAGE_BYTES = 1_000_000_000
 DEFAULT_MIN_FREE_DISK_BYTES = 100_000_000
 DEFAULT_MAX_UNFLUSHED_AGE_SECS = 0
+DEFAULT_METRICS_TTL_SECS = 1.0
+DEFAULT_IP_RPM = 6000
 _FAMILY = "synthetic_boolean_v1"
 
 
@@ -43,6 +46,37 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)))
     except Exception:
         return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _assert_single_worker_env() -> None:
+    if _env_bool("CATHEDRAL_V2_INGRESS_ALLOW_MULTI_WORKER", False):
+        return
+    for name in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS"):
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        try:
+            workers = int(raw)
+        except Exception:
+            continue
+        if workers > 1:
+            raise RuntimeError(
+                f"{name}={workers} is unsafe for sqlite-wal lean ingress; use one worker"
+            )
 
 
 def _now_iso_ms() -> str:
@@ -68,10 +102,27 @@ class LeanIngressPressureError(RuntimeError):
 class LeanIngressStore:
     """Tiny SQLite WAL-backed local durable event log."""
 
-    def __init__(self, path: str | os.PathLike[str]):
+    def __init__(self, path: str | os.PathLike[str], *, enforce_single_process: bool = True):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._process_lock_handle = None
+        if enforce_single_process:
+            self._acquire_process_lock()
         self.init()
+
+    def _acquire_process_lock(self) -> None:
+        try:
+            import fcntl  # POSIX-only; deployment target is Linux.
+        except Exception:
+            return
+        lock_path = self.path + ".lock"
+        handle = open(lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.close()
+            raise RuntimeError("v2_lean_ingress_single_process_lock_failed") from exc
+        self._process_lock_handle = handle
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
@@ -437,10 +488,15 @@ def build_ingress_app(
     max_storage_bytes: int | None = None,
     min_free_disk_bytes: int | None = None,
     max_unflushed_age_secs: int | None = None,
+    metrics_token: str | None = None,
+    metrics_ttl_secs: float | None = None,
+    ip_rpm: int | None = None,
 ) -> FastAPI:
+    _assert_single_worker_env()
     app = FastAPI(title="Cathedral V2 Lean Ingress", version="0.1.0")
     app.state.store = store or LeanIngressStore(
-        os.environ.get("CATHEDRAL_V2_INGRESS_DB_PATH", "./data/v2-ingress.sqlite3")
+        os.environ.get("CATHEDRAL_V2_INGRESS_DB_PATH", "./data/v2-ingress.sqlite3"),
+        enforce_single_process=not _env_bool("CATHEDRAL_V2_INGRESS_DISABLE_PROCESS_LOCK", False),
     )
     app.state.verifier = verifier or default_verifier()
     app.state.submit_token_secret = submit_token_secret or os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "")
@@ -462,8 +518,23 @@ def build_ingress_app(
     app.state.max_unflushed_age_secs = int(max_unflushed_age_secs if max_unflushed_age_secs is not None else _env_int(
         "CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_AGE_SECS", DEFAULT_MAX_UNFLUSHED_AGE_SECS
     ))
+    app.state.metrics_token = (metrics_token if metrics_token is not None else os.environ.get(
+        "CATHEDRAL_V2_INGRESS_METRICS_TOKEN", ""
+    )).strip()
+    app.state.metrics_ttl_secs = float(metrics_ttl_secs if metrics_ttl_secs is not None else _env_float(
+        "CATHEDRAL_V2_INGRESS_METRICS_TTL_SECS", DEFAULT_METRICS_TTL_SECS
+    ))
+    app.state.ip_rpm = int(ip_rpm if ip_rpm is not None else _env_int(
+        "CATHEDRAL_V2_INGRESS_IP_RPM", DEFAULT_IP_RPM
+    ))
+    app.state._metrics_cache = {"ts": 0.0, "payload": None}
+    app.state._metrics_lock = threading.Lock()
+    app.state._reject_counts: dict[str, int] = {}
+    app.state._reject_lock = threading.Lock()
+    app.state._ip_windows: dict[str, tuple[int, int]] = {}
+    app.state._ip_lock = threading.Lock()
 
-    def _limits() -> dict[str, int]:
+    def _limits() -> dict[str, Any]:
         return {
             "max_body_bytes": int(app.state.max_body_bytes),
             "timestamp_skew_secs": int(app.state.timestamp_skew_secs),
@@ -471,11 +542,71 @@ def build_ingress_app(
             "max_storage_bytes": int(app.state.max_storage_bytes),
             "min_free_disk_bytes": int(app.state.min_free_disk_bytes),
             "max_unflushed_age_secs": int(app.state.max_unflushed_age_secs),
+            "ip_rpm": int(app.state.ip_rpm),
+            "metrics_ttl_secs": float(app.state.metrics_ttl_secs),
         }
 
+    def _record_reject_memory(reason: str) -> None:
+        with app.state._reject_lock:
+            key = str(reason)[:128]
+            app.state._reject_counts[key] = int(app.state._reject_counts.get(key, 0)) + 1
+
     def reject(reason: str, status_code: int = 400) -> None:
-        app.state.store.record_reject(reason)
+        # Public junk traffic must not contend on the SQLite write lock. Keep
+        # reject accounting in memory; accepted events remain durable in SQLite.
+        _record_reject_memory(reason)
         raise HTTPException(status_code, reason)
+
+    def _metrics_payload() -> dict[str, Any]:
+        now = time.time()
+        with app.state._metrics_lock:
+            cached = app.state._metrics_cache.get("payload")
+            cached_ts = float(app.state._metrics_cache.get("ts") or 0.0)
+            if cached is not None and now - cached_ts <= max(0.0, float(app.state.metrics_ttl_secs)):
+                return dict(cached)
+            payload = app.state.store.metrics()
+            with app.state._reject_lock:
+                rejects = dict(app.state._reject_counts)
+            merged_rejects = dict(payload.get("rejects") or {})
+            for key, value in rejects.items():
+                merged_rejects[key] = int(merged_rejects.get(key, 0)) + int(value)
+            payload["rejects"] = merged_rejects
+            payload["limits"] = _limits()
+            app.state._metrics_cache = {"ts": now, "payload": dict(payload)}
+            return payload
+
+    def _metrics_authorized(request: Request) -> bool:
+        token = str(app.state.metrics_token or "").strip()
+        if not token:
+            return True
+        auth = request.headers.get("authorization", "").strip()
+        if auth.lower().startswith("bearer ") and auth[7:].strip() == token:
+            return True
+        return request.headers.get("x-cathedral-admin-token", "").strip() == token
+
+    def _client_ip(request: Request) -> str:
+        cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+        if cf_ip:
+            return cf_ip
+        xff = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if xff:
+            return xff
+        return request.client.host if request.client else "unknown"
+
+    def _check_ip_rate(request: Request) -> None:
+        rpm = int(app.state.ip_rpm or 0)
+        if rpm <= 0:
+            return
+        ip = _client_ip(request)
+        bucket = int(time.time() // 60)
+        with app.state._ip_lock:
+            old_bucket, count = app.state._ip_windows.get(ip, (bucket, 0))
+            if old_bucket != bucket:
+                old_bucket, count = bucket, 0
+            count += 1
+            app.state._ip_windows[ip] = (old_bucket, count)
+            if count > rpm:
+                reject("ingress_ip_rate_limited", 429)
 
     @app.get("/health/live")
     def health_live():
@@ -490,7 +621,7 @@ def build_ingress_app(
 
     @app.get("/health/ready")
     def health_ready():
-        metrics = app.state.store.metrics()
+        metrics = _metrics_payload()
         reason = None
         if not app.state.submit_token_secret:
             reason = "v2_submit_token_secret_missing"
@@ -513,12 +644,12 @@ def build_ingress_app(
         return JSONResponse(payload, status_code=200 if reason is None else 503)
 
     @app.get("/v2/ingress/metrics")
-    def ingress_metrics():
-        payload = app.state.store.metrics()
-        payload["limits"] = _limits()
+    def ingress_metrics(request: Request):
+        if not _metrics_authorized(request):
+            raise HTTPException(401, "metrics_unauthorized")
         return JSONResponse(
-            payload,
-            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            _metrics_payload(),
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.post("/v2/agents/submit-bitset")
@@ -528,6 +659,7 @@ def build_ingress_app(
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str = Header(...),
     ):
+        _check_ip_rate(request)
         if not app.state.submit_token_secret:
             reject("v2_submit_token_secret_missing", 503)
         content_length = request.headers.get("content-length")

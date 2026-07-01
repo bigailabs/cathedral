@@ -520,6 +520,11 @@ def build_app(
     v2_submit_bitset_enabled = _env_bool("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", False)
     v2_submit_token_secret = os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip()
     v2_submit_token_ttl_secs = max(1, _env_int("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", 300))
+    v2_submit_token_allowlist = {
+        item.strip()
+        for item in os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST", "").replace("\n", ",").split(",")
+        if item.strip()
+    }
     v2_submit_bitset_max_body_bytes = max(
         1024, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", 16_384))
     v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
@@ -5298,6 +5303,10 @@ def build_app(
         }
 
     # ---- V2 off-chain solution manifest intake (Phase 1/2+) ---------------
+    def _require_v2_submit_token_mint_allowed(hotkey: str) -> None:
+        if v2_submit_token_allowlist and str(hotkey).strip() not in v2_submit_token_allowlist:
+            raise HTTPException(403, "v2_submit_token_hotkey_not_allowlisted")
+
     @app.get("/v2/synthetic-boolean/per-miner/challenges")
     def v2_per_miner_challenges(
         request: Request,
@@ -5326,6 +5335,7 @@ def build_app(
             items = pm.miner_instance_set(
                 x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
             if v2_submit_bitset_enabled:
+                _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                 if not v2_submit_token_secret:
                     raise HTTPException(503, "v2_submit_token_secret_missing")
                 expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
@@ -5415,6 +5425,7 @@ def build_app(
                 "X-Perminer-Epoch": str(epoch),
             }
             if v2_submit_bitset_enabled:
+                _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                 if not v2_submit_token_secret:
                     raise HTTPException(503, "v2_submit_token_secret_missing")
                 cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()

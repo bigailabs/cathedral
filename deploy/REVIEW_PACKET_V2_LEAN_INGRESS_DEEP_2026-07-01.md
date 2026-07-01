@@ -175,3 +175,87 @@ Also separately state whether the design is acceptable for the next milestone:
 ```text
 F1: batch flusher/verifier implementation
 ```
+
+## Addendum — Changes After Deep Review Blockers
+
+The public-exposure blockers from the deep review have been addressed as follows:
+
+### H1
+
+Pre-auth rejects no longer write SQLite by default. Reject counts are held in memory and merged into metrics.
+
+Please review:
+
+```text
+reject() in scaffold/publisher/v2_lean_ingress.py
+```
+
+### H2
+
+Metrics are cached and `/v2/ingress/metrics` can be token-gated.
+
+New env:
+
+```text
+CATHEDRAL_V2_INGRESS_METRICS_TOKEN
+CATHEDRAL_V2_INGRESS_METRICS_TTL_SECS
+```
+
+Please review whether `/health/ready` using cached metrics is acceptable.
+
+### H3
+
+Single worker/process is now enforced two ways:
+
+```text
+WEB_CONCURRENCY/UVICORN_WORKERS/GUNICORN_WORKERS > 1 => boot failure
+SQLite DB process lock sidecar file
+```
+
+Please review whether this is sufficient for a small public test host.
+
+### Per-IP limiter
+
+New env:
+
+```text
+CATHEDRAL_V2_INGRESS_IP_RPM
+```
+
+Please review the fixed-window limiter and whether it should live at Cloudflare instead, or both.
+
+### F-MINT test gate
+
+New default-off token mint allowlist on the V2 beta challenge/token service:
+
+```text
+CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST=<comma-separated hotkeys>
+```
+
+When set, non-allowlisted hotkeys cannot receive V2 bitset submit tokens from `/v2/synthetic-boolean/per-miner/challenges` or `/v2/synthetic-boolean/per-miner/cnf`.
+
+Please review whether this is sufficient for the public replay-spam test, with the understanding that it is not the final registration/stake gate.
+
+### Updated tests
+
+```text
+29 passed
+```
+
+New tests include:
+
+```text
+metrics token gate
+memory-only reject accounting
+IP limiter
+multi-worker env fail-closed
+```
+
+## Updated Requested Verdict
+
+Please give separate verdicts for:
+
+1. closed replay-spam test
+2. public allowlisted replay-spam test
+3. unrestricted unique-row public test
+4. F1 flusher/verifier milestone

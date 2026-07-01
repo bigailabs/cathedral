@@ -534,3 +534,162 @@ no production route change
 After the latest feedback updates, it is ready for the scoped isolated replay-spam test.
 
 It is not yet ready for unrestricted unique-row spam or production scoring.
+
+## Addendum — Public-Exposure Hardening After Deep Review
+
+A later deep review approved the code for a closed replay-spam test but found public-exposure blockers. These have now been addressed in code or converted into explicit deployment gates.
+
+### H1 fixed: pre-auth rejects no longer write SQLite by default
+
+Problem:
+
+```text
+bad JSON / bad token / oversized junk could call record_reject()
+record_reject() wrote SQLite
+junk flood could contend with real admits on the single SQLite write lock
+```
+
+Fix:
+
+```text
+reject counters are now in-memory by default
+accepted events remain durable in SQLite WAL
+invalid junk no longer creates reject_rollup SQLite writes in the hot path
+```
+
+Test coverage:
+
+```text
+test_lean_ingress_rejects_bad_token_before_event
+```
+
+This test verifies the reject appears in metrics while `reject_rollups_local` remains empty.
+
+### H2 fixed: metrics are cached and can be token-gated
+
+Problem:
+
+```text
+public /health/ready and /v2/ingress/metrics could repeatedly scan local SQLite tables
+```
+
+Fix:
+
+```text
+metrics payloads are cached with CATHEDRAL_V2_INGRESS_METRICS_TTL_SECS
+/v2/ingress/metrics supports CATHEDRAL_V2_INGRESS_METRICS_TOKEN
+/health/ready uses the cached metrics snapshot
+```
+
+Public deployment should set:
+
+```text
+CATHEDRAL_V2_INGRESS_METRICS_TOKEN=<operator-only-token>
+CATHEDRAL_V2_INGRESS_METRICS_TTL_SECS=1.0
+```
+
+Test coverage:
+
+```text
+test_lean_ingress_metrics_token_gate
+```
+
+### H3 fixed: single-process/worker enforcement
+
+Problem:
+
+```text
+multiple uvicorn/gunicorn/Railway workers could hit one SQLite WAL file and cause SQLITE_BUSY/500s
+```
+
+Fix:
+
+```text
+common worker-count env vars >1 fail closed at boot
+SQLite DB path gets a POSIX process lock sidecar file
+runbook pins WEB_CONCURRENCY=1 and --workers 1
+```
+
+Test coverage:
+
+```text
+test_lean_ingress_rejects_multi_worker_env
+```
+
+### Per-IP rate limiter added
+
+For public tests, the ingress now supports:
+
+```text
+CATHEDRAL_V2_INGRESS_IP_RPM=6000
+```
+
+This is a local fixed-window per-IP limiter using `CF-Connecting-IP`, then `X-Forwarded-For`, then socket peer.
+
+Test coverage:
+
+```text
+test_lean_ingress_ip_rate_limit_before_body_work
+```
+
+### F-MINT partially addressed with a default-off mint allowlist
+
+Problem:
+
+```text
+V2 beta challenge/token-mint endpoint allowed any signed hotkey to mint tokens
+fresh keypairs could mint many tokens and fill unique-row backlog
+```
+
+Fix added:
+
+```text
+CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST=<comma-separated tester hotkeys>
+```
+
+When set on the V2 beta challenge/token service, only allowlisted hotkeys receive V2 bitset submit tokens. When unset, current behavior is unchanged.
+
+This is a test gate, not the final registration system. Before real unique-row public traffic, replace or supplement it with registration/stake eligibility and per-hotkey quotas.
+
+### Documentation nits fixed
+
+- `deploy/V2_BITSET_INGRESS_CONTRACT_2026-06-30.md` now matches the real validation order: signature and exact replay lookup happen before fresh token HMAC verification.
+- The runbook now states that `synchronous=NORMAL` is a practical WAL durability/performance tradeoff, not the same thing as a fully replicated durable queue.
+
+### Updated test result
+
+Latest relevant suite:
+
+```text
+29 passed
+```
+
+Latest local HTTP E2E:
+
+```text
+E2E_OK
+status=received
+idempotent_replay=True
+unflushed_events=1
+```
+
+### Updated verdict
+
+Ready for:
+
+```text
+closed replay-spam test
+public replay-spam test only if:
+  - metrics token is set
+  - IP rate limit is set
+  - one worker/process is enforced
+  - V2 submit token allowlist is set on the challenge/token service
+```
+
+Still not ready for:
+
+```text
+unrestricted unique-row public spam
+production rewards
+real validator weights
+```
