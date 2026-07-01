@@ -189,28 +189,43 @@ def get_json(session: requests.Session, base: str, path: str, *, headers: dict[s
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run an isolated Cathedral V2 bitset miner E2E smoke")
-    ap.add_argument("--base", default=os.environ.get("CATHEDRAL_V2_BASE_URL", DEFAULT_BASE).rstrip("/"))
+    ap.add_argument("--base", default=os.environ.get("CATHEDRAL_V2_BASE_URL", DEFAULT_BASE).rstrip("/"), help="Default base for both challenge and submit paths")
+    ap.add_argument("--challenge-base", default=os.environ.get("CATHEDRAL_V2_CHALLENGE_BASE_URL", ""), help="Fetch V2 challenges/CNFs from this base; defaults to --base")
+    ap.add_argument("--submit-base", default=os.environ.get("CATHEDRAL_V2_SUBMIT_BASE_URL", ""), help="Submit V2 bitsets to this base; defaults to --base")
     ap.add_argument("--limit", type=int, default=1)
     ap.add_argument("--solver", default=os.environ.get("CATHEDRAL_MINER_SOLVER", "cadical153"))
     ap.add_argument("--poll-secs", type=float, default=30.0)
     ap.add_argument("--uri", default="", help="Optional dev URI, e.g. //Alice")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--repeat-submit", type=int, default=1, help="Repeat the same solved submit N times; useful for lean-ingress spam/idempotency tests")
+    ap.add_argument("--expect-status", choices=("verified", "received", "any"), default="verified", help="Expected receipt status. Use 'received' for lean ingress Phase 1.")
+    ap.add_argument("--skip-weights", action="store_true", help="Skip V2 shadow weight check; required for lean ingress Phase 1")
     args = ap.parse_args()
 
     session = requests.Session()
     base = args.base.rstrip("/")
+    challenge_base = (args.challenge_base or base).rstrip("/")
+    submit_base = (args.submit_base or base).rstrip("/")
     kp, key_source = make_keypair(args)
     print(f"base={base}")
+    print(f"challenge_base={challenge_base}")
+    print(f"submit_base={submit_base}")
     print(f"hotkey={kp.ss58_address}")
     print(f"key_source={key_source}")
 
-    r, body = get_json(session, base, "/health/live", timeout=20)
-    print(f"health_live={r.status_code}")
+    r, body = get_json(session, challenge_base, "/health/live", timeout=20)
+    print(f"challenge_health_live={r.status_code}")
     if r.status_code != 200:
         print(body)
         return 1
+    if submit_base != challenge_base:
+        r, body = get_json(session, submit_base, "/health/live", timeout=20)
+        print(f"submit_health_live={r.status_code}")
+        if r.status_code != 200:
+            print(body)
+            return 1
 
-    r, payload = get_json(session, base, f"/v2/synthetic-boolean/per-miner/challenges?limit={int(args.limit)}", headers=read_headers(kp), timeout=30)
+    r, payload = get_json(session, challenge_base, f"/v2/synthetic-boolean/per-miner/challenges?limit={int(args.limit)}", headers=read_headers(kp), timeout=30)
     print(f"challenges_status={r.status_code}")
     if r.status_code != 200 or not isinstance(payload, dict):
         print(json.dumps(payload, indent=2) if isinstance(payload, (dict, list)) else str(payload)[:1000])
@@ -235,7 +250,7 @@ def main() -> int:
         return 1
 
     query = urlencode({"challenge_id": challenge_id, "tier": tier, "seq": seq})
-    r = session.get(base + "/v2/synthetic-boolean/per-miner/cnf?" + query, headers=read_headers(kp), timeout=30)
+    r = session.get(challenge_base + "/v2/synthetic-boolean/per-miner/cnf?" + query, headers=read_headers(kp), timeout=30)
     print(f"cnf_status={r.status_code} bytes={len(r.content)}")
     if r.status_code != 200:
         print(r.text[:1000])
@@ -261,35 +276,63 @@ def main() -> int:
         "assignment_encoding": "bitset/v1",
         "assignment_b64": assignment_b64,
     }
-    t0 = time.time()
-    r = session.post(base + "/v2/agents/submit-bitset", json=body, headers=bitset_headers(kp, body), timeout=30)
-    admit_ms = (time.time() - t0) * 1000.0
-    print(f"submit_bitset_status={r.status_code} admit_ms={admit_ms:.1f}")
-    if r.status_code not in (200, 202):
-        print(r.text[:1000])
-        return 1
-    receipt = r.json()
-    receipt_id = receipt["receipt_id"]
-    print(f"receipt_id={receipt_id} status={receipt.get('status')} score={receipt.get('weighted_score')}")
+    submit_results: list[dict[str, Any]] = []
+    receipt_id = ""
+    admit_ms_values: list[float] = []
+    for i in range(max(1, int(args.repeat_submit))):
+        t0 = time.time()
+        r = session.post(submit_base + "/v2/agents/submit-bitset", json=body, headers=bitset_headers(kp, body), timeout=30)
+        admit_ms = (time.time() - t0) * 1000.0
+        admit_ms_values.append(admit_ms)
+        print(f"submit_bitset_status[{i}]={r.status_code} admit_ms={admit_ms:.1f}")
+        if r.status_code not in (200, 202):
+            print(r.text[:1000])
+            return 1
+        receipt = r.json()
+        submit_results.append(receipt)
+        receipt_id = receipt_id or receipt["receipt_id"]
+        print(f"receipt_id[{i}]={receipt.get('receipt_id')} status={receipt.get('status')} score={receipt.get('weighted_score')} replay={receipt.get('idempotent_replay')}")
+    receipt = submit_results[-1]
 
     deadline = time.time() + max(1.0, float(args.poll_secs))
     final: dict[str, Any] | None = None
-    while time.time() < deadline:
-        r, final_body = get_json(session, base, f"/v2/agents/submit-bitset/receipts/{receipt_id}", timeout=20)
+    if args.expect_status == "received":
+        r, final_body = get_json(session, submit_base, f"/v2/agents/submit-bitset/receipts/{receipt_id}", timeout=20)
         if r.status_code == 200 and isinstance(final_body, dict):
             final = final_body
             print(f"receipt_state={final.get('status')} terminal={final.get('terminal')}")
-            if final.get("terminal"):
-                break
         else:
             print(f"receipt_status={r.status_code} body={str(final_body)[:300]}")
-        time.sleep(1)
-    if not final or final.get("status") != "verified":
-        print("E2E_FAILED receipt_not_verified")
+            return 1
+    else:
+        while time.time() < deadline:
+            r, final_body = get_json(session, submit_base, f"/v2/agents/submit-bitset/receipts/{receipt_id}", timeout=20)
+            if r.status_code == 200 and isinstance(final_body, dict):
+                final = final_body
+                print(f"receipt_state={final.get('status')} terminal={final.get('terminal')}")
+                if final.get("terminal") or args.expect_status == "any":
+                    break
+            else:
+                print(f"receipt_status={r.status_code} body={str(final_body)[:300]}")
+            time.sleep(1)
+    if not final or (args.expect_status != "any" and final.get("status") != args.expect_status):
+        print(f"E2E_FAILED receipt_not_{args.expect_status}")
         print(json.dumps(final or {}, indent=2, sort_keys=True))
         return 1
 
-    r, weights = get_json(session, base, "/v2/validator/weights/next", timeout=30)
+    if args.skip_weights:
+        print("weights_check=skipped")
+        print("E2E_OK " + json.dumps({
+            "receipt_id": receipt_id,
+            "status": final.get("status"),
+            "hotkey": kp.ss58_address,
+            "admit_ms_min": round(min(admit_ms_values), 1),
+            "admit_ms_max": round(max(admit_ms_values), 1),
+            "repeat_submit": max(1, int(args.repeat_submit)),
+        }, sort_keys=True))
+        return 0
+
+    r, weights = get_json(session, challenge_base, "/v2/validator/weights/next", timeout=30)
     print(f"weights_status={r.status_code}")
     if r.status_code != 200 or not isinstance(weights, dict):
         print(weights)
@@ -306,7 +349,7 @@ def main() -> int:
         "hotkey": kp.ss58_address,
         "weight": row.get("weight"),
         "raw_score": row.get("raw_score"),
-        "admit_ms": round(admit_ms, 1),
+        "admit_ms": round(admit_ms_values[-1], 1),
     }, sort_keys=True))
     return 0
 
