@@ -142,6 +142,68 @@ def test_lean_ingress_rejects_bad_token_before_event(tmp_path):
     assert metrics["rejects"]["invalid_submit_token"] == 1
 
 
+def test_lean_ingress_exact_replay_bypasses_later_token_expiry(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    kp = _keypair()
+    body, headers = _submit_body(kp)
+
+    first = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert first.status_code == 202, first.text
+    receipt_id = first.json()["receipt_id"]
+
+    def _expired(*args, **kwargs):
+        raise v2_bitset_submit.BitsetSubmitError("submit_token_expired")
+
+    monkeypatch.setattr(v2_bitset_submit, "verify_submit_token", _expired)
+    replay = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["receipt_id"] == receipt_id
+    assert replay.json()["idempotent_replay"] is True
+
+
+def test_lean_ingress_can_replace_existing_rejected_row(tmp_path):
+    client = _client(tmp_path)
+    kp = _keypair()
+    body, headers = _submit_body(kp, challenge_id="pm-t2-e495232-s7-reject-retry")
+
+    first = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert first.status_code == 202, first.text
+    first_payload = first.json()
+    first_sha = first_payload["assignment_sha256"]
+
+    store = client.app.state.store
+    idem = v2_bitset_submit.idempotency_key(
+        miner_hotkey=kp.ss58_address,
+        challenge_id=body["challenge_id"],
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE submit_events_local SET status='rejected', rejection_reason='witness_check_failed' "
+            "WHERE idempotency_key=?",
+            (idem,),
+        )
+
+    raw2 = bytes([0x00, 0x00])
+    body["assignment_b64"] = base64.b64encode(raw2).decode("ascii")
+    submit = v2_bitset_submit.normalize_submit_body(
+        body,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=headers["X-Cathedral-Submitted-At"],
+        card_id="synthetic_boolean_v1",
+    )
+    headers["X-Cathedral-Signature"] = base64.b64encode(
+        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
+    ).decode("ascii")
+
+    retry = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert retry.status_code == 202, retry.text
+    retry_payload = retry.json()
+    assert retry_payload["receipt_id"] == first_payload["receipt_id"]
+    assert retry_payload["status"] == "received"
+    assert retry_payload["assignment_sha256"] != first_sha
+    assert retry_payload["idempotent_replay"] is False
+
+
 def test_lean_ingress_backpressure_allows_replay_blocks_new_unique(tmp_path):
     client = _client(tmp_path, max_unflushed_events=1)
     kp = _keypair()

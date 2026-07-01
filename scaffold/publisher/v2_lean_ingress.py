@@ -115,6 +115,8 @@ class LeanIngressStore:
                   ON submit_events_local(status, received_at_iso);
                 CREATE INDEX IF NOT EXISTS idx_submit_events_local_miner_challenge
                   ON submit_events_local(miner_hotkey, challenge_id);
+                CREATE INDEX IF NOT EXISTS idx_submit_events_local_unflushed
+                  ON submit_events_local(flushed_at_iso, received_at_iso);
                 CREATE TABLE IF NOT EXISTS reject_rollups_local (
                   bucket_iso TEXT NOT NULL,
                   reason TEXT NOT NULL,
@@ -191,6 +193,25 @@ class LeanIngressStore:
                 return "ingress_flush_lag"
         return None
 
+    def get_replay_candidate(
+        self,
+        *,
+        miner_hotkey: str,
+        challenge_id: str,
+        submit_token_id: str,
+    ) -> dict[str, Any] | None:
+        idem = v2_bitset_submit.idempotency_key(
+            miner_hotkey=miner_hotkey,
+            challenge_id=challenge_id,
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM submit_events_local "
+                "WHERE idempotency_key=? AND submit_token_id=? AND status != 'rejected' LIMIT 1",
+                (idem, submit_token_id),
+            ).fetchone()
+            return dict(row) if row else None
+
     def admit_event(
         self,
         *,
@@ -240,9 +261,16 @@ class LeanIngressStore:
                 "SELECT * FROM submit_events_local WHERE idempotency_key=? LIMIT 1",
                 (idem,),
             ).fetchone()
-            if existing is not None:
+            existing_row = dict(existing) if existing is not None else None
+            if existing_row is not None and str(existing_row.get("status") or "") != "rejected":
                 conn.execute("COMMIT")
-                return dict(existing), False
+                return existing_row, False
+            if existing_row is not None:
+                rid = str(existing_row["receipt_id"])
+                event["receipt_id"] = rid
+                event["replaces_rejected"] = True
+                event_json = _json_dumps(event)
+                event_sha = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
             pressure_reason = self._pressure_reason(
                 conn,
                 max_unflushed_events=max_unflushed_events,
@@ -253,35 +281,62 @@ class LeanIngressStore:
             if pressure_reason:
                 conn.execute("ROLLBACK")
                 raise LeanIngressPressureError(pressure_reason)
-            cur = conn.execute(
-                "INSERT INTO submit_events_local("
-                "receipt_id, idempotency_key, miner_hotkey, challenge_id, card_id, "
-                "epoch, tier, seq, cnf_sha256, assignment_encoding, assignment_sha256, "
-                "assignment_b64, status, eligibility_status, received_at_iso, submitted_at, "
-                "verified_at_iso, signature, submit_token_id, weighted_score, event_json, event_sha256"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'unknown_beta', ?, ?, "
-                "NULL, ?, ?, 0.0, ?, ?)",
-                (
-                    rid,
-                    idem,
-                    submit["miner_hotkey"],
-                    submit["challenge_id"],
-                    submit["card_id"],
-                    int(token_payload["epoch"]),
-                    int(token_payload["tier"]),
-                    int(token_payload["seq"]),
-                    str(token_payload["cnf_sha256"]).lower(),
-                    submit["assignment_encoding"],
-                    assignment_sha,
-                    submit["assignment_b64"],
-                    received_at_iso,
-                    submit["submitted_at"],
-                    signature,
-                    submit_token_id,
-                    event_json,
-                    event_sha,
-                ),
-            )
+            if existing_row is not None:
+                cur = conn.execute(
+                    "UPDATE submit_events_local SET "
+                    "epoch=?, tier=?, seq=?, cnf_sha256=?, assignment_encoding=?, "
+                    "assignment_sha256=?, assignment_b64=?, status='received', "
+                    "eligibility_status='unknown_beta', received_at_iso=?, submitted_at=?, "
+                    "verified_at_iso=NULL, signature=?, submit_token_id=?, weighted_score=0.0, "
+                    "event_json=?, event_sha256=?, flushed_at_iso=NULL, rejection_reason=NULL "
+                    "WHERE idempotency_key=? AND status='rejected'",
+                    (
+                        int(token_payload["epoch"]),
+                        int(token_payload["tier"]),
+                        int(token_payload["seq"]),
+                        str(token_payload["cnf_sha256"]).lower(),
+                        submit["assignment_encoding"],
+                        assignment_sha,
+                        submit["assignment_b64"],
+                        received_at_iso,
+                        submit["submitted_at"],
+                        signature,
+                        submit_token_id,
+                        event_json,
+                        event_sha,
+                        idem,
+                    ),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO submit_events_local("
+                    "receipt_id, idempotency_key, miner_hotkey, challenge_id, card_id, "
+                    "epoch, tier, seq, cnf_sha256, assignment_encoding, assignment_sha256, "
+                    "assignment_b64, status, eligibility_status, received_at_iso, submitted_at, "
+                    "verified_at_iso, signature, submit_token_id, weighted_score, event_json, event_sha256"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'unknown_beta', ?, ?, "
+                    "NULL, ?, ?, 0.0, ?, ?)",
+                    (
+                        rid,
+                        idem,
+                        submit["miner_hotkey"],
+                        submit["challenge_id"],
+                        submit["card_id"],
+                        int(token_payload["epoch"]),
+                        int(token_payload["tier"]),
+                        int(token_payload["seq"]),
+                        str(token_payload["cnf_sha256"]).lower(),
+                        submit["assignment_encoding"],
+                        assignment_sha,
+                        submit["assignment_b64"],
+                        received_at_iso,
+                        submit["submitted_at"],
+                        signature,
+                        submit_token_id,
+                        event_json,
+                        event_sha,
+                    ),
+                )
             inserted = cur.rowcount > 0
             row = conn.execute(
                 "SELECT * FROM submit_events_local WHERE idempotency_key=? LIMIT 1",
@@ -503,6 +558,27 @@ def build_ingress_app(
         if ts is None or abs(time.time() - ts) > app.state.timestamp_skew_secs:
             reject("submitted_at outside acceptable clock-skew window", 400)
 
+        msg = v2_bitset_submit.canonical_submit_bytes(submit)
+        if not app.state.verifier.verify(x_cathedral_hotkey, msg, x_cathedral_signature):
+            reject("invalid hotkey signature", 401)
+
+        # Exact signed replays should remain cheap and available even if the
+        # short-lived submit token has expired. This does not admit new work: it
+        # only returns an existing non-rejected row for the same hotkey,
+        # challenge, and submit-token hash.
+        submit_token_id = hashlib.sha256(str(submit["submit_token"]).encode("utf-8")).hexdigest()[:32]
+        replay_row = app.state.store.get_replay_candidate(
+            miner_hotkey=x_cathedral_hotkey,
+            challenge_id=submit["challenge_id"],
+            submit_token_id=submit_token_id,
+        )
+        if replay_row is not None:
+            return JSONResponse(
+                receipt_payload(replay_row, inserted=False),
+                status_code=200,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+
         try:
             token_payload = v2_bitset_submit.verify_submit_token(
                 submit["submit_token"],
@@ -512,10 +588,6 @@ def build_ingress_app(
             )
         except v2_bitset_submit.BitsetSubmitError as exc:
             reject(exc.reason, 400)
-
-        msg = v2_bitset_submit.canonical_submit_bytes(submit)
-        if not app.state.verifier.verify(x_cathedral_hotkey, msg, x_cathedral_signature):
-            reject("invalid hotkey signature", 401)
 
         try:
             assignment_raw, _assignment = v2_bitset_submit.decode_assignment_b64(

@@ -139,6 +139,8 @@ This tests:
 
 It creates only one accepted event row because duplicates are idempotent replays.
 
+After the feedback update, exact signed replays for an existing non-rejected row stay cheap even if the original 300s submit token has expired. New unique rows still require a valid unexpired submit token.
+
 This is the safest first public spam test.
 
 ## Higher-Write Test Mode
@@ -154,7 +156,9 @@ stage 3: 50 miners, repeat-submit 1000 replay mode
 stage 4: bounded unique-submit test after backpressure limits are added
 ```
 
-Do not invite unrestricted unique-row spam until the Postgres flusher exists and has been tested.
+Do not invite unrestricted unique-row spam until the Postgres flusher exists and has been tested, and until registration/per-hotkey quota is enforced.
+
+Without a registration/quota gate, anyone can mint fresh keypairs, fetch challenge sets, and fill the unique-row backlog with shape-valid submissions. The ingress guards bound disk and keep exact replays working, but honest new unique submissions can still get `503 ingress_backlog_full` if a grief test fills the cap.
 
 The ingress now has:
 
@@ -166,6 +170,8 @@ optional oldest_unflushed_age guard
 ```
 
 For Phase 1 public testing, use replay spam first because it validates hot-path throughput without filling the local WAL with many unique rows.
+
+The code also supports future verifier retry semantics: if a row is later marked `rejected`, a miner can re-admit a new bitset for the same `(hotkey, challenge)` instead of being permanently locked out by the original idempotency key.
 
 ## What Miners Should Understand
 
