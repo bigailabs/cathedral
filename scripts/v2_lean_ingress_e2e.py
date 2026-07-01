@@ -127,6 +127,9 @@ def main() -> None:
     status, health = _http_json("GET", f"{base}/health/live")
     if status != 200 or health.get("status") != "ok":
         raise SystemExit(f"health failed: {status} {health}")
+    status, ready = _http_json("GET", f"{base}/health/ready")
+    if status != 200 or ready.get("status") != "ok":
+        raise SystemExit(f"ready failed: {status} {ready}")
 
     body, headers = build_submit(args.secret, args.key_uri)
     status, receipt = _http_json("POST", f"{base}/v2/agents/submit-bitset", body=body, headers=headers)

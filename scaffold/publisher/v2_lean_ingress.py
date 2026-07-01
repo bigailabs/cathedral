@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -30,6 +31,10 @@ from . import v2_bitset_submit
 
 DEFAULT_MAX_BODY_BYTES = 16_384
 DEFAULT_SKEW_SECS = 5 * 60
+DEFAULT_MAX_UNFLUSHED_EVENTS = 100_000
+DEFAULT_MAX_STORAGE_BYTES = 1_000_000_000
+DEFAULT_MIN_FREE_DISK_BYTES = 100_000_000
+DEFAULT_MAX_UNFLUSHED_AGE_SECS = 0
 _FAMILY = "synthetic_boolean_v1"
 
 
@@ -50,6 +55,14 @@ def _receipt_id() -> str:
 
 def _json_dumps(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+
+
+class LeanIngressPressureError(RuntimeError):
+    """Local WAL/backlog/disk pressure should stop new unique admissions."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class LeanIngressStore:
@@ -129,6 +142,55 @@ class LeanIngressStore:
             except Exception:
                 pass
 
+    def storage_bytes(self) -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += Path(self.path + suffix).stat().st_size
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+        return int(total)
+
+    def disk_free_bytes(self) -> int | None:
+        try:
+            return int(shutil.disk_usage(str(Path(self.path).parent)).free)
+        except Exception:
+            return None
+
+    def _pressure_reason(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        max_unflushed_events: int = 0,
+        max_storage_bytes: int = 0,
+        min_free_disk_bytes: int = 0,
+        max_unflushed_age_secs: int = 0,
+    ) -> str | None:
+        if max_unflushed_events > 0:
+            unflushed = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM submit_events_local WHERE flushed_at_iso IS NULL"
+            ).fetchone()["n"] or 0)
+            if unflushed >= int(max_unflushed_events):
+                return "ingress_backlog_full"
+        if max_storage_bytes > 0 and self.storage_bytes() >= int(max_storage_bytes):
+            return "ingress_storage_limit"
+        if min_free_disk_bytes > 0:
+            free = self.disk_free_bytes()
+            if free is not None and free < int(min_free_disk_bytes):
+                return "ingress_disk_pressure"
+        if max_unflushed_age_secs > 0:
+            row = conn.execute(
+                "SELECT MIN(received_at_iso) AS oldest FROM submit_events_local "
+                "WHERE flushed_at_iso IS NULL"
+            ).fetchone()
+            oldest = str(row["oldest"] or "") if row else ""
+            ts = v2_bitset_submit.parse_iso(oldest) if oldest else None
+            if ts is not None and time.time() - ts > int(max_unflushed_age_secs):
+                return "ingress_flush_lag"
+        return None
+
     def admit_event(
         self,
         *,
@@ -137,6 +199,10 @@ class LeanIngressStore:
         signature: str,
         assignment_raw: bytes,
         received_at_iso: str,
+        max_unflushed_events: int = 0,
+        max_storage_bytes: int = 0,
+        min_free_disk_bytes: int = 0,
+        max_unflushed_age_secs: int = 0,
     ) -> tuple[dict[str, Any], bool]:
         idem = v2_bitset_submit.idempotency_key(
             miner_hotkey=submit["miner_hotkey"],
@@ -170,8 +236,25 @@ class LeanIngressStore:
         try:
             conn = self._connect()
             conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM submit_events_local WHERE idempotency_key=? LIMIT 1",
+                (idem,),
+            ).fetchone()
+            if existing is not None:
+                conn.execute("COMMIT")
+                return dict(existing), False
+            pressure_reason = self._pressure_reason(
+                conn,
+                max_unflushed_events=max_unflushed_events,
+                max_storage_bytes=max_storage_bytes,
+                min_free_disk_bytes=min_free_disk_bytes,
+                max_unflushed_age_secs=max_unflushed_age_secs,
+            )
+            if pressure_reason:
+                conn.execute("ROLLBACK")
+                raise LeanIngressPressureError(pressure_reason)
             cur = conn.execute(
-                "INSERT OR IGNORE INTO submit_events_local("
+                "INSERT INTO submit_events_local("
                 "receipt_id, idempotency_key, miner_hotkey, challenge_id, card_id, "
                 "epoch, tier, seq, cnf_sha256, assignment_encoding, assignment_sha256, "
                 "assignment_b64, status, eligibility_status, received_at_iso, submitted_at, "
@@ -233,16 +316,26 @@ class LeanIngressStore:
             reject_rows = conn.execute(
                 "SELECT reason, SUM(count) AS n FROM reject_rollups_local GROUP BY reason"
             ).fetchall()
-            unflushed = conn.execute(
+            unflushed = int(conn.execute(
                 "SELECT COUNT(*) AS n FROM submit_events_local WHERE flushed_at_iso IS NULL"
-            ).fetchone()["n"]
-            total = conn.execute("SELECT COUNT(*) AS n FROM submit_events_local").fetchone()["n"]
+            ).fetchone()["n"] or 0)
+            total = int(conn.execute("SELECT COUNT(*) AS n FROM submit_events_local").fetchone()["n"] or 0)
+            oldest_row = conn.execute(
+                "SELECT MIN(received_at_iso) AS oldest FROM submit_events_local WHERE flushed_at_iso IS NULL"
+            ).fetchone()
+        oldest = str(oldest_row["oldest"] or "") if oldest_row else ""
+        oldest_ts = v2_bitset_submit.parse_iso(oldest) if oldest else None
+        oldest_age = max(0.0, time.time() - oldest_ts) if oldest_ts is not None else None
         return {
             "schema": "cathedral.v2.lean_ingress_metrics.v1",
             "events": {str(r["status"]): int(r["n"] or 0) for r in status_rows},
             "rejects": {str(r["reason"]): int(r["n"] or 0) for r in reject_rows},
-            "total_events": int(total or 0),
-            "unflushed_events": int(unflushed or 0),
+            "total_events": total,
+            "unflushed_events": unflushed,
+            "oldest_unflushed_at": oldest or None,
+            "oldest_unflushed_age_secs": round(oldest_age, 3) if oldest_age is not None else None,
+            "storage_bytes": self.storage_bytes(),
+            "disk_free_bytes": self.disk_free_bytes(),
         }
 
 
@@ -285,6 +378,10 @@ def build_ingress_app(
     submit_token_secret: str | None = None,
     max_body_bytes: int | None = None,
     timestamp_skew_secs: int | None = None,
+    max_unflushed_events: int | None = None,
+    max_storage_bytes: int | None = None,
+    min_free_disk_bytes: int | None = None,
+    max_unflushed_age_secs: int | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Cathedral V2 Lean Ingress", version="0.1.0")
     app.state.store = store or LeanIngressStore(
@@ -295,9 +392,31 @@ def build_ingress_app(
     app.state.max_body_bytes = int(max_body_bytes or _env_int(
         "CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES
     ))
-    app.state.timestamp_skew_secs = int(timestamp_skew_secs or _env_int(
+    app.state.timestamp_skew_secs = int(timestamp_skew_secs if timestamp_skew_secs is not None else _env_int(
         "CATHEDRAL_V2_INGRESS_TIMESTAMP_SKEW_SECS", DEFAULT_SKEW_SECS
     ))
+    app.state.max_unflushed_events = int(max_unflushed_events if max_unflushed_events is not None else _env_int(
+        "CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_EVENTS", DEFAULT_MAX_UNFLUSHED_EVENTS
+    ))
+    app.state.max_storage_bytes = int(max_storage_bytes if max_storage_bytes is not None else _env_int(
+        "CATHEDRAL_V2_INGRESS_MAX_STORAGE_BYTES", DEFAULT_MAX_STORAGE_BYTES
+    ))
+    app.state.min_free_disk_bytes = int(min_free_disk_bytes if min_free_disk_bytes is not None else _env_int(
+        "CATHEDRAL_V2_INGRESS_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES
+    ))
+    app.state.max_unflushed_age_secs = int(max_unflushed_age_secs if max_unflushed_age_secs is not None else _env_int(
+        "CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_AGE_SECS", DEFAULT_MAX_UNFLUSHED_AGE_SECS
+    ))
+
+    def _limits() -> dict[str, int]:
+        return {
+            "max_body_bytes": int(app.state.max_body_bytes),
+            "timestamp_skew_secs": int(app.state.timestamp_skew_secs),
+            "max_unflushed_events": int(app.state.max_unflushed_events),
+            "max_storage_bytes": int(app.state.max_storage_bytes),
+            "min_free_disk_bytes": int(app.state.min_free_disk_bytes),
+            "max_unflushed_age_secs": int(app.state.max_unflushed_age_secs),
+        }
 
     def reject(reason: str, status_code: int = 400) -> None:
         app.state.store.record_reject(reason)
@@ -311,13 +430,39 @@ def build_ingress_app(
             "service_role": "v2-lean-ingress",
             "db": "sqlite-wal",
             "submit_token_secret": "set" if app.state.submit_token_secret else "missing",
-            "max_body_bytes": app.state.max_body_bytes,
+            "limits": _limits(),
         }
+
+    @app.get("/health/ready")
+    def health_ready():
+        metrics = app.state.store.metrics()
+        reason = None
+        if not app.state.submit_token_secret:
+            reason = "v2_submit_token_secret_missing"
+        elif app.state.max_unflushed_events > 0 and metrics["unflushed_events"] >= app.state.max_unflushed_events:
+            reason = "ingress_backlog_full"
+        elif app.state.max_storage_bytes > 0 and metrics["storage_bytes"] >= app.state.max_storage_bytes:
+            reason = "ingress_storage_limit"
+        elif app.state.min_free_disk_bytes > 0 and metrics.get("disk_free_bytes") is not None and metrics["disk_free_bytes"] < app.state.min_free_disk_bytes:
+            reason = "ingress_disk_pressure"
+        elif app.state.max_unflushed_age_secs > 0 and metrics.get("oldest_unflushed_age_secs") is not None and metrics["oldest_unflushed_age_secs"] > app.state.max_unflushed_age_secs:
+            reason = "ingress_flush_lag"
+        payload = {
+            "status": "ok" if reason is None else "degraded",
+            "kind": "ready",
+            "service_role": "v2-lean-ingress",
+            "reason": reason,
+            "metrics": metrics,
+            "limits": _limits(),
+        }
+        return JSONResponse(payload, status_code=200 if reason is None else 503)
 
     @app.get("/v2/ingress/metrics")
     def ingress_metrics():
+        payload = app.state.store.metrics()
+        payload["limits"] = _limits()
         return JSONResponse(
-            app.state.store.metrics(),
+            payload,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
@@ -380,13 +525,20 @@ def build_ingress_app(
         except v2_bitset_submit.BitsetSubmitError as exc:
             reject(exc.reason, 400)
 
-        row, inserted = app.state.store.admit_event(
-            submit=submit,
-            token_payload=token_payload,
-            signature=x_cathedral_signature,
-            assignment_raw=assignment_raw,
-            received_at_iso=_now_iso_ms(),
-        )
+        try:
+            row, inserted = app.state.store.admit_event(
+                submit=submit,
+                token_payload=token_payload,
+                signature=x_cathedral_signature,
+                assignment_raw=assignment_raw,
+                received_at_iso=_now_iso_ms(),
+                max_unflushed_events=app.state.max_unflushed_events,
+                max_storage_bytes=app.state.max_storage_bytes,
+                min_free_disk_bytes=app.state.min_free_disk_bytes,
+                max_unflushed_age_secs=app.state.max_unflushed_age_secs,
+            )
+        except LeanIngressPressureError as exc:
+            reject(exc.reason, 503)
         return JSONResponse(
             receipt_payload(row, inserted=inserted),
             status_code=202 if inserted else 200,

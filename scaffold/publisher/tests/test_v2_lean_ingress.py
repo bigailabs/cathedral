@@ -32,22 +32,27 @@ def _keypair(uri: str = "//V2LeanIngressTest"):
     return Keypair.create_from_uri(uri)
 
 
-def _client(tmp_path, *, secret: str = SECRET, skew: int = 300) -> TestClient:
+def _client(tmp_path, *, secret: str = SECRET, skew: int = 300,
+            max_unflushed_events: int = 100_000) -> TestClient:
     store = LeanIngressStore(tmp_path / "ingress.sqlite3")
     app = build_ingress_app(
         store=store,
         submit_token_secret=secret,
         max_body_bytes=1024,
         timestamp_skew_secs=skew,
+        max_unflushed_events=max_unflushed_events,
+        max_storage_bytes=0,
+        min_free_disk_bytes=0,
+        max_unflushed_age_secs=0,
     )
     return TestClient(app)
 
 
-def _submit_body(kp, *, secret: str = SECRET, submitted_at: str | None = None):
+def _submit_body(kp, *, secret: str = SECRET, submitted_at: str | None = None,
+                 challenge_id: str = "pm-t2-e495232-s7-test"):
     ts = submitted_at or _now_iso()
     assignment = [1, -2, 3, -4, 5, -6, 7, -8, 9, -10]
     raw = v2_pipeline.encode_bitset_assignment(assignment)
-    challenge_id = "pm-t2-e495232-s7-test"
     token = v2_bitset_submit.mint_submit_token(
         secret=secret,
         miner_hotkey=kp.ss58_address,
@@ -135,6 +140,30 @@ def test_lean_ingress_rejects_bad_token_before_event(tmp_path):
     metrics = client.get("/v2/ingress/metrics").json()
     assert metrics["total_events"] == 0
     assert metrics["rejects"]["invalid_submit_token"] == 1
+
+
+def test_lean_ingress_backpressure_allows_replay_blocks_new_unique(tmp_path):
+    client = _client(tmp_path, max_unflushed_events=1)
+    kp = _keypair()
+    body, headers = _submit_body(kp, challenge_id="pm-t2-e495232-s7-pressure-a")
+
+    first = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert first.status_code == 202, first.text
+    receipt_id = first.json()["receipt_id"]
+
+    replay = client.post("/v2/agents/submit-bitset", json=body, headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["receipt_id"] == receipt_id
+    assert replay.json()["idempotent_replay"] is True
+
+    body2, headers2 = _submit_body(kp, challenge_id="pm-t2-e495232-s7-pressure-b")
+    blocked = client.post("/v2/agents/submit-bitset", json=body2, headers=headers2)
+    assert blocked.status_code == 503
+    assert blocked.json()["detail"] == "ingress_backlog_full"
+
+    ready = client.get("/health/ready")
+    assert ready.status_code == 503
+    assert ready.json()["reason"] == "ingress_backlog_full"
 
 
 def test_lean_ingress_body_cap_before_json_parse(tmp_path):

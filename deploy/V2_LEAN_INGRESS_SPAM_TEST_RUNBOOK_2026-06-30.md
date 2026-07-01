@@ -54,13 +54,23 @@ CATHEDRAL_V2_SUBMIT_TOKEN_SECRET=<same secret as v2-beta token minting>
 
 Do not expose the secret.
 
-Other suggested env:
+Required safety env:
 
 ```text
 CATHEDRAL_V2_INGRESS_DB_PATH=/var/lib/cathedral/v2-ingress-test.sqlite3
 CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES=16384
 CATHEDRAL_V2_INGRESS_TIMESTAMP_SKEW_SECS=300
+CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_EVENTS=100000
+CATHEDRAL_V2_INGRESS_MAX_STORAGE_BYTES=1000000000
+CATHEDRAL_V2_INGRESS_MIN_FREE_DISK_BYTES=100000000
+CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_AGE_SECS=0
 ```
+
+Notes:
+
+- `MAX_UNFLUSHED_EVENTS` stops new unique accepted rows once the local backlog reaches the cap.
+- Idempotent replay spam still returns the existing receipt even when the unique-row cap is reached.
+- `MAX_UNFLUSHED_AGE_SECS=0` is intentional for Phase 1 because there is no flusher yet.
 
 Run command example:
 
@@ -144,14 +154,18 @@ stage 3: 50 miners, repeat-submit 1000 replay mode
 stage 4: bounded unique-submit test after backpressure limits are added
 ```
 
-Do not invite unrestricted unique-row spam until the ingress has:
+Do not invite unrestricted unique-row spam until the Postgres flusher exists and has been tested.
+
+The ingress now has:
 
 ```text
 max_unflushed_events
-max_unflushed_bytes
-disk pressure guard
-oldest_unflushed_age guard
+max_storage_bytes
+disk free guard
+optional oldest_unflushed_age guard
 ```
+
+For Phase 1 public testing, use replay spam first because it validates hot-path throughput without filling the local WAL with many unique rows.
 
 ## What Miners Should Understand
 
@@ -170,12 +184,15 @@ It only tests the future lean ACK path.
 
 ## Monitoring During Test
 
-Check:
+Before inviting miners, check:
 
 ```text
 GET https://v2-ingress-test.cathedral.computer/health/live
+GET https://v2-ingress-test.cathedral.computer/health/ready
 GET https://v2-ingress-test.cathedral.computer/v2/ingress/metrics
 ```
+
+`/health/ready` must return `200` and `status=ok`.
 
 Watch:
 
