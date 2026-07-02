@@ -5385,6 +5385,7 @@ def build_app(
                 if not v2_submit_token_secret:
                     raise HTTPException(503, "v2_submit_token_secret_missing")
                 expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                from ..dimacs import parse_cnf
                 for item in items:
                     tier_i = int(item["tier"])
                     seq_i = int(item["seq"])
@@ -5392,6 +5393,13 @@ def build_app(
                         x_cathedral_hotkey, epoch, tier_i, seq_i)
                     if cid != item["challenge_id"]:
                         raise HTTPException(500, "v2_challenge_generation_mismatch")
+                    # Bind the reported/minted shape to the ACTUAL generated CNF, not
+                    # the nominal tier shape — real-instance sources (combinatorial/
+                    # corpus, see real_corpus.py) produce CNFs sized differently from
+                    # shape_for(tier). Planted CNFs already have exactly
+                    # shape_for(tier) vars, so this is a no-op for the default source.
+                    actual_nvars, _clauses = parse_cnf(cnf_text)
+                    item["n_vars"] = actual_nvars
                     cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                     item["cnf_sha256"] = cnf_sha
                     item["assignment_encoding"] = "bitset/v1"
@@ -5402,7 +5410,7 @@ def build_app(
                         epoch=epoch,
                         tier=tier_i,
                         seq=seq_i,
-                        nvars=int(item["n_vars"]),
+                        nvars=actual_nvars,
                         cnf_sha256=cnf_sha,
                         expires_at=expires_at,
                     )
@@ -5474,6 +5482,10 @@ def build_app(
                 _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                 if not v2_submit_token_secret:
                     raise HTTPException(503, "v2_submit_token_secret_missing")
+                from ..dimacs import parse_cnf
+                # Bind to the ACTUAL generated CNF's var count, not the nominal tier
+                # shape — see the analogous fix in v2_per_miner_challenges above.
+                actual_nvars, _clauses = parse_cnf(cnf_text)
                 cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                 expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
                 headers.update({
@@ -5485,7 +5497,7 @@ def build_app(
                         epoch=epoch,
                         tier=tier_i,
                         seq=seq_i,
-                        nvars=pm.shape_for(tier_i)[0],
+                        nvars=actual_nvars,
                         cnf_sha256=cnf_sha,
                         expires_at=expires_at,
                     ),
@@ -6065,7 +6077,16 @@ def build_app(
             if cnf_sha != str(token_payload["cnf_sha256"]):
                 raise HTTPException(400, "submit_token_cnf_mismatch")
             nvars = int(token_payload["nvars"])
-            if nvars != int(pm.shape_for(tier_i)[0]):
+            # Bind the shape check to the server-regenerated CNF's ACTUAL var count,
+            # not the nominal tier shape — real-instance sources (combinatorial/
+            # corpus) produce CNFs sized differently from shape_for(tier). Planted
+            # CNFs already have exactly shape_for(tier) vars, so behavior is
+            # unchanged for the default source. The cnf_sha256 check above already
+            # binds the token to this exact CNF body; this keeps the anti-cheat
+            # shape binding intact while matching the real generated instance.
+            from ..dimacs import parse_cnf
+            actual_nvars, _clauses = parse_cnf(cnf_text)
+            if nvars != actual_nvars:
                 raise HTTPException(400, "submit_token_shape_mismatch")
             try:
                 assignment_raw, assignment = v2_bitset_submit.decode_assignment_b64(
