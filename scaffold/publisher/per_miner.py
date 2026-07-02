@@ -54,6 +54,7 @@ from functools import lru_cache
 from typing import Any
 
 from ..dimacs import gen_planted_3sat, verify_witness
+from . import real_corpus
 from .store import Store
 
 _EPHEMERAL_SEED_SECRET = secrets.token_bytes(32)
@@ -260,13 +261,27 @@ def _gen_cached(hotkey: str, epoch: int, tier: int, seq: int,
     return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
 
 
-def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, list[int]]:
+def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, list[int] | None]:
     """Generate ONE per-miner instance. Returns (challenge_id, cnf_text, planted_assignment).
 
     The planted assignment is the publisher's hidden witness — never sent to
     the miner. The miner must solve the CNF independently. tier1=biased (easy
     floor), tier2=ajm (hard) per method_for(); cached so it's cheap to re-derive.
+
+    CATHEDRAL_V2_CHALLENGE_SOURCE (default "planted") swaps the CNF source:
+    unset/"planted" is this exact path, UNCHANGED. "combinatorial"/"corpus"
+    (see real_corpus.py) serve REAL, unplanted instances keyed by
+    (epoch, tier, seq) — planted_assignment is None because there is no
+    embedded solution; dimacs.verify_witness is still the correctness gate.
+    The wire challenge_id is always instance_id() (hotkey-HMAC'd), so token
+    binding is identical across sources.
     """
+    source = real_corpus.challenge_source()
+    if source != "planted":
+        _content_id, cnf_text = real_corpus.generate_real_instance(epoch, tier, seq)
+        cid = instance_id(hotkey, epoch, tier, seq)
+        return cid, cnf_text, None
+
     n_vars, n_clauses = shape_for(tier)
     cnf_text, planted = _gen_cached(hotkey, epoch, tier, seq,
                                     method_for(tier), n_vars, n_clauses)
