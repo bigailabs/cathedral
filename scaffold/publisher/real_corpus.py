@@ -66,8 +66,8 @@ def _env_float(name: str, default: float) -> float:
 
 # Small-but-real shapes: solve_cnf (the scaffold's tiny DPLL) must finish these
 # in a few seconds, since it is not a competitive solver. Env-overridable.
-_COLORING_SHAPE: dict[int, tuple[int, int]] = {1: (8, 3), 2: (11, 3)}
-_LATIN_SHAPE: dict[int, int] = {1: 4, 2: 5}
+_COLORING_SHAPE: dict[int, tuple[int, int]] = {1: (12, 3), 2: (16, 3)}
+_LATIN_SHAPE: dict[int, int] = {1: 5, 2: 5}
 
 
 def coloring_shape_for(tier: int) -> tuple[int, int]:
@@ -100,11 +100,11 @@ def real_seed(epoch: int, tier: int, seq: int, salt: str = "") -> int:
     return int(h[:16], 16) & 0x7FFFFFFFFFFFFFFF
 
 
-def kind_for(epoch: int, tier: int, seq: int) -> str:
+def kind_for(epoch: int, tier: int, seq: int, salt: str = "") -> str:
     forced = _forced_kind()
     if forced:
         return forced
-    return "coloring" if real_seed(epoch, tier, seq, "kind") % 2 == 0 else "latin"
+    return "coloring" if real_seed(epoch, tier, seq, "kind:" + salt) % 2 == 0 else "latin"
 
 
 def content_id_for(epoch: int, tier: int, seq: int, kind: str) -> str:
@@ -247,17 +247,20 @@ def gen_latin_square(seed: int, n: int, *, mask_fraction: float = 0.45) -> str:
 # Public generator: combinatorial (in-process, no external files)
 # --------------------------------------------------------------------------
 
-def generate_combinatorial_instance(epoch: int, tier: int, seq: int) -> tuple[str, str]:
-    """Deterministic in (epoch, tier, seq). Returns (content_id, dimacs_text).
-    No planted/known solution is returned or embedded — genuinely unplanted."""
-    kind = kind_for(epoch, tier, seq)
+def generate_combinatorial_instance(epoch: int, tier: int, seq: int, salt: str = "") -> tuple[str, str]:
+    """Deterministic in (epoch, tier, seq, salt). Returns (content_id, dimacs_text).
+    No planted/known solution is returned or embedded — genuinely unplanted.
+    `salt` (the miner hotkey on the live per-miner path) makes the instance
+    per-miner so two miners with the same (epoch,tier,seq) get different puzzles
+    and cannot copy each other's answer. Empty salt = the legacy shared form."""
+    kind = kind_for(epoch, tier, seq, salt)
     if kind == "coloring":
         n_nodes, k_colors = coloring_shape_for(tier)
-        seed = real_seed(epoch, tier, seq, "coloring")
+        seed = real_seed(epoch, tier, seq, "coloring:" + salt)
         cnf_text = gen_graph_coloring(seed, n_nodes, k_colors)
     else:
         n = latin_shape_for(tier)
-        seed = real_seed(epoch, tier, seq, "latin")
+        seed = real_seed(epoch, tier, seq, "latin:" + salt)
         cnf_text = gen_latin_square(seed, n)
     return content_id_for(epoch, tier, seq, kind), cnf_text
 
@@ -278,7 +281,7 @@ def _corpus_files(directory: str) -> list[str]:
     return names
 
 
-def load_corpus_instance(epoch: int, tier: int, seq: int) -> tuple[str, str] | None:
+def load_corpus_instance(epoch: int, tier: int, seq: int, salt: str = "") -> tuple[str, str] | None:
     """Deterministically select and load a real .cnf file from
     CATHEDRAL_V2_CORPUS_DIR. Returns None if the dir is unset/empty/missing —
     callers should fall back to generate_combinatorial_instance().
@@ -289,7 +292,7 @@ def load_corpus_instance(epoch: int, tier: int, seq: int) -> tuple[str, str] | N
     files = _corpus_files(directory)
     if not files:
         return None
-    idx = real_seed(epoch, tier, seq, "corpus") % len(files)
+    idx = real_seed(epoch, tier, seq, "corpus:" + salt) % len(files)
     fname = files[idx]
     path = os.path.join(directory, fname)
     with open(path, "r", encoding="utf-8", errors="strict") as fh:
@@ -297,12 +300,13 @@ def load_corpus_instance(epoch: int, tier: int, seq: int) -> tuple[str, str] | N
     return f"corpus-{fname}-e{int(epoch)}-t{int(tier)}-s{int(seq)}", text
 
 
-def generate_real_instance(epoch: int, tier: int, seq: int) -> tuple[str, str]:
+def generate_real_instance(epoch: int, tier: int, seq: int, salt: str = "") -> tuple[str, str]:
     """Top-level dispatcher used by per_miner.generate_instance for the
-    'combinatorial' and 'corpus' sources. Returns (content_id, dimacs_text)."""
+    'combinatorial' and 'corpus' sources. Returns (content_id, dimacs_text).
+    `salt` (miner hotkey on the live path) makes the instance per-miner."""
     if challenge_source() == "corpus":
-        loaded = load_corpus_instance(epoch, tier, seq)
+        loaded = load_corpus_instance(epoch, tier, seq, salt)
         if loaded is not None:
             return loaded
         # Empty/unset CATHEDRAL_V2_CORPUS_DIR: fall back rather than error.
-    return generate_combinatorial_instance(epoch, tier, seq)
+    return generate_combinatorial_instance(epoch, tier, seq, salt)

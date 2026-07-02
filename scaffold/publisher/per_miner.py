@@ -261,6 +261,33 @@ def _gen_cached(hotkey: str, epoch: int, tier: int, seq: int,
     return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
 
 
+REAL_FRACTION_ENV = "CATHEDRAL_V2_REAL_FRACTION"
+
+
+def _real_fraction() -> float:
+    """Fraction (0..1) of a miner's challenges served from the REAL generator.
+    Explicit CATHEDRAL_V2_REAL_FRACTION wins. If unset, a non-"planted"
+    CATHEDRAL_V2_CHALLENGE_SOURCE means legacy all-real (1.0); otherwise 0.0 —
+    all planted, the default UNCHANGED live behavior."""
+    raw = os.environ.get(REAL_FRACTION_ENV, "").strip()
+    if raw:
+        try:
+            return min(1.0, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    return 1.0 if real_corpus.challenge_source() != "planted" else 0.0
+
+
+def _real_pick(hotkey: str, epoch: int, tier: int, seq: int) -> float:
+    """Deterministic ~uniform value in [0,1) for the real/planted decision — a
+    pure function of (hotkey, epoch, tier, seq) so mint and verify agree on
+    whether this exact challenge is real."""
+    h = hashlib.sha256(
+        f"realpick:{hotkey}:{int(epoch)}:{int(tier)}:{int(seq)}".encode("utf-8")
+    ).hexdigest()
+    return (int(h[:8], 16) % 1_000_000) / 1_000_000.0
+
+
 def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, list[int] | None]:
     """Generate ONE per-miner instance. Returns (challenge_id, cnf_text, planted_assignment).
 
@@ -276,9 +303,13 @@ def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str
     The wire challenge_id is always instance_id() (hotkey-HMAC'd), so token
     binding is identical across sources.
     """
-    source = real_corpus.challenge_source()
-    if source != "planted":
-        _content_id, cnf_text = real_corpus.generate_real_instance(epoch, tier, seq)
+    frac = _real_fraction()
+    use_real = frac >= 1.0 or (frac > 0.0 and _real_pick(hotkey, epoch, tier, seq) < frac)
+    if use_real:
+        # REAL, per-miner (salt=hotkey so miners can't copy), unplanted;
+        # dimacs.verify_witness is the correctness gate.
+        _content_id, cnf_text = real_corpus.generate_real_instance(
+            epoch, tier, seq, salt=hotkey)
         cid = instance_id(hotkey, epoch, tier, seq)
         return cid, cnf_text, None
 
