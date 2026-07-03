@@ -2709,6 +2709,11 @@ def build_app(
         """
         if not external_scores.ingest_enabled():
             raise HTTPException(404, "external_scores_ingest_not_enabled")
+        # (#3) If these scores actually feed the real signed vector, refuse
+        # unauthenticated ingest regardless of ALLOW_UNAUTHENTICATED — a
+        # real-money credential must be present.
+        if weights_mod.external_scores_enabled() and not external_scores.token_configured():
+            raise HTTPException(503, "external_scores_token_required_while_blending")
         body = await request.body()
         if not external_scores.bearer_authorized(authorization, x_cathedral_external_token):
             raise HTTPException(401, "invalid_external_scores_token")

@@ -94,6 +94,18 @@ EXTERNAL_SCORES_MODE_ENV = "CATHEDRAL_EXTERNAL_SCORES_MODE"  # blend | external_
 EXTERNAL_SCORES_WEIGHT_ENV = "CATHEDRAL_EXTERNAL_SCORES_WEIGHT"
 EXTERNAL_SCORES_BASE_WEIGHT_ENV = "CATHEDRAL_EXTERNAL_SCORES_BASE_WEIGHT"
 EXTERNAL_SCORES_WINDOW_SECS_ENV = "CATHEDRAL_EXTERNAL_SCORES_WINDOW_SECS"
+# Real-money safety knobs (see docs/VIOLET_EXTERNAL_SCORES.md):
+#  FRACTION       — explicit external share (0..1); if set it wins over the
+#                   base/external weights (e.g. 0.10 = 10% external, 90% base).
+#  MAX_FRACTION   — hard cap on the external share (default 0.5) so a misconfig
+#                   cannot silently hand the vector to the external source.
+#  REQUIRE_REGISTERED — external scores may only pay hotkeys in the fresh
+#                   metagraph snapshot; fail-closed if the snapshot is missing.
+#  PRIMARY_CONFIRM — external_primary (100% external) requires this explicit ack.
+EXTERNAL_SCORES_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_FRACTION"
+EXTERNAL_SCORES_MAX_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION"
+EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV = "CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED"
+EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV = "CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM"
 
 _CACHE_TTL_SECS = 60.0
 _PERSISTED_VECTOR_ID = "latest"
@@ -806,6 +818,30 @@ def _compose_external_scores(
     return _identity_collapse_scores(raw, ident=ident)
 
 
+def _external_blend_weights() -> tuple[float, float, float]:
+    """Return (base_weight, external_weight, effective_external_share).
+
+    An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION wins (share == fraction).
+    Otherwise the legacy base/external weights are used, but the effective
+    external share is HARD-CAPPED at CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION
+    (default 0.5) so a fat external_weight cannot silently take the vector."""
+    max_frac = min(1.0, max(0.0, _env_float(EXTERNAL_SCORES_MAX_FRACTION_ENV, 0.5)))
+    frac_raw = os.environ.get(EXTERNAL_SCORES_FRACTION_ENV, "").strip()
+    if frac_raw:
+        frac = min(max_frac, max(0.0, _env_float(EXTERNAL_SCORES_FRACTION_ENV, 0.0)))
+        return (1.0 - frac), frac, frac
+    base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
+    external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))
+    tot = base_weight + external_weight
+    if tot <= 0.0:
+        return 0.0, 0.0, 0.0
+    share = external_weight / tot
+    if share > max_frac and max_frac < 1.0:
+        external_weight = base_weight * max_frac / (1.0 - max_frac)
+        share = max_frac
+    return base_weight, external_weight, share
+
+
 def _apply_external_scores(
     store: Store,
     base: dict[str, float],
@@ -818,13 +854,33 @@ def _apply_external_scores(
     ext = _compose_external_scores(store, now=now, ident=ident)
     if not ext:
         return base
+    # (#2) Registration gate: external scores may pay only REGISTERED miners.
+    # Fail-closed — if we cannot confirm the metagraph snapshot, do NOT blend
+    # unverified external scores into the real signed vector.
+    if _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True):
+        registered, _meta = _load_fresh_metagraph_hotkeys(store, now=now)
+        if registered is None:
+            print("[weights] external_scores: registration snapshot unavailable "
+                  "-> NOT blending external scores (fail-closed)")
+            return base
+        ext = {hk: v for hk, v in ext.items() if hk in registered}
+        if not ext:
+            return base
+    # (#5) external_primary replaces the ENTIRE vector — require explicit ack.
     if external_scores_mode() == "external_primary":
-        return ext
+        if _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False):
+            print("[weights] external_scores: EXTERNAL_PRIMARY active — external "
+                  "source is the ENTIRE weight vector")
+            return _normalize_positive_scores(ext)
+        print("[weights] external_scores: external_primary requested WITHOUT "
+              f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend")
+    # (#1) Blend with an explicit, capped external share.
     base_norm = _normalize_positive_scores(base)
-    base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
-    external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))
+    base_weight, external_weight, eff_share = _external_blend_weights()
     if base_weight <= 0.0 and external_weight <= 0.0:
         return base
+    print(f"[weights] external_scores blend: external share ~{eff_share:.3f} "
+          f"(source={external_scores_source()}, registered_scored={len(ext)})")
     hotkeys = set(base_norm) | set(ext)
     blended = {
         hk: (base_norm.get(hk, 0.0) * base_weight) + (ext.get(hk, 0.0) * external_weight)
@@ -848,6 +904,9 @@ def _external_scores_policy_status(
         "window_secs": window_secs,
         "base_weight": max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0)),
         "external_weight": max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0)),
+        "effective_external_share": round(_external_blend_weights()[2], 6),
+        "require_registered": _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True),
+        "primary_confirmed": _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False),
         "has_scores": False,
     }
     if not enabled or store is None:

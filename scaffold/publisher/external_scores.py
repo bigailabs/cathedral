@@ -109,6 +109,11 @@ def _canonical(obj: Any) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def token_configured() -> bool:
+    """True iff a bearer token is set — i.e. ingest can be authenticated."""
+    return bool((os.environ.get(AUTH_TOKEN_ENV) or "").strip())
+
+
 def bearer_authorized(authorization: str | None, x_token: str | None = None) -> bool:
     expected = (os.environ.get(AUTH_TOKEN_ENV) or "").strip()
     if not expected:
