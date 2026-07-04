@@ -277,6 +277,7 @@ def admit_verified_event(
     answer_hash: str,
     verifier_details_hash: str,
     eligibility_status: str = "unknown_beta",
+    challenge_kind: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     idem = idempotency_key(
         miner_hotkey=submit["miner_hotkey"],
@@ -293,8 +294,8 @@ def admit_verified_event(
             "cnf_sha256, assignment_encoding, assignment_sha256, assignment_b64, status, "
             "eligibility_status, received_at_iso, submitted_at, verified_at_iso, signature, "
             "submit_token_id, weighted_score, answer_hash, verifier_details_hash, "
-            "solver_id, solver_hash, image_url"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "solver_id, solver_hash, image_url, challenge_kind"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rid,
                 idem,
@@ -321,6 +322,7 @@ def admit_verified_event(
                 submit.get("solver_id"),
                 submit.get("solver_hash"),
                 submit.get("image_url"),
+                challenge_kind,
             ),
         )
         row = conn.execute(
@@ -382,6 +384,8 @@ def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dic
         payload["solver_hash"] = str(row["solver_hash"])
     if row.get("image_url"):
         payload["image_url"] = str(row["image_url"])
+    if row.get("challenge_kind"):
+        payload["challenge_kind"] = str(row["challenge_kind"])
     if inserted is not None:
         payload["idempotent_replay"] = not inserted
     return payload

@@ -634,6 +634,9 @@ _MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE v2_submit_events ADD COLUMN solver_hash TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN image_url TEXT;
     """),
+    ("0041_v2_submit_events_challenge_kind", """
+        ALTER TABLE v2_submit_events ADD COLUMN challenge_kind TEXT;
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1170,6 +1173,9 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS solver_id TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS solver_hash TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS image_url TEXT;
+    """),
+    ("0041_v2_submit_events_challenge_kind", """
+        ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS challenge_kind TEXT;
     """),
 ]
 

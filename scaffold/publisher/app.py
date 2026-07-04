@@ -5365,6 +5365,7 @@ def build_app(
         if not solution_manifest_enabled:
             raise HTTPException(404, "solution_manifest_v2_not_enabled")
         from . import per_miner as pm
+        from . import real_corpus
         with v2_pipeline.v2_pm_env():
             if not pm.perminer_enabled():
                 raise HTTPException(404, "v2_per_miner_not_enabled")
@@ -5389,7 +5390,7 @@ def build_app(
                 for item in items:
                     tier_i = int(item["tier"])
                     seq_i = int(item["seq"])
-                    cid, cnf_text, _ = pm.generate_instance(
+                    cid, cnf_text, planted = pm.generate_instance(
                         x_cathedral_hotkey, epoch, tier_i, seq_i)
                     if cid != item["challenge_id"]:
                         raise HTTPException(500, "v2_challenge_generation_mismatch")
@@ -5400,6 +5401,14 @@ def build_app(
                     # shape_for(tier) vars, so this is a no-op for the default source.
                     actual_nvars, _clauses = parse_cnf(cnf_text)
                     item["n_vars"] = actual_nvars
+                    # planted is None iff this is a REAL (unplanted) instance — see
+                    # per_miner.generate_instance docstring. Label from the ACTUAL
+                    # generation result, not a re-derivation, so the reported kind
+                    # always agrees with the CNF the miner will actually solve.
+                    item["kind"] = (
+                        real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
+                        if planted is None else "random_3sat_perminer"
+                    )
                     cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                     item["cnf_sha256"] = cnf_sha
                     item["assignment_encoding"] = "bitset/v1"
@@ -6053,6 +6062,7 @@ def build_app(
             raise HTTPException(400, exc.reason)
 
         from . import per_miner as pm
+        from . import real_corpus
         with v2_pipeline.v2_pm_env():
             if not pm.perminer_enabled():
                 raise HTTPException(404, "v2_per_miner_not_enabled")
@@ -6069,10 +6079,17 @@ def build_app(
             )
             if resolved is None:
                 raise HTTPException(400, "challenge_id_not_in_miner_set")
-            cid, cnf_text, _ = pm.generate_instance(
+            cid, cnf_text, planted = pm.generate_instance(
                 x_cathedral_hotkey, epoch_i, tier_i, seq_i)
             if cid != submit["challenge_id"]:
                 raise HTTPException(400, "challenge_id_not_in_miner_set")
+            # planted is None iff this is a REAL (unplanted) instance — see
+            # per_miner.generate_instance docstring. Derived from the ACTUAL
+            # generation result so it always agrees with the CNF just verified.
+            challenge_kind = (
+                real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=x_cathedral_hotkey)
+                if planted is None else "random_3sat_perminer"
+            )
             cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
             if cnf_sha != str(token_payload["cnf_sha256"]):
                 raise HTTPException(400, "submit_token_cnf_mismatch")
@@ -6124,6 +6141,7 @@ def build_app(
                 json.dumps(details, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
             eligibility_status="unknown_beta",
+            challenge_kind=challenge_kind,
         )
         return JSONResponse(
             v2_bitset_submit.receipt_payload(row, inserted=inserted),
@@ -6240,6 +6258,53 @@ def build_app(
             "by_source": by_source,
         }
 
+    def _v2_verify_kind_metrics() -> dict[str, Any]:
+        """Attributed real-vs-planted solve counts from verified v2_submit_events.
+
+        challenge_kind is metadata only (see kind_for docstring) — this never
+        touches scoring/eligibility. NULL challenge_kind (pre-existing rows
+        from before the column existed) is bucketed as "unknown" rather than
+        raising.
+        """
+        try:
+            rows = v2_store.query(
+                "SELECT challenge_kind, miner_hotkey, COUNT(*) AS n "
+                "FROM v2_submit_events WHERE status = ? "
+                "GROUP BY challenge_kind, miner_hotkey",
+                (v2_pipeline.STATUS_VERIFIED,),
+            )
+        except Exception:
+            rows = []
+        totals = {"real": 0, "planted": 0, "unknown": 0}
+        kinds: dict[str, int] = {}
+        per_hotkey: dict[str, dict[str, int]] = {}
+        for row in rows:
+            kind = row["challenge_kind"]
+            hotkey = str(row["miner_hotkey"] or "")
+            n = int(row["n"] or 0)
+            kind_label = str(kind) if kind else "unknown"
+            kinds[kind_label] = kinds.get(kind_label, 0) + n
+            if kind_label in ("coloring", "latin"):
+                bucket = "real"
+            elif kind_label == "random_3sat_perminer":
+                bucket = "planted"
+            else:
+                bucket = "unknown"
+            totals[bucket] += n
+            if bucket in ("real", "planted") and hotkey:
+                entry = per_hotkey.setdefault(hotkey, {"real": 0, "planted": 0})
+                entry[bucket] += n
+        top_hotkeys = sorted(
+            per_hotkey.items(),
+            key=lambda kv: kv[1]["real"] + kv[1]["planted"],
+            reverse=True,
+        )[:50]
+        return {
+            "totals": totals,
+            "kinds": kinds,
+            "by_hotkey": dict(top_hotkeys),
+        }
+
     @app.get("/v2/verify/metrics")
     def v2_verify_metrics():
         if not solution_manifest_enabled:
@@ -6269,6 +6334,7 @@ def build_app(
             "verify_rate_per_sec": round(total_last_60s / 60.0, 6),
             "tick_errors_last_60s": len(errors),
             **pending,
+            "by_kind": _v2_verify_kind_metrics(),
         }
         return JSONResponse(
             payload,
