@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -24,6 +25,28 @@ STATUS_VERIFIED = "verified"
 ASSIGNMENT_ENCODING = "bitset/v1"
 _TOKEN_VERSION = "v1"
 _B64_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+
+# Forward-looking solver provenance metadata: miner-declared solver_id /
+# solver_hash / image_url. SIGNED (part of canonical_submit_bytes, so tamper
+# with any of it and the hotkey signature fails), stored on the v2_submit_events
+# row, but never used for scoring/verification/eligibility today. Purely for
+# later attestation/verification tooling.
+_SOLVER_ID_RE = re.compile(r"^[A-Za-z0-9_.:+/ -]{1,64}$")
+_SOLVER_HASH_RE = re.compile(r"^(sha256:)?[0-9a-fA-F]+$")
+_IMAGE_URL_SCHEMES = ("https://", "oci://", "docker://", "ipfs://", "hippius://")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def require_solver_meta() -> bool:
+    """CATHEDRAL_V2_REQUIRE_SOLVER_META — default false (accept-optional, no
+    breakage). When true, submits missing solver_id/solver_hash are rejected."""
+    return _env_bool("CATHEDRAL_V2_REQUIRE_SOLVER_META", False)
 
 
 class BitsetSubmitError(ValueError):
@@ -169,7 +192,28 @@ def normalize_submit_body(
     assignment_b64 = str(body.get("assignment_b64") or "").strip()
     if not assignment_b64 or len(assignment_b64) > 100_000:
         raise BitsetSubmitError("invalid_assignment_b64")
-    return {
+
+    # Optional, forward-looking solver provenance. Miner-declared, SIGNED
+    # (included in the normalized dict below so canonical_submit_bytes covers
+    # them), stored for later verification/attestation — never used for
+    # scoring today. Absent fields are simply omitted so the canonical form
+    # stays deterministic and existing (no-metadata) callers are unaffected.
+    solver_id = str(body.get("solver_id") or "").strip()
+    if solver_id and not _SOLVER_ID_RE.match(solver_id):
+        raise BitsetSubmitError("invalid_solver_id")
+    solver_hash = str(body.get("solver_hash") or "").strip()
+    if solver_hash:
+        if len(solver_hash) > 80 or not _SOLVER_HASH_RE.match(solver_hash):
+            raise BitsetSubmitError("invalid_solver_hash")
+    image_url = str(body.get("image_url") or "").strip()
+    if image_url:
+        if len(image_url) > 512 or not image_url.startswith(_IMAGE_URL_SCHEMES):
+            raise BitsetSubmitError("invalid_image_url")
+
+    if require_solver_meta() and not (solver_id and solver_hash):
+        raise BitsetSubmitError("solver_meta_required")
+
+    out = {
         "schema": SCHEMA,
         "card_id": card_id,
         "miner_hotkey": miner_hotkey,
@@ -179,6 +223,13 @@ def normalize_submit_body(
         "assignment_encoding": ASSIGNMENT_ENCODING,
         "assignment_b64": assignment_b64,
     }
+    if solver_id:
+        out["solver_id"] = solver_id
+    if solver_hash:
+        out["solver_hash"] = solver_hash
+    if image_url:
+        out["image_url"] = image_url
+    return out
 
 
 def canonical_submit_bytes(submit: dict[str, Any]) -> bytes:
@@ -241,8 +292,9 @@ def admit_verified_event(
             "id, idempotency_key, miner_hotkey, challenge_id, card_id, epoch, tier, seq, "
             "cnf_sha256, assignment_encoding, assignment_sha256, assignment_b64, status, "
             "eligibility_status, received_at_iso, submitted_at, verified_at_iso, signature, "
-            "submit_token_id, weighted_score, answer_hash, verifier_details_hash"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "submit_token_id, weighted_score, answer_hash, verifier_details_hash, "
+            "solver_id, solver_hash, image_url"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rid,
                 idem,
@@ -266,6 +318,9 @@ def admit_verified_event(
                 float(weighted_score),
                 answer_hash,
                 verifier_details_hash,
+                submit.get("solver_id"),
+                submit.get("solver_hash"),
+                submit.get("image_url"),
             ),
         )
         row = conn.execute(
@@ -321,6 +376,12 @@ def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dic
         payload["answer_hash"] = str(row["answer_hash"])
     if row.get("rejection_reason"):
         payload["rejection_reason"] = str(row["rejection_reason"])
+    if row.get("solver_id"):
+        payload["solver_id"] = str(row["solver_id"])
+    if row.get("solver_hash"):
+        payload["solver_hash"] = str(row["solver_hash"])
+    if row.get("image_url"):
+        payload["image_url"] = str(row["image_url"])
     if inserted is not None:
         payload["idempotent_replay"] = not inserted
     return payload

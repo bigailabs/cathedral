@@ -69,7 +69,21 @@ def canonical_bitset_submit_bytes(body: dict[str, Any], *, miner_hotkey: str, su
         "assignment_encoding": "bitset/v1",
         "assignment_b64": str(body["assignment_b64"]).strip(),
     }
+    # Optional, forward-looking solver provenance. When present these are
+    # SIGNED along with everything else (part of the same canonical bytes),
+    # so the server can prove they were not tampered with after signing. They
+    # are stored only — never used for scoring/verification today.
+    for key in ("solver_id", "solver_hash", "image_url"):
+        if body.get(key):
+            submit[key] = str(body[key]).strip()
     return canonical_json_bytes({k: submit[k] for k in sorted(submit)})
+
+
+def solver_hash_for(solver_name: str) -> str:
+    """A stable, deterministic solver_hash from the solver name/version — a
+    real miner would hash its actual solver binary/image; this is a
+    reasonable stand-in for the reference E2E script."""
+    return "sha256:" + hashlib.sha256(solver_name.encode("utf-8")).hexdigest()
 
 
 def sign_b64(kp: Keypair, msg: bytes) -> str:
@@ -200,6 +214,7 @@ def main() -> int:
     ap.add_argument("--repeat-submit", type=int, default=1, help="Repeat the same solved submit N times; useful for lean-ingress spam/idempotency tests")
     ap.add_argument("--expect-status", choices=("verified", "received", "any"), default="verified", help="Expected receipt status. Use 'received' for lean ingress Phase 1.")
     ap.add_argument("--skip-weights", action="store_true", help="Skip V2 shadow weight check; required for lean ingress Phase 1")
+    ap.add_argument("--image-url", default=os.environ.get("CATHEDRAL_MINER_IMAGE_URL", ""), help="Optional solver image reference (https://, oci://, docker://, ipfs://, or hippius://); stored only, never fetched")
     args = ap.parse_args()
 
     session = requests.Session()
@@ -275,7 +290,11 @@ def main() -> int:
         "submit_token": submit_token,
         "assignment_encoding": "bitset/v1",
         "assignment_b64": assignment_b64,
+        "solver_id": solver_used,
+        "solver_hash": solver_hash_for(solver_used),
     }
+    if args.image_url:
+        body["image_url"] = args.image_url
     submit_results: list[dict[str, Any]] = []
     receipt_id = ""
     admit_ms_values: list[float] = []

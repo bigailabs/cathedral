@@ -629,6 +629,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_v2_submit_events_epoch
             ON v2_submit_events(epoch, status);
     """),
+    ("0040_v2_submit_events_solver_meta", """
+        ALTER TABLE v2_submit_events ADD COLUMN solver_id TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN solver_hash TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN image_url TEXT;
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1160,6 +1165,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON v2_submit_events(miner_hotkey, challenge_id);
         CREATE INDEX IF NOT EXISTS idx_v2_submit_events_epoch
             ON v2_submit_events(epoch, status);
+    """),
+    ("0040_v2_submit_events_solver_meta", """
+        ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS solver_id TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS solver_hash TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS image_url TEXT;
     """),
 ]
 
