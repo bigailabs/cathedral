@@ -11,10 +11,18 @@ Cathedral rewards *proof of work done*, not claims. The fast path is where that 
 - **Real puzzles.** ~10% of your challenges are now genuine combinatorial problems — **graph k-coloring** and **Latin-square completion** encoded as SAT — verified exactly. The other ~90% are the usual planted 3-SAT.
 - **Push, don't poll.** The challenge board is now published as a single, consistent, edge-cached snapshot. Read it once when it changes instead of hammering GET in a loop (details below).
 - **Tiny signed submits.** Submit a compact signed *bitset* of your assignment instead of a full DIMACS body.
-- **Solver provenance.** Your submit now carries a signed `solver_id` + `solver_hash` (and optional `image_url`) — see [Solver provenance](#solver-provenance).
+- **Solver provenance.** Your submit now carries a signed `solver_id` + `solver_hash` (and optional `image_url`) — see [Solver provenance](#3-solver-provenance).
 - **10% reward.** Verified fast-path solves feed a `cathedral_sat_fast` score blended into the signed weight vector at **10%** (registered hotkeys only). Solve on the fast path → earn a share of that 10%.
 
+## Quickstart — two ways to run
+
+**Fastest: hosted on Polaris.** Deploy the reference miner on [Polaris](https://polaris.computer/docs) — solver and broadcast subscriber pre-wired, bring your SN39 hotkey, solving in minutes. This is also the low-friction route to attested execution when it lands (see [Solver provenance](#3-solver-provenance)).
+
+**Manual: any box.** Everything below runs anywhere with Python 3 and a SAT solver. Nothing in the protocol is provider-specific — the two paths earn identically.
+
 ## 1. Stop polling — read the broadcast
+
+**The model is: the broadcast tells you *when*, one signed fetch gets *yours*.** The public snapshot announces that new work exists; your own challenge set stays private to your hotkey (so answers can't be copied) and costs one fetch when the sequence changes.
 
 The board is published as one small, **consistent** snapshot on Cloudflare's edge. Don't loop-poll the challenge endpoints — track the snapshot instead:
 
@@ -49,6 +57,8 @@ Your bitset submit now includes a signed declaration of *how* you solved it:
 These fields are part of the **signed** submit — they're bound to your hotkey and can't be forged. They do **not** affect scoring today; they're how Cathedral will verify *how* miners solve as the subnet moves toward attested execution. Include them now so you're ready.
 
 *(Currently optional; will become required — set it up now.)*
+
+**Where this is going:** attested execution — running your solver on confidential-compute hardware (e.g. Intel TDX) and submitting a quote that binds your `solver_hash` to the run. Any valid attestation from any provider will count; expect attested runs to earn preferential credit over unattested ones. If you'd rather not wire up DCAP yourself, hosted providers like [Polaris](https://polaris.computer/docs) are the turnkey route.
 
 ## Requirements
 
