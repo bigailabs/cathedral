@@ -1424,7 +1424,7 @@ class Store:
             self._conn.commit()
 
     def _migrate_postgres(self) -> None:
-        raw = self._pool.getconn()
+        raw = self._getconn()
         try:
             cur = raw.cursor()
             cur.execute(
@@ -1446,12 +1446,59 @@ class Store:
             raw.rollback()
             raise
         finally:
-            self._pool.putconn(raw)
+            self._putconn(raw)
+
+    # ---- pooled-connection hygiene ----------------------------------------
+    def _getconn(self):
+        """Borrow a pooled psycopg2 connection with a guaranteed-clean
+        transaction state.
+
+        A prior borrower that failed to roll back an aborted transaction (for
+        example an error path whose own rollback() raised on a broken socket)
+        would otherwise leave the connection in a failed transaction. Every
+        subsequent query on it then raises InFailedSqlTransaction ("current
+        transaction is aborted, commands ignored until end of transaction
+        block") until the connection is rolled back — which is exactly the wedge
+        that freezes weights refresh and stops on-chain updates. A rollback here
+        is a cheap no-op on a clean connection and resets an aborted one, so no
+        poisoned connection can ever be reused."""
+        raw = self._pool.getconn()
+        try:
+            raw.rollback()
+        except Exception:
+            # The connection itself is unusable — discard it and take another.
+            try:
+                self._pool.putconn(raw, close=True)
+            except Exception:
+                pass
+            raw = self._pool.getconn()
+            try:
+                raw.rollback()
+            except Exception:
+                pass
+        return raw
+
+    def _putconn(self, raw) -> None:
+        """Return a connection to the pool only after clearing any lingering
+        transaction state, so an aborted transaction can never be handed to the
+        next borrower even if an error path above forgot (or failed) to roll
+        back."""
+        try:
+            raw.rollback()
+        except Exception:
+            # Broken connection — discard it rather than poison the pool.
+            try:
+                self._pool.putconn(raw, close=True)
+            except Exception:
+                pass
+            return
+        self._pool.putconn(raw)
+
 
     # ---- low-level access -------------------------------------------------
     def query(self, sql: str, params: tuple = ()) -> list:
         if self.backend == "postgres":
-            raw = self._pool.getconn()
+            raw = self._getconn()
             try:
                 cur = raw.cursor()
                 timeout_ms = _postgres_statement_timeout_ms()
@@ -1465,7 +1512,7 @@ class Store:
                 raw.rollback()
                 raise
             finally:
-                self._pool.putconn(raw)
+                self._putconn(raw)
         with self._lock:
             return list(self._conn.execute(sql, params))
 
@@ -1477,7 +1524,7 @@ class Store:
         normal transaction — MVCC removes the need for a global lock (the wedge
         fix). fn returns whatever it wants; the wrapped conn translates dialect."""
         if self.backend == "postgres":
-            raw = self._pool.getconn()
+            raw = self._getconn()
             try:
                 result = fn(_PgConn(raw))
                 raw.commit()
@@ -1486,7 +1533,7 @@ class Store:
                 raw.rollback()
                 raise
             finally:
-                self._pool.putconn(raw)
+                self._putconn(raw)
         with self._lock:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
