@@ -505,6 +505,45 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_hotkey_verified_time
             ON per_miner_solves(miner_hotkey, verified, solved_at_iso);
     """),
+    # 0037: external score intake (e.g. Violet audio). These reports are
+    # publisher-side scoring inputs only; validators still consume the final
+    # Cathedral-signed weight vector.
+    ("0037_external_score_reports", """
+        CREATE TABLE IF NOT EXISTS external_score_reports (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            epoch INTEGER NOT NULL DEFAULT 0,
+            generated_at_iso TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            report_sha256 TEXT NOT NULL,
+            score_count INTEGER NOT NULL DEFAULT 0,
+            report_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_external_score_reports_source_received
+            ON external_score_reports(source, received_at_iso);
+
+        CREATE TABLE IF NOT EXISTS external_score_entries (
+            report_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            epoch INTEGER NOT NULL DEFAULT 0,
+            miner_hotkey TEXT NOT NULL,
+            uid INTEGER,
+            score REAL NOT NULL,
+            quality REAL,
+            latency REAL,
+            validity REAL,
+            tasks_scored INTEGER NOT NULL DEFAULT 0,
+            confidence REAL,
+            generated_at_iso TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (report_id, miner_hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_external_score_entries_source_received
+            ON external_score_entries(source, received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_external_score_entries_hotkey_received
+            ON external_score_entries(miner_hotkey, received_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -917,6 +956,45 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_hotkey_verified_time
             ON per_miner_solves(miner_hotkey, verified, solved_at_iso);
     """),
+    # 0037: external score intake (e.g. Violet audio). These reports are
+    # publisher-side scoring inputs only; validators still consume the final
+    # Cathedral-signed weight vector.
+    ("0037_external_score_reports", """
+        CREATE TABLE IF NOT EXISTS external_score_reports (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            epoch BIGINT NOT NULL DEFAULT 0,
+            generated_at_iso TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            report_sha256 TEXT NOT NULL,
+            score_count INTEGER NOT NULL DEFAULT 0,
+            report_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_external_score_reports_source_received
+            ON external_score_reports(source, received_at_iso);
+
+        CREATE TABLE IF NOT EXISTS external_score_entries (
+            report_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            epoch BIGINT NOT NULL DEFAULT 0,
+            miner_hotkey TEXT NOT NULL,
+            uid INTEGER,
+            score DOUBLE PRECISION NOT NULL,
+            quality DOUBLE PRECISION,
+            latency DOUBLE PRECISION,
+            validity DOUBLE PRECISION,
+            tasks_scored INTEGER NOT NULL DEFAULT 0,
+            confidence DOUBLE PRECISION,
+            generated_at_iso TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (report_id, miner_hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_external_score_entries_source_received
+            ON external_score_entries(source, received_at_iso);
+        CREATE INDEX IF NOT EXISTS idx_external_score_entries_hotkey_received
+            ON external_score_entries(miner_hotkey, received_at_iso);
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -941,6 +1019,8 @@ _PK_BY_TABLE: dict[str, str] = {
     "coldkey_map": "hotkey",
     "metagraph_hotkeys": "network, netuid, hotkey",
     "signed_weight_vectors": "id",
+    "external_score_reports": "id",
+    "external_score_entries": "report_id, miner_hotkey",
     "tee_gpu_capacity": "capacity_id",
     "tee_gpu_capacity_events": "id",
     "attest_nonces": "nonce",
