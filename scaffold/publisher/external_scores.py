@@ -27,6 +27,13 @@ MAX_SCORES_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_SCORES"
 _DEFAULT_SOURCE = "violet_audio"
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
+# Known/allowed `source` labels for POST /v1/external-scores/violet. The route
+# name predates any source beyond Violet's own audio scorer; widen this
+# allowlist (not the auth/registration/fraction-cap gates) when a new external
+# mechanism — e.g. Cathedral's own fast-path SAT scoreboard — is wired to post
+# here. Anything not listed is rejected with invalid_source_for_violet_endpoint.
+ALLOWED_ENDPOINT_SOURCES = {"violet_audio", "cathedral_sat_fast"}
+
 
 class ExternalScoreError(ValueError):
     def __init__(self, reason: str):

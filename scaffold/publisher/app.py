@@ -2727,7 +2727,7 @@ def build_app(
             report = external_scores.normalize_report(payload, default_source="violet_audio")
         except external_scores.ExternalScoreError as exc:
             raise HTTPException(400, exc.reason)
-        if report["source"] != "violet_audio":
+        if report["source"] not in external_scores.ALLOWED_ENDPOINT_SOURCES:
             raise HTTPException(400, "invalid_source_for_violet_endpoint")
         try:
             accepted = external_scores.store_report(store, report)
