@@ -6,6 +6,7 @@
   <a href="CATHEDRAL_V0_LANES.md">v0 Lanes</a> |
   <a href="LAUNCH_V0_RUNBOOK.md">v0 Launch Runbook</a> |
   <a href="game/arena/ARENA.md">Arena</a> |
+  <a href="docs/FAST_PATH_MINER_GUIDE.md">Fast Path</a> |
   <a href="https://api.cathedral.computer/v1/synthetic-boolean/active-challenges">Active Challenges</a> |
   <a href="https://github.com/cathedralai/cathedral/releases">Releases</a>
 </p>
@@ -168,6 +169,16 @@ Operator visibility:
   `Authorization: Bearer <token>` to read it.
 - `CATHEDRAL_SUBMIT_LOG_EVENTS=1` enables per-submit rejection logs. Leave it
   off for normal high-throughput operation; counters still record by default.
+
+### Fast Path — real problems, real rewards
+
+Cathedral is opening a **faster miner lane** alongside the v1 flow above:
+
+- **Tiny signed submits.** Instead of a full DIMACS body, the fast path takes a compact signed *bitset* of your assignment — cheap to send, cheap to verify — over the per-miner V2 endpoints on `v2-beta.cathedral.computer`.
+- **Real, checkable problems.** A configurable share (currently ~10%) of per-miner challenges are genuine combinatorial instances — **graph k-coloring** and **Latin-square completion** encoded as SAT — mixed in with the usual planted 3-SAT. Cathedral verifies the witness exactly; a wrong-but-fast answer scores `0.0`.
+- **10% of incentive routes to the fast path.** Verified fast-path solves feed a `cathedral_sat_fast` score that Cathedral blends into the single signed weight vector at 10% (registered hotkeys only, capped, fail-safe) — so your fast-path work shows up in your on-chain weight without changing anything for validators.
+
+Full walkthrough — endpoints, the reference miner, and how the reward composes — in [`docs/FAST_PATH_MINER_GUIDE.md`](docs/FAST_PATH_MINER_GUIDE.md). Watch it live: fast-path solve/verify rate at [`/v2/verify/metrics`](https://v2-beta.cathedral.computer/v2/verify/metrics), the fast-path scoreboard at [`/v2/validator/weights/next`](https://v2-beta.cathedral.computer/v2/validator/weights/next).
 
 ### Local Verification Arena
 
