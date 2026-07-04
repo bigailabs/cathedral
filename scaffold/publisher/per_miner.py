@@ -54,6 +54,7 @@ from functools import lru_cache
 from typing import Any
 
 from ..dimacs import gen_planted_3sat, verify_witness
+from . import real_corpus
 from .store import Store
 
 _EPHEMERAL_SEED_SECRET = secrets.token_bytes(32)
@@ -260,13 +261,58 @@ def _gen_cached(hotkey: str, epoch: int, tier: int, seq: int,
     return gen_planted_3sat(seed, n_vars, n_clauses, method=method)
 
 
-def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, list[int]]:
+REAL_FRACTION_ENV = "CATHEDRAL_V2_REAL_FRACTION"
+
+
+def _real_fraction() -> float:
+    """Fraction (0..1) of a miner's challenges served from the REAL generator.
+    Explicit CATHEDRAL_V2_REAL_FRACTION wins. If unset, a non-"planted"
+    CATHEDRAL_V2_CHALLENGE_SOURCE means legacy all-real (1.0); otherwise 0.0 —
+    all planted, the default UNCHANGED live behavior."""
+    raw = os.environ.get(REAL_FRACTION_ENV, "").strip()
+    if raw:
+        try:
+            return min(1.0, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    return 1.0 if real_corpus.challenge_source() != "planted" else 0.0
+
+
+def _real_pick(hotkey: str, epoch: int, tier: int, seq: int) -> float:
+    """Deterministic ~uniform value in [0,1) for the real/planted decision — a
+    pure function of (hotkey, epoch, tier, seq) so mint and verify agree on
+    whether this exact challenge is real."""
+    h = hashlib.sha256(
+        f"realpick:{hotkey}:{int(epoch)}:{int(tier)}:{int(seq)}".encode("utf-8")
+    ).hexdigest()
+    return (int(h[:8], 16) % 1_000_000) / 1_000_000.0
+
+
+def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, list[int] | None]:
     """Generate ONE per-miner instance. Returns (challenge_id, cnf_text, planted_assignment).
 
     The planted assignment is the publisher's hidden witness — never sent to
     the miner. The miner must solve the CNF independently. tier1=biased (easy
     floor), tier2=ajm (hard) per method_for(); cached so it's cheap to re-derive.
+
+    CATHEDRAL_V2_CHALLENGE_SOURCE (default "planted") swaps the CNF source:
+    unset/"planted" is this exact path, UNCHANGED. "combinatorial"/"corpus"
+    (see real_corpus.py) serve REAL, unplanted instances keyed by
+    (epoch, tier, seq) — planted_assignment is None because there is no
+    embedded solution; dimacs.verify_witness is still the correctness gate.
+    The wire challenge_id is always instance_id() (hotkey-HMAC'd), so token
+    binding is identical across sources.
     """
+    frac = _real_fraction()
+    use_real = frac >= 1.0 or (frac > 0.0 and _real_pick(hotkey, epoch, tier, seq) < frac)
+    if use_real:
+        # REAL, per-miner (salt=hotkey so miners can't copy), unplanted;
+        # dimacs.verify_witness is the correctness gate.
+        _content_id, cnf_text = real_corpus.generate_real_instance(
+            epoch, tier, seq, salt=hotkey)
+        cid = instance_id(hotkey, epoch, tier, seq)
+        return cid, cnf_text, None
+
     n_vars, n_clauses = shape_for(tier)
     cnf_text, planted = _gen_cached(hotkey, epoch, tier, seq,
                                     method_for(tier), n_vars, n_clauses)
