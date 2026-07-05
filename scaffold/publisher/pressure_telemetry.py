@@ -104,14 +104,14 @@ def _canonical_path(path: str) -> str:
 
 
 def _client_ip(scope: Scope) -> str:
-    for header in (b"cf-connecting-ip", b"x-real-ip", b"x-forwarded-for"):
-        raw = _header(scope, header)
-        if raw:
-            return raw.split(",", 1)[0].strip()
-    client = scope.get("client")
-    if client:
-        return str(client[0])
-    return ""
+    # Route through the single hardened derivation (CATHEDRAL_CLIENT_IP_MODE)
+    # so telemetry buckets are not spoofable on the un-proxied origin either.
+    # See ratelimit._client_ip_from_scope and issue #333.
+    from . import ratelimit
+    ip = ratelimit._client_ip_from_scope(scope)
+    if ip in ("unknown", "", ratelimit.UNRESOLVED_IP):
+        return ""
+    return ip
 
 
 def _ip_block(ip: str) -> str:
