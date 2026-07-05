@@ -6479,12 +6479,21 @@ def build_app(
     def validator_weights_next_v2():
         if not solution_manifest_enabled:
             raise HTTPException(404, "solution_manifest_v2_not_enabled")
-        vector = v2_pipeline.build_shadow_weight_vector(
-            v2_store,
-            signing_key_hex=key_hex,
-            window_hours=_env_float("CATHEDRAL_V2_WEIGHTS_WINDOW_HOURS", 24.0),
-            valid_for_secs=_env_float("CATHEDRAL_V2_WEIGHTS_VALID_FOR_SECS", 1800.0),
-        )
+        # TTL-cached: this endpoint is publicly polled (the miner announcement
+        # calls it the fast-path scoreboard) and a full vector rebuild is a
+        # 20-40s multi-query sweep of the 24h window. Uncached, concurrent
+        # pollers exhausted the PG pool (PoolError -> 500s) and starved the
+        # reward poster. One caller rebuilds every 20s; everyone else gets the
+        # cached signed vector (valid_for_secs is 1800s, so a 20s-stale copy
+        # is always still comfortably valid for consumers).
+        vector = _v2_metrics_cached(
+            "weights_next_v2", 20.0,
+            lambda: v2_pipeline.build_shadow_weight_vector(
+                v2_store,
+                signing_key_hex=key_hex,
+                window_hours=_env_float("CATHEDRAL_V2_WEIGHTS_WINDOW_HOURS", 24.0),
+                valid_for_secs=_env_float("CATHEDRAL_V2_WEIGHTS_VALID_FOR_SECS", 1800.0),
+            ))
         return JSONResponse(
             vector,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
