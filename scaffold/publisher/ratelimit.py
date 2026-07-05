@@ -85,6 +85,12 @@ _EXEMPT_SUFFIXES: tuple[str, ...] = (
     # unfairly throttles legitimate high-throughput miners behind one egress IP.
     "/v1/synthetic-boolean/per-miner/challenges",
     "/v1/synthetic-boolean/per-miner/cnf",
+    # V2 fast-path per-miner reads are the same class of hot signed GET and
+    # carry the same pm_read_hard_cap concurrency gate. They were missing here,
+    # so on the un-proxied v2 origin the coarse 120rpm global limiter (keyed on
+    # a shared upstream IP) throttled the whole fast-path fleet into one bucket.
+    "/v2/synthetic-boolean/per-miner/challenges",
+    "/v2/synthetic-boolean/per-miner/cnf",
 )
 
 # Prefix for the legacy path-strip compat so exempt check works both ways.
@@ -183,6 +189,8 @@ _ABUSE_TARGETS: set[tuple[str, str]] = {
     ("POST", "/v1/agents/submit"),
     ("GET", "/v1/synthetic-boolean/per-miner/cnf"),
     ("GET", "/v1/synthetic-boolean/per-miner/challenges"),
+    ("GET", "/v2/synthetic-boolean/per-miner/cnf"),
+    ("GET", "/v2/synthetic-boolean/per-miner/challenges"),
 }
 
 
