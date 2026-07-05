@@ -1311,6 +1311,8 @@ _PK_BY_TABLE: dict[str, str] = {
     "coldkey_map": "hotkey",
     "metagraph_hotkeys": "network, netuid, hotkey",
     "signed_weight_vectors": "id",
+    "external_score_reports": "id",
+    "external_score_entries": "report_id, miner_hotkey",
     "solution_manifests": "id",
     "tee_gpu_capacity": "capacity_id",
     "tee_gpu_capacity_events": "id",

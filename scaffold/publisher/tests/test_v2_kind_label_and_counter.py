@@ -108,7 +108,9 @@ def _build(tmp_path, monkeypatch, *, source: str | None = None, kind: str | None
     monkeypatch.delenv("CATHEDRAL_V2_REAL_FRACTION", raising=False)
     db = str(tmp_path / "pub.sqlite")
     app = build_app(database_path=db, signing_key_hex=SIGNING_KEY_HEX)
-    return app, Store(db)
+    # v2 rows (v2_submit_events receipts) live in the separate V2 store the app
+    # wires from CATHEDRAL_V2_DB_PATH above, not the main publisher DB.
+    return app, Store(str(tmp_path / "v2.sqlite"))
 
 
 def _fetch_item(client, kp, *, tier: int) -> dict:

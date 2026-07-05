@@ -49,7 +49,6 @@ from .cnf_store import CNFStore
 from . import v2_cnf_store
 from .sat_solution import verify_dimacs_solution
 from . import external_scores, submit_admission
-from . import submit_admission
 from . import solution_manifest
 from . import v2_pipeline
 from . import v2_bitset_submit
