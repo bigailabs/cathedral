@@ -52,6 +52,7 @@ from . import submit_admission
 from . import solution_manifest
 from . import v2_pipeline
 from . import v2_bitset_submit
+from . import v2_receipts
 from . import blob_store as blob_store_mod
 from .per_hotkey_limit import (
     ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
@@ -434,6 +435,11 @@ def build_app(
     # local tests share the app store.
     v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
     v2_blob_store = blob_store_mod.store_from_env()
+    # Best-effort hotkey->coldkey resolver for the public receipts feed,
+    # reusing the existing metagraph-backed coldkey_map table (see
+    # weights._load_coldkey_map). Built once per app instance so its internal
+    # 10-minute cache is actually shared across requests.
+    v2_receipts_coldkey_resolver = v2_receipts.make_coldkey_resolver(v2_store)
     service_role = _service_role_from_env()
     _check_read_statement_timeout(service_role)
     verifier = default_verifier()
@@ -1313,6 +1319,7 @@ def build_app(
             "/v2/synthetic-boolean/per-miner/cnf",
             "/v2/validator/weights/next",
             "/v2/audit/epochs/",
+            "/v2/receipts/",
         }
         _SUBMIT_GET_PATHS = {
             "/v1/admin/synthetic-boolean/submit-metrics",
@@ -1333,6 +1340,7 @@ def build_app(
             "/v2/synthetic-boolean/per-miner/cnf",
             "/v2/validator/weights/next",
             "/v2/audit/epochs/",
+            "/v2/receipts/",
             "/v2/shadow/v1/agents/submit/receipts/",
         }
         _SUBMIT_POST_PATHS = {
@@ -6507,6 +6515,51 @@ def build_app(
         return JSONResponse(
             bundle,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    # ---- Public receipts feed (scrubbed, signed, per-epoch) ---------------
+    # Public and read-only by design: it only ever surfaces already-VERIFIED
+    # rows, scrubbed to a fixed field list (see v2_receipts._public_receipt).
+    # Epochs are append-only once the epoch has fully passed, so a 5-minute
+    # cache is safe; /latest still needs to notice a brand-new epoch quickly,
+    # so its own MAX(epoch) lookup is cached much shorter (60s).
+    def _receipts_bundle_for_epoch(epoch: int) -> dict[str, Any]:
+        return _v2_metrics_cached(
+            f"receipts:{epoch}", 300.0,
+            lambda: v2_receipts.build_receipts_bundle(
+                v2_store,
+                epoch=epoch,
+                signing_key_hex=key_hex,
+                coldkey_resolver=v2_receipts_coldkey_resolver,
+            ))
+
+    @app.get("/v2/receipts/epochs/{epoch}")
+    def receipts_epoch_v2(epoch: int):
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        bundle = _receipts_bundle_for_epoch(epoch)
+        return JSONResponse(
+            bundle,
+            headers={
+                "Cache-Control": "public, max-age=60",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
+    @app.get("/v2/receipts/latest")
+    def receipts_latest_v2():
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        epoch = _v2_metrics_cached(
+            "receipts:latest_epoch", 60.0,
+            lambda: v2_receipts.latest_verified_epoch(v2_store))
+        bundle = _receipts_bundle_for_epoch(int(epoch) if epoch is not None else 0)
+        return JSONResponse(
+            bundle,
+            headers={
+                "Cache-Control": "public, max-age=60",
+                "Access-Control-Allow-Origin": "*",
+            },
         )
 
     # ---- Durable submit receipts (Phase 4) --------------------------------
