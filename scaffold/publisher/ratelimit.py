@@ -41,6 +41,32 @@ import os
 import time
 import threading
 
+# Sentinel client-IP when no trustworthy address can be derived (railway mode,
+# forwarded chain shorter than the trusted-hop count). Limiters fail OPEN on it
+# rather than bucket such requests together (which on Railway would key every
+# request on the edge's internal IP and 429 the whole fleet). Not a real IP, so
+# it never collides with a client value.
+UNRESOLVED_IP = "\x00unresolved"
+
+# Observability: count fail-open events (railway mode couldn't derive a
+# trustworthy client IP). In normal operation the edge always appends the
+# peer, so this stays 0. A rising value means the edge stopped appending on
+# some path and the limiter is silently un-throttling it — surface it via
+# metrics so an edge regression is loud, not invisible.
+_unresolved_ip_count = 0
+_unresolved_ip_lock = threading.Lock()
+
+
+def _note_unresolved_ip() -> None:
+    global _unresolved_ip_count
+    with _unresolved_ip_lock:
+        _unresolved_ip_count += 1
+
+
+def unresolved_ip_count() -> int:
+    """Total fail-open (un-derivable client IP) events since process start."""
+    return _unresolved_ip_count
+
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 # Default: 120 req/min/key.  Set env to 0 to disable.
@@ -59,6 +85,12 @@ _EXEMPT_SUFFIXES: tuple[str, ...] = (
     # unfairly throttles legitimate high-throughput miners behind one egress IP.
     "/v1/synthetic-boolean/per-miner/challenges",
     "/v1/synthetic-boolean/per-miner/cnf",
+    # V2 fast-path per-miner reads are the same class of hot signed GET and
+    # carry the same pm_read_hard_cap concurrency gate. They were missing here,
+    # so on the un-proxied v2 origin the coarse 120rpm global limiter (keyed on
+    # a shared upstream IP) throttled the whole fast-path fleet into one bucket.
+    "/v2/synthetic-boolean/per-miner/challenges",
+    "/v2/synthetic-boolean/per-miner/cnf",
 )
 
 # Prefix for the legacy path-strip compat so exempt check works both ways.
@@ -157,6 +189,8 @@ _ABUSE_TARGETS: set[tuple[str, str]] = {
     ("POST", "/v1/agents/submit"),
     ("GET", "/v1/synthetic-boolean/per-miner/cnf"),
     ("GET", "/v1/synthetic-boolean/per-miner/challenges"),
+    ("GET", "/v2/synthetic-boolean/per-miner/cnf"),
+    ("GET", "/v2/synthetic-boolean/per-miner/challenges"),
 }
 
 
@@ -260,7 +294,7 @@ _abuse_state = _AbuseLimiterState()
 
 
 def _get_header(headers: list, name: bytes) -> str | None:
-    """Extract a header value from raw ASGI headers list."""
+    """Extract the FIRST matching header value from raw ASGI headers."""
     name_lower = name.lower()
     for k, v in headers:
         if k.lower() == name_lower:
@@ -268,9 +302,82 @@ def _get_header(headers: list, name: bytes) -> str | None:
     return None
 
 
+def _all_xff_values(headers: list) -> list[str]:
+    """Flatten EVERY x-forwarded-for entry across ALL header lines, in order.
+
+    A client can send its own X-Forwarded-For; the trusted edge appends the
+    real peer. ASGI keeps repeated headers as separate list entries, and a
+    single line may itself hold a comma list. We must not assume the edge's
+    value is on the same line as (or a later line than) the client's — so we
+    concatenate all of them left-to-right and let the caller index from the
+    RIGHT (closest trusted hop). Reading only the first line would return the
+    client-controlled value; reading only .split(',')[-1] of one line can too.
+    """
+    out: list[str] = []
+    name = b"x-forwarded-for"
+    for k, v in headers:
+        if k.lower() == name:
+            for part in v.decode("latin-1", errors="replace").split(","):
+                part = part.strip()
+                if part:
+                    out.append(part)
+    return out
+
+
+def _client_ip_mode() -> str:
+    """How to derive the client IP. Must match the fronting topology:
+
+    * "headers" (default, legacy): trust cf-connecting-ip, then x-real-ip,
+      then the FIRST x-forwarded-for entry. Correct ONLY behind Cloudflare,
+      which strips/overwrites these from the outside world.
+    * "railway": the service origin is reached directly through Railway's
+      edge (DNS-only, no Cloudflare). Every forwarded header is
+      client-controlled EXCEPT the trailing entries appended by the trusted
+      edge. We index CATHEDRAL_TRUSTED_PROXY_HOPS (default 1) from the RIGHT
+      of the fully-flattened x-forwarded-for chain, so a client cannot spoof
+      it by sending extra values or extra header lines. Trusting anything
+      else lets an attacker rotate fake IPs past the limiter or pin a
+      victim's IP into a 429 bucket.
+    * "socket": direct exposure, no proxy at all — use the peer address.
+    """
+    mode = os.environ.get("CATHEDRAL_CLIENT_IP_MODE", "").strip().lower()
+    return mode if mode in {"headers", "railway", "socket"} else "headers"
+
+
+def _trusted_proxy_hops() -> int:
+    try:
+        return max(1, int(os.environ.get("CATHEDRAL_TRUSTED_PROXY_HOPS", "1")))
+    except ValueError:
+        return 1
+
+
 def _client_ip_from_scope(scope: Scope) -> str:
-    """Best-effort client IP from ASGI scope headers or direct connection."""
+    """Client IP per CATHEDRAL_CLIENT_IP_MODE (see _client_ip_mode)."""
     headers = scope.get("headers", [])
+    mode = _client_ip_mode()
+    if mode == "railway":
+        chain = _all_xff_values(headers)
+        hops = _trusted_proxy_hops()
+        # The rightmost `hops` entries are the trusted edge's; the one at
+        # index -hops is the real client as the innermost trusted proxy saw
+        # it. A client cannot reach that slot by padding the chain.
+        if len(chain) >= hops:
+            return chain[-hops]
+        # Chain shorter than the trusted-hop count: we CANNOT derive a
+        # trustworthy client IP. Do NOT fall back to the socket peer here —
+        # on Railway that peer is the edge's own internal address, so every
+        # such request would collapse into ONE shared bucket and could 429
+        # the whole fleet. Return the UNRESOLVED sentinel; the limiters treat
+        # it as fail-open (never throttled) without accumulating per-key
+        # state. In normal operation the edge always appends the peer, so
+        # this path is not expected to be hit.
+        _note_unresolved_ip()
+        return UNRESOLVED_IP
+    if mode == "socket":
+        client = scope.get("client")
+        if client:
+            return client[0]
+        return "unknown"
     cf_ip = _get_header(headers, b"cf-connecting-ip")
     if cf_ip:
         return cf_ip.strip()
@@ -315,6 +422,10 @@ class RateLimitMiddleware:
             return
 
         key = _client_ip_from_scope(scope)
+        if key == UNRESOLVED_IP:
+            # Fail open: no trustworthy client IP to bucket on.
+            await self.app(scope, receive, send)
+            return
 
         if not _state.check(key, limit):
             body = b"rate_limited"
@@ -374,6 +485,11 @@ class AbuseLimitMiddleware:
             "CATHEDRAL_ABUSE_RETRY_MAX_SECS", _ABUSE_DEFAULT_RETRY_MAX_SECS)
 
         ip = _client_ip_from_scope(scope)
+        if ip == UNRESOLVED_IP:
+            # Fail open: no trustworthy client IP to bucket on. The actor key
+            # embeds the IP, so it is meaningless here too — pass through.
+            await self.app(scope, receive, send)
+            return
         ip_limit = _env_int("CATHEDRAL_ABUSE_IP_RPM", _ABUSE_DEFAULT_IP_RPM)
         allowed, retry_after = _abuse_state.check(
             f"ip:{ip}", ip_limit, retry_base=retry_base, retry_max=retry_max)

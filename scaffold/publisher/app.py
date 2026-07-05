@@ -46,8 +46,14 @@ from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
 from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
+from . import v2_cnf_store
 from .sat_solution import verify_dimacs_solution
 from . import external_scores, submit_admission
+from . import solution_manifest
+from . import v2_pipeline
+from . import v2_bitset_submit
+from . import v2_receipts
+from . import blob_store as blob_store_mod
 from .per_hotkey_limit import (
     ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
     PerHotkeyLimiter,
@@ -397,6 +403,43 @@ def build_app(
     pub_hex = rows.public_key_hex(key_hex)
     jwks_doc = rows.jwks_from_key(key_hex)
     store = Store(database_path)
+    v2_database_path = (
+        os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
+        or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()
+    )
+    def _build_v2_store(path: str) -> Store:
+        # Store's Postgres pool knobs are legacy/global. Map V2-prefixed pool
+        # knobs only for this constructor call so a beta stack does not require
+        # setting generic CATHEDRAL_PG_POOL_* env.
+        mapped = {
+            "CATHEDRAL_PG_POOL_MIN": "CATHEDRAL_V2_PG_POOL_MIN",
+            "CATHEDRAL_PG_POOL_MAX": "CATHEDRAL_V2_PG_POOL_MAX",
+            "CATHEDRAL_PG_CONNECT_TIMEOUT": "CATHEDRAL_V2_PG_CONNECT_TIMEOUT",
+        }
+        old: dict[str, str | None] = {}
+        try:
+            for legacy, v2_name in mapped.items():
+                if v2_name in os.environ:
+                    old[legacy] = os.environ.get(legacy)
+                    os.environ[legacy] = os.environ[v2_name]
+            return Store(path, prefer_env_database_url=False)
+        finally:
+            for legacy, value in old.items():
+                if value is None:
+                    os.environ.pop(legacy, None)
+                else:
+                    os.environ[legacy] = value
+
+    # If configured, V2 uses a physically separate DB/store so beta deploys and
+    # live-adjacent tests cannot mutate the current subnet payout DB. If unset,
+    # local tests share the app store.
+    v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
+    v2_blob_store = blob_store_mod.store_from_env()
+    # Best-effort hotkey->coldkey resolver for the public receipts feed,
+    # reusing the existing metagraph-backed coldkey_map table (see
+    # weights._load_coldkey_map). Built once per app instance so its internal
+    # 10-minute cache is actually shared across requests.
+    v2_receipts_coldkey_resolver = v2_receipts.make_coldkey_resolver(v2_store)
     service_role = _service_role_from_env()
     _check_read_statement_timeout(service_role)
     verifier = default_verifier()
@@ -469,6 +512,36 @@ def build_app(
         "CATHEDRAL_SUBMIT_MAX_SOLUTION_BYTES", 1_000_000)
     pm_submit_max_solution_bytes = _env_int(
         "CATHEDRAL_PM_SUBMIT_MAX_SOLUTION_BYTES", 1_000_000)
+    # V2 off-chain manifest submit is phase-1/2 only: signature-verified,
+    # durable, no payout/scoring until workers are wired. Default off so deploys
+    # are inert unless explicitly enabled.
+    solution_manifest_enabled = _env_bool("CATHEDRAL_V2_ENABLED", False)
+    solution_manifest_max_bytes = _env_int("CATHEDRAL_V2_MAX_SOLUTION_BYTES", 0)
+    solution_blob_upload_enabled = _env_bool(
+        "CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", solution_manifest_enabled)
+    solution_blob_upload_max_bytes = _env_int(
+        "CATHEDRAL_V2_BLOB_UPLOAD_MAX_BYTES", 5_000_000)
+    v2_shadow_v1_enabled = _env_bool("CATHEDRAL_V2_SHADOW_V1_ENABLED", False)
+    v2_shadow_v1_max_solution_bytes = _env_int(
+        "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
+    v2_submit_bitset_enabled = _env_bool("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", False)
+    v2_submit_token_secret = os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip()
+    v2_submit_token_ttl_secs = max(1, _env_int("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", 300))
+    v2_submit_token_allowlist = {
+        item.strip()
+        for item in os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST", "").replace("\n", ",").split(",")
+        if item.strip()
+    }
+    v2_submit_bitset_max_body_bytes = max(
+        1024, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", 16_384))
+    v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
+    v2_worker_batch_size = max(1, _env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8))
+    v2_worker_interval_secs = max(
+        0.1, _env_float("CATHEDRAL_V2_VERIFY_INTERVAL_SECS", 1.0))
+    v2_worker_lock_secs = max(
+        1.0, _env_float("CATHEDRAL_V2_VERIFY_LOCK_SECS", 120.0))
+    v2_worker_max_blob_bytes = _env_int(
+        "CATHEDRAL_V2_VERIFY_MAX_BLOB_BYTES", solution_blob_upload_max_bytes)
     submit_queue_backpressure_enabled = _env_bool(
         "CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED", False)
     submit_queue_backpressure = (
@@ -1086,12 +1159,18 @@ def build_app(
         _SUBMIT_PATHS = {
             "/v1/agents/submit",
             f"{_LEGACY_PREFIX}/v1/agents/submit",
+            "/v2/agents/submit-bitset",
+            f"{_LEGACY_PREFIX}/v2/agents/submit-bitset",
         }
         _PM_READ_PATHS = {
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",
             f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/challenges",
             f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/challenges",
+            "/v2/synthetic-boolean/per-miner/cnf",
+            f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/challenges",
+            f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/cnf",
         }
 
         def __init__(self, asgi_app):
@@ -1226,6 +1305,7 @@ def build_app(
             # read service that actually serves the Tier 0 weight feed.
             "/v1/admin/validator-health",
             "/v1/admin/synthetic-boolean/submit-metrics",
+            "/v2/shadow/v1/agents/submit/metrics",
         }
         _READ_GET_PREFIXES = {
             "/sat/sequences/",
@@ -1233,9 +1313,17 @@ def build_app(
             # Durable submit receipts (Phase 4): a read of durable state, safe to
             # serve from the read role as well as submit (miners poll their receipt).
             "/v1/agents/receipts/",
+            "/v2/agents/submit-manifest/receipts/",
+            "/v2/agents/submit-bitset/receipts/",
+            "/v2/synthetic-boolean/per-miner/challenges",
+            "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/validator/weights/next",
+            "/v2/audit/epochs/",
+            "/v2/receipts/",
         }
         _SUBMIT_GET_PATHS = {
             "/v1/admin/synthetic-boolean/submit-metrics",
+            "/v2/shadow/v1/agents/submit/metrics",
             "/v1/synthetic-boolean/active-cnf",
             "/v1/synthetic-boolean/per-miner/challenges",
             "/v1/synthetic-boolean/per-miner/cnf",
@@ -1246,10 +1334,23 @@ def build_app(
             # The submit role returns 202 + receipt_url; let the same host resolve
             # that receipt so miners don't need a second host for status polling.
             "/v1/agents/receipts/",
+            "/v2/agents/submit-manifest/receipts/",
+            "/v2/agents/submit-bitset/receipts/",
+            "/v2/synthetic-boolean/per-miner/challenges",
+            "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/validator/weights/next",
+            "/v2/audit/epochs/",
+            "/v2/receipts/",
+            "/v2/shadow/v1/agents/submit/receipts/",
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
             "/v1/external-scores/violet",
+            "/v2/agents/submit-manifest",
+            "/v2/agents/submit-bitset",
+            "/v2/blobs/solutions",
+            "/v2/admin/verify/tick",
+            "/v2/shadow/v1/agents/submit",
         }
 
         def __init__(self, asgi_app):
@@ -1360,6 +1461,23 @@ def build_app(
     app.state.arena_eval_task = None
     app.state.arena_payout_task = None
     app.state.async_verify_task = None
+    app.state.v2_verify_task = None
+    app.state.v2_verify_metrics = {
+        "worker_id": None,
+        "lock_held_by_self": False,
+        "last_lock_acquired_at": None,
+        "last_lock_contended_at": None,
+        "last_batch_at": None,
+        "last_batch_ms": None,
+        "last_batch_count": 0,
+        "recent_events": [],
+        "tick_errors": [],
+        "worker_restarts": 0,
+        "last_worker_error": None,
+        "lock_steals": 0,
+    }
+    app.state.v2_store = v2_store
+    app.state.v2_blob_store = v2_blob_store
     app.state.pressure_telemetry = pressure_telemetry
     # Lane S champion machine + registry persist across eval ticks on app.state
     # (the validator constructs ONE lane and reuses it so the champion survives).
@@ -1557,6 +1675,154 @@ def build_app(
                     heartbeat=_verify_heartbeat),
             ))
 
+    async def _run_v2_singleton_background(label: str, lock_name: str, coro_factory):
+        import asyncio
+
+        retry_secs = max(1, int(os.environ.get("CATHEDRAL_V2_SINGLETON_RETRY_SECS", "15")))
+        contended_log_secs = max(30, int(os.environ.get("CATHEDRAL_V2_SINGLETON_CONTENDED_LOG_SECS", "300")))
+        # Self-healing takeover: when the lock is held elsewhere, check whether
+        # the holder is actually a crashed/replaced worker (PG session idle
+        # AND its heartbeat stale/absent for longer than this) rather than a
+        # live peer between ticks. See Store.steal_stale_advisory_lock.
+        steal_idle_secs = max(30, int(os.environ.get("CATHEDRAL_V2_LOCK_STEAL_IDLE_SECS", "180")))
+        # Crash containment: an exception escaping the lock/coro_factory body
+        # (as opposed to an ordinary per-batch tick error, which _loop already
+        # swallows internally) backs off 5s -> 60s instead of hammering
+        # retry_secs, and resets to the floor after any healthy cycle so a
+        # transient blip does not leave the loop permanently slow.
+        error_backoff_floor = max(0.01, _env_float("CATHEDRAL_V2_ERROR_BACKOFF_FLOOR_SECS", 5.0))
+        error_backoff_cap = max(error_backoff_floor, _env_float("CATHEDRAL_V2_ERROR_BACKOFF_CAP_SECS", 60.0))
+        error_backoff = error_backoff_floor
+        last_contended_log = 0.0
+        while True:
+            sleep_secs = retry_secs
+            try:
+                with v2_store.advisory_lock(lock_name) as acquired:
+                    if not acquired:
+                        now = time.time()
+                        app.state.v2_verify_metrics["lock_held_by_self"] = False
+                        app.state.v2_verify_metrics["last_lock_contended_at"] = _now_iso_ms()
+                        if now - last_contended_log >= contended_log_secs:
+                            print(f"[{label}] singleton_lock_held_elsewhere")
+                            last_contended_log = now
+                        try:
+                            stolen = v2_store.steal_stale_advisory_lock(
+                                lock_name, idle_secs=steal_idle_secs)
+                        except Exception as steal_exc:
+                            stolen = 0
+                            print(f"[{label}] lock_steal_check_failed error={steal_exc!r}")
+                        if stolen:
+                            app.state.v2_verify_metrics["lock_steals"] = (
+                                int(app.state.v2_verify_metrics.get("lock_steals") or 0) + stolen)
+                            print(f"[{label}] lock_steal_terminated n={stolen}")
+                    else:
+                        app.state.v2_verify_metrics["lock_held_by_self"] = True
+                        app.state.v2_verify_metrics["last_lock_acquired_at"] = _now_iso_ms()
+                        print(f"[{label}] singleton_lock_acquired")
+                        await coro_factory()
+                        app.state.v2_verify_metrics["lock_held_by_self"] = False
+                        print(f"[{label}] singleton_task_exited")
+                        error_backoff = error_backoff_floor
+            except asyncio.CancelledError:
+                app.state.v2_verify_metrics["lock_held_by_self"] = False
+                print(f"[{label}] singleton_task_cancelled")
+                raise
+            except Exception as exc:
+                # ANY exception that reaches here (lock acquisition itself
+                # failing, or -- in principle -- coro_factory raising) must
+                # never kill this task: log it, let advisory_lock's own
+                # cleanup release/discard the lock connection (best-effort),
+                # back off, and loop again to re-acquire and resume.
+                app.state.v2_verify_metrics["lock_held_by_self"] = False
+                app.state.v2_verify_metrics["worker_restarts"] = (
+                    int(app.state.v2_verify_metrics.get("worker_restarts") or 0) + 1)
+                app.state.v2_verify_metrics["last_worker_error"] = repr(exc)[:200]
+                print(f"[{label}] singleton_task_error error={exc!r}")
+                sleep_secs = error_backoff
+                error_backoff = min(error_backoff * 2.0, error_backoff_cap)
+            await asyncio.sleep(sleep_secs)
+
+    @app.on_event("startup")
+    async def _start_v2_verify_worker():
+        if not (solution_manifest_enabled and v2_worker_enabled):
+            return
+        if not _role_runs_worker(service_role):
+            print(f"[v2_verify] skipped service_role={service_role}")
+            return
+        import asyncio
+        worker_id = f"v2:{service_role}:{new_uuid()[:8]}"
+        # Shared literal so the heartbeat row _loop() writes below and the
+        # advisory lock _run_v2_singleton_background acquires always refer to
+        # the same lock -- steal_stale_advisory_lock's second guardrail
+        # (heartbeat staleness) only lines up with the right lock if these
+        # two never drift apart.
+        v2_verify_lock_name = "cathedral:v2:verify"
+
+        async def _loop():
+            app.state.v2_verify_metrics["worker_id"] = worker_id
+            while True:
+                # Best-effort liveness beat: proves to steal_stale_advisory_lock
+                # that a live worker (not just an idle PG session) holds the
+                # lock. write_v2_worker_heartbeat never raises; the to_thread
+                # wrapper just keeps this blocking DB call off the event loop.
+                try:
+                    await asyncio.to_thread(
+                        v2_store.write_v2_worker_heartbeat,
+                        v2_verify_lock_name, worker_id, _now_iso_ms(),
+                    )
+                except Exception as hb_exc:
+                    print(f"[v2_verify] heartbeat_failed error={hb_exc!r}")
+                try:
+                    batch_started = time.time()
+                    results = await asyncio.to_thread(
+                        v2_pipeline.process_batch,
+                        v2_store,
+                        v2_blob_store,
+                        worker_id=worker_id,
+                        batch_size=v2_worker_batch_size,
+                        lock_secs=v2_worker_lock_secs,
+                        max_blob_bytes=v2_worker_max_blob_bytes,
+                    )
+                    batch_ms = (time.time() - batch_started) * 1000.0
+                    if results:
+                        counts = {}
+                        for r in results:
+                            counts[str(r.get("status") or "unknown")] = counts.get(str(r.get("status") or "unknown"), 0) + 1
+                        now_iso = _now_iso_ms()
+                        app.state.v2_verify_metrics["last_batch_at"] = now_iso
+                        app.state.v2_verify_metrics["last_batch_ms"] = round(batch_ms, 3)
+                        app.state.v2_verify_metrics["last_batch_count"] = len(results)
+                        events = app.state.v2_verify_metrics.get("recent_events") or []
+                        events.append({
+                            "ts": time.time(),
+                            "verified": int(counts.get(v2_pipeline.STATUS_VERIFIED, 0)),
+                            "rejected": int(counts.get(v2_pipeline.STATUS_REJECTED, 0)),
+                            "total": int(len(results)),
+                        })
+                        app.state.v2_verify_metrics["recent_events"] = events[-512:]
+                        print(
+                            "[v2_verify] batch "
+                            f"n_verified={counts.get(v2_pipeline.STATUS_VERIFIED, 0)} "
+                            f"n_rejected={counts.get(v2_pipeline.STATUS_REJECTED, 0)} "
+                            f"n_total={len(results)} batch_ms={batch_ms:.1f}"
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    errors = app.state.v2_verify_metrics.get("tick_errors") or []
+                    errors.append({"ts": time.time(), "error": repr(exc)})
+                    app.state.v2_verify_metrics["tick_errors"] = errors[-128:]
+                    print(f"[v2_verify] tick_failed error={exc!r}")
+                await asyncio.sleep(v2_worker_interval_secs)
+
+        app.state.v2_verify_task = asyncio.create_task(
+            _run_v2_singleton_background(
+                "v2_verify",
+                v2_verify_lock_name,
+                _loop,
+            )
+        )
+
     # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
     # Periodically scores registered pending solvers and, on a record-fall,
     # emits a signed v6 row crediting the new champion's owner. Default OFF.
@@ -1687,7 +1953,7 @@ def build_app(
 
         for attr in (
             "refill_task", "seed_task", "arena_eval_task", "arena_payout_task",
-            "retention_task",
+            "retention_task", "v2_verify_task",
         ):
             task = getattr(app.state, attr, None)
             if task is not None:
@@ -4021,6 +4287,13 @@ def build_app(
         if not hmac.compare_digest(_bearer_value(authorization), token):
             raise HTTPException(401, "invalid_admin_token")
 
+    def _require_v2_admin(authorization: str | None) -> None:
+        token = os.environ.get("CATHEDRAL_V2_ADMIN_TOKEN", "").strip()
+        if not token:
+            raise HTTPException(503, "v2_admin_token_not_configured")
+        if not hmac.compare_digest(_bearer_value(authorization), token):
+            raise HTTPException(401, "invalid_v2_admin_token")
+
     @app.get("/v1/synthetic-boolean/per-miner/status")
     def per_miner_status(
         x_cathedral_hotkey: str = Header(...),
@@ -5186,6 +5459,1156 @@ def build_app(
             "challenge_id": challenge_id, "weighted_score": ws,
             "solve_rank": rank, "attestation_status": "pending",
         }
+
+    # ---- V2 off-chain solution manifest intake (Phase 1/2+) ---------------
+    def _require_v2_submit_token_mint_allowed(hotkey: str) -> None:
+        if v2_submit_token_allowlist and str(hotkey).strip() not in v2_submit_token_allowlist:
+            raise HTTPException(403, "v2_submit_token_hotkey_not_allowlisted")
+
+    @app.get("/v2/synthetic-boolean/per-miner/challenges")
+    def v2_per_miner_challenges(
+        request: Request,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=500),
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        from . import per_miner as pm
+        from . import real_corpus
+        with v2_pipeline.v2_pm_env():
+            if not pm.perminer_enabled():
+                raise HTTPException(404, "v2_per_miner_not_enabled")
+            _require_perminer_ready(pm)
+            if x_cathedral_submitted_at is None:
+                raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+            _verify_hotkey_claim(
+                x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+                challenge_id="", dimacs_solution_sha256="",
+            )
+            mark_verified_hotkey(request, x_cathedral_hotkey)
+            epoch = pm.current_epoch()
+            effective_limit = pm.assignment_page_limit(limit)
+            items = pm.miner_instance_set(
+                x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
+            if v2_submit_bitset_enabled:
+                _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
+                if not v2_submit_token_secret:
+                    raise HTTPException(503, "v2_submit_token_secret_missing")
+                expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                from ..dimacs import parse_cnf
+                for item in items:
+                    tier_i = int(item["tier"])
+                    seq_i = int(item["seq"])
+                    cid, cnf_text, planted = pm.generate_instance(
+                        x_cathedral_hotkey, epoch, tier_i, seq_i)
+                    if cid != item["challenge_id"]:
+                        raise HTTPException(500, "v2_challenge_generation_mismatch")
+                    # Bake the CNF we just generated so the V2 verify worker can
+                    # read it back instead of regenerating from seed. Best-effort:
+                    # v2_cnf_store wraps all errors internally and never raises.
+                    try:
+                        v2_cnf_store.put(v2_store, cid, cnf_text)
+                    except Exception:
+                        pass
+                    # Bind the reported/minted shape to the ACTUAL generated CNF, not
+                    # the nominal tier shape — real-instance sources (combinatorial/
+                    # corpus, see real_corpus.py) produce CNFs sized differently from
+                    # shape_for(tier). Planted CNFs already have exactly
+                    # shape_for(tier) vars, so this is a no-op for the default source.
+                    actual_nvars, _clauses = parse_cnf(cnf_text)
+                    item["n_vars"] = actual_nvars
+                    # planted is None iff this is a REAL (unplanted) instance — see
+                    # per_miner.generate_instance docstring. Label from the ACTUAL
+                    # generation result, not a re-derivation, so the reported kind
+                    # always agrees with the CNF the miner will actually solve.
+                    item["kind"] = (
+                        real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
+                        if planted is None else "random_3sat_perminer"
+                    )
+                    cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                    item["cnf_sha256"] = cnf_sha
+                    item["assignment_encoding"] = "bitset/v1"
+                    item["submit_token"] = v2_bitset_submit.mint_submit_token(
+                        secret=v2_submit_token_secret,
+                        miner_hotkey=x_cathedral_hotkey,
+                        challenge_id=cid,
+                        epoch=epoch,
+                        tier=tier_i,
+                        seq=seq_i,
+                        nvars=actual_nvars,
+                        cnf_sha256=cnf_sha,
+                        expires_at=expires_at,
+                    )
+                    item["submit_token_expires_at"] = expires_at
+            return {
+                "family_id": _FAMILY,
+                "kind": "per_miner_v2",
+                "epoch": epoch,
+                "miner_hotkey": x_cathedral_hotkey,
+                "assignment_identity": x_cathedral_hotkey,
+                "offset": offset,
+                "requested_limit": limit,
+                "limit": effective_limit,
+                "max_limit": pm.assignment_page_limit_max(),
+                "next_offset": offset + effective_limit,
+                "count": len(items),
+                "items": items,
+                "submit_path": "/v2/agents/submit-bitset" if v2_submit_bitset_enabled else "/v2/agents/submit-manifest",
+                "submit_bitset_path": "/v2/agents/submit-bitset",
+                "manifest_submit_path": "/v2/agents/submit-manifest",
+                "blob_upload_path": "/v2/blobs/solutions",
+                "cnf_path": "/v2/synthetic-boolean/per-miner/cnf",
+                "cnf_params": ["challenge_id", "tier", "seq"],
+            }
+
+    @app.get("/v2/synthetic-boolean/per-miner/cnf")
+    def v2_per_miner_cnf(
+        request: Request,
+        challenge_id: str = Query(...),
+        tier: int | None = Query(None, ge=1),
+        seq: int | None = Query(None, ge=0),
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        from . import per_miner as pm
+        with v2_pipeline.v2_pm_env():
+            if not pm.perminer_enabled():
+                raise HTTPException(404, "v2_per_miner_not_enabled")
+            _require_perminer_ready(pm)
+            if x_cathedral_submitted_at is None:
+                raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+            _verify_hotkey_claim(
+                x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+                challenge_id="", dimacs_solution_sha256="",
+            )
+            mark_verified_hotkey(request, x_cathedral_hotkey)
+            parsed = pm.parse_challenge_id(challenge_id)
+            epoch = int(parsed["epoch"]) if parsed else pm.current_epoch()
+            tier_seq = pm.resolve_tier_seq_for(
+                x_cathedral_hotkey, epoch, challenge_id, tier=tier, seq=seq)
+            if tier_seq is None:
+                raise HTTPException(404, "challenge_id_not_in_miner_set")
+            tier_i, seq_i = tier_seq
+            cid, cnf_text, _ = pm.generate_instance(
+                x_cathedral_hotkey, epoch, tier_i, seq_i)
+            if cid != challenge_id:
+                raise HTTPException(404, "challenge_id_not_in_miner_set")
+            headers = {
+                "X-Cathedral-V2": "true",
+                "X-Perminer-Challenge-Id": cid,
+                "X-Perminer-Tier": str(tier_i),
+                "X-Perminer-Seq": str(seq_i),
+                "X-Perminer-Epoch": str(epoch),
+            }
+            if v2_submit_bitset_enabled:
+                _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
+                if not v2_submit_token_secret:
+                    raise HTTPException(503, "v2_submit_token_secret_missing")
+                from ..dimacs import parse_cnf
+                # Bind to the ACTUAL generated CNF's var count, not the nominal tier
+                # shape — see the analogous fix in v2_per_miner_challenges above.
+                actual_nvars, _clauses = parse_cnf(cnf_text)
+                cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                headers.update({
+                    "X-Cathedral-Submit-Path": "/v2/agents/submit-bitset",
+                    "X-Cathedral-Submit-Token": v2_bitset_submit.mint_submit_token(
+                        secret=v2_submit_token_secret,
+                        miner_hotkey=x_cathedral_hotkey,
+                        challenge_id=cid,
+                        epoch=epoch,
+                        tier=tier_i,
+                        seq=seq_i,
+                        nvars=actual_nvars,
+                        cnf_sha256=cnf_sha,
+                        expires_at=expires_at,
+                    ),
+                    "X-Cathedral-Submit-Token-Expires-At": expires_at,
+                    "X-Cathedral-Assignment-Encoding": "bitset/v1",
+                    "X-Cathedral-CNF-Sha256": cnf_sha,
+                })
+            return PlainTextResponse(
+                cnf_text,
+                media_type="text/plain; charset=utf-8",
+                headers=headers,
+            )
+
+    def _v2_shadow_row_dict(row: Any) -> dict[str, Any]:
+        try:
+            keys = row.keys()
+            return {k: row[k] for k in keys}
+        except Exception:
+            return dict(row)
+
+    def _v2_shadow_v1_receipt(row: dict[str, Any], *, inserted: bool | None = None) -> dict[str, Any]:
+        payload = {
+            "schema": "cathedral.v2.shadow_v1_submit_receipt.v1",
+            "shadow": True,
+            "status": str(row.get("status") or "received"),
+            "open": True,
+            "terminal": False,
+            "receipt_id": str(row["id"]),
+            "receipt_url": f"/v2/shadow/v1/agents/submit/receipts/{row['id']}",
+            "miner_hotkey": str(row["miner_hotkey"]),
+            "challenge_id": str(row["challenge_id"]),
+            "card_id": str(row["card_id"]),
+            "solution_sha256": str(row["solution_sha256"]),
+            "solution_bytes": int(row.get("solution_bytes") or 0),
+            "solution_cid": str(row["solution_cid"]),
+            "received_at": str(row["received_at_iso"]),
+            "source": str(row.get("source") or "mirror"),
+        }
+        if row.get("submitted_at"):
+            payload["submitted_at"] = str(row["submitted_at"])
+        if inserted is not None:
+            payload["idempotent_replay"] = not inserted
+        return payload
+
+    def _v2_shadow_v1_admit(
+        *,
+        miner_hotkey: str,
+        challenge_id: str,
+        card_id: str,
+        solution_sha256: str,
+        solution_bytes: int,
+        solution_cid: str,
+        request_sha256: str,
+        content_type: str,
+        submitted_at: str,
+        received_at_iso: str,
+        signature: str,
+        source: str,
+        form_json: str,
+        headers_json: str,
+    ) -> tuple[dict[str, Any], bool]:
+        idem_body = json.dumps(
+            {
+                "miner_hotkey": miner_hotkey,
+                "challenge_id": challenge_id,
+                "solution_sha256": solution_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        idem = hashlib.sha256(b"cathedral:v2:shadow-v1-submit:\0" + idem_body).hexdigest()
+        rid = "shv1_" + new_uuid().replace("-", "")
+
+        def _tx(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO v2_shadow_v1_submits("
+                "id, idempotency_key, miner_hotkey, challenge_id, card_id, "
+                "solution_sha256, solution_bytes, solution_cid, request_sha256, "
+                "content_type, status, submitted_at, received_at_iso, signature, "
+                "source, form_json, headers_json"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?)",
+                (
+                    rid,
+                    idem,
+                    miner_hotkey,
+                    challenge_id,
+                    card_id,
+                    solution_sha256,
+                    int(solution_bytes),
+                    solution_cid,
+                    request_sha256,
+                    content_type,
+                    submitted_at,
+                    received_at_iso,
+                    signature,
+                    source,
+                    form_json,
+                    headers_json,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM v2_shadow_v1_submits WHERE idempotency_key=? LIMIT 1",
+                (idem,),
+            ).fetchone()
+            try:
+                keys = row.keys()
+                out = {k: row[k] for k in keys}
+            except Exception:
+                out = dict(row)
+            return out, bool(out.get("id") == rid)
+
+        return v2_store.write(_tx)
+
+    def _v2_shadow_v1_meta_admit(body: dict[str, Any], *, header_hotkey: str, source_header: str) -> dict[str, Any]:
+        rid = "shv1m_" + new_uuid().replace("-", "")
+
+        def _str_field(name: str, default: str = "") -> str:
+            value = body.get(name, default)
+            if value is None:
+                return default
+            return str(value)
+
+        def _int_field(name: str, default: int = 0) -> int:
+            value = body.get(name, default)
+            try:
+                return max(0, int(value or 0))
+            except Exception:
+                return default
+
+        miner_hotkey = (_str_field("miner_hotkey") or header_hotkey or "").strip()[:256]
+        challenge_id = _str_field("challenge_id").strip()[:256]
+        card_id = _str_field("card_id").strip()[:128]
+        submitted_at = _str_field("submitted_at").strip()[:64]
+        edge_received_at_iso = _str_field("edge_received_at_iso").strip()[:64]
+        request_id = _str_field("request_id").strip()[:128]
+        source = (_str_field("source") or source_header or "mirror-meta").strip()[:64]
+        content_type = _str_field("content_type").strip()[:256]
+        parse_error = _str_field("parse_error").strip()[:256]
+        signature_present = 1 if bool(body.get("signature_present")) else 0
+        received_at_iso = _now_iso_ms()
+
+        def _tx(conn):
+            conn.execute(
+                "INSERT INTO v2_shadow_v1_submit_meta("
+                "id, request_id, miner_hotkey, challenge_id, card_id, submitted_at, "
+                "edge_received_at_iso, received_at_iso, source, original_content_length, "
+                "original_body_bytes, dimacs_solution_bytes, field_count, signature_present, "
+                "content_type, parse_error"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    rid,
+                    request_id,
+                    miner_hotkey,
+                    challenge_id,
+                    card_id,
+                    submitted_at,
+                    edge_received_at_iso,
+                    received_at_iso,
+                    source,
+                    _int_field("original_content_length"),
+                    _int_field("original_body_bytes"),
+                    _int_field("dimacs_solution_bytes"),
+                    _int_field("field_count"),
+                    signature_present,
+                    content_type,
+                    parse_error,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM v2_shadow_v1_submit_meta WHERE id=? LIMIT 1",
+                (rid,),
+            ).fetchone()
+            try:
+                keys = row.keys()
+                return {k: row[k] for k in keys}
+            except Exception:
+                return dict(row)
+
+        return v2_store.write(_tx)
+
+    @app.post("/v2/shadow/v1/agents/submit/meta")
+    async def shadow_v1_submit_meta_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(default=""),
+        x_cathedral_shadow_source: str = Header(default=""),
+    ):
+        """Metadata-only live V1 submit mirror target for throughput probes.
+
+        This intentionally does not store the DIMACS solution body and does not
+        verify/sign/score anything. V1 remains authoritative. The row is an
+        isolated V2 shadow measurement of live submit metadata write pressure.
+        """
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("not_object")
+        except Exception:
+            raise HTTPException(400, "invalid_shadow_meta_json")
+        row = _v2_shadow_v1_meta_admit(
+            body,
+            header_hotkey=x_cathedral_hotkey,
+            source_header=x_cathedral_shadow_source,
+        )
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.shadow_v1_submit_meta_receipt.v1",
+                "shadow": True,
+                "metadata_only": True,
+                "solution_body_stored": False,
+                "status": "received",
+                "receipt_id": str(row["id"]),
+                "miner_hotkey": str(row.get("miner_hotkey") or ""),
+                "challenge_id": str(row.get("challenge_id") or ""),
+                "card_id": str(row.get("card_id") or ""),
+                "dimacs_solution_bytes": int(row.get("dimacs_solution_bytes") or 0),
+                "received_at": str(row.get("received_at_iso") or ""),
+                "edge_received_at": str(row.get("edge_received_at_iso") or ""),
+                "source": str(row.get("source") or "mirror-meta"),
+            },
+            status_code=202,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/shadow/v1/agents/submit/meta/metrics")
+    def shadow_v1_submit_meta_metrics_v2():
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        totals = v2_store.query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(original_body_bytes), 0) AS body_bytes, "
+            "COALESCE(SUM(dimacs_solution_bytes), 0) AS solution_bytes, "
+            "MIN(received_at_iso) AS first_received_at, MAX(received_at_iso) AS last_received_at "
+            "FROM v2_shadow_v1_submit_meta"
+        )[0]
+        by_source = v2_store.query(
+            "SELECT source, COUNT(*) AS n, COALESCE(SUM(original_body_bytes), 0) AS body_bytes, "
+            "COALESCE(SUM(dimacs_solution_bytes), 0) AS solution_bytes "
+            "FROM v2_shadow_v1_submit_meta GROUP BY source ORDER BY n DESC LIMIT 20"
+        )
+        recent = v2_store.query(
+            "SELECT id, miner_hotkey, challenge_id, card_id, original_body_bytes, "
+            "dimacs_solution_bytes, received_at_iso, edge_received_at_iso, source, parse_error "
+            "FROM v2_shadow_v1_submit_meta ORDER BY received_at_iso DESC LIMIT 25"
+        )
+        now = datetime.now(timezone.utc)
+        windows = {}
+        for label, secs in (("1m", 60), ("5m", 300), ("1h", 3600)):
+            since_dt = now - timedelta(seconds=secs)
+            since = since_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{since_dt.microsecond // 1000:03d}Z"
+            row = v2_store.query(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(original_body_bytes), 0) AS body_bytes, "
+                "COALESCE(SUM(dimacs_solution_bytes), 0) AS solution_bytes "
+                "FROM v2_shadow_v1_submit_meta WHERE received_at_iso > ?",
+                (since,),
+            )[0]
+            windows[label] = {
+                "count": int(row["n"] or 0),
+                "body_bytes": int(row["body_bytes"] or 0),
+                "solution_bytes": int(row["solution_bytes"] or 0),
+            }
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.shadow_v1_submit_meta_metrics.v1",
+                "shadow": True,
+                "metadata_only": True,
+                "solution_body_stored": False,
+                "total": {
+                    "count": int(totals["n"] or 0),
+                    "body_bytes": int(totals["body_bytes"] or 0),
+                    "solution_bytes": int(totals["solution_bytes"] or 0),
+                },
+                "first_received_at": totals["first_received_at"],
+                "last_received_at": totals["last_received_at"],
+                "windows": windows,
+                "by_source": [
+                    {
+                        "source": str(r["source"]),
+                        "count": int(r["n"] or 0),
+                        "body_bytes": int(r["body_bytes"] or 0),
+                        "solution_bytes": int(r["solution_bytes"] or 0),
+                    }
+                    for r in by_source
+                ],
+                "recent": [_v2_shadow_row_dict(r) for r in recent],
+            },
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.post("/v2/shadow/v1/agents/submit")
+    async def shadow_v1_submit_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(default="", alias="X-Cathedral-Submitted-At"),
+    ):
+        """Storage-only mirror target for live V1 submit traffic.
+
+        This accepts the existing V1 submit form and V1 hotkey signature, stores
+        the solution body as a beta blob plus an idempotent receipt row in the
+        isolated V2 store, and returns quickly. It never writes V1 scoring,
+        rewards, payout, or validator-weight ledgers.
+        """
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        raw_body = await request.body()
+        request_sha = hashlib.sha256(raw_body).hexdigest()
+        try:
+            form = await request.form()
+        except Exception:
+            raise HTTPException(400, "invalid_v1_submit_form")
+
+        def _field(name: str, default: str = "") -> str:
+            value = form.get(name, default)
+            if value is None:
+                return default
+            if hasattr(value, "filename"):
+                raise HTTPException(400, f"invalid_{name}")
+            return str(value)
+
+        card_id = _field("card_id")
+        challenge_id = _field("challenge_id")
+        dimacs_solution = _field("dimacs_solution")
+        submitted_at = _field("submitted_at", x_cathedral_submitted_at or _now_iso_ms())
+        display_name = _field("display_name", "")
+        if card_id != _FAMILY:
+            raise HTTPException(400, f"only card_id={_FAMILY} accepted")
+        if not challenge_id or not dimacs_solution:
+            raise HTTPException(400, "missing_challenge_id_or_dimacs_solution")
+
+        solution_bytes = dimacs_solution.encode("utf-8")
+        if v2_shadow_v1_max_solution_bytes > 0 and len(solution_bytes) > v2_shadow_v1_max_solution_bytes:
+            raise HTTPException(413, "solution_too_large")
+        sol_sha = hashlib.sha256(solution_bytes).hexdigest()
+        submitted_at = _verify_hotkey_claim(
+            x_cathedral_hotkey,
+            x_cathedral_signature,
+            submitted_at,
+            challenge_id=challenge_id,
+            dimacs_solution_sha256=sol_sha,
+            alt_submitted_at=x_cathedral_submitted_at or None,
+            allow_fallback_shapes=False,
+        )
+        mark_verified_hotkey(request, x_cathedral_hotkey)
+
+        put = v2_blob_store.put(solution_bytes, kind="v1_submit_solution")
+        received_at_iso = _now_iso_ms()
+        source = (request.headers.get("x-cathedral-shadow-source") or "mirror").strip()[:64]
+        content_type = (request.headers.get("content-type") or "").strip()[:256]
+        form_json = json.dumps(
+            {
+                "card_id": card_id,
+                "challenge_id": challenge_id,
+                "display_name": display_name,
+                "submitted_at": submitted_at,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        headers_json = json.dumps(
+            {
+                "content_type": content_type,
+                "content_length": request.headers.get("content-length", ""),
+                "shadow_source": source,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        row, inserted = _v2_shadow_v1_admit(
+            miner_hotkey=x_cathedral_hotkey,
+            challenge_id=challenge_id,
+            card_id=card_id,
+            solution_sha256=put.sha256,
+            solution_bytes=put.size,
+            solution_cid=put.cid,
+            request_sha256=request_sha,
+            content_type=content_type,
+            submitted_at=submitted_at,
+            received_at_iso=received_at_iso,
+            signature=x_cathedral_signature,
+            source=source,
+            form_json=form_json,
+            headers_json=headers_json,
+        )
+        return JSONResponse(
+            _v2_shadow_v1_receipt(row, inserted=inserted),
+            status_code=202 if inserted else 200,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/shadow/v1/agents/submit/receipts/{receipt_id}")
+    def shadow_v1_submit_receipt_v2(receipt_id: str):
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        rows = v2_store.query(
+            "SELECT * FROM v2_shadow_v1_submits WHERE id=? LIMIT 1",
+            (receipt_id,),
+        )
+        if not rows:
+            raise HTTPException(404, "receipt_not_found")
+        return JSONResponse(
+            _v2_shadow_v1_receipt(_v2_shadow_row_dict(rows[0])),
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/shadow/v1/agents/submit/metrics")
+    def shadow_v1_submit_metrics_v2():
+        if not (solution_manifest_enabled and v2_shadow_v1_enabled):
+            raise HTTPException(404, "v2_shadow_v1_not_enabled")
+        by_status = v2_store.query(
+            "SELECT status, COUNT(*) AS n, COALESCE(SUM(solution_bytes), 0) AS bytes "
+            "FROM v2_shadow_v1_submits GROUP BY status ORDER BY status"
+        )
+        totals = v2_store.query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(solution_bytes), 0) AS bytes, "
+            "MIN(received_at_iso) AS first_received_at, MAX(received_at_iso) AS last_received_at "
+            "FROM v2_shadow_v1_submits"
+        )[0]
+        recent = v2_store.query(
+            "SELECT id, miner_hotkey, challenge_id, solution_bytes, received_at_iso, source "
+            "FROM v2_shadow_v1_submits ORDER BY received_at_iso DESC LIMIT 25"
+        )
+        now = datetime.now(timezone.utc)
+        windows = {}
+        for label, secs in (("1m", 60), ("5m", 300), ("1h", 3600)):
+            since = (now - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%S.") + f"{(now - timedelta(seconds=secs)).microsecond // 1000:03d}Z"
+            row = v2_store.query(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(solution_bytes), 0) AS bytes "
+                "FROM v2_shadow_v1_submits WHERE received_at_iso > ?",
+                (since,),
+            )[0]
+            windows[label] = {"count": int(row["n"] or 0), "bytes": int(row["bytes"] or 0)}
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.shadow_v1_submit_metrics.v1",
+                "shadow": True,
+                "total": {"count": int(totals["n"] or 0), "bytes": int(totals["bytes"] or 0)},
+                "first_received_at": totals["first_received_at"],
+                "last_received_at": totals["last_received_at"],
+                "windows": windows,
+                "by_status": [
+                    {"status": str(r["status"]), "count": int(r["n"] or 0), "bytes": int(r["bytes"] or 0)}
+                    for r in by_status
+                ],
+                "recent": [_v2_shadow_row_dict(r) for r in recent],
+            },
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.post("/v2/blobs/solutions")
+    async def upload_solution_blob_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(...),
+        x_cathedral_blob_sha256: str = Header(...),
+    ):
+        """Optional local/beta blob upload for V2.
+
+        Production miners can publish directly to Hippius/IPFS/R2 and skip this.
+        This route exists so the full blob -> manifest -> verify path can be
+        tested on an isolated V2 stack without touching the V1 submit body path.
+        """
+        if not (solution_manifest_enabled and solution_blob_upload_enabled):
+            raise HTTPException(404, "solution_blob_upload_v2_not_enabled")
+        body = await request.body()
+        if solution_blob_upload_max_bytes > 0 and len(body) > solution_blob_upload_max_bytes:
+            raise HTTPException(413, "solution_blob_too_large")
+        actual_sha = hashlib.sha256(body).hexdigest()
+        if actual_sha != x_cathedral_blob_sha256.strip().lower():
+            raise HTTPException(400, "blob_sha256_mismatch")
+        ts = _parse_iso(x_cathedral_submitted_at)
+        if ts is None or abs(time.time() - ts) > _SKEW_SECS:
+            raise HTTPException(400, "submitted_at outside acceptable clock-skew window")
+        msg = solution_manifest.canonical_blob_upload_bytes(
+            miner_hotkey=x_cathedral_hotkey,
+            submitted_at=x_cathedral_submitted_at,
+            blob_sha256=actual_sha,
+            blob_bytes=len(body),
+            kind="solution",
+        )
+        if not verifier.verify(x_cathedral_hotkey, msg, x_cathedral_signature):
+            raise HTTPException(401, "invalid hotkey signature")
+        mark_verified_hotkey(request, x_cathedral_hotkey)
+        put = v2_blob_store.put(body, kind="solution")
+        return JSONResponse(
+            {
+                "schema": "cathedral.solution_blob.v1",
+                "cid": put.cid,
+                "sha256": put.sha256,
+                "bytes": put.size,
+            },
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.post("/v2/agents/submit-bitset")
+    async def submit_bitset_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(...),
+    ):
+        """Tiny PM-native V2 submit path.
+
+        This path is beta/shadow-only. It admits only cheap-valid per-miner SAT
+        assignments: token-bound challenge, hotkey signature, exact bitset shape,
+        and SAT witness verification all pass before a durable event is written.
+        """
+        if not (solution_manifest_enabled and v2_submit_bitset_enabled):
+            raise HTTPException(404, "v2_submit_bitset_not_enabled")
+        if not v2_submit_token_secret:
+            raise HTTPException(503, "v2_submit_token_secret_missing")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > v2_submit_bitset_max_body_bytes:
+                    raise HTTPException(413, "submit_bitset_body_too_large")
+            except ValueError:
+                raise HTTPException(400, "invalid_content_length")
+        raw_body = await request.body()
+        if len(raw_body) > v2_submit_bitset_max_body_bytes:
+            raise HTTPException(413, "submit_bitset_body_too_large")
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except Exception:
+            raise HTTPException(400, "invalid_json_submit_bitset")
+        try:
+            submit = v2_bitset_submit.normalize_submit_body(
+                body,
+                miner_hotkey=x_cathedral_hotkey,
+                submitted_at=x_cathedral_submitted_at,
+                card_id=_FAMILY,
+            )
+        except v2_bitset_submit.BitsetSubmitError as exc:
+            raise HTTPException(400, exc.reason)
+
+        ts = _parse_iso(x_cathedral_submitted_at)
+        if ts is None or abs(time.time() - ts) > _SKEW_SECS:
+            raise HTTPException(400, "submitted_at outside acceptable clock-skew window")
+        msg = v2_bitset_submit.canonical_submit_bytes(submit)
+        if not verifier.verify(x_cathedral_hotkey, msg, x_cathedral_signature):
+            raise HTTPException(401, "invalid hotkey signature")
+        mark_verified_hotkey(request, x_cathedral_hotkey)
+
+        try:
+            token_payload = v2_bitset_submit.verify_submit_token(
+                submit["submit_token"],
+                secret=v2_submit_token_secret,
+                miner_hotkey=x_cathedral_hotkey,
+                challenge_id=submit["challenge_id"],
+            )
+        except v2_bitset_submit.BitsetSubmitError as exc:
+            raise HTTPException(400, exc.reason)
+
+        from . import per_miner as pm
+        from . import real_corpus
+        with v2_pipeline.v2_pm_env():
+            if not pm.perminer_enabled():
+                raise HTTPException(404, "v2_per_miner_not_enabled")
+            _require_perminer_ready(pm)
+            tier_i = int(token_payload["tier"])
+            seq_i = int(token_payload["seq"])
+            epoch_i = int(token_payload["epoch"])
+            resolved = pm.resolve_tier_seq_for(
+                x_cathedral_hotkey,
+                epoch_i,
+                submit["challenge_id"],
+                tier=tier_i,
+                seq=seq_i,
+            )
+            if resolved is None:
+                raise HTTPException(400, "challenge_id_not_in_miner_set")
+            cid, cnf_text, planted = pm.generate_instance(
+                x_cathedral_hotkey, epoch_i, tier_i, seq_i)
+            if cid != submit["challenge_id"]:
+                raise HTTPException(400, "challenge_id_not_in_miner_set")
+            # Bake the CNF we just regenerated so the V2 verify worker (which
+            # re-derives the same CNF for the resulting solution_manifests /
+            # v2_submit_events event) can read it back instead of regenerating
+            # from seed. Best-effort: v2_cnf_store wraps all errors internally
+            # and never raises.
+            try:
+                v2_cnf_store.put(v2_store, cid, cnf_text)
+            except Exception:
+                pass
+            # planted is None iff this is a REAL (unplanted) instance — see
+            # per_miner.generate_instance docstring. Derived from the ACTUAL
+            # generation result so it always agrees with the CNF just verified.
+            challenge_kind = (
+                real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=x_cathedral_hotkey)
+                if planted is None else "random_3sat_perminer"
+            )
+            cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+            if cnf_sha != str(token_payload["cnf_sha256"]):
+                raise HTTPException(400, "submit_token_cnf_mismatch")
+            nvars = int(token_payload["nvars"])
+            # Bind the shape check to the server-regenerated CNF's ACTUAL var count,
+            # not the nominal tier shape — real-instance sources (combinatorial/
+            # corpus) produce CNFs sized differently from shape_for(tier). Planted
+            # CNFs already have exactly shape_for(tier) vars, so behavior is
+            # unchanged for the default source. The cnf_sha256 check above already
+            # binds the token to this exact CNF body; this keeps the anti-cheat
+            # shape binding intact while matching the real generated instance.
+            from ..dimacs import parse_cnf
+            actual_nvars, _clauses = parse_cnf(cnf_text)
+            if nvars != actual_nvars:
+                raise HTTPException(400, "submit_token_shape_mismatch")
+            try:
+                assignment_raw, assignment = v2_bitset_submit.decode_assignment_b64(
+                    submit["assignment_b64"], nvars=nvars)
+            except v2_bitset_submit.BitsetSubmitError as exc:
+                raise HTTPException(400, exc.reason)
+            ok, reason = v2_pipeline.verify_assignment_literals(cnf_text, assignment)
+            if not ok:
+                raise HTTPException(400, reason or "witness_check_failed")
+            weight = float(pm.weight_for(tier_i))
+
+        received_at = _now_iso_ms()
+        assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
+        details = {
+            "schema": "cathedral.v2.submit_bitset_verifier_details.v1",
+            "challenge_id": submit["challenge_id"],
+            "miner_hotkey": x_cathedral_hotkey,
+            "epoch": epoch_i,
+            "tier": tier_i,
+            "seq": seq_i,
+            "cnf_sha256": cnf_sha,
+            "assignment_sha256": assignment_sha,
+            "verified_at": received_at,
+        }
+        row, inserted = v2_bitset_submit.admit_verified_event(
+            v2_store,
+            submit=submit,
+            token_payload=token_payload,
+            signature=x_cathedral_signature,
+            assignment_raw=assignment_raw,
+            received_at_iso=received_at,
+            weighted_score=weight,
+            answer_hash=assignment_sha,
+            verifier_details_hash=hashlib.sha256(
+                json.dumps(details, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            eligibility_status="unknown_beta",
+            challenge_kind=challenge_kind,
+        )
+        return JSONResponse(
+            v2_bitset_submit.receipt_payload(row, inserted=inserted),
+            status_code=202 if inserted else 200,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/agents/submit-bitset/receipts/{receipt_id}")
+    def submit_bitset_receipt_v2(receipt_id: str):
+        if not (solution_manifest_enabled and v2_submit_bitset_enabled):
+            raise HTTPException(404, "v2_submit_bitset_not_enabled")
+        row = v2_bitset_submit.get_receipt(v2_store, receipt_id)
+        if row is None:
+            raise HTTPException(404, "receipt_not_found")
+        return JSONResponse(
+            v2_bitset_submit.receipt_payload(row),
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.post("/v2/agents/submit-manifest")
+    async def submit_solution_manifest_v2(
+        request: Request,
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str = Header(...),
+    ):
+        """Cheap, durable V2 admission for blob-backed solution submissions.
+
+        This endpoint does not verify the solution or affect payout yet. It only
+        authenticates a small manifest and writes an idempotent receipt row so we
+        can test the new "miner uploads blob, Cathedral stores manifest" path
+        beside the current synchronous submit.
+        """
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "invalid_json_manifest")
+        try:
+            manifest = solution_manifest.normalize_manifest(
+                body,
+                miner_hotkey=x_cathedral_hotkey,
+                submitted_at=x_cathedral_submitted_at,
+                card_id=_FAMILY,
+                max_solution_bytes=solution_manifest_max_bytes,
+            )
+        except solution_manifest.ManifestError as exc:
+            raise HTTPException(400, exc.reason)
+
+        ts = _parse_iso(x_cathedral_submitted_at)
+        if ts is None or abs(time.time() - ts) > _SKEW_SECS:
+            raise HTTPException(400, "submitted_at outside acceptable clock-skew window")
+        msg = solution_manifest.canonical_manifest_bytes(manifest)
+        if not verifier.verify(x_cathedral_hotkey, msg, x_cathedral_signature):
+            raise HTTPException(401, "invalid hotkey signature")
+
+        mark_verified_hotkey(request, x_cathedral_hotkey)
+        # Capture a durable inline copy of the (small) solution blob at admit
+        # time: the local blob dir is ephemeral container disk, so a redeploy
+        # between admit and async verify loses the bytes (blob_fetch_failed on
+        # the whole backlog). Best-effort — on any failure we admit exactly as
+        # before; verify sha-checks whichever copy it uses.
+        inline_solution: bytes | None = None
+        try:
+            if int(manifest.get("solution_bytes") or 0) <= 8192:
+                inline_solution = v2_blob_store.fetch(
+                    str(manifest["solution_cid"]), max_bytes=8192)
+        except Exception:
+            inline_solution = None
+        row, inserted = solution_manifest.admit_manifest(
+            v2_store, manifest, signature=x_cathedral_signature,
+            inline_solution=inline_solution)
+        payload = solution_manifest.receipt_payload(row, inserted=inserted)
+        return JSONResponse(
+            payload,
+            status_code=202 if inserted else 200,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/agents/submit-manifest/receipts/{receipt_id}")
+    def solution_manifest_receipt_v2(receipt_id: str):
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        row = solution_manifest.get_manifest_receipt(v2_store, receipt_id)
+        if row is None:
+            raise HTTPException(404, "receipt_not_found")
+        return JSONResponse(
+            solution_manifest.receipt_payload(row),
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    # TTL cache for the DB-heavy metrics blocks. /v2/verify/metrics is publicly
+    # polled (the miner announcement points at it), so per-request COUNT(*) and
+    # GROUP BY sweeps over the (large, growing) event tables turn N pollers
+    # into N concurrent table scans and starve the verify worker's DB access.
+    # One caller recomputes when stale; everyone else gets the cached copy.
+    _v2_metrics_cache: dict[str, tuple[float, Any]] = {}
+    _v2_metrics_cache_lock = threading.Lock()
+
+    def _v2_metrics_cached(key: str, ttl_secs: float, compute):
+        now_ts = time.time()
+        with _v2_metrics_cache_lock:
+            entry = _v2_metrics_cache.get(key)
+            if entry and (now_ts - entry[0]) < ttl_secs:
+                return entry[1]
+        value = compute()
+        with _v2_metrics_cache_lock:
+            _v2_metrics_cache[key] = (time.time(), value)
+        return value
+
+    def _v2_verify_pending_metrics_uncached() -> dict[str, Any]:
+        now_ts = time.time()
+        pending_count = 0
+        oldest_iso: str | None = None
+        tables = (
+            ("solution_manifests", "manifest"),
+            ("v2_submit_events", "bitset"),
+        )
+        by_source: dict[str, dict[str, Any]] = {}
+        for table, source in tables:
+            try:
+                rows = v2_store.query(
+                    f"SELECT COUNT(*) AS n, MIN(received_at_iso) AS oldest "
+                    f"FROM {table} WHERE status IN (?, ?)",
+                    (v2_pipeline.STATUS_RECEIVED, v2_pipeline.STATUS_RETRY),
+                )
+                n = int(rows[0]["n"] or 0) if rows else 0
+                oldest = str(rows[0]["oldest"] or "") if rows else ""
+            except Exception:
+                n = 0
+                oldest = ""
+            pending_count += n
+            if oldest and (oldest_iso is None or oldest < oldest_iso):
+                oldest_iso = oldest
+            by_source[source] = {"pending_count": n, "oldest_pending_at": oldest or None}
+        oldest_age = None
+        if oldest_iso:
+            ts = v2_bitset_submit.parse_iso(oldest_iso)
+            if ts is not None:
+                oldest_age = max(0.0, now_ts - ts)
+        return {
+            "pending_count": pending_count,
+            "oldest_pending_at": oldest_iso,
+            "oldest_pending_age_secs": round(oldest_age, 3) if oldest_age is not None else None,
+            "by_source": by_source,
+        }
+
+    def _v2_verify_pending_metrics() -> dict[str, Any]:
+        return _v2_metrics_cached(
+            "pending", 20.0, _v2_verify_pending_metrics_uncached)
+
+    def _v2_verify_kind_metrics_uncached() -> dict[str, Any]:
+        """Attributed real-vs-planted solve counts from verified v2_submit_events.
+
+        challenge_kind is metadata only (see kind_for docstring) — this never
+        touches scoring/eligibility. NULL challenge_kind (pre-existing rows
+        from before the column existed) is bucketed as "unknown" rather than
+        raising.
+        """
+        try:
+            rows = v2_store.query(
+                "SELECT challenge_kind, miner_hotkey, COUNT(*) AS n "
+                "FROM v2_submit_events WHERE status = ? "
+                "GROUP BY challenge_kind, miner_hotkey",
+                (v2_pipeline.STATUS_VERIFIED,),
+            )
+        except Exception:
+            rows = []
+        totals = {"real": 0, "planted": 0, "unknown": 0}
+        kinds: dict[str, int] = {}
+        per_hotkey: dict[str, dict[str, int]] = {}
+        for row in rows:
+            kind = row["challenge_kind"]
+            hotkey = str(row["miner_hotkey"] or "")
+            n = int(row["n"] or 0)
+            kind_label = str(kind) if kind else "unknown"
+            kinds[kind_label] = kinds.get(kind_label, 0) + n
+            if kind_label in ("coloring", "latin"):
+                bucket = "real"
+            elif kind_label == "random_3sat_perminer":
+                bucket = "planted"
+            else:
+                bucket = "unknown"
+            totals[bucket] += n
+            if bucket in ("real", "planted") and hotkey:
+                entry = per_hotkey.setdefault(hotkey, {"real": 0, "planted": 0})
+                entry[bucket] += n
+        top_hotkeys = sorted(
+            per_hotkey.items(),
+            key=lambda kv: kv[1]["real"] + kv[1]["planted"],
+            reverse=True,
+        )[:50]
+        return {
+            "totals": totals,
+            "kinds": kinds,
+            "by_hotkey": dict(top_hotkeys),
+        }
+
+    def _v2_verify_kind_metrics() -> dict[str, Any]:
+        return _v2_metrics_cached(
+            "by_kind", 60.0, _v2_verify_kind_metrics_uncached)
+
+    @app.get("/v2/verify/metrics")
+    def v2_verify_metrics():
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        now = time.time()
+        metrics = dict(app.state.v2_verify_metrics)
+        recent = [e for e in (metrics.get("recent_events") or []) if now - float(e.get("ts") or 0.0) <= 60.0]
+        errors = [e for e in (metrics.get("tick_errors") or []) if now - float(e.get("ts") or 0.0) <= 60.0]
+        verified_last_60s = sum(int(e.get("verified") or 0) for e in recent)
+        rejected_last_60s = sum(int(e.get("rejected") or 0) for e in recent)
+        total_last_60s = sum(int(e.get("total") or 0) for e in recent)
+        pending = _v2_verify_pending_metrics()
+        payload = {
+            "schema": "cathedral.v2.verify_metrics.v1",
+            "enabled": bool(v2_worker_enabled),
+            "service_role": service_role,
+            "worker_id": metrics.get("worker_id"),
+            "lock_held_by_self": bool(metrics.get("lock_held_by_self")),
+            "last_lock_acquired_at": metrics.get("last_lock_acquired_at"),
+            "last_lock_contended_at": metrics.get("last_lock_contended_at"),
+            "last_batch_at": metrics.get("last_batch_at"),
+            "last_batch_ms": metrics.get("last_batch_ms"),
+            "last_batch_count": int(metrics.get("last_batch_count") or 0),
+            "verified_last_60s": verified_last_60s,
+            "rejected_last_60s": rejected_last_60s,
+            "processed_last_60s": total_last_60s,
+            "verify_rate_per_sec": round(total_last_60s / 60.0, 6),
+            "tick_errors_last_60s": len(errors),
+            "worker_restarts": int(metrics.get("worker_restarts") or 0),
+            "last_worker_error": metrics.get("last_worker_error"),
+            "lock_steals": int(metrics.get("lock_steals") or 0),
+            **pending,
+            "by_kind": _v2_verify_kind_metrics(),
+            **v2_pipeline.cnf_store_metrics(),
+        }
+        return JSONResponse(
+            payload,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.post("/v2/admin/verify/tick")
+    def v2_verify_tick_admin(authorization: str | None = Header(None)):
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        _require_v2_admin(authorization)
+        results = v2_pipeline.process_batch(
+            v2_store,
+            v2_blob_store,
+            worker_id=f"v2:manual:{new_uuid()[:8]}",
+            batch_size=v2_worker_batch_size,
+            lock_secs=v2_worker_lock_secs,
+            max_blob_bytes=v2_worker_max_blob_bytes,
+        )
+        return JSONResponse(
+            {"schema": "cathedral.v2.verify_tick.v1", "count": len(results), "results": results},
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/validator/weights/next")
+    def validator_weights_next_v2():
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        # TTL-cached: this endpoint is publicly polled (the miner announcement
+        # calls it the fast-path scoreboard) and a full vector rebuild is a
+        # 20-40s multi-query sweep of the 24h window. Uncached, concurrent
+        # pollers exhausted the PG pool (PoolError -> 500s) and starved the
+        # reward poster. One caller rebuilds every 20s; everyone else gets the
+        # cached signed vector (valid_for_secs is 1800s, so a 20s-stale copy
+        # is always still comfortably valid for consumers).
+        vector = _v2_metrics_cached(
+            "weights_next_v2", 20.0,
+            lambda: v2_pipeline.build_shadow_weight_vector(
+                v2_store,
+                signing_key_hex=key_hex,
+                window_hours=_env_float("CATHEDRAL_V2_WEIGHTS_WINDOW_HOURS", 24.0),
+                valid_for_secs=_env_float("CATHEDRAL_V2_WEIGHTS_VALID_FOR_SECS", 1800.0),
+            ))
+        return JSONResponse(
+            vector,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/audit/epochs/{epoch}")
+    def audit_epoch_v2(epoch: int):
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        bundle = v2_pipeline.audit_bundle(v2_store, epoch=epoch, signing_key_hex=key_hex)
+        return JSONResponse(
+            bundle,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    # ---- Public receipts feed (scrubbed, signed, per-epoch) ---------------
+    # Public and read-only by design: it only ever surfaces already-VERIFIED
+    # rows, scrubbed to a fixed field list (see v2_receipts._public_receipt).
+    # Epochs are append-only once the epoch has fully passed, so a 5-minute
+    # cache is safe; /latest still needs to notice a brand-new epoch quickly,
+    # so its own MAX(epoch) lookup is cached much shorter (60s).
+    def _receipts_bundle_for_epoch(epoch: int) -> dict[str, Any]:
+        return _v2_metrics_cached(
+            f"receipts:{epoch}", 300.0,
+            lambda: v2_receipts.build_receipts_bundle(
+                v2_store,
+                epoch=epoch,
+                signing_key_hex=key_hex,
+                coldkey_resolver=v2_receipts_coldkey_resolver,
+            ))
+
+    @app.get("/v2/receipts/epochs/{epoch}")
+    def receipts_epoch_v2(epoch: int):
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        bundle = _receipts_bundle_for_epoch(epoch)
+        return JSONResponse(
+            bundle,
+            headers={
+                "Cache-Control": "public, max-age=60",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
+    @app.get("/v2/receipts/latest")
+    def receipts_latest_v2():
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        epoch = _v2_metrics_cached(
+            "receipts:latest_epoch", 60.0,
+            lambda: v2_receipts.latest_verified_epoch(v2_store))
+        bundle = _receipts_bundle_for_epoch(int(epoch) if epoch is not None else 0)
+        return JSONResponse(
+            bundle,
+            headers={
+                "Cache-Control": "public, max-age=60",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
     # ---- Durable submit receipts (Phase 4) --------------------------------
     @app.get("/v1/agents/receipts/{receipt_id}")

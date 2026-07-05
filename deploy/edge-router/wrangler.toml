@@ -32,6 +32,8 @@ routes = [
 
   { pattern = "api.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/api/cathedral/v1/agents/submit*", zone_name = "cathedral.computer" },
+  { pattern = "submit.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
+  { pattern = "submit.cathedral.computer/api/cathedral/v1/agents/submit*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/v1/leaderboard/recent*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/v1/leaderboard/top*", zone_name = "cathedral.computer" },
   { pattern = "api.cathedral.computer/v1/leaderboard/explain*", zone_name = "cathedral.computer" },
@@ -45,6 +47,18 @@ routes = [
 [vars]
 READ_ORIGIN = "https://read.cathedral.computer"
 READ_ORIGIN_RESOLVE_OVERRIDE = ""
-SUBMIT_ORIGIN = "https://submit.cathedral.computer"
+# Direct origin URL avoids a loop when submit.cathedral.computer is proxied through this Worker.
+SUBMIT_ORIGIN = "https://cathedral-submit-production.up.railway.app"
 READ_ORIGIN_TIMEOUT_MS = "10000"
 READ_HEALTH_ORIGIN_TIMEOUT_MS = "9000"
+
+# Default-off live submit mirroring. When enabled, POST /v1/agents/submit still
+# returns the authoritative current V1 response, while a cloned request is sent
+# via waitUntil() to the isolated V2 shadow mirror target.
+SHADOW_V1_MIRROR_ENABLED = "false"
+SHADOW_V1_MIRROR_ORIGIN = "https://v2-beta.cathedral.computer"
+# full = forward full V1 body to V2 shadow; meta = drop dimacs_solution and send tiny metadata only.
+SHADOW_V1_MIRROR_MODE = "meta"
+SHADOW_V1_MIRROR_SAMPLE_PERCENT = "0.1"
+SHADOW_V1_MIRROR_TIMEOUT_MS = "1000"
+SHADOW_V1_MIRROR_SOURCE = "edge-mirror-v1-0p1pct"
