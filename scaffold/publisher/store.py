@@ -649,6 +649,13 @@ _MIGRATIONS: list[tuple[str, str]] = [
     ("0043_solution_manifests_inline", """
         ALTER TABLE solution_manifests ADD COLUMN solution_inline BLOB;
     """),
+    ("0044_v2_worker_heartbeat", """
+        CREATE TABLE IF NOT EXISTS v2_worker_heartbeat (
+            key TEXT PRIMARY KEY,
+            worker_id TEXT,
+            beat_at_iso TEXT
+        );
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1201,6 +1208,13 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
     ("0043_solution_manifests_inline", """
         ALTER TABLE solution_manifests ADD COLUMN IF NOT EXISTS solution_inline BYTEA;
     """),
+    ("0044_v2_worker_heartbeat", """
+        CREATE TABLE IF NOT EXISTS v2_worker_heartbeat (
+            key TEXT PRIMARY KEY,
+            worker_id TEXT,
+            beat_at_iso TEXT
+        );
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -1230,6 +1244,7 @@ _PK_BY_TABLE: dict[str, str] = {
     "tee_gpu_capacity_events": "id",
     "attest_nonces": "nonce",
     "attestations": "id",
+    "v2_worker_heartbeat": "key",
 }
 
 
@@ -1482,6 +1497,11 @@ class Store:
                 self._conn.rollback()
                 raise
 
+    @staticmethod
+    def _advisory_lock_key(name: str) -> int:
+        key = int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:8], "big")
+        return key & ((1 << 63) - 1)
+
     @contextlib.contextmanager
     def advisory_lock(self, name: str):
         """Best-effort cross-process lock for singleton background jobs.
@@ -1494,10 +1514,22 @@ class Store:
             yield True
             return
 
-        key = int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:8], "big")
-        key &= (1 << 63) - 1
+        key = self._advisory_lock_key(name)
         raw = self._pool.getconn()
         acquired = False
+        # Set when this connection hits an error while it may be holding (or
+        # attempting to hold) the advisory lock. A "dirty" connection is
+        # discarded rather than returned to the pool: reusing a connection
+        # whose unlock failed (e.g. the session was left in a broken/aborted
+        # state by whatever raised inside the `with` body, such as a
+        # statement-timeout mid-batch) would silently hand some unrelated
+        # future caller a session that still holds this advisory lock at the
+        # PG session level -- the lock would then never be released until
+        # that pooled connection happens to be closed, which is exactly the
+        # "no worker anywhere can acquire it" prod incident this guards
+        # against. Discarding forces PG to tear the backend down immediately,
+        # freeing every lock it holds.
+        dirty = False
         try:
             cur = raw.cursor()
             cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
@@ -1505,20 +1537,124 @@ class Store:
             raw.commit()
             yield acquired
         except Exception:
-            raw.rollback()
+            dirty = True
+            try:
+                raw.rollback()
+            except Exception:
+                pass
             raise
         finally:
-            try:
-                if acquired:
+            if acquired and not dirty:
+                try:
+                    cur = raw.cursor()
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+                    raw.commit()
+                except Exception:
+                    dirty = True
                     try:
-                        cur = raw.cursor()
-                        cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
-                        raw.commit()
-                    except Exception:
                         raw.rollback()
-                        raise
-            finally:
+                    except Exception:
+                        pass
+            if dirty:
+                try:
+                    self._pool.putconn(raw, close=True)
+                except Exception:
+                    pass
+            else:
                 self._pool.putconn(raw)
+
+    def steal_stale_advisory_lock(self, name: str, idle_secs: int = 180) -> int:
+        """Best-effort self-healing takeover of a stale advisory-lock holder.
+
+        Postgres only -- SQLite is single-process, so a lock can never go
+        stale across processes there; always a no-op on that backend.
+
+        This exists for the case `advisory_lock`'s own cleanup cannot cover:
+        the holder's *process* is gone outright (container replaced on
+        deploy, OOM-kill, hard node failure) before any Python cleanup code
+        runs, so the PG backend session just sits idle, still holding the
+        lock, until something else notices.
+
+        Both guardrails below must hold before anything is terminated:
+          1. The PG backend holding this advisory key has been `idle` (not
+             running a query) for more than `idle_secs`.
+          2. The v2_worker_heartbeat row for this lock `name` is absent, or
+             its last beat is older than `idle_secs`.
+        Condition 1 alone is not enough: a healthy worker's lock-holding
+        session is routinely idle between ticks. Condition 2 is what proves
+        the *worker*, not just the connection, is actually gone -- so a lock
+        whose heartbeat is fresh is never touched, even if this happens to
+        run mid-idle-gap.
+
+        Always best-effort: any error here (including the heartbeat lookup)
+        is swallowed and reported as "0 stolen" so a problem in the steal
+        path itself can never add a NEW way to stall verification.
+
+        Returns the number of backends terminated (normally 0).
+        """
+        if self.backend != "postgres":
+            return 0
+        key = self._advisory_lock_key(name)
+        # pg_locks represents a single-bigint advisory-lock key (the
+        # pg_advisory_lock(bigint) overload, as used by advisory_lock() above)
+        # split across two columns: classid holds the high 32 bits, objid the
+        # low 32 bits, and objsubid=1 marks it as the single-key form (vs. 2
+        # for the two-int32-key overload). Matching objid alone would miss
+        # the high bits of our 63-bit key.
+        classid = key >> 32
+        objid = key & 0xFFFFFFFF
+        raw = self._pool.getconn()
+        try:
+            cur = raw.cursor()
+            cur.execute(
+                """
+                SELECT pg_terminate_backend(l.pid)
+                FROM pg_locks l
+                JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE l.locktype = 'advisory'
+                  AND l.classid = %s
+                  AND l.objid = %s
+                  AND l.objsubid = 1
+                  AND a.pid <> pg_backend_pid()
+                  AND a.state = 'idle'
+                  AND a.state_change < now() - (%s * interval '1 second')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM v2_worker_heartbeat h
+                      WHERE h.key = %s
+                        AND h.beat_at_iso::timestamptz > now() - (%s * interval '1 second')
+                  )
+                """,
+                (classid, objid, idle_secs, name, idle_secs),
+            )
+            rows = cur.fetchall()
+            raw.commit()
+            return sum(1 for r in rows if r and r[0])
+        except Exception:
+            try:
+                raw.rollback()
+            except Exception:
+                pass
+            return 0
+        finally:
+            self._pool.putconn(raw)
+
+    def write_v2_worker_heartbeat(self, key: str, worker_id: str, beat_at_iso: str) -> None:
+        """Best-effort liveness beat for a v2 singleton background worker.
+
+        Powers steal_stale_advisory_lock's second guardrail: a lock is only
+        stolen if BOTH the PG session is idle-stale AND this heartbeat is
+        stale/missing. `key` should be the same lock `name` passed to
+        advisory_lock so the two line up. Never raises -- a heartbeat write
+        failure must not stall (or crash) verification.
+        """
+        try:
+            self.write(lambda conn: conn.execute(
+                "INSERT OR REPLACE INTO v2_worker_heartbeat(key, worker_id, beat_at_iso) "
+                "VALUES (?, ?, ?)",
+                (key, worker_id, beat_at_iso),
+            ))
+        except Exception:
+            pass
 
     def close(self) -> None:
         if self.backend == "postgres":

@@ -1463,6 +1463,9 @@ def build_app(
         "last_batch_count": 0,
         "recent_events": [],
         "tick_errors": [],
+        "worker_restarts": 0,
+        "last_worker_error": None,
+        "lock_steals": 0,
     }
     app.state.v2_store = v2_store
     app.state.v2_blob_store = v2_blob_store
@@ -1668,8 +1671,22 @@ def build_app(
 
         retry_secs = max(1, int(os.environ.get("CATHEDRAL_V2_SINGLETON_RETRY_SECS", "15")))
         contended_log_secs = max(30, int(os.environ.get("CATHEDRAL_V2_SINGLETON_CONTENDED_LOG_SECS", "300")))
+        # Self-healing takeover: when the lock is held elsewhere, check whether
+        # the holder is actually a crashed/replaced worker (PG session idle
+        # AND its heartbeat stale/absent for longer than this) rather than a
+        # live peer between ticks. See Store.steal_stale_advisory_lock.
+        steal_idle_secs = max(30, int(os.environ.get("CATHEDRAL_V2_LOCK_STEAL_IDLE_SECS", "180")))
+        # Crash containment: an exception escaping the lock/coro_factory body
+        # (as opposed to an ordinary per-batch tick error, which _loop already
+        # swallows internally) backs off 5s -> 60s instead of hammering
+        # retry_secs, and resets to the floor after any healthy cycle so a
+        # transient blip does not leave the loop permanently slow.
+        error_backoff_floor = max(0.01, _env_float("CATHEDRAL_V2_ERROR_BACKOFF_FLOOR_SECS", 5.0))
+        error_backoff_cap = max(error_backoff_floor, _env_float("CATHEDRAL_V2_ERROR_BACKOFF_CAP_SECS", 60.0))
+        error_backoff = error_backoff_floor
         last_contended_log = 0.0
         while True:
+            sleep_secs = retry_secs
             try:
                 with v2_store.advisory_lock(lock_name) as acquired:
                     if not acquired:
@@ -1679,6 +1696,16 @@ def build_app(
                         if now - last_contended_log >= contended_log_secs:
                             print(f"[{label}] singleton_lock_held_elsewhere")
                             last_contended_log = now
+                        try:
+                            stolen = v2_store.steal_stale_advisory_lock(
+                                lock_name, idle_secs=steal_idle_secs)
+                        except Exception as steal_exc:
+                            stolen = 0
+                            print(f"[{label}] lock_steal_check_failed error={steal_exc!r}")
+                        if stolen:
+                            app.state.v2_verify_metrics["lock_steals"] = (
+                                int(app.state.v2_verify_metrics.get("lock_steals") or 0) + stolen)
+                            print(f"[{label}] lock_steal_terminated n={stolen}")
                     else:
                         app.state.v2_verify_metrics["lock_held_by_self"] = True
                         app.state.v2_verify_metrics["last_lock_acquired_at"] = _now_iso_ms()
@@ -1686,14 +1713,25 @@ def build_app(
                         await coro_factory()
                         app.state.v2_verify_metrics["lock_held_by_self"] = False
                         print(f"[{label}] singleton_task_exited")
+                        error_backoff = error_backoff_floor
             except asyncio.CancelledError:
                 app.state.v2_verify_metrics["lock_held_by_self"] = False
                 print(f"[{label}] singleton_task_cancelled")
                 raise
             except Exception as exc:
+                # ANY exception that reaches here (lock acquisition itself
+                # failing, or -- in principle -- coro_factory raising) must
+                # never kill this task: log it, let advisory_lock's own
+                # cleanup release/discard the lock connection (best-effort),
+                # back off, and loop again to re-acquire and resume.
                 app.state.v2_verify_metrics["lock_held_by_self"] = False
+                app.state.v2_verify_metrics["worker_restarts"] = (
+                    int(app.state.v2_verify_metrics.get("worker_restarts") or 0) + 1)
+                app.state.v2_verify_metrics["last_worker_error"] = repr(exc)[:200]
                 print(f"[{label}] singleton_task_error error={exc!r}")
-            await asyncio.sleep(retry_secs)
+                sleep_secs = error_backoff
+                error_backoff = min(error_backoff * 2.0, error_backoff_cap)
+            await asyncio.sleep(sleep_secs)
 
     @app.on_event("startup")
     async def _start_v2_verify_worker():
@@ -1704,10 +1742,27 @@ def build_app(
             return
         import asyncio
         worker_id = f"v2:{service_role}:{new_uuid()[:8]}"
+        # Shared literal so the heartbeat row _loop() writes below and the
+        # advisory lock _run_v2_singleton_background acquires always refer to
+        # the same lock -- steal_stale_advisory_lock's second guardrail
+        # (heartbeat staleness) only lines up with the right lock if these
+        # two never drift apart.
+        v2_verify_lock_name = "cathedral:v2:verify"
 
         async def _loop():
             app.state.v2_verify_metrics["worker_id"] = worker_id
             while True:
+                # Best-effort liveness beat: proves to steal_stale_advisory_lock
+                # that a live worker (not just an idle PG session) holds the
+                # lock. write_v2_worker_heartbeat never raises; the to_thread
+                # wrapper just keeps this blocking DB call off the event loop.
+                try:
+                    await asyncio.to_thread(
+                        v2_store.write_v2_worker_heartbeat,
+                        v2_verify_lock_name, worker_id, _now_iso_ms(),
+                    )
+                except Exception as hb_exc:
+                    print(f"[v2_verify] heartbeat_failed error={hb_exc!r}")
                 try:
                     batch_started = time.time()
                     results = await asyncio.to_thread(
@@ -1754,7 +1809,7 @@ def build_app(
         app.state.v2_verify_task = asyncio.create_task(
             _run_v2_singleton_background(
                 "v2_verify",
-                "cathedral:v2:verify",
+                v2_verify_lock_name,
                 _loop,
             )
         )
@@ -6390,6 +6445,9 @@ def build_app(
             "processed_last_60s": total_last_60s,
             "verify_rate_per_sec": round(total_last_60s / 60.0, 6),
             "tick_errors_last_60s": len(errors),
+            "worker_restarts": int(metrics.get("worker_restarts") or 0),
+            "last_worker_error": metrics.get("last_worker_error"),
+            "lock_steals": int(metrics.get("lock_steals") or 0),
             **pending,
             "by_kind": _v2_verify_kind_metrics(),
             **v2_pipeline.cnf_store_metrics(),
