@@ -46,6 +46,7 @@ from .auth import canonical_claim_bytes, default_verifier, sha256_hex
 from .board_cache import BoardCache, board_cache_headers
 from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
+from . import v2_cnf_store
 from .sat_solution import verify_dimacs_solution
 from . import submit_admission
 from . import solution_manifest
@@ -5394,6 +5395,13 @@ def build_app(
                         x_cathedral_hotkey, epoch, tier_i, seq_i)
                     if cid != item["challenge_id"]:
                         raise HTTPException(500, "v2_challenge_generation_mismatch")
+                    # Bake the CNF we just generated so the V2 verify worker can
+                    # read it back instead of regenerating from seed. Best-effort:
+                    # v2_cnf_store wraps all errors internally and never raises.
+                    try:
+                        v2_cnf_store.put(v2_store, cid, cnf_text)
+                    except Exception:
+                        pass
                     # Bind the reported/minted shape to the ACTUAL generated CNF, not
                     # the nominal tier shape — real-instance sources (combinatorial/
                     # corpus, see real_corpus.py) produce CNFs sized differently from
@@ -6083,6 +6091,15 @@ def build_app(
                 x_cathedral_hotkey, epoch_i, tier_i, seq_i)
             if cid != submit["challenge_id"]:
                 raise HTTPException(400, "challenge_id_not_in_miner_set")
+            # Bake the CNF we just regenerated so the V2 verify worker (which
+            # re-derives the same CNF for the resulting solution_manifests /
+            # v2_submit_events event) can read it back instead of regenerating
+            # from seed. Best-effort: v2_cnf_store wraps all errors internally
+            # and never raises.
+            try:
+                v2_cnf_store.put(v2_store, cid, cnf_text)
+            except Exception:
+                pass
             # planted is None iff this is a REAL (unplanted) instance — see
             # per_miner.generate_instance docstring. Derived from the ACTUAL
             # generation result so it always agrees with the CNF just verified.
@@ -6335,6 +6352,7 @@ def build_app(
             "tick_errors_last_60s": len(errors),
             **pending,
             "by_kind": _v2_verify_kind_metrics(),
+            **v2_pipeline.cnf_store_metrics(),
         }
         return JSONResponse(
             payload,

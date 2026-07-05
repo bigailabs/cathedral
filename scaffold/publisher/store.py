@@ -637,6 +637,15 @@ _MIGRATIONS: list[tuple[str, str]] = [
     ("0041_v2_submit_events_challenge_kind", """
         ALTER TABLE v2_submit_events ADD COLUMN challenge_kind TEXT;
     """),
+    ("0042_v2_cnf_store", """
+        CREATE TABLE IF NOT EXISTS v2_cnf_store (
+            challenge_id TEXT PRIMARY KEY,
+            cnf_sha256 TEXT NOT NULL,
+            cnf_zlib BLOB NOT NULL,
+            created_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_cnf_store_created ON v2_cnf_store(created_at_iso);
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1176,6 +1185,15 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
     """),
     ("0041_v2_submit_events_challenge_kind", """
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS challenge_kind TEXT;
+    """),
+    ("0042_v2_cnf_store", """
+        CREATE TABLE IF NOT EXISTS v2_cnf_store (
+            challenge_id TEXT PRIMARY KEY,
+            cnf_sha256 TEXT NOT NULL,
+            cnf_zlib BYTEA NOT NULL,
+            created_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_cnf_store_created ON v2_cnf_store(created_at_iso);
     """),
 ]
 

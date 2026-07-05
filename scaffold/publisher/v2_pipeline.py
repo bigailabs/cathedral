@@ -23,6 +23,7 @@ from ..dimacs import parse_cnf
 from ..wire_vector import canonical_bytes
 from . import per_miner as pm
 from . import solution_manifest
+from . import v2_cnf_store
 from .auth import sha256_hex
 from .sat_solution import verify_dimacs_solution
 from .store import Store
@@ -32,6 +33,33 @@ STATUS_RETRY = "retry"
 STATUS_VERIFYING = "verifying"
 STATUS_VERIFIED = "verified"
 STATUS_REJECTED = "rejected"
+
+# ---- CNF store hit/miss counters (verify-path metrics) --------------------
+# Cumulative, process-lifetime counters for how often verify_one found the CNF
+# already baked in v2_cnf_store vs had to regenerate it from seed. Read by the
+# /v2/verify/metrics endpoint. Not persisted — a restart resets them, which is
+# fine for an operational hit-rate gauge.
+_CNF_STORE_METRICS_LOCK = threading.Lock()
+_cnf_store_hits = 0
+_cnf_store_misses = 0
+
+
+def _record_cnf_store_hit() -> None:
+    global _cnf_store_hits
+    with _CNF_STORE_METRICS_LOCK:
+        _cnf_store_hits += 1
+
+
+def _record_cnf_store_miss() -> None:
+    global _cnf_store_misses
+    with _CNF_STORE_METRICS_LOCK:
+        _cnf_store_misses += 1
+
+
+def cnf_store_metrics() -> dict[str, int]:
+    with _CNF_STORE_METRICS_LOCK:
+        return {"cnf_store_hits": _cnf_store_hits, "cnf_store_misses": _cnf_store_misses}
+
 
 _PM_ENV_LOCK = threading.RLock()
 _V2_PM_ENV_MAP = {
@@ -260,6 +288,7 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
 
     challenge_id = str(row["challenge_id"])
     miner_hotkey = str(row["miner_hotkey"])
+    event_cnf_sha = str(row.get("cnf_sha256") or "") or None
     with v2_pm_env():
         parsed = pm.parse_challenge_id(challenge_id)
         if not parsed:
@@ -271,11 +300,34 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
             _finish_rejected(store, rid, "assignment_required_fetch_challenges_first")
             return {"id": rid, "status": STATUS_REJECTED, "reason": "assignment_required_fetch_challenges_first"}
         tier, seq = tier_seq
-        generated = pm.get_miner_cnf(miner_hotkey, epoch, tier, seq)
-        if generated is None:
-            _finish_rejected(store, rid, "challenge_id_not_in_miner_set")
-            return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_not_in_miner_set"}
-        _cid, cnf_text = generated
+
+        # CNF store read: the CNF for this challenge_id may already be baked
+        # (mint-time / submit-time write in app.py) — reading it back skips
+        # the expensive from-seed regeneration (generate_instance), which for
+        # REAL/unplanted instances re-runs combinatorial coloring/latin-square
+        # generation with internal retries. sha-gated against the event's own
+        # cnf_sha256 (when present) so a stale/corrupt store entry can never
+        # be used; any error here is swallowed and treated as a plain miss —
+        # this call must never be able to break verification.
+        try:
+            cnf_text = v2_cnf_store.get(store, challenge_id, expected_sha256=event_cnf_sha)
+        except Exception:
+            cnf_text = None
+        if cnf_text is not None:
+            _record_cnf_store_hit()
+        else:
+            _record_cnf_store_miss()
+            # Fallback: EXACT existing regeneration path, unchanged.
+            generated = pm.get_miner_cnf(miner_hotkey, epoch, tier, seq)
+            if generated is None:
+                _finish_rejected(store, rid, "challenge_id_not_in_miner_set")
+                return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_not_in_miner_set"}
+            _cid, cnf_text = generated
+            # Backfill so the next event for this challenge_id hits.
+            try:
+                v2_cnf_store.put(store, challenge_id, cnf_text)
+            except Exception:
+                pass
 
     encoding = str(row["assignment_encoding"])
     if encoding == "dimacs/v1":
@@ -337,7 +389,15 @@ def process_batch(
 ) -> list[dict[str, Any]]:
     worker_id = worker_id or f"v2-{uuid.uuid4().hex[:12]}"
     rows = claim_batch(store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs)
-    return [verify_one(store, row, blob_store, max_blob_bytes=max_blob_bytes) for row in rows]
+    results = [verify_one(store, row, blob_store, max_blob_bytes=max_blob_bytes) for row in rows]
+    # Opportunistic purge of old baked CNFs — self-throttled to at most once
+    # per ~10 minutes inside v2_cnf_store, so it is cheap to call every tick.
+    # Best-effort: maybe_purge_older_than swallows all errors internally.
+    try:
+        v2_cnf_store.maybe_purge_older_than(store, hours=24, min_interval_secs=600.0)
+    except Exception:
+        pass
+    return results
 
 
 def _score_rows(store: Store, table: str, *, since_iso: str | None = None,
