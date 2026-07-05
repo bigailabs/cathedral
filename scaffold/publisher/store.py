@@ -646,6 +646,9 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_v2_cnf_store_created ON v2_cnf_store(created_at_iso);
     """),
+    ("0043_solution_manifests_inline", """
+        ALTER TABLE solution_manifests ADD COLUMN solution_inline BLOB;
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1194,6 +1197,9 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             created_at_iso TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_v2_cnf_store_created ON v2_cnf_store(created_at_iso);
+    """),
+    ("0043_solution_manifests_inline", """
+        ALTER TABLE solution_manifests ADD COLUMN IF NOT EXISTS solution_inline BYTEA;
     """),
 ]
 

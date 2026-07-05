@@ -179,8 +179,22 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return {k: row[k] for k in keys}
 
 
-def admit_manifest(store, manifest: dict[str, Any], *, signature: str) -> tuple[dict[str, Any], bool]:
-    """Insert manifest if new, returning (row, inserted). Idempotent on replay."""
+def admit_manifest(
+    store,
+    manifest: dict[str, Any],
+    *,
+    signature: str,
+    inline_solution: bytes | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Insert manifest if new, returning (row, inserted). Idempotent on replay.
+
+    inline_solution: optional copy of the (small) solution blob bytes, stored in
+    the solution_inline column so verification survives blob-store loss (the
+    local blob dir is ephemeral container disk — a redeploy wipes it). Kept
+    OUTSIDE manifest_json so the miner-signed manifest bytes are untouched.
+    The verify path sha-checks whatever bytes it uses against the manifest's
+    solution_sha256, so a wrong inline copy can never be scored.
+    """
     idem = idempotency_key(manifest)
     rid = str(uuid.uuid4())
     received_at = _now_iso_ms()
@@ -191,8 +205,9 @@ def admit_manifest(store, manifest: dict[str, Any], *, signature: str) -> tuple[
             "INSERT OR IGNORE INTO solution_manifests("
             "id, idempotency_key, miner_hotkey, challenge_id, card_id, "
             "assignment_encoding, solution_cid, solution_sha256, solution_bytes, "
-            "cnf_sha256, status, submitted_at, received_at_iso, signature, manifest_json"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "cnf_sha256, status, submitted_at, received_at_iso, signature, manifest_json, "
+            "solution_inline"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rid,
                 idem,
@@ -209,6 +224,7 @@ def admit_manifest(store, manifest: dict[str, Any], *, signature: str) -> tuple[
                 received_at,
                 signature,
                 manifest_json,
+                inline_solution,
             ),
         )
         row = conn.execute(

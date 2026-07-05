@@ -269,17 +269,31 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
 
     cid = str(row["solution_cid"])
     expected_sha = str(row["solution_sha256"]).lower()
+    # Prefer the durable inline copy captured at admit time (solution_inline
+    # column): the local blob dir is ephemeral container disk, so blobs die on
+    # redeploy while queued. The sha check below gates BOTH sources — a wrong
+    # inline copy can never be scored. Falls back to the blob store unchanged.
+    blob: bytes | None = None
     try:
-        blob = blob_store.fetch(cid, max_bytes=max_blob_bytes)
-    except ValueError as exc:
-        reason = str(exc) or "blob_fetch_failed"
-        terminal = reason in {"blob_too_large", "unsupported_cid_scheme", "cid_fetch_backend_not_configured"}
-        _finish_rejected(store, rid, reason, terminal=terminal)
-        return {"id": rid, "status": STATUS_REJECTED if terminal else STATUS_RETRY, "reason": reason}
-    except Exception as exc:
-        reason = f"blob_fetch_failed:{type(exc).__name__}"
-        _finish_rejected(store, rid, reason, terminal=False)
-        return {"id": rid, "status": STATUS_RETRY, "reason": reason}
+        raw = row.get("solution_inline")
+        if raw:
+            blob = raw.tobytes() if isinstance(raw, memoryview) else bytes(raw)
+            if max_blob_bytes and len(blob) > int(max_blob_bytes):
+                blob = None
+    except Exception:
+        blob = None
+    if blob is None:
+        try:
+            blob = blob_store.fetch(cid, max_bytes=max_blob_bytes)
+        except ValueError as exc:
+            reason = str(exc) or "blob_fetch_failed"
+            terminal = reason in {"blob_too_large", "unsupported_cid_scheme", "cid_fetch_backend_not_configured"}
+            _finish_rejected(store, rid, reason, terminal=terminal)
+            return {"id": rid, "status": STATUS_REJECTED if terminal else STATUS_RETRY, "reason": reason}
+        except Exception as exc:
+            reason = f"blob_fetch_failed:{type(exc).__name__}"
+            _finish_rejected(store, rid, reason, terminal=False)
+            return {"id": rid, "status": STATUS_RETRY, "reason": reason}
 
     actual_sha = hashlib.sha256(blob).hexdigest()
     if actual_sha != expected_sha:

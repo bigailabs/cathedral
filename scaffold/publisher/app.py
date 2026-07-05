@@ -6217,8 +6217,21 @@ def build_app(
             raise HTTPException(401, "invalid hotkey signature")
 
         mark_verified_hotkey(request, x_cathedral_hotkey)
+        # Capture a durable inline copy of the (small) solution blob at admit
+        # time: the local blob dir is ephemeral container disk, so a redeploy
+        # between admit and async verify loses the bytes (blob_fetch_failed on
+        # the whole backlog). Best-effort — on any failure we admit exactly as
+        # before; verify sha-checks whichever copy it uses.
+        inline_solution: bytes | None = None
+        try:
+            if int(manifest.get("solution_bytes") or 0) <= 8192:
+                inline_solution = v2_blob_store.fetch(
+                    str(manifest["solution_cid"]), max_bytes=8192)
+        except Exception:
+            inline_solution = None
         row, inserted = solution_manifest.admit_manifest(
-            v2_store, manifest, signature=x_cathedral_signature)
+            v2_store, manifest, signature=x_cathedral_signature,
+            inline_solution=inline_solution)
         payload = solution_manifest.receipt_payload(row, inserted=inserted)
         return JSONResponse(
             payload,
