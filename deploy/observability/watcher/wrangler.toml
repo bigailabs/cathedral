@@ -1,0 +1,52 @@
+name = "cathedral-alert-watcher"
+main = "worker.mjs"
+compatibility_date = "2026-06-25"
+workers_dev = true
+
+# Off-box watcher for the ramp-critical health signals (see README.md).
+# Cron-only; it holds no routes on cathedral.computer.
+[triggers]
+crons = ["* * * * *"]
+
+# Alert state: dedup/re-alert bookkeeping, counter baselines for 429/5xx rate
+# deltas, and the v2 backlog trend window.
+# Create with: wrangler kv namespace create ALERT_STATE
+# then paste the returned id below (same convention as weights-failover).
+kv_namespaces = [
+  { binding = "ALERT_STATE", id = "<paste-ALERT_STATE-kv-namespace-id>" },
+]
+
+# Secrets (set with `wrangler secret put <NAME>`, never in this file):
+#   ALERT_WEBHOOK_URL      required; Discord webhook URL (or Slack/generic,
+#                          see WEBHOOK_FORMAT)
+#   CATHEDRAL_ADMIN_TOKEN  recommended; enables the /v1/admin/validator-health
+#                          probe (origin freshness, counted feed 5xx, 429 rate,
+#                          unresolved_ip_count)
+#   STATUS_TOKEN           optional; bearer-gates GET /status on workers.dev
+
+[vars]
+# Tier 0: all three validator weight-feed URLs must hold (ALERTS.md).
+WEIGHTS_URLS = "https://api.cathedral.computer/v1/validator/weights/next,https://api.cathedral.computer/api/cathedral/v1/validator/weights/next,https://read.cathedral.computer/v1/validator/weights/next"
+PUBLISHER_ORIGIN = "https://api.cathedral.computer"
+V2_ORIGIN = "https://v2-beta.cathedral.computer"
+WEBHOOK_FORMAT = "discord"
+FETCH_TIMEOUT_MS = "10000"
+
+# Thresholds. Defaults live in checks.mjs (DEFAULT_CONFIG) and mirror
+# deploy/observability/ALERTS.md + scaffold/publisher/health_thresholds.py.
+# Uncomment to override.
+# VECTOR_WARN_SECS = "300"
+# VECTOR_PAGE_SECS = "600"
+# PENDING_WARN = "5000"
+# PENDING_PAGE = "20000"
+# PENDING_TREND_POLLS = "5"
+# PENDING_TREND_FLOOR = "500"
+# OLDEST_PENDING_WARN_SECS = "300"
+# OLDEST_PENDING_PAGE_SECS = "900"
+# STALL_MIN_PENDING = "10"
+# BUSY_429_WARN_PER_MIN = "120"
+# RATE_5XX_WARN = "0.02"
+# RATE_5XX_MIN_SAMPLE = "20"
+# NET_FAIL_PAGE_POLLS = "2"
+# REALERT_MINS = "30"
+# V2_EXPECTED = "1"

@@ -4,6 +4,11 @@ Status: derived from `deploy/RELIABILITY_UPGRADE_PLAN.md` (Phase 7). That plan i
 the single source of truth; if a threshold here ever disagrees with the plan, the
 plan wins and this file is the bug.
 
+Delivery: `watcher/` (cathedral-alert-watcher, a Cloudflare cron worker) polls
+the weight feed, `/v1/admin/validator-health`, and `/v2/verify/metrics` every
+minute and pushes PAGE/WARN alerts to a webhook. See `watcher/README.md` for
+thresholds, deploy steps, and first-response notes per alert.
+
 Thresholds in code: `scaffold/publisher/health_thresholds.py` (shared by the live
 `/v1/admin/validator-health` endpoint and `scripts/validator_release_gate.py`).
 
