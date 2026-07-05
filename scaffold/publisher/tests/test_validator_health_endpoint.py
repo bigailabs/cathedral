@@ -58,6 +58,23 @@ def test_validator_health_shape(client):
     assert body["tempo_seconds"] == 4320
 
 
+def test_validator_health_ratelimit_block(client):
+    # unresolved_ip_count is the #333 client-IP fail-open counter. On revisions
+    # where ratelimit.py predates the counter the field is null; once the
+    # counter exists it must be a non-negative integer. Either way the block
+    # is always present so the alert watcher has a stable path to poll.
+    resp = client.get(
+        "/v1/admin/validator-health",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "ratelimit" in body
+    assert "unresolved_ip_count" in body["ratelimit"]
+    value = body["ratelimit"]["unresolved_ip_count"]
+    assert value is None or (isinstance(value, int) and value >= 0)
+
+
 def test_4xx_counted_but_404_is_not_a_5xx(client):
     # A 404 (unknown route) is a 4xx, not a server fault: confirm 4xx is counted
     # and the 5xx class is left untouched. The genuine 5xx path is covered by

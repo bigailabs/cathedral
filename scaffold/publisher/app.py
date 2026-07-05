@@ -4373,6 +4373,17 @@ def build_app(
         _require_publisher_admin(authorization)
 
         from . import health_thresholds as ht
+        from . import ratelimit as ratelimit_mod
+
+        # unresolved_ip_count is the client-IP fail-open counter introduced by
+        # the v2 ingress hardening (#333). getattr keeps this surface working
+        # on revisions where ratelimit.py predates the counter: the field is
+        # null there, an integer once the counter exists. Read-only either way.
+        _unresolved_ip_fn = getattr(ratelimit_mod, "unresolved_ip_count", None)
+        try:
+            unresolved_ip = int(_unresolved_ip_fn()) if callable(_unresolved_ip_fn) else None
+        except Exception:
+            unresolved_ip = None
 
         weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         vec_generated_at: str | None = None
@@ -4404,6 +4415,7 @@ def build_app(
             "http_status": http_snapshot,
             "submit": _submit_metrics_snapshot(),
             "pressure": pressure_telemetry.snapshot(),
+            "ratelimit": {"unresolved_ip_count": unresolved_ip},
             "tempo_seconds": ht.TEMPO_SECONDS,
         }
         return JSONResponse(
