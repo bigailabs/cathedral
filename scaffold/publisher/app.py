@@ -6238,7 +6238,26 @@ def build_app(
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
-    def _v2_verify_pending_metrics() -> dict[str, Any]:
+    # TTL cache for the DB-heavy metrics blocks. /v2/verify/metrics is publicly
+    # polled (the miner announcement points at it), so per-request COUNT(*) and
+    # GROUP BY sweeps over the (large, growing) event tables turn N pollers
+    # into N concurrent table scans and starve the verify worker's DB access.
+    # One caller recomputes when stale; everyone else gets the cached copy.
+    _v2_metrics_cache: dict[str, tuple[float, Any]] = {}
+    _v2_metrics_cache_lock = threading.Lock()
+
+    def _v2_metrics_cached(key: str, ttl_secs: float, compute):
+        now_ts = time.time()
+        with _v2_metrics_cache_lock:
+            entry = _v2_metrics_cache.get(key)
+            if entry and (now_ts - entry[0]) < ttl_secs:
+                return entry[1]
+        value = compute()
+        with _v2_metrics_cache_lock:
+            _v2_metrics_cache[key] = (time.time(), value)
+        return value
+
+    def _v2_verify_pending_metrics_uncached() -> dict[str, Any]:
         now_ts = time.time()
         pending_count = 0
         oldest_iso: str | None = None
@@ -6275,7 +6294,11 @@ def build_app(
             "by_source": by_source,
         }
 
-    def _v2_verify_kind_metrics() -> dict[str, Any]:
+    def _v2_verify_pending_metrics() -> dict[str, Any]:
+        return _v2_metrics_cached(
+            "pending", 20.0, _v2_verify_pending_metrics_uncached)
+
+    def _v2_verify_kind_metrics_uncached() -> dict[str, Any]:
         """Attributed real-vs-planted solve counts from verified v2_submit_events.
 
         challenge_kind is metadata only (see kind_for docstring) — this never
@@ -6321,6 +6344,10 @@ def build_app(
             "kinds": kinds,
             "by_hotkey": dict(top_hotkeys),
         }
+
+    def _v2_verify_kind_metrics() -> dict[str, Any]:
+        return _v2_metrics_cached(
+            "by_kind", 60.0, _v2_verify_kind_metrics_uncached)
 
     @app.get("/v2/verify/metrics")
     def v2_verify_metrics():
