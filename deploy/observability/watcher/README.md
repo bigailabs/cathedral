@@ -44,9 +44,17 @@ the last-known-good signed vector; make sure its routes are attached.
 | `weights_feed_5xx_counted` | the origin-side 5xx counter for the weight feed advanced since the last poll | PAGE |
 | `http_5xx_rate` | global 5xx rate > 2% over the poll window (min 20 requests) | WARN |
 | `submit_429_rate` | `submit_busy_retry` + `per_miner_busy_retry` > 120/min | WARN |
+| `submit_path_down` | 5xx-class submit rejections (`async_worker_unavailable` / `pm_async_worker_unavailable_sync` / `submit_queue_backpressure`) rose since the last poll | PAGE |
 | `ratelimit_fail_open` | `ratelimit.unresolved_ip_count` rose since the last poll | WARN |
 | `validator_health_auth` | admin token rejected (401/403) | WARN |
 | `validator_health_unreachable` | fetch failure / non-200 | WARN |
+
+First response for `submit_path_down` (PAGE): the submit route is returning
+5xx, not merely throttling — this is the outage class a miner reported once
+already. The v2 backlog can look *healthier* during this (nothing gets
+admitted), so this direct probe is the real signal. Check the verify worker is
+alive (`CATHEDRAL_SUBMIT_ASYNC_REQUIRE_WORKER` gates 503s on worker liveness)
+and the submit/pool config; correlate with `v2_worker_stall`.
 
 First response for `submit_429_rate`: this is the submit or pm-read gate
 saturating (the 429-bug incident signature). Check submit-metrics

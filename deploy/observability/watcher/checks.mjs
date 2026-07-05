@@ -50,6 +50,16 @@ export const DEFAULT_CONFIG = {
   v2Expected: true,
 };
 
+// submit.by_reason values that mean the submit path is DOWN (returns 5xx),
+// distinct from busy-retry 429s which mean merely saturated. Verified against
+// the producer (app.py: async_worker_unavailable at 503). A rising count here
+// is the exact class of outage a miner reported once already — page on it.
+export const SUBMIT_OUTAGE_REASONS = [
+  "async_worker_unavailable",
+  "pm_async_worker_unavailable_sync",
+  "submit_queue_backpressure",
+];
+
 export function numberFromEnv(env, key, fallback) {
   const raw = env && env[key];
   if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
@@ -243,6 +253,12 @@ export function checkValidatorHealth(res, prev, nowMs, cfg) {
     total: Number(body.http_status?.total ?? 0),
     total5xx: Number(body.http_status?.by_class?.["5xx"] ?? 0),
     busy429: Number(busyReasons.submit_busy_retry ?? 0) + Number(busyReasons.per_miner_busy_retry ?? 0),
+    // 5xx-class submit rejections = the submit path is actually DOWN (not just
+    // busy). ALERTS.md: submit_admission_unavailable / 503 is a PAGE. Backlog
+    // metrics can't catch this — a broken submit route makes pending stop
+    // growing, which reads as "healthier". So probe it directly here.
+    submitDown: SUBMIT_OUTAGE_REASONS.reduce(
+      (n, r) => n + Number(busyReasons[r] ?? 0), 0),
     unresolvedIp: (typeof body.ratelimit?.unresolved_ip_count === "number")
       ? body.ratelimit.unresolved_ip_count : null,
   };
@@ -277,6 +293,18 @@ export function checkValidatorHealth(res, prev, nowMs, cfg) {
           id: "submit_429_rate",
           level: "warn",
           title: `busy-retry 429 rate ${Math.round(perMin)}/min (submit+pm-read gates saturating)`,
+        });
+      }
+
+      // Submit path DOWN (5xx-class rejections rising) = PAGE. Backlog metrics
+      // go quiet or look healthier when the submit route breaks, so this is the
+      // only direct signal for that outage class.
+      const dSubmitDown = cur.submitDown - Number(prev.submitDown || 0);
+      if (dSubmitDown > 0) {
+        findings.push({
+          id: "submit_path_down",
+          level: "page",
+          title: `submit path returned ${dSubmitDown} 5xx-class rejections since last poll (async_worker_unavailable / backpressure)`,
         });
       }
 
@@ -456,6 +484,27 @@ export function reconcileAlerts(findings, prevAlerts, nowMs, realertMs) {
   }
 
   return { alerts, events };
+}
+
+// When webhook delivery FAILS, we must not persist state as if the events were
+// sent — otherwise a fire/escalate/realert has its lastSentMs stamped to now
+// (so it won't re-fire for realertMs, up to 30 min) and a resolve is dropped
+// from `prev` forever. This rewinds the reconciled `alerts` back toward `prev`
+// for exactly the undelivered event ids so the next poll re-attempts them:
+//   - fire/escalate/realert id -> reset lastSentMs to 0 (force re-send next run)
+//   - resolve id -> restore the prior alert entry (so the resolve re-emits until sent)
+export function rollbackUndelivered(alerts, prevAlerts, events) {
+  const prev = prevAlerts || {};
+  const out = { ...alerts };
+  for (const e of events) {
+    if (e.type === "resolve") {
+      const p = prev[e.id];
+      if (p) out[e.id] = { ...p }; // condition cleared but resolve not delivered: keep it active so it re-resolves
+    } else {
+      if (out[e.id]) out[e.id] = { ...out[e.id], lastSentMs: 0 };
+    }
+  }
+  return out;
 }
 
 function durationLabel(sinceMs, nowMs) {

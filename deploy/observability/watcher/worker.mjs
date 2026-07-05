@@ -17,6 +17,7 @@ import {
   formatWebhookPayload,
   numberFromEnv,
   reconcileAlerts,
+  rollbackUndelivered,
 } from "./checks.mjs";
 
 const STATE_KEY = "state";
@@ -92,16 +93,31 @@ async function deliver(env, events, nowMs, notes) {
     console.log(`alert-watcher: ALERT_WEBHOOK_URL not set; undelivered events: ${JSON.stringify(events)}`);
     return false;
   }
-  const resp = await fetch(env.ALERT_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!resp.ok) {
-    console.log(`alert-watcher: webhook delivery failed HTTP ${resp.status}`);
+  // Bound the webhook fetch the same way surface fetches are bounded — a hung
+  // Discord must not stall the run (which would also skip persisting counter
+  // baselines). Any failure (non-2xx, timeout, network) returns false so the
+  // caller can roll back state and retry next poll instead of losing the page.
+  const controller = new AbortController();
+  const timeoutMs = numberFromEnv(env, "WEBHOOK_TIMEOUT_MS", 8000);
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(env.ALERT_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      console.log(`alert-watcher: webhook delivery failed HTTP ${resp.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.log(`alert-watcher: webhook delivery threw: ${err && err.name ? err.name : err}`);
     return false;
+  } finally {
+    clearTimeout(t);
   }
-  return true;
 }
 
 export async function runOnce(env, { send = true, persist = true } = {}) {
@@ -163,10 +179,18 @@ export async function runOnce(env, { send = true, persist = true } = {}) {
     delivered = await deliver(env, events, nowMs, notes);
   }
 
+  // If there were events to send but delivery failed, rewind the alert state so
+  // the undelivered events (including a first PAGE) re-fire next poll instead of
+  // being swallowed or delayed by the realert window.
+  let alertsToPersist = alerts;
+  if (send && events.length && !delivered) {
+    alertsToPersist = rollbackUndelivered(alerts, state.alerts || {}, events);
+  }
+
   if (persist) {
     await saveState(env, {
       atMs: nowMs,
-      alerts,
+      alerts: alertsToPersist,
       health: healthBaseline,
       v2: v2State,
       weightsFailures,

@@ -11,6 +11,7 @@ import {
   formatEventLines,
   formatWebhookPayload,
   reconcileAlerts,
+  rollbackUndelivered,
 } from "./checks.mjs";
 
 const cfg = DEFAULT_CONFIG;
@@ -171,6 +172,54 @@ function healthBody(overrides = {}) {
   });
   const { findings } = checkValidatorHealth({ status: 200, json: body, error: null }, prev, NOW, cfg);
   assert.deepEqual(ids(findings), ["page:weights_feed_5xx_counted", "warn:submit_429_rate"]);
+}
+
+// submit path DOWN (5xx-class reject rising) PAGEs, distinct from busy-retry 429 WARN
+{
+  const prev = {
+    atMs: NOW - 60000, startedAt: "2026-07-05T00:00:00.000Z",
+    feed5xx: 0, total: 1000, total5xx: 0, busy429: 0, submitDown: 0, unresolvedIp: null,
+  };
+  const down = healthBody({ submit: { by_reason: { async_worker_unavailable: 5 } } });
+  assert.deepEqual(
+    ids(checkValidatorHealth({ status: 200, json: down, error: null }, prev, NOW, cfg).findings),
+    ["page:submit_path_down"]);
+  // backpressure reason also counts
+  const bp = healthBody({ submit: { by_reason: { submit_queue_backpressure: 2 } } });
+  assert.deepEqual(
+    ids(checkValidatorHealth({ status: 200, json: bp, error: null }, prev, NOW, cfg).findings),
+    ["page:submit_path_down"]);
+  // no 5xx-class rejections -> no page
+  const clean = healthBody({ submit: { by_reason: { submit_busy_retry: 3 } } });
+  assert.equal(
+    checkValidatorHealth({ status: 200, json: clean, error: null }, prev, NOW, cfg)
+      .findings.filter((f) => f.id === "submit_path_down").length, 0);
+}
+
+// rollbackUndelivered: a failed webhook must let the events re-fire next poll
+{
+  // fire an alert, then simulate delivery FAILURE
+  const r1 = reconcileAlerts(
+    [{ id: "weights_5xx:u", level: "page", title: "feed down" }], {}, NOW, 30 * 60000);
+  assert.deepEqual(r1.events.map((e) => e.type), ["fire"]);
+  // as-if delivered: lastSentMs = NOW, would NOT re-fire for 30 min
+  assert.equal(r1.alerts["weights_5xx:u"].lastSentMs, NOW);
+  // rolled back: lastSentMs zeroed -> next reconcile re-fires as realert immediately
+  const rolled = rollbackUndelivered(r1.alerts, {}, r1.events);
+  assert.equal(rolled["weights_5xx:u"].lastSentMs, 0);
+  const r2 = reconcileAlerts(
+    [{ id: "weights_5xx:u", level: "page", title: "feed down" }], rolled, NOW + 60000, 30 * 60000);
+  assert.deepEqual(r2.events.map((e) => e.type), ["realert"]); // re-sent, not swallowed
+
+  // a resolve whose delivery failed must be retried, not lost
+  const prevActive = { "x": { level: "page", title: "t", sinceMs: NOW, lastSentMs: NOW } };
+  const r3 = reconcileAlerts([], prevActive, NOW + 60000, 30 * 60000); // condition cleared
+  assert.deepEqual(r3.events.map((e) => e.type), ["resolve"]);
+  assert.equal(r3.alerts["x"], undefined); // dropped from state
+  const rolled3 = rollbackUndelivered(r3.alerts, prevActive, r3.events);
+  assert.ok(rolled3["x"], "resolve rolled back: alert kept active so it re-resolves");
+  const r4 = reconcileAlerts([], rolled3, NOW + 120000, 30 * 60000);
+  assert.deepEqual(r4.events.map((e) => e.type), ["resolve"]); // resolve re-emitted
 }
 
 // restart (different started_at_iso) suppresses deltas instead of false-firing
