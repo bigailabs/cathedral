@@ -585,19 +585,21 @@ def build_ingress_app(
         return request.headers.get("x-cathedral-admin-token", "").strip() == token
 
     def _client_ip(request: Request) -> str:
-        cf_ip = request.headers.get("cf-connecting-ip", "").strip()
-        if cf_ip:
-            return cf_ip
-        xff = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        if xff:
-            return xff
-        return request.client.host if request.client else "unknown"
+        # Route through the single hardened derivation (CATHEDRAL_CLIENT_IP_MODE)
+        # so the ingress IP rate limit is not spoofable on the un-proxied
+        # origin. request.scope carries the raw ASGI headers + client peer.
+        # See ratelimit._client_ip_from_scope and issue #333.
+        from . import ratelimit
+        return ratelimit._client_ip_from_scope(request.scope)
 
     def _check_ip_rate(request: Request) -> None:
         rpm = int(app.state.ip_rpm or 0)
         if rpm <= 0:
             return
         ip = _client_ip(request)
+        from . import ratelimit
+        if ip == ratelimit.UNRESOLVED_IP:
+            return  # fail open: no trustworthy IP to bucket on
         bucket = int(time.time() // 60)
         with app.state._ip_lock:
             old_bucket, count = app.state._ip_windows.get(ip, (bucket, 0))
