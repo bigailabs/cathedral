@@ -328,6 +328,30 @@ def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str
     return cid, cnf_text, planted
 
 
+@lru_cache(maxsize=200_000)
+def item_meta(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, int, bool, str]:
+    """Return per-item data the challenges page needs, plus the CNF body:
+    (challenge_id, cnf_sha256, nvars, is_real, cnf_text).
+
+    IMMUTABLE for a (hotkey, epoch, tier, seq), so memoized — a warm page skips
+    the expensive parse_cnf + sha256 and only mints the (time-bound) token,
+    removing the per-request CPU peg that starved the worker threadpool under a
+    challenges flood. The caller still bakes cnf_text into v2_cnf_store (an
+    idempotent INSERT OR IGNORE, so re-baking a warm item is a cheap no-op) so the
+    verify worker reads the store instead of regenerating. The token is NOT cached
+    (it carries expires_at/not_before and must be minted fresh).
+
+    is_real == (planted is None) so callers derive the kind label without
+    re-running the source predicate.
+    """
+    import hashlib
+    cid, cnf_text, planted = generate_instance(hotkey, epoch, tier, seq)
+    sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+    from ..dimacs import parse_cnf
+    nvars, _clauses = parse_cnf(cnf_text)
+    return cid, sha, nvars, (planted is None), cnf_text
+
+
 def miner_instance_set(
     hotkey: str,
     epoch: int,

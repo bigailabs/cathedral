@@ -564,6 +564,16 @@ def build_app(
         1, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_THREADS", 8))
     v2_submit_executor = ThreadPoolExecutor(
         max_workers=v2_submit_bitset_threads, thread_name_prefix="v2-submit")
+    # Dedicated executor for the per-miner challenges/cnf READ path. The item loop
+    # (generate/read-through + parse_cnf + sha + mint_token, x page size) is CPU
+    # heavy; running it in the shared anyio threadpool lets a challenges flood
+    # saturate every thread so /health, /submit and everything else queue behind
+    # it (observed live: 502/503/timeout while the DB pool sat idle — worker/thread
+    # starvation, not DB). A separate bounded pool isolates read load so the rest
+    # of the origin stays responsive under a page flood.
+    v2_read_threads = max(1, _env_int("CATHEDRAL_V2_READ_THREADS", 6))
+    v2_read_executor = ThreadPoolExecutor(
+        max_workers=v2_read_threads, thread_name_prefix="v2-read")
     v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
     v2_worker_batch_size = max(1, _env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8))
     v2_worker_interval_secs = max(
@@ -5491,58 +5501,36 @@ def build_app(
                 if not v2_submit_token_secret:
                     raise HTTPException(503, "v2_submit_token_secret_missing")
                 expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
-                from ..dimacs import parse_cnf
                 for item in items:
                     tier_i = int(item["tier"])
                     seq_i = int(item["seq"])
                     cid = str(item["challenge_id"])
-                    # Read-through the CNF store before generating: rows are
-                    # immutable per challenge_id (INSERT OR IGNORE), written only
-                    # from real generation results, and get() self-verifies the
-                    # body against its recorded sha, so a cached body is
-                    # byte-identical to what generate_instance would return.
-                    # A warm page does zero generation and zero DB writes; with
-                    # CATHEDRAL_V2_CNF_STORE_READ=0, get() returns None and every
-                    # item takes the generate path below (today's behavior).
-                    # OPS: if you change generation config that alters the CNF BODY
-                    # without changing the challenge_id (CATHEDRAL_V2_REAL_FRACTION,
-                    # CHALLENGE_SOURCE, corpus contents, tier shape) MID-EPOCH, stale
-                    # immutable rows keep minting tokens whose sha no longer matches
-                    # a fresh regeneration, so warm submits 400 submit_token_cnf_mismatch
-                    # until the ~24h purge or epoch roll. Set CATHEDRAL_V2_CNF_STORE_READ=0
-                    # (or purge v2_cnf_store) when rotating generation config. No
-                    # verification bypass — submit still regenerates + sha-gates.
-                    cnf_text = v2_cnf_store.get(v2_store, cid)
-                    if cnf_text is None:
-                        gen_cid, cnf_text, _planted = pm.generate_instance(
-                            x_cathedral_hotkey, epoch, tier_i, seq_i)
-                        if gen_cid != cid:
-                            raise HTTPException(500, "v2_challenge_generation_mismatch")
-                        # Bake the CNF we just generated so the V2 verify worker and
-                        # later page fetches can read it back instead of regenerating
-                        # from seed. Best-effort: v2_cnf_store wraps all errors
-                        # internally and never raises.
-                        try:
-                            v2_cnf_store.put(v2_store, cid, cnf_text)
-                        except Exception:
-                            pass
-                    # Bind the reported/minted shape to the ACTUAL CNF body, not
-                    # the nominal tier shape — real-instance sources (combinatorial/
-                    # corpus, see real_corpus.py) produce CNFs sized differently from
-                    # shape_for(tier). Planted CNFs already have exactly
-                    # shape_for(tier) vars, so this is a no-op for the default source.
-                    actual_nvars, _clauses = parse_cnf(cnf_text)
+                    # The per-item derived data (challenge_id, cnf_sha256, nvars,
+                    # is_real) is IMMUTABLE for (hotkey, epoch, tier, seq), so it is
+                    # memoized in pm.item_meta() — a warm page does ZERO generation,
+                    # ZERO parse_cnf, ZERO sha256, and only mints the (time-bound)
+                    # token. This removed the per-request CPU that starved the
+                    # worker threadpool under a challenges flood (502/503/timeout
+                    # with the DB pool idle). Correctness is unchanged: item_meta
+                    # calls the SAME generate_instance path, and submit still
+                    # regenerates + sha-gates independently.
+                    meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
+                        x_cathedral_hotkey, epoch, tier_i, seq_i)
+                    if meta_cid != cid:
+                        raise HTTPException(500, "v2_challenge_generation_mismatch")
+                    # Bake the CNF so the verify worker reads the store instead of
+                    # regenerating. Idempotent INSERT OR IGNORE — a cheap no-op on
+                    # warm items; respects CATHEDRAL_V2_CNF_STORE_WRITE. Best-effort:
+                    # v2_cnf_store wraps all errors internally and never raises.
+                    try:
+                        v2_cnf_store.put(v2_store, cid, cnf_text)
+                    except Exception:
+                        pass
                     item["n_vars"] = actual_nvars
-                    # uses_real_instance() is the exact source-selection predicate
-                    # generate_instance runs (planted is None iff it is True), so
-                    # the reported kind always agrees with the CNF body whether it
-                    # came from the store or from fresh generation.
                     item["kind"] = (
                         real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
-                        if pm.uses_real_instance(x_cathedral_hotkey, epoch, tier_i, seq_i)
-                        else "random_3sat_perminer"
+                        if is_real else "random_3sat_perminer"
                     )
-                    cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                     item["cnf_sha256"] = cnf_sha
                     item["assignment_encoding"] = "bitset/v1"
                     item["submit_token"] = v2_bitset_submit.mint_submit_token(
