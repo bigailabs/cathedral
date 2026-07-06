@@ -5535,31 +5535,52 @@ def build_app(
                 for item in items:
                     tier_i = int(item["tier"])
                     seq_i = int(item["seq"])
-                    cid, cnf_text, planted = pm.generate_instance(
-                        x_cathedral_hotkey, epoch, tier_i, seq_i)
-                    if cid != item["challenge_id"]:
-                        raise HTTPException(500, "v2_challenge_generation_mismatch")
-                    # Bake the CNF we just generated so the V2 verify worker can
-                    # read it back instead of regenerating from seed. Best-effort:
-                    # v2_cnf_store wraps all errors internally and never raises.
-                    try:
-                        v2_cnf_store.put(v2_store, cid, cnf_text)
-                    except Exception:
-                        pass
-                    # Bind the reported/minted shape to the ACTUAL generated CNF, not
+                    cid = str(item["challenge_id"])
+                    # Read-through the CNF store before generating: rows are
+                    # immutable per challenge_id (INSERT OR IGNORE), written only
+                    # from real generation results, and get() self-verifies the
+                    # body against its recorded sha, so a cached body is
+                    # byte-identical to what generate_instance would return.
+                    # A warm page does zero generation and zero DB writes; with
+                    # CATHEDRAL_V2_CNF_STORE_READ=0, get() returns None and every
+                    # item takes the generate path below (today's behavior).
+                    # OPS: if you change generation config that alters the CNF BODY
+                    # without changing the challenge_id (CATHEDRAL_V2_REAL_FRACTION,
+                    # CHALLENGE_SOURCE, corpus contents, tier shape) MID-EPOCH, stale
+                    # immutable rows keep minting tokens whose sha no longer matches
+                    # a fresh regeneration, so warm submits 400 submit_token_cnf_mismatch
+                    # until the ~24h purge or epoch roll. Set CATHEDRAL_V2_CNF_STORE_READ=0
+                    # (or purge v2_cnf_store) when rotating generation config. No
+                    # verification bypass — submit still regenerates + sha-gates.
+                    cnf_text = v2_cnf_store.get(v2_store, cid)
+                    if cnf_text is None:
+                        gen_cid, cnf_text, _planted = pm.generate_instance(
+                            x_cathedral_hotkey, epoch, tier_i, seq_i)
+                        if gen_cid != cid:
+                            raise HTTPException(500, "v2_challenge_generation_mismatch")
+                        # Bake the CNF we just generated so the V2 verify worker and
+                        # later page fetches can read it back instead of regenerating
+                        # from seed. Best-effort: v2_cnf_store wraps all errors
+                        # internally and never raises.
+                        try:
+                            v2_cnf_store.put(v2_store, cid, cnf_text)
+                        except Exception:
+                            pass
+                    # Bind the reported/minted shape to the ACTUAL CNF body, not
                     # the nominal tier shape — real-instance sources (combinatorial/
                     # corpus, see real_corpus.py) produce CNFs sized differently from
                     # shape_for(tier). Planted CNFs already have exactly
                     # shape_for(tier) vars, so this is a no-op for the default source.
                     actual_nvars, _clauses = parse_cnf(cnf_text)
                     item["n_vars"] = actual_nvars
-                    # planted is None iff this is a REAL (unplanted) instance — see
-                    # per_miner.generate_instance docstring. Label from the ACTUAL
-                    # generation result, not a re-derivation, so the reported kind
-                    # always agrees with the CNF the miner will actually solve.
+                    # uses_real_instance() is the exact source-selection predicate
+                    # generate_instance runs (planted is None iff it is True), so
+                    # the reported kind always agrees with the CNF body whether it
+                    # came from the store or from fresh generation.
                     item["kind"] = (
                         real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
-                        if planted is None else "random_3sat_perminer"
+                        if pm.uses_real_instance(x_cathedral_hotkey, epoch, tier_i, seq_i)
+                        else "random_3sat_perminer"
                     )
                     cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                     item["cnf_sha256"] = cnf_sha
@@ -5628,10 +5649,23 @@ def build_app(
             if tier_seq is None:
                 raise HTTPException(404, "challenge_id_not_in_miner_set")
             tier_i, seq_i = tier_seq
-            cid, cnf_text, _ = pm.generate_instance(
-                x_cathedral_hotkey, epoch, tier_i, seq_i)
-            if cid != challenge_id:
-                raise HTTPException(404, "challenge_id_not_in_miner_set")
+            # Ownership is proven by resolve_tier_seq_for above (challenge_id is
+            # HMAC-bound to this hotkey), so the immutable cached body can be
+            # served without generating. Read-through: on a miss, generate exactly
+            # as before and best-effort bake so the next reader (this endpoint or
+            # the challenges page) hits. CATHEDRAL_V2_CNF_STORE_READ=0 makes
+            # get() return None, restoring always-generate.
+            cid = challenge_id
+            cnf_text = v2_cnf_store.get(v2_store, challenge_id)
+            if cnf_text is None:
+                gen_cid, cnf_text, _ = pm.generate_instance(
+                    x_cathedral_hotkey, epoch, tier_i, seq_i)
+                if gen_cid != challenge_id:
+                    raise HTTPException(404, "challenge_id_not_in_miner_set")
+                try:
+                    v2_cnf_store.put(v2_store, challenge_id, cnf_text)
+                except Exception:
+                    pass
             headers = {
                 "X-Cathedral-V2": "true",
                 "X-Perminer-Challenge-Id": cid,
