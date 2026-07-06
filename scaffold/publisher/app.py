@@ -436,6 +436,14 @@ def build_app(
     # local tests share the app store.
     v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
     v2_blob_store = blob_store_mod.store_from_env()
+    # Startup-time env pinning: copy the V2 per-miner env onto the legacy names
+    # once, while build_app is still single-threaded, so the V2 per-miner
+    # handlers and verify worker skip v2_pm_env()'s process-global lock (it
+    # serialized every V2 per-miner request to one-at-a-time per process).
+    # Opt-in via CATHEDRAL_V2_PERMINER_ENV_PIN and guarded -- refusal reasons
+    # are logged inside pin_v2_pm_env().
+    v2_pm_env_pinned = v2_pipeline.pin_v2_pm_env()
+    print(f"[v2_pm_env] pinned={v2_pm_env_pinned}")
     # Best-effort hotkey->coldkey resolver for the public receipts feed,
     # reusing the existing metagraph-backed coldkey_map table (see
     # weights._load_coldkey_map). Built once per app instance so its internal
@@ -3888,6 +3896,17 @@ def build_app(
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
 
+    def _require_v2_perminer_ready(pm) -> None:
+        # V2 twin of _require_perminer_ready. pm.require_seed_secret() gates on
+        # the unprefixed CATHEDRAL_PERMINER_ENABLED, which startup env pinning
+        # (v2_pipeline.pin_v2_pm_env) deliberately leaves unset -- through it
+        # the missing-seed check would silently pass and per-miner ids would
+        # fall back to the ephemeral per-process seed. Gate on the V2 flag;
+        # seed_secret_configured() sees the pinned (or v2_pm_env-bridged)
+        # secret either way.
+        if v2_pipeline.v2_perminer_enabled() and not pm.seed_secret_configured():
+            raise HTTPException(503, "per_miner_seed_secret_missing")
+
     def _perminer_epoch_for(pm, challenge_id: str | None = None) -> int:
         current = pm.current_epoch()
         if not challenge_id:
@@ -5445,9 +5464,9 @@ def build_app(
         from . import per_miner as pm
         from . import real_corpus
         with v2_pipeline.v2_pm_env():
-            if not pm.perminer_enabled():
+            if not v2_pipeline.v2_perminer_enabled():
                 raise HTTPException(404, "v2_per_miner_not_enabled")
-            _require_perminer_ready(pm)
+            _require_v2_perminer_ready(pm)
             if x_cathedral_submitted_at is None:
                 raise HTTPException(401, "missing X-Cathedral-Submitted-At")
             _verify_hotkey_claim(
@@ -5544,9 +5563,9 @@ def build_app(
             raise HTTPException(404, "solution_manifest_v2_not_enabled")
         from . import per_miner as pm
         with v2_pipeline.v2_pm_env():
-            if not pm.perminer_enabled():
+            if not v2_pipeline.v2_perminer_enabled():
                 raise HTTPException(404, "v2_per_miner_not_enabled")
-            _require_perminer_ready(pm)
+            _require_v2_perminer_ready(pm)
             if x_cathedral_submitted_at is None:
                 raise HTTPException(401, "missing X-Cathedral-Submitted-At")
             _verify_hotkey_claim(
@@ -6156,9 +6175,9 @@ def build_app(
         # so every rejection path keeps its exact status + reason.
         def _regen_verify_and_admit():
             with v2_pipeline.v2_pm_env():
-                if not pm.perminer_enabled():
+                if not v2_pipeline.v2_perminer_enabled():
                     raise HTTPException(404, "v2_per_miner_not_enabled")
-                _require_perminer_ready(pm)
+                _require_v2_perminer_ready(pm)
                 tier_i = int(token_payload["tier"])
                 seq_i = int(token_payload["seq"])
                 epoch_i = int(token_payload["epoch"])

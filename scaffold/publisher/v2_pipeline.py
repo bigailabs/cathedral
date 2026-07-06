@@ -62,6 +62,9 @@ def cnf_store_metrics() -> dict[str, int]:
 
 
 _PM_ENV_LOCK = threading.RLock()
+_PM_ENV_PINNED = False
+# Same truthy set as per_miner.perminer_enabled() so both gates agree.
+_ENV_TRUTHY = {"1", "true", "yes", "on"}
 _V2_PM_ENV_MAP = {
     "CATHEDRAL_PERMINER_ENABLED": "CATHEDRAL_V2_PERMINER_ENABLED",
     "CATHEDRAL_PERMINER_SEED_SECRET": "CATHEDRAL_V2_PERMINER_SEED_SECRET",
@@ -80,6 +83,77 @@ _V2_PM_ENV_MAP = {
 }
 
 
+def v2_perminer_enabled() -> bool:
+    """Enabled-gate for the V2 per-miner surface, read from env directly.
+
+    Mirrors what per_miner.perminer_enabled() sees inside v2_pm_env(): the
+    V2-prefixed name when present (even present-but-empty, matching the
+    bridge's presence check), else the unprefixed legacy name. Reading it here
+    lets the V2 handlers answer "is V2 on?" without the env bridge -- required
+    once pin_v2_pm_env() runs, because the pin deliberately never sets the
+    legacy CATHEDRAL_PERMINER_ENABLED.
+    """
+    if "CATHEDRAL_V2_PERMINER_ENABLED" in os.environ:
+        raw = os.environ["CATHEDRAL_V2_PERMINER_ENABLED"]
+    else:
+        raw = os.environ.get("CATHEDRAL_PERMINER_ENABLED", "")
+    return raw.strip().lower() in _ENV_TRUTHY
+
+
+def pin_v2_pm_env() -> bool:
+    """Pin the V2 per-miner env onto the legacy names once, at startup.
+
+    Called from build_app before the app serves traffic (single-threaded), so
+    the per-miner handlers and the verify worker no longer need v2_pm_env()'s
+    process-global lock -- the lock serialized every V2 per-miner request
+    (challenges fetch, CNF fetch, submit) and the verify worker to
+    one-at-a-time per process.
+
+    Opt-in via CATHEDRAL_V2_PERMINER_ENV_PIN (default off: behavior stays
+    byte-identical to the bridged path). Refuses, leaving the bridge in place:
+      - when the unprefixed CATHEDRAL_PERMINER_ENABLED is truthy -- the V1
+        per-miner surface is live in this process and overwriting its config
+        would corrupt it;
+      - when a mapped legacy name is already set to a value differing from its
+        V2 name -- an operator set legacy config on purpose.
+
+    CATHEDRAL_PERMINER_ENABLED itself is deliberately never pinned: setting it
+    would enable the V1 per-miner routes and could flip live scoring (the
+    pm_primary /leaderboard/recent compatibility path keys off it). The V2
+    handlers gate on v2_perminer_enabled() instead.
+    """
+    global _PM_ENV_PINNED
+    if os.environ.get("CATHEDRAL_V2_PERMINER_ENV_PIN", "").strip().lower() not in _ENV_TRUTHY:
+        return False
+    if os.environ.get("CATHEDRAL_PERMINER_ENABLED", "").strip().lower() in _ENV_TRUTHY:
+        print(
+            "[v2_pm_env] pin refused: CATHEDRAL_PERMINER_ENABLED is truthy "
+            "(V1 per-miner active in-process)"
+        )
+        return False
+    with _PM_ENV_LOCK:
+        for legacy, v2_name in _V2_PM_ENV_MAP.items():
+            if legacy == "CATHEDRAL_PERMINER_ENABLED":
+                continue
+            if (
+                v2_name in os.environ
+                and legacy in os.environ
+                and os.environ[legacy] != os.environ[v2_name]
+            ):
+                print(
+                    f"[v2_pm_env] pin refused: {legacy} already set and "
+                    f"differs from {v2_name}"
+                )
+                return False
+        for legacy, v2_name in _V2_PM_ENV_MAP.items():
+            if legacy == "CATHEDRAL_PERMINER_ENABLED":
+                continue
+            if v2_name in os.environ:
+                os.environ[legacy] = os.environ[v2_name]
+        _PM_ENV_PINNED = True
+    return True
+
+
 @contextmanager
 def v2_pm_env():
     """Temporarily map V2-prefixed PM config onto the existing PM generator.
@@ -87,7 +161,13 @@ def v2_pm_env():
     The current PM generator reads process env directly. V2 is isolated and uses
     prefixed env vars, so this bridge lets the beta stack avoid setting live-ish
     CATHEDRAL_PERMINER_* names. A lock keeps the temporary mapping serialized.
+
+    When pin_v2_pm_env() ran at startup the mapping is already baked into
+    os.environ, so this becomes a lock-free no-op.
     """
+    if _PM_ENV_PINNED:
+        yield
+        return
     with _PM_ENV_LOCK:
         old: dict[str, str | None] = {}
         try:
