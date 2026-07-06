@@ -106,6 +106,15 @@ def _raises(exc, fn, *a, **k) -> bool:
 
 
 # --- Build sample verified traces -> exports -----------------------------------
+# Independent registry of verified trace_hashes captured at verify time. The
+# provenance check resolves each export's source_trace_hash against THIS set,
+# not against the exports themselves (which would be tautological).
+_VERIFIED_TRACE_HASHES: set[str] = set()
+# Also record what source_trace_hash each export claims, keyed by export_hash, so
+# we can detect a forged export whose claimed source hash was never verified.
+_EXPORT_SOURCE_CLAIM: dict[str, str] = {}
+
+
 def _make_export(seq: int, accepted: bool, *, policy: RedactionPolicy | None = None) -> dict:
     cnf = "p cnf 1 1\n1 0\n"
     target = AuditTarget(
@@ -142,7 +151,11 @@ def _make_export(seq: int, accepted: bool, *, policy: RedactionPolicy | None = N
         cnf_text=cnf,
         replay_fn=fixedpoint_fee_silent_zero_replay,
     )
-    return export_trace(verdict.distillation_trace, policy or RedactionPolicy())
+    # Record the INDEPENDENT verified trace_hash before export.
+    _VERIFIED_TRACE_HASHES.add(str(verdict.distillation_trace.get("trace_hash") or ""))
+    exp = export_trace(verdict.distillation_trace, policy or RedactionPolicy())
+    _EXPORT_SOURCE_CLAIM[exp["export_hash"]] = str(exp.get("source_trace_hash") or "")
+    return exp
 
 
 # A spread of exports: several accepted, several rejected, distinct seqs.
@@ -476,9 +489,11 @@ def _hash_body(obj) -> str:
     ).hexdigest()
 
 
-# Retained export index by export_hash, and the retained verified-trace hashes.
+# Retained export index by export_hash. The trace index is the INDEPENDENT set
+# of verified trace_hashes captured at verify_and_replay time (NOT reconstructed
+# from the exports, which would make the check tautological).
 _EXPORT_INDEX = {e["export_hash"]: e for e in EXPORTS}
-_TRACE_INDEX = {e["source_trace_hash"] for e in EXPORTS}
+_TRACE_INDEX = set(_VERIFIED_TRACE_HASHES)
 
 
 def _provenance_ok() -> bool:
@@ -521,6 +536,21 @@ def _provenance_ok() -> bool:
 
 
 ck("provenance_chain_intact", _provenance_ok())
+
+# Negative: a forged export whose source_trace_hash was NEVER verified must fail
+# provenance, even if its export_hash is internally recomputed to be consistent.
+def _forged_source_trace_fails() -> bool:
+    forged = _copy0.deepcopy(EXPORTS[0])
+    forged["source_trace_hash"] = "forged-never-verified-hash"
+    body = {k: v for k, v in forged.items() if k != "export_hash"}
+    forged["export_hash"] = _hash_body(body)  # internally consistent
+    member = training_safe_view(forged)  # passes structural checks
+    # Resolve against the independent verified-trace index: must be absent.
+    return member["source_trace_hash"] not in _TRACE_INDEX
+
+
+import copy as _copy0  # noqa: E402
+ck("forged_source_trace_hash_rejected", _forged_source_trace_fails())
 
 
 # no_emissions_writes: AST denylist over the new modules.
