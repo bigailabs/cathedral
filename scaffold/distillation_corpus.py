@@ -225,6 +225,10 @@ def training_safe_view(export: dict[str, Any]) -> dict[str, Any]:
     }
     # Defense in depth: assert no sensitive marker survived the whitelist.
     _assert_member_clean(member)
+    # Bind full member content so post-assembly mutation is detected (finding: a
+    # mutated supervision.accepted must not pass integrity). member_hash is
+    # computed over everything EXCEPT itself.
+    member["member_hash"] = _hash_obj(member)
     return member
 
 
@@ -329,7 +333,7 @@ def assemble_corpus(
     split_assignments = {
         m["export_hash"]: _assign_split(m["export_hash"], config) for m in members
     }
-    member_set_hash = _hash_obj(sorted(m["export_hash"] for m in members))
+    member_set_hash = recompute_member_set_hash(members)
     corpus_hash = _hash_obj(
         {
             "schema_version": CORPUS_SCHEMA_VERSION,
@@ -348,8 +352,16 @@ def assemble_corpus(
     )
 
 
+def _member_content_hash(member: dict[str, Any]) -> str:
+    """Recompute a member's content hash (over everything except member_hash)."""
+    body = {k: v for k, v in member.items() if k != "member_hash"}
+    return _hash_obj(body)
+
+
 def recompute_member_set_hash(members: tuple[dict[str, Any], ...]) -> str:
-    return _hash_obj(sorted(m["export_hash"] for m in members))
+    # Bind full member content (member_hash), not just export_hash, so mutating
+    # any member field changes the set hash.
+    return _hash_obj(sorted(_member_content_hash(m) for m in members))
 
 
 def recompute_corpus_hash(corpus: Corpus) -> str:
@@ -371,11 +383,17 @@ def recompute_corpus_hash(corpus: Corpus) -> str:
 
 
 def verify_corpus_integrity(corpus: Corpus) -> None:
-    """Raise if the corpus was mutated after assembly (finding #2)."""
+    """Raise if the corpus was mutated after assembly.
+
+    Binds FULL member content: recomputing each member_hash catches mutation of
+    any member field (e.g. supervision.accepted, which changes pair labels).
+    """
+    for m in corpus.members:
+        stored = m.get("member_hash")
+        if not stored or _member_content_hash(m) != stored:
+            raise UnsafeExportError("corpus_member_content_mutated")
+        _assert_member_clean(m)
     if recompute_member_set_hash(corpus.members) != corpus.member_set_hash:
         raise UnsafeExportError("corpus_member_set_hash_mismatch")
     if recompute_corpus_hash(corpus) != corpus.corpus_hash:
         raise UnsafeExportError("corpus_hash_mismatch")
-    # Every member must still be training-safe (re-run the clean assertion).
-    for m in corpus.members:
-        _assert_member_clean(m)

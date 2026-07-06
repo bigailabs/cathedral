@@ -38,6 +38,17 @@ def _guarded_import(name, *a, **k):  # noqa: ANN001
 
 builtins.__import__ = _guarded_import  # type: ignore[assignment]
 
+
+# Also block importlib.import_module (bypasses __import__) via a meta_path finder.
+class _AccelBlocker:
+    def find_spec(self, name, path=None, target=None):  # noqa: ANN001
+        if name.split(".")[0] in _BLOCKED_ACCEL:
+            raise RuntimeError(f"accelerator_import_blocked_in_gate:{name}")
+        return None
+
+
+sys.meta_path.insert(0, _AccelBlocker())
+
 from scaffold.distillation import RedactionPolicy, export_trace  # noqa: E402
 from scaffold.lanes.audit_arena import (  # noqa: E402
     AuditTarget,
@@ -299,10 +310,16 @@ ck("serve_gated_by_default", sm_default["gated"] is True)
 import copy as _copy  # noqa: E402
 from scaffold.distillation_corpus import verify_corpus_integrity, UnsafeExportError as _UEE  # noqa: E402
 
-# Mutated corpus must be rejected at pair-build time.
+# Mutated split assignment must be rejected at pair-build time.
 _mut = _copy.deepcopy(corpus)
 _mut.split_assignments[next(iter(_mut.split_assignments))] = "test"
 ck("mutated_corpus_rejected", _raises(_UEE, verify_corpus_integrity, _mut))
+
+# Mutated member content (flipping supervision.accepted, which changes labels)
+# must also be rejected — hashes bind full content, not just export_hash.
+_mut2 = _copy.deepcopy(corpus)
+_mut2.members[0]["supervision"]["accepted"] = not _mut2.members[0]["supervision"]["accepted"]
+ck("mutated_member_content_rejected", _raises(_UEE, verify_corpus_integrity, _mut2))
 
 # Forged eval report (bogus eval_hash) must not reach earning.
 from scaffold.distillation_serve import EvalReport as _ER  # noqa: E402
@@ -329,41 +346,65 @@ ck("future_receipt_not_fresh", not _sm_future["earning"])
 
 
 # =============================== Cross-cutting ================================
-# provenance_chain_intact: recompute EVERY hash along the chain (finding #7).
-from scaffold.distillation_corpus import recompute_corpus_hash, recompute_member_set_hash  # noqa: E402
+# provenance_chain_intact: recompute EVERY hash along the chain and rebuild the
+# safe members from the retained export bodies (findings #5/#7).
+import hashlib as _hashlib  # noqa: E402
+import json as _json  # noqa: E402
+from scaffold.distillation_corpus import (  # noqa: E402
+    recompute_corpus_hash,
+    recompute_member_set_hash,
+    training_safe_view,
+)
 from scaffold.distillation_pairs import recompute_pairs_hash  # noqa: E402
 
-# Retained verified-trace index: the source_trace_hash of every export we built.
-_TRACE_INDEX = {
-    e["source_trace_hash"] for e in EXPORTS
-}
+
+def _hash_body(obj) -> str:
+    return _hashlib.sha256(
+        _json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+# Retained export index by export_hash, and the retained verified-trace hashes.
+_EXPORT_INDEX = {e["export_hash"]: e for e in EXPORTS}
+_TRACE_INDEX = {e["source_trace_hash"] for e in EXPORTS}
 
 
 def _provenance_ok() -> bool:
-    # 1. Corpus hashes recompute from its own members/config/splits.
+    # 1. Corpus hashes recompute from members/config/splits, and each member's
+    #    content hash recomputes (mutation would break this).
     if recompute_member_set_hash(corpus.members) != corpus.member_set_hash:
         return False
     if recompute_corpus_hash(corpus) != corpus.corpus_hash:
         return False
-    # 2. Pairs hash recomputes; pairs carry the corpus hash.
-    if recompute_pairs_hash(train_pairs.pairs) != train_pairs.pairs_hash:
-        return False
-    if train_pairs.corpus_hash != corpus.corpus_hash:
-        return False
-    # 3. Model manifest binds corpus + pairs.
-    if manifest["corpus_hash"] != corpus.corpus_hash:
-        return False
-    if manifest["pairs_hash"] != train_pairs.pairs_hash:
-        return False
-    # 4. Served earning manifest carries a bound, non-null eval.
-    if sm_earning["eval"] is None:
-        return False
-    # 5. Every member resolves to a retained verified trace.
+    # 2. Every member: recompute export_hash from the retained export body, and
+    #    rebuild the safe member from that export to confirm it matches.
     for m in corpus.members:
+        exp = _EXPORT_INDEX.get(m["export_hash"])
+        if exp is None:
+            return False
+        body = {k: v for k, v in exp.items() if k != "export_hash"}
+        if _hash_body(body) != m["export_hash"]:
+            return False
+        rebuilt = training_safe_view(exp)
+        if rebuilt.get("member_hash") != m.get("member_hash"):
+            return False
         if m["source_schema_version"] != "cathedral.audit_trace.v1":
             return False
         if not m["source_trace_hash"] or m["source_trace_hash"] not in _TRACE_INDEX:
             return False
+    # 3. Pairs hash recomputes; pairs carry the corpus hash.
+    if recompute_pairs_hash(train_pairs.pairs) != train_pairs.pairs_hash:
+        return False
+    if train_pairs.corpus_hash != corpus.corpus_hash:
+        return False
+    # 4. Model manifest binds corpus + pairs.
+    if manifest["corpus_hash"] != corpus.corpus_hash:
+        return False
+    if manifest["pairs_hash"] != train_pairs.pairs_hash:
+        return False
+    # 5. Served earning manifest carries a bound, non-null eval.
+    if sm_earning["eval"] is None:
+        return False
     return True
 
 
@@ -432,11 +473,19 @@ ck("no_emissions_writes", _emissions_clean())
 def _guards_armed() -> bool:
     if socket.socket is not _blocked_socket:
         return False
+    # __import__ path blocked.
     try:
         _guarded_import("torch")
+        return False
+    except RuntimeError:
+        pass
+    # importlib.import_module path blocked too.
+    import importlib as _il
+    try:
+        _il.import_module("jax")
+        return False
     except RuntimeError:
         return True
-    return False
 
 
 ck("dry_run_no_gpu_no_network", _guards_armed())

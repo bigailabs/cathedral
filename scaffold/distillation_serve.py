@@ -12,7 +12,7 @@ import hashlib
 import json
 from typing import Any, Callable
 
-from scaffold.distillation_pairs import PairsManifest
+from scaffold.distillation_pairs import PairsManifest, verify_pairs_manifest
 
 
 EVAL_SCHEMA_VERSION = "cathedral.distillation_eval.v1"
@@ -93,6 +93,14 @@ def evaluate(
     """
     if pairs_manifest.split != "test":
         raise LeakageError(f"eval_requires_test_split:{pairs_manifest.split}")
+    # Verify the test manifest is internally consistent, and bind it to the model
+    # under test: the test split must come from the same corpus the model trained
+    # on (finding: evaluate must verify the manifest + corpus-hash match).
+    verify_pairs_manifest(pairs_manifest)
+    if artifact is not None:
+        model_corpus = str(getattr(artifact, "corpus_hash", ""))
+        if model_corpus and pairs_manifest.corpus_hash != model_corpus:
+            raise LeakageError("eval_corpus_hash_mismatch_with_model")
     config = config or EvalConfig()
     pairs = pairs_manifest.pairs
     n = len(pairs)
@@ -172,16 +180,20 @@ def _per_category_metrics(preds: list[str], truth: list[str]) -> dict[str, dict[
 
 
 def _eval_report_authentic(report: EvalReport, artifact: Any) -> bool:
-    """Recompute eval_hash and check the report binds to this artifact (finding #4)."""
+    """Recompute eval_hash and require the report binds to a real artifact.
+
+    No None bypass: a serving decision that could lead to earning must have a
+    concrete model artifact whose identity matches the report.
+    """
     if _hash_obj(report.body()) != report.eval_hash:
         return False
     if artifact is None:
-        return True  # offline gate may pass a placeholder; hash integrity still enforced
+        return False
     expected_sha = str(getattr(artifact, "artifact_sha256", ""))
-    if report.model_artifact_sha256 != expected_sha:
+    if not expected_sha or report.model_artifact_sha256 != expected_sha:
         return False
     expected_corpus = str(getattr(artifact, "corpus_hash", ""))
-    if report.model_corpus_hash != expected_corpus:
+    if not expected_corpus or report.model_corpus_hash != expected_corpus:
         return False
     return True
 
@@ -243,9 +255,12 @@ def serving_manifest(
         if health_stale or usage_stale:
             state = "stale"
     elif state in ("healthy", "earning"):
+        # Demote if EITHER receipt is stale. A stale usage receipt with a fresh
+        # health receipt must not remain "healthy" (finding: usage staleness
+        # must demote too).
         if not _receipt_fresh(health_receipt, config, now):
             state = "stale"
-        elif state == "earning" and not _receipt_fresh(usage_receipt, config, now):
+        elif isinstance(usage_receipt, dict) and not _receipt_fresh(usage_receipt, config, now):
             state = "stale"
 
     return {
