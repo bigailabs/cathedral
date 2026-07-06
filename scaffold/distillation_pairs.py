@@ -127,26 +127,59 @@ def build_pairs(corpus: Corpus, *, fmt: PairFormat | None = None, split: str) ->
     pairs = tuple(_build_pair(m, fmt) for m in members)
     for p in pairs:
         _assert_no_sensitive_markers(p)
-    pairs_hash = recompute_pairs_hash(pairs)
+    member_export_hashes = tuple(m["export_hash"] for m in members)
+    format_hash = _hash_obj(fmt.canonical())
+    # pairs_hash binds the FULL manifest contract (rows + split + corpus_hash +
+    # format + member set), so flipping `split` train<->test breaks the hash and
+    # is rejected by verify_pairs_manifest (prevents train/test swap leakage).
+    pairs_hash = _compute_pairs_hash(
+        pairs, split, corpus.corpus_hash, format_hash, member_export_hashes
+    )
     return PairsManifest(
         pairs=pairs,
         split=split,
         corpus_hash=corpus.corpus_hash,
         pairs_hash=pairs_hash,
-        format_hash=_hash_obj(fmt.canonical()),
-        member_export_hashes=tuple(m["export_hash"] for m in members),
+        format_hash=format_hash,
+        member_export_hashes=member_export_hashes,
     )
 
 
-def recompute_pairs_hash(pairs: tuple[TrainingPair, ...]) -> str:
-    return _hash_obj([p.to_dict() for p in pairs])
+def _compute_pairs_hash(
+    pairs: tuple[TrainingPair, ...],
+    split: str,
+    corpus_hash: str,
+    format_hash: str,
+    member_export_hashes: tuple[str, ...],
+) -> str:
+    return _hash_obj(
+        {
+            "schema_version": PAIRS_SCHEMA_VERSION,
+            "split": split,
+            "corpus_hash": corpus_hash,
+            "format_hash": format_hash,
+            "member_export_hashes": sorted(member_export_hashes),
+            "pairs": [p.to_dict() for p in pairs],
+        }
+    )
+
+
+def recompute_pairs_hash(manifest: "PairsManifest") -> str:
+    """Recompute a manifest's pairs_hash from its full contract."""
+    return _compute_pairs_hash(
+        manifest.pairs,
+        manifest.split,
+        manifest.corpus_hash,
+        manifest.format_hash,
+        manifest.member_export_hashes,
+    )
 
 
 def verify_pairs_manifest(manifest: PairsManifest) -> None:
-    """Raise if a PairsManifest is internally inconsistent (finding #3)."""
+    """Raise if a PairsManifest is internally inconsistent or tampered."""
     if not getattr(manifest, "corpus_hash", ""):
         raise ValueError("pairs_manifest_missing_corpus_hash")
-    if recompute_pairs_hash(manifest.pairs) != manifest.pairs_hash:
+    if recompute_pairs_hash(manifest) != manifest.pairs_hash:
         raise ValueError("pairs_hash_mismatch")
     declared = set(manifest.member_export_hashes)
     provenance = {p.provenance_hash for p in manifest.pairs}

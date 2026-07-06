@@ -97,10 +97,16 @@ def evaluate(
     # under test: the test split must come from the same corpus the model trained
     # on (finding: evaluate must verify the manifest + corpus-hash match).
     verify_pairs_manifest(pairs_manifest)
-    if artifact is not None:
-        model_corpus = str(getattr(artifact, "corpus_hash", ""))
-        if model_corpus and pairs_manifest.corpus_hash != model_corpus:
-            raise LeakageError("eval_corpus_hash_mismatch_with_model")
+    # A usable eval requires a real, provenanced model artifact whose corpus
+    # matches the test split's corpus (no partial/unprovenanced artifacts).
+    if artifact is None:
+        raise LeakageError("eval_requires_model_artifact")
+    model_sha = str(getattr(artifact, "artifact_sha256", ""))
+    model_corpus = str(getattr(artifact, "corpus_hash", ""))
+    if not model_sha or not model_corpus:
+        raise LeakageError("eval_requires_provenanced_artifact")
+    if pairs_manifest.corpus_hash != model_corpus:
+        raise LeakageError("eval_corpus_hash_mismatch_with_model")
     config = config or EvalConfig()
     pairs = pairs_manifest.pairs
     n = len(pairs)

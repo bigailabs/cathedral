@@ -136,6 +136,20 @@ def test_eval_report_bound_to_artifact():
     assert not sm["earning"]
 
 
+def test_split_flip_rejected_by_eval():
+    # A train manifest re-labeled split="test" must NOT be accepted as held-out
+    # data: pairs_hash binds split, so verify_pairs_manifest rejects it.
+    import dataclasses
+    from scaffold.distillation_pairs import build_pairs as _bp
+    from scaffold.distillation_corpus import assemble_corpus as _ac
+    corpus = _ac(_exports(60))
+    train_pairs = _bp(corpus, split="train")
+    artifact = train(train_pairs, dry_run=True)
+    forged = dataclasses.replace(train_pairs, split="test")  # pairs_hash now stale
+    with pytest.raises(ValueError):
+        evaluate(artifact, forged)
+
+
 def test_future_receipt_not_fresh():
     _, _, test_pairs, artifact = _setup()
     report = evaluate(artifact, test_pairs, predict=_perfect(test_pairs), config=_PASS)

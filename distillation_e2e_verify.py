@@ -39,6 +39,13 @@ def _guarded_import(name, *a, **k):  # noqa: ANN001
 builtins.__import__ = _guarded_import  # type: ignore[assignment]
 
 
+# Purge any already-cached accelerator modules so importlib.import_module cannot
+# return a cached hit without consulting the finder below.
+for _mod_name in list(sys.modules):
+    if _mod_name.split(".")[0] in _BLOCKED_ACCEL:
+        del sys.modules[_mod_name]
+
+
 # Also block importlib.import_module (bypasses __import__) via a meta_path finder.
 class _AccelBlocker:
     def find_spec(self, name, path=None, target=None):  # noqa: ANN001
@@ -344,6 +351,13 @@ _sm_future = serving_manifest(
 )
 ck("future_receipt_not_fresh", not _sm_future["earning"])
 
+# Split-flip leakage: a train manifest re-labeled split="test" must be rejected
+# (pairs_hash binds split), preventing train pairs being evaluated as held-out.
+import dataclasses as _dc  # noqa: E402
+from scaffold.distillation_serve import LeakageError as _LE  # noqa: E402
+_flipped = _dc.replace(train_pairs, split="test")
+ck("split_flip_rejected", _raises((_LE, ValueError), evaluate, artifact, _flipped))
+
 
 # =============================== Cross-cutting ================================
 # provenance_chain_intact: recompute EVERY hash along the chain and rebuild the
@@ -393,7 +407,7 @@ def _provenance_ok() -> bool:
         if not m["source_trace_hash"] or m["source_trace_hash"] not in _TRACE_INDEX:
             return False
     # 3. Pairs hash recomputes; pairs carry the corpus hash.
-    if recompute_pairs_hash(train_pairs.pairs) != train_pairs.pairs_hash:
+    if recompute_pairs_hash(train_pairs) != train_pairs.pairs_hash:
         return False
     if train_pairs.corpus_hash != corpus.corpus_hash:
         return False
