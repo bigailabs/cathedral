@@ -1280,43 +1280,53 @@ def build_app(
             # Phase 3: bounded non-blocking wait before rejecting. We poll the
             # semaphore with short asyncio sleeps rather than a blocking acquire so
             # the event loop is never stalled while we wait for a slot to free.
-            acquired = gate.acquire(blocking=False)
-            if not acquired and submit_busy_wait_secs > 0:
-                import asyncio
-                deadline = time.monotonic() + submit_busy_wait_secs
-                while not acquired and time.monotonic() < deadline:
-                    await asyncio.sleep(0.02)
-                    acquired = gate.acquire(blocking=False)
-            if not acquired:
-                _record_submit_event(
-                    "rate_limited",
-                    reason,
-                    status_code=429,
-                    log=True,
-                )
-                retry_after_secs = 1
-                body = _retry_after_body(reason, retry_after_secs)
-                await send({
-                    "type": "http.response.start",
-                    "status": 429,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(body)).encode()),
-                        (b"retry-after", str(retry_after_secs).encode()),
-                        (b"x-cathedral-rejection-reason", reason.encode("utf-8")),
-                    ],
-                })
-                await send({
-                    "type": "http.response.body",
-                    "body": body,
-                    "more_body": False,
-                })
-                return
-
+            #
+            # LEAK FIX: the whole path from a successful acquire() to the final
+            # release() must be exception-safe. Previously a slot acquired at the
+            # end of the polling loop could be leaked if a CancelledError (client
+            # disconnect) fired after acquire() but before the try/finally that
+            # releases it — over many disconnects the BoundedSemaphore drained to
+            # zero and every request 429'd spuriously even on an idle origin. We
+            # now hold the slot inside a single try that spans BOTH the shed-poll
+            # tail and the app call, releasing in finally on every exit path.
+            acquired = False
             try:
+                acquired = gate.acquire(blocking=False)
+                if not acquired and submit_busy_wait_secs > 0:
+                    import asyncio
+                    deadline = time.monotonic() + submit_busy_wait_secs
+                    while not acquired and time.monotonic() < deadline:
+                        await asyncio.sleep(0.02)
+                        acquired = gate.acquire(blocking=False)
+                if not acquired:
+                    _record_submit_event(
+                        "rate_limited",
+                        reason,
+                        status_code=429,
+                        log=True,
+                    )
+                    retry_after_secs = 1
+                    body = _retry_after_body(reason, retry_after_secs)
+                    await send({
+                        "type": "http.response.start",
+                        "status": 429,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                            (b"retry-after", str(retry_after_secs).encode()),
+                            (b"x-cathedral-rejection-reason", reason.encode("utf-8")),
+                        ],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": body,
+                        "more_body": False,
+                    })
+                    return
                 await self._app(scope, receive, send)
             finally:
-                gate.release()
+                if acquired:
+                    gate.release()
 
     class _ServiceRoleGuardMiddleware:
         """Fail closed when this process is launched as a narrow service role."""
