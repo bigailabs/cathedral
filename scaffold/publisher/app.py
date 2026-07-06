@@ -530,6 +530,14 @@ def build_app(
         "CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", solution_manifest_enabled)
     solution_blob_upload_max_bytes = _env_int(
         "CATHEDRAL_V2_BLOB_UPLOAD_MAX_BYTES", 5_000_000)
+    # Durable inline copy threshold. The local blob dir is per-container /tmp, so
+    # the async verify worker (a different container) cannot read what the web
+    # container wrote — a redeploy or cross-container fetch loses the bytes and
+    # the row poison-loops on blob_fetch_failed forever. Inline every solution we
+    # accept for blob upload so verification never depends on the local blob
+    # store. Defaults to the upload max so coverage always matches what we admit.
+    solution_inline_max_bytes = _env_int(
+        "CATHEDRAL_V2_INLINE_MAX_BYTES", solution_blob_upload_max_bytes)
     v2_shadow_v1_enabled = _env_bool("CATHEDRAL_V2_SHADOW_V1_ENABLED", False)
     v2_shadow_v1_max_solution_bytes = _env_int(
         "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
@@ -6364,9 +6372,9 @@ def build_app(
         # before; verify sha-checks whichever copy it uses.
         inline_solution: bytes | None = None
         try:
-            if int(manifest.get("solution_bytes") or 0) <= 8192:
+            if int(manifest.get("solution_bytes") or 0) <= solution_inline_max_bytes:
                 inline_solution = v2_blob_store.fetch(
-                    str(manifest["solution_cid"]), max_bytes=8192)
+                    str(manifest["solution_cid"]), max_bytes=solution_inline_max_bytes)
         except Exception:
             inline_solution = None
         row, inserted = solution_manifest.admit_manifest(

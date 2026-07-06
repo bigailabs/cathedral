@@ -264,23 +264,40 @@ def claim_batch(
     worker_id: str,
     batch_size: int = 8,
     lock_secs: float = 120.0,
+    max_attempts: int = 20,
 ) -> list[dict[str, Any]]:
     """Claim V2 rows for verification.
 
     This is sufficient for one/few workers in beta. A future high-scale queue can
     replace this with SKIP LOCKED/NATS/etc. without changing manifest format.
+
+    max_attempts caps how many times a single row is claimed. Without it, a row
+    that keeps failing non-terminally (e.g. an unreachable blob) re-enters the
+    oldest-first queue every retry interval and, in bulk, starves every healthy
+    row so nothing verifies. Rows past the cap are skipped here and swept to
+    'rejected' as exhausted, keeping the queue live. 0 disables the cap.
+    Expired-lock 'verifying' rows are also reclaimed so a worker that died
+    mid-verify (or a lock that lapsed) cannot strand rows forever.
     """
     now_iso = _now_iso_ms()
     lock_until = _iso_plus(lock_secs)
+    cap_clause = "" if not max_attempts else "AND attempt_count < ? "
 
     def _tx(conn):
+        params: list[Any] = [
+            STATUS_RECEIVED, STATUS_RETRY, STATUS_VERIFYING, now_iso, now_iso,
+        ]
+        if max_attempts:
+            params.append(int(max_attempts))
+        params.append(int(batch_size))
         rows = conn.execute(
             "SELECT * FROM solution_manifests "
-            "WHERE status IN (?, ?) "
+            "WHERE status IN (?, ?, ?) "
             "AND (next_attempt_at_iso IS NULL OR next_attempt_at_iso <= ?) "
             "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
+            + cap_clause +
             "ORDER BY received_at_iso ASC LIMIT ?",
-            (STATUS_RECEIVED, STATUS_RETRY, now_iso, now_iso, int(batch_size)),
+            tuple(params),
         ).fetchall()
         ids = [str(r["id"]) for r in rows]
         for rid in ids:
@@ -372,8 +389,23 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
             return {"id": rid, "status": STATUS_REJECTED if terminal else STATUS_RETRY, "reason": reason}
         except Exception as exc:
             reason = f"blob_fetch_failed:{type(exc).__name__}"
-            _finish_rejected(store, rid, reason, terminal=False)
-            return {"id": rid, "status": STATUS_RETRY, "reason": reason}
+            # A local:// blob with no durable inline copy can NEVER be fetched by
+            # this worker: local:// blobs live on the web container's ephemeral
+            # /tmp, which is not shared cross-container and is wiped on redeploy.
+            # Retrying is futile and lets one such row poison-loop forever,
+            # starving the batch (claim orders oldest-first) so no healthy row
+            # ever verifies. Make it terminal. Solutions admitted after the
+            # inline-threshold fix always carry solution_inline, so this only
+            # ever fires for pre-fix stranded rows.
+            no_inline = not row.get("solution_inline")
+            local_blob = cid.startswith("local://")
+            terminal = no_inline and local_blob
+            _finish_rejected(store, rid, reason, terminal=terminal)
+            return {
+                "id": rid,
+                "status": STATUS_REJECTED if terminal else STATUS_RETRY,
+                "reason": reason,
+            }
 
     actual_sha = hashlib.sha256(blob).hexdigest()
     if actual_sha != expected_sha:
@@ -472,6 +504,42 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
     return {"id": rid, "status": STATUS_VERIFIED, **result}
 
 
+def sweep_exhausted(store: Store, *, max_attempts: int = 20, limit: int = 500) -> int:
+    """Reject rows that have exhausted the claim attempt cap.
+
+    claim_batch skips rows at/over max_attempts so they can no longer starve the
+    queue, but they'd otherwise sit in 'retry' indefinitely. This sweeps them to
+    'rejected' (verify_attempts_exhausted) so the backlog stays clean. Best-effort,
+    called once per tick. Disabled when max_attempts is 0.
+    """
+    if not max_attempts:
+        return 0
+    now_iso = _now_iso_ms()
+
+    def _tx(conn):
+        rows = conn.execute(
+            "SELECT id FROM solution_manifests "
+            "WHERE status IN (?, ?) AND attempt_count >= ? "
+            "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) LIMIT ?",
+            (STATUS_RECEIVED, STATUS_RETRY, int(max_attempts), now_iso, int(limit)),
+        ).fetchall()
+        ids = [str(r["id"]) for r in rows]
+        for rid in ids:
+            conn.execute(
+                "UPDATE solution_manifests SET status=?, rejection_reason=?, "
+                "locked_by=NULL, locked_until_iso=NULL, next_attempt_at_iso=NULL, "
+                "last_error=? WHERE id=?",
+                (STATUS_REJECTED, "verify_attempts_exhausted",
+                 "verify_attempts_exhausted", rid),
+            )
+        return len(ids)
+
+    try:
+        return store.write(_tx)
+    except Exception:
+        return 0
+
+
 def process_batch(
     store: Store,
     blob_store,
@@ -480,10 +548,19 @@ def process_batch(
     batch_size: int = 8,
     lock_secs: float = 120.0,
     max_blob_bytes: int = 0,
+    max_attempts: int = 20,
 ) -> list[dict[str, Any]]:
     worker_id = worker_id or f"v2-{uuid.uuid4().hex[:12]}"
-    rows = claim_batch(store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs)
+    rows = claim_batch(
+        store, worker_id=worker_id, batch_size=batch_size,
+        lock_secs=lock_secs, max_attempts=max_attempts)
     results = [verify_one(store, row, blob_store, max_blob_bytes=max_blob_bytes) for row in rows]
+    # Sweep attempt-cap-exhausted rows to 'rejected' so they leave the queue
+    # instead of lingering in 'retry'. Cheap point-update, best-effort.
+    try:
+        sweep_exhausted(store, max_attempts=max_attempts)
+    except Exception:
+        pass
     # Opportunistic purge of old baked CNFs — self-throttled to at most once
     # per ~10 minutes inside v2_cnf_store, so it is cheap to call every tick.
     # Best-effort: maybe_purge_older_than swallows all errors internally.
