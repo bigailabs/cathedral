@@ -175,8 +175,16 @@ def recompute_pairs_hash(manifest: "PairsManifest") -> str:
     )
 
 
-def verify_pairs_manifest(manifest: PairsManifest) -> None:
-    """Raise if a PairsManifest is internally inconsistent or tampered."""
+def verify_pairs_manifest(manifest: PairsManifest, corpus: Corpus | None = None) -> None:
+    """Raise if a PairsManifest is inconsistent, tampered, or (when a trusted
+    corpus is provided) does not actually belong to the claimed split.
+
+    Self-hash recomputation only proves INTERNAL consistency. Authenticity —
+    that these are really the ``split`` members of ``corpus`` — requires checking
+    against the trusted corpus, because an attacker can relabel the split and
+    recompute the hash. When ``corpus`` is provided, we rebuild the manifest from
+    it and require an exact match.
+    """
     if not getattr(manifest, "corpus_hash", ""):
         raise ValueError("pairs_manifest_missing_corpus_hash")
     if recompute_pairs_hash(manifest) != manifest.pairs_hash:
@@ -185,3 +193,15 @@ def verify_pairs_manifest(manifest: PairsManifest) -> None:
     provenance = {p.provenance_hash for p in manifest.pairs}
     if not provenance.issubset(declared):
         raise ValueError("pair_provenance_not_in_member_set")
+
+    if corpus is not None:
+        verify_corpus_integrity(corpus)
+        if manifest.corpus_hash != corpus.corpus_hash:
+            raise ValueError("pairs_manifest_corpus_hash_mismatch")
+        # Rebuild the canonical manifest for this split from the trusted corpus
+        # and require the attacker-supplied manifest to match it exactly. This
+        # closes the relabel-and-rehash split-swap: the member set for "test" in
+        # the corpus will not equal train's members.
+        canonical = build_pairs(corpus, split=manifest.split)
+        if canonical.pairs_hash != manifest.pairs_hash:
+            raise ValueError("pairs_manifest_does_not_match_corpus_split")

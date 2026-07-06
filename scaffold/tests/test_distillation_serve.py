@@ -136,18 +136,55 @@ def test_eval_report_bound_to_artifact():
     assert not sm["earning"]
 
 
-def test_split_flip_rejected_by_eval():
-    # A train manifest re-labeled split="test" must NOT be accepted as held-out
-    # data: pairs_hash binds split, so verify_pairs_manifest rejects it.
+def test_split_flip_stale_hash_rejected():
+    # A train manifest re-labeled split="test" (stale hash) is rejected.
     import dataclasses
     from scaffold.distillation_pairs import build_pairs as _bp
     from scaffold.distillation_corpus import assemble_corpus as _ac
     corpus = _ac(_exports(60))
     train_pairs = _bp(corpus, split="train")
-    artifact = train(train_pairs, dry_run=True)
+    artifact = train(train_pairs, corpus=corpus, dry_run=True)
     forged = dataclasses.replace(train_pairs, split="test")  # pairs_hash now stale
     with pytest.raises(ValueError):
         evaluate(artifact, forged)
+
+
+def test_split_flip_rehash_rejected_against_corpus():
+    # The deeper attack: relabel split AND recompute the hash so it is internally
+    # consistent. Rejected only because we verify against the trusted corpus.
+    import dataclasses
+    from scaffold.distillation_pairs import build_pairs as _bp, recompute_pairs_hash as _rph
+    from scaffold.distillation_corpus import assemble_corpus as _ac
+    corpus = _ac(_exports(60))
+    train_pairs = _bp(corpus, split="train")
+    artifact = train(train_pairs, corpus=corpus, dry_run=True)
+    relabelled = dataclasses.replace(train_pairs, split="test")
+    relabelled = dataclasses.replace(relabelled, pairs_hash=_rph(relabelled))  # self-consistent
+    with pytest.raises(ValueError):
+        evaluate(artifact, relabelled, corpus=corpus)
+
+
+def test_forged_eval_test_hash_rejected():
+    # A self-consistent forged eval report whose test_pairs_hash does not match
+    # the trusted test manifest cannot reach earning.
+    import dataclasses
+    from scaffold.distillation_serve import EvalReport as _ER, _hash_obj as _sh
+    _, _, test_pairs, artifact = _setup()
+    forged = _ER(n=10, accuracy=1.0, per_category={}, positive_recall=1.0,
+                 baseline_accuracy=0.0, beats_baseline=True,
+                 model_artifact_sha256=artifact.artifact_sha256,
+                 model_corpus_hash=artifact.corpus_hash,
+                 test_pairs_hash="WRONG", eval_hash="x")
+    forged = dataclasses.replace(forged, eval_hash=_sh(forged.body()))
+    sm = serving_manifest(
+        artifact, forged, test_pairs_manifest=test_pairs,
+        config=ServeConfig(eval=_PASS),
+        deployment_id="d", auth="a",
+        health_receipt={"timestamp": 100},
+        usage_receipt={"timestamp": 100, "receipt_hash": "h", "receipt_source": "c"},
+        now=200,
+    )
+    assert not sm["earning"]
 
 
 def test_future_receipt_not_fresh():

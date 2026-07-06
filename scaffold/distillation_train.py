@@ -12,6 +12,7 @@ import hashlib
 import json
 from typing import Any
 
+from scaffold.distillation_corpus import Corpus
 from scaffold.distillation_pairs import PairsManifest, verify_pairs_manifest
 
 
@@ -77,7 +78,7 @@ def _hash_obj(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _require_lineage(pairs_manifest: PairsManifest) -> None:
+def _require_lineage(pairs_manifest: PairsManifest, corpus: Corpus | None) -> None:
     if not getattr(pairs_manifest, "corpus_hash", ""):
         raise UnprovenancedTrainingError("pairs_manifest_missing_corpus_hash")
     if not getattr(pairs_manifest, "pairs_hash", ""):
@@ -86,11 +87,11 @@ def _require_lineage(pairs_manifest: PairsManifest) -> None:
         raise UnprovenancedTrainingError(
             f"train_requires_train_split:{getattr(pairs_manifest, 'split', None)}"
         )
-    # Recompute pairs_hash and verify provenance so a forged/stale manifest with
-    # bogus hashes or arbitrary pairs cannot train and record fake lineage
-    # (finding #3). A duck-typed fake without .pairs is rejected here too.
+    # Verify against the trusted corpus when provided: this proves the manifest
+    # really is the train split of that corpus, defeating a relabel-and-rehash
+    # split swap. Without a corpus we can only prove internal consistency.
     try:
-        verify_pairs_manifest(pairs_manifest)
+        verify_pairs_manifest(pairs_manifest, corpus)
     except (ValueError, AttributeError, TypeError) as exc:
         raise UnprovenancedTrainingError(f"pairs_manifest_inconsistent:{exc}") from exc
 
@@ -98,12 +99,13 @@ def _require_lineage(pairs_manifest: PairsManifest) -> None:
 def train(
     pairs_manifest: PairsManifest,
     *,
+    corpus: Corpus | None = None,
     config: TrainConfig | None = None,
     dry_run: bool = False,
     created_by: str = "operator",
 ) -> ModelArtifact:
     config = config or TrainConfig()
-    _require_lineage(pairs_manifest)
+    _require_lineage(pairs_manifest, corpus)
     train_config_hash = _hash_obj(config.canonical())
 
     if dry_run:

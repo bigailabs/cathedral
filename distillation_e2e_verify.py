@@ -229,7 +229,8 @@ ck("pairs_carry_corpus_hash", train_pairs.corpus_hash == corpus.corpus_hash)
 
 
 # =============================== Stage 6: train ===============================
-artifact = train(train_pairs, config=TrainConfig(), dry_run=True)
+# Train with the trusted corpus so lineage is authenticated against it.
+artifact = train(train_pairs, corpus=corpus, config=TrainConfig(), dry_run=True)
 ck("train_dry_run_no_gpu", artifact.artifact_sha256 == "dry-run")
 
 manifest = artifact.to_manifest()
@@ -355,8 +356,36 @@ ck("future_receipt_not_fresh", not _sm_future["earning"])
 # (pairs_hash binds split), preventing train pairs being evaluated as held-out.
 import dataclasses as _dc  # noqa: E402
 from scaffold.distillation_serve import LeakageError as _LE  # noqa: E402
+from scaffold.distillation_pairs import recompute_pairs_hash as _rph  # noqa: E402
 _flipped = _dc.replace(train_pairs, split="test")
-ck("split_flip_rejected", _raises((_LE, ValueError), evaluate, artifact, _flipped))
+ck("split_flip_stale_hash_rejected", _raises((_LE, ValueError), evaluate, artifact, _flipped))
+
+# The DEEPER attack: relabel split AND recompute the hash so it is internally
+# consistent. Must still be rejected when verified against the trusted corpus,
+# because train's members != test's members in that corpus.
+_relabelled = _dc.replace(train_pairs, split="test")
+_relabelled = _dc.replace(_relabelled, pairs_hash=_rph(_relabelled))  # now self-consistent
+ck("split_flip_rehash_rejected_vs_corpus",
+   _raises((_LE, ValueError), evaluate, artifact, _relabelled, corpus=corpus))
+
+# The strict serving path binds the eval to the trusted test manifest: a forged
+# report whose test_pairs_hash doesn't match the real test split cannot earn.
+_forged_test = _ER(n=10, accuracy=1.0, per_category={}, positive_recall=1.0,
+                   baseline_accuracy=0.0, beats_baseline=True,
+                   model_artifact_sha256="dry-run", model_corpus_hash=corpus.corpus_hash,
+                   test_pairs_hash="WRONG", eval_hash="x")
+from scaffold.distillation_serve import _hash_obj as _sh  # noqa: E402
+import dataclasses as _dc2  # noqa: E402
+_forged_test = _dc2.replace(_forged_test, eval_hash=_sh(_forged_test.body()))  # self-consistent
+_sm_forged_test = serving_manifest(
+    artifact, _forged_test, test_pairs_manifest=test_pairs,
+    config=ServeConfig(eval=_PASS_EVAL),
+    deployment_id="d", auth="a",
+    health_receipt={"timestamp": 100},
+    usage_receipt={"timestamp": 100, "receipt_hash": "h", "receipt_source": "c"},
+    now=200,
+)
+ck("forged_test_hash_rejected", not _sm_forged_test["earning"])
 
 
 # =============================== Cross-cutting ================================

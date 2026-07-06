@@ -12,6 +12,7 @@ import hashlib
 import json
 from typing import Any, Callable
 
+from scaffold.distillation_corpus import Corpus
 from scaffold.distillation_pairs import PairsManifest, verify_pairs_manifest
 
 
@@ -83,6 +84,7 @@ def evaluate(
     artifact: Any,
     pairs_manifest: PairsManifest,
     *,
+    corpus: Corpus | None = None,
     predict: Callable[[str], str] | None = None,
     config: EvalConfig | None = None,
 ) -> EvalReport:
@@ -90,13 +92,14 @@ def evaluate(
 
     ``predict`` maps a pair input -> predicted label. If omitted, a deterministic
     stub predicts the majority label (used only to exercise the gate offline).
+    When ``corpus`` is provided, the test manifest is verified against it so a
+    relabel-and-rehash split swap cannot pass training pairs off as held-out.
     """
     if pairs_manifest.split != "test":
         raise LeakageError(f"eval_requires_test_split:{pairs_manifest.split}")
-    # Verify the test manifest is internally consistent, and bind it to the model
-    # under test: the test split must come from the same corpus the model trained
-    # on (finding: evaluate must verify the manifest + corpus-hash match).
-    verify_pairs_manifest(pairs_manifest)
+    # Verify the test manifest against the trusted corpus (authenticity), not
+    # just internal consistency.
+    verify_pairs_manifest(pairs_manifest, corpus)
     # A usable eval requires a real, provenanced model artifact whose corpus
     # matches the test split's corpus (no partial/unprovenanced artifacts).
     if artifact is None:
@@ -185,8 +188,11 @@ def _per_category_metrics(preds: list[str], truth: list[str]) -> dict[str, dict[
     return out
 
 
-def _eval_report_authentic(report: EvalReport, artifact: Any) -> bool:
-    """Recompute eval_hash and require the report binds to a real artifact.
+def _eval_report_authentic(
+    report: EvalReport, artifact: Any, test_pairs_manifest: PairsManifest | None = None
+) -> bool:
+    """Recompute eval_hash and require the report binds to a real artifact and,
+    when supplied, to the trusted test manifest.
 
     No None bypass: a serving decision that could lead to earning must have a
     concrete model artifact whose identity matches the report.
@@ -198,6 +204,11 @@ def _eval_report_authentic(report: EvalReport, artifact: Any) -> bool:
     expected_sha = str(getattr(artifact, "artifact_sha256", ""))
     if not expected_sha or report.model_artifact_sha256 != expected_sha:
         return False
+    # Bind to the trusted test split: a forged report cannot fake the real
+    # test_pairs_hash if we require it to match the trusted manifest.
+    if test_pairs_manifest is not None:
+        if report.test_pairs_hash != test_pairs_manifest.pairs_hash:
+            return False
     expected_corpus = str(getattr(artifact, "corpus_hash", ""))
     if not expected_corpus or report.model_corpus_hash != expected_corpus:
         return False
@@ -218,6 +229,7 @@ def serving_manifest(
     artifact: Any,
     eval_report: EvalReport | None,
     *,
+    test_pairs_manifest: PairsManifest | None = None,
     config: ServeConfig | None = None,
     gated: bool = True,
     deployment_id: str | None = None,
@@ -233,9 +245,11 @@ def serving_manifest(
     receipt_source = ""
 
     if eval_report is not None:
-        # Verify the eval report is authentic and belongs to this artifact
-        # (finding #4): recompute eval_hash and match the artifact identity.
-        if not _eval_report_authentic(eval_report, artifact):
+        # Verify the eval report is authentic and belongs to this artifact:
+        # recompute eval_hash, match the artifact identity, and (when a trusted
+        # test manifest is supplied) require the report's test_pairs_hash to match
+        # it — a forged report can fabricate metrics but not the real test split.
+        if not _eval_report_authentic(eval_report, artifact, test_pairs_manifest):
             eval_report = None
 
     if eval_report is not None:
