@@ -270,8 +270,10 @@ def _assert_member_clean(member: dict[str, Any]) -> None:
             raise UnsafeExportError(f"member_contains_sensitive_marker:{marker}")
 
 
-def _assign_split(export_hash: str, config: CorpusConfig) -> str:
-    bucket = int(_sha256(export_hash + config.split_salt), 16) % _SPLIT_MODULUS
+def _assign_split(source_trace_hash: str, config: CorpusConfig) -> str:
+    # Seed by source_trace_hash (the true example identity), so the same example
+    # always lands in the same split regardless of export/redaction details.
+    bucket = int(_sha256(source_trace_hash + config.split_salt), 16) % _SPLIT_MODULUS
     train_r = config.split.get("train", 0.0)
     val_r = config.split.get("val", 0.0)
     train_cut = int(round(train_r * _SPLIT_MODULUS))
@@ -293,7 +295,8 @@ def assemble_corpus(
 ) -> Corpus:
     config = config or CorpusConfig()
     seen: dict[str, dict[str, Any]] = {}
-    drops = {"duplicates": 0, "unsafe": 0, "not_export": 0}
+    seen_source: set[str] = set()
+    drops = {"duplicates": 0, "unsafe": 0, "not_export": 0, "duplicate_source": 0}
 
     for record in exports:
         try:
@@ -304,6 +307,15 @@ def assemble_corpus(
         except UnsafeExportError:
             drops["unsafe"] += 1
             raise
+        # Dedup by the true EXAMPLE identity (source_trace_hash), not export_hash:
+        # the same verified trace re-exported under a different redaction salt has
+        # a different export_hash but is the SAME example, and must not appear
+        # twice (which could otherwise split the same example across train/test).
+        source = member["source_trace_hash"]
+        if source in seen_source:
+            drops["duplicate_source"] += 1
+            continue
+        seen_source.add(source)
         key = member["export_hash"] if config.dedup_by == "export_hash" else _hash_obj(member)
         if key in seen:
             drops["duplicates"] += 1
@@ -331,7 +343,7 @@ def assemble_corpus(
             raise ValueError("corpus_negative_ratio_exceeds_cap")
 
     split_assignments = {
-        m["export_hash"]: _assign_split(m["export_hash"], config) for m in members
+        m["export_hash"]: _assign_split(m["source_trace_hash"], config) for m in members
     }
     member_set_hash = recompute_member_set_hash(members)
     corpus_hash = _hash_obj(

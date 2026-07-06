@@ -71,23 +71,55 @@ def _attested(test_pairs, artifact):
     )
 
 
-def test_earning_requires_full_evidence():
-    corpus, _, test_pairs, artifact = _setup()
-    trusted = dict(corpus=corpus, test_pairs_manifest=test_pairs,
-                   predict=_attested(test_pairs, artifact))
-    no_receipt = serving_manifest(
-        artifact, None, **trusted, config=ServeConfig(eval=_PASS),
-        deployment_id="d", auth="a", health_receipt={"timestamp": 100}, now=200,
-    )
-    assert not no_receipt["earning"]
+def _with_tier_b_verifier():
+    """Context manager: temporarily wire a Tier B attestation verifier."""
+    import contextlib
+    import scaffold.distillation_serve as svc
 
-    earning = serving_manifest(
-        artifact, None, **trusted, config=ServeConfig(eval=_PASS),
+    @contextlib.contextmanager
+    def _cm():
+        prev = svc.TIER_B_ATTESTATION_VERIFIER
+        svc.TIER_B_ATTESTATION_VERIFIER = lambda p, a: bool(p.attestation)
+        try:
+            yield
+        finally:
+            svc.TIER_B_ATTESTATION_VERIFIER = prev
+    return _cm()
+
+
+def test_tier_a_fails_closed_no_earning():
+    # Default (no Tier B verifier): even a matching AttestedPredictor cannot earn.
+    corpus, _, test_pairs, artifact = _setup()
+    sm = serving_manifest(
+        artifact, None, corpus=corpus, test_pairs_manifest=test_pairs,
+        predict=_attested(test_pairs, artifact), config=ServeConfig(eval=_PASS),
         deployment_id="d", auth="a",
         health_receipt={"timestamp": 100},
         usage_receipt={"timestamp": 100, "receipt_hash": "h", "receipt_source": "chutes"},
         now=200,
     )
+    assert sm["state"] == "healthy"
+    assert not sm["earning"]
+
+
+def test_earning_requires_full_evidence():
+    corpus, _, test_pairs, artifact = _setup()
+    trusted = dict(corpus=corpus, test_pairs_manifest=test_pairs,
+                   predict=_attested(test_pairs, artifact))
+    with _with_tier_b_verifier():
+        no_receipt = serving_manifest(
+            artifact, None, **trusted, config=ServeConfig(eval=_PASS),
+            deployment_id="d", auth="a", health_receipt={"timestamp": 100}, now=200,
+        )
+        assert not no_receipt["earning"]
+
+        earning = serving_manifest(
+            artifact, None, **trusted, config=ServeConfig(eval=_PASS),
+            deployment_id="d", auth="a",
+            health_receipt={"timestamp": 100},
+            usage_receipt={"timestamp": 100, "receipt_hash": "h", "receipt_source": "chutes"},
+            now=200,
+        )
     assert earning["earning"]
     assert earning["receipt_hash"] == "h"
 

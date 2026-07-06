@@ -131,6 +131,17 @@ def test_keeps_negative_controls():
 
 def test_dedup_drops_duplicates():
     exp = _exports(10)
-    corpus = assemble_corpus(exp + exp)  # each export twice
+    corpus = assemble_corpus(exp + exp)  # each export twice (same source trace)
     assert len(corpus.members) == 10
-    assert corpus.drops["duplicates"] == 10
+    # Deduped by source_trace_hash: the second copy of each is a duplicate source.
+    assert corpus.drops["duplicate_source"] == 10
+
+
+def test_same_source_cannot_cross_splits():
+    # Two exports of the SAME verified trace (different redaction salts) must not
+    # land in different splits: dedup by source removes the second entirely.
+    from scaffold.distillation import RedactionPolicy
+    e = _export(1, True)
+    e2 = _export(1, True, RedactionPolicy(audience="private"))  # same source trace
+    corpus = assemble_corpus([e, e2])
+    assert len(corpus.members) == 1  # one example, one split

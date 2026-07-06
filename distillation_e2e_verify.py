@@ -110,9 +110,11 @@ def _raises(exc, fn, *a, **k) -> bool:
 # provenance check resolves each export's source_trace_hash against THIS set,
 # not against the exports themselves (which would be tautological).
 _VERIFIED_TRACE_HASHES: set[str] = set()
-# Also record what source_trace_hash each export claims, keyed by export_hash, so
-# we can detect a forged export whose claimed source hash was never verified.
-_EXPORT_SOURCE_CLAIM: dict[str, str] = {}
+# Bind each verified source_trace_hash to the member_hash it legitimately
+# produces. A forged export that REUSES a real source_trace_hash but mutates a
+# training-affecting field (e.g. supervision.accepted) yields a different
+# member_hash, so this binding rejects it. This is the non-tautological check.
+_TRACE_TO_MEMBER: dict[str, str] = {}
 
 
 def _make_export(seq: int, accepted: bool, *, policy: RedactionPolicy | None = None) -> dict:
@@ -151,10 +153,18 @@ def _make_export(seq: int, accepted: bool, *, policy: RedactionPolicy | None = N
         cnf_text=cnf,
         replay_fn=fixedpoint_fee_silent_zero_replay,
     )
-    # Record the INDEPENDENT verified trace_hash before export.
-    _VERIFIED_TRACE_HASHES.add(str(verdict.distillation_trace.get("trace_hash") or ""))
+    # Record the INDEPENDENT verified trace_hash before export, and bind it to
+    # the legitimate member_hash it produces.
+    thash = str(verdict.distillation_trace.get("trace_hash") or "")
+    _VERIFIED_TRACE_HASHES.add(thash)
     exp = export_trace(verdict.distillation_trace, policy or RedactionPolicy())
-    _EXPORT_SOURCE_CLAIM[exp["export_hash"]] = str(exp.get("source_trace_hash") or "")
+    # Bind trace->member only for training-safe exports (skip deliberately-unsafe
+    # fixtures used to test rejection).
+    try:
+        legit_member = training_safe_view(exp)
+        _TRACE_TO_MEMBER[legit_member["source_trace_hash"]] = legit_member["member_hash"]
+    except Exception:
+        pass
     return exp
 
 
@@ -320,10 +330,13 @@ sm_bare = serving_manifest(
 ck("bare_predict_reaches_healthy_not_earning",
    sm_bare["state"] == "healthy" and not sm_bare["earning"])
 
-# An AttestedPredictor bound to the artifact (Tier B) reaches earning.
+# Tier A FAILS CLOSED: with no Tier B verifier wired, even a "matching"
+# AttestedPredictor with a fabricated attestation string CANNOT earn.
+import scaffold.distillation_serve as _svc  # noqa: E402
+assert _svc.TIER_B_ATTESTATION_VERIFIER is None  # default state
 _attested = _AP(fn=_perfect, bound_artifact_sha256=artifact.artifact_sha256,
-                attestation="tee-attested-run")
-sm_earning = serving_manifest(
+                attestation="tee-attested-run")  # fabricated
+sm_tierA = serving_manifest(
     artifact, None, corpus=corpus, test_pairs_manifest=test_pairs, predict=_attested,
     config=ServeConfig(eval=_PASS_EVAL),
     deployment_id="dep-1", auth="allowlist",
@@ -331,7 +344,25 @@ sm_earning = serving_manifest(
     usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
     now=200,
 )
-ck("attested_predictor_reaches_earning",
+ck("tier_a_fails_closed_no_earning",
+   sm_tierA["state"] == "healthy" and not sm_tierA["earning"])
+
+# The MECHANISM works when a Tier B verifier is wired (simulated here). This
+# proves the earning transition is reachable through the intended gate, and is
+# torn down immediately so the rest of the gate stays in fail-closed Tier A.
+_svc.TIER_B_ATTESTATION_VERIFIER = lambda p, a: p.attestation == "tee-attested-run"
+try:
+    sm_earning = serving_manifest(
+        artifact, None, corpus=corpus, test_pairs_manifest=test_pairs, predict=_attested,
+        config=ServeConfig(eval=_PASS_EVAL),
+        deployment_id="dep-1", auth="allowlist",
+        health_receipt={"timestamp": 100},
+        usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
+        now=200,
+    )
+finally:
+    _svc.TIER_B_ATTESTATION_VERIFIER = None  # restore fail-closed
+ck("tier_b_verifier_enables_earning",
    sm_earning["state"] == "earning" and sm_earning["earning"]
    and sm_earning["receipt_hash"] == "abc")
 
@@ -519,6 +550,11 @@ def _provenance_ok() -> bool:
             return False
         if not m["source_trace_hash"] or m["source_trace_hash"] not in _TRACE_INDEX:
             return False
+        # Non-tautological: the member_hash must match the one this verified
+        # source_trace_hash legitimately produces. A forged member that reuses a
+        # real source_trace_hash but mutated a field has a different member_hash.
+        if _TRACE_TO_MEMBER.get(m["source_trace_hash"]) != m["member_hash"]:
+            return False
     # 3. Pairs hash recomputes; pairs carry the corpus hash.
     if recompute_pairs_hash(train_pairs) != train_pairs.pairs_hash:
         return False
@@ -551,6 +587,28 @@ def _forged_source_trace_fails() -> bool:
 
 import copy as _copy0  # noqa: E402
 ck("forged_source_trace_hash_rejected", _forged_source_trace_fails())
+
+
+# Negative: an export that REUSES a real verified source_trace_hash but mutates a
+# training-affecting field (supervision.accepted) produces a different member_hash
+# and is rejected by the trace->member binding.
+def _reused_hash_mutated_field_fails() -> bool:
+    forged = _copy0.deepcopy(EXPORTS[0])
+    real_source = forged["source_trace_hash"]  # a genuinely verified hash
+    # Flip accepted in the export's verdict + supervision (changes labels).
+    forged["verdict"]["accepted"] = not forged["verdict"].get("accepted")
+    forged["supervision"]["accepted"] = not forged["supervision"].get("accepted")
+    body = {k: v for k, v in forged.items() if k != "export_hash"}
+    forged["export_hash"] = _hash_body(body)  # internally consistent
+    member = training_safe_view(forged)
+    # Same real source hash, but member_hash differs from the bound legitimate one.
+    return (
+        member["source_trace_hash"] == real_source
+        and _TRACE_TO_MEMBER.get(real_source) != member["member_hash"]
+    )
+
+
+ck("reused_source_hash_mutated_field_rejected", _reused_hash_mutated_field_fails())
 
 
 # no_emissions_writes: AST denylist over the new modules.

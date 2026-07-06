@@ -89,12 +89,24 @@ def _predictor_fn(predict: Any) -> Callable[[str], str]:
     return predict
 
 
+# Tier A (offline scaffold) FAILS CLOSED on earning: there is no way to verify a
+# real attestation offline, so earning is unreachable until an operator wires a
+# real Tier B verifier and sets this True. This makes the boundary enforced in
+# code, not just documented.
+TIER_B_ATTESTATION_VERIFIER: Callable[["AttestedPredictor", Any], bool] | None = None
+
+
 def _predictor_is_attested(predict: Any, artifact: Any) -> bool:
     if not isinstance(predict, AttestedPredictor):
         return False
     if not predict.attestation:
         return False
-    return predict.bound_artifact_sha256 == str(getattr(artifact, "artifact_sha256", ""))
+    if predict.bound_artifact_sha256 != str(getattr(artifact, "artifact_sha256", "")):
+        return False
+    # Fail closed: without a wired Tier B verifier, no attestation is trusted.
+    if TIER_B_ATTESTATION_VERIFIER is None:
+        return False
+    return bool(TIER_B_ATTESTATION_VERIFIER(predict, artifact))
 
 
 def _canonical_json(value: Any) -> str:
