@@ -538,11 +538,14 @@ def test_submit_bitset_accepts_token_minted_from_warm_page(tmp_path, monkeypatch
     assert r.json()["status"] == "verified"
 
 
-def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch):
-    """CATHEDRAL_V2_CNF_STORE_READ=0 must bypass the cache on the serving
-    paths. Proven by poisoning the stored row with a different (but
-    self-consistent) body: with reads off the page mints the fresh-generation
-    sha; with reads on it demonstrably serves the row."""
+def test_challenges_page_always_serves_fresh_generation_sha(tmp_path, monkeypatch):
+    """The challenges page mints from pm.item_meta() (memoized fresh generation),
+    NOT from v2_cnf_store, so a poisoned store row can NEVER change the sha the
+    page reports to a miner — the page always serves the true fresh-generation
+    sha regardless of CATHEDRAL_V2_CNF_STORE_READ. This is strictly safer than the
+    old read-through-on-page behaviour (a poisoned row used to be served, causing
+    submit_token_cnf_mismatch). The store is now only a cache for the verify
+    worker, which sha-gates independently, so a bad row can never earn credit."""
     import zlib
 
     app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
@@ -562,15 +565,14 @@ def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch
 
     v2_store.write(_poison)
 
+    # Reads off: page serves fresh-generation sha (as before).
     monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_READ", "0")
     off = _fetch_item(client, kp)
-    assert off["cnf_sha256"] == cold["cnf_sha256"]  # generate path, row ignored
+    assert off["cnf_sha256"] == cold["cnf_sha256"]
 
-    # Sanity check that the poisoned row would otherwise have been served,
-    # i.e. the READ=0 run above genuinely bypassed the store rather than the
-    # store coincidentally holding the true bytes. (Rows are written only by
-    # server-side generation; the submit path still regenerates and rejects
-    # any sha drift, so a bad row can never earn credit.)
+    # Reads on: page STILL serves fresh-generation sha — the poisoned row is
+    # ignored because the page mints from item_meta (generation), not the store.
     monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_READ", raising=False)
     on = _fetch_item(client, kp)
-    assert on["cnf_sha256"] == poison_sha
+    assert on["cnf_sha256"] == cold["cnf_sha256"]
+    assert on["cnf_sha256"] != poison_sha
