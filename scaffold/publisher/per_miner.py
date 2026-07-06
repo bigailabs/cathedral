@@ -288,6 +288,16 @@ def _real_pick(hotkey: str, epoch: int, tier: int, seq: int) -> float:
     return (int(h[:8], 16) % 1_000_000) / 1_000_000.0
 
 
+def uses_real_instance(hotkey: str, epoch: int, tier: int, seq: int) -> bool:
+    """True iff generate_instance() serves the REAL (unplanted) source for this
+    (hotkey, epoch, tier, seq), equivalently iff its planted_assignment is
+    None. This is THE source-selection predicate generate_instance uses, kept
+    public so callers that already hold the CNF body (e.g. a v2_cnf_store cache
+    hit) can derive the kind label without generating."""
+    frac = _real_fraction()
+    return frac >= 1.0 or (frac > 0.0 and _real_pick(hotkey, epoch, tier, seq) < frac)
+
+
 def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, list[int] | None]:
     """Generate ONE per-miner instance. Returns (challenge_id, cnf_text, planted_assignment).
 
@@ -303,9 +313,7 @@ def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str
     The wire challenge_id is always instance_id() (hotkey-HMAC'd), so token
     binding is identical across sources.
     """
-    frac = _real_fraction()
-    use_real = frac >= 1.0 or (frac > 0.0 and _real_pick(hotkey, epoch, tier, seq) < frac)
-    if use_real:
+    if uses_real_instance(hotkey, epoch, tier, seq):
         # REAL, per-miner (salt=hotkey so miners can't copy), unplanted;
         # dimacs.verify_witness is the correctness gate.
         _content_id, cnf_text = real_corpus.generate_real_instance(
