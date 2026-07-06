@@ -230,6 +230,8 @@ def serving_manifest(
     eval_report: EvalReport | None,
     *,
     test_pairs_manifest: PairsManifest | None = None,
+    corpus: Corpus | None = None,
+    predict: Callable[[str], str] | None = None,
     config: ServeConfig | None = None,
     gated: bool = True,
     deployment_id: str | None = None,
@@ -238,17 +240,34 @@ def serving_manifest(
     usage_receipt: dict[str, Any] | None = None,
     now: int = 0,
 ) -> dict[str, Any]:
-    """Build a serving manifest, advancing state only when evidence exists."""
+    """Build a serving manifest, advancing state only when evidence exists.
+
+    Reaching ``earning`` requires a TRUSTED evaluation: the caller must supply the
+    trusted ``corpus``, ``test_pairs_manifest``, and a ``predict`` function, and
+    this function RE-RUNS ``evaluate`` itself. Caller-supplied ``eval_report``
+    metrics are never trusted for earning (they can be forged); at most a
+    self-consistent report lets the manifest report ``ready`` without earning.
+    """
     config = config or ServeConfig()
     state = "unevaluated"
     receipt_hash = ""
     receipt_source = ""
+    trusted_eval = False
 
-    if eval_report is not None:
-        # Verify the eval report is authentic and belongs to this artifact:
-        # recompute eval_hash, match the artifact identity, and (when a trusted
-        # test manifest is supplied) require the report's test_pairs_hash to match
-        # it — a forged report can fabricate metrics but not the real test split.
+    # Trusted path: recompute the eval from the trusted inputs. This is the ONLY
+    # way to reach earning — forged metrics cannot survive re-evaluation.
+    if corpus is not None and test_pairs_manifest is not None and predict is not None:
+        try:
+            eval_report = evaluate(
+                artifact, test_pairs_manifest, corpus=corpus,
+                predict=predict, config=config.eval,
+            )
+            trusted_eval = True
+        except Exception:
+            eval_report = None
+    elif eval_report is not None:
+        # Untrusted path: a self-consistent report can inform `ready`, but can
+        # never reach `earning` (guarded below).
         if not _eval_report_authentic(eval_report, artifact, test_pairs_manifest):
             eval_report = None
 
@@ -260,7 +279,12 @@ def serving_manifest(
                 state = "deployed"
                 if _receipt_fresh(health_receipt, config, now):
                     state = "healthy"
-                    if _receipt_fresh(usage_receipt, config, now) and _receipt_signed(usage_receipt):
+                    # earning requires a TRUSTED (re-run) eval, not a caller report.
+                    if (
+                        trusted_eval
+                        and _receipt_fresh(usage_receipt, config, now)
+                        and _receipt_signed(usage_receipt)
+                    ):
                         state = "earning"
                         receipt_hash = str(usage_receipt.get("receipt_hash"))
                         receipt_source = str(usage_receipt.get("receipt_source"))

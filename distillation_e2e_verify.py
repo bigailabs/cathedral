@@ -290,8 +290,11 @@ sm_no_receipt = serving_manifest(
 )
 ck("serve_no_earning_without_receipt", not sm_no_receipt["earning"])
 
+# Earning requires the TRUSTED eval path: corpus + test manifest + predict, which
+# serving_manifest re-runs itself. Caller metrics are never trusted for earning.
+_TRUSTED = dict(corpus=corpus, test_pairs_manifest=test_pairs, predict=_perfect)
 sm_earning = serving_manifest(
-    artifact, good_report,
+    artifact, None, **_TRUSTED,
     config=ServeConfig(eval=_PASS_EVAL),
     deployment_id="dep-1", auth="allowlist",
     health_receipt={"timestamp": 100},
@@ -299,7 +302,7 @@ sm_earning = serving_manifest(
     now=200,
 )
 sm_stale = serving_manifest(
-    artifact, good_report,
+    artifact, None, **_TRUSTED,
     config=ServeConfig(eval=_PASS_EVAL, receipt_max_age_seconds=10),
     deployment_id="dep-1", auth="allowlist",
     health_receipt={"timestamp": 100},
@@ -310,6 +313,41 @@ ck("serve_earning_with_full_evidence",
    sm_earning["state"] == "earning" and sm_earning["earning"]
    and sm_earning["receipt_hash"] == "abc" and sm_earning["receipt_source"] == "chutes")
 ck("serve_stale_receipt_demotes", sm_stale["state"] == "stale" and not sm_stale["earning"])
+
+# A caller-supplied report (no trusted corpus/predict) must NOT reach earning,
+# even with a self-consistent report and full receipts.
+sm_untrusted = serving_manifest(
+    artifact, good_report,  # report only, no corpus/predict
+    test_pairs_manifest=test_pairs,
+    config=ServeConfig(eval=_PASS_EVAL),
+    deployment_id="dep-1", auth="allowlist",
+    health_receipt={"timestamp": 100},
+    usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
+    now=200,
+)
+ck("untrusted_report_cannot_earn", not sm_untrusted["earning"])
+
+# The specific attack Codex found: forged metrics with the CORRECT test hash.
+# On the untrusted path it cannot earn (no re-eval); on the trusted path the
+# forged report is ignored entirely (metrics are recomputed).
+import dataclasses as _dc0  # noqa: E402
+from scaffold.distillation_serve import EvalReport as _ER, _hash_obj as _sh2  # noqa: E402
+_forged_correct_hash = _ER(
+    n=10, accuracy=1.0, per_category={}, positive_recall=1.0,
+    baseline_accuracy=0.0, beats_baseline=True,
+    model_artifact_sha256="dry-run", model_corpus_hash=corpus.corpus_hash,
+    test_pairs_hash=test_pairs.pairs_hash, eval_hash="x",
+)
+_forged_correct_hash = _dc0.replace(_forged_correct_hash, eval_hash=_sh2(_forged_correct_hash.body()))
+sm_forged_metrics = serving_manifest(
+    artifact, _forged_correct_hash, test_pairs_manifest=test_pairs,
+    config=ServeConfig(eval=_PASS_EVAL),
+    deployment_id="dep-1", auth="allowlist",
+    health_receipt={"timestamp": 100},
+    usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
+    now=200,
+)
+ck("forged_metrics_correct_hash_cannot_earn", not sm_forged_metrics["earning"])
 
 sm_default = serving_manifest(artifact, good_report)
 ck("serve_gated_by_default", sm_default["gated"] is True)
@@ -330,7 +368,7 @@ _mut2.members[0]["supervision"]["accepted"] = not _mut2.members[0]["supervision"
 ck("mutated_member_content_rejected", _raises(_UEE, verify_corpus_integrity, _mut2))
 
 # Forged eval report (bogus eval_hash) must not reach earning.
-from scaffold.distillation_serve import EvalReport as _ER  # noqa: E402
+# (_ER imported earlier)
 _forged = _ER(n=10, accuracy=1.0, per_category={}, positive_recall=1.0,
               baseline_accuracy=0.0, beats_baseline=True,
               model_artifact_sha256="dry-run", model_corpus_hash=corpus.corpus_hash,

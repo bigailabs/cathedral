@@ -63,16 +63,16 @@ def _perfect(test_pairs):
 
 
 def test_earning_requires_full_evidence():
-    _, _, test_pairs, artifact = _setup()
-    report = evaluate(artifact, test_pairs, predict=_perfect(test_pairs), config=_PASS)
+    corpus, _, test_pairs, artifact = _setup()
+    trusted = dict(corpus=corpus, test_pairs_manifest=test_pairs, predict=_perfect(test_pairs))
     no_receipt = serving_manifest(
-        artifact, report, config=ServeConfig(eval=_PASS),
+        artifact, None, **trusted, config=ServeConfig(eval=_PASS),
         deployment_id="d", auth="a", health_receipt={"timestamp": 100}, now=200,
     )
     assert not no_receipt["earning"]
 
     earning = serving_manifest(
-        artifact, report, config=ServeConfig(eval=_PASS),
+        artifact, None, **trusted, config=ServeConfig(eval=_PASS),
         deployment_id="d", auth="a",
         health_receipt={"timestamp": 100},
         usage_receipt={"timestamp": 100, "receipt_hash": "h", "receipt_source": "chutes"},
@@ -82,11 +82,26 @@ def test_earning_requires_full_evidence():
     assert earning["receipt_hash"] == "h"
 
 
-def test_stale_receipt_demotes():
-    _, _, test_pairs, artifact = _setup()
-    report = evaluate(artifact, test_pairs, predict=_perfect(test_pairs), config=_PASS)
+def test_caller_report_cannot_earn():
+    # The untrusted path (report only, no corpus/predict) can never earn, even
+    # with a self-consistent report and full receipts.
+    corpus, _, test_pairs, artifact = _setup()
+    report = evaluate(artifact, test_pairs, corpus=corpus, predict=_perfect(test_pairs), config=_PASS)
     sm = serving_manifest(
-        artifact, report,
+        artifact, report, test_pairs_manifest=test_pairs, config=ServeConfig(eval=_PASS),
+        deployment_id="d", auth="a",
+        health_receipt={"timestamp": 100},
+        usage_receipt={"timestamp": 100, "receipt_hash": "h", "receipt_source": "chutes"},
+        now=200,
+    )
+    assert not sm["earning"]
+
+
+def test_stale_receipt_demotes():
+    corpus, _, test_pairs, artifact = _setup()
+    sm = serving_manifest(
+        artifact, None,
+        corpus=corpus, test_pairs_manifest=test_pairs, predict=_perfect(test_pairs),
         config=ServeConfig(eval=_PASS, receipt_max_age_seconds=10),
         deployment_id="d", auth="a",
         health_receipt={"timestamp": 100},
