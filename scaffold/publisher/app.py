@@ -818,29 +818,38 @@ def build_app(
         # Phase 3: a brief bounded wait turns most transient overlaps into an
         # accepted submit instead of an instant miner-facing 429. The hard ceiling
         # is preserved — we still reject after the wait, just less often.
-        acquired = (
-            submit_gate.acquire(timeout=submit_busy_wait_secs)
-            if submit_busy_wait_secs > 0 else submit_gate.acquire(blocking=False)
-        )
-        if not acquired:
-            _record_submit_event(
-                "rate_limited",
-                "submit_busy_retry",
-                status_code=429,
-                log=True,
-            )
-            raise HTTPException(
-                429,
-                _retry_after_payload("submit_busy_retry", 1),
-                headers={
-                    "Retry-After": "1",
-                    "X-Cathedral-Rejection-Reason": "submit_busy_retry",
-                },
-            )
+        #
+        # LEAK FIX (same class as the read gate): the acquired slot must be
+        # released on EVERY exit path, including a cancel that fires between the
+        # successful acquire() and the try/yield below. Hold the slot in a single
+        # try that spans the reject-check and the yield so a disconnect can never
+        # leak it (a leak drains the BoundedSemaphore and 429s spuriously on an
+        # idle origin — observed as 2/20 sequential submit 429s before this fix).
+        acquired = False
         try:
+            acquired = (
+                submit_gate.acquire(timeout=submit_busy_wait_secs)
+                if submit_busy_wait_secs > 0 else submit_gate.acquire(blocking=False)
+            )
+            if not acquired:
+                _record_submit_event(
+                    "rate_limited",
+                    "submit_busy_retry",
+                    status_code=429,
+                    log=True,
+                )
+                raise HTTPException(
+                    429,
+                    _retry_after_payload("submit_busy_retry", 1),
+                    headers={
+                        "Retry-After": "1",
+                        "X-Cathedral-Rejection-Reason": "submit_busy_retry",
+                    },
+                )
             yield
         finally:
-            submit_gate.release()
+            if acquired:
+                submit_gate.release()
 
     def _submit_rate_limited(rl_key: tuple[str, str], now: float) -> bool:
         if min_interval <= 0:
