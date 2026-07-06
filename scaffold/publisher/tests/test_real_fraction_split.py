@@ -65,6 +65,33 @@ def test_real_instances_are_per_miner_unique(monkeypatch):
     assert differing >= 18, f"only {differing}/20 real puzzles differed between miners"
 
 
+def test_uses_real_instance_parity_with_generation(monkeypatch):
+    """uses_real_instance() must EXACTLY equal (generate_instance()[2] is None)
+    for all inputs: the challenges page derives the kind label from the
+    predicate on v2_cnf_store cache hits, so the label and the CNF body must
+    never disagree."""
+    for raw in (None, "0.0", "0.1", "0.5", "1.0"):
+        if raw is None:
+            monkeypatch.delenv("CATHEDRAL_V2_REAL_FRACTION", raising=False)
+        else:
+            monkeypatch.setenv("CATHEDRAL_V2_REAL_FRACTION", raw)
+        for tier in (1, 2):
+            for seq in range(12):
+                _cid, _cnf, planted = pm.generate_instance(HOTKEY, EPOCH, tier, seq)
+                assert pm.uses_real_instance(HOTKEY, EPOCH, tier, seq) == (planted is None), (
+                    f"predicate/generation disagree: fraction={raw} tier={tier} seq={seq}"
+                )
+
+
+def test_uses_real_instance_parity_with_legacy_source_env(monkeypatch):
+    # Unset fraction + non-planted source is the legacy all-real path (1.0).
+    monkeypatch.setenv("CATHEDRAL_V2_CHALLENGE_SOURCE", "combinatorial")
+    for seq in range(6):
+        _cid, _cnf, planted = pm.generate_instance(HOTKEY, EPOCH, 1, seq)
+        assert planted is None
+        assert pm.uses_real_instance(HOTKEY, EPOCH, 1, seq) is True
+
+
 def test_real_instances_are_satisfiable_solvable_and_verifiable(monkeypatch):
     monkeypatch.setenv("CATHEDRAL_V2_REAL_FRACTION", "1.0")
     worst = 0.0

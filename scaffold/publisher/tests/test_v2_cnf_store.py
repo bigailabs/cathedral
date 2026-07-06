@@ -404,3 +404,173 @@ def test_put_exception_at_verify_time_does_not_break_verification(tmp_path, monk
         v2_store, app.state.v2_blob_store, worker_id="test-put-boom", batch_size=8, lock_secs=60)
     assert len(results) == 1
     assert results[0]["status"] == v2_pipeline.STATUS_VERIFIED, results[0]
+
+
+# ---------------------------------------------------------------------------
+# Serving-path read-through: the challenges page and the /cnf endpoint consult
+# the store before generating. The invariant under test: a page-minted token's
+# cnf_sha256 equals sha256 of the exact bytes /cnf returns, on the cold
+# (generate) path AND the warm (cache-hit) path.
+# ---------------------------------------------------------------------------
+
+def _get_cnf(client, kp, item):
+    r = client.get(
+        "/v2/synthetic-boolean/per-miner/cnf",
+        params={
+            "challenge_id": item["challenge_id"],
+            "tier": item["tier"],
+            "seq": item["seq"],
+        },
+        headers=_read_headers(kp),
+    )
+    assert r.status_code == 200, r.text
+    return r
+
+
+def test_page_token_sha_matches_cnf_body_cold_and_warm(tmp_path, monkeypatch):
+    app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
+    client = TestClient(app)
+    kp = _keypair("//CnfReadThroughShaBinding")
+
+    # Cold: the store starts empty, so the first page takes the generate path.
+    cold = _fetch_item(client, kp)
+    r1 = _get_cnf(client, kp, cold)
+    assert hashlib.sha256(r1.text.encode("utf-8")).hexdigest() == cold["cnf_sha256"]
+    assert r1.headers["X-Cathedral-CNF-Sha256"] == cold["cnf_sha256"]
+
+    # The token itself binds the same sha the item reports.
+    from scaffold.publisher import v2_bitset_submit
+    payload = v2_bitset_submit.verify_submit_token(
+        cold["submit_token"], secret="test-v2-submit-token-secret",
+        miner_hotkey=kp.ss58_address, challenge_id=cold["challenge_id"])
+    assert payload["cnf_sha256"] == cold["cnf_sha256"]
+
+    # Warm: the row is baked now. Booby-trap generation: a warm page and a
+    # warm /cnf must do ZERO generation and still agree byte-for-byte.
+    def _boom(*args, **kwargs):
+        raise AssertionError("generate_instance called on a warm read-through path")
+
+    monkeypatch.setattr(pm, "generate_instance", _boom)
+
+    warm = _fetch_item(client, kp)
+    assert warm["challenge_id"] == cold["challenge_id"]
+    assert warm["cnf_sha256"] == cold["cnf_sha256"]
+    assert warm["kind"] == cold["kind"]
+    assert warm["n_vars"] == cold["n_vars"]
+    r2 = _get_cnf(client, kp, warm)
+    assert r2.text == r1.text
+    assert hashlib.sha256(r2.text.encode("utf-8")).hexdigest() == warm["cnf_sha256"]
+    warm_payload = v2_bitset_submit.verify_submit_token(
+        warm["submit_token"], secret="test-v2-submit-token-secret",
+        miner_hotkey=kp.ss58_address, challenge_id=warm["challenge_id"])
+    assert warm_payload["cnf_sha256"] == warm["cnf_sha256"]
+
+
+def test_cnf_endpoint_bakes_on_miss_and_warms_the_page(tmp_path, monkeypatch):
+    """/cnf now writes the store on its generate path, so a cold challenge_id
+    fetched via /cnf first serves the page from cache afterwards."""
+    app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
+    client = TestClient(app)
+    kp = _keypair("//CnfEndpointBakes")
+
+    item = _fetch_item(client, kp)
+    # Wipe the mint-time bake so /cnf sees a genuinely cold store.
+    def _wipe(conn):
+        conn.execute(
+            "DELETE FROM v2_cnf_store WHERE challenge_id=?", (item["challenge_id"],))
+
+    v2_store.write(_wipe)
+    assert v2_cnf_store.get(v2_store, item["challenge_id"]) is None
+
+    r = _get_cnf(client, kp, item)
+    baked = v2_cnf_store.get(
+        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
+    assert baked == r.text
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("generate_instance called after /cnf baked the row")
+
+    monkeypatch.setattr(pm, "generate_instance", _boom)
+    warm = _fetch_item(client, kp)
+    assert warm["cnf_sha256"] == item["cnf_sha256"]
+
+
+def test_submit_bitset_accepts_token_minted_from_warm_page(tmp_path, monkeypatch):
+    """End to end: a token minted purely from the cached CNF (warm page) must
+    pass the submit path, which regenerates from seed and sha-compares."""
+    app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
+    client = TestClient(app)
+    kp = _keypair("//CnfReadThroughWarmSubmit")
+
+    _cold = _fetch_item(client, kp)  # bakes the row
+    warm = _fetch_item(client, kp)   # minted from the store
+
+    with v2_pipeline.v2_pm_env():
+        cid, _cnf, assignment = pm.generate_instance(
+            kp.ss58_address, int(warm["epoch"]), int(warm["tier"]), int(warm["seq"]))
+    assert cid == warm["challenge_id"]
+
+    assignment_b64 = base64.b64encode(
+        v2_pipeline.encode_bitset_assignment(assignment)
+    ).decode("ascii")
+    body = {
+        "schema": "cathedral.v2.submit_bitset.v1",
+        "card_id": _FAMILY,
+        "challenge_id": warm["challenge_id"],
+        "submit_token": warm["submit_token"],
+        "assignment_encoding": "bitset/v1",
+        "assignment_b64": assignment_b64,
+    }
+    from scaffold.publisher import v2_bitset_submit
+    submitted_at = _now_iso()
+    submit = v2_bitset_submit.normalize_submit_body(
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY)
+    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+    r = client.post(
+        "/v2/agents/submit-bitset", json=body,
+        headers={
+            "X-Cathedral-Hotkey": kp.ss58_address,
+            "X-Cathedral-Signature": sig,
+            "X-Cathedral-Submitted-At": submitted_at,
+        },
+    )
+    assert r.status_code == 202, r.text
+    assert r.json()["status"] == "verified"
+
+
+def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch):
+    """CATHEDRAL_V2_CNF_STORE_READ=0 must bypass the cache on the serving
+    paths. Proven by poisoning the stored row with a different (but
+    self-consistent) body: with reads off the page mints the fresh-generation
+    sha; with reads on it demonstrably serves the row."""
+    import zlib
+
+    app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
+    client = TestClient(app)
+    kp = _keypair("//CnfReadThroughKillSwitch")
+
+    cold = _fetch_item(client, kp)  # bakes the true row
+
+    poison = "p cnf 1 1\n1 0\n"
+    poison_sha = hashlib.sha256(poison.encode("utf-8")).hexdigest()
+    assert poison_sha != cold["cnf_sha256"]
+
+    def _poison(conn):
+        conn.execute(
+            "UPDATE v2_cnf_store SET cnf_sha256=?, cnf_zlib=? WHERE challenge_id=?",
+            (poison_sha, zlib.compress(poison.encode("utf-8")), cold["challenge_id"]))
+
+    v2_store.write(_poison)
+
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_READ", "0")
+    off = _fetch_item(client, kp)
+    assert off["cnf_sha256"] == cold["cnf_sha256"]  # generate path, row ignored
+
+    # Sanity check that the poisoned row would otherwise have been served,
+    # i.e. the READ=0 run above genuinely bypassed the store rather than the
+    # store coincidentally holding the true bytes. (Rows are written only by
+    # server-side generation; the submit path still regenerates and rejects
+    # any sha drift, so a bad row can never earn credit.)
+    monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_READ", raising=False)
+    on = _fetch_item(client, kp)
+    assert on["cnf_sha256"] == poison_sha
