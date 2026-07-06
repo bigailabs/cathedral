@@ -290,28 +290,59 @@ sm_no_receipt = serving_manifest(
 )
 ck("serve_no_earning_without_receipt", not sm_no_receipt["earning"])
 
-# Earning requires the TRUSTED eval path: corpus + test manifest + predict, which
-# serving_manifest re-runs itself. Caller metrics are never trusted for earning.
-_TRUSTED = dict(corpus=corpus, test_pairs_manifest=test_pairs, predict=_perfect)
-sm_earning = serving_manifest(
-    artifact, None, **_TRUSTED,
+# A bare `predict` callable can be a label oracle, so it defeats forged metrics
+# but does NOT prove the metrics are the model's -> tops out at `healthy`, never
+# `earning`. Earning requires an AttestedPredictor (Tier B). This keeps the
+# Tier A / Tier B boundary honest.
+from scaffold.distillation_serve import AttestedPredictor as _AP  # noqa: E402
+_bare = dict(corpus=corpus, test_pairs_manifest=test_pairs, predict=_perfect)
+sm_bare = serving_manifest(
+    artifact, None, **_bare,
     config=ServeConfig(eval=_PASS_EVAL),
     deployment_id="dep-1", auth="allowlist",
     health_receipt={"timestamp": 100},
     usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
     now=200,
 )
+ck("bare_predict_reaches_healthy_not_earning",
+   sm_bare["state"] == "healthy" and not sm_bare["earning"])
+
+# An AttestedPredictor bound to the artifact (Tier B) reaches earning.
+_attested = _AP(fn=_perfect, bound_artifact_sha256=artifact.artifact_sha256,
+                attestation="tee-attested-run")
+sm_earning = serving_manifest(
+    artifact, None, corpus=corpus, test_pairs_manifest=test_pairs, predict=_attested,
+    config=ServeConfig(eval=_PASS_EVAL),
+    deployment_id="dep-1", auth="allowlist",
+    health_receipt={"timestamp": 100},
+    usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
+    now=200,
+)
+ck("attested_predictor_reaches_earning",
+   sm_earning["state"] == "earning" and sm_earning["earning"]
+   and sm_earning["receipt_hash"] == "abc")
+
+# A label-oracle attack via bare predict must NOT earn (the exact Codex repro).
+_oracle = lambda inp: next((p.label for p in test_pairs.pairs if p.input == inp),
+                           "rejected_claim_negative_control")
+sm_oracle = serving_manifest(
+    artifact, None, corpus=corpus, test_pairs_manifest=test_pairs, predict=_oracle,
+    config=ServeConfig(eval=_PASS_EVAL),
+    deployment_id="dep-1", auth="allowlist",
+    health_receipt={"timestamp": 100},
+    usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
+    now=200,
+)
+ck("label_oracle_predict_cannot_earn", not sm_oracle["earning"])
+
 sm_stale = serving_manifest(
-    artifact, None, **_TRUSTED,
+    artifact, None, corpus=corpus, test_pairs_manifest=test_pairs, predict=_attested,
     config=ServeConfig(eval=_PASS_EVAL, receipt_max_age_seconds=10),
     deployment_id="dep-1", auth="allowlist",
     health_receipt={"timestamp": 100},
     usage_receipt={"timestamp": 100, "receipt_hash": "abc", "receipt_source": "chutes"},
     now=100_000,
 )
-ck("serve_earning_with_full_evidence",
-   sm_earning["state"] == "earning" and sm_earning["earning"]
-   and sm_earning["receipt_hash"] == "abc" and sm_earning["receipt_source"] == "chutes")
 ck("serve_stale_receipt_demotes", sm_stale["state"] == "stale" and not sm_stale["earning"])
 
 # A caller-supplied report (no trusted corpus/predict) must NOT reach earning,

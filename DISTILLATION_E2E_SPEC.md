@@ -227,7 +227,11 @@ Hard rules (enforced, tested):
 3. Eval must beat the majority-class baseline when `must_beat_baseline=True`;
    a degenerate always-one-class model is rejected.
 4. `state="earning"` requires deployment + health_receipt + usage_receipt with a
-   non-empty `receipt_hash` and `receipt_source`. Missing any → not earning.
+   non-empty `receipt_hash` and `receipt_source` AND a trusted re-run eval driven
+   by an `AttestedPredictor` bound to the artifact. A bare `predict` callable can
+   be a label oracle, so it tops out at `healthy` — earning needs a real attested
+   inference run (Tier B). This keeps the Tier A / Tier B boundary honest: the
+   offline scaffold cannot reach `earning`. Missing any → not earning.
 5. Stale health/usage receipt demotes `earning`/`healthy` back to `stale`.
 6. Default `gated=True`: serving is invite/allowlist gated until operator opens it.
 

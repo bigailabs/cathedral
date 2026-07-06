@@ -68,6 +68,35 @@ class ServeConfig:
     receipt_max_age_seconds: int = 3600
 
 
+@dataclass(frozen=True)
+class AttestedPredictor:
+    """A predictor whose outputs are attested to come from a specific model.
+
+    In the offline scaffold there is NO way to produce a real attestation (that
+    needs a real, measured inference run — Tier B). So an AttestedPredictor with
+    a non-empty ``attestation`` cannot be legitimately constructed offline; the
+    field exists so the earning gate has a hook Tier B can satisfy. A bare
+    ``predict`` callable is never attested and tops out at ``ready``.
+    """
+    fn: Callable[[str], str]
+    bound_artifact_sha256: str
+    attestation: str = ""  # non-empty only from a real attested inference run
+
+
+def _predictor_fn(predict: Any) -> Callable[[str], str]:
+    if isinstance(predict, AttestedPredictor):
+        return predict.fn
+    return predict
+
+
+def _predictor_is_attested(predict: Any, artifact: Any) -> bool:
+    if not isinstance(predict, AttestedPredictor):
+        return False
+    if not predict.attestation:
+        return False
+    return predict.bound_artifact_sha256 == str(getattr(artifact, "artifact_sha256", ""))
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -254,15 +283,21 @@ def serving_manifest(
     receipt_source = ""
     trusted_eval = False
 
-    # Trusted path: recompute the eval from the trusted inputs. This is the ONLY
-    # way to reach earning — forged metrics cannot survive re-evaluation.
+    # Re-run eval from trusted inputs when a predictor is supplied. This defeats
+    # forged METRICS. But an arbitrary `predict` callable can be a label oracle
+    # (closed over the test labels), so re-running with it does NOT prove the
+    # metrics are the MODEL's. Therefore `predict` alone yields at most `ready`.
+    # Reaching `earning` requires an AttestedPredictor bound to this artifact —
+    # which only a real (Tier B) attested inference run can produce. The offline
+    # scaffold has no attestation, so it cannot reach `earning`. This keeps the
+    # Tier A / Tier B boundary honest in code (finding: label-oracle predict).
     if corpus is not None and test_pairs_manifest is not None and predict is not None:
         try:
             eval_report = evaluate(
                 artifact, test_pairs_manifest, corpus=corpus,
-                predict=predict, config=config.eval,
+                predict=_predictor_fn(predict), config=config.eval,
             )
-            trusted_eval = True
+            trusted_eval = _predictor_is_attested(predict, artifact)
         except Exception:
             eval_report = None
     elif eval_report is not None:

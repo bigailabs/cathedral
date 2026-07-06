@@ -62,9 +62,19 @@ def _perfect(test_pairs):
     return f
 
 
+def _attested(test_pairs, artifact):
+    from scaffold.distillation_serve import AttestedPredictor
+    return AttestedPredictor(
+        fn=_perfect(test_pairs),
+        bound_artifact_sha256=artifact.artifact_sha256,
+        attestation="tee-attested-run",
+    )
+
+
 def test_earning_requires_full_evidence():
     corpus, _, test_pairs, artifact = _setup()
-    trusted = dict(corpus=corpus, test_pairs_manifest=test_pairs, predict=_perfect(test_pairs))
+    trusted = dict(corpus=corpus, test_pairs_manifest=test_pairs,
+                   predict=_attested(test_pairs, artifact))
     no_receipt = serving_manifest(
         artifact, None, **trusted, config=ServeConfig(eval=_PASS),
         deployment_id="d", auth="a", health_receipt={"timestamp": 100}, now=200,
@@ -80,6 +90,21 @@ def test_earning_requires_full_evidence():
     )
     assert earning["earning"]
     assert earning["receipt_hash"] == "h"
+
+
+def test_bare_predict_cannot_earn():
+    # A bare callable (possible label oracle) reaches healthy, never earning.
+    corpus, _, test_pairs, artifact = _setup()
+    sm = serving_manifest(
+        artifact, None, corpus=corpus, test_pairs_manifest=test_pairs,
+        predict=_perfect(test_pairs), config=ServeConfig(eval=_PASS),
+        deployment_id="d", auth="a",
+        health_receipt={"timestamp": 100},
+        usage_receipt={"timestamp": 100, "receipt_hash": "h", "receipt_source": "chutes"},
+        now=200,
+    )
+    assert sm["state"] == "healthy"
+    assert not sm["earning"]
 
 
 def test_caller_report_cannot_earn():
@@ -101,7 +126,7 @@ def test_stale_receipt_demotes():
     corpus, _, test_pairs, artifact = _setup()
     sm = serving_manifest(
         artifact, None,
-        corpus=corpus, test_pairs_manifest=test_pairs, predict=_perfect(test_pairs),
+        corpus=corpus, test_pairs_manifest=test_pairs, predict=_attested(test_pairs, artifact),
         config=ServeConfig(eval=_PASS, receipt_max_age_seconds=10),
         deployment_id="d", auth="a",
         health_receipt={"timestamp": 100},
