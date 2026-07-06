@@ -5525,6 +5525,14 @@ def build_app(
                     # A warm page does zero generation and zero DB writes; with
                     # CATHEDRAL_V2_CNF_STORE_READ=0, get() returns None and every
                     # item takes the generate path below (today's behavior).
+                    # OPS: if you change generation config that alters the CNF BODY
+                    # without changing the challenge_id (CATHEDRAL_V2_REAL_FRACTION,
+                    # CHALLENGE_SOURCE, corpus contents, tier shape) MID-EPOCH, stale
+                    # immutable rows keep minting tokens whose sha no longer matches
+                    # a fresh regeneration, so warm submits 400 submit_token_cnf_mismatch
+                    # until the ~24h purge or epoch roll. Set CATHEDRAL_V2_CNF_STORE_READ=0
+                    # (or purge v2_cnf_store) when rotating generation config. No
+                    # verification bypass — submit still regenerates + sha-gates.
                     cnf_text = v2_cnf_store.get(v2_store, cid)
                     if cnf_text is None:
                         gen_cid, cnf_text, _planted = pm.generate_instance(
