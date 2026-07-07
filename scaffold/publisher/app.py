@@ -55,6 +55,8 @@ from . import v2_pipeline
 from . import v2_bitset_submit
 from . import v2_receipts
 from . import blob_store as blob_store_mod
+from . import hippius_presign as hippius_presign_mod
+from . import results_publisher
 from .per_hotkey_limit import (
     ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
     PerHotkeyLimiter,
@@ -436,6 +438,9 @@ def build_app(
     # local tests share the app store.
     v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
     v2_blob_store = blob_store_mod.store_from_env()
+    # Hippius presign client for flat results-file pushes. None when env is
+    # unset; gated in results_publisher so missing config is always a no-op.
+    v2_hip = hippius_presign_mod.HippiusPresign.from_env()
     # Startup-time env pinning: copy the V2 per-miner env onto the legacy names
     # once, while build_app is still single-threaded, so the V2 per-miner
     # handlers and verify worker skip v2_pm_env()'s process-global lock (it
@@ -1856,6 +1861,15 @@ def build_app(
                             results = list(results) + list(bitset_results)
                     except Exception as be:
                         print(f"[v2_verify] bitset_batch_error error={be!r}")
+                    # Push flat per-miner results files to Hippius for each
+                    # distinct (hotkey, epoch) that changed this tick. One
+                    # write per miner regardless of batch size. Best-effort:
+                    # publish_changed_miners never raises.
+                    if results:
+                        await asyncio.to_thread(
+                            results_publisher.publish_changed_miners,
+                            v2_store, v2_hip, results,
+                        )
                     batch_ms = (time.time() - batch_started) * 1000.0
                     if results:
                         counts = {}
