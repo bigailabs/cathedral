@@ -47,6 +47,11 @@ routes = [
 [vars]
 READ_ORIGIN = "https://read.cathedral.computer"
 READ_ORIGIN_RESOLVE_OVERRIDE = ""
+WEIGHTS_ORIGIN = "https://api.github.com/repos/wallscaler/cathedral-weight-feed/contents"
+WEIGHTS_ORIGIN_SEARCH = "?ref=main"
+WEIGHTS_ORIGIN_ACCEPT = "application/vnd.github.raw"
+WEIGHTS_ORIGIN_USER_AGENT = "cathedral-edge-router"
+WEIGHTS_ORIGIN_RESOLVE_OVERRIDE = ""
 # Direct origin URL avoids a loop when submit.cathedral.computer is proxied through this Worker.
 SUBMIT_ORIGIN = "https://cathedral-submit-production.up.railway.app"
 READ_ORIGIN_TIMEOUT_MS = "10000"
