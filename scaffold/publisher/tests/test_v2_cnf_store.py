@@ -250,9 +250,10 @@ def _submit_manifest(client, kp, *, challenge_id, solution_cid, solution_sha256,
     return r.json()
 
 
-def test_mint_time_and_submit_bitset_time_bake_wire_the_store(tmp_path, monkeypatch):
-    """The two write sites (challenge list mint, submit-bitset) actually land
-    a row keyed by challenge_id, matching the CNF that was generated."""
+def test_mint_time_and_bitset_verify_bake_wire_the_store(tmp_path, monkeypatch):
+    """Challenge-list mint and async bitset verify land a row keyed by
+    challenge_id, matching the CNF that was generated. Thin submit itself stays
+    cheap and does not regenerate/bake the CNF."""
     app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
     client = TestClient(app)
     kp = _keypair("//CnfStoreMintWrite")
@@ -265,8 +266,8 @@ def test_mint_time_and_submit_bitset_time_bake_wire_the_store(tmp_path, monkeypa
     baked = v2_cnf_store.get(v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
     assert baked == cnf_text
 
-    # Delete the row to isolate the submit_bitset_v2 write site, then re-derive
-    # an assignment and submit via the bitset path — it should re-bake it.
+    # Delete the row to isolate the bitset verify worker write site, then
+    # re-derive an assignment and submit via the thin bitset path.
     def _wipe(conn):
         conn.execute(
             "DELETE FROM v2_cnf_store WHERE challenge_id=?", (item["challenge_id"],))
@@ -302,7 +303,14 @@ def test_mint_time_and_submit_bitset_time_bake_wire_the_store(tmp_path, monkeypa
         },
     )
     assert r.status_code == 202, r.text
-    assert r.json()["status"] == "verified"
+    assert r.json()["status"] == "received"
+
+    assert v2_cnf_store.get(v2_store, item["challenge_id"]) is None
+
+    results = v2_pipeline.process_bitset_batch(
+        v2_store, worker_id="test-bitset-bake", batch_size=8, lock_secs=60)
+    assert len(results) == 1
+    assert results[0]["status"] == v2_pipeline.STATUS_VERIFIED, results[0]
 
     rebaked = v2_cnf_store.get(v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
     assert rebaked == cnf_text
@@ -535,17 +543,14 @@ def test_submit_bitset_accepts_token_minted_from_warm_page(tmp_path, monkeypatch
         },
     )
     assert r.status_code == 202, r.text
-    assert r.json()["status"] == "verified"
+    assert r.json()["status"] == "received"
 
 
-def test_challenges_page_always_serves_fresh_generation_sha(tmp_path, monkeypatch):
-    """The challenges page mints from pm.item_meta() (memoized fresh generation),
-    NOT from v2_cnf_store, so a poisoned store row can NEVER change the sha the
-    page reports to a miner — the page always serves the true fresh-generation
-    sha regardless of CATHEDRAL_V2_CNF_STORE_READ. This is strictly safer than the
-    old read-through-on-page behaviour (a poisoned row used to be served, causing
-    submit_token_cnf_mismatch). The store is now only a cache for the verify
-    worker, which sha-gates independently, so a bad row can never earn credit."""
+def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch):
+    """CATHEDRAL_V2_CNF_STORE_READ=0 must bypass the cache on the serving
+    paths. Proven by poisoning the stored row with a different, self-consistent
+    body: with reads off the page mints the fresh-generation sha; with reads on
+    it serves the cached row."""
     import zlib
 
     app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
@@ -565,14 +570,10 @@ def test_challenges_page_always_serves_fresh_generation_sha(tmp_path, monkeypatc
 
     v2_store.write(_poison)
 
-    # Reads off: page serves fresh-generation sha (as before).
     monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_READ", "0")
     off = _fetch_item(client, kp)
     assert off["cnf_sha256"] == cold["cnf_sha256"]
 
-    # Reads on: page STILL serves fresh-generation sha — the poisoned row is
-    # ignored because the page mints from item_meta (generation), not the store.
     monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_READ", raising=False)
     on = _fetch_item(client, kp)
-    assert on["cnf_sha256"] == cold["cnf_sha256"]
-    assert on["cnf_sha256"] != poison_sha
+    assert on["cnf_sha256"] == poison_sha

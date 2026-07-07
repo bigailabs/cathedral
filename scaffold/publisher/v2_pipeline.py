@@ -608,6 +608,7 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
     from . import per_miner as pm
     from ..dimacs import parse_cnf
     from . import real_corpus
+    from . import v2_cnf_store
 
     rid = str(row["id"])
     hk = str(row["miner_hotkey"])
@@ -647,6 +648,10 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
                 # config drift since mint — cannot fairly score. Reject, never credit.
                 _finish(STATUS_REJECTED, reason="cnf_sha_drift")
                 return {"id": rid, "status": STATUS_REJECTED, "reason": "cnf_sha_drift"}
+            try:
+                v2_cnf_store.put(store, cid, cnf_text)
+            except Exception:
+                pass
             nvars, _clauses = parse_cnf(cnf_text)
             from . import v2_bitset_submit as _bs
             assignment_raw, assignment = _bs.decode_assignment_b64(

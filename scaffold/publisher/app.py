@@ -49,7 +49,7 @@ from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
 from . import v2_cnf_store
 from .sat_solution import verify_dimacs_solution
-from . import submit_admission
+from . import external_scores, submit_admission
 from . import solution_manifest
 from . import v2_pipeline
 from . import v2_bitset_submit
@@ -1409,6 +1409,7 @@ def build_app(
         }
         _SUBMIT_POST_PATHS = {
             "/v1/agents/submit",
+            "/v1/external-scores/violet",
             "/v2/agents/submit-manifest",
             "/v2/agents/submit-bitset",
             "/v2/blobs/solutions",
@@ -3044,6 +3045,53 @@ def build_app(
                 "Access-Control-Allow-Origin": "*",
                 "X-Cathedral-Cache": cache_status,
             },
+        )
+
+    # ---- External score intake (publisher-side only) ----------------------
+    @app.post("/v1/external-scores/violet")
+    async def external_scores_violet(
+        request: Request,
+        authorization: str | None = Header(None),
+        x_cathedral_external_token: str | None = Header(None),
+        x_cathedral_external_signature: str | None = Header(None),
+    ):
+        """Accept Violet's signed/authenticated score report for composition.
+
+        This endpoint never sets weights directly. It stores source scores for
+        weights.py to blend into the single Cathedral-signed vector that thin
+        validators already verify and apply.
+        """
+        if not external_scores.ingest_enabled():
+            raise HTTPException(404, "external_scores_ingest_not_enabled")
+        # (#3) If these scores actually feed the real signed vector, refuse
+        # unauthenticated ingest regardless of ALLOW_UNAUTHENTICATED — a
+        # real-money credential must be present.
+        if weights_mod.external_scores_enabled() and not external_scores.token_configured():
+            raise HTTPException(503, "external_scores_token_required_while_blending")
+        body = await request.body()
+        if not external_scores.bearer_authorized(authorization, x_cathedral_external_token):
+            raise HTTPException(401, "invalid_external_scores_token")
+        if not external_scores.verify_hmac(body, x_cathedral_external_signature):
+            raise HTTPException(401, "invalid_external_scores_signature")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            raise HTTPException(400, "invalid_json_report")
+        try:
+            report = external_scores.normalize_report(payload, default_source="violet_audio")
+        except external_scores.ExternalScoreError as exc:
+            raise HTTPException(400, exc.reason)
+        if report["source"] not in external_scores.ALLOWED_ENDPOINT_SOURCES:
+            raise HTTPException(400, "invalid_source_for_violet_endpoint")
+        try:
+            accepted = external_scores.store_report(store, report)
+        except Exception as exc:
+            print(f"[external_scores] store failed: {exc!r}")
+            raise HTTPException(503, "external_scores_store_failed")
+        return JSONResponse(
+            accepted,
+            status_code=202,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
     # ---- M1b: signed final-scores vector (the v4 scoring interface) -------
@@ -5549,31 +5597,31 @@ def build_app(
                 if not v2_submit_token_secret:
                     raise HTTPException(503, "v2_submit_token_secret_missing")
                 expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                from ..dimacs import parse_cnf
                 for item in items:
                     tier_i = int(item["tier"])
                     seq_i = int(item["seq"])
                     cid = str(item["challenge_id"])
-                    # The per-item derived data (challenge_id, cnf_sha256, nvars,
-                    # is_real) is IMMUTABLE for (hotkey, epoch, tier, seq), so it is
-                    # memoized in pm.item_meta() — a warm page does ZERO generation,
-                    # ZERO parse_cnf, ZERO sha256, and only mints the (time-bound)
-                    # token. This removed the per-request CPU that starved the
-                    # worker threadpool under a challenges flood (502/503/timeout
-                    # with the DB pool idle). Correctness is unchanged: item_meta
-                    # calls the SAME generate_instance path, and submit still
-                    # regenerates + sha-gates independently.
-                    meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
-                        x_cathedral_hotkey, epoch, tier_i, seq_i)
-                    if meta_cid != cid:
-                        raise HTTPException(500, "v2_challenge_generation_mismatch")
-                    # Bake the CNF so the verify worker reads the store instead of
-                    # regenerating. Idempotent INSERT OR IGNORE — a cheap no-op on
-                    # warm items; respects CATHEDRAL_V2_CNF_STORE_WRITE. Best-effort:
-                    # v2_cnf_store wraps all errors internally and never raises.
-                    try:
-                        v2_cnf_store.put(v2_store, cid, cnf_text)
-                    except Exception:
-                        pass
+                    # Read-through the persistent CNF store first so warm rows
+                    # avoid generation across process restarts. On a miss, use
+                    # pm.item_meta() so process-local warm pages skip generation,
+                    # parse_cnf and sha work. Both paths bind the submit token to
+                    # the exact CNF bytes and submit/verify sha-gate again later.
+                    cnf_text = v2_cnf_store.get(v2_store, cid)
+                    if cnf_text is None:
+                        meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
+                            x_cathedral_hotkey, epoch, tier_i, seq_i)
+                        if meta_cid != cid:
+                            raise HTTPException(500, "v2_challenge_generation_mismatch")
+                        try:
+                            v2_cnf_store.put(v2_store, cid, cnf_text)
+                        except Exception:
+                            pass
+                    else:
+                        actual_nvars, _clauses = parse_cnf(cnf_text)
+                        cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                        is_real = pm.uses_real_instance(
+                            x_cathedral_hotkey, epoch, tier_i, seq_i)
                     item["n_vars"] = actual_nvars
                     item["kind"] = (
                         real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
@@ -6244,15 +6292,14 @@ def build_app(
             raise HTTPException(400, exc.reason)
 
         from . import per_miner as pm
+        from . import real_corpus
 
         # THIN SUBMIT (async scoring). The submit_token was already HMAC-verified
         # above, cryptographically binding miner_hotkey + challenge_id + epoch/tier/
-        # seq + nvars + cnf_sha256 — so ownership and challenge identity are proven
-        # without regenerating the CNF. We only decode the assignment (cheap) and
-        # admit the row as 'received'. The verify worker does the witness check +
-        # scoring ASYNC and pushes the result to the miner's flat results file, so
-        # miners never poll a status endpoint. This keeps submit ~sub-second instead
-        # of the ~40s the inline regen+witness+score cost.
+        # seq + nvars + cnf_sha256. Ownership and challenge identity are proven
+        # without regenerating the CNF. Decode the assignment shape cheaply, then
+        # admit the row as received. The verify worker does witness-check + scoring
+        # async and pushes the miner's flat results file.
         nvars = int(token_payload["nvars"])
         try:
             assignment_raw, _assignment = v2_bitset_submit.decode_assignment_b64(
@@ -6268,8 +6315,6 @@ def build_app(
                 tier_i = int(token_payload["tier"])
                 seq_i = int(token_payload["seq"])
                 epoch_i = int(token_payload["epoch"])
-                # Ownership is already proven by the token HMAC (challenge_id is
-                # bound), so this is a cheap deterministic id check, not a regen.
                 resolved = pm.resolve_tier_seq_for(
                     x_cathedral_hotkey, epoch_i, submit["challenge_id"],
                     tier=tier_i, seq=seq_i)
@@ -6290,11 +6335,9 @@ def build_app(
                 challenge_kind=challenge_kind,
             )
 
-        from . import real_corpus
         row, inserted = await asyncio.get_running_loop().run_in_executor(
-            v2_read_executor, _admit_received)
+            v2_submit_executor, _admit_received)
         payload = v2_bitset_submit.receipt_payload(row, inserted=inserted)
-        # Tell the miner where its results land — it never polls the origin again.
         payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
         return JSONResponse(
             payload,

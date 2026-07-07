@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .store import Store
+from . import external_scores
 # Shared verify surface lives in the dependency-light module so a validator
 # install doesn't drag in FastAPI/store; re-exported here for the orchestrator's
 # callers and the gates (one import surface).
@@ -85,6 +86,26 @@ PERMINER_PUBLIC_BASELINE_ENV = "CATHEDRAL_PERMINER_PUBLIC_BASELINE"
 # removes non-payable hotkeys from the signed weights when a fresh snapshot exists.
 PAYABLE_HOTKEYS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS"  # off | mark | filter
 PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS_MAX_AGE_SECS"
+# External score-source controls. Disabled by default; when enabled, source
+# scores are blended publisher-side before Cathedral signs the one validator feed.
+EXTERNAL_SCORES_ENABLED_ENV = "CATHEDRAL_EXTERNAL_SCORES_ENABLED"
+EXTERNAL_SCORES_SOURCE_ENV = "CATHEDRAL_EXTERNAL_SCORES_SOURCE"
+EXTERNAL_SCORES_MODE_ENV = "CATHEDRAL_EXTERNAL_SCORES_MODE"  # blend | external_primary
+EXTERNAL_SCORES_WEIGHT_ENV = "CATHEDRAL_EXTERNAL_SCORES_WEIGHT"
+EXTERNAL_SCORES_BASE_WEIGHT_ENV = "CATHEDRAL_EXTERNAL_SCORES_BASE_WEIGHT"
+EXTERNAL_SCORES_WINDOW_SECS_ENV = "CATHEDRAL_EXTERNAL_SCORES_WINDOW_SECS"
+# Real-money safety knobs (see docs/VIOLET_EXTERNAL_SCORES.md):
+#  FRACTION       — explicit external share (0..1); if set it wins over the
+#                   base/external weights (e.g. 0.10 = 10% external, 90% base).
+#  MAX_FRACTION   — hard cap on the external share (default 0.5) so a misconfig
+#                   cannot silently hand the vector to the external source.
+#  REQUIRE_REGISTERED — external scores may only pay hotkeys in the fresh
+#                   metagraph snapshot; fail-closed if the snapshot is missing.
+#  PRIMARY_CONFIRM — external_primary (100% external) requires this explicit ack.
+EXTERNAL_SCORES_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_FRACTION"
+EXTERNAL_SCORES_MAX_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION"
+EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV = "CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED"
+EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV = "CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM"
 
 _CACHE_TTL_SECS = 60.0
 _PERSISTED_VECTOR_ID = "latest"
@@ -170,6 +191,13 @@ def _env_float(name: str, default: float) -> float:
         return float(os.environ.get(name, "") or default)
     except ValueError:
         return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def window_hours() -> float:
@@ -705,6 +733,193 @@ def _compose_row_score_recent(
     return result
 
 
+def external_scores_enabled() -> bool:
+    return _env_bool(EXTERNAL_SCORES_ENABLED_ENV, False)
+
+
+def external_scores_source() -> str:
+    raw = (os.environ.get(EXTERNAL_SCORES_SOURCE_ENV, "violet_audio") or "violet_audio").strip()
+    return raw or "violet_audio"
+
+
+def external_scores_mode() -> str:
+    raw = os.environ.get(EXTERNAL_SCORES_MODE_ENV, "blend").strip().lower()
+    return raw if raw in {"blend", "external_primary"} else "blend"
+
+
+def external_scores_window_secs() -> float:
+    return max(1.0, _env_float(EXTERNAL_SCORES_WINDOW_SECS_ENV, 3600.0))
+
+
+def _normalize_positive_scores(scores: dict[str, float]) -> dict[str, float]:
+    clean: dict[str, float] = {}
+    for hk, raw in scores.items():
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            clean[str(hk)] = value
+    if not clean:
+        return {}
+    top = max(clean.values())
+    if top <= 0.0:
+        return {}
+    return {hk: round(v / top, 6) for hk, v in clean.items()}
+
+
+def _identity_collapse_scores(
+    raw: dict[str, float], *, ident=lambda hk: hk
+) -> dict[str, float]:
+    """Normalize hotkey scores and split one identity's score across its hotkeys."""
+    groups: dict[str, set[str]] = {}
+    group_scores: dict[str, float] = {}
+    for hk, raw_score in raw.items():
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(score) or score <= 0.0:
+            continue
+        idk = str(ident(str(hk)))
+        groups.setdefault(idk, set()).add(str(hk))
+        # External reports are score vectors, not event ledgers. Use max per
+        # identity so cloning the same coldkey across hotkeys cannot sum rewards.
+        group_scores[idk] = max(group_scores.get(idk, 0.0), score)
+    if not group_scores:
+        return {}
+    top = max(group_scores.values())
+    if top <= 0.0:
+        return {}
+    out: dict[str, float] = {}
+    for idk, score in group_scores.items():
+        members = groups[idk]
+        per = round((score / top) / len(members), 6)
+        for hk in members:
+            out[hk] = per
+    return out
+
+
+def _compose_external_scores(
+    store: Store,
+    *,
+    now: datetime,
+    ident=lambda hk: hk,
+) -> dict[str, float]:
+    if not external_scores_enabled():
+        return {}
+    since = _ms_iso(now - timedelta(seconds=external_scores_window_secs()))
+    try:
+        raw = external_scores.recent_scores(
+            store, source=external_scores_source(), since_iso=since)
+    except Exception as exc:
+        print(f"[weights] external_scores compose failed: {exc!r}")
+        return {}
+    return _identity_collapse_scores(raw, ident=ident)
+
+
+def _external_blend_weights() -> tuple[float, float, float]:
+    """Return (base_weight, external_weight, effective_external_share).
+
+    An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION wins (share == fraction).
+    Otherwise the legacy base/external weights are used, but the effective
+    external share is HARD-CAPPED at CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION
+    (default 0.5) so a fat external_weight cannot silently take the vector."""
+    max_frac = min(1.0, max(0.0, _env_float(EXTERNAL_SCORES_MAX_FRACTION_ENV, 0.5)))
+    frac_raw = os.environ.get(EXTERNAL_SCORES_FRACTION_ENV, "").strip()
+    if frac_raw:
+        frac = min(max_frac, max(0.0, _env_float(EXTERNAL_SCORES_FRACTION_ENV, 0.0)))
+        return (1.0 - frac), frac, frac
+    base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
+    external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))
+    tot = base_weight + external_weight
+    if tot <= 0.0:
+        return 0.0, 0.0, 0.0
+    share = external_weight / tot
+    if share > max_frac and max_frac < 1.0:
+        external_weight = base_weight * max_frac / (1.0 - max_frac)
+        share = max_frac
+    return base_weight, external_weight, share
+
+
+def _apply_external_scores(
+    store: Store,
+    base: dict[str, float],
+    *,
+    now: datetime,
+    ident=lambda hk: hk,
+) -> dict[str, float]:
+    if not external_scores_enabled():
+        return base
+    ext = _compose_external_scores(store, now=now, ident=ident)
+    if not ext:
+        return base
+    # (#2) Registration gate: external scores may pay only REGISTERED miners.
+    # Fail-closed — if we cannot confirm the metagraph snapshot, do NOT blend
+    # unverified external scores into the real signed vector.
+    if _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True):
+        registered, _meta = _load_fresh_metagraph_hotkeys(store, now=now)
+        if registered is None:
+            print("[weights] external_scores: registration snapshot unavailable "
+                  "-> NOT blending external scores (fail-closed)")
+            return base
+        ext = {hk: v for hk, v in ext.items() if hk in registered}
+        if not ext:
+            return base
+    # (#5) external_primary replaces the ENTIRE vector — require explicit ack.
+    if external_scores_mode() == "external_primary":
+        if _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False):
+            print("[weights] external_scores: EXTERNAL_PRIMARY active — external "
+                  "source is the ENTIRE weight vector")
+            return _normalize_positive_scores(ext)
+        print("[weights] external_scores: external_primary requested WITHOUT "
+              f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend")
+    # (#1) Blend with an explicit, capped external share.
+    base_norm = _normalize_positive_scores(base)
+    base_weight, external_weight, eff_share = _external_blend_weights()
+    if base_weight <= 0.0 and external_weight <= 0.0:
+        return base
+    print(f"[weights] external_scores blend: external share ~{eff_share:.3f} "
+          f"(source={external_scores_source()}, registered_scored={len(ext)})")
+    hotkeys = set(base_norm) | set(ext)
+    blended = {
+        hk: (base_norm.get(hk, 0.0) * base_weight) + (ext.get(hk, 0.0) * external_weight)
+        for hk in hotkeys
+    }
+    return _normalize_positive_scores(blended)
+
+
+def _external_scores_policy_status(
+    store: Store | None,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    enabled = external_scores_enabled()
+    source = external_scores_source()
+    window_secs = external_scores_window_secs()
+    status: dict[str, Any] = {
+        "enabled": enabled,
+        "source": source,
+        "mode": external_scores_mode(),
+        "window_secs": window_secs,
+        "base_weight": max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0)),
+        "external_weight": max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0)),
+        "effective_external_share": round(_external_blend_weights()[2], 6),
+        "require_registered": _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True),
+        "primary_confirmed": _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False),
+        "has_scores": False,
+    }
+    if not enabled or store is None:
+        return status
+    since = _ms_iso(now - timedelta(seconds=window_secs))
+    try:
+        status.update(external_scores.status(store, source=source, since_iso=since))
+        status["has_scores"] = int(status.get("active_score_count") or 0) > 0
+    except Exception as exc:
+        status["error"] = repr(exc)
+    return status
+
+
 def _proportional_ledger_has_rows(store: Store, since: str) -> bool:
     rows = store.query(
         "SELECT 1 FROM lane_challenge_solves s "
@@ -1100,12 +1315,14 @@ def compose_scores(
 
     pm_scores = _perminer_compose_scores(store, ident=pm_ident, since=since)
     if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
-        return pm_scores
+        return _apply_external_scores(store, pm_scores, now=now, ident=ident)
 
     def finish_base(base: dict[str, float]) -> dict[str, float]:
         if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
-            return _apply_perminer_primary(base, pm_scores)
-        return _apply_perminer_bonus(store, base, coldkey_of, now=now)
+            base = _apply_perminer_primary(base, pm_scores)
+        else:
+            base = _apply_perminer_bonus(store, base, coldkey_of, now=now)
+        return _apply_external_scores(store, base, now=now, ident=ident)
 
     if mode() == "row_score_recent":
         return finish_base(_compose_row_score_recent(store, since, ident=ident))
@@ -1202,11 +1419,16 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
     pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
+    external_status = _external_scores_policy_status(store, now=now)
     score_source = pm_status["score_source"] or effective_mode
+    if external_status.get("enabled") and external_status.get("has_scores"):
+        ext_source = f"external:{external_status.get('source')}"
+        score_source = ext_source if external_scores_mode() == "external_primary" else f"{score_source}+{ext_source}"
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
     policy_inputs = {
         "mode": requested_mode, "effective_mode": effective_mode,
         "score_source": score_source,
+        "external_scores": external_status,
         "window_hours": window_hours(),
         "burn": burn_percentage(), "burn_uid": burn_uid(),
         "tier_weights": tier_weights(),
@@ -1239,6 +1461,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "proportional_ledger_empty": proportional_ledger_empty,
             "coldkey_map_loaded": bool(coldkey_of),
             "payable_hotkeys": payable_meta,
+            "external_scores": external_status,
             "perminer_scoring_mode": pm_status["scoring_mode"],
             "perminer": {
                 "enabled": pm_status["perminer_enabled"],
