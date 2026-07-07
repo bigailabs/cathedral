@@ -511,6 +511,12 @@ def sweep_exhausted(store: Store, *, max_attempts: int = 20, limit: int = 500) -
     queue, but they'd otherwise sit in 'retry' indefinitely. This sweeps them to
     'rejected' (verify_attempts_exhausted) so the backlog stays clean. Best-effort,
     called once per tick. Disabled when max_attempts is 0.
+
+    Also sweeps 'verifying' rows whose lock expired and which are over the cap: a
+    worker that dies mid-verify leaves the row 'verifying'; claim_batch reclaims it
+    while under the cap, but once over the cap claim SKIPS it, so it would strand in
+    'verifying' forever (this stranded 134 blob-lost rows from the 2026-07-04
+    incident). Including STATUS_VERIFYING with the expired-lock guard closes that.
     """
     if not max_attempts:
         return 0
@@ -519,9 +525,9 @@ def sweep_exhausted(store: Store, *, max_attempts: int = 20, limit: int = 500) -
     def _tx(conn):
         rows = conn.execute(
             "SELECT id FROM solution_manifests "
-            "WHERE status IN (?, ?) AND attempt_count >= ? "
+            "WHERE status IN (?, ?, ?) AND attempt_count >= ? "
             "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) LIMIT ?",
-            (STATUS_RECEIVED, STATUS_RETRY, int(max_attempts), now_iso, int(limit)),
+            (STATUS_RECEIVED, STATUS_RETRY, STATUS_VERIFYING, int(max_attempts), now_iso, int(limit)),
         ).fetchall()
         ids = [str(r["id"]) for r in rows]
         for rid in ids:
