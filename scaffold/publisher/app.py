@@ -55,6 +55,8 @@ from . import v2_pipeline
 from . import v2_bitset_submit
 from . import v2_receipts
 from . import blob_store as blob_store_mod
+from . import hippius_presign as hippius_presign_mod
+from . import results_publisher
 from .per_hotkey_limit import (
     ABUSE_REASON as _PER_HOTKEY_ABUSE_REASON,
     PerHotkeyLimiter,
@@ -436,6 +438,9 @@ def build_app(
     # local tests share the app store.
     v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
     v2_blob_store = blob_store_mod.store_from_env()
+    # Hippius presign client for flat results-file pushes. None when env is
+    # unset; gated in results_publisher so missing config is always a no-op.
+    v2_hip = hippius_presign_mod.HippiusPresign.from_env()
     # Startup-time env pinning: copy the V2 per-miner env onto the legacy names
     # once, while build_app is still single-threaded, so the V2 per-miner
     # handlers and verify worker skip v2_pm_env()'s process-global lock (it
@@ -530,6 +535,14 @@ def build_app(
         "CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", solution_manifest_enabled)
     solution_blob_upload_max_bytes = _env_int(
         "CATHEDRAL_V2_BLOB_UPLOAD_MAX_BYTES", 5_000_000)
+    # Durable inline copy threshold. The local blob dir is per-container /tmp, so
+    # the async verify worker (a different container) cannot read what the web
+    # container wrote — a redeploy or cross-container fetch loses the bytes and
+    # the row poison-loops on blob_fetch_failed forever. Inline every solution we
+    # accept for blob upload so verification never depends on the local blob
+    # store. Defaults to the upload max so coverage always matches what we admit.
+    solution_inline_max_bytes = _env_int(
+        "CATHEDRAL_V2_INLINE_MAX_BYTES", solution_blob_upload_max_bytes)
     v2_shadow_v1_enabled = _env_bool("CATHEDRAL_V2_SHADOW_V1_ENABLED", False)
     v2_shadow_v1_max_solution_bytes = _env_int(
         "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
@@ -556,6 +569,16 @@ def build_app(
         1, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_THREADS", 8))
     v2_submit_executor = ThreadPoolExecutor(
         max_workers=v2_submit_bitset_threads, thread_name_prefix="v2-submit")
+    # Dedicated executor for the per-miner challenges/cnf READ path. The item loop
+    # (generate/read-through + parse_cnf + sha + mint_token, x page size) is CPU
+    # heavy; running it in the shared anyio threadpool lets a challenges flood
+    # saturate every thread so /health, /submit and everything else queue behind
+    # it (observed live: 502/503/timeout while the DB pool sat idle — worker/thread
+    # starvation, not DB). A separate bounded pool isolates read load so the rest
+    # of the origin stays responsive under a page flood.
+    v2_read_threads = max(1, _env_int("CATHEDRAL_V2_READ_THREADS", 6))
+    v2_read_executor = ThreadPoolExecutor(
+        max_workers=v2_read_threads, thread_name_prefix="v2-read")
     v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
     v2_worker_batch_size = max(1, _env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8))
     v2_worker_interval_secs = max(
@@ -808,29 +831,38 @@ def build_app(
         # Phase 3: a brief bounded wait turns most transient overlaps into an
         # accepted submit instead of an instant miner-facing 429. The hard ceiling
         # is preserved — we still reject after the wait, just less often.
-        acquired = (
-            submit_gate.acquire(timeout=submit_busy_wait_secs)
-            if submit_busy_wait_secs > 0 else submit_gate.acquire(blocking=False)
-        )
-        if not acquired:
-            _record_submit_event(
-                "rate_limited",
-                "submit_busy_retry",
-                status_code=429,
-                log=True,
-            )
-            raise HTTPException(
-                429,
-                _retry_after_payload("submit_busy_retry", 1),
-                headers={
-                    "Retry-After": "1",
-                    "X-Cathedral-Rejection-Reason": "submit_busy_retry",
-                },
-            )
+        #
+        # LEAK FIX (same class as the read gate): the acquired slot must be
+        # released on EVERY exit path, including a cancel that fires between the
+        # successful acquire() and the try/yield below. Hold the slot in a single
+        # try that spans the reject-check and the yield so a disconnect can never
+        # leak it (a leak drains the BoundedSemaphore and 429s spuriously on an
+        # idle origin — observed as 2/20 sequential submit 429s before this fix).
+        acquired = False
         try:
+            acquired = (
+                submit_gate.acquire(timeout=submit_busy_wait_secs)
+                if submit_busy_wait_secs > 0 else submit_gate.acquire(blocking=False)
+            )
+            if not acquired:
+                _record_submit_event(
+                    "rate_limited",
+                    "submit_busy_retry",
+                    status_code=429,
+                    log=True,
+                )
+                raise HTTPException(
+                    429,
+                    _retry_after_payload("submit_busy_retry", 1),
+                    headers={
+                        "Retry-After": "1",
+                        "X-Cathedral-Rejection-Reason": "submit_busy_retry",
+                    },
+                )
             yield
         finally:
-            submit_gate.release()
+            if acquired:
+                submit_gate.release()
 
     def _submit_rate_limited(rl_key: tuple[str, str], now: float) -> bool:
         if min_interval <= 0:
@@ -1262,43 +1294,53 @@ def build_app(
             # Phase 3: bounded non-blocking wait before rejecting. We poll the
             # semaphore with short asyncio sleeps rather than a blocking acquire so
             # the event loop is never stalled while we wait for a slot to free.
-            acquired = gate.acquire(blocking=False)
-            if not acquired and submit_busy_wait_secs > 0:
-                import asyncio
-                deadline = time.monotonic() + submit_busy_wait_secs
-                while not acquired and time.monotonic() < deadline:
-                    await asyncio.sleep(0.02)
-                    acquired = gate.acquire(blocking=False)
-            if not acquired:
-                _record_submit_event(
-                    "rate_limited",
-                    reason,
-                    status_code=429,
-                    log=True,
-                )
-                retry_after_secs = 1
-                body = _retry_after_body(reason, retry_after_secs)
-                await send({
-                    "type": "http.response.start",
-                    "status": 429,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(body)).encode()),
-                        (b"retry-after", str(retry_after_secs).encode()),
-                        (b"x-cathedral-rejection-reason", reason.encode("utf-8")),
-                    ],
-                })
-                await send({
-                    "type": "http.response.body",
-                    "body": body,
-                    "more_body": False,
-                })
-                return
-
+            #
+            # LEAK FIX: the whole path from a successful acquire() to the final
+            # release() must be exception-safe. Previously a slot acquired at the
+            # end of the polling loop could be leaked if a CancelledError (client
+            # disconnect) fired after acquire() but before the try/finally that
+            # releases it — over many disconnects the BoundedSemaphore drained to
+            # zero and every request 429'd spuriously even on an idle origin. We
+            # now hold the slot inside a single try that spans BOTH the shed-poll
+            # tail and the app call, releasing in finally on every exit path.
+            acquired = False
             try:
+                acquired = gate.acquire(blocking=False)
+                if not acquired and submit_busy_wait_secs > 0:
+                    import asyncio
+                    deadline = time.monotonic() + submit_busy_wait_secs
+                    while not acquired and time.monotonic() < deadline:
+                        await asyncio.sleep(0.02)
+                        acquired = gate.acquire(blocking=False)
+                if not acquired:
+                    _record_submit_event(
+                        "rate_limited",
+                        reason,
+                        status_code=429,
+                        log=True,
+                    )
+                    retry_after_secs = 1
+                    body = _retry_after_body(reason, retry_after_secs)
+                    await send({
+                        "type": "http.response.start",
+                        "status": 429,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                            (b"retry-after", str(retry_after_secs).encode()),
+                            (b"x-cathedral-rejection-reason", reason.encode("utf-8")),
+                        ],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": body,
+                        "more_body": False,
+                    })
+                    return
                 await self._app(scope, receive, send)
             finally:
-                gate.release()
+                if acquired:
+                    gate.release()
 
     class _ServiceRoleGuardMiddleware:
         """Fail closed when this process is launched as a narrow service role."""
@@ -1805,6 +1847,30 @@ def build_app(
                         lock_secs=v2_worker_lock_secs,
                         max_blob_bytes=v2_worker_max_blob_bytes,
                     )
+                    # Async witness-check + score for thin-submitted bitset events
+                    # (status 'received'). The submit handler no longer does this
+                    # inline, so it runs here. Same tick, best-effort.
+                    try:
+                        bitset_results = await asyncio.to_thread(
+                            v2_pipeline.process_bitset_batch,
+                            v2_store,
+                            worker_id=worker_id,
+                            batch_size=v2_worker_batch_size,
+                            lock_secs=v2_worker_lock_secs,
+                        )
+                        if bitset_results:
+                            results = list(results) + list(bitset_results)
+                    except Exception as be:
+                        print(f"[v2_verify] bitset_batch_error error={be!r}")
+                    # Push flat per-miner results files to Hippius for each
+                    # distinct (hotkey, epoch) that changed this tick. One
+                    # write per miner regardless of batch size. Best-effort:
+                    # publish_changed_miners never raises.
+                    if results:
+                        await asyncio.to_thread(
+                            results_publisher.publish_changed_miners,
+                            v2_store, v2_hip, results,
+                        )
                     batch_ms = (time.time() - batch_started) * 1000.0
                     if results:
                         counts = {}
@@ -5536,53 +5602,31 @@ def build_app(
                     tier_i = int(item["tier"])
                     seq_i = int(item["seq"])
                     cid = str(item["challenge_id"])
-                    # Read-through the CNF store before generating: rows are
-                    # immutable per challenge_id (INSERT OR IGNORE), written only
-                    # from real generation results, and get() self-verifies the
-                    # body against its recorded sha, so a cached body is
-                    # byte-identical to what generate_instance would return.
-                    # A warm page does zero generation and zero DB writes; with
-                    # CATHEDRAL_V2_CNF_STORE_READ=0, get() returns None and every
-                    # item takes the generate path below (today's behavior).
-                    # OPS: if you change generation config that alters the CNF BODY
-                    # without changing the challenge_id (CATHEDRAL_V2_REAL_FRACTION,
-                    # CHALLENGE_SOURCE, corpus contents, tier shape) MID-EPOCH, stale
-                    # immutable rows keep minting tokens whose sha no longer matches
-                    # a fresh regeneration, so warm submits 400 submit_token_cnf_mismatch
-                    # until the ~24h purge or epoch roll. Set CATHEDRAL_V2_CNF_STORE_READ=0
-                    # (or purge v2_cnf_store) when rotating generation config. No
-                    # verification bypass — submit still regenerates + sha-gates.
+                    # Read-through the persistent CNF store first so warm rows
+                    # avoid generation across process restarts. On a miss, use
+                    # pm.item_meta() so process-local warm pages skip generation,
+                    # parse_cnf and sha work. Both paths bind the submit token to
+                    # the exact CNF bytes and submit/verify sha-gate again later.
                     cnf_text = v2_cnf_store.get(v2_store, cid)
                     if cnf_text is None:
-                        gen_cid, cnf_text, _planted = pm.generate_instance(
+                        meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
                             x_cathedral_hotkey, epoch, tier_i, seq_i)
-                        if gen_cid != cid:
+                        if meta_cid != cid:
                             raise HTTPException(500, "v2_challenge_generation_mismatch")
-                        # Bake the CNF we just generated so the V2 verify worker and
-                        # later page fetches can read it back instead of regenerating
-                        # from seed. Best-effort: v2_cnf_store wraps all errors
-                        # internally and never raises.
                         try:
                             v2_cnf_store.put(v2_store, cid, cnf_text)
                         except Exception:
                             pass
-                    # Bind the reported/minted shape to the ACTUAL CNF body, not
-                    # the nominal tier shape — real-instance sources (combinatorial/
-                    # corpus, see real_corpus.py) produce CNFs sized differently from
-                    # shape_for(tier). Planted CNFs already have exactly
-                    # shape_for(tier) vars, so this is a no-op for the default source.
-                    actual_nvars, _clauses = parse_cnf(cnf_text)
+                    else:
+                        actual_nvars, _clauses = parse_cnf(cnf_text)
+                        cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                        is_real = pm.uses_real_instance(
+                            x_cathedral_hotkey, epoch, tier_i, seq_i)
                     item["n_vars"] = actual_nvars
-                    # uses_real_instance() is the exact source-selection predicate
-                    # generate_instance runs (planted is None iff it is True), so
-                    # the reported kind always agrees with the CNF body whether it
-                    # came from the store or from fresh generation.
                     item["kind"] = (
                         real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
-                        if pm.uses_real_instance(x_cathedral_hotkey, epoch, tier_i, seq_i)
-                        else "random_3sat_perminer"
+                        if is_real else "random_3sat_perminer"
                     )
-                    cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                     item["cnf_sha256"] = cnf_sha
                     item["assignment_encoding"] = "bitset/v1"
                     item["submit_token"] = v2_bitset_submit.mint_submit_token(
@@ -6249,13 +6293,21 @@ def build_app(
 
         from . import per_miner as pm
         from . import real_corpus
-        from ..dimacs import parse_cnf
 
-        # The regen + witness-verify + admit body is sync CPU and sync DB. Run it
-        # in the dedicated submit executor so it never blocks the event loop.
-        # HTTPExceptions raised inside propagate through run_in_executor unchanged,
-        # so every rejection path keeps its exact status + reason.
-        def _regen_verify_and_admit():
+        # THIN SUBMIT (async scoring). The submit_token was already HMAC-verified
+        # above, cryptographically binding miner_hotkey + challenge_id + epoch/tier/
+        # seq + nvars + cnf_sha256. Ownership and challenge identity are proven
+        # without regenerating the CNF. Decode the assignment shape cheaply, then
+        # admit the row as received. The verify worker does witness-check + scoring
+        # async and pushes the miner's flat results file.
+        nvars = int(token_payload["nvars"])
+        try:
+            assignment_raw, _assignment = v2_bitset_submit.decode_assignment_b64(
+                submit["assignment_b64"], nvars=nvars)
+        except v2_bitset_submit.BitsetSubmitError as exc:
+            raise HTTPException(400, exc.reason)
+
+        def _admit_received():
             with v2_pipeline.v2_pm_env():
                 if not v2_pipeline.v2_perminer_enabled():
                     raise HTTPException(404, "v2_per_miner_not_enabled")
@@ -6264,92 +6316,31 @@ def build_app(
                 seq_i = int(token_payload["seq"])
                 epoch_i = int(token_payload["epoch"])
                 resolved = pm.resolve_tier_seq_for(
-                    x_cathedral_hotkey,
-                    epoch_i,
-                    submit["challenge_id"],
-                    tier=tier_i,
-                    seq=seq_i,
-                )
+                    x_cathedral_hotkey, epoch_i, submit["challenge_id"],
+                    tier=tier_i, seq=seq_i)
                 if resolved is None:
                     raise HTTPException(400, "challenge_id_not_in_miner_set")
-                cid, cnf_text, planted = pm.generate_instance(
-                    x_cathedral_hotkey, epoch_i, tier_i, seq_i)
-                if cid != submit["challenge_id"]:
-                    raise HTTPException(400, "challenge_id_not_in_miner_set")
-                # Bake the CNF we just regenerated so the V2 verify worker (which
-                # re-derives the same CNF for the resulting solution_manifests /
-                # v2_submit_events event) can read it back instead of regenerating
-                # from seed. Best-effort: v2_cnf_store wraps all errors internally
-                # and never raises.
-                try:
-                    v2_cnf_store.put(v2_store, cid, cnf_text)
-                except Exception:
-                    pass
-                # planted is None iff this is a REAL (unplanted) instance — see
-                # per_miner.generate_instance docstring. Derived from the ACTUAL
-                # generation result so it always agrees with the CNF just verified.
                 challenge_kind = (
                     real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=x_cathedral_hotkey)
-                    if planted is None else "random_3sat_perminer"
+                    if pm.uses_real_instance(x_cathedral_hotkey, epoch_i, tier_i, seq_i)
+                    else "random_3sat_perminer"
                 )
-                cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
-                if cnf_sha != str(token_payload["cnf_sha256"]):
-                    raise HTTPException(400, "submit_token_cnf_mismatch")
-                nvars = int(token_payload["nvars"])
-                # Bind the shape check to the server-regenerated CNF's ACTUAL var
-                # count, not the nominal tier shape — real-instance sources
-                # (combinatorial/corpus) produce CNFs sized differently from
-                # shape_for(tier). Planted CNFs already have exactly shape_for(tier)
-                # vars, so behavior is unchanged for the default source. The
-                # cnf_sha256 check above already binds the token to this exact CNF
-                # body; this keeps the anti-cheat shape binding intact while
-                # matching the real generated instance.
-                actual_nvars, _clauses = parse_cnf(cnf_text)
-                if nvars != actual_nvars:
-                    raise HTTPException(400, "submit_token_shape_mismatch")
-                try:
-                    assignment_raw, assignment = v2_bitset_submit.decode_assignment_b64(
-                        submit["assignment_b64"], nvars=nvars)
-                except v2_bitset_submit.BitsetSubmitError as exc:
-                    raise HTTPException(400, exc.reason)
-                ok, reason = v2_pipeline.verify_assignment_literals(cnf_text, assignment)
-                if not ok:
-                    raise HTTPException(400, reason or "witness_check_failed")
-                weight = float(pm.weight_for(tier_i))
-
-            received_at = _now_iso_ms()
-            assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
-            details = {
-                "schema": "cathedral.v2.submit_bitset_verifier_details.v1",
-                "challenge_id": submit["challenge_id"],
-                "miner_hotkey": x_cathedral_hotkey,
-                "epoch": epoch_i,
-                "tier": tier_i,
-                "seq": seq_i,
-                "cnf_sha256": cnf_sha,
-                "assignment_sha256": assignment_sha,
-                "verified_at": received_at,
-            }
-            return v2_bitset_submit.admit_verified_event(
+            return v2_bitset_submit.admit_received_event(
                 v2_store,
                 submit=submit,
                 token_payload=token_payload,
                 signature=x_cathedral_signature,
                 assignment_raw=assignment_raw,
-                received_at_iso=received_at,
-                weighted_score=weight,
-                answer_hash=assignment_sha,
-                verifier_details_hash=hashlib.sha256(
-                    json.dumps(details, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                ).hexdigest(),
-                eligibility_status="unknown_beta",
+                received_at_iso=_now_iso_ms(),
                 challenge_kind=challenge_kind,
             )
 
         row, inserted = await asyncio.get_running_loop().run_in_executor(
-            v2_submit_executor, _regen_verify_and_admit)
+            v2_submit_executor, _admit_received)
+        payload = v2_bitset_submit.receipt_payload(row, inserted=inserted)
+        payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
         return JSONResponse(
-            v2_bitset_submit.receipt_payload(row, inserted=inserted),
+            payload,
             status_code=202 if inserted else 200,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
@@ -6412,9 +6403,9 @@ def build_app(
         # before; verify sha-checks whichever copy it uses.
         inline_solution: bytes | None = None
         try:
-            if int(manifest.get("solution_bytes") or 0) <= 8192:
+            if int(manifest.get("solution_bytes") or 0) <= solution_inline_max_bytes:
                 inline_solution = v2_blob_store.fetch(
-                    str(manifest["solution_cid"]), max_bytes=8192)
+                    str(manifest["solution_cid"]), max_bytes=solution_inline_max_bytes)
         except Exception:
             inline_solution = None
         row, inserted = solution_manifest.admit_manifest(

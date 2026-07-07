@@ -136,8 +136,15 @@ def _submit_and_assert_verified(client, kp, item):
     actual_nvars, _clauses = parse_cnf(cnf_text)
     assert actual_nvars == item["n_vars"]
 
-    assignment = solve_cnf(cnf_text)
-    assert assignment is not None
+    if item.get("kind") == "random_3sat_perminer":
+        with v2_pipeline.v2_pm_env():
+            _cid, _cnf, planted = pm.generate_instance(
+                kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+        assert planted is not None
+        assignment = planted
+    else:
+        assignment = solve_cnf(cnf_text)
+        assert assignment is not None
 
     assignment_b64 = base64.b64encode(
         v2_pipeline.encode_bitset_assignment(assignment)
@@ -158,8 +165,18 @@ def _submit_and_assert_verified(client, kp, item):
     )
     assert r.status_code == 202, r.text
     receipt = r.json()
-    assert receipt["status"] == "verified"
-    return receipt
+    assert receipt["status"] == "received"
+
+    results = v2_pipeline.process_bitset_batch(
+        client.app.state.v2_store, worker_id="test-kind", batch_size=8, lock_secs=60)
+    assert len(results) == 1
+    assert results[0]["status"] == v2_pipeline.STATUS_VERIFIED, results[0]
+
+    final = client.get(receipt["receipt_url"])
+    assert final.status_code == 200
+    final_payload = final.json()
+    assert final_payload["status"] == "verified"
+    return final_payload
 
 
 # --------------------------------------------------------------------------
@@ -304,4 +321,4 @@ def test_verify_metrics_by_kind_never_touches_scoring(tmp_path, monkeypatch):
     item = _fetch_item(client, kp, tier=1)
     receipt = _submit_and_assert_verified(client, kp, item)
     assert receipt["weighted_score"] == item["difficulty_weight"]
-    assert receipt["eligibility_status"] == "unknown_beta"
+    assert receipt["eligibility_status"] == "eligible_beta"
