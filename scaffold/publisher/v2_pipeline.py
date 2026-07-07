@@ -686,10 +686,27 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
 
 def process_bitset_batch(store: Store, *, worker_id: str | None = None,
                          batch_size: int = 8, lock_secs: float = 120.0) -> list[dict[str, Any]]:
-    """Claim + verify + score a batch of received bitset events."""
+    """Claim + verify + score a batch of received bitset events.
+
+    The verification work is per-row independent after claim: regenerate the CNF,
+    sha-gate the token, decode/verify the bitset, then write that row's terminal
+    status. Run those row checks in a bounded local pool so a burst of thin
+    submits drains faster than one serial CNF verification loop.
+    """
     worker_id = worker_id or f"v2b-{uuid.uuid4().hex[:12]}"
     rows = claim_bitset_batch(store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs)
-    return [verify_bitset_one(store, r) for r in rows]
+    if not rows:
+        return []
+    try:
+        workers = max(1, int(os.environ.get("CATHEDRAL_V2_BITSET_VERIFY_THREADS", "8") or "1"))
+    except ValueError:
+        workers = 8
+    workers = min(workers, len(rows))
+    if workers <= 1:
+        return [verify_bitset_one(store, r) for r in rows]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="v2-bitset-verify") as pool:
+        return list(pool.map(lambda r: verify_bitset_one(store, r), rows))
 
 
 def _score_rows(store: Store, table: str, *, since_iso: str | None = None,
