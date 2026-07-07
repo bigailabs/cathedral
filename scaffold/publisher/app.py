@@ -1841,6 +1841,21 @@ def build_app(
                         lock_secs=v2_worker_lock_secs,
                         max_blob_bytes=v2_worker_max_blob_bytes,
                     )
+                    # Async witness-check + score for thin-submitted bitset events
+                    # (status 'received'). The submit handler no longer does this
+                    # inline, so it runs here. Same tick, best-effort.
+                    try:
+                        bitset_results = await asyncio.to_thread(
+                            v2_pipeline.process_bitset_batch,
+                            v2_store,
+                            worker_id=worker_id,
+                            batch_size=v2_worker_batch_size,
+                            lock_secs=v2_worker_lock_secs,
+                        )
+                        if bitset_results:
+                            results = list(results) + list(bitset_results)
+                    except Exception as be:
+                        print(f"[v2_verify] bitset_batch_error error={be!r}")
                     batch_ms = (time.time() - batch_started) * 1000.0
                     if results:
                         counts = {}
@@ -6215,14 +6230,23 @@ def build_app(
             raise HTTPException(400, exc.reason)
 
         from . import per_miner as pm
-        from . import real_corpus
-        from ..dimacs import parse_cnf
 
-        # The regen + witness-verify + admit body is sync CPU and sync DB. Run it
-        # in the dedicated submit executor so it never blocks the event loop.
-        # HTTPExceptions raised inside propagate through run_in_executor unchanged,
-        # so every rejection path keeps its exact status + reason.
-        def _regen_verify_and_admit():
+        # THIN SUBMIT (async scoring). The submit_token was already HMAC-verified
+        # above, cryptographically binding miner_hotkey + challenge_id + epoch/tier/
+        # seq + nvars + cnf_sha256 — so ownership and challenge identity are proven
+        # without regenerating the CNF. We only decode the assignment (cheap) and
+        # admit the row as 'received'. The verify worker does the witness check +
+        # scoring ASYNC and pushes the result to the miner's flat results file, so
+        # miners never poll a status endpoint. This keeps submit ~sub-second instead
+        # of the ~40s the inline regen+witness+score cost.
+        nvars = int(token_payload["nvars"])
+        try:
+            assignment_raw, _assignment = v2_bitset_submit.decode_assignment_b64(
+                submit["assignment_b64"], nvars=nvars)
+        except v2_bitset_submit.BitsetSubmitError as exc:
+            raise HTTPException(400, exc.reason)
+
+        def _admit_received():
             with v2_pipeline.v2_pm_env():
                 if not v2_pipeline.v2_perminer_enabled():
                     raise HTTPException(404, "v2_per_miner_not_enabled")
@@ -6230,93 +6254,36 @@ def build_app(
                 tier_i = int(token_payload["tier"])
                 seq_i = int(token_payload["seq"])
                 epoch_i = int(token_payload["epoch"])
+                # Ownership is already proven by the token HMAC (challenge_id is
+                # bound), so this is a cheap deterministic id check, not a regen.
                 resolved = pm.resolve_tier_seq_for(
-                    x_cathedral_hotkey,
-                    epoch_i,
-                    submit["challenge_id"],
-                    tier=tier_i,
-                    seq=seq_i,
-                )
+                    x_cathedral_hotkey, epoch_i, submit["challenge_id"],
+                    tier=tier_i, seq=seq_i)
                 if resolved is None:
                     raise HTTPException(400, "challenge_id_not_in_miner_set")
-                cid, cnf_text, planted = pm.generate_instance(
-                    x_cathedral_hotkey, epoch_i, tier_i, seq_i)
-                if cid != submit["challenge_id"]:
-                    raise HTTPException(400, "challenge_id_not_in_miner_set")
-                # Bake the CNF we just regenerated so the V2 verify worker (which
-                # re-derives the same CNF for the resulting solution_manifests /
-                # v2_submit_events event) can read it back instead of regenerating
-                # from seed. Best-effort: v2_cnf_store wraps all errors internally
-                # and never raises.
-                try:
-                    v2_cnf_store.put(v2_store, cid, cnf_text)
-                except Exception:
-                    pass
-                # planted is None iff this is a REAL (unplanted) instance — see
-                # per_miner.generate_instance docstring. Derived from the ACTUAL
-                # generation result so it always agrees with the CNF just verified.
                 challenge_kind = (
                     real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=x_cathedral_hotkey)
-                    if planted is None else "random_3sat_perminer"
+                    if pm.uses_real_instance(x_cathedral_hotkey, epoch_i, tier_i, seq_i)
+                    else "random_3sat_perminer"
                 )
-                cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
-                if cnf_sha != str(token_payload["cnf_sha256"]):
-                    raise HTTPException(400, "submit_token_cnf_mismatch")
-                nvars = int(token_payload["nvars"])
-                # Bind the shape check to the server-regenerated CNF's ACTUAL var
-                # count, not the nominal tier shape — real-instance sources
-                # (combinatorial/corpus) produce CNFs sized differently from
-                # shape_for(tier). Planted CNFs already have exactly shape_for(tier)
-                # vars, so behavior is unchanged for the default source. The
-                # cnf_sha256 check above already binds the token to this exact CNF
-                # body; this keeps the anti-cheat shape binding intact while
-                # matching the real generated instance.
-                actual_nvars, _clauses = parse_cnf(cnf_text)
-                if nvars != actual_nvars:
-                    raise HTTPException(400, "submit_token_shape_mismatch")
-                try:
-                    assignment_raw, assignment = v2_bitset_submit.decode_assignment_b64(
-                        submit["assignment_b64"], nvars=nvars)
-                except v2_bitset_submit.BitsetSubmitError as exc:
-                    raise HTTPException(400, exc.reason)
-                ok, reason = v2_pipeline.verify_assignment_literals(cnf_text, assignment)
-                if not ok:
-                    raise HTTPException(400, reason or "witness_check_failed")
-                weight = float(pm.weight_for(tier_i))
-
-            received_at = _now_iso_ms()
-            assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
-            details = {
-                "schema": "cathedral.v2.submit_bitset_verifier_details.v1",
-                "challenge_id": submit["challenge_id"],
-                "miner_hotkey": x_cathedral_hotkey,
-                "epoch": epoch_i,
-                "tier": tier_i,
-                "seq": seq_i,
-                "cnf_sha256": cnf_sha,
-                "assignment_sha256": assignment_sha,
-                "verified_at": received_at,
-            }
-            return v2_bitset_submit.admit_verified_event(
+            return v2_bitset_submit.admit_received_event(
                 v2_store,
                 submit=submit,
                 token_payload=token_payload,
                 signature=x_cathedral_signature,
                 assignment_raw=assignment_raw,
-                received_at_iso=received_at,
-                weighted_score=weight,
-                answer_hash=assignment_sha,
-                verifier_details_hash=hashlib.sha256(
-                    json.dumps(details, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                ).hexdigest(),
-                eligibility_status="unknown_beta",
+                received_at_iso=_now_iso_ms(),
                 challenge_kind=challenge_kind,
             )
 
+        from . import real_corpus
         row, inserted = await asyncio.get_running_loop().run_in_executor(
-            v2_submit_executor, _regen_verify_and_admit)
+            v2_read_executor, _admit_received)
+        payload = v2_bitset_submit.receipt_payload(row, inserted=inserted)
+        # Tell the miner where its results land — it never polls the origin again.
+        payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
         return JSONResponse(
-            v2_bitset_submit.receipt_payload(row, inserted=inserted),
+            payload,
             status_code=202 if inserted else 200,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )

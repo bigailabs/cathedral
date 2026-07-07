@@ -571,6 +571,122 @@ def process_batch(
     return results
 
 
+def claim_bitset_batch(store: Store, *, worker_id: str, batch_size: int = 8,
+                       lock_secs: float = 120.0) -> list[dict[str, Any]]:
+    """Claim 'received' v2_submit_events for async witness-check + scoring.
+    Mirrors claim_batch but for the bitset table. Reclaims expired-lock rows so a
+    dead worker cannot strand them."""
+    now_iso = _now_iso_ms()
+    lock_until = _iso_plus(lock_secs)
+
+    def _tx(conn):
+        rows = conn.execute(
+            "SELECT * FROM v2_submit_events "
+            "WHERE status=? "
+            "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
+            "ORDER BY received_at_iso ASC LIMIT ?",
+            (STATUS_RECEIVED, now_iso, int(batch_size)),
+        ).fetchall()
+        ids = [str(r["id"]) for r in rows]
+        for rid in ids:
+            conn.execute(
+                "UPDATE v2_submit_events SET locked_by=?, locked_until_iso=? WHERE id=?",
+                (worker_id, lock_until, rid),
+            )
+        return [_row_to_dict(r) for r in rows]
+
+    return store.write(_tx)
+
+
+def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
+    """Witness-check + score ONE received bitset event, then mark it verified (or
+    rejected). Regenerates the CNF from seed (the token already bound the
+    cnf_sha256, so a mismatch means config drift -> reject, never score). This is
+    the async half of the thin-submit design: the heavy work the submit handler
+    used to do inline now runs here."""
+    import hashlib as _h
+    from . import per_miner as pm
+    from ..dimacs import parse_cnf
+    from . import real_corpus
+
+    rid = str(row["id"])
+    hk = str(row["miner_hotkey"])
+    epoch_i, tier_i, seq_i = int(row["epoch"]), int(row["tier"]), int(row["seq"])
+    now_iso = _now_iso_ms()
+
+    def _finish(status, *, score=None, ah=None, vdh=None, reason=None):
+        # weighted_score/answer_hash/verifier_details_hash are NOT NULL, so a
+        # reject path MUST write the zero/empty defaults (not None) or the UPDATE
+        # is rejected and the row stays 'received' -> unlocks -> retries forever
+        # (poison queue). On verify we write the real values.
+        def _tx(conn):
+            conn.execute(
+                "UPDATE v2_submit_events SET status=?, weighted_score=?, "
+                "answer_hash=?, verifier_details_hash=?, verified_at_iso=?, "
+                "eligibility_status=?, last_error=?, locked_by=NULL, "
+                "locked_until_iso=NULL WHERE id=?",
+                (status,
+                 float(score) if score is not None else 0.0,
+                 ah if ah is not None else "",
+                 vdh if vdh is not None else "",
+                 now_iso if status == STATUS_VERIFIED else None,
+                 "eligible_beta" if status == STATUS_VERIFIED else (reason or "rejected"),
+                 None if status == STATUS_VERIFIED else (reason or "rejected"),
+                 rid),
+            )
+        store.write(_tx)
+
+    try:
+        with v2_pm_env():
+            cid, cnf_text, planted = pm.generate_instance(hk, epoch_i, tier_i, seq_i)
+            if cid != str(row["challenge_id"]):
+                _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
+                return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
+            cnf_sha = _h.sha256(cnf_text.encode("utf-8")).hexdigest()
+            if cnf_sha != str(row["cnf_sha256"]).lower():
+                # config drift since mint — cannot fairly score. Reject, never credit.
+                _finish(STATUS_REJECTED, reason="cnf_sha_drift")
+                return {"id": rid, "status": STATUS_REJECTED, "reason": "cnf_sha_drift"}
+            nvars, _clauses = parse_cnf(cnf_text)
+            from . import v2_bitset_submit as _bs
+            assignment_raw, assignment = _bs.decode_assignment_b64(
+                str(row["assignment_b64"]), nvars=nvars)
+            ok, reason = verify_assignment_literals(cnf_text, assignment)
+            weight = float(pm.weight_for(tier_i))
+        if not ok:
+            _finish(STATUS_REJECTED, reason=reason or "witness_check_failed")
+            return {"id": rid, "status": STATUS_REJECTED, "reason": reason or "witness_check_failed"}
+        ah = _h.sha256(assignment_raw).hexdigest()
+        details = {
+            "schema": "cathedral.v2.submit_bitset_verifier_details.v1",
+            "challenge_id": cid, "miner_hotkey": hk, "epoch": epoch_i,
+            "tier": tier_i, "seq": seq_i, "cnf_sha256": cnf_sha,
+            "assignment_sha256": ah, "verified_at": now_iso,
+        }
+        vdh = _h.sha256(json.dumps(details, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        _finish(STATUS_VERIFIED, score=weight, ah=ah, vdh=vdh)
+        return {"id": rid, "status": STATUS_VERIFIED, "weighted_score": weight,
+                "miner_hotkey": hk, "challenge_id": cid}
+    except Exception as exc:  # keep it claimable next tick rather than lost
+        def _unlock(conn):
+            conn.execute(
+                "UPDATE v2_submit_events SET locked_by=NULL, locked_until_iso=NULL, "
+                "last_error=? WHERE id=?", (f"bitset_verify_error:{type(exc).__name__}", rid))
+        try:
+            store.write(_unlock)
+        except Exception:
+            pass
+        return {"id": rid, "status": "error", "reason": str(exc)[:120]}
+
+
+def process_bitset_batch(store: Store, *, worker_id: str | None = None,
+                         batch_size: int = 8, lock_secs: float = 120.0) -> list[dict[str, Any]]:
+    """Claim + verify + score a batch of received bitset events."""
+    worker_id = worker_id or f"v2b-{uuid.uuid4().hex[:12]}"
+    rows = claim_bitset_batch(store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs)
+    return [verify_bitset_one(store, r) for r in rows]
+
+
 def _score_rows(store: Store, table: str, *, since_iso: str | None = None,
                 epoch: int | None = None) -> list[dict[str, Any]]:
     clauses = ["status=?"]

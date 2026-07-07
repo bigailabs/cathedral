@@ -637,6 +637,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
     ("0041_v2_submit_events_challenge_kind", """
         ALTER TABLE v2_submit_events ADD COLUMN challenge_kind TEXT;
     """),
+    ("0041b_v2_submit_events_async_verify", """
+        ALTER TABLE v2_submit_events ADD COLUMN locked_by TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN locked_until_iso TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN last_error TEXT;
+    """),
     ("0042_v2_cnf_store", """
         CREATE TABLE IF NOT EXISTS v2_cnf_store (
             challenge_id TEXT PRIMARY KEY,
@@ -1195,6 +1200,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
     """),
     ("0041_v2_submit_events_challenge_kind", """
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS challenge_kind TEXT;
+    """),
+    ("0041b_v2_submit_events_async_verify", """
+        ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS locked_by TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS locked_until_iso TEXT;
+        ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS last_error TEXT;
     """),
     ("0042_v2_cnf_store", """
         CREATE TABLE IF NOT EXISTS v2_cnf_store (
