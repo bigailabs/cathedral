@@ -5570,7 +5570,7 @@ def build_app(
             raise HTTPException(403, "v2_submit_token_hotkey_not_allowlisted")
 
     @app.get("/v2/synthetic-boolean/per-miner/challenges")
-    def v2_per_miner_challenges(
+    async def v2_per_miner_challenges(
         request: Request,
         offset: int = Query(0, ge=0),
         limit: int = Query(50, ge=1, le=500),
@@ -5578,97 +5578,101 @@ def build_app(
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str | None = Header(None),
     ):
-        if not solution_manifest_enabled:
-            raise HTTPException(404, "solution_manifest_v2_not_enabled")
-        from . import per_miner as pm
-        from . import real_corpus
-        with v2_pipeline.v2_pm_env():
-            if not v2_pipeline.v2_perminer_enabled():
-                raise HTTPException(404, "v2_per_miner_not_enabled")
-            _require_v2_perminer_ready(pm)
-            if x_cathedral_submitted_at is None:
-                raise HTTPException(401, "missing X-Cathedral-Submitted-At")
-            _verify_hotkey_claim(
-                x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
-                challenge_id="", dimacs_solution_sha256="",
-            )
-            mark_verified_hotkey(request, x_cathedral_hotkey)
-            epoch = pm.current_epoch()
-            effective_limit = pm.assignment_page_limit(limit)
-            items = pm.miner_instance_set(
-                x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
-            if v2_submit_bitset_enabled:
-                _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
-                if not v2_submit_token_secret:
-                    raise HTTPException(503, "v2_submit_token_secret_missing")
-                expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
-                from ..dimacs import parse_cnf
-                for item in items:
-                    tier_i = int(item["tier"])
-                    seq_i = int(item["seq"])
-                    cid = str(item["challenge_id"])
-                    # Read-through the persistent CNF store first so warm rows
-                    # avoid generation across process restarts. On a miss, use
-                    # pm.item_meta() so process-local warm pages skip generation,
-                    # parse_cnf and sha work. Both paths bind the submit token to
-                    # the exact CNF bytes and submit/verify sha-gate again later.
-                    cnf_text = v2_cnf_store.get(v2_store, cid)
-                    if cnf_text is None:
-                        meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
-                            x_cathedral_hotkey, epoch, tier_i, seq_i)
-                        if meta_cid != cid:
-                            raise HTTPException(500, "v2_challenge_generation_mismatch")
-                        try:
-                            v2_cnf_store.put(v2_store, cid, cnf_text)
-                        except Exception:
-                            pass
-                    else:
-                        actual_nvars, _clauses = parse_cnf(cnf_text)
-                        cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
-                        is_real = pm.uses_real_instance(
-                            x_cathedral_hotkey, epoch, tier_i, seq_i)
-                    item["n_vars"] = actual_nvars
-                    item["kind"] = (
-                        real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
-                        if is_real else "random_3sat_perminer"
-                    )
-                    item["cnf_sha256"] = cnf_sha
-                    item["assignment_encoding"] = "bitset/v1"
-                    item["submit_token"] = v2_bitset_submit.mint_submit_token(
-                        secret=v2_submit_token_secret,
-                        miner_hotkey=x_cathedral_hotkey,
-                        challenge_id=cid,
-                        epoch=epoch,
-                        tier=tier_i,
-                        seq=seq_i,
-                        nvars=actual_nvars,
-                        cnf_sha256=cnf_sha,
-                        expires_at=expires_at,
-                    )
-                    item["submit_token_expires_at"] = expires_at
-            return {
-                "family_id": _FAMILY,
-                "kind": "per_miner_v2",
-                "epoch": epoch,
-                "miner_hotkey": x_cathedral_hotkey,
-                "assignment_identity": x_cathedral_hotkey,
-                "offset": offset,
-                "requested_limit": limit,
-                "limit": effective_limit,
-                "max_limit": pm.assignment_page_limit_max(),
-                "next_offset": offset + effective_limit,
-                "count": len(items),
-                "items": items,
-                "submit_path": "/v2/agents/submit-bitset" if v2_submit_bitset_enabled else "/v2/agents/submit-manifest",
-                "submit_bitset_path": "/v2/agents/submit-bitset",
-                "manifest_submit_path": "/v2/agents/submit-manifest",
-                "blob_upload_path": "/v2/blobs/solutions",
-                "cnf_path": "/v2/synthetic-boolean/per-miner/cnf",
-                "cnf_params": ["challenge_id", "tier", "seq"],
-            }
+        def _run():
+            if not solution_manifest_enabled:
+                raise HTTPException(404, "solution_manifest_v2_not_enabled")
+            from . import per_miner as pm
+            from . import real_corpus
+            with v2_pipeline.v2_pm_env():
+                if not v2_pipeline.v2_perminer_enabled():
+                    raise HTTPException(404, "v2_per_miner_not_enabled")
+                _require_v2_perminer_ready(pm)
+                if x_cathedral_submitted_at is None:
+                    raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+                _verify_hotkey_claim(
+                    x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+                    challenge_id="", dimacs_solution_sha256="",
+                )
+                mark_verified_hotkey(request, x_cathedral_hotkey)
+                epoch = pm.current_epoch()
+                effective_limit = pm.assignment_page_limit(limit)
+                items = pm.miner_instance_set(
+                    x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
+                if v2_submit_bitset_enabled:
+                    _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
+                    if not v2_submit_token_secret:
+                        raise HTTPException(503, "v2_submit_token_secret_missing")
+                    expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                    from ..dimacs import parse_cnf
+                    for item in items:
+                        tier_i = int(item["tier"])
+                        seq_i = int(item["seq"])
+                        cid = str(item["challenge_id"])
+                        # Read-through the persistent CNF store first so warm rows
+                        # avoid generation across process restarts. On a miss, use
+                        # pm.item_meta() so process-local warm pages skip generation,
+                        # parse_cnf and sha work. Both paths bind the submit token to
+                        # the exact CNF bytes and submit/verify sha-gate again later.
+                        cnf_text = v2_cnf_store.get(v2_store, cid)
+                        if cnf_text is None:
+                            meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
+                                x_cathedral_hotkey, epoch, tier_i, seq_i)
+                            if meta_cid != cid:
+                                raise HTTPException(500, "v2_challenge_generation_mismatch")
+                            try:
+                                v2_cnf_store.put(v2_store, cid, cnf_text)
+                            except Exception:
+                                pass
+                        else:
+                            actual_nvars, _clauses = parse_cnf(cnf_text)
+                            cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                            is_real = pm.uses_real_instance(
+                                x_cathedral_hotkey, epoch, tier_i, seq_i)
+                        item["n_vars"] = actual_nvars
+                        item["kind"] = (
+                            real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
+                            if is_real else "random_3sat_perminer"
+                        )
+                        item["cnf_sha256"] = cnf_sha
+                        item["assignment_encoding"] = "bitset/v1"
+                        item["submit_token"] = v2_bitset_submit.mint_submit_token(
+                            secret=v2_submit_token_secret,
+                            miner_hotkey=x_cathedral_hotkey,
+                            challenge_id=cid,
+                            epoch=epoch,
+                            tier=tier_i,
+                            seq=seq_i,
+                            nvars=actual_nvars,
+                            cnf_sha256=cnf_sha,
+                            expires_at=expires_at,
+                        )
+                        item["submit_token_expires_at"] = expires_at
+                return {
+                    "family_id": _FAMILY,
+                    "kind": "per_miner_v2",
+                    "epoch": epoch,
+                    "miner_hotkey": x_cathedral_hotkey,
+                    "assignment_identity": x_cathedral_hotkey,
+                    "offset": offset,
+                    "requested_limit": limit,
+                    "limit": effective_limit,
+                    "max_limit": pm.assignment_page_limit_max(),
+                    "next_offset": offset + effective_limit,
+                    "count": len(items),
+                    "items": items,
+                    "submit_path": "/v2/agents/submit-bitset" if v2_submit_bitset_enabled else "/v2/agents/submit-manifest",
+                    "submit_bitset_path": "/v2/agents/submit-bitset",
+                    "manifest_submit_path": "/v2/agents/submit-manifest",
+                    "blob_upload_path": "/v2/blobs/solutions",
+                    "cnf_path": "/v2/synthetic-boolean/per-miner/cnf",
+                    "cnf_params": ["challenge_id", "tier", "seq"],
+                }
+
+        import asyncio
+        return await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
 
     @app.get("/v2/synthetic-boolean/per-miner/cnf")
-    def v2_per_miner_cnf(
+    async def v2_per_miner_cnf(
         request: Request,
         challenge_id: str = Query(...),
         tier: int | None = Query(None, ge=1),
@@ -5677,83 +5681,87 @@ def build_app(
         x_cathedral_signature: str = Header(...),
         x_cathedral_submitted_at: str | None = Header(None),
     ):
-        if not solution_manifest_enabled:
-            raise HTTPException(404, "solution_manifest_v2_not_enabled")
-        from . import per_miner as pm
-        with v2_pipeline.v2_pm_env():
-            if not v2_pipeline.v2_perminer_enabled():
-                raise HTTPException(404, "v2_per_miner_not_enabled")
-            _require_v2_perminer_ready(pm)
-            if x_cathedral_submitted_at is None:
-                raise HTTPException(401, "missing X-Cathedral-Submitted-At")
-            _verify_hotkey_claim(
-                x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
-                challenge_id="", dimacs_solution_sha256="",
-            )
-            mark_verified_hotkey(request, x_cathedral_hotkey)
-            parsed = pm.parse_challenge_id(challenge_id)
-            epoch = int(parsed["epoch"]) if parsed else pm.current_epoch()
-            tier_seq = pm.resolve_tier_seq_for(
-                x_cathedral_hotkey, epoch, challenge_id, tier=tier, seq=seq)
-            if tier_seq is None:
-                raise HTTPException(404, "challenge_id_not_in_miner_set")
-            tier_i, seq_i = tier_seq
-            # Ownership is proven by resolve_tier_seq_for above (challenge_id is
-            # HMAC-bound to this hotkey), so the immutable cached body can be
-            # served without generating. Read-through: on a miss, generate exactly
-            # as before and best-effort bake so the next reader (this endpoint or
-            # the challenges page) hits. CATHEDRAL_V2_CNF_STORE_READ=0 makes
-            # get() return None, restoring always-generate.
-            cid = challenge_id
-            cnf_text = v2_cnf_store.get(v2_store, challenge_id)
-            if cnf_text is None:
-                gen_cid, cnf_text, _ = pm.generate_instance(
-                    x_cathedral_hotkey, epoch, tier_i, seq_i)
-                if gen_cid != challenge_id:
+        def _run():
+            if not solution_manifest_enabled:
+                raise HTTPException(404, "solution_manifest_v2_not_enabled")
+            from . import per_miner as pm
+            with v2_pipeline.v2_pm_env():
+                if not v2_pipeline.v2_perminer_enabled():
+                    raise HTTPException(404, "v2_per_miner_not_enabled")
+                _require_v2_perminer_ready(pm)
+                if x_cathedral_submitted_at is None:
+                    raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+                _verify_hotkey_claim(
+                    x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
+                    challenge_id="", dimacs_solution_sha256="",
+                )
+                mark_verified_hotkey(request, x_cathedral_hotkey)
+                parsed = pm.parse_challenge_id(challenge_id)
+                epoch = int(parsed["epoch"]) if parsed else pm.current_epoch()
+                tier_seq = pm.resolve_tier_seq_for(
+                    x_cathedral_hotkey, epoch, challenge_id, tier=tier, seq=seq)
+                if tier_seq is None:
                     raise HTTPException(404, "challenge_id_not_in_miner_set")
-                try:
-                    v2_cnf_store.put(v2_store, challenge_id, cnf_text)
-                except Exception:
-                    pass
-            headers = {
-                "X-Cathedral-V2": "true",
-                "X-Perminer-Challenge-Id": cid,
-                "X-Perminer-Tier": str(tier_i),
-                "X-Perminer-Seq": str(seq_i),
-                "X-Perminer-Epoch": str(epoch),
-            }
-            if v2_submit_bitset_enabled:
-                _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
-                if not v2_submit_token_secret:
-                    raise HTTPException(503, "v2_submit_token_secret_missing")
-                from ..dimacs import parse_cnf
-                # Bind to the ACTUAL generated CNF's var count, not the nominal tier
-                # shape — see the analogous fix in v2_per_miner_challenges above.
-                actual_nvars, _clauses = parse_cnf(cnf_text)
-                cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
-                expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
-                headers.update({
-                    "X-Cathedral-Submit-Path": "/v2/agents/submit-bitset",
-                    "X-Cathedral-Submit-Token": v2_bitset_submit.mint_submit_token(
-                        secret=v2_submit_token_secret,
-                        miner_hotkey=x_cathedral_hotkey,
-                        challenge_id=cid,
-                        epoch=epoch,
-                        tier=tier_i,
-                        seq=seq_i,
-                        nvars=actual_nvars,
-                        cnf_sha256=cnf_sha,
-                        expires_at=expires_at,
-                    ),
-                    "X-Cathedral-Submit-Token-Expires-At": expires_at,
-                    "X-Cathedral-Assignment-Encoding": "bitset/v1",
-                    "X-Cathedral-CNF-Sha256": cnf_sha,
-                })
-            return PlainTextResponse(
-                cnf_text,
-                media_type="text/plain; charset=utf-8",
-                headers=headers,
-            )
+                tier_i, seq_i = tier_seq
+                # Ownership is proven by resolve_tier_seq_for above (challenge_id is
+                # HMAC-bound to this hotkey), so the immutable cached body can be
+                # served without generating. Read-through: on a miss, generate exactly
+                # as before and best-effort bake so the next reader (this endpoint or
+                # the challenges page) hits. CATHEDRAL_V2_CNF_STORE_READ=0 makes
+                # get() return None, restoring always-generate.
+                cid = challenge_id
+                cnf_text = v2_cnf_store.get(v2_store, challenge_id)
+                if cnf_text is None:
+                    gen_cid, cnf_text, _ = pm.generate_instance(
+                        x_cathedral_hotkey, epoch, tier_i, seq_i)
+                    if gen_cid != challenge_id:
+                        raise HTTPException(404, "challenge_id_not_in_miner_set")
+                    try:
+                        v2_cnf_store.put(v2_store, challenge_id, cnf_text)
+                    except Exception:
+                        pass
+                headers = {
+                    "X-Cathedral-V2": "true",
+                    "X-Perminer-Challenge-Id": cid,
+                    "X-Perminer-Tier": str(tier_i),
+                    "X-Perminer-Seq": str(seq_i),
+                    "X-Perminer-Epoch": str(epoch),
+                }
+                if v2_submit_bitset_enabled:
+                    _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
+                    if not v2_submit_token_secret:
+                        raise HTTPException(503, "v2_submit_token_secret_missing")
+                    from ..dimacs import parse_cnf
+                    # Bind to the ACTUAL generated CNF's var count, not the nominal tier
+                    # shape — see the analogous fix in v2_per_miner_challenges above.
+                    actual_nvars, _clauses = parse_cnf(cnf_text)
+                    cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
+                    expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                    headers.update({
+                        "X-Cathedral-Submit-Path": "/v2/agents/submit-bitset",
+                        "X-Cathedral-Submit-Token": v2_bitset_submit.mint_submit_token(
+                            secret=v2_submit_token_secret,
+                            miner_hotkey=x_cathedral_hotkey,
+                            challenge_id=cid,
+                            epoch=epoch,
+                            tier=tier_i,
+                            seq=seq_i,
+                            nvars=actual_nvars,
+                            cnf_sha256=cnf_sha,
+                            expires_at=expires_at,
+                        ),
+                        "X-Cathedral-Submit-Token-Expires-At": expires_at,
+                        "X-Cathedral-Assignment-Encoding": "bitset/v1",
+                        "X-Cathedral-CNF-Sha256": cnf_sha,
+                    })
+                return PlainTextResponse(
+                    cnf_text,
+                    media_type="text/plain; charset=utf-8",
+                    headers=headers,
+                )
+
+        import asyncio
+        return await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
 
     def _v2_shadow_row_dict(row: Any) -> dict[str, Any]:
         try:
