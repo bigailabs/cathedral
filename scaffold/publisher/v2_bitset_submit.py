@@ -22,6 +22,7 @@ from . import v2_pipeline
 SCHEMA = "cathedral.v2.submit_bitset.v1"
 TOKEN_SCHEMA = "cathedral.v2.submit_token.v1"
 STATUS_VERIFIED = "verified"
+STATUS_RECEIVED = "received"
 ASSIGNMENT_ENCODING = "bitset/v1"
 _TOKEN_VERSION = "v1"
 _B64_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
@@ -105,8 +106,15 @@ def mint_submit_token(
     nvars: int,
     cnf_sha256: str,
     expires_at: str,
+    not_before: str | None = None,
 ) -> str:
-    """Return a compact HMAC token bound to a miner's exact PM challenge."""
+    """Return a compact HMAC token bound to a miner's exact PM challenge.
+
+    not_before (optional): earliest ISO time a submit for this token is accepted.
+    Used by the epoch publisher so a miner cannot pre-solve a NEXT-epoch manifest
+    fetched early from public storage and submit before the epoch officially
+    opens. Absent = no lower bound (back-compat with per-request minting).
+    """
     payload = {
         "schema": TOKEN_SCHEMA,
         "miner_hotkey": str(miner_hotkey),
@@ -118,6 +126,8 @@ def mint_submit_token(
         "cnf_sha256": str(cnf_sha256).lower(),
         "expires_at": str(expires_at),
     }
+    if not_before:
+        payload["not_before"] = str(not_before)
     body = _token_payload_bytes(payload)
     sig = hmac.new(_secret_bytes(secret), body, hashlib.sha256).digest()
     return f"{_TOKEN_VERSION}.{_b64url(body)}.{_b64url(sig)}"
@@ -145,9 +155,19 @@ def verify_submit_token(token: str, *, secret: str, miner_hotkey: str, challenge
         raise BitsetSubmitError("submit_token_hotkey_mismatch")
     if str(payload.get("challenge_id") or "") != str(challenge_id):
         raise BitsetSubmitError("submit_token_challenge_mismatch")
+    now_ts = datetime.now(timezone.utc).timestamp()
     exp_ts = parse_iso(str(payload.get("expires_at") or ""))
-    if exp_ts is None or datetime.now(timezone.utc).timestamp() > exp_ts:
+    if exp_ts is None or now_ts > exp_ts:
         raise BitsetSubmitError("submit_token_expired")
+    # not_before is optional (per-request tokens omit it). When the epoch
+    # publisher sets it, reject submits before the epoch officially opens so a
+    # miner cannot pre-solve a next-epoch manifest fetched early from public
+    # storage. A malformed not_before is treated as "not yet valid" (fail closed).
+    nbf_raw = payload.get("not_before")
+    if nbf_raw:
+        nbf_ts = parse_iso(str(nbf_raw))
+        if nbf_ts is None or now_ts < nbf_ts:
+            raise BitsetSubmitError("submit_token_not_yet_valid")
     for key in ("epoch", "tier", "seq", "nvars"):
         try:
             payload[key] = int(payload[key])
@@ -319,6 +339,87 @@ def admit_verified_event(
                 float(weighted_score),
                 answer_hash,
                 verifier_details_hash,
+                submit.get("solver_id"),
+                submit.get("solver_hash"),
+                submit.get("image_url"),
+                challenge_kind,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM v2_submit_events WHERE idempotency_key=? LIMIT 1",
+            (idem,),
+        ).fetchone()
+        try:
+            out = {k: row[k] for k in row.keys()}
+        except Exception:
+            out = dict(row)
+        return out, bool(out.get("id") == rid)
+
+    return store.write(_tx)
+
+
+def admit_received_event(
+    store,
+    *,
+    submit: dict[str, Any],
+    token_payload: dict[str, Any],
+    signature: str,
+    assignment_raw: bytes,
+    received_at_iso: str,
+    challenge_kind: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """THIN admit: store the bitset submission as 'received' without regenerating
+    the CNF or witness-checking. The submit_token (already HMAC-verified by the
+    caller) cryptographically binds miner_hotkey + challenge_id + epoch/tier/seq +
+    nvars + cnf_sha256, so ownership and challenge identity are proven here. The
+    only thing NOT yet checked is whether the assignment satisfies the CNF — that
+    witness check + scoring is done ASYNC by the verify worker, which claims
+    'received' v2_submit_events rows (indexes idx_v2_submit_events_status_received
+    exist for exactly this). This keeps submit ~sub-second instead of ~40s.
+
+    weighted_score / answer_hash / verifier_details_hash / verified_at_iso are left
+    NULL until the worker finalizes.
+    """
+    idem = idempotency_key(
+        miner_hotkey=submit["miner_hotkey"],
+        challenge_id=submit["challenge_id"],
+    )
+    rid = str(uuid.uuid4())
+    assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
+    submit_token_id = hashlib.sha256(str(submit["submit_token"]).encode("utf-8")).hexdigest()[:32]
+
+    def _tx(conn):
+        conn.execute(
+            "INSERT OR IGNORE INTO v2_submit_events("
+            "id, idempotency_key, miner_hotkey, challenge_id, card_id, epoch, tier, seq, "
+            "cnf_sha256, assignment_encoding, assignment_sha256, assignment_b64, status, "
+            "eligibility_status, received_at_iso, submitted_at, verified_at_iso, signature, "
+            "submit_token_id, weighted_score, answer_hash, verifier_details_hash, "
+            "solver_id, solver_hash, image_url, challenge_kind"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                rid,
+                idem,
+                submit["miner_hotkey"],
+                submit["challenge_id"],
+                submit["card_id"],
+                int(token_payload["epoch"]),
+                int(token_payload["tier"]),
+                int(token_payload["seq"]),
+                str(token_payload["cnf_sha256"]).lower(),
+                submit["assignment_encoding"],
+                assignment_sha,
+                submit["assignment_b64"],
+                STATUS_RECEIVED,
+                "unknown_beta",
+                received_at_iso,
+                submit["submitted_at"],
+                None,  # verified_at_iso — set by the worker (nullable)
+                signature,
+                submit_token_id,
+                0.0,   # weighted_score — placeholder; the worker sets the real score
+                "",    # answer_hash — set by the worker
+                "",    # verifier_details_hash — set by the worker
                 submit.get("solver_id"),
                 submit.get("solver_hash"),
                 submit.get("image_url"),
