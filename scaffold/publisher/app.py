@@ -587,6 +587,7 @@ def build_app(
         1.0, _env_float("CATHEDRAL_V2_VERIFY_LOCK_SECS", 120.0))
     v2_worker_max_blob_bytes = _env_int(
         "CATHEDRAL_V2_VERIFY_MAX_BLOB_BYTES", solution_blob_upload_max_bytes)
+    v2_worker_parallel_claims = _env_bool("CATHEDRAL_V2_VERIFY_PARALLEL_CLAIMS", False)
     submit_queue_backpressure_enabled = _env_bool(
         "CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED", False)
     submit_queue_backpressure = (
@@ -1903,13 +1904,17 @@ def build_app(
                     print(f"[v2_verify] tick_failed error={exc!r}")
                 await asyncio.sleep(v2_worker_interval_secs)
 
-        app.state.v2_verify_task = asyncio.create_task(
-            _run_v2_singleton_background(
-                "v2_verify",
-                v2_verify_lock_name,
-                _loop,
+        if v2_worker_parallel_claims:
+            print("[v2_verify] parallel_claims_enabled")
+            app.state.v2_verify_task = asyncio.create_task(_loop())
+        else:
+            app.state.v2_verify_task = asyncio.create_task(
+                _run_v2_singleton_background(
+                    "v2_verify",
+                    v2_verify_lock_name,
+                    _loop,
+                )
             )
-        )
 
     # ---- Lane S: arena eval loop (env-gated, TASK 1) ----------------------
     # Periodically scores registered pending solvers and, on a record-fall,

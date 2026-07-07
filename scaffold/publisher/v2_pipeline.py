@@ -290,6 +290,22 @@ def claim_batch(
         if max_attempts:
             params.append(int(max_attempts))
         params.append(int(batch_size))
+        if getattr(store, "backend", "") == "postgres":
+            rows = conn.execute(
+                "WITH picked AS ("
+                "SELECT id FROM solution_manifests "
+                "WHERE status IN (?, ?, ?) "
+                "AND (next_attempt_at_iso IS NULL OR next_attempt_at_iso <= ?) "
+                "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
+                + cap_clause +
+                "ORDER BY received_at_iso ASC LIMIT ? FOR UPDATE SKIP LOCKED"
+                ") "
+                "UPDATE solution_manifests AS s SET status=?, locked_by=?, "
+                "locked_until_iso=?, attempt_count=attempt_count+1, last_error=NULL "
+                "FROM picked WHERE s.id=picked.id RETURNING s.*",
+                tuple(params + [STATUS_VERIFYING, worker_id, lock_until]),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
         rows = conn.execute(
             "SELECT * FROM solution_manifests "
             "WHERE status IN (?, ?, ?) "
@@ -580,6 +596,19 @@ def claim_bitset_batch(store: Store, *, worker_id: str, batch_size: int = 8,
     lock_until = _iso_plus(lock_secs)
 
     def _tx(conn):
+        if getattr(store, "backend", "") == "postgres":
+            rows = conn.execute(
+                "WITH picked AS ("
+                "SELECT id FROM v2_submit_events "
+                "WHERE status=? "
+                "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
+                "ORDER BY received_at_iso ASC LIMIT ? FOR UPDATE SKIP LOCKED"
+                ") "
+                "UPDATE v2_submit_events AS e SET locked_by=?, locked_until_iso=? "
+                "FROM picked WHERE e.id=picked.id RETURNING e.*",
+                (STATUS_RECEIVED, now_iso, int(batch_size), worker_id, lock_until),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
         rows = conn.execute(
             "SELECT * FROM v2_submit_events "
             "WHERE status=? "
