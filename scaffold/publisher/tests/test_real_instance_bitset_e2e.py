@@ -119,9 +119,74 @@ def _fetch_item(client, kp, *, tier: int) -> dict:
     return match
 
 
-def _submit_and_assert_verified(client, kp, item, *, expected_nvars: int):
-    """Solve the CNF the miner actually fetches, submit via the bitset path,
-    and assert the receipt is accepted and verified."""
+def _solve_fixture_cnf(cnf_text: str) -> list[int] | None:
+    """Fast path for graph-coloring fixtures; generic DPLL is a fallback.
+
+    These tests are about V2 transport/token/verify semantics, not solver
+    performance. The combinatorial fixture emits graph-coloring metadata in a
+    comment, so reconstruct a valid coloring directly and keep the launch suite
+    fast.
+    """
+    n_nodes = k_colors = None
+    for line in cnf_text.splitlines():
+        if not line.startswith("c graph-coloring "):
+            continue
+        parts = dict(
+            part.split("=", 1)
+            for part in line.split()
+            if "=" in part
+        )
+        try:
+            n_nodes = int(parts["n_nodes"])
+            k_colors = int(parts["k_colors"])
+        except (KeyError, ValueError):
+            n_nodes = k_colors = None
+        break
+    if n_nodes is None or k_colors is None:
+        return solve_cnf(cnf_text)
+
+    _nvars, clauses = parse_cnf(cnf_text)
+
+    def decode_var(var_id: int) -> tuple[int, int]:
+        z = var_id - 1
+        return z // k_colors, z % k_colors
+
+    edges: set[tuple[int, int]] = set()
+    for clause in clauses:
+        if len(clause) != 2 or clause[0] >= 0 or clause[1] >= 0:
+            continue
+        left_v, left_c = decode_var(abs(clause[0]))
+        right_v, right_c = decode_var(abs(clause[1]))
+        if left_c == right_c and left_v != right_v:
+            edges.add(tuple(sorted((left_v, right_v))))
+
+    coloring = real_corpus._find_coloring(n_nodes, k_colors, sorted(edges))
+    if coloring is None:
+        return None
+
+    assignment: list[int] = []
+    for vertex in range(n_nodes):
+        for color in range(k_colors):
+            lit = vertex * k_colors + color + 1
+            assignment.append(lit if coloring[vertex] == color else -lit)
+    return assignment
+
+
+def _planted_assignment_for_item(kp, item) -> list[int] | None:
+    """Return the deterministic planted witness when the active source has one."""
+    with v2_pipeline.v2_pm_env():
+        challenge_id, _cnf, planted = pm.generate_instance(
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
+    if challenge_id != item["challenge_id"]:
+        return None
+    return planted
+
+
+def _submit_and_assert_verified(client, kp, item, *, expected_nvars: int, v2_store):
+    """Solve the CNF the miner actually fetches, submit via the thin bitset
+    path (admit returns 'received'), drain the async verify worker, then
+    assert the fetched receipt is verified."""
     assert item["n_vars"] == expected_nvars
 
     cnf_resp = client.get(
@@ -137,7 +202,7 @@ def _submit_and_assert_verified(client, kp, item, *, expected_nvars: int):
     # the SAME real nvars as the challenges-list-minted token (item["submit_token"]).
     assert cnf_resp.headers["x-cathedral-submit-token"]
 
-    assignment = solve_cnf(cnf_text)
+    assignment = _planted_assignment_for_item(kp, item) or _solve_fixture_cnf(cnf_text)
     assert assignment is not None
     assert len(assignment) == expected_nvars
 
@@ -159,8 +224,17 @@ def _submit_and_assert_verified(client, kp, item, *, expected_nvars: int):
         headers=_bitset_headers(kp, body, submitted_at=submitted_at),
     )
     assert r.status_code == 202, r.text
-    receipt = r.json()
-    assert receipt["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
+    received = r.json()
+    assert received["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
+    # Thin submit: admit is intentionally async; verification happens in the
+    # worker below. Never assert inline verify here.
+    assert received["status"] == "received"
+    results = v2_pipeline.process_bitset_batch(v2_store, batch_size=1)
+    assert results and results[0]["status"] == "verified", results
+    fetched = client.get(received["receipt_url"])
+    assert fetched.status_code == 200, fetched.text
+    receipt = fetched.json()
+    assert receipt["receipt_id"] == received["receipt_id"]
     assert receipt["status"] == "verified"
     return receipt
 
@@ -172,6 +246,7 @@ def test_real_instance_combinatorial_bitset_e2e_verifies_at_real_shape(tmp_path,
     submit token/reported n_vars was pinned to shape_for(tier)=400, so every
     submission on this path was rejected with submit_token_shape_mismatch."""
     app, _store = _build(tmp_path, monkeypatch, source="combinatorial", kind="coloring")
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
     client = TestClient(app)
 
     # Sanity: the nominal tier shape really does differ from the real CNF size,
@@ -187,11 +262,11 @@ def test_real_instance_combinatorial_bitset_e2e_verifies_at_real_shape(tmp_path,
 
     kp1 = _keypair("//RealInstanceBitsetT1")
     item1 = _fetch_item(client, kp1, tier=1)
-    _submit_and_assert_verified(client, kp1, item1, expected_nvars=real_t1)
+    _submit_and_assert_verified(client, kp1, item1, expected_nvars=real_t1, v2_store=v2_store)
 
     kp2 = _keypair("//RealInstanceBitsetT2")
     item2 = _fetch_item(client, kp2, tier=2)
-    _submit_and_assert_verified(client, kp2, item2, expected_nvars=real_t2)
+    _submit_and_assert_verified(client, kp2, item2, expected_nvars=real_t2, v2_store=v2_store)
 
 
 def test_planted_default_source_still_mints_nominal_tier_shape(tmp_path, monkeypatch):
@@ -200,6 +275,7 @@ def test_planted_default_source_still_mints_nominal_tier_shape(tmp_path, monkeyp
     of shape_for) must be a complete no-op — token/reported nvars == shape_for
     still, and the bitset path still verifies end to end."""
     app, _store = _build(tmp_path, monkeypatch, source=None)
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
     client = TestClient(app)
     assert real_corpus.challenge_source() == "planted"
 
@@ -208,5 +284,6 @@ def test_planted_default_source_still_mints_nominal_tier_shape(tmp_path, monkeyp
     assert item["n_vars"] == pm.shape_for(1)[0]
     assert item["submit_token"]
 
-    receipt = _submit_and_assert_verified(client, kp, item, expected_nvars=pm.shape_for(1)[0])
+    receipt = _submit_and_assert_verified(
+        client, kp, item, expected_nvars=pm.shape_for(1)[0], v2_store=v2_store)
     assert receipt["weighted_score"] == item["difficulty_weight"]

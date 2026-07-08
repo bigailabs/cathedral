@@ -436,16 +436,22 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     )
     assert first.status_code == 202
     assert second.status_code == 200
-    receipt = first.json()
+    received = first.json()
+    assert received["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
+    assert received["status"] == "received"
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    results = v2_pipeline.process_bitset_batch(v2_store, batch_size=1)
+    assert results[0]["status"] == "verified"
+
+    fetched = client.get(received["receipt_url"])
+    assert fetched.status_code == 200
+    receipt = fetched.json()
+    assert receipt["receipt_id"] == received["receipt_id"]
     assert receipt["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
     assert receipt["status"] == "verified"
     assert receipt["weighted_score"] == item["difficulty_weight"]
-    assert second.json()["receipt_id"] == receipt["receipt_id"]
+    assert second.json()["receipt_id"] == received["receipt_id"]
     assert second.json()["idempotent_replay"] is True
-
-    fetched = client.get(receipt["receipt_url"])
-    assert fetched.status_code == 200
-    assert fetched.json()["receipt_id"] == receipt["receipt_id"]
 
     weights = client.get("/v2/validator/weights/next")
     assert weights.status_code == 200
@@ -462,7 +468,6 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     assert bundle["status_counts"]["bitset:verified"] == 1
     assert any(r["id"] == receipt["receipt_id"] and r["source"] == "bitset" for r in bundle["receipts"])
 
-    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
     assert v2_store.query("SELECT COUNT(*) AS n FROM v2_submit_events")[0]["n"] == 1
     assert v2_store.query("SELECT COUNT(*) AS n FROM solution_manifests")[0]["n"] == 0
 
@@ -522,6 +527,10 @@ def test_solution_manifest_v2_manifest_and_bitset_same_challenge_count_once(tmp_
         headers=_bitset_headers(kp, bitset_body),
     )
     assert bitset.status_code == 202
+    # Thin submit: drain the async verify worker before asserting scored state.
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    results = v2_pipeline.process_bitset_batch(v2_store, batch_size=1)
+    assert results and results[0]["status"] == "verified"
 
     vector = client.get("/v2/validator/weights/next").json()
     row = next(w for w in vector["weights"] if w["miner_hotkey"] == kp.ss58_address)
