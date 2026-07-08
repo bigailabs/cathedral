@@ -18,7 +18,7 @@ deprecated, or a candidate for deletion in the post-relaunch env cleanup.
 
 | Env | Values | Default | Meaning |
 |---|---|---|---|
-| `CATHEDRAL_LAUNCH_PROFILE` | unset, `v2-converged` | unset | `v2-converged` = the single unified miner protocol: V2 surface + bitset submit + lazy issuance + PM payout bridge. Unset = legacy per-flag behavior. |
+| `CATHEDRAL_LAUNCH_PROFILE` | unset, `v2-converged` | unset | `v2-converged` = the single unified miner protocol: V2 surface + bitset submit + lazy issuance + PM payout bridge + startup env pinning. Unset = legacy per-flag behavior. |
 
 Fail-closed at boot (RuntimeError, never a warning):
 - Unknown profile value.
@@ -119,7 +119,7 @@ executor); add a deploy smoke check for this.
   are the path that matters.
 - `CATHEDRAL_V2_SHADOW_V1_*` (shadow mirror of V1 submits).
 - `CATHEDRAL_V2_PERMINER_ENV_PIN` and the whole V2->legacy env bridge once V1
-  per-miner env is gone (kills the pm env lock serialization).
+  per-miner env is gone (`v2-converged` already pins automatically).
 - Duplicated `CATHEDRAL_V2_PERMINER_*` twins of calibration envs.
 - `CATHEDRAL_V2_DATABASE_URL`/`CATHEDRAL_V2_DB_PATH` split-store option
   (converged profile forbids it; delete after V1 removal).

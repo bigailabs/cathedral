@@ -138,8 +138,10 @@ def pin_v2_pm_env() -> bool:
     (challenges fetch, CNF fetch, submit) and the verify worker to
     one-at-a-time per process.
 
-    Opt-in via CATHEDRAL_V2_PERMINER_ENV_PIN (default off: behavior stays
-    byte-identical to the bridged path). Refuses, leaving the bridge in place:
+    Enabled automatically by the v2-converged launch profile, which is the
+    deployment path that promises one coherent env surface. Legacy/surgical
+    rollouts can still opt in via CATHEDRAL_V2_PERMINER_ENV_PIN. Refuses,
+    leaving the bridge in place:
       - when the unprefixed CATHEDRAL_PERMINER_ENABLED is truthy -- the V1
         per-miner surface is live in this process and overwriting its config
         would corrupt it;
@@ -151,8 +153,14 @@ def pin_v2_pm_env() -> bool:
     pm_primary /leaderboard/recent compatibility path keys off it). The V2
     handlers gate on v2_perminer_enabled() instead.
     """
+    from . import launch_profile
+
     global _PM_ENV_PINNED
-    if os.environ.get("CATHEDRAL_V2_PERMINER_ENV_PIN", "").strip().lower() not in _ENV_TRUTHY:
+    explicit_pin = (
+        os.environ.get("CATHEDRAL_V2_PERMINER_ENV_PIN", "").strip().lower()
+        in _ENV_TRUTHY
+    )
+    if not (explicit_pin or launch_profile.converged()):
         return False
     if os.environ.get("CATHEDRAL_PERMINER_ENABLED", "").strip().lower() in _ENV_TRUTHY:
         print(

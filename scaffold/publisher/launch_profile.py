@@ -12,6 +12,7 @@ Profiles:
                     * bitset submit on (CATHEDRAL_V2_SUBMIT_BITSET_ENABLED)
                     * lazy issuance on (CATHEDRAL_V2_LAZY_ISSUANCE)
                     * PM payout bridge on (CATHEDRAL_V2_PM_PAYOUT_BRIDGE)
+                    * startup env pinning on (no V2 per-request env lock)
                     V1 miner routes remain edge-gated; validators consume the
                     unchanged signed weight vector.
 

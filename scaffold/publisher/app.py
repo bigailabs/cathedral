@@ -471,8 +471,9 @@ def build_app(
     # once, while build_app is still single-threaded, so the V2 per-miner
     # handlers and verify worker skip v2_pm_env()'s process-global lock (it
     # serialized every V2 per-miner request to one-at-a-time per process).
-    # Opt-in via CATHEDRAL_V2_PERMINER_ENV_PIN and guarded -- refusal reasons
-    # are logged inside pin_v2_pm_env().
+    # Implied by CATHEDRAL_LAUNCH_PROFILE=v2-converged, with an explicit opt-in
+    # still available for surgical rollout. Refusal reasons are logged inside
+    # pin_v2_pm_env().
     v2_pm_env_pinned = v2_pipeline.pin_v2_pm_env()
     print(f"[v2_pm_env] pinned={v2_pm_env_pinned}")
     # Best-effort hotkey->coldkey resolver for the public receipts feed,

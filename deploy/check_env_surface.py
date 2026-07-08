@@ -84,7 +84,7 @@ DANGEROUS_DEPRECATED = {
 }
 
 LEGACY_WARN_EXACT = {
-    "CATHEDRAL_V2_PERMINER_ENV_PIN": "old V2-to-legacy env bridge; avoid in converged profile",
+    "CATHEDRAL_V2_PERMINER_ENV_PIN": "redundant: v2-converged pins the env bridge automatically",
     "CATHEDRAL_V2_PERMINER_SEED_SECRET": "prefer CATHEDRAL_PERMINER_SEED_SECRET",
     "CATHEDRAL_ASYNC_VERIFY_ENABLED": "old V1 async worker flag; V2 uses CATHEDRAL_V2_VERIFY_WORKER_ENABLED",
     "CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED": "old V1 pm-async rollout flag; V2 bitset submit owns relaunch path",
