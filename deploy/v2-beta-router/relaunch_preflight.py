@@ -416,6 +416,7 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
         f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
         f"CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS={float(args.pm_coverage_horizon_hours)} "
         f"CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT={int(args.min_weight_count)} "
+        f"CATHEDRAL_PREFLIGHT_MIN_LIVE_COVERAGE_RATIO={float(args.min_live_coverage_ratio)} "
         """.venv/bin/python - <<'PY'
 import json
 import os
@@ -429,9 +430,12 @@ def ms_iso(value: datetime) -> str:
     return value.strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
 
 
-def positive_score_count(at: datetime) -> int:
-    scores = weights_mod.compose_scores(store, now=at)
-    return sum(1 for value in scores.values() if float(value) > 0.0)
+def positive_scores(at: datetime) -> dict[str, float]:
+    return {
+        str(hotkey): float(value)
+        for hotkey, value in weights_mod.compose_scores(store, now=at).items()
+        if float(value) > 0.0
+    }
 
 
 def ledger_stats(at: datetime) -> dict:
@@ -455,27 +459,74 @@ def ledger_stats(at: datetime) -> dict:
     }
 
 
+def chain_hotkeys() -> tuple[set[str], str | None]:
+    try:
+        import bittensor as bt
+        network = os.environ.get(weights_mod.NETWORK_ENV, "finney")
+        netuid = int(os.environ.get(weights_mod.NETUID_ENV, "39") or "39")
+        sub = bt.subtensor(network=network) if hasattr(bt, "subtensor") else bt.Subtensor(network=network)
+        mg = sub.metagraph(netuid=netuid)
+        return set(str(hk) for hk in (getattr(mg, "hotkeys", []) or [])), None
+    except Exception as exc:
+        return set(), f"{type(exc).__name__}: {str(exc)[:160]}"
+
+
 store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
 now = datetime.now(timezone.utc)
 window_hours = float(weights_mod.window_hours())
 horizon_hours = float(os.environ.get("CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS", "18") or "18")
 min_weight_count = int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300")
+min_live_coverage_ratio = float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_LIVE_COVERAGE_RATIO", "0.85") or "0.85")
 horizon_at = now + timedelta(hours=horizon_hours)
 current = ledger_stats(now)
 horizon = ledger_stats(horizon_at)
-current["score_hotkeys"] = positive_score_count(now)
-horizon["score_hotkeys"] = positive_score_count(horizon_at)
+current_scores = positive_scores(now)
+horizon_scores = positive_scores(horizon_at)
+current["score_hotkeys"] = len(current_scores)
+horizon["score_hotkeys"] = len(horizon_scores)
+live_hotkeys, live_error = chain_hotkeys()
+if live_hotkeys:
+    current["live_score_hotkeys"] = sum(1 for hotkey in current_scores if hotkey in live_hotkeys)
+    horizon["live_score_hotkeys"] = sum(1 for hotkey in horizon_scores if hotkey in live_hotkeys)
+else:
+    current["live_score_hotkeys"] = None
+    horizon["live_score_hotkeys"] = None
+live_count = len(live_hotkeys)
+current_live_ratio = (
+    float(current["live_score_hotkeys"]) / live_count
+    if live_count and current["live_score_hotkeys"] is not None else None
+)
+horizon_live_ratio = (
+    float(horizon["live_score_hotkeys"]) / live_count
+    if live_count and horizon["live_score_hotkeys"] is not None else None
+)
 scoring_mode = weights_mod.perminer_scoring_mode()
+if live_count:
+    coverage_ok = (
+        current_live_ratio is not None
+        and horizon_live_ratio is not None
+        and current_live_ratio >= min_live_coverage_ratio
+        and horizon_live_ratio >= min_live_coverage_ratio
+    )
+else:
+    coverage_ok = (
+        current["score_hotkeys"] > min_weight_count
+        and horizon["score_hotkeys"] > min_weight_count
+    )
 payload = {
     "ok": (
         scoring_mode == "pm_primary"
-        and current["score_hotkeys"] > min_weight_count
-        and horizon["score_hotkeys"] > min_weight_count
+        and coverage_ok
     ),
+    "chain_hotkeys": live_count,
+    "chain_error": live_error,
+    "current_live_ratio": current_live_ratio,
+    "horizon_live_ratio": horizon_live_ratio,
     "scoring_mode": scoring_mode,
     "window_hours": window_hours,
     "horizon_hours": horizon_hours,
     "min_weight_count": min_weight_count,
+    "min_live_coverage_ratio": min_live_coverage_ratio,
     "now": current,
     "horizon": horizon,
 }
@@ -500,12 +551,25 @@ PY"""
     else:
         now_payload = payload.get("now") or {}
         horizon_payload = payload.get("horizon") or {}
+        chain_hotkeys = int(payload.get("chain_hotkeys") or 0)
+        if chain_hotkeys:
+            coverage_detail = (
+                f"now_live={now_payload.get('live_score_hotkeys')}/{chain_hotkeys} "
+                f"horizon_live={horizon_payload.get('live_score_hotkeys')}/{chain_hotkeys} "
+                f"min_live_ratio={payload.get('min_live_coverage_ratio')}"
+            )
+        else:
+            coverage_detail = (
+                f"chain_unavailable={payload.get('chain_error')} "
+                f"min_scores={payload.get('min_weight_count')}"
+            )
         detail = (
             f"mode={payload.get('scoring_mode')} "
             f"window={payload.get('window_hours')}h "
             f"horizon={payload.get('horizon_hours')}h "
             f"now_scores={now_payload.get('score_hotkeys')} "
             f"horizon_scores={horizon_payload.get('score_hotkeys')} "
+            f"{coverage_detail} "
             f"horizon_since={horizon_payload.get('since')} "
             f"last_at={horizon_payload.get('last_at')}"
         )
@@ -734,6 +798,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--min-weight-count", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300"))
     ap.add_argument("--min-prebake-depth", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_PREBAKE_DEPTH", "10") or "10"))
     ap.add_argument("--pm-coverage-horizon-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS", "18") or "18"))
+    ap.add_argument("--min-live-coverage-ratio", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_LIVE_COVERAGE_RATIO", "0.85") or "0.85"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))
