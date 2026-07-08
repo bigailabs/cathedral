@@ -602,6 +602,19 @@ def build_app(
         0.0, _env_float("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_OLDEST_AGE_SECS", 0.0))
     v2_submit_backpressure_retry_after_secs = max(
         1, _env_int("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_RETRY_AFTER_SECS", 5))
+    # Front-door shed for DB connection pressure (open-v2 incident 2026-07-08):
+    # under real all-miner load, submit admission and receipt polling exhausted
+    # PG connection acquisition (psycopg2.OperationalError from psycopg2.connect
+    # inside _pool.getconn) and surfaced as raw 500s + readiness flaps. When the
+    # DB is briefly unreachable/saturated, return a controlled 503 with a
+    # distinct reason + Retry-After instead of an unhandled OperationalError.
+    v2_db_unavailable_retry_after_secs = max(
+        1, _env_int("CATHEDRAL_V2_DB_UNAVAILABLE_RETRY_AFTER_SECS", 2))
+    # Receipt pollers hammer the origin immediately after submit and every poll
+    # is a DB read; a small dedicated concurrency gate keeps a poll flood from
+    # exhausting the PG pool before the shed above ever fires. 0 disables.
+    v2_receipt_poll_max_concurrency = max(
+        0, _env_int("CATHEDRAL_V2_RECEIPT_POLL_MAX_CONCURRENCY", 16))
     # /v2/agents/submit-bitset is an async handler, but the verify+admit body it
     # runs is sync CPU (CNF regeneration, witness check) + sync DB. Running that
     # inline on the event loop froze the whole worker (health checks, connection
@@ -682,6 +695,7 @@ def build_app(
         "pm_read_hard_cap": pm_read_hard_cap,
         "configured_pm_read_hard_cap": configured_pm_read_hard_cap,
         "pm_read_min_cap": pm_read_min_cap,
+        "v2_receipt_poll_max_concurrency": v2_receipt_poll_max_concurrency,
         "min_interval_secs": min_interval,
         "total": 0,
         "by_outcome": {},
@@ -1273,6 +1287,10 @@ def build_app(
             f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/challenges",
             f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/cnf",
         }
+        _V2_RECEIPT_POLL_PREFIXES = (
+            "/v2/agents/submit-bitset/receipts/",
+            f"{_LEGACY_PREFIX}/v2/agents/submit-bitset/receipts/",
+        )
 
         def __init__(self, asgi_app):
             self._app = asgi_app
@@ -1283,6 +1301,13 @@ def build_app(
             self._pm_read_gate = (
                 threading.BoundedSemaphore(pm_read_hard_cap)
                 if pm_read_hard_cap > 0 else None
+            )
+            # Dedicated gate for V2 receipt polling: each uncached poll is a DB
+            # read and live miners poll aggressively right after submit. Bounding
+            # concurrency here protects the PG pool (open-v2 incident 2026-07-08).
+            self._receipt_poll_gate = (
+                threading.BoundedSemaphore(v2_receipt_poll_max_concurrency)
+                if v2_receipt_poll_max_concurrency > 0 else None
             )
 
         async def __call__(self, scope, receive, send):
@@ -1300,6 +1325,9 @@ def build_app(
             elif method == "GET" and path in self._PM_READ_PATHS:
                 gate = self._pm_read_gate
                 reason = "per_miner_busy_retry"
+            elif method == "GET" and path.startswith(self._V2_RECEIPT_POLL_PREFIXES):
+                gate = self._receipt_poll_gate
+                reason = "receipt_poll_busy_retry"
 
             # Track 2 (item 7): per-hotkey fairness check BEFORE the global gate.
             # A single hotkey over its budget is rejected with the distinct
@@ -6329,6 +6357,48 @@ def build_app(
         except Exception:
             return dict(row)
 
+    def _is_db_unavailable_error(exc: BaseException) -> bool:
+        """True when exc (or its cause/context chain) is a DB availability
+        failure: psycopg2 OperationalError (connect refused/timeout under
+        connection pressure), psycopg2 pool PoolError (pool exhausted), or
+        sqlite3 OperationalError ("database is locked"). Matching by class
+        name/module keeps psycopg2 an optional import on sqlite deployments."""
+        seen: set[int] = set()
+        cur: BaseException | None = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            name = type(cur).__name__
+            module = getattr(type(cur), "__module__", "") or ""
+            if name in {"OperationalError", "PoolError"} and (
+                    module.startswith("psycopg2") or module == "sqlite3"):
+                return True
+            cur = cur.__cause__ or cur.__context__
+        return False
+
+    def _v2_db_unavailable_response() -> JSONResponse:
+        """Controlled shed for transient DB connection pressure on the V2
+        submit/receipt hot path (open-v2 incident 2026-07-08): a distinct 503 +
+        Retry-After instead of an unhandled psycopg2.OperationalError 500."""
+        reason = "v2_db_unavailable_retry"
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.db_unavailable.v1",
+                "detail": reason,
+                "reason": reason,
+                "message": "V2 origin database is briefly saturated. Retry shortly.",
+                "retry_after_seconds": v2_db_unavailable_retry_after_secs,
+            },
+            status_code=503,
+            headers={
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+                "Retry-After": str(v2_db_unavailable_retry_after_secs),
+                # Literal on purpose: the miner error contract drift-check
+                # (test_miner_error_contract.py) greps static header values.
+                "X-Cathedral-Rejection-Reason": "v2_db_unavailable_retry",
+            },
+        )
+
     def _v2_submit_backpressure_snapshot() -> dict[str, Any] | None:
         if not v2_submit_backpressure_enabled:
             return None
@@ -6436,7 +6506,12 @@ def build_app(
         except v2_bitset_submit.BitsetSubmitError as exc:
             raise HTTPException(400, exc.reason)
 
-        existing = _v2_submit_existing_receipt(submit)
+        try:
+            existing = _v2_submit_existing_receipt(submit)
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
         if existing is not None:
             payload = v2_bitset_submit.receipt_payload(existing, inserted=False)
             payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
@@ -6446,7 +6521,12 @@ def build_app(
                 headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
             )
 
-        backpressure = _v2_submit_backpressure_snapshot()
+        try:
+            backpressure = _v2_submit_backpressure_snapshot()
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
         if backpressure is not None:
             return JSONResponse(
                 backpressure,
@@ -6494,8 +6574,13 @@ def build_app(
                 challenge_kind=challenge_kind,
             )
 
-        row, inserted = await asyncio.get_running_loop().run_in_executor(
-            v2_submit_executor, _admit_received)
+        try:
+            row, inserted = await asyncio.get_running_loop().run_in_executor(
+                v2_submit_executor, _admit_received)
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
         payload = v2_bitset_submit.receipt_payload(row, inserted=inserted)
         payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
         return JSONResponse(
@@ -6508,7 +6593,12 @@ def build_app(
     def submit_bitset_receipt_v2(receipt_id: str):
         if not (solution_manifest_enabled and v2_submit_bitset_enabled):
             raise HTTPException(404, "v2_submit_bitset_not_enabled")
-        row = v2_bitset_submit.get_receipt(v2_store, receipt_id)
+        try:
+            row = v2_bitset_submit.get_receipt(v2_store, receipt_id)
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
         if row is None:
             raise HTTPException(404, "receipt_not_found")
         return JSONResponse(
