@@ -1,0 +1,8 @@
+name = "cathedral-v2-beta-router"
+main = "worker.mjs"
+compatibility_date = "2026-07-08"
+account_id = "9d20a61a5e8cb607440480eef6155480"
+
+routes = [
+  { pattern = "v2-beta.cathedral.computer/*", zone_name = "cathedral.computer" }
+]
