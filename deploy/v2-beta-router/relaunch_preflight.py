@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -367,6 +368,33 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
     else:
         pf.fail("sandbox services active", proc.stdout[-500:].strip())
 
+    remote_dir = shlex.quote(args.ssh_cathedral_dir)
+    remote_env = shlex.quote(args.ssh_env_file)
+    remote_audit = (
+        f"cd {remote_dir} && "
+        f".venv/bin/python deploy/check_env_surface.py --env-file {remote_env}"
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_audit],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        pf.fail("remote env audit", proc.stdout[-800:].strip())
+    else:
+        warning_count = sum(
+            1 for line in proc.stdout.splitlines() if line.startswith("  warn    ")
+        )
+        if warning_count:
+            pf.warn(
+                "remote env audit",
+                f"no fatal errors; {warning_count} cleanup warnings",
+            )
+        else:
+            pf.pass_("remote env audit", "no fatal errors")
+
 
 def check_e2e(pf: Preflight, args: argparse.Namespace) -> None:
     run_e2e = args.run_e2e or os.environ.get("CATHEDRAL_PREFLIGHT_RUN_E2E", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -397,6 +425,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--env-file", default=os.environ.get("CATHEDRAL_PREFLIGHT_ENV_FILE", ""))
     ap.add_argument("--ssh-target", default="")
     ap.add_argument("--ssh-key", default="")
+    ap.add_argument(
+        "--ssh-cathedral-dir",
+        default=os.environ.get(
+            "CATHEDRAL_PREFLIGHT_SSH_CATHEDRAL_DIR",
+            "/home/polaris/cathedral",
+        ),
+    )
+    ap.add_argument(
+        "--ssh-env-file",
+        default=os.environ.get("CATHEDRAL_PREFLIGHT_SSH_ENV_FILE", ".env.sh"),
+    )
     ap.add_argument("--max-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PENDING", "0") or "0"))
     ap.add_argument("--max-weight-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_WEIGHT_AGE_SECS", "900") or "900"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
