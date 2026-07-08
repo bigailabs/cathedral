@@ -20,10 +20,15 @@ Flow:
 ```text
 GET  /v2/synthetic-boolean/per-miner/challenges
 GET  /v2/synthetic-boolean/per-miner/cnf
+read X-Cathedral-Submit-Token from the CNF response headers
 POST /v2/agents/submit-bitset
 GET  /v2/agents/submit-bitset/receipts/{receipt_id}
 GET  /v2/validator/weights/next
 ```
+
+Under the converged V2 profile, challenge pages are lazy descriptors and do not
+carry per-item `submit_token` values. Fetch the CNF first, then submit using the
+`X-Cathedral-Submit-Token` header returned with that exact CNF.
 
 ## Quick test
 
@@ -48,6 +53,7 @@ shadow_weight=1.0
 This proves the V2 protocol pieces:
 
 - miner receives a token-bound challenge
+- miner reads the submit token from the CNF response header
 - miner solves locally
 - miner submits a compact bitset assignment
 - Cathedral verifies token, signature, assignment shape, and SAT witness
