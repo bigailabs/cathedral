@@ -2,11 +2,13 @@
 """Cathedral V2 bitset miner E2E smoke.
 
 Flow:
-  fetch V2 per-miner challenge + submit_token -> fetch CNF -> solve locally ->
-  submit tiny signed bitset -> check receipt -> check V2 shadow weights.
+  fetch V2 per-miner challenge descriptor -> fetch CNF + submit token header ->
+  solve locally -> submit tiny signed bitset -> check receipt -> check V2
+  shadow weights.
 
-This script writes only to isolated V2 beta tables. It does not affect V1
-production weights, rewards, or payouts.
+On converged deployments, verified bitset events can bridge into that
+deployment's `per_miner_solves` payout rows. Run it only against a base URL you
+intend to dogfood.
 """
 from __future__ import annotations
 

@@ -29,11 +29,12 @@ The board is published as one small, **consistent** snapshot on Cloudflare's edg
 Your per-miner challenges are private to your hotkey, so you fetch your own set from the V2 endpoints on `v2-beta.cathedral.computer`:
 
 1. **Fetch your challenges** (signed read, your hotkey):
-   `GET https://v2-beta.cathedral.computer/v2/synthetic-boolean/per-miner/challenges?limit=64`
-   → each item: `challenge_id`, `tier`, `seq`, `n_vars`, `kind` (`coloring`/`latin`/planted), `cnf_sha256`, `submit_token`.
+   `GET https://v2-beta.cathedral.computer/v2/synthetic-boolean/per-miner/challenges?limit=10`
+   → each item: `challenge_id`, `tier`, `seq`, `n_vars`, `kind` (`coloring`/`latin`/planted), `cnf_sha256`, and `token_source`.
 2. **Fetch the CNF and solve it:**
    `GET https://v2-beta.cathedral.computer/v2/synthetic-boolean/per-miner/cnf?challenge_id=...&tier=...&seq=...`
-3. **Submit the signed bitset** (with solver provenance — see below):
+   → read the `X-Cathedral-Submit-Token` response header. Under the converged V2 profile, challenge pages are lazy and do **not** include per-item `submit_token` values.
+3. **Submit the signed bitset** with that header token (and solver provenance — see below):
    `POST https://v2-beta.cathedral.computer/v2/agents/submit-bitset`
 4. **Check your receipt:**
    `GET https://v2-beta.cathedral.computer/v2/agents/submit-bitset/receipts/{receipt_id}`
