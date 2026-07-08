@@ -44,9 +44,14 @@ export CATHEDRAL_V2_BITSET_VERIFY_THREADS=1
 export CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS=1800
 
 export CATHEDRAL_PERMINER_NVARS_T1=600
-export CATHEDRAL_PERMINER_NVARS_T2=600
+# Tier2 difficulty gate (2026-07-08): 800/3408 keeps ratio 4.26 but makes
+# tier2 the throughput limiter - miner solve time gates submit volume, so
+# tight per-miner rate limits are unnecessary. Tier1 stays the easy 'biased'
+# participation floor, bounded by ALLOTMENT_T1 so it is not a spam lane.
+export CATHEDRAL_PERMINER_NVARS_T2=800
 export CATHEDRAL_PERMINER_NCLAUSES_T1=2556
-export CATHEDRAL_PERMINER_NCLAUSES_T2=2556
+export CATHEDRAL_PERMINER_NCLAUSES_T2=3408
+export CATHEDRAL_PERMINER_ALLOTMENT_T1=500
 export CATHEDRAL_PERMINER_SCORING_MODE=pm_primary
 export CATHEDRAL_V2_REAL_FRACTION=0
 
