@@ -2,12 +2,14 @@ name = "cathedral-v2-beta-router"
 main = "worker.mjs"
 compatibility_date = "2026-07-08"
 account_id = "9d20a61a5e8cb607440480eef6155480"
+workers_dev = false
+preview_urls = false
+
+routes = [
+  { pattern = "v2-beta.cathedral.computer/*", zone_name = "cathedral.computer" }
+]
 
 [vars]
 # Default closed. The V2 all-hotkey reopen requires an explicit deploy with
 # V2_GATE_MODE=open-v2 after Fred's go and the pre-post checklist passes.
 V2_GATE_MODE = "staged"
-
-routes = [
-  { pattern = "v2-beta.cathedral.computer/*", zone_name = "cathedral.computer" }
-]
