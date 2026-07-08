@@ -117,6 +117,11 @@ def v2_perminer_enabled() -> bool:
     once pin_v2_pm_env() runs, because the pin deliberately never sets the
     legacy CATHEDRAL_PERMINER_ENABLED.
     """
+    from . import launch_profile
+    if launch_profile.converged() and "CATHEDRAL_V2_PERMINER_ENABLED" not in os.environ:
+        # The converged launch profile implies the V2 per-miner surface;
+        # an explicit env still wins (contradictions fail closed at boot).
+        return True
     if "CATHEDRAL_V2_PERMINER_ENABLED" in os.environ:
         raw = os.environ["CATHEDRAL_V2_PERMINER_ENABLED"]
     else:
@@ -461,7 +466,11 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
             _finish_rejected(store, rid, "unsupported_challenge_kind")
             return {"id": rid, "status": STATUS_REJECTED, "reason": "unsupported_challenge_kind"}
         epoch = int(parsed["epoch"])
-        tier_seq = pm.resolve_tier_seq_for(miner_hotkey, epoch, challenge_id)
+        # V1 parity: ownership resolves against the scoring identity (coldkey
+        # collapse aware), matching the mint/admit sites. Raw hotkey stays the
+        # signing/receipt identity.
+        _manifest_identity = _scoring_identity(store, miner_hotkey)
+        tier_seq = pm.resolve_tier_seq_for(_manifest_identity, epoch, challenge_id)
         if tier_seq is None:
             _finish_rejected(store, rid, "assignment_required_fetch_challenges_first")
             return {"id": rid, "status": STATUS_REJECTED, "reason": "assignment_required_fetch_challenges_first"}
@@ -484,7 +493,7 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
         else:
             _record_cnf_store_miss()
             # Fallback: EXACT existing regeneration path, unchanged.
-            generated = pm.get_miner_cnf(miner_hotkey, epoch, tier, seq)
+            generated = pm.get_miner_cnf(_manifest_identity, epoch, tier, seq)
             if generated is None:
                 _finish_rejected(store, rid, "challenge_id_not_in_miner_set")
                 return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_not_in_miner_set"}
@@ -525,7 +534,7 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
         return {"id": rid, "status": STATUS_REJECTED, "reason": "unsupported_assignment_encoding"}
 
     with v2_pm_env():
-        ok, reason = pm.verify_miner_submission_for(miner_hotkey, epoch, tier, seq, challenge_id, assignment)
+        ok, reason = pm.verify_miner_submission_for(_manifest_identity, epoch, tier, seq, challenge_id, assignment)
         weight = pm.weight_for(tier)
     if not ok:
         _finish_rejected(store, rid, reason or "witness_check_failed")
@@ -683,11 +692,18 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
         # weight the verifier scored under v2_pm_env, never a recompute.
         def _tx(conn):
             if payout is not None:
-                pm.record_perminer_solve_tx(
+                inserted = pm.record_perminer_solve_tx(
                     conn, hk, payout["epoch"], payout["challenge_id"],
                     tier_i, seq_i, True,
                     solved_at_iso=now_iso,
                     difficulty_weight=payout["weight"])
+                if not inserted:
+                    # Existing ledger row (e.g. written earlier by the V1 accept
+                    # path) wins; audit-log so a weight mismatch between the V2
+                    # receipt and the paid row is visible in a dispute.
+                    print(f"[v2_pm_payout_bridge] duplicate_ledger_row "
+                          f"challenge_id={payout['challenge_id']} hotkey={hk} "
+                          f"v2_weight={payout['weight']}")
             conn.execute(
                 "UPDATE v2_submit_events SET status=?, weighted_score=?, "
                 "answer_hash=?, verifier_details_hash=?, verified_at_iso=?, "

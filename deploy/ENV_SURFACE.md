@@ -14,9 +14,16 @@ for deletion in the post-relaunch env cleanup.
 
 Fail-closed at boot (RuntimeError, never a warning):
 - Unknown profile value.
-- Profile + any implied flag explicitly forced off (contradiction).
+- Profile + any implied flag explicitly forced off (contradiction), including
+  `CATHEDRAL_V2_PERMINER_ENABLED` (the profile implies the per-miner surface).
 - Profile without `CATHEDRAL_V2_SUBMIT_TOKEN_SECRET`.
-- Profile (or the bridge flag) + a split V2 DB (`CATHEDRAL_V2_DATABASE_URL` / `CATHEDRAL_V2_DB_PATH`) — bridged payout rows must land in the scoring store.
+- Profile without a stable per-miner seed (`CATHEDRAL_V2_PERMINER_SEED_SECRET`
+  or `CATHEDRAL_PERMINER_SEED_SECRET`).
+- Profile (or the bridge flag) + a split V2 DB (`CATHEDRAL_V2_DATABASE_URL` /
+  `CATHEDRAL_V2_DB_PATH`) — bridged payout rows must land in the scoring store.
+- Profile without a shared Postgres store (`DATABASE_URL`) — the SQLite
+  fallback would silently stop the two deployment processes sharing state
+  (pytest is exempt so tests can build local stores).
 
 ## 2. Role (what this process does)
 
@@ -30,7 +37,7 @@ Fail-closed at boot (RuntimeError, never a warning):
 | Env | Meaning |
 |---|---|
 | `DATABASE_URL` | Postgres DSN; single shared store for scoring + V2 under the converged profile. |
-| `CATHEDRAL_SIGNING_KEY` (via keys module) | Ed25519 weight/eval signing key. Never rotate casually: validators pin it. |
+| `CATHEDRAL_EVAL_SIGNING_KEY` | Ed25519 weight/eval signing key (hex). Never rotate casually: validators pin it. If unset, a THROWAWAY dev key is generated and validators will reject everything. |
 | `CATHEDRAL_V2_SUBMIT_TOKEN_SECRET` | HMAC secret binding submit tokens to (hotkey, challenge, epoch, tier, seq, nvars, cnf_sha). Required by the profile. |
 | `CATHEDRAL_PERMINER_SEED_SECRET` | Deterministic instance derivation seed. Required for per-miner issuance. |
 | `CATHEDRAL_CNF_TOKEN_SECRET` | Legacy V1 CNF token HMAC (V1 miner routes are edge-gated; keep until V1 removal). |
@@ -51,9 +58,29 @@ Fail-closed at boot (RuntimeError, never a warning):
 ## 5. Internal / test-only (do not set in deployments; use the profile)
 
 `CATHEDRAL_V2_ENABLED`, `CATHEDRAL_V2_SUBMIT_BITSET_ENABLED`,
-`CATHEDRAL_V2_LAZY_ISSUANCE`, `CATHEDRAL_V2_PM_PAYOUT_BRIDGE` — implied by the
-profile; explicit values only for tests and surgical rollout, contradictions
-fail closed.
+`CATHEDRAL_V2_LAZY_ISSUANCE`, `CATHEDRAL_V2_PM_PAYOUT_BRIDGE`,
+`CATHEDRAL_V2_PERMINER_ENABLED` — implied by the profile; explicit values only
+for tests and surgical rollout, contradictions fail closed.
+
+Reference sandbox layout (two processes, one shared env file):
+
+```sh
+# shared .env.sh
+export DATABASE_URL='postgresql://...'        # required by the profile
+export CATHEDRAL_LAUNCH_PROFILE=v2-converged
+export CATHEDRAL_EVAL_SIGNING_KEY='<pinned hex>'
+export CATHEDRAL_V2_SUBMIT_TOKEN_SECRET='<stable>'
+export CATHEDRAL_PERMINER_SEED_SECRET='<stable>'
+export CATHEDRAL_CNF_TOKEN_SECRET='<stable, until V1 removal>'
+export CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE=1
+# never set CATHEDRAL_PERMINER_ENABLED (V1 surface stays off; enables env pin)
+
+# public origin (:8080): CATHEDRAL_SERVICE_ROLE=all, CATHEDRAL_V2_VERIFY_WORKER_ENABLED=0
+# private process (:8000): CATHEDRAL_SERVICE_ROLE=all, CATHEDRAL_V2_VERIFY_WORKER_ENABLED=1
+```
+
+Exactly one process per deployment runs the verify worker (payout bridge
+executor); add a deploy smoke check for this.
 
 ## 6. Deprecation queue (post-relaunch cleanup, tracked for deletion)
 

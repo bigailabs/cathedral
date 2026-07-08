@@ -64,6 +64,17 @@ def validate_env() -> list[str]:
     if not os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip():
         errors.append(
             f"{PROFILE_ENV}={V2_CONVERGED} requires CATHEDRAL_V2_SUBMIT_TOKEN_SECRET")
+    if not (os.environ.get("CATHEDRAL_V2_PERMINER_SEED_SECRET", "").strip()
+            or os.environ.get("CATHEDRAL_PERMINER_SEED_SECRET", "").strip()):
+        errors.append(
+            f"{PROFILE_ENV}={V2_CONVERGED} requires a stable per-miner seed "
+            "(CATHEDRAL_V2_PERMINER_SEED_SECRET or CATHEDRAL_PERMINER_SEED_SECRET); "
+            "an ephemeral per-process seed would fork instance derivation across "
+            "processes and epochs")
+    if _explicit_off("CATHEDRAL_V2_PERMINER_ENABLED"):
+        errors.append(
+            f"CATHEDRAL_V2_PERMINER_ENABLED is explicitly off but "
+            f"{PROFILE_ENV}={V2_CONVERGED} implies the per-miner surface on")
     if (os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
             or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()):
         errors.append(

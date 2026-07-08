@@ -443,6 +443,14 @@ def build_app(
     # live-adjacent tests cannot mutate the current subnet payout DB. If unset,
     # local tests share the app store.
     v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
+    if (launch_profile.converged() and store.backend != "postgres"
+            and "PYTEST_CURRENT_TEST" not in os.environ):
+        # Two deployment processes with a SQLite fallback would silently stop
+        # sharing the scoring/V2 store (DATABASE_URL unset or malformed).
+        # Payout-critical: fail closed outside tests.
+        raise RuntimeError(
+            "launch profile v2-converged requires a shared Postgres store: "
+            "set DATABASE_URL (postgresql://...); refusing SQLite fallback")
     if v2_pipeline.pm_payout_bridge_enabled() and v2_database_path:
         # The bridge records per_miner_solves rows via the verify worker's store
         # handle (the V2 store). Scoring reads the MAIN store. With a split V2
