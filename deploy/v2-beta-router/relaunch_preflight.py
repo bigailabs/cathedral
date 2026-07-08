@@ -327,6 +327,8 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
     key = args.ssh_key or os.environ.get("CATHEDRAL_PREFLIGHT_SSH_KEY", "").strip()
     if key:
         ssh_cmd += ["-i", str(Path(key).expanduser())]
+    remote_dir = shlex.quote(args.ssh_cathedral_dir)
+    remote_env = shlex.quote(args.ssh_env_file)
     try:
         proc = subprocess.run(
             ssh_cmd + [target, "curl -fsS http://127.0.0.1:8000/v2/verify/metrics"],
@@ -356,7 +358,31 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
     if pending > args.max_pending:
         pf.fail("private verifier topology", f"pending={pending} > {args.max_pending}")
         return
-    pf.pass_("private verifier topology", f"enabled=true pending={pending} last_batch={metrics.get('last_batch_count')}")
+    oldest_pending_age = metrics.get("oldest_pending_age_secs")
+    if oldest_pending_age is not None:
+        try:
+            oldest_pending_age_f = float(oldest_pending_age)
+        except (TypeError, ValueError):
+            pf.fail(
+                "private verifier topology",
+                f"bad oldest_pending_age_secs={oldest_pending_age!r}",
+            )
+            return
+        if oldest_pending_age_f > args.max_oldest_pending_age_secs:
+            pf.fail(
+                "private verifier topology",
+                f"oldest_pending_age={oldest_pending_age_f:.1f}s "
+                f"> {args.max_oldest_pending_age_secs}s",
+            )
+            return
+    age_detail = (
+        "none" if oldest_pending_age is None else f"{float(oldest_pending_age):.1f}s"
+    )
+    pf.pass_(
+        "private verifier topology",
+        f"enabled=true pending={pending} oldest_pending_age={age_detail} "
+        f"last_batch={metrics.get('last_batch_count')}",
+    )
 
     services = (
         "systemctl --user is-active cathedral-v2-beta-origin.service && "
@@ -373,6 +399,123 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
         pf.pass_("sandbox services active")
     else:
         pf.fail("sandbox services active", proc.stdout[-500:].strip())
+
+    remote_process_env = (
+        f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
+        """.venv/bin/python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+CORE_KEYS = (
+    "CATHEDRAL_PM_READ_HARD_CAP",
+    "CATHEDRAL_V2_READ_THREADS",
+    "CATHEDRAL_V2_SUBMIT_BITSET_THREADS",
+    "CATHEDRAL_V2_VERIFY_BATCH_SIZE",
+    "CATHEDRAL_V2_BITSET_VERIFY_THREADS",
+    "CATHEDRAL_PG_STATEMENT_TIMEOUT_MS",
+    "CATHEDRAL_WEIGHTS_WINDOW_HOURS",
+)
+
+
+def read_proc_env(pid: str) -> dict[str, str]:
+    raw = Path(f"/proc/{pid}/environ").read_bytes()
+    data = {}
+    for item in raw.split(b"\\0"):
+        if not item or b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        data[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return data
+
+
+def proc_for_port(port: str) -> tuple[str | None, list[str]]:
+    matches = []
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            cmdline = (path / "cmdline").read_bytes().replace(b"\\0", b" ").decode()
+        except Exception:
+            continue
+        if (
+            "uvicorn" in cmdline
+            and "scaffold.publisher.server:app" in cmdline
+            and f"--port {port}" in cmdline
+        ):
+            matches.append(path.name)
+    return (matches[0] if len(matches) == 1 else None), matches
+
+
+private_pid, private_matches = proc_for_port("8000")
+public_pid, public_matches = proc_for_port("8080")
+errors = []
+private_env = read_proc_env(private_pid) if private_pid else {}
+public_env = read_proc_env(public_pid) if public_pid else {}
+if private_pid is None:
+    errors.append(f"private_pid_matches={private_matches}")
+if public_pid is None:
+    errors.append(f"public_pid_matches={public_matches}")
+
+expected_private = {key: str(os.environ.get(key, "")) for key in CORE_KEYS}
+expected_public = dict(expected_private)
+expected_public["CATHEDRAL_PM_READ_HARD_CAP"] = str(
+    os.environ.get("CATHEDRAL_V2_PUBLIC_READ_HARD_CAP", "8") or "8"
+)
+expected_public["CATHEDRAL_V2_READ_THREADS"] = str(
+    os.environ.get("CATHEDRAL_V2_PUBLIC_READ_THREADS", "4") or "4"
+)
+
+private_actual = {key: private_env.get(key, "") for key in CORE_KEYS}
+public_actual = {key: public_env.get(key, "") for key in CORE_KEYS}
+for key, expected in expected_private.items():
+    if private_actual.get(key) != expected:
+        errors.append(f"private {key}={private_actual.get(key)!r} expected {expected!r}")
+for key, expected in expected_public.items():
+    if public_actual.get(key) != expected:
+        errors.append(f"public {key}={public_actual.get(key)!r} expected {expected!r}")
+if private_env.get("CATHEDRAL_V2_VERIFY_WORKER_ENABLED") != "1":
+    errors.append("private verifier worker env is not 1")
+if public_env.get("CATHEDRAL_V2_VERIFY_WORKER_ENABLED") != "0":
+    errors.append("public verifier worker env is not 0")
+
+payload = {
+    "ok": not errors,
+    "errors": errors,
+    "private_pid": private_pid,
+    "public_pid": public_pid,
+    "private": private_actual,
+    "public": public_actual,
+    "private_worker": private_env.get("CATHEDRAL_V2_VERIFY_WORKER_ENABLED"),
+    "public_worker": public_env.get("CATHEDRAL_V2_VERIFY_WORKER_ENABLED"),
+}
+print(json.dumps(payload, sort_keys=True))
+raise SystemExit(0 if payload["ok"] else 1)
+PY"""
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_process_env],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    try:
+        payload = json.loads(proc.stdout.splitlines()[-1])
+    except Exception as exc:
+        pf.fail(
+            "remote process env parity",
+            f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
+        )
+    else:
+        if proc.returncode == 0 and payload.get("ok") is True:
+            detail = (
+                f"private_pid={payload.get('private_pid')} worker={payload.get('private_worker')} "
+                f"public_pid={payload.get('public_pid')} worker={payload.get('public_worker')}"
+            )
+            pf.pass_("remote process env parity", detail)
+        else:
+            pf.fail("remote process env parity", f"errors={payload.get('errors')}")
 
     proc = subprocess.run(
         ssh_cmd + [
@@ -410,8 +553,6 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
                     ),
                 )
 
-    remote_dir = shlex.quote(args.ssh_cathedral_dir)
-    remote_env = shlex.quote(args.ssh_env_file)
     remote_vector_continuity = (
         f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
         f"CATHEDRAL_PREFLIGHT_MIN_POLICY_VERSION={int(args.min_policy_version)} "
@@ -1129,6 +1270,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=os.environ.get("CATHEDRAL_PREFLIGHT_SSH_ENV_FILE", ".env.sh"),
     )
     ap.add_argument("--max-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PENDING", "0") or "0"))
+    ap.add_argument("--max-oldest-pending-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_OLDEST_PENDING_AGE_SECS", "120") or "120"))
     ap.add_argument("--max-weight-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_WEIGHT_AGE_SECS", "900") or "900"))
     ap.add_argument("--min-weight-count", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300"))
     ap.add_argument("--min-prebake-depth", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_PREBAKE_DEPTH", "10") or "10"))
