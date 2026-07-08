@@ -147,8 +147,13 @@ export default {
       return withCacheHeader(cached, "HIT");
     }
     if (cached) {
-      ctx.waitUntil(refresh(cache, key));
-      return withCacheHeader(cached, "STALE-REFRESH");
+      try {
+        return withCacheHeader(await refresh(cache, key), "REFRESH");
+      } catch (error) {
+        const stale = withCacheHeader(cached, "STALE-FALLBACK");
+        stale.headers.set("X-Cathedral-Refresh-Error", String(error && error.message || error));
+        return stale;
+      }
     }
     try {
       return withCacheHeader(await refresh(cache, key), "MISS");
