@@ -651,6 +651,92 @@ PY"""
                 f"{detail}; widen CATHEDRAL_WEIGHTS_WINDOW_HOURS or refill fair V2 solves",
             )
 
+    remote_retention = (
+        f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
+        f"CATHEDRAL_PREFLIGHT_RETENTION_BATCH_SIZE={int(args.retention_batch_size)} "
+        """.venv/bin/python - <<'PY'
+import json
+import os
+
+from scaffold.publisher import retention
+from scaffold.publisher import weights as weights_mod
+from scaffold.publisher.store import Store
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+batch_size = env_int("CATHEDRAL_PREFLIGHT_RETENTION_BATCH_SIZE", 25000)
+os.environ["CATHEDRAL_RETENTION_BATCH_SIZE"] = str(batch_size)
+store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
+window_hours = float(weights_mod.window_hours())
+solve_ledger_hours = int(retention.solve_ledger_hours())
+eval_runs_hours = int(retention.eval_runs_hours())
+pm_attempt_hours = int(retention.pm_attempt_hours())
+summary = retention.retention_tick(store, dry=True)
+deleted = summary.get("deleted") or {}
+compacted = summary.get("compacted") or {}
+counts_within_batch = all(int(value or 0) <= batch_size for value in deleted.values())
+ok = (
+    summary.get("dry_run") is True
+    and solve_ledger_hours >= window_hours
+    and eval_runs_hours >= window_hours
+    and pm_attempt_hours >= window_hours
+    and counts_within_batch
+)
+payload = {
+    "ok": ok,
+    "retention_enabled": retention.retention_enabled(),
+    "retention_dry_run_env": retention.dry_run(),
+    "window_hours": window_hours,
+    "solve_ledger_hours": solve_ledger_hours,
+    "eval_runs_hours": eval_runs_hours,
+    "pm_attempt_hours": pm_attempt_hours,
+    "batch_size": batch_size,
+    "deleted": deleted,
+    "compacted": compacted,
+    "counts_within_batch": counts_within_batch,
+}
+print(json.dumps(payload, sort_keys=True))
+raise SystemExit(0 if payload["ok"] else 1)
+PY"""
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_retention],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+    )
+    try:
+        payload = json.loads(proc.stdout.splitlines()[-1])
+    except Exception as exc:
+        pf.fail(
+            "remote retention dry-run",
+            f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
+        )
+    else:
+        deleted = payload.get("deleted") or {}
+        detail = (
+            f"enabled={payload.get('retention_enabled')} "
+            f"window={payload.get('window_hours')}h "
+            f"solve_retention={payload.get('solve_ledger_hours')}h "
+            f"batch={payload.get('batch_size')} "
+            f"would_delete_per_miner_solves={deleted.get('per_miner_solves')} "
+            f"would_delete_assignments={deleted.get('per_miner_assignments')}"
+        )
+        if proc.returncode == 0 and payload.get("ok") is True:
+            pf.pass_("remote retention dry-run", detail)
+        else:
+            pf.fail(
+                "remote retention dry-run",
+                f"{detail}; counts={deleted} compacted={payload.get('compacted')}",
+            )
+
     remote_audit = (
         f"cd {remote_dir} && "
         f".venv/bin/python deploy/check_env_surface.py --env-file {remote_env}"
@@ -873,6 +959,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-v2-read-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_READ_THREADS", "4") or "4"))
     ap.add_argument("--max-pg-statement-timeout-ms", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", "4000") or "4000"))
     ap.add_argument("--min-weights-window-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48"))
+    ap.add_argument("--retention-batch-size", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_RETENTION_BATCH_SIZE", "25000") or "25000"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))

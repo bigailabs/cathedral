@@ -75,6 +75,11 @@ and the temporary `CATHEDRAL_WEIGHTS_WINDOW_HOURS >= 48` bridge while the gate
 is held closed. Raise those ceilings only with fresh latency and coverage
 evidence, not by copying old Railway defaults.
 
+The same preflight runs `retention_tick(..., dry=True)` against the live store.
+That check proves the bounded hot-state pruning path is executable and would
+retain at least the active scoring window; it does not enable destructive
+retention. Turning retention on is a separate DB-write decision.
+
 ## 5. Mechanism calibration (meaningful, documented, rarely changed)
 
 | Env | Default | Meaning |
