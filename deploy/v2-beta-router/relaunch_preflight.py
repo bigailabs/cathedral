@@ -412,6 +412,94 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
 
     remote_dir = shlex.quote(args.ssh_cathedral_dir)
     remote_env = shlex.quote(args.ssh_env_file)
+    remote_guardrails = (
+        f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
+        f"CATHEDRAL_PREFLIGHT_MAX_PM_READ_HARD_CAP={int(args.max_pm_read_hard_cap)} "
+        f"CATHEDRAL_PREFLIGHT_MAX_V2_READ_THREADS={int(args.max_v2_read_threads)} "
+        f"CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS={int(args.max_pg_statement_timeout_ms)} "
+        f"CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS={float(args.min_weights_window_hours)} "
+        """.venv/bin/python - <<'PY'
+import json
+import os
+
+from scaffold.publisher import weights as weights_mod
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+pm_read_hard_cap = env_int("CATHEDRAL_PM_READ_HARD_CAP", 128)
+v2_read_threads = env_int("CATHEDRAL_V2_READ_THREADS", 6)
+statement_timeout_ms = env_int("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS", 0)
+weights_window_hours = float(weights_mod.window_hours())
+max_pm_read_hard_cap = env_int("CATHEDRAL_PREFLIGHT_MAX_PM_READ_HARD_CAP", 8)
+max_v2_read_threads = env_int("CATHEDRAL_PREFLIGHT_MAX_V2_READ_THREADS", 4)
+max_statement_timeout_ms = env_int("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", 4000)
+min_weights_window_hours = float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48")
+checks = {
+    "pm_read_hard_cap_positive": pm_read_hard_cap > 0,
+    "pm_read_hard_cap_within_launch_ceiling": pm_read_hard_cap <= max_pm_read_hard_cap,
+    "v2_read_threads_within_launch_ceiling": 0 < v2_read_threads <= max_v2_read_threads,
+    "statement_timeout_positive": statement_timeout_ms > 0,
+    "statement_timeout_within_launch_ceiling": statement_timeout_ms <= max_statement_timeout_ms,
+    "weights_window_launch_bridge": weights_window_hours >= min_weights_window_hours,
+}
+payload = {
+    "ok": all(checks.values()),
+    "checks": checks,
+    "pm_read_hard_cap": pm_read_hard_cap,
+    "max_pm_read_hard_cap": max_pm_read_hard_cap,
+    "v2_read_threads": v2_read_threads,
+    "max_v2_read_threads": max_v2_read_threads,
+    "statement_timeout_ms": statement_timeout_ms,
+    "max_statement_timeout_ms": max_statement_timeout_ms,
+    "weights_window_hours": weights_window_hours,
+    "min_weights_window_hours": min_weights_window_hours,
+}
+print(json.dumps(payload, sort_keys=True))
+raise SystemExit(0 if payload["ok"] else 1)
+PY"""
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_guardrails],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    try:
+        payload = json.loads(proc.stdout.splitlines()[-1])
+    except Exception as exc:
+        pf.fail(
+            "remote runtime guardrails",
+            f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
+        )
+    else:
+        detail = (
+            f"pm_read_cap={payload.get('pm_read_hard_cap')}"
+            f"/<={payload.get('max_pm_read_hard_cap')} "
+            f"v2_read_threads={payload.get('v2_read_threads')}"
+            f"/<={payload.get('max_v2_read_threads')} "
+            f"stmt_timeout_ms={payload.get('statement_timeout_ms')}"
+            f"/<={payload.get('max_statement_timeout_ms')} "
+            f"window={payload.get('weights_window_hours')}h"
+            f">={payload.get('min_weights_window_hours')}h"
+        )
+        if proc.returncode == 0 and payload.get("ok") is True:
+            pf.pass_("remote runtime guardrails", detail)
+        else:
+            failed = [
+                name for name, ok in (payload.get("checks") or {}).items() if not ok
+            ]
+            pf.fail(
+                "remote runtime guardrails",
+                f"{detail}; failed={failed}",
+            )
+
     remote_pm_coverage = (
         f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
         f"CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS={float(args.pm_coverage_horizon_hours)} "
@@ -781,6 +869,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--min-prebake-depth", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_PREBAKE_DEPTH", "10") or "10"))
     ap.add_argument("--pm-coverage-horizon-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS", "18") or "18"))
     ap.add_argument("--min-live-coverage-ratio", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_LIVE_COVERAGE_RATIO", "0.85") or "0.85"))
+    ap.add_argument("--max-pm-read-hard-cap", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PM_READ_HARD_CAP", "8") or "8"))
+    ap.add_argument("--max-v2-read-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_READ_THREADS", "4") or "4"))
+    ap.add_argument("--max-pg-statement-timeout-ms", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", "4000") or "4000"))
+    ap.add_argument("--min-weights-window-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))

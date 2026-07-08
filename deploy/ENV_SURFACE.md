@@ -68,6 +68,13 @@ Fail-closed at boot (RuntimeError, never a warning):
 | snapshot/cache TTLs | optional | `CATHEDRAL_BOARD_TTL_SECS`, `CATHEDRAL_RECENT_CACHE_TTL_SECS`, `CATHEDRAL_MATERIALIZED_SNAPSHOT_*`, and `CATHEDRAL_DASHBOARD_SNAPSHOT_*` protect read-heavy non-miner routes. |
 | `CATHEDRAL_PG_POOL_MAX` / `CATHEDRAL_THREADPOOL_TOKENS` | optional | Only set when sizing a known host. Do not cargo-cult old Railway values. |
 
+The relaunch preflight intentionally enforces the current small-origin launch
+posture over SSH: positive read admission, `CATHEDRAL_PM_READ_HARD_CAP <= 8`,
+`CATHEDRAL_V2_READ_THREADS <= 4`, `CATHEDRAL_PG_STATEMENT_TIMEOUT_MS <= 4000`,
+and the temporary `CATHEDRAL_WEIGHTS_WINDOW_HOURS >= 48` bridge while the gate
+is held closed. Raise those ceilings only with fresh latency and coverage
+evidence, not by copying old Railway defaults.
+
 ## 5. Mechanism calibration (meaningful, documented, rarely changed)
 
 | Env | Default | Meaning |
