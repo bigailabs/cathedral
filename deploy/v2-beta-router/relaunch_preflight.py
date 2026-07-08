@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""Read-only Cathedral V2 relaunch preflight.
+
+This script proves the system is ready to open, but it never opens the gate.
+The actual open still requires the separate, explicit wrangler deploy with
+V2_GATE_MODE=open-v2 after Fred says go.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+SCRIPT = Path(__file__).resolve()
+ROUTER_DIR = SCRIPT.parent
+REPO = ROUTER_DIR.parent.parent
+DEFAULT_BASE = "https://v2-beta.cathedral.computer"
+DEFAULT_WEIGHTS_URL = "https://api.cathedral.computer/v1/validator/weights/next"
+NON_CANARY_HOTKEY = "5NotACanaryHotkeyAtAll1111111111111111111111111"
+
+
+@dataclass
+class Result:
+    status: str
+    name: str
+    detail: str = ""
+
+
+class Preflight:
+    def __init__(self) -> None:
+        self.results: list[Result] = []
+
+    def pass_(self, name: str, detail: str = "") -> None:
+        self.results.append(Result("PASS", name, detail))
+        print(f"PASS {name}" + (f" - {detail}" if detail else ""))
+
+    def warn(self, name: str, detail: str = "") -> None:
+        self.results.append(Result("WARN", name, detail))
+        print(f"WARN {name}" + (f" - {detail}" if detail else ""))
+
+    def fail(self, name: str, detail: str = "") -> None:
+        self.results.append(Result("FAIL", name, detail))
+        print(f"FAIL {name}" + (f" - {detail}" if detail else ""))
+
+    def exit_code(self, warnings_as_errors: bool) -> int:
+        if any(r.status == "FAIL" for r in self.results):
+            return 1
+        if warnings_as_errors and any(r.status == "WARN" for r in self.results):
+            return 1
+        return 0
+
+
+def run(
+    pf: Preflight,
+    name: str,
+    cmd: list[str],
+    *,
+    cwd: Path = REPO,
+    timeout: int = 60,
+    check_contains: str | None = None,
+    check_not_contains: str | None = None,
+) -> str | None:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        pf.fail(name, f"command not found: {cmd[0]}")
+        return None
+    except subprocess.TimeoutExpired:
+        pf.fail(name, f"timed out after {timeout}s")
+        return None
+    out = proc.stdout or ""
+    if proc.returncode != 0:
+        pf.fail(name, f"exit={proc.returncode}; last output: {out[-600:].strip()}")
+        return out
+    if check_contains and check_contains not in out:
+        pf.fail(name, f"missing expected output {check_contains!r}")
+        return out
+    if check_not_contains and check_not_contains in out:
+        pf.fail(name, f"unexpected output {check_not_contains!r}")
+        return out
+    pf.pass_(name)
+    return out
+
+
+def http_json(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = 20.0,
+) -> tuple[int, dict[str, str], Any, str]:
+    request_headers = {
+        "User-Agent": "cathedral-relaunch-preflight/1.0",
+        "Accept": "application/json",
+    }
+    request_headers.update(headers or {})
+    req = Request(url, headers=request_headers)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            status = int(resp.status)
+            resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        status = int(exc.code)
+        resp_headers = {k.lower(): v for k, v in exc.headers.items()}
+    except URLError as exc:
+        raise RuntimeError(str(exc)) from exc
+    try:
+        body: Any = json.loads(raw)
+    except Exception:
+        body = raw
+    return status, resp_headers, body, raw
+
+
+def iso_age_secs(value: str) -> float:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, datetime.now(timezone.utc).timestamp() - parsed.timestamp())
+
+
+def select_python() -> str:
+    explicit = os.environ.get("CATHEDRAL_PREFLIGHT_PYTHON", "").strip()
+    if explicit:
+        return explicit
+    for candidate in (
+        REPO / ".venv/bin/python",
+        Path("/Users/dreamboat/Documents/PROJECTS/cathedralsubnet/.venv/bin/python"),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("python3") or "python3"
+
+
+def check_git(pf: Preflight) -> None:
+    out = run(pf, "git branch status", ["git", "status", "--short", "--branch"], timeout=20)
+    if out is None:
+        return
+    lines = out.splitlines()
+    branch = lines[0] if lines else ""
+    tracked_dirty = [line for line in lines[1:] if not line.startswith("?? ")]
+    untracked = [line for line in lines[1:] if line.startswith("?? ")]
+    if tracked_dirty:
+        pf.fail("tracked worktree clean", "; ".join(tracked_dirty[:6]))
+    else:
+        pf.pass_("tracked worktree clean", branch)
+    if untracked:
+        pf.warn("untracked files present", f"{len(untracked)} untracked; ignored by preflight")
+
+
+def check_local(pf: Preflight, args: argparse.Namespace) -> None:
+    check_git(pf)
+    run(pf, "worker syntax", ["node", "--check", "deploy/v2-beta-router/worker.mjs"])
+    run(pf, "worker staged/open tests", ["node", "deploy/v2-beta-router/worker.test.mjs"])
+    run(
+        pf,
+        "env checker syntax",
+        [select_python(), "-m", "py_compile", "deploy/check_env_surface.py"],
+    )
+    run(
+        pf,
+        "miner e2e script syntax",
+        [select_python(), "-m", "py_compile", "scripts/v2_bitset_miner_e2e.py"],
+    )
+    if not args.skip_python_tests:
+        run(
+            pf,
+            "focused launch pytest",
+            [
+                select_python(),
+                "-m",
+                "pytest",
+                "scaffold/publisher/tests/test_real_instance_bitset_e2e.py",
+                "scaffold/publisher/tests/test_solution_manifest_v2.py",
+                "scaffold/publisher/tests/test_v2_pm_payout_bridge.py",
+                "scaffold/publisher/tests/test_statement_timeout_guard.py",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+            ],
+            timeout=args.pytest_timeout_secs,
+        )
+    if args.env_file:
+        run(
+            pf,
+            "operator env audit",
+            [select_python(), "deploy/check_env_surface.py", "--env-file", args.env_file],
+        )
+
+
+def check_wrangler(pf: Preflight, args: argparse.Namespace) -> None:
+    if args.skip_wrangler:
+        pf.warn("wrangler dry-run", "skipped by flag")
+        return
+    staged = run(
+        pf,
+        "wrangler dry-run staged",
+        ["npx", "wrangler", "deploy", "--dry-run"],
+        cwd=ROUTER_DIR,
+        timeout=90,
+        check_contains="env.V2_GATE_MODE",
+        check_not_contains="env.routes",
+    )
+    if staged and 'env.V2_GATE_MODE ("staged")' not in staged:
+        pf.warn("wrangler staged binding value", "expected staged binding was not visible")
+    opened = run(
+        pf,
+        "wrangler dry-run open-v2",
+        ["npx", "wrangler", "deploy", "--dry-run", "--var", "V2_GATE_MODE:open-v2"],
+        cwd=ROUTER_DIR,
+        timeout=90,
+        check_contains="env.V2_GATE_MODE",
+        check_not_contains="env.routes",
+    )
+    if opened:
+        pf.pass_("open command remains explicit", "dry-run only; no deploy performed")
+
+
+def check_live_gate(pf: Preflight, args: argparse.Namespace) -> None:
+    if args.skip_live:
+        pf.warn("live edge checks", "skipped by flag")
+        return
+    base = args.base.rstrip("/")
+    miner_headers = {
+        "x-cathedral-hotkey": NON_CANARY_HOTKEY,
+        "x-cathedral-signature": "preflight-signature",
+        "x-cathedral-submitted-at": "2026-07-08T00:00:00.000Z",
+    }
+    try:
+        status, headers, body, _raw = http_json(
+            f"{base}/v2/synthetic-boolean/per-miner/challenges?limit=1",
+            headers=miner_headers,
+        )
+        reason = headers.get("x-cathedral-rejection-reason") or (
+            body.get("reason") if isinstance(body, dict) else None)
+        if status == 429 and reason == "v2_beta_staged_reopen":
+            pf.pass_("non-canary V2 gate closed", "429 v2_beta_staged_reopen")
+        else:
+            pf.fail("non-canary V2 gate closed", f"status={status} reason={reason!r}")
+
+        status, headers, body, _raw = http_json(
+            f"{base}/v1/synthetic-boolean/per-miner/challenges?limit=1",
+            headers=miner_headers,
+        )
+        reason = headers.get("x-cathedral-rejection-reason") or (
+            body.get("reason") if isinstance(body, dict) else None)
+        if status == 410 and reason == "v1_miner_path_retired":
+            pf.pass_("V1 per-miner path retired", "410 v1_miner_path_retired")
+        else:
+            pf.fail("V1 per-miner path retired", f"status={status} reason={reason!r}")
+
+        status, _headers, body, _raw = http_json(f"{base}/health/ready")
+        if status == 200 and isinstance(body, dict) and body.get("status") == "ok":
+            pf.pass_("public readiness", f"service_role={body.get('service_role')}")
+        else:
+            pf.fail("public readiness", f"status={status} body={str(body)[:300]}")
+
+        status, _headers, body, _raw = http_json(f"{base}/v2/verify/metrics")
+        if status == 200 and isinstance(body, dict) and body.get("enabled") is False:
+            pf.pass_("public verifier disabled", f"pending={body.get('pending_count')}")
+        else:
+            enabled = body.get("enabled") if isinstance(body, dict) else None
+            pf.fail("public verifier disabled", f"status={status} enabled={enabled!r}")
+    except RuntimeError as exc:
+        pf.fail("live edge checks", str(exc))
+
+
+def check_weights(pf: Preflight, args: argparse.Namespace) -> None:
+    if args.skip_live:
+        return
+    try:
+        status, headers, body, _raw = http_json(args.weights_url)
+    except RuntimeError as exc:
+        pf.fail("validator weights fresh", str(exc))
+        return
+    if status != 200 or not isinstance(body, dict):
+        pf.fail("validator weights fresh", f"status={status} body={str(body)[:300]}")
+        return
+    weights = body.get("weights") or []
+    generated_at = str(body.get("generated_at") or "")
+    if not generated_at or not isinstance(weights, list) or not weights:
+        pf.fail("validator weights fresh", "missing generated_at or weights")
+        return
+    try:
+        age = iso_age_secs(generated_at)
+    except Exception as exc:
+        pf.fail("validator weights fresh", f"bad generated_at={generated_at!r}: {exc}")
+        return
+    source = headers.get("x-cathedral-vector-source", "unknown")
+    if age <= args.max_weight_age_secs:
+        pf.pass_("validator weights fresh", f"age={age:.0f}s weights={len(weights)} source={source}")
+    else:
+        pf.fail("validator weights fresh", f"age={age:.0f}s exceeds {args.max_weight_age_secs}s")
+
+
+def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
+    target = args.ssh_target or os.environ.get("CATHEDRAL_PREFLIGHT_SSH", "").strip()
+    if not target:
+        pf.warn("private verifier topology", "skipped; set CATHEDRAL_PREFLIGHT_SSH to check")
+        return
+    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    key = args.ssh_key or os.environ.get("CATHEDRAL_PREFLIGHT_SSH_KEY", "").strip()
+    if key:
+        ssh_cmd += ["-i", str(Path(key).expanduser())]
+    try:
+        proc = subprocess.run(
+            ssh_cmd + [target, "curl -fsS http://127.0.0.1:8000/v2/verify/metrics"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+    except Exception as exc:
+        pf.fail("private verifier topology", str(exc))
+        return
+    if proc.returncode != 0:
+        pf.fail("private verifier topology", proc.stdout[-500:].strip())
+        return
+    try:
+        metrics = json.loads(proc.stdout)
+    except Exception as exc:
+        pf.fail("private verifier topology", f"bad metrics JSON: {exc}")
+        return
+    if metrics.get("enabled") is not True:
+        pf.fail("private verifier topology", f"enabled={metrics.get('enabled')!r}")
+        return
+    if metrics.get("last_worker_error"):
+        pf.fail("private verifier topology", f"last_worker_error={metrics.get('last_worker_error')!r}")
+        return
+    pending = int(metrics.get("pending_count") or 0)
+    if pending > args.max_pending:
+        pf.fail("private verifier topology", f"pending={pending} > {args.max_pending}")
+        return
+    pf.pass_("private verifier topology", f"enabled=true pending={pending} last_batch={metrics.get('last_batch_count')}")
+
+    services = (
+        "systemctl --user is-active cathedral-v2-beta-origin.service && "
+        "systemctl is-active cathedral-publisher.service"
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, services],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    if proc.returncode == 0 and proc.stdout.splitlines().count("active") >= 2:
+        pf.pass_("sandbox services active")
+    else:
+        pf.fail("sandbox services active", proc.stdout[-500:].strip())
+
+
+def check_e2e(pf: Preflight, args: argparse.Namespace) -> None:
+    run_e2e = args.run_e2e or os.environ.get("CATHEDRAL_PREFLIGHT_RUN_E2E", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not run_e2e:
+        pf.warn("canary E2E", "skipped by default; set --run-e2e to submit/replay")
+        return
+    run(
+        pf,
+        "canary V2 bitset E2E",
+        [
+            select_python(),
+            "scripts/v2_bitset_miner_e2e.py",
+            "--base",
+            args.base.rstrip("/"),
+            "--uri",
+            args.e2e_uri,
+            "--limit",
+            "1",
+        ],
+        timeout=args.e2e_timeout_secs,
+    )
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--base", default=os.environ.get("CATHEDRAL_PREFLIGHT_BASE", DEFAULT_BASE))
+    ap.add_argument("--weights-url", default=os.environ.get("CATHEDRAL_PREFLIGHT_WEIGHTS_URL", DEFAULT_WEIGHTS_URL))
+    ap.add_argument("--env-file", default=os.environ.get("CATHEDRAL_PREFLIGHT_ENV_FILE", ""))
+    ap.add_argument("--ssh-target", default="")
+    ap.add_argument("--ssh-key", default="")
+    ap.add_argument("--max-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PENDING", "0") or "0"))
+    ap.add_argument("--max-weight-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_WEIGHT_AGE_SECS", "900") or "900"))
+    ap.add_argument("--pytest-timeout-secs", type=int, default=120)
+    ap.add_argument("--e2e-timeout-secs", type=int, default=120)
+    ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))
+    ap.add_argument("--skip-python-tests", action="store_true")
+    ap.add_argument("--skip-wrangler", action="store_true")
+    ap.add_argument("--skip-live", action="store_true")
+    ap.add_argument("--run-e2e", action="store_true")
+    ap.add_argument("--warnings-as-errors", action="store_true")
+    return ap.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    pf = Preflight()
+    print("Cathedral V2 relaunch preflight")
+    print(f"repo={REPO}")
+    print(f"base={args.base.rstrip('/')}")
+    print("mode=read-only; this script does not deploy or open the gate")
+    print()
+
+    start = time.time()
+    check_local(pf, args)
+    check_wrangler(pf, args)
+    check_live_gate(pf, args)
+    check_weights(pf, args)
+    check_ssh(pf, args)
+    check_e2e(pf, args)
+
+    elapsed = time.time() - start
+    counts = {status: sum(1 for r in pf.results if r.status == status) for status in ("PASS", "WARN", "FAIL")}
+    print()
+    print(f"summary pass={counts['PASS']} warn={counts['WARN']} fail={counts['FAIL']} elapsed={elapsed:.1f}s")
+    if counts["FAIL"]:
+        print("PRECHECK_FAILED")
+    else:
+        print("PRECHECK_OK")
+    return pf.exit_code(args.warnings_as_errors)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

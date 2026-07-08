@@ -11,5 +11,5 @@ routes = [
 
 [vars]
 # Default closed. The V2 all-hotkey reopen requires an explicit deploy with
-# V2_GATE_MODE=open-v2 after Fred's go and the pre-post checklist passes.
+# V2_GATE_MODE=open-v2 after Fred's go and relaunch_preflight.py passes.
 V2_GATE_MODE = "staged"

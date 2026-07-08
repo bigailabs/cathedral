@@ -74,17 +74,23 @@ Before posting, verify:
 
 ```text
 1. Fred explicitly says go.
-2. Deploy the V2-open edge mode:
+2. From repo root, run the read-only preflight:
+   python3 deploy/v2-beta-router/relaunch_preflight.py
+   Expected: PRECHECK_OK. SSH/private verifier and canary E2E are opt-in:
+   CATHEDRAL_PREFLIGHT_SSH=polaris@34.71.88.140 \
+   CATHEDRAL_PREFLIGHT_SSH_KEY=~/.ssh/polaris_rsa \
+   python3 deploy/v2-beta-router/relaunch_preflight.py --run-e2e
+3. Deploy the V2-open edge mode:
    cd deploy/v2-beta-router
    CLOUDFLARE_API_TOKEN=... npx wrangler deploy --var V2_GATE_MODE:open-v2
-3. Non-canary V2 no longer returns v2_beta_staged_reopen.
-4. Non-canary V1 miner routes return 410 v1_miner_path_retired.
-5. /v2/verify/metrics shows exactly one verifier worker enabled.
-6. A non-canary E2E submit reaches verified.
-7. per_miner_solves receives exactly one row for that verified receipt.
-8. /v1/validator/weights/next remains fresh.
-9. Logs show no duplicate-ledger storm, stale-epoch rejects, or fail-closed boot errors.
-10. If rollback is needed, redeploy the default staged mode:
+4. Non-canary V2 no longer returns v2_beta_staged_reopen.
+5. Non-canary V1 miner routes return 410 v1_miner_path_retired.
+6. /v2/verify/metrics shows exactly one verifier worker enabled.
+7. A non-canary E2E submit reaches verified.
+8. per_miner_solves receives exactly one row for that verified receipt.
+9. /v1/validator/weights/next remains fresh.
+10. Logs show no duplicate-ledger storm, stale-epoch rejects, or fail-closed boot errors.
+11. If rollback is needed, redeploy the default staged mode:
     cd deploy/v2-beta-router
     CLOUDFLARE_API_TOKEN=... npx wrangler deploy
 ```
