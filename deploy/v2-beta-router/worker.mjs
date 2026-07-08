@@ -41,7 +41,8 @@ function isGatedMinerPath(url, method) {
     return path === "/v2/agents/submit-bitset"
       || path === "/v2/agents/submit-manifest"
       || path === "/v2/blobs/solutions"
-      || path === "/v1/agents/submit";
+      || path === "/v1/agents/submit"
+      || path === "/v1/external-scores/violet";
   }
   return false;
 }
@@ -119,8 +120,8 @@ export default {
     const originUrl = new URL(request.url);
     if (request.method === "GET" && isPerMinerRead(originUrl)) {
       const requestedLimit = Number(originUrl.searchParams.get("limit") || "0");
-      if (!Number.isFinite(requestedLimit) || requestedLimit <= 0 || requestedLimit > 5) {
-        originUrl.searchParams.set("limit", "5");
+      if (!Number.isFinite(requestedLimit) || requestedLimit <= 0 || requestedLimit > 10) {
+        originUrl.searchParams.set("limit", "10");
       }
     }
     originUrl.protocol = "http:";
