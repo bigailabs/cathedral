@@ -83,11 +83,26 @@ _V2_PM_ENV_MAP = {
 }
 
 
+def _scoring_identity(store: Store, hotkey: str) -> str:
+    """V1-parity assignment identity (coldkey collapse aware).
+
+    Same semantics as app._assignment_identity_for_hotkey: when collapse is on
+    and a coldkey_map row exists, instances derive from the coldkey; otherwise
+    the raw hotkey. Signing and receipts always stay on the raw hotkey."""
+    from . import weights as weights_mod
+    return weights_mod.scoring_identity_for_hotkey(
+        store, hotkey, require_mapped=False) or hotkey
+
+
 def pm_payout_bridge_enabled() -> bool:
     """When on, a VERIFIED bitset event also records a per_miner_solves row so
     the existing pm_primary scoring path pays V2 submits. This is the V1->V2
     convergence bridge: validators keep consuming the identical signed vector;
-    only the miner-facing protocol changes. Default off."""
+    only the miner-facing protocol changes. Default off; implied on by the
+    v2-converged launch profile."""
+    from . import launch_profile
+    if launch_profile.converged():
+        return True
     return os.environ.get(
         "CATHEDRAL_V2_PM_PAYOUT_BRIDGE", "").strip().lower() in _ENV_TRUTHY
 
@@ -653,12 +668,26 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
     epoch_i, tier_i, seq_i = int(row["epoch"]), int(row["tier"]), int(row["seq"])
     now_iso = _now_iso_ms()
 
-    def _finish(status, *, score=None, ah=None, vdh=None, reason=None):
+    def _finish(status, *, score=None, ah=None, vdh=None, reason=None, payout=None):
         # weighted_score/answer_hash/verifier_details_hash are NOT NULL, so a
         # reject path MUST write the zero/empty defaults (not None) or the UPDATE
         # is rejected and the row stays 'received' -> unlocks -> retries forever
         # (poison queue). On verify we write the real values.
+        #
+        # payout (bridge): the per_miner_solves insert rides the SAME transaction
+        # as the terminal status update, so a paid row and a verified receipt are
+        # atomic -- no pay-without-terminal-receipt dispute window. The insert is
+        # INSERT OR IGNORE on (challenge_id, miner_hotkey) with the RAW signing
+        # hotkey (V1 accept parity), so the same identity-derived challenge can
+        # never double-pay across protocols. difficulty_weight is the EXACT
+        # weight the verifier scored under v2_pm_env, never a recompute.
         def _tx(conn):
+            if payout is not None:
+                pm.record_perminer_solve_tx(
+                    conn, hk, payout["epoch"], payout["challenge_id"],
+                    tier_i, seq_i, True,
+                    solved_at_iso=now_iso,
+                    difficulty_weight=payout["weight"])
             conn.execute(
                 "UPDATE v2_submit_events SET status=?, weighted_score=?, "
                 "answer_hash=?, verifier_details_hash=?, verified_at_iso=?, "
@@ -677,7 +706,18 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
 
     try:
         with v2_pm_env():
-            cid, cnf_text, planted = pm.generate_instance(hk, epoch_i, tier_i, seq_i)
+            current_epoch = pm.current_epoch()
+            if epoch_i not in (current_epoch, current_epoch - 1):
+                # Same gate as V1's _perminer_epoch_for. Stale epochs are 410 at
+                # mint and admit; an event that slipped through anyway must
+                # terminal-reject here BEFORE the payout bridge can see it.
+                _finish(STATUS_REJECTED, reason="per_miner_challenge_expired")
+                return {"id": rid, "status": STATUS_REJECTED,
+                        "reason": "per_miner_challenge_expired"}
+            # V1 parity: instances derive from the scoring identity (coldkey
+            # collapse aware); receipts and the payout row keep the RAW hotkey.
+            identity = _scoring_identity(store, hk)
+            cid, cnf_text, planted = pm.generate_instance(identity, epoch_i, tier_i, seq_i)
             if cid != str(row["challenge_id"]):
                 _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
                 return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
@@ -707,16 +747,11 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
             "assignment_sha256": ah, "verified_at": now_iso,
         }
         vdh = _h.sha256(json.dumps(details, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        if pm_payout_bridge_enabled():
-            # Payout row FIRST, terminal status second: if we crash between the
-            # two, the event stays claimable and the retry is idempotent on both
-            # sides (per_miner_solves PK is (challenge_id, miner_hotkey)), so a
-            # verified event can never silently miss payout. Identity is the raw
-            # hotkey: V2 has no coldkey collapse. weight_for reads the same env
-            # the serving process uses, so the recorded difficulty_weight matches
-            # the eval weight above.
-            pm.record_perminer_solve(store, hk, epoch_i, cid, tier_i, seq_i, True)
-        _finish(STATUS_VERIFIED, score=weight, ah=ah, vdh=vdh)
+        payout = (
+            {"epoch": epoch_i, "challenge_id": cid, "weight": weight}
+            if pm_payout_bridge_enabled() else None
+        )
+        _finish(STATUS_VERIFIED, score=weight, ah=ah, vdh=vdh, payout=payout)
         return {"id": rid, "status": STATUS_VERIFIED, "weighted_score": weight,
                 "miner_hotkey": hk, "challenge_id": cid,
                 "pm_payout_bridged": pm_payout_bridge_enabled()}

@@ -45,11 +45,18 @@ def main() -> int:
 
     rows = store.query("SELECT DISTINCT hotkey FROM metagraph_hotkeys")
     hotkeys = sorted({str(r["hotkey"]) for r in rows})
-    mine = [hk for i, hk in enumerate(hotkeys) if i % args.shards == args.shard]
+    # V1/V2 parity: instances derive from the scoring identity (coldkey collapse
+    # aware), not the raw hotkey. Bake what the handlers will actually serve.
+    from scaffold.publisher import weights as weights_mod
+    identities = sorted({
+        weights_mod.scoring_identity_for_hotkey(store, hk, require_mapped=False) or hk
+        for hk in hotkeys
+    })
+    mine = [ident for i, ident in enumerate(identities) if i % args.shards == args.shard]
 
     started = time.time()
     baked = skipped = failed = 0
-    for hk in mine:
+    for hk in mine:  # hk here is the assignment identity
         for tier in pm.TIERS:
             depth = min(args.depth, pm.allotment_for(tier))
             for seq in range(depth):

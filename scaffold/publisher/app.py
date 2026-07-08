@@ -402,6 +402,12 @@ def build_app(
     signing_key_hex: str | None = None,
     submit_min_interval_secs: int | None = None,
 ) -> FastAPI:
+    from . import launch_profile
+    _profile_errors = launch_profile.validate_env()
+    if _profile_errors:
+        raise RuntimeError(
+            "launch profile misconfiguration (fail-closed): "
+            + "; ".join(_profile_errors))
     key_hex = signing_key_hex or keys.load_signing_key()
     pub_hex = rows.public_key_hex(key_hex)
     jwks_doc = rows.jwks_from_key(key_hex)
@@ -441,13 +447,12 @@ def build_app(
         # The bridge records per_miner_solves rows via the verify worker's store
         # handle (the V2 store). Scoring reads the MAIN store. With a split V2
         # DB the bridged payout rows would be invisible to weights -- miners
-        # would verify but never earn.
-        print(
-            "[v2_pm_payout_bridge] WARNING: CATHEDRAL_V2_PM_PAYOUT_BRIDGE is on "
-            "but V2 uses a separate DB "
-            "(CATHEDRAL_V2_DATABASE_URL/CATHEDRAL_V2_DB_PATH). Bridged "
-            "per_miner_solves rows will NOT reach the payout store. Unset the "
-            "split or keep the bridge off."
+        # would verify but never earn. Payout code fails closed: refuse to boot.
+        raise RuntimeError(
+            "CATHEDRAL_V2_PM_PAYOUT_BRIDGE requires V2 to share the main store: "
+            "unset CATHEDRAL_V2_DATABASE_URL/CATHEDRAL_V2_DB_PATH or disable "
+            "the bridge. Bridged per_miner_solves rows in a split V2 DB never "
+            "reach the payout store (miners verify but never earn)."
         )
     v2_blob_store = blob_store_mod.store_from_env()
     # Hippius presign client for flat results-file pushes. None when env is
@@ -541,7 +546,8 @@ def build_app(
     # V2 off-chain manifest submit is phase-1/2 only: signature-verified,
     # durable, no payout/scoring until workers are wired. Default off so deploys
     # are inert unless explicitly enabled.
-    solution_manifest_enabled = _env_bool("CATHEDRAL_V2_ENABLED", False)
+    solution_manifest_enabled = _env_bool(
+        "CATHEDRAL_V2_ENABLED", launch_profile.converged())
     solution_manifest_max_bytes = _env_int("CATHEDRAL_V2_MAX_SOLUTION_BYTES", 0)
     solution_blob_upload_enabled = _env_bool(
         "CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", solution_manifest_enabled)
@@ -558,14 +564,17 @@ def build_app(
     v2_shadow_v1_enabled = _env_bool("CATHEDRAL_V2_SHADOW_V1_ENABLED", False)
     v2_shadow_v1_max_solution_bytes = _env_int(
         "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
-    v2_submit_bitset_enabled = _env_bool("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", False)
+    v2_submit_bitset_enabled = _env_bool(
+        "CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", launch_profile.converged())
     # V1-style lazy issuance for the V2 challenges page: descriptors only, no
     # CNF generation or token minting at listing time. The miner gets the
     # (time-bound) submit token, actual nvars, and cnf_sha256 from the CNF
     # fetch headers -- it must fetch the CNF to solve it anyway. This removes
     # the per-page CPU cost that melted the origin on 2026-07-08. Default off
-    # so existing page-token clients keep working until they migrate.
-    v2_lazy_issuance = _env_bool("CATHEDRAL_V2_LAZY_ISSUANCE", False)
+    # (on under the v2-converged launch profile) so existing page-token
+    # clients keep working until they migrate.
+    v2_lazy_issuance = _env_bool(
+        "CATHEDRAL_V2_LAZY_ISSUANCE", launch_profile.converged())
     v2_submit_token_secret = os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip()
     v2_submit_token_ttl_secs = max(1, _env_int("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", 300))
     v2_submit_token_allowlist = {
@@ -5614,9 +5623,13 @@ def build_app(
                 )
                 mark_verified_hotkey(request, x_cathedral_hotkey)
                 epoch = pm.current_epoch()
+                # V1 parity: instances derive from the scoring identity (coldkey
+                # collapse aware). Signing/receipts stay on the raw hotkey.
+                v2_assignment_identity = _assignment_identity_for_hotkey(
+                    x_cathedral_hotkey)
                 effective_limit = pm.assignment_page_limit(limit)
                 items = pm.miner_instance_set(
-                    x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
+                    v2_assignment_identity, epoch, offset=offset, limit=effective_limit)
                 if v2_submit_bitset_enabled and v2_lazy_issuance:
                     _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                     if not v2_submit_token_secret:
@@ -5642,7 +5655,7 @@ def build_app(
                         cnf_text = v2_cnf_store.get(v2_store, cid)
                         if cnf_text is None:
                             meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
-                                x_cathedral_hotkey, epoch, tier_i, seq_i)
+                                v2_assignment_identity, epoch, tier_i, seq_i)
                             if meta_cid != cid:
                                 raise HTTPException(500, "v2_challenge_generation_mismatch")
                             try:
@@ -5653,10 +5666,10 @@ def build_app(
                             actual_nvars, _clauses = parse_cnf(cnf_text)
                             cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                             is_real = pm.uses_real_instance(
-                                x_cathedral_hotkey, epoch, tier_i, seq_i)
+                                v2_assignment_identity, epoch, tier_i, seq_i)
                         item["n_vars"] = actual_nvars
                         item["kind"] = (
-                            real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
+                            real_corpus.kind_for(epoch, tier_i, seq_i, salt=v2_assignment_identity)
                             if is_real else "random_3sat_perminer"
                         )
                         item["cnf_sha256"] = cnf_sha
@@ -5679,7 +5692,7 @@ def build_app(
                     "issuance": "lazy" if (v2_submit_bitset_enabled and v2_lazy_issuance) else "eager",
                     "epoch": epoch,
                     "miner_hotkey": x_cathedral_hotkey,
-                    "assignment_identity": x_cathedral_hotkey,
+                    "assignment_identity": v2_assignment_identity,
                     "offset": offset,
                     "requested_limit": limit,
                     "limit": effective_limit,
@@ -5724,9 +5737,17 @@ def build_app(
                 )
                 mark_verified_hotkey(request, x_cathedral_hotkey)
                 parsed = pm.parse_challenge_id(challenge_id)
-                epoch = int(parsed["epoch"]) if parsed else pm.current_epoch()
+                current_epoch = pm.current_epoch()
+                epoch = int(parsed["epoch"]) if parsed else current_epoch
+                if epoch not in (current_epoch, current_epoch - 1):
+                    # V1 parity (_perminer_epoch_for): stale epochs never mint a
+                    # fresh submit token -- archived challenges cannot be
+                    # re-tokened into the current payout window.
+                    raise HTTPException(410, "per_miner_challenge_expired")
+                v2_assignment_identity = _assignment_identity_for_hotkey(
+                    x_cathedral_hotkey)
                 tier_seq = pm.resolve_tier_seq_for(
-                    x_cathedral_hotkey, epoch, challenge_id, tier=tier, seq=seq)
+                    v2_assignment_identity, epoch, challenge_id, tier=tier, seq=seq)
                 if tier_seq is None:
                     raise HTTPException(404, "challenge_id_not_in_miner_set")
                 tier_i, seq_i = tier_seq
@@ -5740,7 +5761,7 @@ def build_app(
                 cnf_text = v2_cnf_store.get(v2_store, challenge_id)
                 if cnf_text is None:
                     gen_cid, cnf_text, _ = pm.generate_instance(
-                        x_cathedral_hotkey, epoch, tier_i, seq_i)
+                        v2_assignment_identity, epoch, tier_i, seq_i)
                     if gen_cid != challenge_id:
                         raise HTTPException(404, "challenge_id_not_in_miner_set")
                     try:
@@ -6355,14 +6376,21 @@ def build_app(
                 tier_i = int(token_payload["tier"])
                 seq_i = int(token_payload["seq"])
                 epoch_i = int(token_payload["epoch"])
+                current_epoch = pm.current_epoch()
+                if epoch_i not in (current_epoch, current_epoch - 1):
+                    # V1 parity: stale-epoch tokens are refused at admit, so the
+                    # verify worker and payout bridge only ever see in-window work.
+                    raise HTTPException(410, "per_miner_challenge_expired")
+                v2_assignment_identity = _assignment_identity_for_hotkey(
+                    x_cathedral_hotkey)
                 resolved = pm.resolve_tier_seq_for(
-                    x_cathedral_hotkey, epoch_i, submit["challenge_id"],
+                    v2_assignment_identity, epoch_i, submit["challenge_id"],
                     tier=tier_i, seq=seq_i)
                 if resolved is None:
                     raise HTTPException(400, "challenge_id_not_in_miner_set")
                 challenge_kind = (
-                    real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=x_cathedral_hotkey)
-                    if pm.uses_real_instance(x_cathedral_hotkey, epoch_i, tier_i, seq_i)
+                    real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=v2_assignment_identity)
+                    if pm.uses_real_instance(v2_assignment_identity, epoch_i, tier_i, seq_i)
                     else "random_3sat_perminer"
                 )
             return v2_bitset_submit.admit_received_event(
