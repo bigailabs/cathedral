@@ -3242,15 +3242,62 @@ def build_app(
     async def health_live():
         return _health_base("live", "not_checked")
 
-    @app.get("/health/ready")
-    async def health_ready():
+    # Readiness DB probe: OFF the event loop, single-flight, briefly cached.
+    # The old inline `store.query("SELECT 1")` was a blocking psycopg2 call in
+    # an async handler: under the 2026-07-08 open-v2 flood, one slow probe
+    # (pool churn / fresh connect, up to connect_timeout) stalled the whole
+    # event loop, so readiness itself timed out (edge 000/520) while the origin
+    # was otherwise admitting fine. Same failure class the submit path fixed
+    # with its dedicated executor. Probe rules: at most ONE DB ping in flight
+    # (1-thread executor + single-flight flag), concurrent callers serve the
+    # last-known state (stale-while-revalidate), result cached ~2s, probe
+    # bounded by a timeout so readiness answers promptly even when the DB
+    # hangs.
+    _ready_ttl_secs = max(0.5, _env_float("CATHEDRAL_READY_CACHE_SECS", 2.0))
+    _ready_timeout_secs = max(0.5, _env_float("CATHEDRAL_READY_TIMEOUT_SECS", 3.0))
+    _ready_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readyz")
+    _ready_lock = threading.Lock()
+    # Start stale-but-ok: build_app already ran store.migrate() against the DB,
+    # so "reachable at startup" is the honest initial state; at=0 forces the
+    # first request to refresh.
+    _ready_state: dict[str, Any] = {"at": 0.0, "ok": True, "error": "", "refreshing": False}
+
+    def _ready_db_probe() -> tuple[bool, str]:
         try:
             store.query("SELECT 1 AS ok")
-            return _health_base("ready", "ok")
+            return True, ""
         except Exception as exc:
-            payload = _health_base("ready", "error")
-            payload["error"] = type(exc).__name__
-            return JSONResponse(payload, status_code=503)
+            return False, type(exc).__name__
+
+    @app.get("/health/ready")
+    async def health_ready():
+        refresh = False
+        with _ready_lock:
+            stale = (time.monotonic() - _ready_state["at"]) >= _ready_ttl_secs
+            if stale and not _ready_state["refreshing"]:
+                _ready_state["refreshing"] = True
+                refresh = True
+            ok, err = _ready_state["ok"], _ready_state["error"]
+        if refresh:
+            try:
+                ok, err = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        _ready_executor, _ready_db_probe),
+                    timeout=_ready_timeout_secs,
+                )
+            except asyncio.TimeoutError:
+                ok, err = False, "ReadyProbeTimeout"
+            except Exception as exc:
+                ok, err = False, type(exc).__name__
+            finally:
+                with _ready_lock:
+                    _ready_state.update(
+                        at=time.monotonic(), ok=ok, error=err, refreshing=False)
+        if ok:
+            return _health_base("ready", "ok")
+        payload = _health_base("ready", "error")
+        payload["error"] = err
+        return JSONResponse(payload, status_code=503)
 
     @app.get("/health")
     async def health():
