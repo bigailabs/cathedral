@@ -83,6 +83,15 @@ _V2_PM_ENV_MAP = {
 }
 
 
+def pm_payout_bridge_enabled() -> bool:
+    """When on, a VERIFIED bitset event also records a per_miner_solves row so
+    the existing pm_primary scoring path pays V2 submits. This is the V1->V2
+    convergence bridge: validators keep consuming the identical signed vector;
+    only the miner-facing protocol changes. Default off."""
+    return os.environ.get(
+        "CATHEDRAL_V2_PM_PAYOUT_BRIDGE", "").strip().lower() in _ENV_TRUTHY
+
+
 def v2_perminer_enabled() -> bool:
     """Enabled-gate for the V2 per-miner surface, read from env directly.
 
@@ -698,9 +707,19 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
             "assignment_sha256": ah, "verified_at": now_iso,
         }
         vdh = _h.sha256(json.dumps(details, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if pm_payout_bridge_enabled():
+            # Payout row FIRST, terminal status second: if we crash between the
+            # two, the event stays claimable and the retry is idempotent on both
+            # sides (per_miner_solves PK is (challenge_id, miner_hotkey)), so a
+            # verified event can never silently miss payout. Identity is the raw
+            # hotkey: V2 has no coldkey collapse. weight_for reads the same env
+            # the serving process uses, so the recorded difficulty_weight matches
+            # the eval weight above.
+            pm.record_perminer_solve(store, hk, epoch_i, cid, tier_i, seq_i, True)
         _finish(STATUS_VERIFIED, score=weight, ah=ah, vdh=vdh)
         return {"id": rid, "status": STATUS_VERIFIED, "weighted_score": weight,
-                "miner_hotkey": hk, "challenge_id": cid}
+                "miner_hotkey": hk, "challenge_id": cid,
+                "pm_payout_bridged": pm_payout_bridge_enabled()}
     except Exception as exc:  # keep it claimable next tick rather than lost
         def _unlock(conn):
             conn.execute(

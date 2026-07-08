@@ -437,6 +437,18 @@ def build_app(
     # live-adjacent tests cannot mutate the current subnet payout DB. If unset,
     # local tests share the app store.
     v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
+    if v2_pipeline.pm_payout_bridge_enabled() and v2_database_path:
+        # The bridge records per_miner_solves rows via the verify worker's store
+        # handle (the V2 store). Scoring reads the MAIN store. With a split V2
+        # DB the bridged payout rows would be invisible to weights -- miners
+        # would verify but never earn.
+        print(
+            "[v2_pm_payout_bridge] WARNING: CATHEDRAL_V2_PM_PAYOUT_BRIDGE is on "
+            "but V2 uses a separate DB "
+            "(CATHEDRAL_V2_DATABASE_URL/CATHEDRAL_V2_DB_PATH). Bridged "
+            "per_miner_solves rows will NOT reach the payout store. Unset the "
+            "split or keep the bridge off."
+        )
     v2_blob_store = blob_store_mod.store_from_env()
     # Hippius presign client for flat results-file pushes. None when env is
     # unset; gated in results_publisher so missing config is always a no-op.
@@ -547,6 +559,13 @@ def build_app(
     v2_shadow_v1_max_solution_bytes = _env_int(
         "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
     v2_submit_bitset_enabled = _env_bool("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", False)
+    # V1-style lazy issuance for the V2 challenges page: descriptors only, no
+    # CNF generation or token minting at listing time. The miner gets the
+    # (time-bound) submit token, actual nvars, and cnf_sha256 from the CNF
+    # fetch headers -- it must fetch the CNF to solve it anyway. This removes
+    # the per-page CPU cost that melted the origin on 2026-07-08. Default off
+    # so existing page-token clients keep working until they migrate.
+    v2_lazy_issuance = _env_bool("CATHEDRAL_V2_LAZY_ISSUANCE", False)
     v2_submit_token_secret = os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip()
     v2_submit_token_ttl_secs = max(1, _env_int("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", 300))
     v2_submit_token_allowlist = {
@@ -5598,7 +5617,14 @@ def build_app(
                 effective_limit = pm.assignment_page_limit(limit)
                 items = pm.miner_instance_set(
                     x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
-                if v2_submit_bitset_enabled:
+                if v2_submit_bitset_enabled and v2_lazy_issuance:
+                    _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
+                    if not v2_submit_token_secret:
+                        raise HTTPException(503, "v2_submit_token_secret_missing")
+                    for item in items:
+                        item["assignment_encoding"] = "bitset/v1"
+                        item["token_source"] = "cnf_fetch"
+                elif v2_submit_bitset_enabled:
                     _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                     if not v2_submit_token_secret:
                         raise HTTPException(503, "v2_submit_token_secret_missing")
@@ -5650,6 +5676,7 @@ def build_app(
                 return {
                     "family_id": _FAMILY,
                     "kind": "per_miner_v2",
+                    "issuance": "lazy" if (v2_submit_bitset_enabled and v2_lazy_issuance) else "eager",
                     "epoch": epoch,
                     "miner_hotkey": x_cathedral_hotkey,
                     "assignment_identity": x_cathedral_hotkey,
