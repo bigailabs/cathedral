@@ -51,7 +51,12 @@ export CATHEDRAL_PERMINER_NVARS_T1=600
 export CATHEDRAL_PERMINER_NVARS_T2=800
 export CATHEDRAL_PERMINER_NCLAUSES_T1=2556
 export CATHEDRAL_PERMINER_NCLAUSES_T2=3408
-export CATHEDRAL_PERMINER_ALLOTMENT_T1=500
+# 2026-07-08 wave-1 finding: at 500, active miners page hundreds of easy T1
+# challenges past prebake depth, saturating the public origin's read path with
+# on-demand generation at every epoch rollover. 50 keeps T1 a real
+# participation floor and pushes competition to T2 (3x pay), which is
+# miner-CPU-bound, not origin-bound.
+export CATHEDRAL_PERMINER_ALLOTMENT_T1=50
 export CATHEDRAL_PERMINER_SCORING_MODE=pm_primary
 export CATHEDRAL_V2_REAL_FRACTION=0
 
