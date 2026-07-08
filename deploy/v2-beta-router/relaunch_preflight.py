@@ -29,6 +29,7 @@ REPO = ROUTER_DIR.parent.parent
 DEFAULT_BASE = "https://v2-beta.cathedral.computer"
 DEFAULT_WEIGHTS_URL = "https://api.cathedral.computer/v1/validator/weights/next"
 NON_CANARY_HOTKEY = "5NotACanaryHotkeyAtAll1111111111111111111111111"
+TRUTHY = {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -151,6 +152,47 @@ def select_python() -> str:
     return shutil.which("python3") or "python3"
 
 
+def env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in TRUTHY
+
+
+def check_launch_intent(pf: Preflight, args: argparse.Namespace) -> None:
+    intent = args.launch_intent
+    if intent == "staged":
+        pf.pass_("launch intent", "staged/closed-gate readiness profile")
+        return
+
+    missing: list[str] = []
+    if args.skip_live:
+        missing.append("live edge checks must not be skipped")
+    if args.skip_wrangler:
+        missing.append("wrangler dry-runs must not be skipped")
+    if not (args.ssh_target or os.environ.get("CATHEDRAL_PREFLIGHT_SSH", "").strip()):
+        missing.append("CATHEDRAL_PREFLIGHT_SSH or --ssh-target")
+    if not (args.run_e2e or env_truthy("CATHEDRAL_PREFLIGHT_RUN_E2E")):
+        missing.append("--run-e2e")
+    if not (args.run_capacity_probe or env_truthy("CATHEDRAL_PREFLIGHT_RUN_CAPACITY_PROBE")):
+        missing.append("--run-capacity-probe")
+    if not (args.run_edge_soak or env_truthy("CATHEDRAL_PREFLIGHT_RUN_EDGE_SOAK")):
+        missing.append("--run-edge-soak")
+    if args.prebake_epoch_lookahead < 1:
+        missing.append("--prebake-epoch-lookahead 1")
+    if not str(args.expected_v2_real_fraction).strip():
+        missing.append("--expected-v2-real-fraction {0 or 0.10}")
+
+    if missing:
+        pf.fail("all-miner launch intent prerequisites", "; ".join(missing))
+    else:
+        pf.pass_(
+            "all-miner launch intent prerequisites",
+            (
+                "e2e+capacity+edge-soak required; "
+                f"prebake_lookahead={args.prebake_epoch_lookahead}; "
+                f"expected_v2_real_fraction={args.expected_v2_real_fraction}"
+            ),
+        )
+
+
 def check_git(pf: Preflight) -> None:
     out = run(pf, "git branch status", ["git", "status", "--short", "--branch"], timeout=20)
     if out is None:
@@ -169,6 +211,7 @@ def check_git(pf: Preflight) -> None:
 
 def check_local(pf: Preflight, args: argparse.Namespace) -> None:
     check_git(pf)
+    check_launch_intent(pf, args)
     run(pf, "worker syntax", ["node", "--check", "deploy/v2-beta-router/worker.mjs"])
     run(pf, "worker staged/open tests", ["node", "deploy/v2-beta-router/worker.test.mjs"])
     run(
@@ -747,6 +790,10 @@ PY"""
         f"CATHEDRAL_PREFLIGHT_MAX_SUBMIT_MAX_CONCURRENCY={int(args.max_submit_max_concurrency)} "
         f"CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS={int(args.max_pg_statement_timeout_ms)} "
         f"CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS={float(args.min_weights_window_hours)} "
+        f"CATHEDRAL_PREFLIGHT_EXPECTED_V2_REAL_FRACTION={shlex.quote(str(args.expected_v2_real_fraction).strip())} "
+        f"CATHEDRAL_PREFLIGHT_REQUIRE_V2_SUBMIT_BACKPRESSURE={1 if args.launch_intent == 'all-miner-open' else 0} "
+        f"CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BACKPRESSURE_PENDING={int(args.max_v2_submit_backpressure_pending)} "
+        f"CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BACKPRESSURE_OLDEST_AGE_SECS={float(args.max_v2_submit_backpressure_oldest_age_secs)} "
         """.venv/bin/python - <<'PY'
 import json
 import os
@@ -768,6 +815,13 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 pm_read_hard_cap = env_int("CATHEDRAL_PM_READ_HARD_CAP", 128)
 v2_read_threads = env_int("CATHEDRAL_V2_READ_THREADS", 6)
 v2_submit_bitset_threads = env_int("CATHEDRAL_V2_SUBMIT_BITSET_THREADS", 8)
@@ -775,6 +829,9 @@ v2_verify_batch_size = env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8)
 v2_bitset_verify_threads = env_int("CATHEDRAL_V2_BITSET_VERIFY_THREADS", 8)
 submit_hard_cap = env_int("CATHEDRAL_SUBMIT_HARD_CAP", 8)
 submit_max_concurrency = env_int("CATHEDRAL_SUBMIT_MAX_CONCURRENCY", 24)
+v2_submit_backpressure_enabled = env_bool("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_ENABLED", False)
+v2_submit_backpressure_max_pending = env_int("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_PENDING", 0)
+v2_submit_backpressure_max_oldest_age_secs = env_float("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_OLDEST_AGE_SECS", 0.0)
 v2_real_fraction = env_float("CATHEDRAL_V2_REAL_FRACTION", 0.0)
 statement_timeout_ms = env_int("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS", 0)
 weights_window_hours = float(weights_mod.window_hours())
@@ -786,7 +843,20 @@ max_v2_bitset_verify_threads = env_int("CATHEDRAL_PREFLIGHT_MAX_V2_BITSET_VERIFY
 max_submit_hard_cap = env_int("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_HARD_CAP", 32)
 max_submit_max_concurrency = env_int("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_MAX_CONCURRENCY", 32)
 max_statement_timeout_ms = env_int("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", 4000)
+require_v2_submit_backpressure = env_bool("CATHEDRAL_PREFLIGHT_REQUIRE_V2_SUBMIT_BACKPRESSURE", False)
+max_v2_submit_backpressure_pending = env_int("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BACKPRESSURE_PENDING", 5000)
+max_v2_submit_backpressure_oldest_age_secs = env_float("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BACKPRESSURE_OLDEST_AGE_SECS", 300.0)
 min_weights_window_hours = float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48")
+expected_v2_real_fraction_raw = os.environ.get("CATHEDRAL_PREFLIGHT_EXPECTED_V2_REAL_FRACTION", "").strip()
+expected_v2_real_fraction = None
+expected_v2_real_fraction_ok = True
+if expected_v2_real_fraction_raw:
+    try:
+        expected_v2_real_fraction = float(expected_v2_real_fraction_raw)
+    except ValueError:
+        expected_v2_real_fraction_ok = False
+    else:
+        expected_v2_real_fraction_ok = abs(v2_real_fraction - expected_v2_real_fraction) <= 0.000000001
 checks = {
     "pm_read_hard_cap_positive": pm_read_hard_cap > 0,
     "pm_read_hard_cap_within_launch_ceiling": pm_read_hard_cap <= max_pm_read_hard_cap,
@@ -796,7 +866,19 @@ checks = {
     "v2_bitset_verify_threads_within_launch_ceiling": 0 < v2_bitset_verify_threads <= max_v2_bitset_verify_threads,
     "submit_hard_cap_within_launch_ceiling": 0 < submit_hard_cap <= max_submit_hard_cap,
     "submit_max_concurrency_within_launch_ceiling": 0 < submit_max_concurrency <= max_submit_max_concurrency,
+    "v2_submit_backpressure_required": (
+        (not require_v2_submit_backpressure) or v2_submit_backpressure_enabled
+    ),
+    "v2_submit_backpressure_pending_within_launch_ceiling": (
+        (not v2_submit_backpressure_enabled)
+        or (0 < v2_submit_backpressure_max_pending <= max_v2_submit_backpressure_pending)
+    ),
+    "v2_submit_backpressure_age_within_launch_ceiling": (
+        (not v2_submit_backpressure_enabled)
+        or (0 < v2_submit_backpressure_max_oldest_age_secs <= max_v2_submit_backpressure_oldest_age_secs)
+    ),
     "v2_real_fraction_range": 0.0 <= v2_real_fraction <= 1.0,
+    "v2_real_fraction_matches_expected": expected_v2_real_fraction_ok,
     "statement_timeout_positive": statement_timeout_ms > 0,
     "statement_timeout_within_launch_ceiling": statement_timeout_ms <= max_statement_timeout_ms,
     "weights_window_launch_bridge": weights_window_hours >= min_weights_window_hours,
@@ -818,7 +900,15 @@ payload = {
     "max_submit_hard_cap": max_submit_hard_cap,
     "submit_max_concurrency": submit_max_concurrency,
     "max_submit_max_concurrency": max_submit_max_concurrency,
+    "v2_submit_backpressure_enabled": v2_submit_backpressure_enabled,
+    "v2_submit_backpressure_max_pending": v2_submit_backpressure_max_pending,
+    "max_v2_submit_backpressure_pending": max_v2_submit_backpressure_pending,
+    "v2_submit_backpressure_max_oldest_age_secs": v2_submit_backpressure_max_oldest_age_secs,
+    "max_v2_submit_backpressure_oldest_age_secs": max_v2_submit_backpressure_oldest_age_secs,
+    "require_v2_submit_backpressure": require_v2_submit_backpressure,
     "v2_real_fraction": v2_real_fraction,
+    "expected_v2_real_fraction": expected_v2_real_fraction,
+    "expected_v2_real_fraction_raw": expected_v2_real_fraction_raw,
     "statement_timeout_ms": statement_timeout_ms,
     "max_statement_timeout_ms": max_statement_timeout_ms,
     "weights_window_hours": weights_window_hours,
@@ -858,7 +948,13 @@ PY"""
             f"/<={payload.get('max_submit_hard_cap')} "
             f"submit_max_concurrency={payload.get('submit_max_concurrency')}"
             f"/<={payload.get('max_submit_max_concurrency')} "
+            f"v2_submit_backpressure={payload.get('v2_submit_backpressure_enabled')} "
+            f"pending_cap={payload.get('v2_submit_backpressure_max_pending')}"
+            f"/<={payload.get('max_v2_submit_backpressure_pending')} "
+            f"oldest_age_cap={payload.get('v2_submit_backpressure_max_oldest_age_secs')}"
+            f"/<={payload.get('max_v2_submit_backpressure_oldest_age_secs')} "
             f"v2_real_fraction={payload.get('v2_real_fraction')} "
+            f"expected_v2_real_fraction={payload.get('expected_v2_real_fraction')} "
             f"stmt_timeout_ms={payload.get('statement_timeout_ms')}"
             f"/<={payload.get('max_statement_timeout_ms')} "
             f"window={payload.get('weights_window_hours')}h"
@@ -1200,6 +1296,7 @@ PY"""
     remote_bake_coverage = (
         f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
         f"CATHEDRAL_PREFLIGHT_PREBAKE_DEPTH={int(args.min_prebake_depth)} "
+        f"CATHEDRAL_PREFLIGHT_PREBAKE_EPOCH_LOOKAHEAD={int(args.prebake_epoch_lookahead)} "
         """.venv/bin/python - <<'PY'
 import json
 import os
@@ -1210,6 +1307,7 @@ from scaffold.publisher import weights as weights_mod
 from scaffold.publisher.store import Store
 
 depth = max(1, int(os.environ.get("CATHEDRAL_PREFLIGHT_PREBAKE_DEPTH", "10") or "10"))
+epoch_lookahead = max(0, int(os.environ.get("CATHEDRAL_PREFLIGHT_PREBAKE_EPOCH_LOOKAHEAD", "0") or "0"))
 v2_database_path = (
     os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
     or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()
@@ -1235,16 +1333,21 @@ identities = sorted({
     weights_mod.scoring_identity_for_hotkey(store, hk, require_mapped=False) or hk
     for hk in hotkeys
 })
-epoch = pm.current_epoch()
-expected_ids = []
-for identity in identities:
-    for tier in pm.TIERS:
-        for seq in range(min(depth, pm.allotment_for(tier))):
-            expected_ids.append(pm.instance_id(identity, epoch, tier, seq))
+current_epoch = pm.current_epoch()
+epochs = list(range(current_epoch, current_epoch + epoch_lookahead + 1))
+expected_by_epoch = {}
+for epoch in epochs:
+    expected_ids = []
+    for identity in identities:
+        for tier in pm.TIERS:
+            for seq in range(min(depth, pm.allotment_for(tier))):
+                expected_ids.append(pm.instance_id(identity, epoch, tier, seq))
+    expected_by_epoch[epoch] = expected_ids
 
 present = set()
-for idx in range(0, len(expected_ids), 500):
-    chunk = expected_ids[idx:idx + 500]
+all_expected_ids = [cid for ids in expected_by_epoch.values() for cid in ids]
+for idx in range(0, len(all_expected_ids), 500):
+    chunk = all_expected_ids[idx:idx + 500]
     if not chunk:
         continue
     placeholders = ",".join("?" for _ in chunk)
@@ -1252,16 +1355,29 @@ for idx in range(0, len(expected_ids), 500):
     for row in store.query(q, tuple(chunk)):
         present.add(str(row["challenge_id"]))
 
-missing = [cid for cid in expected_ids if cid not in present]
+epochs_payload = []
+missing = []
+for epoch, expected_ids in expected_by_epoch.items():
+    epoch_missing = [cid for cid in expected_ids if cid not in present]
+    missing.extend(epoch_missing)
+    epochs_payload.append({
+        "epoch": epoch,
+        "expected": len(expected_ids),
+        "present": len(expected_ids) - len(epoch_missing),
+        "missing": len(epoch_missing),
+        "missing_samples": epoch_missing[:5],
+    })
 payload = {
-    "ok": bool(expected_ids) and not missing,
+    "ok": bool(all_expected_ids) and not missing,
     "store_backend": store.backend,
     "store_source": store_source,
-    "epoch": epoch,
+    "current_epoch": current_epoch,
+    "epoch_lookahead": epoch_lookahead,
+    "epochs": epochs_payload,
     "depth": depth,
     "hotkeys": len(hotkeys),
     "identities": len(identities),
-    "expected": len(expected_ids),
+    "expected": len(all_expected_ids),
     "present": len(present),
     "missing": len(missing),
     "missing_samples": missing[:5],
@@ -1285,8 +1401,14 @@ PY"""
             f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
         )
     else:
+        epochs = payload.get("epochs") or []
+        epoch_detail = ",".join(
+            f"{item.get('epoch')}:{item.get('present')}/{item.get('expected')}"
+            for item in epochs
+        )
         detail = (
-            f"epoch={payload.get('epoch')} depth={payload.get('depth')} "
+            f"epochs={epoch_detail} depth={payload.get('depth')} "
+            f"lookahead={payload.get('epoch_lookahead')} "
             f"present={payload.get('present')}/{payload.get('expected')} "
             f"store={payload.get('store_source')}/{payload.get('store_backend')}"
         )
@@ -1399,6 +1521,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default=os.environ.get("CATHEDRAL_PREFLIGHT_BASE", DEFAULT_BASE))
     ap.add_argument("--weights-url", default=os.environ.get("CATHEDRAL_PREFLIGHT_WEIGHTS_URL", DEFAULT_WEIGHTS_URL))
+    ap.add_argument(
+        "--launch-intent",
+        choices=("staged", "all-miner-open"),
+        default=os.environ.get("CATHEDRAL_PREFLIGHT_LAUNCH_INTENT", "staged"),
+    )
+    ap.add_argument(
+        "--expected-v2-real-fraction",
+        default=os.environ.get("CATHEDRAL_PREFLIGHT_EXPECTED_V2_REAL_FRACTION", ""),
+        help="Require the remote runtime CATHEDRAL_V2_REAL_FRACTION to match this exact launch decision.",
+    )
     ap.add_argument("--env-file", default=os.environ.get("CATHEDRAL_PREFLIGHT_ENV_FILE", ""))
     ap.add_argument("--env-template", default=os.environ.get("CATHEDRAL_PREFLIGHT_ENV_TEMPLATE", "deploy/sandbox/env.template.sh"))
     ap.add_argument("--ssh-target", default="")
@@ -1426,6 +1558,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-weight-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_WEIGHT_AGE_SECS", "900") or "900"))
     ap.add_argument("--min-weight-count", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300"))
     ap.add_argument("--min-prebake-depth", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_PREBAKE_DEPTH", "10") or "10"))
+    ap.add_argument("--prebake-epoch-lookahead", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_PREBAKE_EPOCH_LOOKAHEAD", "0") or "0"))
     ap.add_argument("--pm-coverage-horizon-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS", "18") or "18"))
     ap.add_argument("--min-live-coverage-ratio", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_LIVE_COVERAGE_RATIO", "0.85") or "0.85"))
     ap.add_argument("--max-pm-read-hard-cap", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PM_READ_HARD_CAP", "8") or "8"))
@@ -1435,6 +1568,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-v2-bitset-verify-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_BITSET_VERIFY_THREADS", "1") or "1"))
     ap.add_argument("--max-submit-hard-cap", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_HARD_CAP", "32") or "32"))
     ap.add_argument("--max-submit-max-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_MAX_CONCURRENCY", "32") or "32"))
+    ap.add_argument("--max-v2-submit-backpressure-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BACKPRESSURE_PENDING", "5000") or "5000"))
+    ap.add_argument("--max-v2-submit-backpressure-oldest-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BACKPRESSURE_OLDEST_AGE_SECS", "300") or "300"))
     ap.add_argument("--max-pg-statement-timeout-ms", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", "4000") or "4000"))
     ap.add_argument("--min-weights-window-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48"))
     ap.add_argument("--retention-batch-size", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_RETENTION_BATCH_SIZE", "25000") or "25000"))

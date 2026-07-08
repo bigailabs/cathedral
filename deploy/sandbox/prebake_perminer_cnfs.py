@@ -31,6 +31,8 @@ def main() -> int:
     ap.add_argument("--depth", type=int,
                     default=int(os.environ.get("CATHEDRAL_PREBAKE_DEPTH", "10")),
                     help="seqs to bake per (hotkey, tier)")
+    ap.add_argument("--epoch", type=int, default=None,
+                    help="exact per-miner epoch to bake; overrides --epoch-offset-secs")
     ap.add_argument("--epoch-offset-secs", type=int, default=300,
                     help="bake the epoch active this many seconds from now")
     ap.add_argument("--shard", type=int, default=0)
@@ -64,7 +66,11 @@ def main() -> int:
         store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
         store_source = "main"
     hours = pm.epoch_bucket_hours()
-    epoch = (int(time.time()) + args.epoch_offset_secs) // (hours * 3600)
+    epoch = (
+        int(args.epoch)
+        if args.epoch is not None
+        else (int(time.time()) + args.epoch_offset_secs) // (hours * 3600)
+    )
 
     rows = store.query("SELECT DISTINCT hotkey FROM metagraph_hotkeys")
     hotkeys = sorted({str(r["hotkey"]) for r in rows})

@@ -594,6 +594,14 @@ def build_app(
     }
     v2_submit_bitset_max_body_bytes = max(
         1024, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", 16_384))
+    v2_submit_backpressure_enabled = _env_bool(
+        "CATHEDRAL_V2_SUBMIT_BACKPRESSURE_ENABLED", False)
+    v2_submit_backpressure_max_pending = max(
+        0, _env_int("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_PENDING", 0))
+    v2_submit_backpressure_max_oldest_age_secs = max(
+        0.0, _env_float("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_OLDEST_AGE_SECS", 0.0))
+    v2_submit_backpressure_retry_after_secs = max(
+        1, _env_int("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_RETRY_AFTER_SECS", 5))
     # /v2/agents/submit-bitset is an async handler, but the verify+admit body it
     # runs is sync CPU (CNF regeneration, witness check) + sync DB. Running that
     # inline on the event loop froze the whole worker (health checks, connection
@@ -6304,6 +6312,55 @@ def build_app(
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
+    def _v2_submit_existing_receipt(submit: dict[str, Any]) -> dict[str, Any] | None:
+        idem = v2_bitset_submit.idempotency_key(
+            miner_hotkey=submit["miner_hotkey"],
+            challenge_id=submit["challenge_id"],
+        )
+        rows = v2_store.query(
+            "SELECT * FROM v2_submit_events WHERE idempotency_key=? LIMIT 1",
+            (idem,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        try:
+            return {k: row[k] for k in row.keys()}
+        except Exception:
+            return dict(row)
+
+    def _v2_submit_backpressure_snapshot() -> dict[str, Any] | None:
+        if not v2_submit_backpressure_enabled:
+            return None
+        pending = _v2_verify_pending_metrics_uncached()
+        pending_count = int(pending.get("pending_count") or 0)
+        oldest_age = pending.get("oldest_pending_age_secs")
+        reasons: list[str] = []
+        if (
+            v2_submit_backpressure_max_pending > 0
+            and pending_count >= v2_submit_backpressure_max_pending
+        ):
+            reasons.append("pending_count")
+        if (
+            v2_submit_backpressure_max_oldest_age_secs > 0
+            and oldest_age is not None
+            and float(oldest_age) >= v2_submit_backpressure_max_oldest_age_secs
+        ):
+            reasons.append("oldest_pending_age")
+        if not reasons:
+            return None
+        return {
+            "schema": "cathedral.v2.submit_backpressure.v1",
+            "detail": "v2_submit_backpressure",
+            "reason": "v2_submit_backpressure",
+            "reasons": reasons,
+            "pending_count": pending_count,
+            "oldest_pending_age_secs": oldest_age,
+            "max_pending": v2_submit_backpressure_max_pending,
+            "max_oldest_pending_age_secs": v2_submit_backpressure_max_oldest_age_secs,
+            "retry_after_seconds": v2_submit_backpressure_retry_after_secs,
+        }
+
     @app.post("/v2/agents/submit-bitset")
     async def submit_bitset_v2(
         request: Request,
@@ -6378,6 +6435,29 @@ def build_app(
                 submit["assignment_b64"], nvars=nvars)
         except v2_bitset_submit.BitsetSubmitError as exc:
             raise HTTPException(400, exc.reason)
+
+        existing = _v2_submit_existing_receipt(submit)
+        if existing is not None:
+            payload = v2_bitset_submit.receipt_payload(existing, inserted=False)
+            payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
+            return JSONResponse(
+                payload,
+                status_code=200,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+
+        backpressure = _v2_submit_backpressure_snapshot()
+        if backpressure is not None:
+            return JSONResponse(
+                backpressure,
+                status_code=503,
+                headers={
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*",
+                    "Retry-After": str(v2_submit_backpressure_retry_after_secs),
+                    "X-Cathedral-Rejection-Reason": "v2_submit_backpressure",
+                },
+            )
 
         def _admit_received():
             with v2_pipeline.v2_pm_env():

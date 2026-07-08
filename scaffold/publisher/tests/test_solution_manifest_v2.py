@@ -476,6 +476,57 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     assert v2_store.query("SELECT COUNT(*) AS n FROM solution_manifests")[0]["n"] == 0
 
 
+def test_solution_manifest_v2_submit_bitset_backpressure_sheds_new_work_not_replays(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_PENDING", "1")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_RETRY_AFTER_SECS", "7")
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+
+    def build_submit(uri: str):
+        kp = _keypair(uri)
+        board = client.get(
+            "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+            headers=_read_headers(kp),
+        )
+        assert board.status_code == 200
+        item = board.json()["items"][0]
+        with v2_pipeline.v2_pm_env():
+            _cid, _cnf, assignment = pm.generate_instance(
+                kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+        body = {
+            "schema": v2_bitset_submit.SCHEMA,
+            "card_id": _FAMILY,
+            "challenge_id": item["challenge_id"],
+            "submit_token": item["submit_token"],
+            "assignment_encoding": "bitset/v1",
+            "assignment_b64": base64.b64encode(
+                v2_pipeline.encode_bitset_assignment(assignment)
+            ).decode("ascii"),
+        }
+        submitted_at = _now_iso()
+        return kp, body, _bitset_headers(kp, body, submitted_at=submitted_at)
+
+    _kp1, body1, headers1 = build_submit("//BitsetBackpressureOne")
+    first = client.post("/v2/agents/submit-bitset", json=body1, headers=headers1)
+    assert first.status_code == 202, first.text
+
+    replay = client.post("/v2/agents/submit-bitset", json=body1, headers=headers1)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["receipt_id"] == first.json()["receipt_id"]
+    assert replay.json()["idempotent_replay"] is True
+
+    _kp2, body2, headers2 = build_submit("//BitsetBackpressureTwo")
+    shed = client.post("/v2/agents/submit-bitset", json=body2, headers=headers2)
+    assert shed.status_code == 503
+    assert shed.headers["retry-after"] == "7"
+    assert shed.headers["x-cathedral-rejection-reason"] == "v2_submit_backpressure"
+    assert shed.json()["reason"] == "v2_submit_backpressure"
+    assert shed.json()["pending_count"] == 1
+
+
 def test_solution_manifest_v2_manifest_and_bitset_same_challenge_count_once(tmp_path, monkeypatch):
     app, _store = _build(
         tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
