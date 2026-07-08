@@ -395,6 +395,49 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
         else:
             pf.pass_("remote env audit", "no fatal errors")
 
+    remote_pin = (
+        f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
+        """.venv/bin/python - <<'PY'
+import json
+from scaffold.publisher import v2_pipeline
+
+pin_ok = v2_pipeline.pin_v2_pm_env()
+payload = {
+    "pin_ok": pin_ok,
+    "pinned": v2_pipeline._PM_ENV_PINNED,
+    "v2_perminer_enabled": v2_pipeline.v2_perminer_enabled(),
+}
+print(json.dumps(payload, sort_keys=True))
+raise SystemExit(0 if all(payload.values()) else 1)
+PY"""
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_pin],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        pf.fail("remote V2 env pin", proc.stdout[-800:].strip())
+    else:
+        try:
+            payload = json.loads(proc.stdout.splitlines()[-1])
+        except Exception as exc:
+            pf.fail(
+                "remote V2 env pin",
+                f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
+            )
+        else:
+            pf.pass_(
+                "remote V2 env pin",
+                (
+                    f"pin_ok={payload.get('pin_ok')} "
+                    f"pinned={payload.get('pinned')} "
+                    f"v2_perminer_enabled={payload.get('v2_perminer_enabled')}"
+                ),
+            )
+
 
 def check_e2e(pf: Preflight, args: argparse.Namespace) -> None:
     run_e2e = args.run_e2e or os.environ.get("CATHEDRAL_PREFLIGHT_RUN_E2E", "").strip().lower() in {"1", "true", "yes", "on"}

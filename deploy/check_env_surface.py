@@ -91,6 +91,22 @@ LEGACY_WARN_EXACT = {
     "CATHEDRAL_SUBMIT_ASYNC_ENABLED": "old public V1 async rollout flag; leave unset for V2 relaunch",
 }
 
+V2_PM_ENV_TWINS = {
+    "CATHEDRAL_PERMINER_SEED_SECRET": "CATHEDRAL_V2_PERMINER_SEED_SECRET",
+    "CATHEDRAL_PERMINER_EPOCH_HOURS": "CATHEDRAL_V2_PERMINER_EPOCH_HOURS",
+    "CATHEDRAL_PERMINER_MAX_PAGE_LIMIT": "CATHEDRAL_V2_PERMINER_MAX_PAGE_LIMIT",
+    "CATHEDRAL_PERMINER_ALLOTMENT_T1": "CATHEDRAL_V2_PERMINER_ALLOTMENT_T1",
+    "CATHEDRAL_PERMINER_ALLOTMENT_T2": "CATHEDRAL_V2_PERMINER_ALLOTMENT_T2",
+    "CATHEDRAL_PERMINER_WEIGHT_T1": "CATHEDRAL_V2_PERMINER_WEIGHT_T1",
+    "CATHEDRAL_PERMINER_WEIGHT_T2": "CATHEDRAL_V2_PERMINER_WEIGHT_T2",
+    "CATHEDRAL_PERMINER_METHOD_T1": "CATHEDRAL_V2_PERMINER_METHOD_T1",
+    "CATHEDRAL_PERMINER_METHOD_T2": "CATHEDRAL_V2_PERMINER_METHOD_T2",
+    "CATHEDRAL_PERMINER_NVARS_T1": "CATHEDRAL_V2_PERMINER_NVARS_T1",
+    "CATHEDRAL_PERMINER_NVARS_T2": "CATHEDRAL_V2_PERMINER_NVARS_T2",
+    "CATHEDRAL_PERMINER_NCLAUSES_T1": "CATHEDRAL_V2_PERMINER_NCLAUSES_T1",
+    "CATHEDRAL_PERMINER_NCLAUSES_T2": "CATHEDRAL_V2_PERMINER_NCLAUSES_T2",
+}
+
 LEGACY_WARN_PREFIXES = (
     "CATHEDRAL_V2_PERMINER_",
     "CATHEDRAL_V2_SHADOW_V1_",
@@ -227,6 +243,15 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
             warnings.append(f"{name} is set; remove it entirely ({why})")
         else:
             errors.append(f"{name} must not be set for relaunch: {why}")
+
+    for canonical, v2_twin in sorted(V2_PM_ENV_TWINS.items()):
+        if canonical not in env or v2_twin not in env:
+            continue
+        if env[canonical] != env[v2_twin]:
+            errors.append(
+                f"{canonical} and {v2_twin} conflict; remove the V2 twin or "
+                "make it identical so startup env pinning can proceed"
+            )
 
     known = set(CORE_REQUIRED) | CORE_OPTIONAL | PROFILE_IMPLIED_FLAGS | set(DANGEROUS_DEPRECATED)
     known |= set(LEGACY_WARN_EXACT) | ALLOWED_GENERIC
