@@ -191,6 +191,7 @@ def check_local(pf: Preflight, args: argparse.Namespace) -> None:
             "py_compile",
             "scripts/v2_bitset_miner_e2e.py",
             "scripts/v2_bitset_capacity_probe.py",
+            "scripts/v2_edge_staged_soak.py",
         ],
     )
     if not args.skip_python_tests:
@@ -1365,6 +1366,35 @@ def check_capacity_probe(pf: Preflight, args: argparse.Namespace) -> None:
     )
 
 
+def check_edge_soak(pf: Preflight, args: argparse.Namespace) -> None:
+    run_soak = args.run_edge_soak or os.environ.get(
+        "CATHEDRAL_PREFLIGHT_RUN_EDGE_SOAK", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not run_soak:
+        pf.warn("staged edge soak", "skipped; set --run-edge-soak for edge stampede guard")
+        return
+    run(
+        pf,
+        "staged edge soak",
+        [
+            select_python(),
+            "scripts/v2_edge_staged_soak.py",
+            "--base",
+            args.base.rstrip("/"),
+            "--requests",
+            str(args.edge_soak_requests),
+            "--concurrency",
+            str(args.edge_soak_concurrency),
+            "--max-p95-ms",
+            str(args.edge_soak_max_p95_ms),
+            "--uri-prefix",
+            args.edge_soak_uri_prefix,
+        ],
+        timeout=args.edge_soak_timeout_secs,
+        check_contains="EDGE_STAGED_OK",
+    )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default=os.environ.get("CATHEDRAL_PREFLIGHT_BASE", DEFAULT_BASE))
@@ -1424,6 +1454,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--capacity-max-admit-p95-ms", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MAX_ADMIT_P95_MS", "1000") or "1000"))
     ap.add_argument("--capacity-uri-prefix", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_URI_PREFIX", "//CapacityProbe"))
     ap.add_argument("--capacity-timeout-secs", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_TIMEOUT_SECS", "180") or "180"))
+    ap.add_argument("--run-edge-soak", action="store_true")
+    ap.add_argument("--edge-soak-requests", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_EDGE_SOAK_REQUESTS", "64") or "64"))
+    ap.add_argument("--edge-soak-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_EDGE_SOAK_CONCURRENCY", "16") or "16"))
+    ap.add_argument("--edge-soak-max-p95-ms", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_EDGE_SOAK_MAX_P95_MS", "1500") or "1500"))
+    ap.add_argument("--edge-soak-uri-prefix", default=os.environ.get("CATHEDRAL_PREFLIGHT_EDGE_SOAK_URI_PREFIX", "//EdgeStagedSoak"))
+    ap.add_argument("--edge-soak-timeout-secs", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_EDGE_SOAK_TIMEOUT_SECS", "120") or "120"))
     ap.add_argument("--skip-python-tests", action="store_true")
     ap.add_argument("--skip-wrangler", action="store_true")
     ap.add_argument("--skip-live", action="store_true")
@@ -1449,6 +1485,7 @@ def main(argv: list[str]) -> int:
     check_ssh(pf, args)
     check_e2e(pf, args)
     check_capacity_probe(pf, args)
+    check_edge_soak(pf, args)
 
     elapsed = time.time() - start
     counts = {status: sum(1 for r in pf.results if r.status == status) for status in ("PASS", "WARN", "FAIL")}
