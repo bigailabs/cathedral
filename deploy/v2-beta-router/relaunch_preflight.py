@@ -185,7 +185,13 @@ def check_local(pf: Preflight, args: argparse.Namespace) -> None:
     run(
         pf,
         "miner e2e script syntax",
-        [select_python(), "-m", "py_compile", "scripts/v2_bitset_miner_e2e.py"],
+        [
+            select_python(),
+            "-m",
+            "py_compile",
+            "scripts/v2_bitset_miner_e2e.py",
+            "scripts/v2_bitset_capacity_probe.py",
+        ],
     )
     if not args.skip_python_tests:
         run(
@@ -1316,6 +1322,40 @@ def check_e2e(pf: Preflight, args: argparse.Namespace) -> None:
     )
 
 
+def check_capacity_probe(pf: Preflight, args: argparse.Namespace) -> None:
+    run_probe = args.run_capacity_probe or os.environ.get(
+        "CATHEDRAL_PREFLIGHT_RUN_CAPACITY_PROBE", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not run_probe:
+        pf.warn("V2 capacity probe", "skipped; set --run-capacity-probe for submit/drain burst")
+        return
+    base = (args.capacity_base or args.base).rstrip("/")
+    run(
+        pf,
+        "V2 capacity probe",
+        [
+            select_python(),
+            "scripts/v2_bitset_capacity_probe.py",
+            "--base",
+            base,
+            "--miners",
+            str(args.capacity_miners),
+            "--per-miner-limit",
+            str(args.capacity_per_miner_limit),
+            "--submit-concurrency",
+            str(args.capacity_submit_concurrency),
+            "--max-drain-secs",
+            str(args.capacity_max_drain_secs),
+            "--max-admit-p95-ms",
+            str(args.capacity_max_admit_p95_ms),
+            "--uri-prefix",
+            args.capacity_uri_prefix,
+        ],
+        timeout=args.capacity_timeout_secs,
+        check_contains="CAPACITY_OK",
+    )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default=os.environ.get("CATHEDRAL_PREFLIGHT_BASE", DEFAULT_BASE))
@@ -1363,6 +1403,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))
+    ap.add_argument("--run-capacity-probe", action="store_true")
+    ap.add_argument("--capacity-base", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_BASE", ""))
+    ap.add_argument("--capacity-miners", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MINERS", "4") or "4"))
+    ap.add_argument("--capacity-per-miner-limit", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_PER_MINER_LIMIT", "4") or "4"))
+    ap.add_argument("--capacity-submit-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_SUBMIT_CONCURRENCY", "8") or "8"))
+    ap.add_argument("--capacity-max-drain-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MAX_DRAIN_SECS", "20") or "20"))
+    ap.add_argument("--capacity-max-admit-p95-ms", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MAX_ADMIT_P95_MS", "1000") or "1000"))
+    ap.add_argument("--capacity-uri-prefix", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_URI_PREFIX", "//CapacityProbe"))
+    ap.add_argument("--capacity-timeout-secs", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_TIMEOUT_SECS", "180") or "180"))
     ap.add_argument("--skip-python-tests", action="store_true")
     ap.add_argument("--skip-wrangler", action="store_true")
     ap.add_argument("--skip-live", action="store_true")
@@ -1387,6 +1436,7 @@ def main(argv: list[str]) -> int:
     check_weights(pf, args)
     check_ssh(pf, args)
     check_e2e(pf, args)
+    check_capacity_probe(pf, args)
 
     elapsed = time.time() - start
     counts = {status: sum(1 for r in pf.results if r.status == status) for status in ("PASS", "WARN", "FAIL")}
