@@ -438,25 +438,16 @@ def positive_scores(at: datetime) -> dict[str, float]:
     }
 
 
-def ledger_stats(at: datetime) -> dict:
+def coverage_stats(at: datetime, scores: dict[str, float], live_hotkeys: set[str]) -> dict:
     since = ms_iso(at - timedelta(hours=window_hours))
-    rows = store.query(
-        "SELECT COUNT(DISTINCT miner_hotkey) AS hotkeys, COUNT(*) AS solves, "
-        "COALESCE(SUM(difficulty_weight), 0) AS units, "
-        "MIN(solved_at_iso) AS first_at, MAX(solved_at_iso) AS last_at "
-        "FROM per_miner_solves "
-        "WHERE solved_at_iso > ? AND verified=1 AND difficulty_weight > 0",
-        (since,),
-    )
-    row = rows[0] if rows else None
-    return {
+    stats = {
         "since": since,
-        "ledger_hotkeys": int(row["hotkeys"] or 0) if row else 0,
-        "solves": int(row["solves"] or 0) if row else 0,
-        "units": float(row["units"] or 0.0) if row else 0.0,
-        "first_at": row["first_at"] if row else None,
-        "last_at": row["last_at"] if row else None,
+        "score_hotkeys": len(scores),
+        "live_score_hotkeys": None,
     }
+    if live_hotkeys:
+        stats["live_score_hotkeys"] = sum(1 for hotkey in scores if hotkey in live_hotkeys)
+    return stats
 
 
 def chain_hotkeys() -> tuple[set[str], str | None]:
@@ -478,19 +469,11 @@ horizon_hours = float(os.environ.get("CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HO
 min_weight_count = int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300")
 min_live_coverage_ratio = float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_LIVE_COVERAGE_RATIO", "0.85") or "0.85")
 horizon_at = now + timedelta(hours=horizon_hours)
-current = ledger_stats(now)
-horizon = ledger_stats(horizon_at)
 current_scores = positive_scores(now)
 horizon_scores = positive_scores(horizon_at)
-current["score_hotkeys"] = len(current_scores)
-horizon["score_hotkeys"] = len(horizon_scores)
 live_hotkeys, live_error = chain_hotkeys()
-if live_hotkeys:
-    current["live_score_hotkeys"] = sum(1 for hotkey in current_scores if hotkey in live_hotkeys)
-    horizon["live_score_hotkeys"] = sum(1 for hotkey in horizon_scores if hotkey in live_hotkeys)
-else:
-    current["live_score_hotkeys"] = None
-    horizon["live_score_hotkeys"] = None
+current = coverage_stats(now, current_scores, live_hotkeys)
+horizon = coverage_stats(horizon_at, horizon_scores, live_hotkeys)
 live_count = len(live_hotkeys)
 current_live_ratio = (
     float(current["live_score_hotkeys"]) / live_count
@@ -570,8 +553,7 @@ PY"""
             f"now_scores={now_payload.get('score_hotkeys')} "
             f"horizon_scores={horizon_payload.get('score_hotkeys')} "
             f"{coverage_detail} "
-            f"horizon_since={horizon_payload.get('since')} "
-            f"last_at={horizon_payload.get('last_at')}"
+            f"horizon_since={horizon_payload.get('since')}"
         )
         if proc.returncode == 0 and payload.get("ok") is True:
             pf.pass_("remote PM coverage horizon", detail)
