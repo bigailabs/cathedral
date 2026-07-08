@@ -300,6 +300,12 @@ def check_weights(pf: Preflight, args: argparse.Namespace) -> None:
     if not generated_at or not isinstance(weights, list) or not weights:
         pf.fail("validator weights fresh", "missing generated_at or weights")
         return
+    if len(weights) <= args.min_weight_count:
+        pf.fail(
+            "validator weights fresh",
+            f"weights={len(weights)} <= min {args.min_weight_count}",
+        )
+        return
     try:
         age = iso_age_secs(generated_at)
     except Exception as exc:
@@ -367,6 +373,42 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
         pf.pass_("sandbox services active")
     else:
         pf.fail("sandbox services active", proc.stdout[-500:].strip())
+
+    proc = subprocess.run(
+        ssh_cmd + [
+            target,
+            "curl -fsS http://127.0.0.1:8000/v1/validator/weights/next",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        pf.fail("private weight vector cardinality", proc.stdout[-500:].strip())
+    else:
+        try:
+            payload = json.loads(proc.stdout)
+            count = len(payload.get("weights") or [])
+            meta = payload.get("policy_metadata") or {}
+            external = meta.get("external_scores") or {}
+        except Exception as exc:
+            pf.fail("private weight vector cardinality", f"bad JSON: {exc}")
+        else:
+            if count <= args.min_weight_count:
+                pf.fail(
+                    "private weight vector cardinality",
+                    f"weights={count} <= min {args.min_weight_count}",
+                )
+            else:
+                pf.pass_(
+                    "private weight vector cardinality",
+                    (
+                        f"weights={count} "
+                        f"mode={meta.get('effective_mode')} "
+                        f"external_enabled={external.get('enabled')}"
+                    ),
+                )
 
     remote_dir = shlex.quote(args.ssh_cathedral_dir)
     remote_env = shlex.quote(args.ssh_env_file)
@@ -481,6 +523,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     ap.add_argument("--max-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PENDING", "0") or "0"))
     ap.add_argument("--max-weight-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_WEIGHT_AGE_SECS", "900") or "900"))
+    ap.add_argument("--min-weight-count", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))

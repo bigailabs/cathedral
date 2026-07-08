@@ -20,6 +20,7 @@ from starlette.testclient import TestClient
 from scaffold.publisher import per_miner as pm
 from scaffold.publisher import v2_bitset_submit
 from scaffold.publisher import v2_pipeline
+from scaffold.publisher import weights
 from scaffold.publisher.app import build_app
 from scaffold.publisher.auth import canonical_claim_bytes
 from scaffold.publisher.store import Store
@@ -406,6 +407,7 @@ def test_launch_profile_v2_converged_implies_unified_protocol(tmp_path, monkeypa
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_SEED_SECRET", "profile-test-seed")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ALLOTMENT_T1", "4")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ALLOTMENT_T2", "1")
+    monkeypatch.setenv("CATHEDRAL_PERMINER_SCORING_MODE", "pm_primary")
     db = str(tmp_path / "pub.sqlite")
     app = build_app(database_path=db, signing_key_hex=SIGNING_KEY_HEX)
     v2_store = Store(db, prefer_env_database_url=False)
@@ -435,6 +437,16 @@ def test_launch_profile_v2_converged_implies_unified_protocol(tmp_path, monkeypa
     results = v2_pipeline.process_bitset_batch(v2_store)
     assert results and results[0]["status"] == v2_pipeline.STATUS_VERIFIED
     assert len(_payout_rows(v2_store, kp.ss58_address)) == 1
+    # Route safety/env pinning keeps the legacy V1 per-miner route flag unset,
+    # but converged V2 bridged solves must still feed the signed vector.
+    assert pm.perminer_enabled() is False
+    scores = weights.compose_scores(v2_store)
+    assert scores == {kp.ss58_address: 1.0}
+    vector = weights.build_signed_vector(v2_store, signing_key_hex=SIGNING_KEY_HEX)
+    assert vector["policy_metadata"]["perminer"]["enabled"] is True
+    assert vector["policy_metadata"]["perminer"]["primary_live"] is True
+    assert vector["policy_metadata"]["score_source"] == "pm_primary"
+    assert vector["weights"] == [{"miner_hotkey": kp.ss58_address, "weight": 1.0}]
 
 
 def test_launch_profile_contradiction_fails_closed(tmp_path, monkeypatch):

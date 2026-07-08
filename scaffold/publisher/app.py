@@ -2402,9 +2402,10 @@ def build_app(
         lane as if nothing changed.
         """
         try:
+            from . import launch_profile
             from . import per_miner as pm
             if (
-                pm.perminer_enabled()
+                (pm.perminer_enabled() or launch_profile.converged())
                 and not pm.perminer_shadow()
                 and weights_mod.perminer_scoring_mode() == "pm_primary"
             ):

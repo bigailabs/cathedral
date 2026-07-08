@@ -364,6 +364,25 @@ def perminer_require_coldkey() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _perminer_scoring_enabled() -> bool:
+    """True when per-miner solve rows are allowed to drive scoring.
+
+    The legacy V1 miner surface used CATHEDRAL_PERMINER_ENABLED for both route
+    enablement and scoring. The converged V2 profile keeps that V1 route flag
+    unset so old miner routes stay retired and startup env pinning can be
+    lock-free, but verified V2 bitset submits still bridge into the same
+    per_miner_solves ledger and must feed the signed weight vector.
+    """
+    from . import launch_profile
+    from . import per_miner as pm
+    return pm.perminer_enabled() or launch_profile.converged()
+
+
+def _perminer_scoring_shadow() -> bool:
+    from . import per_miner as pm
+    return pm.perminer_shadow()
+
+
 def payable_hotkeys_mode() -> str:
     raw = os.environ.get(PAYABLE_HOTKEYS_ENV, "off").strip().lower()
     return raw if raw in {"off", "mark", "filter"} else "off"
@@ -499,8 +518,7 @@ def _perminer_window_scores(
 
 def _perminer_scores(store: Store, *, now: datetime | None = None) -> dict[str, float]:
     """Trailing-window normalized per-miner scores, or empty when disabled/no solves."""
-    from . import per_miner as pm
-    if not pm.perminer_enabled() or pm.perminer_shadow():
+    if not _perminer_scoring_enabled() or _perminer_scoring_shadow():
         return {}
     now = now or datetime.now(timezone.utc)
     since = _ms_iso(now - timedelta(hours=window_hours()))
@@ -513,16 +531,16 @@ def _perminer_compose_scores(
     ident=lambda hk: hk,
     since: str | None = None,
 ) -> dict[str, float] | None:
-    """Per-miner scoring path. Returns scores when CATHEDRAL_PERMINER_ENABLED is on
-    AND not in shadow-only mode. Returns None when flag is off (caller falls
-    through to existing scoring — byte-identical to pre-flag behaviour).
+    """Per-miner scoring path. Returns scores when the legacy V1 PM surface is
+    on OR the v2-converged profile is active, and not in shadow-only mode.
+    Returns None when scoring is off (caller falls through to existing scoring
+    — byte-identical to pre-flag behaviour).
 
     Shadow mode: flag is on + CATHEDRAL_PERMINER_SHADOW=1 → compute the vector,
     log it, but return None so the LIVE vector stays the current scoring. This
     lets us run shadow comparisons without touching the live board.
     """
-    from . import per_miner as pm
-    if not pm.perminer_enabled():
+    if not _perminer_scoring_enabled():
         return None  # flag off: zero change
     since = since or _ms_iso(datetime.now(timezone.utc) - timedelta(hours=window_hours()))
     try:
@@ -532,7 +550,7 @@ def _perminer_compose_scores(
             raise
         print("[per_miner] bonus score query failed; continuing with base vector")
         return None
-    if pm.perminer_shadow():
+    if _perminer_scoring_shadow():
         # Shadow: log the vector for comparison but don't serve it.
         print(f"[per_miner] shadow_vector window_hours={window_hours()} scores={scores}")
         return None  # fall through to live scoring
@@ -958,8 +976,8 @@ def _perminer_policy_status(
             "identity_ready": not perminer_require_coldkey(),
             "degraded_reason": "per_miner_import_failed",
         }
-    enabled = pm.perminer_enabled()
-    shadow = pm.perminer_shadow()
+    enabled = _perminer_scoring_enabled()
+    shadow = _perminer_scoring_shadow()
     epoch = pm.current_epoch() if enabled else None
     has_scores = False
     coldkey_loaded = bool(coldkey_of)
