@@ -413,6 +413,8 @@ CORE_KEYS = (
     "CATHEDRAL_V2_SUBMIT_BITSET_THREADS",
     "CATHEDRAL_V2_VERIFY_BATCH_SIZE",
     "CATHEDRAL_V2_BITSET_VERIFY_THREADS",
+    "CATHEDRAL_SUBMIT_HARD_CAP",
+    "CATHEDRAL_SUBMIT_MAX_CONCURRENCY",
     "CATHEDRAL_PG_STATEMENT_TIMEOUT_MS",
     "CATHEDRAL_WEIGHTS_WINDOW_HOURS",
 )
@@ -715,6 +717,8 @@ PY"""
         f"CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BITSET_THREADS={int(args.max_v2_submit_bitset_threads)} "
         f"CATHEDRAL_PREFLIGHT_MAX_V2_VERIFY_BATCH_SIZE={int(args.max_v2_verify_batch_size)} "
         f"CATHEDRAL_PREFLIGHT_MAX_V2_BITSET_VERIFY_THREADS={int(args.max_v2_bitset_verify_threads)} "
+        f"CATHEDRAL_PREFLIGHT_MAX_SUBMIT_HARD_CAP={int(args.max_submit_hard_cap)} "
+        f"CATHEDRAL_PREFLIGHT_MAX_SUBMIT_MAX_CONCURRENCY={int(args.max_submit_max_concurrency)} "
         f"CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS={int(args.max_pg_statement_timeout_ms)} "
         f"CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS={float(args.min_weights_window_hours)} "
         """.venv/bin/python - <<'PY'
@@ -736,6 +740,8 @@ v2_read_threads = env_int("CATHEDRAL_V2_READ_THREADS", 6)
 v2_submit_bitset_threads = env_int("CATHEDRAL_V2_SUBMIT_BITSET_THREADS", 8)
 v2_verify_batch_size = env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8)
 v2_bitset_verify_threads = env_int("CATHEDRAL_V2_BITSET_VERIFY_THREADS", 8)
+submit_hard_cap = env_int("CATHEDRAL_SUBMIT_HARD_CAP", 8)
+submit_max_concurrency = env_int("CATHEDRAL_SUBMIT_MAX_CONCURRENCY", 24)
 statement_timeout_ms = env_int("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS", 0)
 weights_window_hours = float(weights_mod.window_hours())
 max_pm_read_hard_cap = env_int("CATHEDRAL_PREFLIGHT_MAX_PM_READ_HARD_CAP", 8)
@@ -743,6 +749,8 @@ max_v2_read_threads = env_int("CATHEDRAL_PREFLIGHT_MAX_V2_READ_THREADS", 4)
 max_v2_submit_bitset_threads = env_int("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BITSET_THREADS", 4)
 max_v2_verify_batch_size = env_int("CATHEDRAL_PREFLIGHT_MAX_V2_VERIFY_BATCH_SIZE", 8)
 max_v2_bitset_verify_threads = env_int("CATHEDRAL_PREFLIGHT_MAX_V2_BITSET_VERIFY_THREADS", 1)
+max_submit_hard_cap = env_int("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_HARD_CAP", 32)
+max_submit_max_concurrency = env_int("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_MAX_CONCURRENCY", 32)
 max_statement_timeout_ms = env_int("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", 4000)
 min_weights_window_hours = float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48")
 checks = {
@@ -752,6 +760,8 @@ checks = {
     "v2_submit_bitset_threads_within_launch_ceiling": 0 < v2_submit_bitset_threads <= max_v2_submit_bitset_threads,
     "v2_verify_batch_size_within_launch_ceiling": 0 < v2_verify_batch_size <= max_v2_verify_batch_size,
     "v2_bitset_verify_threads_within_launch_ceiling": 0 < v2_bitset_verify_threads <= max_v2_bitset_verify_threads,
+    "submit_hard_cap_within_launch_ceiling": 0 < submit_hard_cap <= max_submit_hard_cap,
+    "submit_max_concurrency_within_launch_ceiling": 0 < submit_max_concurrency <= max_submit_max_concurrency,
     "statement_timeout_positive": statement_timeout_ms > 0,
     "statement_timeout_within_launch_ceiling": statement_timeout_ms <= max_statement_timeout_ms,
     "weights_window_launch_bridge": weights_window_hours >= min_weights_window_hours,
@@ -769,6 +779,10 @@ payload = {
     "max_v2_verify_batch_size": max_v2_verify_batch_size,
     "v2_bitset_verify_threads": v2_bitset_verify_threads,
     "max_v2_bitset_verify_threads": max_v2_bitset_verify_threads,
+    "submit_hard_cap": submit_hard_cap,
+    "max_submit_hard_cap": max_submit_hard_cap,
+    "submit_max_concurrency": submit_max_concurrency,
+    "max_submit_max_concurrency": max_submit_max_concurrency,
     "statement_timeout_ms": statement_timeout_ms,
     "max_statement_timeout_ms": max_statement_timeout_ms,
     "weights_window_hours": weights_window_hours,
@@ -804,6 +818,10 @@ PY"""
             f"/<={payload.get('max_v2_verify_batch_size')} "
             f"v2_bitset_verify_threads={payload.get('v2_bitset_verify_threads')}"
             f"/<={payload.get('max_v2_bitset_verify_threads')} "
+            f"submit_hard_cap={payload.get('submit_hard_cap')}"
+            f"/<={payload.get('max_submit_hard_cap')} "
+            f"submit_max_concurrency={payload.get('submit_max_concurrency')}"
+            f"/<={payload.get('max_submit_max_concurrency')} "
             f"stmt_timeout_ms={payload.get('statement_timeout_ms')}"
             f"/<={payload.get('max_statement_timeout_ms')} "
             f"window={payload.get('weights_window_hours')}h"
@@ -1281,6 +1299,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-v2-submit-bitset-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BITSET_THREADS", "4") or "4"))
     ap.add_argument("--max-v2-verify-batch-size", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_VERIFY_BATCH_SIZE", "8") or "8"))
     ap.add_argument("--max-v2-bitset-verify-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_BITSET_VERIFY_THREADS", "1") or "1"))
+    ap.add_argument("--max-submit-hard-cap", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_HARD_CAP", "32") or "32"))
+    ap.add_argument("--max-submit-max-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_MAX_CONCURRENCY", "32") or "32"))
     ap.add_argument("--max-pg-statement-timeout-ms", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", "4000") or "4000"))
     ap.add_argument("--min-weights-window-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48"))
     ap.add_argument("--retention-batch-size", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_RETENTION_BATCH_SIZE", "25000") or "25000"))

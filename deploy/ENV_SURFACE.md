@@ -70,8 +70,9 @@ Fail-closed at boot (RuntimeError, never a warning):
 | `CATHEDRAL_V2_VERIFY_LOCK_SECS` | `120` | Verifier claim lock TTL. |
 | `CATHEDRAL_V2_VERIFY_PARALLEL_CLAIMS` | optional | Multi-claim verifier mode. Leave unset unless batch drain metrics require it. |
 | `CATHEDRAL_V2_BITSET_VERIFY_THREADS` | optional | Per-batch bitset verification parallelism in the verifier process. |
+| `CATHEDRAL_SUBMIT_MAX_CONCURRENCY` / `CATHEDRAL_SUBMIT_HARD_CAP` | `32` | Global submit admission gate. This includes `/v2/agents/submit-bitset`, so it must shed before the 8-connection Postgres pool thrashes. |
 | `CATHEDRAL_RATELIMIT_RPM` + `CATHEDRAL_PER_HOTKEY_*` | optional | Public origin flood/fairness guardrails. Set intentionally; do not cargo-cult. |
-| `CATHEDRAL_SUBMIT_*` queue/cap knobs | optional | Legacy submit-path backpressure. Keep only while legacy submit surfaces remain served. |
+| `CATHEDRAL_SUBMIT_QUEUE_*` knobs | optional | Legacy submit-path queue backpressure. Keep only while legacy submit surfaces remain served, unless V2 admit-side shedding is explicitly wired to reuse them. |
 | snapshot/cache TTLs | optional | `CATHEDRAL_BOARD_TTL_SECS`, `CATHEDRAL_RECENT_CACHE_TTL_SECS`, `CATHEDRAL_MATERIALIZED_SNAPSHOT_*`, and `CATHEDRAL_DASHBOARD_SNAPSHOT_*` protect read-heavy non-miner routes. |
 | `CATHEDRAL_PG_POOL_MAX` / `CATHEDRAL_THREADPOOL_TOKENS` | optional | Only set when sizing a known host. Do not cargo-cult old Railway values. |
 
@@ -81,6 +82,8 @@ posture over SSH: positive read admission, `CATHEDRAL_PM_READ_HARD_CAP <= 8`,
 `CATHEDRAL_V2_SUBMIT_BITSET_THREADS <= 4`,
 `CATHEDRAL_V2_VERIFY_BATCH_SIZE <= 8`,
 `CATHEDRAL_V2_BITSET_VERIFY_THREADS <= 1`,
+`CATHEDRAL_SUBMIT_MAX_CONCURRENCY <= 32`,
+`CATHEDRAL_SUBMIT_HARD_CAP <= 32`,
 `CATHEDRAL_PG_STATEMENT_TIMEOUT_MS <= 4000`, and the temporary
 `CATHEDRAL_WEIGHTS_WINDOW_HOURS >= 48` bridge while the gate is held closed.
 Raise those ceilings only with fresh latency and coverage evidence, not by
@@ -137,6 +140,8 @@ export CATHEDRAL_V2_SUBMIT_BITSET_THREADS=4
 export CATHEDRAL_V2_VERIFY_BATCH_SIZE=8
 export CATHEDRAL_V2_VERIFY_INTERVAL_SECS=1
 export CATHEDRAL_V2_VERIFY_LOCK_SECS=120
+export CATHEDRAL_SUBMIT_MAX_CONCURRENCY=32
+export CATHEDRAL_SUBMIT_HARD_CAP=32
 export CATHEDRAL_PERMINER_SCORING_MODE=pm_primary
 export CATHEDRAL_WEIGHTS_MODE=proportional
 export CATHEDRAL_WEIGHTS_WINDOW_HOURS=48
