@@ -1474,6 +1474,8 @@ def check_capacity_probe(pf: Preflight, args: argparse.Namespace) -> None:
             str(args.capacity_miners),
             "--per-miner-limit",
             str(args.capacity_per_miner_limit),
+            "--prepare-concurrency",
+            str(args.capacity_prepare_concurrency),
             "--submit-concurrency",
             str(args.capacity_submit_concurrency),
             "--max-drain-secs",
@@ -1587,6 +1589,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--capacity-miners", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MINERS", "4") or "4"))
     ap.add_argument("--capacity-per-miner-limit", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_PER_MINER_LIMIT", "4") or "4"))
     ap.add_argument("--capacity-submit-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_SUBMIT_CONCURRENCY", "8") or "8"))
+    # CNF-fetch prep concurrency for the capacity probe. Default 2 (probe's own
+    # default is 4): tunnel-based runs repeatedly hit RemoteDisconnected during
+    # the prep fetch burst at 4; 2 has been reliable through the same tunnel.
+    ap.add_argument("--capacity-prepare-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_PREPARE_CONCURRENCY", "2") or "2"))
     ap.add_argument("--capacity-max-drain-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MAX_DRAIN_SECS", "20") or "20"))
     ap.add_argument("--capacity-max-admit-p95-ms", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MAX_ADMIT_P95_MS", "1000") or "1000"))
     ap.add_argument("--capacity-min-drain-rate-per-sec", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MIN_DRAIN_RATE_PER_SEC", "0") or "0"))
