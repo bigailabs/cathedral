@@ -820,6 +820,7 @@ def build_app(
                 "pm_read_hard_cap": submit_metrics["pm_read_hard_cap"],
                 "configured_pm_read_hard_cap": submit_metrics["configured_pm_read_hard_cap"],
                 "pm_read_min_cap": submit_metrics["pm_read_min_cap"],
+                "v2_receipt_poll_max_concurrency": submit_metrics["v2_receipt_poll_max_concurrency"],
                 "min_interval_secs": submit_metrics["min_interval_secs"],
                 "total": submit_metrics["total"],
                 "by_outcome": dict(submit_metrics["by_outcome"]),
