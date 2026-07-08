@@ -1480,6 +1480,8 @@ def check_capacity_probe(pf: Preflight, args: argparse.Namespace) -> None:
             str(args.capacity_max_drain_secs),
             "--max-admit-p95-ms",
             str(args.capacity_max_admit_p95_ms),
+            "--min-drain-rate-per-sec",
+            str(args.capacity_min_drain_rate_per_sec),
             "--uri-prefix",
             args.capacity_uri_prefix,
         ],
@@ -1587,6 +1589,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--capacity-submit-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_SUBMIT_CONCURRENCY", "8") or "8"))
     ap.add_argument("--capacity-max-drain-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MAX_DRAIN_SECS", "20") or "20"))
     ap.add_argument("--capacity-max-admit-p95-ms", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MAX_ADMIT_P95_MS", "1000") or "1000"))
+    ap.add_argument("--capacity-min-drain-rate-per-sec", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MIN_DRAIN_RATE_PER_SEC", "0") or "0"))
     ap.add_argument("--capacity-uri-prefix", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_URI_PREFIX", "//CapacityProbe"))
     ap.add_argument("--capacity-timeout-secs", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_TIMEOUT_SECS", "180") or "180"))
     ap.add_argument("--run-edge-soak", action="store_true")

@@ -20,6 +20,7 @@ import json
 import statistics
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,6 +108,42 @@ def fetch_metrics(base: str, *, timeout: float) -> dict[str, Any] | None:
         return None
 
 
+def select_items(items: list[Any], *, limit: int, mode: str) -> list[dict[str, Any]]:
+    rows = [item for item in items if isinstance(item, dict)]
+    want = max(1, int(limit))
+    if mode == "first":
+        return rows[:want]
+    if mode != "mixed":
+        raise ValueError(f"unknown challenge selection mode: {mode}")
+    by_tier: dict[int, list[dict[str, Any]]] = {}
+    for item in rows:
+        try:
+            tier = int(item.get("tier") or 1)
+        except Exception:
+            tier = 1
+        by_tier.setdefault(tier, []).append(item)
+    if len(by_tier) <= 1:
+        return rows[:want]
+    selected: list[dict[str, Any]] = []
+    tier_order = sorted(by_tier)
+    offsets = {tier: 0 for tier in tier_order}
+    while len(selected) < want:
+        progressed = False
+        for tier in tier_order:
+            offset = offsets[tier]
+            bucket = by_tier[tier]
+            if offset >= len(bucket):
+                continue
+            selected.append(bucket[offset])
+            offsets[tier] = offset + 1
+            progressed = True
+            if len(selected) >= want:
+                break
+        if not progressed:
+            break
+    return selected
+
+
 def prepare_for_uri(uri: str, args: argparse.Namespace) -> list[PreparedSubmit]:
     session = requests.Session()
     challenge_base = (args.challenge_base or args.base).rstrip("/")
@@ -127,7 +164,11 @@ def prepare_for_uri(uri: str, args: argparse.Namespace) -> list[PreparedSubmit]:
         raise RuntimeError(f"{uri}: challenges status {r.status_code}: {str(payload)[:500]}")
     if payload.get("submit_path") != "/v2/agents/submit-bitset":
         raise RuntimeError(f"{uri}: bitset submit disabled: {payload.get('submit_path')}")
-    items = list(payload.get("items") or [])[: max(1, int(args.per_miner_limit))]
+    items = select_items(
+        list(payload.get("items") or []),
+        limit=max(1, int(args.per_miner_limit)),
+        mode=str(args.challenge_selection),
+    )
     if not items:
         raise RuntimeError(f"{uri}: no challenge items")
 
@@ -264,6 +305,12 @@ def main() -> int:
     parser.add_argument("--uri-prefix", default="//CapacityProbe")
     parser.add_argument("--miners", type=int, default=4)
     parser.add_argument("--per-miner-limit", type=int, default=4)
+    parser.add_argument(
+        "--challenge-selection",
+        choices=("mixed", "first"),
+        default="mixed",
+        help="Choose per-miner challenges as a tier-balanced mix or first page entries",
+    )
     parser.add_argument("--prepare-concurrency", type=int, default=4)
     parser.add_argument("--submit-concurrency", type=int, default=8)
     parser.add_argument("--solver", default="cadical153")
@@ -271,6 +318,12 @@ def main() -> int:
     parser.add_argument("--poll-interval-secs", type=float, default=0.5)
     parser.add_argument("--max-drain-secs", type=float, default=20.0)
     parser.add_argument("--max-admit-p95-ms", type=float, default=1000.0)
+    parser.add_argument(
+        "--min-drain-rate-per-sec",
+        type=float,
+        default=0.0,
+        help="Fail unless verified receipts / drain_secs_after_submit reaches this rate",
+    )
     parser.add_argument(
         "--metrics-settle-secs",
         type=float,
@@ -292,7 +345,7 @@ def main() -> int:
         "capacity_probe "
         f"challenge_base={challenge_base} submit_base={submit_base} "
         f"metrics_base={metrics_base} miners={len(uris)} per_miner_limit={args.per_miner_limit} "
-        f"expected_submits={expected}"
+        f"expected_submits={expected} challenge_selection={args.challenge_selection}"
     )
 
     if submit_base != challenge_base:
@@ -332,9 +385,11 @@ def main() -> int:
         return 1
 
     solve_secs = [p.solve_secs for p in prepared]
+    tier_counts = dict(sorted(Counter(int(p.tier) for p in prepared).items()))
     print(
         "prepared_summary "
         f"count={len(prepared)} prep_secs={prep_secs:.3f} "
+        f"tier_counts={tier_counts} "
         f"solve_p50={statistics.median(solve_secs):.3f}s "
         f"solve_p95={_percentile(solve_secs, 0.95):.3f}s"
     )
@@ -381,6 +436,8 @@ def main() -> int:
     )
     if after:
         max_pending = max(max_pending, int(after.get("pending_count") or 0))
+    drain_secs_after_submit = max(0.001, drained_at - submit_finished)
+    verified_rate_per_sec = len(verified) / drain_secs_after_submit
 
     summary = {
         "schema": "cathedral.v2.bitset_capacity_probe.v1",
@@ -390,6 +447,8 @@ def main() -> int:
         "metrics_base": metrics_base,
         "miners": len(uris),
         "per_miner_limit": int(args.per_miner_limit),
+        "challenge_selection": str(args.challenge_selection),
+        "tier_counts": tier_counts,
         "submitted": len(receipts),
         "terminal": terminal,
         "verified": len(verified),
@@ -397,6 +456,7 @@ def main() -> int:
         "submit_window_secs": round(submit_finished - submit_started, 3),
         "drain_secs_after_submit": round(drained_at - submit_finished, 3),
         "total_submit_to_drain_secs": round(drained_at - submit_started, 3),
+        "verified_rate_per_sec": round(verified_rate_per_sec, 3),
         "admit_ms_p50": round(statistics.median(admit_values), 1) if admit_values else 0,
         "admit_ms_p95": round(_percentile(admit_values, 0.95), 1),
         "admit_ms_max": round(max(admit_values), 1) if admit_values else 0,
@@ -423,6 +483,10 @@ def main() -> int:
         failures.append(f"rejected={len(rejected)} > {args.max_rejected}")
     if summary["admit_ms_p95"] > float(args.max_admit_p95_ms):
         failures.append(f"admit_p95_ms={summary['admit_ms_p95']} > {args.max_admit_p95_ms}")
+    if verified_rate_per_sec < float(args.min_drain_rate_per_sec):
+        failures.append(
+            f"verified_rate_per_sec={verified_rate_per_sec:.3f} < {args.min_drain_rate_per_sec}"
+        )
     if after and int(after.get("pending_count") or 0) != 0:
         failures.append(f"pending_after={after.get('pending_count')}")
     if after and after.get("lock_held_by_self") is not True:
