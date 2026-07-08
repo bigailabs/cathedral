@@ -1,9 +1,15 @@
 # Cathedral publisher: core env surface
 
 Goal: one coherent launch profile instead of per-feature toggle sprawl. A
-deployment sets the **profile**, the **role**, the **stores/secrets**, the
-small **runtime guardrail** set, and the **mechanism calibration** below — and
-nothing else.
+deployment should have a small set of env vars that an operator can reason about
+under pressure:
+
+- **Required launch core:** profile, role, stores/secrets, payout policy, and the
+  few runtime caps that can starve reads, submits, verification, or weights.
+- **Launch-core optional:** meaningful sizing/policy knobs that are allowed only
+  when intentionally set.
+- **Supporting optional:** caches, snapshots, old submit-path backpressure, and
+  local plumbing. These can help a host, but they are not the relaunch mechanism.
 
 Executable audit:
 
@@ -11,8 +17,9 @@ Executable audit:
 python3 deploy/check_env_surface.py --env-file /path/to/cathedral.env
 ```
 
-Everything outside this document is either internal (tests/surgical rollout),
-deprecated, or a candidate for deletion in the post-relaunch env cleanup.
+The audit prints those groups separately. Everything outside this document is
+either internal (tests/surgical rollout), deprecated, or a candidate for
+deletion in the post-relaunch env cleanup.
 
 ## 1. Profile (what mechanism runs)
 
@@ -57,7 +64,7 @@ Fail-closed at boot (RuntimeError, never a warning):
 | `CATHEDRAL_PG_STATEMENT_TIMEOUT_MS` | `4000` | Mandatory on read-serving roles. Prevents slow board/leaderboard scans from pinning Postgres connections and starving weights/miners. |
 | `CATHEDRAL_PM_READ_HARD_CAP` | start `4` on small origins | Bounds concurrent per-miner read work. Raise only with live evidence. |
 | `CATHEDRAL_V2_READ_THREADS` | start `4` | Dedicated V2 read executor. Keep close to the read cap until the origin has headroom. |
-| `CATHEDRAL_V2_SUBMIT_BITSET_THREADS` | start `4` | Dedicated bitset submit executor so submit verification cannot starve reads/health. |
+| `CATHEDRAL_V2_SUBMIT_BITSET_THREADS` | `4` | Dedicated bitset submit executor so submit verification cannot starve reads/health. Set explicitly; the app default is higher than launch posture. |
 | `CATHEDRAL_V2_VERIFY_BATCH_SIZE` | `8` | Async verifier batch size. |
 | `CATHEDRAL_V2_VERIFY_INTERVAL_SECS` | `1` | Async verifier loop interval. |
 | `CATHEDRAL_V2_VERIFY_LOCK_SECS` | `120` | Verifier claim lock TTL. |
@@ -70,10 +77,14 @@ Fail-closed at boot (RuntimeError, never a warning):
 
 The relaunch preflight intentionally enforces the current small-origin launch
 posture over SSH: positive read admission, `CATHEDRAL_PM_READ_HARD_CAP <= 8`,
-`CATHEDRAL_V2_READ_THREADS <= 4`, `CATHEDRAL_PG_STATEMENT_TIMEOUT_MS <= 4000`,
-and the temporary `CATHEDRAL_WEIGHTS_WINDOW_HOURS >= 48` bridge while the gate
-is held closed. Raise those ceilings only with fresh latency and coverage
-evidence, not by copying old Railway defaults.
+`CATHEDRAL_V2_READ_THREADS <= 4`,
+`CATHEDRAL_V2_SUBMIT_BITSET_THREADS <= 4`,
+`CATHEDRAL_V2_VERIFY_BATCH_SIZE <= 8`,
+`CATHEDRAL_V2_BITSET_VERIFY_THREADS <= 1`,
+`CATHEDRAL_PG_STATEMENT_TIMEOUT_MS <= 4000`, and the temporary
+`CATHEDRAL_WEIGHTS_WINDOW_HOURS >= 48` bridge while the gate is held closed.
+Raise those ceilings only with fresh latency and coverage evidence, not by
+copying old Railway defaults.
 
 The same preflight runs `retention_tick(..., dry=True)` against the live store.
 That check proves the bounded hot-state pruning path is executable and would
@@ -126,8 +137,9 @@ export CATHEDRAL_V2_SUBMIT_BITSET_THREADS=4
 export CATHEDRAL_V2_VERIFY_BATCH_SIZE=8
 export CATHEDRAL_V2_VERIFY_INTERVAL_SECS=1
 export CATHEDRAL_V2_VERIFY_LOCK_SECS=120
-# Optional temporary launch bridge if relaunch slips close to the PM coverage cliff:
-# export CATHEDRAL_WEIGHTS_WINDOW_HOURS=48
+export CATHEDRAL_PERMINER_SCORING_MODE=pm_primary
+export CATHEDRAL_WEIGHTS_MODE=proportional
+export CATHEDRAL_WEIGHTS_WINDOW_HOURS=48
 # never set CATHEDRAL_PERMINER_ENABLED (V1 surface stays off)
 
 # public origin (:8080): CATHEDRAL_SERVICE_ROLE=all, CATHEDRAL_V2_VERIFY_WORKER_ENABLED=0

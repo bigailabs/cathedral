@@ -25,15 +25,18 @@ CORE_REQUIRED = {
     "CATHEDRAL_PERMINER_SEED_SECRET": "stable deterministic per-miner instance seed",
     "CATHEDRAL_CNF_TOKEN_SECRET": "legacy V1 CNF token secret until origin V1 removal",
     "CATHEDRAL_PG_STATEMENT_TIMEOUT_MS": "read-serving query guardrail; use 4000 on public origins",
+    "CATHEDRAL_PM_READ_HARD_CAP": "bounded per-miner read admission; use <=8 for relaunch",
+    "CATHEDRAL_V2_READ_THREADS": "dedicated V2 read executor; use <=4 for relaunch",
+    "CATHEDRAL_V2_SUBMIT_BITSET_THREADS": "dedicated V2 submit executor; use <=4 for relaunch",
+    "CATHEDRAL_V2_VERIFY_BATCH_SIZE": "async verifier batch size; use <=8 for relaunch",
+    "CATHEDRAL_PERMINER_SCORING_MODE": "must be pm_primary for converged relaunch payout",
+    "CATHEDRAL_WEIGHTS_MODE": "must be proportional for converged relaunch payout",
+    "CATHEDRAL_WEIGHTS_WINDOW_HOURS": "temporary fairness bridge; use >=48 until relaunch refill",
     "CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE": "identity alignment / sybil hardening",
 }
 
-CORE_OPTIONAL = {
-    # Runtime guardrails that actually move launch safety.
-    "CATHEDRAL_PM_READ_HARD_CAP",
-    "CATHEDRAL_V2_READ_THREADS",
-    "CATHEDRAL_V2_SUBMIT_BITSET_THREADS",
-    "CATHEDRAL_V2_VERIFY_BATCH_SIZE",
+LAUNCH_CORE_OPTIONAL = {
+    # Runtime guardrails that are meaningful but can ride defaults on small origins.
     "CATHEDRAL_V2_VERIFY_INTERVAL_SECS",
     "CATHEDRAL_V2_VERIFY_LOCK_SECS",
     "CATHEDRAL_V2_VERIFY_MAX_BLOB_BYTES",
@@ -49,24 +52,6 @@ CORE_OPTIONAL = {
     "CATHEDRAL_PER_HOTKEY_BURST",
     "CATHEDRAL_PER_HOTKEY_REFILL_PER_SEC",
     "CATHEDRAL_PER_HOTKEY_RETRY_AFTER_SECS",
-    "CATHEDRAL_SUBMIT_BUSY_WAIT_SECS",
-    "CATHEDRAL_SUBMIT_HARD_CAP",
-    "CATHEDRAL_SUBMIT_MAX_CONCURRENCY",
-    "CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED",
-    "CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_RETRY_AFTER_SECS",
-    "CATHEDRAL_SUBMIT_QUEUE_MAX_PENDING",
-    "CATHEDRAL_SUBMIT_QUEUE_MAX_WORKER_LAG_SECS",
-    "CATHEDRAL_BOARD_TTL_SECS",
-    "CATHEDRAL_RECENT_CACHE_TTL_SECS",
-    "CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED",
-    "CATHEDRAL_MATERIALIZED_SNAPSHOT_REFRESH_SECS",
-    "CATHEDRAL_MATERIALIZED_SNAPSHOT_MAX_AGE",
-    "CATHEDRAL_MATERIALIZED_SNAPSHOT_MAX_STALE_SECS",
-    "CATHEDRAL_MATERIALIZED_SNAPSHOT_SWR_SECS",
-    "CATHEDRAL_DASHBOARD_SNAPSHOT_ENABLED",
-    "CATHEDRAL_DASHBOARD_SNAPSHOT_REFRESH_SECS",
-    "CATHEDRAL_DASHBOARD_SNAPSHOT_MAX_STALE_SECS",
-    "CATHEDRAL_SLOW_REQUEST_LOG_SECS",
     # Mechanism calibration. Leave default unless intentionally changing SAT economics.
     "CATHEDRAL_PERMINER_EPOCH_BUCKET_HOURS",
     "CATHEDRAL_PERMINER_ALLOTMENT_T1",
@@ -80,9 +65,6 @@ CORE_OPTIONAL = {
     "CATHEDRAL_PERMINER_WEIGHT_T1",
     "CATHEDRAL_PERMINER_WEIGHT_T2",
     "CATHEDRAL_PERMINER_MAX_PAGE_LIMIT",
-    "CATHEDRAL_PERMINER_SCORING_MODE",
-    "CATHEDRAL_WEIGHTS_MODE",
-    "CATHEDRAL_WEIGHTS_WINDOW_HOURS",
     "CATHEDRAL_WEIGHTS_TIER2_MULT",
     "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2",
     "CATHEDRAL_V2_REAL_FRACTION",
@@ -96,9 +78,42 @@ CORE_OPTIONAL = {
     "CATHEDRAL_PUBLIC_BASE_URL",
     "CATHEDRAL_PUBLISHER_ADMIN_TOKEN",
     "CATHEDRAL_V2_ADMIN_TOKEN",
+}
+
+SUPPORTING_OPTIONAL = {
+    # Legacy submit-path backpressure. Keep only while legacy submit surfaces remain served.
+    "CATHEDRAL_SUBMIT_BUSY_WAIT_SECS",
+    "CATHEDRAL_SUBMIT_HARD_CAP",
+    "CATHEDRAL_SUBMIT_MAX_CONCURRENCY",
+    "CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_ENABLED",
+    "CATHEDRAL_SUBMIT_QUEUE_BACKPRESSURE_RETRY_AFTER_SECS",
+    "CATHEDRAL_SUBMIT_QUEUE_MAX_PENDING",
+    "CATHEDRAL_SUBMIT_QUEUE_MAX_WORKER_LAG_SECS",
+    # Read-side caches/snapshots. Useful for host pressure, but not launch mechanism.
+    "CATHEDRAL_BOARD_TTL_SECS",
+    "CATHEDRAL_RECENT_CACHE_TTL_SECS",
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_ENABLED",
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_REFRESH_SECS",
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_MAX_AGE",
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_MAX_STALE_SECS",
+    "CATHEDRAL_MATERIALIZED_SNAPSHOT_SWR_SECS",
+    "CATHEDRAL_DASHBOARD_SNAPSHOT_ENABLED",
+    "CATHEDRAL_DASHBOARD_SNAPSHOT_REFRESH_SECS",
+    "CATHEDRAL_DASHBOARD_SNAPSHOT_MAX_STALE_SECS",
+    "CATHEDRAL_SLOW_REQUEST_LOG_SECS",
     # Local/container plumbing.
     "CATHEDRAL_DB_PATH",
     "PORT",
+}
+
+CORE_OPTIONAL = LAUNCH_CORE_OPTIONAL | SUPPORTING_OPTIONAL
+
+LAUNCH_INT_CEILINGS = {
+    "CATHEDRAL_PM_READ_HARD_CAP": (1, 8),
+    "CATHEDRAL_V2_READ_THREADS": (1, 4),
+    "CATHEDRAL_V2_SUBMIT_BITSET_THREADS": (1, 4),
+    "CATHEDRAL_V2_VERIFY_BATCH_SIZE": (1, 8),
+    "CATHEDRAL_PG_STATEMENT_TIMEOUT_MS": (1, 4000),
 }
 
 PROFILE_IMPLIED_FLAGS = {
@@ -167,6 +182,10 @@ SECRET_HINTS = (
     "SECRET",
     "TOKEN",
 )
+NON_SECRET_EXACT = {
+    "CATHEDRAL_THREADPOOL_TOKENS",
+    "CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS",
+}
 
 
 def _is_present(value: str | None) -> bool:
@@ -184,10 +203,20 @@ def _is_falsy(value: str | None) -> bool:
 def _redact(name: str, value: str | None) -> str:
     if value is None:
         return "<unset>"
-    if any(hint in name for hint in SECRET_HINTS):
+    if name not in NON_SECRET_EXACT and any(hint in name for hint in SECRET_HINTS):
         return "<set>" if _is_present(value) else "<missing>"
     shown = value.strip()
     return shown if len(shown) <= 80 else shown[:77] + "..."
+
+
+def _int_value(name: str, value: str | None, errors: list[str]) -> int | None:
+    if not _is_present(value):
+        return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        errors.append(f"{name} must be an integer")
+        return None
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -241,15 +270,31 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
     if db and not db.startswith(("postgres://", "postgresql://")):
         errors.append("DATABASE_URL must be a postgres:// or postgresql:// DSN")
 
-    timeout_raw = env.get("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS")
-    if role in {"all", "read"} and _is_present(timeout_raw):
+    for name, (minimum, maximum) in sorted(LAUNCH_INT_CEILINGS.items()):
+        value = _int_value(name, env.get(name), errors)
+        if value is None:
+            continue
+        if not minimum <= value <= maximum:
+            errors.append(f"{name} must be between {minimum} and {maximum} for relaunch")
+
+    if _is_present(env.get("CATHEDRAL_WEIGHTS_WINDOW_HOURS")):
         try:
-            timeout_ms = int(str(timeout_raw).strip())
+            window_hours = float(str(env["CATHEDRAL_WEIGHTS_WINDOW_HOURS"]).strip())
         except ValueError:
-            errors.append("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS must be a positive integer")
+            errors.append("CATHEDRAL_WEIGHTS_WINDOW_HOURS must be numeric")
         else:
-            if timeout_ms <= 0:
-                errors.append("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS must be > 0 on read-serving roles")
+            if window_hours < 48:
+                errors.append("CATHEDRAL_WEIGHTS_WINDOW_HOURS must be >= 48 for the relaunch bridge")
+
+    if _is_present(env.get("CATHEDRAL_PERMINER_SCORING_MODE")):
+        mode = env["CATHEDRAL_PERMINER_SCORING_MODE"].strip().lower()
+        if mode != "pm_primary":
+            errors.append("CATHEDRAL_PERMINER_SCORING_MODE must be pm_primary for relaunch")
+
+    if _is_present(env.get("CATHEDRAL_WEIGHTS_MODE")):
+        weights_mode = env["CATHEDRAL_WEIGHTS_MODE"].strip().lower()
+        if weights_mode != "proportional":
+            errors.append("CATHEDRAL_WEIGHTS_MODE must be proportional for relaunch")
 
     if _is_present(env.get("CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE")):
         if not _is_truthy(env.get("CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE")):
@@ -339,11 +384,18 @@ def main(argv: list[str] | None = None) -> int:
         status = "ok" if _is_present(interesting.get(name)) else "missing"
         print(f"  {status:7} {name:44} {_redact(name, interesting.get(name))}")
 
-    optional_set = sorted(name for name in CORE_OPTIONAL if name in interesting)
-    if optional_set:
+    launch_optional_set = sorted(name for name in LAUNCH_CORE_OPTIONAL if name in interesting)
+    if launch_optional_set:
         print()
-        print("Core optional set")
-        for name in optional_set:
+        print("Launch core optional set")
+        for name in launch_optional_set:
+            print(f"  ok      {name:44} {_redact(name, interesting.get(name))}")
+
+    supporting_set = sorted(name for name in SUPPORTING_OPTIONAL if name in interesting)
+    if supporting_set:
+        print()
+        print("Supporting optional set")
+        for name in supporting_set:
             print(f"  ok      {name:44} {_redact(name, interesting.get(name))}")
 
     if warnings:
