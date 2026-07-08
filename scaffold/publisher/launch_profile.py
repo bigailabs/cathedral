@@ -37,7 +37,7 @@ def converged() -> bool:
     return profile() == V2_CONVERGED
 
 
-def validate_env() -> list[str]:
+def validate_env(*, signing_key_hex_provided: bool = False) -> list[str]:
     """Return fatal misconfiguration errors for the active profile."""
     errors: list[str] = []
     p = profile()
@@ -64,6 +64,12 @@ def validate_env() -> list[str]:
     if not os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip():
         errors.append(
             f"{PROFILE_ENV}={V2_CONVERGED} requires CATHEDRAL_V2_SUBMIT_TOKEN_SECRET")
+    if (not signing_key_hex_provided
+            and not os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY", "").strip()):
+        errors.append(
+            f"{PROFILE_ENV}={V2_CONVERGED} requires CATHEDRAL_EVAL_SIGNING_KEY; "
+            "do not launch with a generated dev key because validators pin the "
+            "weight-signing identity")
     if not (os.environ.get("CATHEDRAL_V2_PERMINER_SEED_SECRET", "").strip()
             or os.environ.get("CATHEDRAL_PERMINER_SEED_SECRET", "").strip()):
         errors.append(

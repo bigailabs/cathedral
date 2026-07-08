@@ -452,12 +452,13 @@ def get_receipt(store, receipt_id: str) -> dict[str, Any] | None:
 
 def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dict[str, Any]:
     status = str(row.get("status") or STATUS_VERIFIED)
+    terminal = status in {STATUS_VERIFIED, "rejected"}
     payload = {
         "schema": "cathedral.v2.submit_bitset_receipt.v1",
         "shadow": True,
         "status": status,
-        "open": False,
-        "terminal": True,
+        "open": not terminal,
+        "terminal": terminal,
         "receipt_id": str(row["id"]),
         "receipt_url": f"/v2/agents/submit-bitset/receipts/{row['id']}",
         "miner_hotkey": str(row["miner_hotkey"]),
@@ -472,9 +473,10 @@ def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dic
         "eligibility_status": str(row.get("eligibility_status") or "unknown_beta"),
         "submitted_at": str(row["submitted_at"]),
         "received_at": str(row["received_at_iso"]),
-        "verified_at": str(row.get("verified_at_iso") or row["received_at_iso"]),
         "weighted_score": float(row.get("weighted_score") or 0.0),
     }
+    if row.get("verified_at_iso"):
+        payload["verified_at"] = str(row["verified_at_iso"])
     if row.get("answer_hash"):
         payload["answer_hash"] = str(row["answer_hash"])
     if row.get("rejection_reason"):

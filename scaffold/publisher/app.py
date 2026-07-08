@@ -403,7 +403,8 @@ def build_app(
     submit_min_interval_secs: int | None = None,
 ) -> FastAPI:
     from . import launch_profile
-    _profile_errors = launch_profile.validate_env()
+    _profile_errors = launch_profile.validate_env(
+        signing_key_hex_provided=signing_key_hex is not None)
     if _profile_errors:
         raise RuntimeError(
             "launch profile misconfiguration (fail-closed): "

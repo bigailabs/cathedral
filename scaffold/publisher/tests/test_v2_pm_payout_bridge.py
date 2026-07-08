@@ -453,6 +453,17 @@ def test_launch_profile_contradiction_fails_closed(tmp_path, monkeypatch):
                   signing_key_hex=SIGNING_KEY_HEX)
 
 
+def test_launch_profile_requires_pinned_eval_signing_key_for_env_boot(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-secret")
+    monkeypatch.setenv("CATHEDRAL_V2_PERMINER_SEED_SECRET", "profile-test-seed")
+    monkeypatch.delenv("CATHEDRAL_EVAL_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("CATHEDRAL_V2_DB_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="CATHEDRAL_EVAL_SIGNING_KEY"):
+        build_app(database_path=str(tmp_path / "pub.sqlite"))
+
+
 def test_lazy_issuance_mints_at_cnf_fetch_and_bridges(tmp_path, monkeypatch):
     app, v2_store = _build(tmp_path, monkeypatch, bridge=True, lazy=True)
     client = TestClient(app)

@@ -439,6 +439,8 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     received = first.json()
     assert received["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
     assert received["status"] == "received"
+    assert received["open"] is True
+    assert received["terminal"] is False
     v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
     results = v2_pipeline.process_bitset_batch(v2_store, batch_size=1)
     assert results[0]["status"] == "verified"
@@ -449,6 +451,8 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     assert receipt["receipt_id"] == received["receipt_id"]
     assert receipt["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
     assert receipt["status"] == "verified"
+    assert receipt["open"] is False
+    assert receipt["terminal"] is True
     assert receipt["weighted_score"] == item["difficulty_weight"]
     assert second.json()["receipt_id"] == received["receipt_id"]
     assert second.json()["idempotent_replay"] is True
