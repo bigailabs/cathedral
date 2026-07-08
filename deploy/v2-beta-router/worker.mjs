@@ -63,6 +63,33 @@ function isV2GateOpen(env) {
   return String(env?.V2_GATE_MODE || "").trim().toLowerCase() === V2_GATE_OPEN;
 }
 
+// Percentage ramp: while the gate is staged, V2_OPEN_PERCENT (0-100) admits a
+// stable, hotkey-hashed slice of miners. 0/unset keeps pure staged behaviour;
+// 100 admits everyone (same as open-v2). A hotkey's bucket never changes, so
+// raising the percent only ever ADDS miners - nobody flaps in and out.
+function openPercent(env) {
+  const n = Number(String(env?.V2_OPEN_PERCENT ?? "").trim());
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(100, Math.max(0, Math.floor(n)));
+}
+
+function hotkeyBucket(hotkey) {
+  // FNV-1a 32-bit over the hotkey string -> stable bucket 0-99.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < hotkey.length; i++) {
+    h ^= hotkey.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % 100;
+}
+
+function admittedByRamp(hotkey, env) {
+  const percent = openPercent(env);
+  if (percent <= 0) return false;
+  if (percent >= 100) return true;
+  return hotkeyBucket(hotkey) < percent;
+}
+
 function stagedReopenResponse() {
   return new Response(JSON.stringify({
     detail: "v2_beta_staged_reopen",
@@ -148,7 +175,7 @@ export default {
     }
     if (isV2MinerPath(incomingUrl, request.method) && !isV2GateOpen(env)) {
       const hotkey = (request.headers.get("x-cathedral-hotkey") || "").trim();
-      if (!CANARY_HOTKEYS.has(hotkey)) {
+      if (!CANARY_HOTKEYS.has(hotkey) && !admittedByRamp(hotkey, env)) {
         return stagedReopenResponse();
       }
     }

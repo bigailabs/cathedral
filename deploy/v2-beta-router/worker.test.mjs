@@ -130,4 +130,72 @@ resetOriginCalls();
   assert.equal(originCalls.length, 1);
 }
 
+// ---- Percentage ramp (V2_OPEN_PERCENT while staged) ----
+// FNV-1a buckets: NON_CANARY_HOTKEY=81, LOW_BUCKET_HOTKEY=46.
+const LOW_BUCKET_HOTKEY = "5LowBucketTestHotkeyAAAAAAAAAAAAAAAAAAAAAAAA";
+
+resetOriginCalls();
+{
+  // percent unset -> pure staged, non-canary rejected
+  const response = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST" }),
+    {}
+  );
+  assert.equal(response.status, 429);
+  assert.equal(originCalls.length, 0);
+}
+
+resetOriginCalls();
+{
+  // percent=50 admits bucket 46, rejects bucket 81 - stable slice
+  const admitted = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: LOW_BUCKET_HOTKEY }),
+    { V2_OPEN_PERCENT: "50" }
+  );
+  assert.equal(admitted.status, 200);
+  assert.equal(originCalls.length, 1);
+  const rejected = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST" }),
+    { V2_OPEN_PERCENT: "50" }
+  );
+  assert.equal(rejected.status, 429);
+  assert.equal((await json(rejected)).reason, "v2_beta_staged_reopen");
+  assert.equal(originCalls.length, 1);
+}
+
+resetOriginCalls();
+{
+  // percent=100 admits everyone even while staged
+  const response = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST" }),
+    { V2_OPEN_PERCENT: "100" }
+  );
+  assert.equal(response.status, 200);
+  assert.equal(originCalls.length, 1);
+}
+
+resetOriginCalls();
+{
+  // garbage/zero/negative percent -> staged
+  for (const percent of ["", "abc", "0", "-5"]) {
+    const response = await worker.fetch(
+      minerRequest("/v2/agents/submit-bitset", { method: "POST" }),
+      { V2_OPEN_PERCENT: percent }
+    );
+    assert.equal(response.status, 429);
+  }
+  assert.equal(originCalls.length, 0);
+}
+
+resetOriginCalls();
+{
+  // canary still admitted at percent=0
+  const response = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: DOGFOOD_HOTKEY }),
+    { V2_OPEN_PERCENT: "0" }
+  );
+  assert.equal(response.status, 200);
+  assert.equal(originCalls.length, 1);
+}
+
 console.log("v2-beta-router staged/open gate tests passed");
