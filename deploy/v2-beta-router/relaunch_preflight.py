@@ -412,6 +412,161 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
 
     remote_dir = shlex.quote(args.ssh_cathedral_dir)
     remote_env = shlex.quote(args.ssh_env_file)
+    remote_vector_continuity = (
+        f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
+        f"CATHEDRAL_PREFLIGHT_MIN_POLICY_VERSION={int(args.min_policy_version)} "
+        """.venv/bin/python - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+from urllib.request import urlopen
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from scaffold import wire_vector as wire
+from scaffold.publisher import weights as weights_mod
+from scaffold.publisher.store import Store
+
+
+def ms_iso_now() -> str:
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
+state_rows = store.query(
+    "SELECT last_policy_version FROM weight_policy_state WHERE id = 1"
+)
+vector_rows = store.query(
+    "SELECT generated_at_iso, policy_version, vector_json, updated_at_iso "
+    "FROM signed_weight_vectors WHERE id = ?",
+    ("latest",),
+)
+with urlopen("http://127.0.0.1:8000/v1/validator/weights/next", timeout=20) as resp:
+    endpoint_vector = json.loads(resp.read().decode("utf-8"))
+
+signing_key_hex = (
+    os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip()
+    or os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY", "").strip()
+)
+key_id = os.environ.get(weights_mod.KEY_ID_ENV, "cathedral-weight-policy")
+network = os.environ.get(weights_mod.NETWORK_ENV, "finney")
+netuid = int(os.environ.get(weights_mod.NETUID_ENV, "39") or "39")
+min_policy_version = int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_POLICY_VERSION", "1700000000000") or "1700000000000")
+checks = {
+    "state_row_present": bool(state_rows),
+    "latest_vector_present": bool(vector_rows),
+    "signing_key_present": bool(signing_key_hex),
+}
+errors = []
+public_key_hex = None
+persisted_vector = None
+state_version = None
+persisted_version = None
+endpoint_version = int(endpoint_vector.get("policy_version") or 0)
+
+try:
+    sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
+    public_key_hex = sk.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    ).hex()
+except Exception as exc:
+    checks["signing_key_derives_public_key"] = False
+    errors.append(f"signing_key_derives_public_key: {type(exc).__name__}: {exc}")
+else:
+    checks["signing_key_derives_public_key"] = True
+
+if state_rows:
+    state_version = int(state_rows[0]["last_policy_version"] or 0)
+if vector_rows:
+    persisted_version = int(vector_rows[0]["policy_version"] or 0)
+    persisted_vector = json.loads(vector_rows[0]["vector_json"])
+
+checks["state_latest_match"] = (
+    bool(state_version)
+    and bool(persisted_version)
+    and state_version == persisted_version
+    and persisted_vector is not None
+    and int(persisted_vector.get("policy_version") or 0) == persisted_version
+)
+checks["policy_version_epoch_ms_floor"] = (
+    bool(state_version)
+    and bool(persisted_version)
+    and bool(endpoint_version)
+    and min(state_version, persisted_version, endpoint_version) >= min_policy_version
+)
+if public_key_hex:
+    for label, vector in (("persisted", persisted_vector), ("endpoint", endpoint_vector)):
+        try:
+            if not isinstance(vector, dict):
+                raise wire.VectorError("missing vector")
+            wire.verify_signature(
+                vector,
+                public_key_hex=public_key_hex,
+                expected_key_id=key_id,
+            )
+            wire.invariant_check(
+                vector,
+                network=network,
+                netuid=netuid,
+                now_iso=ms_iso_now(),
+            )
+        except Exception as exc:
+            checks[f"{label}_signature_and_invariants"] = False
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
+        else:
+            checks[f"{label}_signature_and_invariants"] = True
+
+payload = {
+    "ok": all(checks.values()),
+    "checks": checks,
+    "errors": errors,
+    "key_id": key_id,
+    "network": network,
+    "netuid": netuid,
+    "state_version": state_version,
+    "persisted_version": persisted_version,
+    "endpoint_version": endpoint_version,
+    "min_policy_version": min_policy_version,
+}
+print(json.dumps(payload, sort_keys=True))
+raise SystemExit(0 if payload["ok"] else 1)
+PY"""
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_vector_continuity],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    try:
+        payload = json.loads(proc.stdout.splitlines()[-1])
+    except Exception as exc:
+        pf.fail(
+            "remote vector continuity",
+            f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
+        )
+    else:
+        detail = (
+            f"state={payload.get('state_version')} "
+            f"persisted={payload.get('persisted_version')} "
+            f"endpoint={payload.get('endpoint_version')} "
+            f"key_id={payload.get('key_id')}"
+        )
+        if proc.returncode == 0 and payload.get("ok") is True:
+            pf.pass_("remote vector continuity", detail)
+        else:
+            failed = [
+                name for name, ok in (payload.get("checks") or {}).items() if not ok
+            ]
+            pf.fail(
+                "remote vector continuity",
+                f"{detail}; failed={failed}; errors={payload.get('errors')}",
+            )
+
     remote_guardrails = (
         f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
         f"CATHEDRAL_PREFLIGHT_MAX_PM_READ_HARD_CAP={int(args.max_pm_read_hard_cap)} "
@@ -960,6 +1115,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-pg-statement-timeout-ms", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PG_STATEMENT_TIMEOUT_MS", "4000") or "4000"))
     ap.add_argument("--min-weights-window-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHTS_WINDOW_HOURS", "48") or "48"))
     ap.add_argument("--retention-batch-size", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_RETENTION_BATCH_SIZE", "25000") or "25000"))
+    ap.add_argument("--min-policy-version", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_POLICY_VERSION", "1700000000000") or "1700000000000"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))

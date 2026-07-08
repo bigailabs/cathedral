@@ -80,6 +80,11 @@ That check proves the bounded hot-state pruning path is executable and would
 retain at least the active scoring window; it does not enable destructive
 retention. Turning retention on is a separate DB-write decision.
 
+It also verifies vector continuity on the private publisher: the persisted
+`signed_weight_vectors.latest` row must match `weight_policy_state`, both the
+persisted and served vectors must verify under the configured Ed25519 key, and
+their policy versions must stay in the epoch-ms range validators expect.
+
 ## 5. Mechanism calibration (meaningful, documented, rarely changed)
 
 | Env | Default | Meaning |
