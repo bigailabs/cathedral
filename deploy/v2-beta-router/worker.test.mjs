@@ -88,9 +88,46 @@ resetOriginCalls();
   const response = await worker.fetch(
     minerRequest("/v1/synthetic-boolean/per-miner/challenges?limit=1")
   );
-  assert.equal(response.status, 429);
-  assert.equal(response.headers.get("x-cathedral-rejection-reason"), "v2_beta_staged_reopen");
+  assert.equal(response.status, 410);
+  assert.equal(response.headers.get("x-cathedral-rejection-reason"), "v1_miner_path_retired");
   assert.equal(originCalls.length, 0);
 }
 
-console.log("v2-beta-router staged gate tests passed");
+resetOriginCalls();
+{
+  const response = await worker.fetch(
+    minerRequest("/v1/synthetic-boolean/per-miner/challenges?limit=1", {
+      hotkey: DOGFOOD_HOTKEY,
+    }),
+    { V2_GATE_MODE: "open-v2" }
+  );
+  assert.equal(response.status, 410);
+  assert.equal(response.headers.get("x-cathedral-rejection-reason"), "v1_miner_path_retired");
+  assert.equal(originCalls.length, 0);
+}
+
+resetOriginCalls();
+{
+  const response = await worker.fetch(
+    minerRequest("/v2/synthetic-boolean/per-miner/challenges?limit=50"),
+    { V2_GATE_MODE: "open-v2" }
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-cathedral-v2-beta-origin"), "polaris-sandbox");
+  assert.equal(originCalls.length, 1);
+  const forwardedUrl = new URL(originCalls[0].url);
+  assert.equal(forwardedUrl.searchParams.get("limit"), "10");
+}
+
+resetOriginCalls();
+{
+  const response = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST" }),
+    { V2_GATE_MODE: "open-v2" }
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-cathedral-v2-beta-origin"), "polaris-sandbox");
+  assert.equal(originCalls.length, 1);
+}
+
+console.log("v2-beta-router staged/open gate tests passed");

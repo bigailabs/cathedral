@@ -73,11 +73,18 @@ Do not paste private keys, seeds, signatures, or submit tokens into Discord.
 Before posting, verify:
 
 ```text
-1. Non-canary V2 no longer returns v2_beta_staged_reopen.
-2. Non-canary V1 miner routes are still blocked or retired.
-3. /v2/verify/metrics shows exactly one verifier worker enabled.
-4. A non-canary E2E submit reaches verified.
-5. per_miner_solves receives exactly one row for that verified receipt.
-6. /v1/validator/weights/next remains fresh.
-7. Logs show no duplicate-ledger storm, stale-epoch rejects, or fail-closed boot errors.
+1. Fred explicitly says go.
+2. Deploy the V2-open edge mode:
+   cd deploy/v2-beta-router
+   CLOUDFLARE_API_TOKEN=... npx wrangler deploy --var V2_GATE_MODE:open-v2
+3. Non-canary V2 no longer returns v2_beta_staged_reopen.
+4. Non-canary V1 miner routes return 410 v1_miner_path_retired.
+5. /v2/verify/metrics shows exactly one verifier worker enabled.
+6. A non-canary E2E submit reaches verified.
+7. per_miner_solves receives exactly one row for that verified receipt.
+8. /v1/validator/weights/next remains fresh.
+9. Logs show no duplicate-ledger storm, stale-epoch rejects, or fail-closed boot errors.
+10. If rollback is needed, redeploy the default staged mode:
+    cd deploy/v2-beta-router
+    CLOUDFLARE_API_TOKEN=... npx wrangler deploy
 ```

@@ -21,30 +21,46 @@ const CANARY_HOTKEYS = new Set([
 ]);
 
 const LEGACY_PREFIX = "/api/cathedral";
+const V2_GATE_OPEN = "open-v2";
 
 function stripLegacyPrefix(pathname) {
   return pathname.startsWith(LEGACY_PREFIX) ? pathname.slice(LEGACY_PREFIX.length) : pathname;
 }
 
-function isGatedMinerPath(url, method) {
-  // Fairness: while reopen is staged, EVERY earning or challenge-serving path is
-  // gated (V1 per-miner pays into the live ledger; V2 is shadow). No side doors.
+function isV2MinerPath(url, method) {
+  // V2 is the only reopen path. It is staged by default and opens to all only
+  // when the deployed worker receives V2_GATE_MODE=open-v2.
   const path = stripLegacyPrefix(url.pathname);
   if (method === "GET") {
     return path === "/v2/synthetic-boolean/per-miner/challenges"
-      || path === "/v2/synthetic-boolean/per-miner/cnf"
-      || path === "/v1/synthetic-boolean/per-miner/challenges"
-      || path === "/v1/synthetic-boolean/per-miner/cnf"
-      || path === "/v1/synthetic-boolean/active-cnf";
+      || path === "/v2/synthetic-boolean/per-miner/cnf";
   }
   if (method === "POST") {
     return path === "/v2/agents/submit-bitset"
       || path === "/v2/agents/submit-manifest"
-      || path === "/v2/blobs/solutions"
-      || path === "/v1/agents/submit"
+      || path === "/v2/blobs/solutions";
+  }
+  return false;
+}
+
+function isRetiredV1Path(url, method) {
+  // V1 miner and violet paths are retired for this relaunch. They never reach
+  // the origin, including canary hotkeys.
+  const path = stripLegacyPrefix(url.pathname);
+  if (method === "GET") {
+    return path === "/v1/synthetic-boolean/per-miner/challenges"
+      || path === "/v1/synthetic-boolean/per-miner/cnf"
+      || path === "/v1/synthetic-boolean/active-cnf";
+  }
+  if (method === "POST") {
+    return path === "/v1/agents/submit"
       || path === "/v1/external-scores/violet";
   }
   return false;
+}
+
+function isV2GateOpen(env) {
+  return String(env?.V2_GATE_MODE || "").trim().toLowerCase() === V2_GATE_OPEN;
 }
 
 function stagedReopenResponse() {
@@ -62,6 +78,23 @@ function stagedReopenResponse() {
       "x-cathedral-rejection-reason": "v2_beta_staged_reopen",
       "x-cathedral-v2-beta-router": "cloudflare-worker",
       "x-cathedral-v2-beta-origin": "edge-staged-reopen",
+    },
+  });
+}
+
+function v1RetiredResponse() {
+  return new Response(JSON.stringify({
+    detail: "v1_miner_path_retired",
+    reason: "v1_miner_path_retired",
+    message: "The V1 miner path is retired for this relaunch. Use V2: fetch challenges, fetch CNF, read X-Cathedral-Submit-Token, then POST /v2/agents/submit-bitset.",
+  }), {
+    status: 410,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "x-cathedral-rejection-reason": "v1_miner_path_retired",
+      "x-cathedral-v2-beta-router": "cloudflare-worker",
+      "x-cathedral-v2-beta-origin": "edge-v1-retired",
     },
   });
 }
@@ -105,12 +138,15 @@ function forwardedHeaders(request) {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
     const incomingUrl = new URL(request.url);
     if (request.method === "GET" && isPerMinerRead(incomingUrl) && missingRequiredMinerHeaders(request)) {
       return edgeValidationResponse();
     }
-    if (isGatedMinerPath(incomingUrl, request.method)) {
+    if (isRetiredV1Path(incomingUrl, request.method)) {
+      return v1RetiredResponse();
+    }
+    if (isV2MinerPath(incomingUrl, request.method) && !isV2GateOpen(env)) {
       const hotkey = (request.headers.get("x-cathedral-hotkey") || "").trim();
       if (!CANARY_HOTKEYS.has(hotkey)) {
         return stagedReopenResponse();
