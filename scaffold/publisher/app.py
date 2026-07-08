@@ -3175,6 +3175,55 @@ def build_app(
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
+    @app.post("/v1/external-scores/cathedral-confidential")
+    async def external_scores_cathedral_confidential(
+        request: Request,
+        authorization: str | None = Header(None),
+        x_cathedral_external_token: str | None = Header(None),
+        x_cathedral_external_signature: str | None = Header(None),
+    ):
+        """Accept Cathedral Confidential score reports for publisher composition."""
+        if not external_scores.ingest_enabled():
+            raise HTTPException(404, "external_scores_ingest_not_enabled")
+        if weights_mod.external_scores_enabled() and not external_scores.token_configured():
+            raise HTTPException(503, "external_scores_token_required_while_blending")
+        body = await request.body()
+        if not external_scores.bearer_authorized(authorization, x_cathedral_external_token):
+            raise HTTPException(401, "invalid_external_scores_token")
+        if not external_scores.verify_hmac(body, x_cathedral_external_signature):
+            raise HTTPException(401, "invalid_external_scores_signature")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            raise HTTPException(400, "invalid_json_report")
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "invalid_report")
+        payload = {
+            **payload,
+            "source": external_scores.CONFIDENTIAL_SOURCE,
+            "mechanism": external_scores.CONFIDENTIAL_SOURCE,
+        }
+        try:
+            report = external_scores.normalize_report(
+                payload,
+                default_source=external_scores.CONFIDENTIAL_SOURCE,
+            )
+            external_scores.validate_confidential_freshness(report)
+        except external_scores.ExternalScoreError as exc:
+            raise HTTPException(400, exc.reason)
+        if report["source"] not in external_scores.ALLOWED_ENDPOINT_SOURCES:
+            raise HTTPException(400, "invalid_source_for_cathedral_confidential_endpoint")
+        try:
+            accepted = external_scores.store_report(store, report)
+        except Exception as exc:
+            print(f"[external_scores] store failed: {exc!r}")
+            raise HTTPException(503, "external_scores_store_failed")
+        return JSONResponse(
+            accepted,
+            status_code=202,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
     # ---- M1b: signed final-scores vector (the v4 scoring interface) -------
     # ONE number per miner + burn, Ed25519-signed, same wire shape deployed
     # validators already verify. All composition (recency window, multi-lane

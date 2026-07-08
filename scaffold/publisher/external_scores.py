@@ -23,16 +23,19 @@ AUTH_TOKEN_ENV = "CATHEDRAL_EXTERNAL_SCORES_TOKEN"
 HMAC_SECRET_ENV = "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET"
 ALLOW_UNAUTH_ENV = "CATHEDRAL_EXTERNAL_SCORES_ALLOW_UNAUTHENTICATED"
 MAX_SCORES_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_SCORES"
+CATHEDRAL_CONFIDENTIAL_MAX_AGE_MS_ENV = "CATHEDRAL_CONFIDENTIAL_SCORE_MAX_AGE_MS"
 
 _DEFAULT_SOURCE = "violet_audio"
+CONFIDENTIAL_SOURCE = "cathedral_confidential"
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_CONFIDENTIAL_DEFAULT_MAX_AGE_MS = 15 * 60 * 1000
+_CONFIDENTIAL_FUTURE_SKEW_MS = 60 * 1000
 
-# Known/allowed `source` labels for POST /v1/external-scores/violet. The route
-# name predates any source beyond Violet's own audio scorer; widen this
+# Known/allowed `source` labels for external score endpoints. The original
+# route name predates any source beyond Violet's own audio scorer; widen this
 # allowlist (not the auth/registration/fraction-cap gates) when a new external
-# mechanism — e.g. Cathedral's own fast-path SAT scoreboard — is wired to post
-# here. Anything not listed is rejected with invalid_source_for_violet_endpoint.
-ALLOWED_ENDPOINT_SOURCES = {"violet_audio", "cathedral_sat_fast"}
+# mechanism is wired to post here. Anything not listed is rejected at the route.
+ALLOWED_ENDPOINT_SOURCES = {"violet_audio", "cathedral_sat_fast", CONFIDENTIAL_SOURCE}
 
 
 class ExternalScoreError(ValueError):
@@ -216,6 +219,34 @@ def normalize_report(payload: Any, *, default_source: str = _DEFAULT_SOURCE) -> 
     normalized["report_sha256"] = digest
     normalized["report_id"] = str(payload.get("report_id") or f"ext-{digest[:32]}")
     return normalized
+
+
+def confidential_max_age_ms() -> int:
+    try:
+        value = int(
+            os.environ.get(CATHEDRAL_CONFIDENTIAL_MAX_AGE_MS_ENV, "")
+            or _CONFIDENTIAL_DEFAULT_MAX_AGE_MS
+        )
+    except (TypeError, ValueError):
+        return _CONFIDENTIAL_DEFAULT_MAX_AGE_MS
+    return value if value > 0 else _CONFIDENTIAL_DEFAULT_MAX_AGE_MS
+
+
+def validate_confidential_freshness(report: dict[str, Any], *, now: datetime | None = None) -> None:
+    generated_at = str(report.get("generated_at") or "").strip()
+    try:
+        signed_at = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except Exception:
+        raise ExternalScoreError("invalid_generated_at")
+    if signed_at.tzinfo is None:
+        signed_at = signed_at.replace(tzinfo=timezone.utc)
+    signed_at = signed_at.astimezone(timezone.utc)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_ms = int((now - signed_at).total_seconds() * 1000)
+    if age_ms < -_CONFIDENTIAL_FUTURE_SKEW_MS:
+        raise ExternalScoreError("confidential_score_timestamp_in_future")
+    if age_ms > confidential_max_age_ms():
+        raise ExternalScoreError("confidential_score_timestamp_too_old")
 
 
 def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
