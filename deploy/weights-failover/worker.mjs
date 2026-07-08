@@ -1,5 +1,6 @@
 const STATIC_WEIGHTS_URL = "https://api.github.com/repos/wallscaler/cathedral-weight-feed/contents/v1/validator/weights/next?ref=main";
-const FALLBACK_WEIGHTS_URL = "https://read.cathedral.computer/v1/validator/weights/next";
+const RAW_STATIC_WEIGHTS_URL = "https://raw.githubusercontent.com/wallscaler/cathedral-weight-feed/main/v1/validator/weights/next";
+const RAILWAY_FALLBACK_WEIGHTS_URL = "https://read.cathedral.computer/v1/validator/weights/next";
 const LEGACY_PREFIX = "/api/cathedral";
 const WEIGHTS_PATH = "/v1/validator/weights/next";
 const FRESH_TTL_SECONDS = 120;
@@ -66,12 +67,25 @@ async function fetchStatic() {
   });
 }
 
-async function fetchFallback() {
-  const response = await fetch(FALLBACK_WEIGHTS_URL, {
+async function fetchRawStatic() {
+  const response = await fetch(RAW_STATIC_WEIGHTS_URL, {
+    headers: { "User-Agent": "cathedral-weights-failover" },
+    cf: { cacheTtl: 60, cacheEverything: true },
+  });
+  if (response.status !== 200) throw new Error(`raw_static_status_${response.status}`);
+  const text = await response.text();
+  validatePayload(text);
+  return jsonResponse(text, 200, "static-github-raw", {
+    "X-Cathedral-Raw-Static-ETag": response.headers.get("etag") || "",
+  });
+}
+
+async function fetchRailwayFallback() {
+  const response = await fetch(RAILWAY_FALLBACK_WEIGHTS_URL, {
     headers: { "User-Agent": "cathedral-weights-failover" },
     cf: { cacheTtl: 30, cacheEverything: true },
   });
-  if (response.status !== 200) throw new Error(`fallback_status_${response.status}`);
+  if (response.status !== 200) throw new Error(`railway_fallback_status_${response.status}`);
   const text = await response.text();
   validatePayload(text);
   return jsonResponse(text, 200, "railway-read-fallback");
@@ -83,10 +97,16 @@ async function refresh(cache, key) {
     response = await fetchStatic();
   } catch (staticError) {
     try {
-      response = await fetchFallback();
+      response = await fetchRawStatic();
       response.headers.set("X-Cathedral-Static-Error", String(staticError && staticError.message || staticError));
-    } catch (fallbackError) {
-      throw new Error(`static_and_fallback_failed:${String(fallbackError && fallbackError.message || fallbackError)}`);
+    } catch (rawStaticError) {
+      try {
+        response = await fetchRailwayFallback();
+        response.headers.set("X-Cathedral-Static-Error", String(staticError && staticError.message || staticError));
+        response.headers.set("X-Cathedral-Raw-Static-Error", String(rawStaticError && rawStaticError.message || rawStaticError));
+      } catch (railwayFallbackError) {
+        throw new Error(`static_raw_and_railway_failed:${String(railwayFallbackError && railwayFallbackError.message || railwayFallbackError)}`);
+      }
     }
   }
   await cache.put(key, response.clone());
