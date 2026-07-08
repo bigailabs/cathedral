@@ -5,9 +5,12 @@ This intentionally drives the real miner wire path:
   challenge page -> CNF fetch/token -> local solve -> concurrent bitset submit
   -> receipt polling -> verify metrics.
 
-Use a direct sandbox origin/tunnel while the public edge gate is staged, e.g.:
-  ssh -N -L 18080:127.0.0.1:8000 polaris@34.71.88.140
-  python scripts/v2_bitset_capacity_probe.py --base http://127.0.0.1:18080
+Use direct sandbox tunnels while the public edge gate is staged, e.g.:
+  ssh -N -L 18080:127.0.0.1:8000 -L 18081:127.0.0.1:8080 polaris@34.71.88.140
+  python scripts/v2_bitset_capacity_probe.py \
+    --challenge-base http://127.0.0.1:18081 \
+    --submit-base http://127.0.0.1:18081 \
+    --metrics-base http://127.0.0.1:18080
 """
 from __future__ import annotations
 
@@ -106,16 +109,16 @@ def fetch_metrics(base: str, *, timeout: float) -> dict[str, Any] | None:
 
 def prepare_for_uri(uri: str, args: argparse.Namespace) -> list[PreparedSubmit]:
     session = requests.Session()
-    base = args.base.rstrip("/")
+    challenge_base = (args.challenge_base or args.base).rstrip("/")
     kp = e2e.Keypair.create_from_uri(uri)
-    r = session.get(base + "/health/live", timeout=args.http_timeout)
+    r = session.get(challenge_base + "/health/live", timeout=args.http_timeout)
     if r.status_code != 200:
         raise RuntimeError(f"{uri}: health status {r.status_code}: {r.text[:300]}")
 
     path = f"/v2/synthetic-boolean/per-miner/challenges?limit={int(args.per_miner_limit)}"
     r, payload = e2e.get_json(
         session,
-        base,
+        challenge_base,
         path,
         headers=e2e.read_headers(kp),
         timeout=args.http_timeout,
@@ -137,7 +140,7 @@ def prepare_for_uri(uri: str, args: argparse.Namespace) -> list[PreparedSubmit]:
         submit_token = str(item.get("submit_token") or "")
         query = urlencode({"challenge_id": challenge_id, "tier": tier, "seq": seq})
         r = session.get(
-            base + "/v2/synthetic-boolean/per-miner/cnf?" + query,
+            challenge_base + "/v2/synthetic-boolean/per-miner/cnf?" + query,
             headers=e2e.read_headers(kp),
             timeout=args.http_timeout,
         )
@@ -186,7 +189,7 @@ def submit_one(base: str, item: PreparedSubmit, *, timeout: float) -> dict[str, 
     session = requests.Session()
     t0 = time.time()
     resp = session.post(
-        base.rstrip() + "/v2/agents/submit-bitset",
+        base.rstrip("/") + "/v2/agents/submit-bitset",
         json=item.body,
         headers=e2e.bitset_headers(item.keypair, item.body),
         timeout=timeout,
@@ -216,13 +219,15 @@ def poll_receipts(
     deadline: float,
     interval_secs: float,
     timeout: float,
+    metrics_base: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     session = requests.Session()
+    metrics_url_base = (metrics_base or base).rstrip("/")
     remaining = {str(r["receipt_id"]): r for r in receipts if r.get("receipt_id")}
     finals: dict[str, dict[str, Any]] = {}
     metric_samples: list[dict[str, Any]] = []
     while remaining and time.time() < deadline:
-        metrics = fetch_metrics(base, timeout=timeout)
+        metrics = fetch_metrics(metrics_url_base, timeout=timeout)
         if metrics:
             metric_samples.append(metrics)
         for receipt_id in list(remaining):
@@ -251,6 +256,9 @@ def settle_metrics(base: str, *, timeout: float, settle_secs: float, interval_se
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default=e2e.DEFAULT_BASE)
+    parser.add_argument("--challenge-base", default="")
+    parser.add_argument("--submit-base", default="")
+    parser.add_argument("--metrics-base", default="")
     parser.add_argument("--uri", action="append", default=[], help="Miner URI; repeatable")
     parser.add_argument("--uris", default="", help="Comma-separated miner URIs")
     parser.add_argument("--uri-prefix", default="//CapacityProbe")
@@ -275,15 +283,29 @@ def main() -> int:
     args = parser.parse_args()
 
     base = args.base.rstrip("/")
+    challenge_base = (args.challenge_base or base).rstrip("/")
+    submit_base = (args.submit_base or base).rstrip("/")
+    metrics_base = (args.metrics_base or submit_base).rstrip("/")
     uris = _uris(args)
     expected = len(uris) * max(1, int(args.per_miner_limit))
     print(
         "capacity_probe "
-        f"base={base} miners={len(uris)} per_miner_limit={args.per_miner_limit} "
+        f"challenge_base={challenge_base} submit_base={submit_base} "
+        f"metrics_base={metrics_base} miners={len(uris)} per_miner_limit={args.per_miner_limit} "
         f"expected_submits={expected}"
     )
 
-    before = fetch_metrics(base, timeout=args.http_timeout)
+    if submit_base != challenge_base:
+        try:
+            r = requests.get(submit_base + "/health/live", timeout=args.http_timeout)
+            if r.status_code != 200:
+                print(f"CAPACITY_FAILED submit_health status={r.status_code} body={r.text[:300]}")
+                return 1
+        except Exception as exc:
+            print(f"CAPACITY_FAILED submit_health error={exc!r}")
+            return 1
+
+    before = fetch_metrics(metrics_base, timeout=args.http_timeout)
     if before:
         print(
             "metrics_before "
@@ -320,7 +342,7 @@ def main() -> int:
     receipts: list[dict[str, Any]] = []
     submit_started = time.time()
     with ThreadPoolExecutor(max_workers=max(1, int(args.submit_concurrency))) as pool:
-        futures = {pool.submit(submit_one, base, item, timeout=args.http_timeout): item for item in prepared}
+        futures = {pool.submit(submit_one, submit_base, item, timeout=args.http_timeout): item for item in prepared}
         for fut in as_completed(futures):
             result = fut.result()
             receipts.append(result)
@@ -338,11 +360,12 @@ def main() -> int:
 
     deadline = submit_finished + max(1.0, float(args.max_drain_secs))
     finals, samples = poll_receipts(
-        base,
+        submit_base,
         receipts,
         deadline=deadline,
         interval_secs=args.poll_interval_secs,
         timeout=args.http_timeout,
+        metrics_base=metrics_base,
     )
     drained_at = time.time()
     verified = [r for r in finals.values() if r.get("status") == "verified"]
@@ -351,7 +374,7 @@ def main() -> int:
     admit_values = [float(r["admit_ms"]) for r in receipts]
     max_pending = max([int(s.get("pending_count") or 0) for s in samples] or [0])
     after = settle_metrics(
-        base,
+        metrics_base,
         timeout=args.http_timeout,
         settle_secs=args.metrics_settle_secs,
         interval_secs=args.poll_interval_secs,
@@ -362,6 +385,9 @@ def main() -> int:
     summary = {
         "schema": "cathedral.v2.bitset_capacity_probe.v1",
         "base": base,
+        "challenge_base": challenge_base,
+        "submit_base": submit_base,
+        "metrics_base": metrics_base,
         "miners": len(uris),
         "per_miner_limit": int(args.per_miner_limit),
         "submitted": len(receipts),

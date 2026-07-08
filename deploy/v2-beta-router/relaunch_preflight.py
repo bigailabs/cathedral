@@ -1330,6 +1330,9 @@ def check_capacity_probe(pf: Preflight, args: argparse.Namespace) -> None:
         pf.warn("V2 capacity probe", "skipped; set --run-capacity-probe for submit/drain burst")
         return
     base = (args.capacity_base or args.base).rstrip("/")
+    challenge_base = (args.capacity_challenge_base or base).rstrip("/")
+    submit_base = (args.capacity_submit_base or base).rstrip("/")
+    metrics_base = (args.capacity_metrics_base or submit_base).rstrip("/")
     run(
         pf,
         "V2 capacity probe",
@@ -1338,6 +1341,12 @@ def check_capacity_probe(pf: Preflight, args: argparse.Namespace) -> None:
             "scripts/v2_bitset_capacity_probe.py",
             "--base",
             base,
+            "--challenge-base",
+            challenge_base,
+            "--submit-base",
+            submit_base,
+            "--metrics-base",
+            metrics_base,
             "--miners",
             str(args.capacity_miners),
             "--per-miner-limit",
@@ -1405,6 +1414,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))
     ap.add_argument("--run-capacity-probe", action="store_true")
     ap.add_argument("--capacity-base", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_BASE", ""))
+    ap.add_argument("--capacity-challenge-base", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_CHALLENGE_BASE", ""))
+    ap.add_argument("--capacity-submit-base", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_SUBMIT_BASE", ""))
+    ap.add_argument("--capacity-metrics-base", default=os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_METRICS_BASE", ""))
     ap.add_argument("--capacity-miners", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_MINERS", "4") or "4"))
     ap.add_argument("--capacity-per-miner-limit", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_PER_MINER_LIMIT", "4") or "4"))
     ap.add_argument("--capacity-submit-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_CAPACITY_SUBMIT_CONCURRENCY", "8") or "8"))
