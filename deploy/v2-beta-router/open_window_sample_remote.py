@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """One open-window watch sample, run ON the sandbox host.
 
-Prints a single line: local readiness, origin FD count, verifier drain
-metrics, and shed counters. Invoked by open_window_watch.sh over SSH.
+Prints a single line: local readiness, origin FD count, accept-queue
+depth on :8080, verifier drain metrics, and shed counters. A full accept
+queue (acceptq at its max) means the event loop has wedged and miners are
+getting timeouts, even if nothing is erroring. Invoked by open_window_watch.sh over SSH.
 Expects CATHEDRAL_PUBLISHER_ADMIN_TOKEN in the environment (source .env.sh)
 and WATCH_FDS optionally pre-computed by the caller.
 """
@@ -41,6 +43,20 @@ def origin_fds() -> str:
         return "?"
 
 
+def accept_queue() -> str:
+    """Accept-queue depth/backlog for the :8080 listener (Recv-Q/Send-Q)."""
+    try:
+        fields = subprocess.run(
+            ["ss", "-ltnH", "sport = :8080"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.split()
+        if len(fields) >= 3:
+            return f"{fields[1]}/{fields[2]}"
+    except Exception:
+        pass
+    return "?"
+
+
 def main() -> None:
     ready, _ = get("http://127.0.0.1:8080/health/ready")
     _, vm_raw = get("http://127.0.0.1:8000/v2/verify/metrics")
@@ -58,7 +74,7 @@ def main() -> None:
         sm = {}
     reasons = sm.get("by_reason") or {}
     print(
-        f"local_ready={ready} fds={origin_fds()}"
+        f"local_ready={ready} fds={origin_fds()} acceptq={accept_queue()}"
         f" pending={vm.get('pending_count')}"
         f" oldest={vm.get('oldest_pending_age_secs')}"
         f" proc60={vm.get('processed_last_60s')}"
