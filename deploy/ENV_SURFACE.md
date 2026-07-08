@@ -61,6 +61,11 @@ Fail-closed at boot (RuntimeError, never a warning):
 | `CATHEDRAL_V2_VERIFY_BATCH_SIZE` | `8` | Async verifier batch size. |
 | `CATHEDRAL_V2_VERIFY_INTERVAL_SECS` | `1` | Async verifier loop interval. |
 | `CATHEDRAL_V2_VERIFY_LOCK_SECS` | `120` | Verifier claim lock TTL. |
+| `CATHEDRAL_V2_VERIFY_PARALLEL_CLAIMS` | optional | Multi-claim verifier mode. Leave unset unless batch drain metrics require it. |
+| `CATHEDRAL_V2_BITSET_VERIFY_THREADS` | optional | Per-batch bitset verification parallelism in the verifier process. |
+| `CATHEDRAL_RATELIMIT_RPM` + `CATHEDRAL_PER_HOTKEY_*` | optional | Public origin flood/fairness guardrails. Set intentionally; do not cargo-cult. |
+| `CATHEDRAL_SUBMIT_*` queue/cap knobs | optional | Legacy submit-path backpressure. Keep only while legacy submit surfaces remain served. |
+| snapshot/cache TTLs | optional | `CATHEDRAL_BOARD_TTL_SECS`, `CATHEDRAL_RECENT_CACHE_TTL_SECS`, `CATHEDRAL_MATERIALIZED_SNAPSHOT_*`, and `CATHEDRAL_DASHBOARD_SNAPSHOT_*` protect read-heavy non-miner routes. |
 | `CATHEDRAL_PG_POOL_MAX` / `CATHEDRAL_THREADPOOL_TOKENS` | optional | Only set when sizing a known host. Do not cargo-cult old Railway values. |
 
 ## 5. Mechanism calibration (meaningful, documented, rarely changed)
@@ -74,6 +79,9 @@ Fail-closed at boot (RuntimeError, never a warning):
 | `CATHEDRAL_V2_REAL_FRACTION` | 0 | Fraction of real (unplanted) instances. |
 | `CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE` | off | Sybil hardening; assignment identity = coldkey when mapped. V2 is identity-aligned with V1; pre-bake resolves identities. |
 | `CATHEDRAL_PERMINER_MAX_PAGE_LIMIT` | 50 | Origin page size cap. The edge Worker additionally clamps public traffic; the launch example pins `10` until load is proven. |
+| `CATHEDRAL_PERMINER_SCORING_MODE` | bonus | `pm_primary` makes verified assigned solves the paying lane. Set explicitly for the converged relaunch. |
+| `CATHEDRAL_WEIGHTS_MODE` / `CATHEDRAL_WEIGHTS_TIER2_MULT` | proportional / 3.0 | Weight-vector composition and tier multiplier. Treat as payout policy, not runtime tuning. |
+| `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2` | 0 | Explicit burn-policy override. The legacy `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE` key is ignored and should not be set. |
 
 ## 6. Internal / test-only (do not set in deployments; use the profile)
 
