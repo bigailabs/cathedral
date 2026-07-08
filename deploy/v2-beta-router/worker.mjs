@@ -20,15 +20,28 @@ const CANARY_HOTKEYS = new Set([
   "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", // //Alice dev key (E2E smoke)
 ]);
 
+const LEGACY_PREFIX = "/api/cathedral";
+
+function stripLegacyPrefix(pathname) {
+  return pathname.startsWith(LEGACY_PREFIX) ? pathname.slice(LEGACY_PREFIX.length) : pathname;
+}
+
 function isGatedMinerPath(url, method) {
+  // Fairness: while reopen is staged, EVERY earning or challenge-serving path is
+  // gated (V1 per-miner pays into the live ledger; V2 is shadow). No side doors.
+  const path = stripLegacyPrefix(url.pathname);
   if (method === "GET") {
-    return url.pathname === "/v2/synthetic-boolean/per-miner/challenges"
-      || url.pathname === "/v2/synthetic-boolean/per-miner/cnf";
+    return path === "/v2/synthetic-boolean/per-miner/challenges"
+      || path === "/v2/synthetic-boolean/per-miner/cnf"
+      || path === "/v1/synthetic-boolean/per-miner/challenges"
+      || path === "/v1/synthetic-boolean/per-miner/cnf"
+      || path === "/v1/synthetic-boolean/active-cnf";
   }
   if (method === "POST") {
-    return url.pathname === "/v2/agents/submit-bitset"
-      || url.pathname === "/v2/agents/submit-manifest"
-      || url.pathname === "/v2/blobs/solutions";
+    return path === "/v2/agents/submit-bitset"
+      || path === "/v2/agents/submit-manifest"
+      || path === "/v2/blobs/solutions"
+      || path === "/v1/agents/submit";
   }
   return false;
 }
@@ -53,8 +66,11 @@ function stagedReopenResponse() {
 }
 
 function isPerMinerRead(url) {
-  return url.pathname === "/v2/synthetic-boolean/per-miner/challenges"
-    || url.pathname === "/v2/synthetic-boolean/per-miner/cnf";
+  const path = stripLegacyPrefix(url.pathname);
+  return path === "/v2/synthetic-boolean/per-miner/challenges"
+    || path === "/v2/synthetic-boolean/per-miner/cnf"
+    || path === "/v1/synthetic-boolean/per-miner/challenges"
+    || path === "/v1/synthetic-boolean/per-miner/cnf";
 }
 
 function missingRequiredMinerHeaders(request) {
