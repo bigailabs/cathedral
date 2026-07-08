@@ -174,7 +174,13 @@ def check_local(pf: Preflight, args: argparse.Namespace) -> None:
     run(
         pf,
         "env checker syntax",
-        [select_python(), "-m", "py_compile", "deploy/check_env_surface.py"],
+        [
+            select_python(),
+            "-m",
+            "py_compile",
+            "deploy/check_env_surface.py",
+            "deploy/check_env_template.py",
+        ],
     )
     run(
         pf,
@@ -204,6 +210,18 @@ def check_local(pf: Preflight, args: argparse.Namespace) -> None:
             pf,
             "operator env audit",
             [select_python(), "deploy/check_env_surface.py", "--env-file", args.env_file],
+        )
+        run(
+            pf,
+            "operator env template",
+            [
+                select_python(),
+                "deploy/check_env_template.py",
+                "--template",
+                args.env_template,
+                "--env-file",
+                args.env_file,
+            ],
         )
 
 
@@ -416,6 +434,7 @@ CORE_KEYS = (
     "CATHEDRAL_SUBMIT_HARD_CAP",
     "CATHEDRAL_SUBMIT_MAX_CONCURRENCY",
     "CATHEDRAL_PG_STATEMENT_TIMEOUT_MS",
+    "CATHEDRAL_V2_REAL_FRACTION",
     "CATHEDRAL_WEIGHTS_WINDOW_HOURS",
 )
 
@@ -735,6 +754,13 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
 pm_read_hard_cap = env_int("CATHEDRAL_PM_READ_HARD_CAP", 128)
 v2_read_threads = env_int("CATHEDRAL_V2_READ_THREADS", 6)
 v2_submit_bitset_threads = env_int("CATHEDRAL_V2_SUBMIT_BITSET_THREADS", 8)
@@ -742,6 +768,7 @@ v2_verify_batch_size = env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8)
 v2_bitset_verify_threads = env_int("CATHEDRAL_V2_BITSET_VERIFY_THREADS", 8)
 submit_hard_cap = env_int("CATHEDRAL_SUBMIT_HARD_CAP", 8)
 submit_max_concurrency = env_int("CATHEDRAL_SUBMIT_MAX_CONCURRENCY", 24)
+v2_real_fraction = env_float("CATHEDRAL_V2_REAL_FRACTION", 0.0)
 statement_timeout_ms = env_int("CATHEDRAL_PG_STATEMENT_TIMEOUT_MS", 0)
 weights_window_hours = float(weights_mod.window_hours())
 max_pm_read_hard_cap = env_int("CATHEDRAL_PREFLIGHT_MAX_PM_READ_HARD_CAP", 8)
@@ -762,6 +789,7 @@ checks = {
     "v2_bitset_verify_threads_within_launch_ceiling": 0 < v2_bitset_verify_threads <= max_v2_bitset_verify_threads,
     "submit_hard_cap_within_launch_ceiling": 0 < submit_hard_cap <= max_submit_hard_cap,
     "submit_max_concurrency_within_launch_ceiling": 0 < submit_max_concurrency <= max_submit_max_concurrency,
+    "v2_real_fraction_range": 0.0 <= v2_real_fraction <= 1.0,
     "statement_timeout_positive": statement_timeout_ms > 0,
     "statement_timeout_within_launch_ceiling": statement_timeout_ms <= max_statement_timeout_ms,
     "weights_window_launch_bridge": weights_window_hours >= min_weights_window_hours,
@@ -783,6 +811,7 @@ payload = {
     "max_submit_hard_cap": max_submit_hard_cap,
     "submit_max_concurrency": submit_max_concurrency,
     "max_submit_max_concurrency": max_submit_max_concurrency,
+    "v2_real_fraction": v2_real_fraction,
     "statement_timeout_ms": statement_timeout_ms,
     "max_statement_timeout_ms": max_statement_timeout_ms,
     "weights_window_hours": weights_window_hours,
@@ -822,6 +851,7 @@ PY"""
             f"/<={payload.get('max_submit_hard_cap')} "
             f"submit_max_concurrency={payload.get('submit_max_concurrency')}"
             f"/<={payload.get('max_submit_max_concurrency')} "
+            f"v2_real_fraction={payload.get('v2_real_fraction')} "
             f"stmt_timeout_ms={payload.get('statement_timeout_ms')}"
             f"/<={payload.get('max_statement_timeout_ms')} "
             f"window={payload.get('weights_window_hours')}h"
@@ -1100,6 +1130,23 @@ PY"""
         else:
             pf.pass_("remote env audit", "no fatal errors")
 
+    remote_template = (
+        f"cd {remote_dir} && "
+        f".venv/bin/python deploy/check_env_template.py "
+        f"--template {shlex.quote(args.ssh_env_template)} --env-file {remote_env}"
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_template],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+    if proc.returncode == 0:
+        pf.pass_("remote env template", "live env matches sandbox template")
+    else:
+        pf.fail("remote env template", proc.stdout[-1000:].strip())
+
     remote_pin = (
         f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
         """.venv/bin/python - <<'PY'
@@ -1274,6 +1321,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--base", default=os.environ.get("CATHEDRAL_PREFLIGHT_BASE", DEFAULT_BASE))
     ap.add_argument("--weights-url", default=os.environ.get("CATHEDRAL_PREFLIGHT_WEIGHTS_URL", DEFAULT_WEIGHTS_URL))
     ap.add_argument("--env-file", default=os.environ.get("CATHEDRAL_PREFLIGHT_ENV_FILE", ""))
+    ap.add_argument("--env-template", default=os.environ.get("CATHEDRAL_PREFLIGHT_ENV_TEMPLATE", "deploy/sandbox/env.template.sh"))
     ap.add_argument("--ssh-target", default="")
     ap.add_argument("--ssh-key", default="")
     ap.add_argument(
@@ -1286,6 +1334,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument(
         "--ssh-env-file",
         default=os.environ.get("CATHEDRAL_PREFLIGHT_SSH_ENV_FILE", ".env.sh"),
+    )
+    ap.add_argument(
+        "--ssh-env-template",
+        default=os.environ.get(
+            "CATHEDRAL_PREFLIGHT_SSH_ENV_TEMPLATE",
+            "deploy/sandbox/env.template.sh",
+        ),
     )
     ap.add_argument("--max-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PENDING", "0") or "0"))
     ap.add_argument("--max-oldest-pending-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_OLDEST_PENDING_AGE_SECS", "120") or "120"))

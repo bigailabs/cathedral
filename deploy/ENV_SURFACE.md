@@ -17,9 +17,23 @@ Executable audit:
 python3 deploy/check_env_surface.py --env-file /path/to/cathedral.env
 ```
 
+Sandbox template drift check:
+
+```sh
+python3 deploy/check_env_template.py \
+  --template deploy/sandbox/env.template.sh \
+  --env-file /path/to/cathedral.env
+```
+
 The audit prints those groups separately. Everything outside this document is
 either internal (tests/surgical rollout), deprecated, or a candidate for
 deletion in the post-relaunch env cleanup.
+
+The sandbox template is the source of truth for non-secret launch posture. It
+uses `<secret:...>` placeholders for host-only secrets and fails on any extra
+managed env key (`CATHEDRAL_*`, `RAILWAY_*`, `DATABASE_URL`, `PORT`,
+`WEB_CONCURRENCY`, or `V2_GATE_MODE`) not present in the template. This is what
+prevents multi-agent hand edits from becoming unreviewed launch state.
 
 ## 1. Profile (what mechanism runs)
 
@@ -107,12 +121,12 @@ their policy versions must stay in the epoch-ms range validators expect.
 | `CATHEDRAL_PERMINER_ALLOTMENT_T1/T2` | 10000 | Virtual per-tier allotment (lazy; miners page as deep as they can solve). |
 | `CATHEDRAL_PERMINER_NVARS_T*` / `NCLAUSES_T*` | 400/1704 | Instance shape per tier (α≈4.26 band). |
 | `CATHEDRAL_PERMINER_WEIGHT_T*` | 1.0 / 2.0 | Tier difficulty weight. The payout bridge records the EXACT verifier weight. |
-| `CATHEDRAL_V2_REAL_FRACTION` | 0 | Fraction of real (unplanted) instances. |
 | `CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE` | off | Sybil hardening; assignment identity = coldkey when mapped. V2 is identity-aligned with V1; pre-bake resolves identities. |
 | `CATHEDRAL_PERMINER_MAX_PAGE_LIMIT` | 50 | Origin page size cap. The edge Worker additionally clamps public traffic; the launch example pins `10` until load is proven. |
 | `CATHEDRAL_PERMINER_SCORING_MODE` | bonus | `pm_primary` makes verified assigned solves the paying lane. Set explicitly for the converged relaunch. |
 | `CATHEDRAL_WEIGHTS_MODE` / `CATHEDRAL_WEIGHTS_TIER2_MULT` | proportional / 3.0 | Weight-vector composition and tier multiplier. Treat as payout policy, not runtime tuning. |
 | `CATHEDRAL_WEIGHTS_WINDOW_HOURS` | 24 | Trailing verified-solve window for the signed vector. Only widen deliberately as a temporary fairness bridge when relaunch timing would otherwise age broad PM coverage out before miners can refill it. |
+| `CATHEDRAL_V2_REAL_FRACTION` | 0 | Fraction of real/unplanted V2 instances. The sandbox currently pins `0` explicitly to preserve current all-planted behavior; change only as a deliberate mechanism decision. |
 | `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2` | 0 | Explicit burn-policy override. The legacy `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE` key is ignored and should not be set. |
 
 ## 6. Internal / test-only (do not set in deployments; use the profile)
@@ -143,6 +157,7 @@ export CATHEDRAL_V2_VERIFY_LOCK_SECS=120
 export CATHEDRAL_SUBMIT_MAX_CONCURRENCY=32
 export CATHEDRAL_SUBMIT_HARD_CAP=32
 export CATHEDRAL_PERMINER_SCORING_MODE=pm_primary
+export CATHEDRAL_V2_REAL_FRACTION=0
 export CATHEDRAL_WEIGHTS_MODE=proportional
 export CATHEDRAL_WEIGHTS_WINDOW_HOURS=48
 # never set CATHEDRAL_PERMINER_ENABLED (V1 surface stays off)

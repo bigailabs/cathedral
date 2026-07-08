@@ -288,6 +288,15 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
             if window_hours < 48:
                 errors.append("CATHEDRAL_WEIGHTS_WINDOW_HOURS must be >= 48 for the relaunch bridge")
 
+    if _is_present(env.get("CATHEDRAL_V2_REAL_FRACTION")):
+        try:
+            real_fraction = float(str(env["CATHEDRAL_V2_REAL_FRACTION"]).strip())
+        except ValueError:
+            errors.append("CATHEDRAL_V2_REAL_FRACTION must be numeric")
+        else:
+            if not 0.0 <= real_fraction <= 1.0:
+                errors.append("CATHEDRAL_V2_REAL_FRACTION must be between 0 and 1")
+
     if _is_present(env.get("CATHEDRAL_PERMINER_SCORING_MODE")):
         mode = env["CATHEDRAL_PERMINER_SCORING_MODE"].strip().lower()
         if mode != "pm_primary":
