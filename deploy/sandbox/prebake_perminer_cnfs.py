@@ -13,6 +13,8 @@ read-through store fills the tail organically.
 
 Runs on the sandbox with /home/polaris/cathedral/.env.sh sourced so generation
 env (seed secret, shapes, real fraction) matches the serving processes exactly.
+The store selection mirrors app.py: if a V2 DB is configured, bake there;
+otherwise bake into the shared main store.
 """
 from __future__ import annotations
 
@@ -33,13 +35,34 @@ def main() -> int:
                     help="bake the epoch active this many seconds from now")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--shards", type=int, default=1)
+    ap.add_argument("--cache-clear-every", type=int,
+                    default=int(os.environ.get("CATHEDRAL_PREBAKE_CACHE_CLEAR_EVERY", "512")),
+                    help="clear generation LRU caches after this many item attempts; 0 disables")
     args = ap.parse_args()
 
+    from scaffold.publisher import v2_pipeline
     from scaffold.publisher import per_miner as pm
     from scaffold.publisher import v2_cnf_store
     from scaffold.publisher.store import Store
 
-    store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
+    v2_database_path = (
+        os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
+        or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()
+    )
+    if v2_database_path and v2_pipeline.pm_payout_bridge_enabled():
+        print(
+            "[prebake] refusing split V2 store while PM payout bridge is enabled; "
+            "unset CATHEDRAL_V2_DATABASE_URL/CATHEDRAL_V2_DB_PATH or disable the bridge",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    if v2_database_path:
+        store = Store(v2_database_path, prefer_env_database_url=False)
+        store_source = "v2"
+    else:
+        store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
+        store_source = "main"
     hours = pm.epoch_bucket_hours()
     epoch = (int(time.time()) + args.epoch_offset_secs) // (hours * 3600)
 
@@ -56,10 +79,12 @@ def main() -> int:
 
     started = time.time()
     baked = skipped = failed = 0
+    attempted = 0
     for hk in mine:  # hk here is the assignment identity
         for tier in pm.TIERS:
             depth = min(args.depth, pm.allotment_for(tier))
             for seq in range(depth):
+                attempted += 1
                 try:
                     cid = pm.instance_id(hk, epoch, tier, seq)
                     if v2_cnf_store.get(store, cid) is not None:
@@ -73,8 +98,16 @@ def main() -> int:
                     failed += 1
                     print(f"[prebake] item_failed hk={hk[:8]} tier={tier} seq={seq} err={exc!r}",
                           flush=True)
+                finally:
+                    if args.cache_clear_every > 0 and attempted % args.cache_clear_every == 0:
+                        pm.item_meta.cache_clear()
+                        try:
+                            pm._gen_cached.cache_clear()
+                        except AttributeError:
+                            pass
     elapsed = time.time() - started
-    print(f"[prebake] done shard={args.shard}/{args.shards} epoch={epoch} "
+    print(f"[prebake] done shard={args.shard}/{args.shards} store={store_source} "
+          f"backend={store.backend} epoch={epoch} "
           f"hotkeys={len(mine)} baked={baked} skipped={skipped} failed={failed} "
           f"elapsed={elapsed:.1f}s", flush=True)
     return 0 if failed == 0 else 1

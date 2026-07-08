@@ -5,9 +5,9 @@ seq) via `per_miner.generate_instance`. That generation is cheap for the
 default planted path (LRU-cached in per_miner.py) but expensive for REAL
 (unplanted) instances — combinatorial coloring/latin-square generation with
 internal retries (see real_corpus.py, CATHEDRAL_V2_CHALLENGE_SOURCE /
-CATHEDRAL_PERMINER_REAL_FRACTION). The V2 async verify worker
-(`v2_pipeline.verify_one`) regenerates the CNF from scratch for every event,
-which is the dominant cost of a verify.
+CATHEDRAL_PERMINER_REAL_FRACTION). The V2 async verify paths consult this store
+before falling back to from-seed regeneration, which is the dominant cost of a
+cold verify.
 
 This module is a tiny, best-effort cache of the CNF body keyed by
 challenge_id, populated once at mint time (challenge list) and at submit

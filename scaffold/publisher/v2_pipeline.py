@@ -670,10 +670,14 @@ def claim_bitset_batch(store: Store, *, worker_id: str, batch_size: int = 8,
 
 def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
     """Witness-check + score ONE received bitset event, then mark it verified (or
-    rejected). Regenerates the CNF from seed (the token already bound the
-    cnf_sha256, so a mismatch means config drift -> reject, never score). This is
-    the async half of the thin-submit design: the heavy work the submit handler
-    used to do inline now runs here."""
+    rejected).
+
+    The token already bound the exact cnf_sha256, so the verifier first tries the
+    baked CNF store with that hash. On a miss it falls back to deterministic
+    generation and keeps the old drift checks. This is the async half of the
+    thin-submit design: the heavy work the submit handler used to do inline now
+    runs here, and warm baked rows avoid doing it again.
+    """
     import hashlib as _h
     from . import per_miner as pm
     from ..dimacs import parse_cnf
@@ -741,19 +745,31 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
             # V1 parity: instances derive from the scoring identity (coldkey
             # collapse aware); receipts and the payout row keep the RAW hotkey.
             identity = _scoring_identity(store, hk)
-            cid, cnf_text, planted = pm.generate_instance(identity, epoch_i, tier_i, seq_i)
+            cid = pm.instance_id(identity, epoch_i, tier_i, seq_i)
             if cid != str(row["challenge_id"]):
                 _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
                 return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
-            cnf_sha = _h.sha256(cnf_text.encode("utf-8")).hexdigest()
-            if cnf_sha != str(row["cnf_sha256"]).lower():
-                # config drift since mint — cannot fairly score. Reject, never credit.
-                _finish(STATUS_REJECTED, reason="cnf_sha_drift")
-                return {"id": rid, "status": STATUS_REJECTED, "reason": "cnf_sha_drift"}
-            try:
-                v2_cnf_store.put(store, cid, cnf_text)
-            except Exception:
-                pass
+            expected_cnf_sha = str(row["cnf_sha256"]).lower()
+            cnf_text = v2_cnf_store.get(store, cid, expected_sha256=expected_cnf_sha)
+            if cnf_text is not None:
+                _record_cnf_store_hit()
+                cnf_sha = expected_cnf_sha
+            else:
+                _record_cnf_store_miss()
+                generated_cid, cnf_text, _planted = pm.generate_instance(
+                    identity, epoch_i, tier_i, seq_i)
+                if generated_cid != cid:
+                    _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
+                    return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
+                cnf_sha = _h.sha256(cnf_text.encode("utf-8")).hexdigest()
+                if cnf_sha != expected_cnf_sha:
+                    # config drift since mint — cannot fairly score. Reject, never credit.
+                    _finish(STATUS_REJECTED, reason="cnf_sha_drift")
+                    return {"id": rid, "status": STATUS_REJECTED, "reason": "cnf_sha_drift"}
+                try:
+                    v2_cnf_store.put(store, cid, cnf_text)
+                except Exception:
+                    pass
             nvars, _clauses = parse_cnf(cnf_text)
             from . import v2_bitset_submit as _bs
             assignment_raw, assignment = _bs.decode_assignment_b64(
@@ -795,10 +811,11 @@ def process_bitset_batch(store: Store, *, worker_id: str | None = None,
                          batch_size: int = 8, lock_secs: float = 120.0) -> list[dict[str, Any]]:
     """Claim + verify + score a batch of received bitset events.
 
-    The verification work is per-row independent after claim: regenerate the CNF,
-    sha-gate the token, decode/verify the bitset, then write that row's terminal
-    status. Run those row checks in a bounded local pool so a burst of thin
-    submits drains faster than one serial CNF verification loop.
+    The verification work is per-row independent after claim: read the baked CNF
+    or regenerate on a cache miss, sha-gate the token, decode/verify the bitset,
+    then write that row's terminal status. Run those row checks in a bounded local
+    pool so a burst of thin submits drains faster than one serial CNF verification
+    loop.
     """
     worker_id = worker_id or f"v2b-{uuid.uuid4().hex[:12]}"
     rows = claim_bitset_batch(store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs)

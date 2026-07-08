@@ -480,6 +480,109 @@ PY"""
                 ),
             )
 
+    remote_bake_coverage = (
+        f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
+        f"CATHEDRAL_PREFLIGHT_PREBAKE_DEPTH={int(args.min_prebake_depth)} "
+        """.venv/bin/python - <<'PY'
+import json
+import os
+
+from scaffold.publisher import per_miner as pm
+from scaffold.publisher import v2_pipeline
+from scaffold.publisher import weights as weights_mod
+from scaffold.publisher.store import Store
+
+depth = max(1, int(os.environ.get("CATHEDRAL_PREFLIGHT_PREBAKE_DEPTH", "10") or "10"))
+v2_database_path = (
+    os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
+    or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()
+)
+if v2_database_path and v2_pipeline.pm_payout_bridge_enabled():
+    payload = {
+        "ok": False,
+        "reason": "split_v2_store_with_pm_payout_bridge",
+        "store_source": "v2",
+    }
+    print(json.dumps(payload, sort_keys=True))
+    raise SystemExit(1)
+if v2_database_path:
+    store = Store(v2_database_path, prefer_env_database_url=False)
+    store_source = "v2"
+else:
+    store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
+    store_source = "main"
+
+rows = store.query("SELECT DISTINCT hotkey FROM metagraph_hotkeys")
+hotkeys = sorted({str(r["hotkey"]) for r in rows})
+identities = sorted({
+    weights_mod.scoring_identity_for_hotkey(store, hk, require_mapped=False) or hk
+    for hk in hotkeys
+})
+epoch = pm.current_epoch()
+expected_ids = []
+for identity in identities:
+    for tier in pm.TIERS:
+        for seq in range(min(depth, pm.allotment_for(tier))):
+            expected_ids.append(pm.instance_id(identity, epoch, tier, seq))
+
+present = set()
+for idx in range(0, len(expected_ids), 500):
+    chunk = expected_ids[idx:idx + 500]
+    if not chunk:
+        continue
+    placeholders = ",".join("?" for _ in chunk)
+    q = f"SELECT challenge_id FROM v2_cnf_store WHERE challenge_id IN ({placeholders})"
+    for row in store.query(q, tuple(chunk)):
+        present.add(str(row["challenge_id"]))
+
+missing = [cid for cid in expected_ids if cid not in present]
+payload = {
+    "ok": bool(expected_ids) and not missing,
+    "store_backend": store.backend,
+    "store_source": store_source,
+    "epoch": epoch,
+    "depth": depth,
+    "hotkeys": len(hotkeys),
+    "identities": len(identities),
+    "expected": len(expected_ids),
+    "present": len(present),
+    "missing": len(missing),
+    "missing_samples": missing[:5],
+}
+print(json.dumps(payload, sort_keys=True))
+raise SystemExit(0 if payload["ok"] else 1)
+PY"""
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_bake_coverage],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+    )
+    try:
+        payload = json.loads(proc.stdout.splitlines()[-1])
+    except Exception as exc:
+        pf.fail(
+            "remote CNF prebake coverage",
+            f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
+        )
+    else:
+        detail = (
+            f"epoch={payload.get('epoch')} depth={payload.get('depth')} "
+            f"present={payload.get('present')}/{payload.get('expected')} "
+            f"store={payload.get('store_source')}/{payload.get('store_backend')}"
+        )
+        if proc.returncode == 0 and payload.get("ok") is True:
+            pf.pass_("remote CNF prebake coverage", detail)
+        else:
+            missing_samples = payload.get("missing_samples") or []
+            reason = payload.get("reason") or f"missing={payload.get('missing')}"
+            pf.fail(
+                "remote CNF prebake coverage",
+                f"{detail} {reason} samples={missing_samples}",
+            )
+
 
 def check_e2e(pf: Preflight, args: argparse.Namespace) -> None:
     run_e2e = args.run_e2e or os.environ.get("CATHEDRAL_PREFLIGHT_RUN_E2E", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -524,6 +627,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_PENDING", "0") or "0"))
     ap.add_argument("--max-weight-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_WEIGHT_AGE_SECS", "900") or "900"))
     ap.add_argument("--min-weight-count", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300"))
+    ap.add_argument("--min-prebake-depth", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_PREBAKE_DEPTH", "10") or "10"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))
