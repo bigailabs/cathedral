@@ -81,6 +81,7 @@ Fail-closed at boot (RuntimeError, never a warning):
 | `CATHEDRAL_PERMINER_MAX_PAGE_LIMIT` | 50 | Origin page size cap. The edge Worker additionally clamps public traffic; the launch example pins `10` until load is proven. |
 | `CATHEDRAL_PERMINER_SCORING_MODE` | bonus | `pm_primary` makes verified assigned solves the paying lane. Set explicitly for the converged relaunch. |
 | `CATHEDRAL_WEIGHTS_MODE` / `CATHEDRAL_WEIGHTS_TIER2_MULT` | proportional / 3.0 | Weight-vector composition and tier multiplier. Treat as payout policy, not runtime tuning. |
+| `CATHEDRAL_WEIGHTS_WINDOW_HOURS` | 24 | Trailing verified-solve window for the signed vector. Only widen deliberately as a temporary fairness bridge when relaunch timing would otherwise age broad PM coverage out before miners can refill it. |
 | `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2` | 0 | Explicit burn-policy override. The legacy `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE` key is ignored and should not be set. |
 
 ## 6. Internal / test-only (do not set in deployments; use the profile)
@@ -108,6 +109,8 @@ export CATHEDRAL_V2_SUBMIT_BITSET_THREADS=4
 export CATHEDRAL_V2_VERIFY_BATCH_SIZE=8
 export CATHEDRAL_V2_VERIFY_INTERVAL_SECS=1
 export CATHEDRAL_V2_VERIFY_LOCK_SECS=120
+# Optional temporary launch bridge if relaunch slips close to the PM coverage cliff:
+# export CATHEDRAL_WEIGHTS_WINDOW_HOURS=48
 # never set CATHEDRAL_PERMINER_ENABLED (V1 surface stays off)
 
 # public origin (:8080): CATHEDRAL_SERVICE_ROLE=all, CATHEDRAL_V2_VERIFY_WORKER_ENABLED=0

@@ -412,6 +412,111 @@ def check_ssh(pf: Preflight, args: argparse.Namespace) -> None:
 
     remote_dir = shlex.quote(args.ssh_cathedral_dir)
     remote_env = shlex.quote(args.ssh_env_file)
+    remote_pm_coverage = (
+        f"cd {remote_dir} && set -a && . {remote_env} && set +a && "
+        f"CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS={float(args.pm_coverage_horizon_hours)} "
+        f"CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT={int(args.min_weight_count)} "
+        """.venv/bin/python - <<'PY'
+import json
+import os
+from datetime import datetime, timedelta, timezone
+
+from scaffold.publisher import weights as weights_mod
+from scaffold.publisher.store import Store
+
+
+def ms_iso(value: datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
+
+
+def positive_score_count(at: datetime) -> int:
+    scores = weights_mod.compose_scores(store, now=at)
+    return sum(1 for value in scores.values() if float(value) > 0.0)
+
+
+def ledger_stats(at: datetime) -> dict:
+    since = ms_iso(at - timedelta(hours=window_hours))
+    rows = store.query(
+        "SELECT COUNT(DISTINCT miner_hotkey) AS hotkeys, COUNT(*) AS solves, "
+        "COALESCE(SUM(difficulty_weight), 0) AS units, "
+        "MIN(solved_at_iso) AS first_at, MAX(solved_at_iso) AS last_at "
+        "FROM per_miner_solves "
+        "WHERE solved_at_iso > ? AND verified=1 AND difficulty_weight > 0",
+        (since,),
+    )
+    row = rows[0] if rows else None
+    return {
+        "since": since,
+        "ledger_hotkeys": int(row["hotkeys"] or 0) if row else 0,
+        "solves": int(row["solves"] or 0) if row else 0,
+        "units": float(row["units"] or 0.0) if row else 0.0,
+        "first_at": row["first_at"] if row else None,
+        "last_at": row["last_at"] if row else None,
+    }
+
+
+store = Store(os.environ.get("CATHEDRAL_DB_PATH", "cathedral.db"))
+now = datetime.now(timezone.utc)
+window_hours = float(weights_mod.window_hours())
+horizon_hours = float(os.environ.get("CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS", "18") or "18")
+min_weight_count = int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300")
+horizon_at = now + timedelta(hours=horizon_hours)
+current = ledger_stats(now)
+horizon = ledger_stats(horizon_at)
+current["score_hotkeys"] = positive_score_count(now)
+horizon["score_hotkeys"] = positive_score_count(horizon_at)
+scoring_mode = weights_mod.perminer_scoring_mode()
+payload = {
+    "ok": (
+        scoring_mode == "pm_primary"
+        and current["score_hotkeys"] > min_weight_count
+        and horizon["score_hotkeys"] > min_weight_count
+    ),
+    "scoring_mode": scoring_mode,
+    "window_hours": window_hours,
+    "horizon_hours": horizon_hours,
+    "min_weight_count": min_weight_count,
+    "now": current,
+    "horizon": horizon,
+}
+print(json.dumps(payload, sort_keys=True))
+raise SystemExit(0 if payload["ok"] else 1)
+PY"""
+    )
+    proc = subprocess.run(
+        ssh_cmd + [target, remote_pm_coverage],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=90,
+    )
+    try:
+        payload = json.loads(proc.stdout.splitlines()[-1])
+    except Exception as exc:
+        pf.fail(
+            "remote PM coverage horizon",
+            f"bad JSON: {exc}; output={proc.stdout[-500:].strip()}",
+        )
+    else:
+        now_payload = payload.get("now") or {}
+        horizon_payload = payload.get("horizon") or {}
+        detail = (
+            f"mode={payload.get('scoring_mode')} "
+            f"window={payload.get('window_hours')}h "
+            f"horizon={payload.get('horizon_hours')}h "
+            f"now_scores={now_payload.get('score_hotkeys')} "
+            f"horizon_scores={horizon_payload.get('score_hotkeys')} "
+            f"horizon_since={horizon_payload.get('since')} "
+            f"last_at={horizon_payload.get('last_at')}"
+        )
+        if proc.returncode == 0 and payload.get("ok") is True:
+            pf.pass_("remote PM coverage horizon", detail)
+        else:
+            pf.fail(
+                "remote PM coverage horizon",
+                f"{detail}; widen CATHEDRAL_WEIGHTS_WINDOW_HOURS or refill fair V2 solves",
+            )
+
     remote_audit = (
         f"cd {remote_dir} && "
         f".venv/bin/python deploy/check_env_surface.py --env-file {remote_env}"
@@ -628,6 +733,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-weight-age-secs", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_WEIGHT_AGE_SECS", "900") or "900"))
     ap.add_argument("--min-weight-count", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_WEIGHT_COUNT", "300") or "300"))
     ap.add_argument("--min-prebake-depth", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MIN_PREBAKE_DEPTH", "10") or "10"))
+    ap.add_argument("--pm-coverage-horizon-hours", type=float, default=float(os.environ.get("CATHEDRAL_PREFLIGHT_PM_COVERAGE_HORIZON_HOURS", "18") or "18"))
     ap.add_argument("--pytest-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-timeout-secs", type=int, default=120)
     ap.add_argument("--e2e-uri", default=os.environ.get("CATHEDRAL_PREFLIGHT_E2E_URI", "//Alice"))
