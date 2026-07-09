@@ -3164,8 +3164,12 @@ def build_app(
             raise HTTPException(400, exc.reason)
         if report["source"] not in external_scores.ALLOWED_ENDPOINT_SOURCES:
             raise HTTPException(400, "invalid_source_for_violet_endpoint")
+        if report["source"] == external_scores.CONFIDENTIAL_SOURCE:
+            raise HTTPException(400, "invalid_source_for_violet_endpoint")
         try:
             accepted = external_scores.store_report(store, report)
+        except external_scores.ExternalScoreError as exc:
+            raise HTTPException(400, exc.reason)
         except Exception as exc:
             print(f"[external_scores] store failed: {exc!r}")
             raise HTTPException(503, "external_scores_store_failed")
@@ -3208,13 +3212,14 @@ def build_app(
                 payload,
                 default_source=external_scores.CONFIDENTIAL_SOURCE,
             )
-            external_scores.validate_confidential_freshness(report)
         except external_scores.ExternalScoreError as exc:
             raise HTTPException(400, exc.reason)
         if report["source"] not in external_scores.ALLOWED_ENDPOINT_SOURCES:
             raise HTTPException(400, "invalid_source_for_cathedral_confidential_endpoint")
         try:
             accepted = external_scores.store_report(store, report)
+        except external_scores.ExternalScoreError as exc:
+            raise HTTPException(400, exc.reason)
         except Exception as exc:
             print(f"[external_scores] store failed: {exc!r}")
             raise HTTPException(503, "external_scores_store_failed")

@@ -249,7 +249,13 @@ def validate_confidential_freshness(report: dict[str, Any], *, now: datetime | N
         raise ExternalScoreError("confidential_score_timestamp_too_old")
 
 
+def validate_source_report(report: dict[str, Any], *, now: datetime | None = None) -> None:
+    if str(report.get("source") or "").strip() == CONFIDENTIAL_SOURCE:
+        validate_confidential_freshness(report, now=now)
+
+
 def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
+    validate_source_report(report)
     received_at = _now_iso()
     report_id = str(report["report_id"])
     report_json = json.dumps(report, sort_keys=True, separators=(",", ":"))
@@ -311,14 +317,25 @@ def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
 
 
 def recent_scores(store: Store, *, source: str, since_iso: str) -> dict[str, float]:
+    read_now = datetime.now(timezone.utc)
     rows = store.query(
-        "SELECT miner_hotkey, score, received_at_iso FROM external_score_entries "
+        "SELECT miner_hotkey, score, received_at_iso, generated_at_iso "
+        "FROM external_score_entries "
         "WHERE source=? AND received_at_iso > ? AND score > 0 "
         "ORDER BY received_at_iso ASC",
         (source, since_iso),
     )
     latest: dict[str, float] = {}
     for r in rows:
+        if source == CONFIDENTIAL_SOURCE:
+            try:
+                generated_at = r["generated_at_iso"]
+                validate_confidential_freshness(
+                    {"generated_at": generated_at},
+                    now=read_now,
+                )
+            except (ExternalScoreError, KeyError, IndexError):
+                continue
         hk = str(r["miner_hotkey"])
         try:
             score = float(r["score"])
