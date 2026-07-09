@@ -198,4 +198,99 @@ resetOriginCalls();
   assert.equal(originCalls.length, 1);
 }
 
+// ---- edge per-miner rate limit ---------------------------------------------
+
+resetOriginCalls();
+{
+  // burst passes, then 429 edge_rate_limited; origin only sees the burst
+  const env = { V2_OPEN_PERCENT: "100", V2_EDGE_MINER_RPS: "1", V2_EDGE_MINER_BURST: "3" };
+  const hk = "5RateLimitTestMinerAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  let statuses = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await worker.fetch(
+      minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env);
+    statuses.push(r.status);
+  }
+  assert.deepEqual(statuses, [200, 200, 200, 429, 429]);
+  const last = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env);
+  assert.equal((await json(last)).reason, "edge_rate_limited");
+  assert.equal(last.headers.get("retry-after"), "2");
+  assert.equal(originCalls.length, 3);
+}
+
+resetOriginCalls();
+{
+  // receipt polls are rate limited too (they bypass the staged gate)
+  const env = { V2_EDGE_MINER_RPS: "1", V2_EDGE_MINER_BURST: "2" };
+  const hk = "5ReceiptPollTestMinerBBBBBBBBBBBBBBBBBBBBBBBBBB";
+  let statuses = [];
+  for (let i = 0; i < 4; i++) {
+    const r = await worker.fetch(
+      minerRequest("/v2/agents/submit-bitset/receipts/abc123", { hotkey: hk }), env);
+    statuses.push(r.status);
+  }
+  assert.deepEqual(statuses, [200, 200, 429, 429]);
+  assert.equal(originCalls.length, 2);
+}
+
+resetOriginCalls();
+{
+  // canary hotkeys are exempt (keeps E2E smoke + edge soak working)
+  const env = { V2_EDGE_MINER_RPS: "1", V2_EDGE_MINER_BURST: "2" };
+  for (let i = 0; i < 10; i++) {
+    const r = await worker.fetch(
+      minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: DOGFOOD_HOTKEY }), env);
+    assert.equal(r.status, 200);
+  }
+  assert.equal(originCalls.length, 10);
+}
+
+resetOriginCalls();
+{
+  // V2_EDGE_MINER_RPS=0 disables the limiter entirely
+  const env = { V2_OPEN_PERCENT: "100", V2_EDGE_MINER_RPS: "0" };
+  const hk = "5DisabledLimiterTestMinerCCCCCCCCCCCCCCCCCCCCCC";
+  for (let i = 0; i < 20; i++) {
+    const r = await worker.fetch(
+      minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env);
+    assert.equal(r.status, 200);
+  }
+  assert.equal(originCalls.length, 20);
+}
+
+resetOriginCalls();
+{
+  // tokens refill over time (stubbed clock)
+  const env = { V2_OPEN_PERCENT: "100", V2_EDGE_MINER_RPS: "2", V2_EDGE_MINER_BURST: "2" };
+  const hk = "5RefillTestMinerDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+  const realNow = Date.now;
+  let t = realNow();
+  Date.now = () => t;
+  try {
+    assert.equal((await worker.fetch(minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env)).status, 200);
+    assert.equal((await worker.fetch(minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env)).status, 200);
+    assert.equal((await worker.fetch(minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env)).status, 429);
+    t += 1000; // +1s at 2 rps -> 2 tokens back
+    assert.equal((await worker.fetch(minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env)).status, 200);
+    assert.equal((await worker.fetch(minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env)).status, 200);
+    assert.equal((await worker.fetch(minerRequest("/v2/agents/submit-bitset", { method: "POST", hotkey: hk }), env)).status, 429);
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+resetOriginCalls();
+{
+  // staged gate still wins: non-admitted miner gets staged 429, not rate-limit 429
+  const env = { V2_EDGE_MINER_RPS: "1", V2_EDGE_MINER_BURST: "1" };
+  const r = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset", { method: "POST" }), env);
+  assert.equal(r.status, 429);
+  assert.equal((await json(r)).reason, "v2_beta_staged_reopen");
+  assert.equal(originCalls.length, 0);
+}
+
+console.log("v2-beta-router edge rate limit tests passed");
+
 console.log("v2-beta-router staged/open gate tests passed");

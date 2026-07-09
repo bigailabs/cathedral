@@ -90,6 +90,94 @@ function admittedByRamp(hotkey, env) {
   return hotkeyBucket(hotkey) < percent;
 }
 
+// ---- Edge per-miner rate limit (2026-07-09) -------------------------------
+// Infra flood defense, NOT an economic throttle (difficulty is the economic
+// throttle). Every reopen wedge so far had the same shape: a synchronized
+// fetch/poll stampede saturated the origin's accept queue before any in-app
+// guard could engage. This caps each hotkey's request rate AT THE EDGE with a
+// token bucket, so the excess burns as fast Cloudflare 429s instead of origin
+// sockets. Limits are generous for a legitimate miner (fetch a batch, solve
+// for minutes, submit, poll a receipt ~1/s).
+//
+// Scope note: the bucket map is per Worker isolate, so the true ceiling is
+// (configured rate) x (active isolates). A single miner's traffic mostly
+// lands on one PoP/isolate, so per-miner enforcement stays roughly honest;
+// treat the knobs as order-of-magnitude protection, not precise accounting.
+//
+// Knobs: V2_EDGE_MINER_RPS (default 3, 0 disables), V2_EDGE_MINER_BURST
+// (default 12). Canary hotkeys are exempt so E2E smoke and edge soak keep
+// working.
+const _edgeBuckets = new Map();
+const _EDGE_BUCKET_SWEEP_SIZE = 8192;
+
+function minerRps(env) {
+  const n = Number(String(env?.V2_EDGE_MINER_RPS ?? "3").trim());
+  if (!Number.isFinite(n) || n < 0) return 3;
+  return n;
+}
+
+function minerBurst(env) {
+  const n = Number(String(env?.V2_EDGE_MINER_BURST ?? "12").trim());
+  if (!Number.isFinite(n) || n < 1) return 12;
+  return Math.floor(n);
+}
+
+function isReceiptPoll(url, method) {
+  if (method !== "GET") return false;
+  const path = stripLegacyPrefix(url.pathname);
+  return path.startsWith("/v2/agents/submit-bitset/receipts/");
+}
+
+function isRateLimitedPath(url, method) {
+  // Receipt polls are included deliberately: they bypass the staged gate
+  // (they are not in isV2MinerPath) and are the highest-RPS miner behaviour
+  // observed in every open window.
+  return isV2MinerPath(url, method) || isReceiptPoll(url, method);
+}
+
+function takeEdgeToken(key, env, nowMs = Date.now()) {
+  const rps = minerRps(env);
+  if (rps <= 0) return true; // disabled
+  const burst = minerBurst(env);
+  let b = _edgeBuckets.get(key);
+  if (!b) {
+    if (_edgeBuckets.size >= _EDGE_BUCKET_SWEEP_SIZE) {
+      // Cheap pressure valve: drop buckets idle for >60s so the map cannot
+      // grow without bound inside a long-lived isolate.
+      for (const [k, v] of _edgeBuckets) {
+        if (nowMs - v.last > 60_000) _edgeBuckets.delete(k);
+      }
+    }
+    b = { tokens: burst, last: nowMs };
+    _edgeBuckets.set(key, b);
+  }
+  const elapsedSecs = Math.max(0, (nowMs - b.last) / 1000);
+  b.tokens = Math.min(burst, b.tokens + elapsedSecs * rps);
+  b.last = nowMs;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
+function edgeRateLimitedResponse() {
+  return new Response(JSON.stringify({
+    detail: "edge_rate_limited",
+    reason: "edge_rate_limited",
+    message: "Per-miner edge rate limit exceeded. Slow your fetch/submit/receipt-poll loop and retry.",
+    retry_after_seconds: 2,
+  }), {
+    status: 429,
+    headers: {
+      "content-type": "application/json",
+      "retry-after": "2",
+      "cache-control": "no-store",
+      "x-cathedral-rejection-reason": "edge_rate_limited",
+      "x-cathedral-v2-beta-router": "cloudflare-worker",
+      "x-cathedral-v2-beta-origin": "edge-rate-limit",
+    },
+  });
+}
+
 function stagedReopenResponse() {
   return new Response(JSON.stringify({
     detail: "v2_beta_staged_reopen",
@@ -177,6 +265,15 @@ export default {
       const hotkey = (request.headers.get("x-cathedral-hotkey") || "").trim();
       if (!CANARY_HOTKEYS.has(hotkey) && !admittedByRamp(hotkey, env)) {
         return stagedReopenResponse();
+      }
+    }
+    if (isRateLimitedPath(incomingUrl, request.method)) {
+      const hotkey = (request.headers.get("x-cathedral-hotkey") || "").trim();
+      if (!CANARY_HOTKEYS.has(hotkey)) {
+        const key = hotkey || request.headers.get("cf-connecting-ip") || "anon";
+        if (!takeEdgeToken(key, env)) {
+          return edgeRateLimitedResponse();
+        }
       }
     }
 
