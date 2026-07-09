@@ -92,3 +92,41 @@ def test_ready_slow_probe_times_out_instead_of_hanging(tmp_path, monkeypatch):
     assert r.json()["error"] == "ReadyProbeTimeout"
     # Bounded by the probe timeout, not the hung query.
     assert elapsed < 5
+
+
+# ---- disk headroom gate (2026-07-09 disk-full incident) ---------------------
+# Postgres dies ungracefully at 0 bytes free (WAL PANIC -> crash -> 8.5h
+# outage). Readiness must go red while headroom remains so the edge watcher
+# auto-aborts an open window BEFORE the DB is damaged.
+
+def test_ready_disk_low_returns_503(tmp_path, monkeypatch):
+    # Threshold no filesystem can satisfy -> deterministic DiskLow.
+    monkeypatch.setenv("CATHEDRAL_READY_MIN_DISK_FREE_MB", str(10**12))
+    app = _build(tmp_path, monkeypatch, ready_cache_secs="0.5")
+    client = TestClient(app)
+    time.sleep(0.6)  # let the startup-cached OK state expire
+    r = client.get("/health/ready")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["db"] == "error"
+    assert body["error"].startswith("DiskLow:")
+
+
+def test_ready_disk_check_disabled_with_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_READY_MIN_DISK_FREE_MB", "0")
+    app = _build(tmp_path, monkeypatch, ready_cache_secs="0.5")
+    client = TestClient(app)
+    time.sleep(0.6)
+    r = client.get("/health/ready")
+    assert r.status_code == 200
+    assert r.json()["db"] == "ok"
+
+
+def test_ready_disk_ok_with_sane_threshold(tmp_path, monkeypatch):
+    # Default-ish threshold on a dev machine with free space -> 200.
+    monkeypatch.setenv("CATHEDRAL_READY_MIN_DISK_FREE_MB", "1")
+    app = _build(tmp_path, monkeypatch, ready_cache_secs="0.5")
+    client = TestClient(app)
+    time.sleep(0.6)
+    r = client.get("/health/ready")
+    assert r.status_code == 200

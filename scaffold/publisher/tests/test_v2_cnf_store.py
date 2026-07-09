@@ -634,3 +634,29 @@ def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch
     monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_READ", raising=False)
     on = _fetch_item(client, kp)
     assert on["cnf_sha256"] == poison_sha
+
+
+# ---- retention_hours (env knob, 2026-07-09 disk-full incident) -------------
+
+def test_retention_hours_default_is_4(monkeypatch):
+    monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", raising=False)
+    assert v2_cnf_store.retention_hours() == 4.0
+
+
+def test_retention_hours_env_override(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "8.5")
+    assert v2_cnf_store.retention_hours() == 8.5
+
+
+def test_retention_hours_clamped_to_2h_floor(monkeypatch):
+    """A too-small window could purge the current epoch's CNFs out from under
+    the verifier; the floor makes that misconfiguration impossible."""
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "0.25")
+    assert v2_cnf_store.retention_hours() == 2.0
+
+
+def test_retention_hours_garbage_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "banana")
+    assert v2_cnf_store.retention_hours() == 4.0
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "")
+    assert v2_cnf_store.retention_hours() == 4.0

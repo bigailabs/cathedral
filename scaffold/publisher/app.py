@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -3255,6 +3256,12 @@ def build_app(
     # hangs.
     _ready_ttl_secs = max(0.5, _env_float("CATHEDRAL_READY_CACHE_SECS", 2.0))
     _ready_timeout_secs = max(0.5, _env_float("CATHEDRAL_READY_TIMEOUT_SECS", 3.0))
+    # Disk headroom gate (2026-07-09 incident): Postgres dies ungracefully at
+    # 0 bytes free (WAL write PANIC -> crash -> failed recovery -> 8.5h outage).
+    # Failing readiness while headroom remains lets the edge watcher auto-abort
+    # an open window BEFORE the DB is damaged. 0 disables the check.
+    _ready_min_disk_free_mb = max(0.0, _env_float("CATHEDRAL_READY_MIN_DISK_FREE_MB", 2048.0))
+    _ready_disk_path = os.environ.get("CATHEDRAL_READY_DISK_PATH", "/") or "/"
     _ready_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readyz")
     _ready_lock = threading.Lock()
     # Start stale-but-ok: build_app already ran store.migrate() against the DB,
@@ -3265,9 +3272,16 @@ def build_app(
     def _ready_db_probe() -> tuple[bool, str]:
         try:
             store.query("SELECT 1 AS ok")
-            return True, ""
         except Exception as exc:
             return False, type(exc).__name__
+        if _ready_min_disk_free_mb > 0:
+            try:
+                free_mb = shutil.disk_usage(_ready_disk_path).free / (1024 * 1024)
+            except Exception:
+                free_mb = None  # broken statfs must never fail readiness
+            if free_mb is not None and free_mb < _ready_min_disk_free_mb:
+                return False, f"DiskLow:{int(free_mb)}MB<{int(_ready_min_disk_free_mb)}MB"
+        return True, ""
 
     @app.get("/health/ready")
     async def health_ready():

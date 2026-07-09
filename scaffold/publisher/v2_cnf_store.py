@@ -140,6 +140,24 @@ def get(store: Store, challenge_id: str, expected_sha256: str | None = None) -> 
         return None
 
 
+def retention_hours() -> float:
+    """Purge window for baked CNFs, in hours.
+
+    Default 4h: epochs are hourly, so current epoch (<=1h old) + previous
+    epoch grace + verify-backlog headroom. The old 24h default let the store
+    accumulate ~8.7GB/day under all-miner load and filled the disk
+    (2026-07-09 incident). Clamped to >=2h so a bad env value can never purge
+    the current epoch's CNFs out from under the verifier.
+
+    Env: CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS
+    """
+    try:
+        val = float(os.environ.get("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "4") or "4")
+    except Exception:
+        val = 4.0
+    return max(2.0, val)
+
+
 def purge_older_than(store: Store, hours: float = 24) -> int:
     """Delete rows older than `hours`. Best-effort; returns the number of rows
     deleted, or 0 on any error (including when disabled — there is no kill

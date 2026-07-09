@@ -621,8 +621,12 @@ def process_batch(
     # Opportunistic purge of old baked CNFs — self-throttled to at most once
     # per ~10 minutes inside v2_cnf_store, so it is cheap to call every tick.
     # Best-effort: maybe_purge_older_than swallows all errors internally.
+    # Window is env-tunable (CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS, default
+    # 4h, clamped >=2h) — the old hardcoded 24h accumulated ~8.7GB/day under
+    # all-miner load and filled the disk (2026-07-09 incident).
     try:
-        v2_cnf_store.maybe_purge_older_than(store, hours=24, min_interval_secs=600.0)
+        v2_cnf_store.maybe_purge_older_than(
+            store, hours=v2_cnf_store.retention_hours(), min_interval_secs=600.0)
     except Exception:
         pass
     return results
