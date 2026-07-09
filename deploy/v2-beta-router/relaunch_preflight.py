@@ -1571,7 +1571,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--max-v2-read-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_READ_THREADS", "4") or "4"))
     ap.add_argument("--max-v2-submit-bitset-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BITSET_THREADS", "4") or "4"))
     ap.add_argument("--max-v2-verify-batch-size", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_VERIFY_BATCH_SIZE", "8") or "8"))
-    ap.add_argument("--max-v2-bitset-verify-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_BITSET_VERIFY_THREADS", "1") or "1"))
+    ap.add_argument("--max-v2-bitset-verify-threads", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_BITSET_VERIFY_THREADS", "2") or "2"))
     ap.add_argument("--max-submit-hard-cap", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_HARD_CAP", "32") or "32"))
     ap.add_argument("--max-submit-max-concurrency", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_SUBMIT_MAX_CONCURRENCY", "32") or "32"))
     ap.add_argument("--max-v2-submit-backpressure-pending", type=int, default=int(os.environ.get("CATHEDRAL_PREFLIGHT_MAX_V2_SUBMIT_BACKPRESSURE_PENDING", "5000") or "5000"))
