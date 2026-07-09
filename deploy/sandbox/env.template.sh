@@ -25,8 +25,13 @@ export CATHEDRAL_PM_READ_HARD_CAP=8
 export CATHEDRAL_V2_READ_THREADS=4
 export CATHEDRAL_V2_SUBMIT_BITSET_THREADS=4
 export CATHEDRAL_V2_SUBMIT_BACKPRESSURE_ENABLED=true
-export CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_PENDING=5000
-export CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_OLDEST_AGE_SECS=300
+# Backpressure must engage BEFORE the box is in trouble. Both 2026-07-09 open
+# windows (10% and 5%) wedged at the exact moment pending hit the 5000 queue
+# cap with bp sheds still at zero: shedding AT the cap is shedding too late.
+# 1500 sheds while the event loop is healthy; miner scripts see clean 429
+# v2_submit_backpressure + Retry-After and settle into the verify drain rate.
+export CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_PENDING=1500
+export CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_OLDEST_AGE_SECS=120
 export CATHEDRAL_V2_SUBMIT_BACKPRESSURE_RETRY_AFTER_SECS=5
 export CATHEDRAL_SUBMIT_BUSY_WAIT_SECS=0.10
 export CATHEDRAL_SUBMIT_HARD_CAP=32
@@ -40,7 +45,10 @@ export CATHEDRAL_PER_HOTKEY_RETRY_AFTER_SECS=1
 export CATHEDRAL_V2_VERIFY_BATCH_SIZE=8
 export CATHEDRAL_V2_VERIFY_INTERVAL_SECS=1
 export CATHEDRAL_V2_VERIFY_LOCK_SECS=120
-export CATHEDRAL_V2_BITSET_VERIFY_THREADS=1
+# 2 threads: verify drain was the hard ceiling (~6.5/s single-threaded; every
+# admitted percentage outruns it and fills the queue in minutes). The private
+# publisher shares 4 cores with the public origin + PG, so 2, not more.
+export CATHEDRAL_V2_BITSET_VERIFY_THREADS=2
 export CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS=1800
 
 export CATHEDRAL_PERMINER_NVARS_T1=600
