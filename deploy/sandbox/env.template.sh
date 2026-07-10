@@ -42,7 +42,12 @@ export CATHEDRAL_PER_HOTKEY_BURST=30
 export CATHEDRAL_PER_HOTKEY_REFILL_PER_SEC=5.0
 export CATHEDRAL_PER_HOTKEY_RETRY_AFTER_SECS=1
 
-export CATHEDRAL_V2_VERIFY_BATCH_SIZE=8
+# 32 (was 8): verify audit 2026-07-10 measured 14.6ms/item; batch 8 x 1s tick
+# capped drain at ~7/s with the verifier idle 88% of each second. Batch 32
+# yields ~30/s at <50% duty cycle. The 08:15Z open window wedged on a 42/s
+# solve-return wave against the old 7/s drain. Preflight ceiling raised in
+# lockstep (CATHEDRAL_PREFLIGHT_MAX_V2_VERIFY_BATCH_SIZE=32).
+export CATHEDRAL_V2_VERIFY_BATCH_SIZE=32
 export CATHEDRAL_V2_VERIFY_INTERVAL_SECS=1
 export CATHEDRAL_V2_VERIFY_LOCK_SECS=120
 # 2 threads: verify drain was the hard ceiling (~6.5/s single-threaded; every

@@ -398,6 +398,33 @@ resetOriginCalls();
 
 resetOriginCalls();
 {
+  // Ordering: cache HITs are served before the per-miner token bucket. An
+  // exhausted budget must not block polls that never reach the origin, and
+  // HITs must not spend budget needed for fetches/submits.
+  const cache = new TestCache();
+  originHandler = async () => Response.json(receiptPayload("ordered-1"));
+  const env = { RECEIPT_CACHE: cache, V2_EDGE_MINER_RPS: "0.001", V2_EDGE_MINER_BURST: "1" };
+  const path = "/v2/agents/submit-bitset/receipts/ordered-1";
+  const miss = await worker.fetch(minerRequest(path, { hotkey: "5OrderingTestMiner" }), env);
+  assert.equal(miss.status, 200);
+  assert.equal(miss.headers.get("x-cathedral-v2-beta-cache"), "MISS");
+  // Bucket is now empty (burst 1, negligible refill). The cached receipt is
+  // still served, and repeatedly, without consuming anything.
+  for (let i = 0; i < 3; i++) {
+    const hit = await worker.fetch(minerRequest(path, { hotkey: "5OrderingTestMiner" }), env);
+    assert.equal(hit.status, 200);
+    assert.equal(hit.headers.get("x-cathedral-v2-beta-cache"), "HIT");
+  }
+  // An uncached path from the same miner is rate limited: budget was spent by
+  // the MISS, not the HITs.
+  const limited = await worker.fetch(
+    minerRequest("/v2/agents/submit-bitset/receipts/ordered-other", { hotkey: "5OrderingTestMiner" }), env);
+  assert.equal(limited.status, 429);
+  assert.equal(originCalls.length, 1);
+}
+
+resetOriginCalls();
+{
   const cache = new TestCache();
   originHandler = async () => Response.json(receiptPayload("terminal-1", true));
   const response = await worker.fetch(

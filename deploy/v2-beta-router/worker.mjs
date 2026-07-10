@@ -335,16 +335,10 @@ export default {
         return stagedReopenResponse();
       }
     }
-    if (isRateLimitedPath(incomingUrl, request.method)) {
-      const hotkey = (request.headers.get("x-cathedral-hotkey") || "").trim();
-      if (!CANARY_HOTKEYS.has(hotkey)) {
-        const key = hotkey || request.headers.get("cf-connecting-ip") || "anon";
-        if (!takeEdgeToken(key, env)) {
-          return edgeRateLimitedResponse();
-        }
-      }
-    }
-
+    // Receipt cache HITs are served before the per-miner token bucket: a HIT
+    // never reaches the origin, so it should not spend the miner's budget for
+    // fetches/submits. The zone-level per-IP WAF rule still bounds abusive
+    // polling loops upstream of this code.
     const receiptId = request.method === "GET" ? receiptIdFromPath(incomingUrl) : null;
     const receiptCache = env.RECEIPT_CACHE || globalThis.caches?.default;
     const cacheKey = receiptId && receiptCache ? receiptCacheKey(incomingUrl) : null;
@@ -354,6 +348,16 @@ export default {
         if (cached) return clientReceiptResponse(cached, "HIT");
       } catch {
         // Cache availability must never become receipt availability.
+      }
+    }
+
+    if (isRateLimitedPath(incomingUrl, request.method)) {
+      const hotkey = (request.headers.get("x-cathedral-hotkey") || "").trim();
+      if (!CANARY_HOTKEYS.has(hotkey)) {
+        const key = hotkey || request.headers.get("cf-connecting-ip") || "anon";
+        if (!takeEdgeToken(key, env)) {
+          return edgeRateLimitedResponse();
+        }
       }
     }
 
