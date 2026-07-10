@@ -95,6 +95,41 @@ resetOriginCalls();
 
 resetOriginCalls();
 {
+  // Artifact access metadata is authenticated, staged, and never handled by
+  // the receipt cache. The immutable CNF URL it returns is fetched separately.
+  const missingAuth = await worker.fetch(
+    new Request("https://v2-beta.cathedral.computer/v2/synthetic-boolean/per-miner/cnf-access")
+  );
+  assert.equal(missingAuth.status, 422);
+  assert.equal(originCalls.length, 0);
+
+  const staged = await worker.fetch(
+    minerRequest("/v2/synthetic-boolean/per-miner/cnf-access?challenge_id=pm-test")
+  );
+  assert.equal(staged.status, 429);
+  assert.equal((await json(staged)).reason, "v2_beta_staged_reopen");
+  assert.equal(originCalls.length, 0);
+
+  originHandler = async () => Response.json({
+    schema: "cathedral.v2.cnf_access.v1",
+    artifact_url: "https://artifacts.example/v2/cnf/v1/sha256/abc.cnf",
+    submit_token: "sensitive-test-token",
+  }, { headers: { "cache-control": "no-store" } });
+  const admitted = await worker.fetch(
+    minerRequest("/v2/synthetic-boolean/per-miner/cnf-access?challenge_id=pm-test", {
+      hotkey: DOGFOOD_HOTKEY,
+    })
+  );
+  assert.equal(admitted.status, 200);
+  assert.equal(admitted.headers.get("cache-control"), "no-store");
+  assert.equal((await json(admitted)).submit_token, "sensitive-test-token");
+  assert.equal(originCalls.length, 1);
+  assert.equal(new URL(originCalls[0].url).pathname,
+    "/v2/synthetic-boolean/per-miner/cnf-access");
+}
+
+resetOriginCalls();
+{
   const response = await worker.fetch(
     minerRequest("/v2/synthetic-boolean/per-miner/challenges?limit=50", {
       hotkey: DOGFOOD_HOTKEY,

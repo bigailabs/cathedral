@@ -129,7 +129,18 @@ their policy versions must stay in the epoch-ms range validators expect.
 | `CATHEDRAL_V2_REAL_FRACTION` | 0 | Fraction of real/unplanted V2 instances. The sandbox currently pins `0` explicitly to preserve current all-planted behavior; change only as a deliberate mechanism decision. |
 | `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2` | 0 | Explicit burn-policy override. The legacy `CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE` key is ignored and should not be set. |
 
-## 6. Internal / test-only (do not set in deployments; use the profile)
+## 6. Immutable V2 CNF delivery (Phase 2 rollout)
+
+`CATHEDRAL_V2_CNF_ARTIFACT_BASE_URL` is the stable public/CDN base for
+content-addressed `v2/cnf/v1/sha256/<hash>.cnf` objects. Publication uses either
+the existing Hippius credentials (`CATHEDRAL_HIPPIUS_TOKEN` / `_BUCKET`) or the
+existing `CATHEDRAL_CNF_BACKEND=bucket` S3/R2 configuration. Run
+`python3 -m scaffold.publisher.run_epoch_publish` to publish and read-back verify
+the full current + next epoch pair. Only after that command reports
+`'ready': True` should `CATHEDRAL_V2_CNF_ARTIFACTS_ENABLED=1` be set on read
+services. The legacy body-plus-token endpoint remains available throughout.
+
+## 7. Internal / test-only (do not set in deployments; use the profile)
 
 `CATHEDRAL_V2_ENABLED`, `CATHEDRAL_V2_SUBMIT_BITSET_ENABLED`,
 `CATHEDRAL_V2_LAZY_ISSUANCE`, `CATHEDRAL_V2_PM_PAYOUT_BRIDGE`,

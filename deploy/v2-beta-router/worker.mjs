@@ -45,7 +45,8 @@ function isV2MinerPath(url, method) {
   const path = stripLegacyPrefix(url.pathname);
   if (method === "GET") {
     return path === "/v2/synthetic-boolean/per-miner/challenges"
-      || path === "/v2/synthetic-boolean/per-miner/cnf";
+      || path === "/v2/synthetic-boolean/per-miner/cnf"
+      || path === "/v2/synthetic-boolean/per-miner/cnf-access";
   }
   if (method === "POST") {
     return path === "/v2/agents/submit-bitset"
@@ -284,6 +285,7 @@ function isPerMinerRead(url) {
   const path = stripLegacyPrefix(url.pathname);
   return path === "/v2/synthetic-boolean/per-miner/challenges"
     || path === "/v2/synthetic-boolean/per-miner/cnf"
+    || path === "/v2/synthetic-boolean/per-miner/cnf-access"
     || path === "/v1/synthetic-boolean/per-miner/challenges"
     || path === "/v1/synthetic-boolean/per-miner/cnf";
 }

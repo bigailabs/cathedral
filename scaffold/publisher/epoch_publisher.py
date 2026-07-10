@@ -1,197 +1,435 @@
-"""Once-per-epoch assignment publisher (edge-read architecture).
+"""Immutable, content-addressed V2 per-miner CNF publication.
 
-Instead of computing per-miner challenges on every poll (which pins the DB pool
-and forces uncacheable origin reads), this job runs ONCE per epoch and publishes
-each miner's full assignment set to a public Hippius S3 bucket:
+This module publishes CNF *bytes only*.  Authentication, ownership checks, and
+submit-token minting stay in the live app and are deliberately absent here.
+Objects use a versioned SHA-256 key and are read back after publication before
+their catalog row can be recorded:
 
-  cnf/<sha>.cnf                     immutable CNF bodies, deduped by sha256
-  epoch/<epoch>/<hotkey>.json       signed per-miner assignment manifest
-  latest.json                       signed pointer {epoch, published_at}
+    v2/cnf/v1/sha256/<sha256>.cnf
 
-Miners then read from Hippius (no auth, no origin). The origin only accepts
-submits + runs verify. Everything the old challenges handler computed per item is
-a pure function of (hotkey, epoch, tier, seq) + the token secret, so it moves
-here unchanged.
-
-This module is pure orchestration over per_miner + v2_bitset_submit + a blob
-sink; it holds no wall-clock (timestamps are passed in) so it is testable and
-resumable.
+The catalog contains only non-secret delivery metadata.  A separate readiness
+row is marked ready only after every configured artifact for both the requested
+epoch and its successor has been verified.  Re-running a publish is idempotent;
+an existing object or catalog row with different bytes/identity fails closed.
 """
+
 from __future__ import annotations
 
 import hashlib
-import json
+import re
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable
+from urllib.parse import urlsplit
 
 from . import per_miner as pm
-from . import real_corpus
-from . import v2_bitset_submit
-from ..dimacs import parse_cnf
+from . import v2_cnf_store
+from .store import Store
 
-ASSIGNMENT_SCHEMA = "cathedral.v2.assignment.v1"
-POINTER_SCHEMA = "cathedral.v2.epoch_pointer.v1"
+ARTIFACT_VERSION = "v1"
+ARTIFACT_SCHEMA = "cathedral.v2.cnf_artifact.v1"
+ACCESS_SCHEMA = "cathedral.v2.cnf_access.v1"
+ARTIFACT_CACHE_CONTROL = "public, max-age=31536000, immutable"
+ARTIFACT_CONTENT_TYPE = "text/plain; charset=utf-8"
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+PutObject = Callable[[str, bytes, str, str], Any]
+GetObject = Callable[[str], bytes | None]
+Progress = Callable[[str, dict[str, Any]], None]
 
 
-def build_item(hotkey: str, epoch: int, tier: int, seq: int, *,
-               token_secret: str, expires_at: str,
-               not_before: str | None = None) -> tuple[dict[str, Any], str, bytes]:
-    """Pure: build ONE assignment item + its CNF. Returns (item, cnf_sha, cnf_bytes).
+class ArtifactPublicationError(RuntimeError):
+    """Base class for fail-closed artifact publication errors."""
 
-    Mirrors the per-item loop in the old v2_per_miner_challenges handler exactly:
-    generate, parse nvars, label kind, sha, mint token. The planted witness
-    (generate_instance's 3rd return) is DELIBERATELY discarded here — it is never
-    published, so a public bucket leaks nothing usable.
 
-    not_before pins the earliest submit time (the epoch open) so a miner cannot
-    pre-solve a manifest fetched early and submit before the epoch officially
-    starts (Codex gate-1 blocker fix).
-    """
-    cid, cnf_text, planted = pm.generate_instance(hotkey, epoch, tier, seq)
-    nvars, _clauses = parse_cnf(cnf_text)
-    cnf_bytes = cnf_text.encode("utf-8")
-    cnf_sha = hashlib.sha256(cnf_bytes).hexdigest()
-    kind = (
-        real_corpus.kind_for(epoch, tier, seq, salt=hotkey)
-        if planted is None else "random_3sat_perminer"
+class ArtifactMismatchError(ArtifactPublicationError):
+    """An immutable object/catalog entry disagrees with its claimed identity."""
+
+
+@dataclass(frozen=True)
+class ArtifactIdentity:
+    sha256: str
+    length: int
+    key: str
+
+
+def artifact_key(cnf_sha256: str) -> str:
+    sha = str(cnf_sha256 or "").strip().lower()
+    if not _SHA256_RE.fullmatch(sha):
+        raise ValueError("invalid_cnf_sha256")
+    return f"v2/cnf/{ARTIFACT_VERSION}/sha256/{sha}.cnf"
+
+
+def content_addressed_identity(cnf_bytes: bytes) -> ArtifactIdentity:
+    if not isinstance(cnf_bytes, (bytes, bytearray)):
+        raise TypeError("cnf artifact body must be bytes")
+    body = bytes(cnf_bytes)
+    sha = hashlib.sha256(body).hexdigest()
+    return ArtifactIdentity(sha256=sha, length=len(body), key=artifact_key(sha))
+
+
+def immutable_artifact_url(base_url: str, key: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("cnf_artifact_base_url_missing")
+    parsed = urlsplit(base)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("invalid_cnf_artifact_base_url")
+    expected_prefix = f"v2/cnf/{ARTIFACT_VERSION}/sha256/"
+    if not str(key).startswith(expected_prefix):
+        raise ValueError("invalid_cnf_artifact_key")
+    return f"{base}/{key}"
+
+
+def verify_artifact_bytes(body: bytes, identity: ArtifactIdentity) -> None:
+    if not isinstance(body, (bytes, bytearray)):
+        raise ArtifactMismatchError("cnf_artifact_readback_not_bytes")
+    actual = bytes(body)
+    if len(actual) != identity.length:
+        raise ArtifactMismatchError("cnf_artifact_length_mismatch")
+    if hashlib.sha256(actual).hexdigest() != identity.sha256:
+        raise ArtifactMismatchError("cnf_artifact_sha256_mismatch")
+
+
+def _row_dict(row: Any) -> dict[str, Any]:
+    try:
+        return {key: row[key] for key in row.keys()}
+    except Exception:
+        return dict(row)
+
+
+def get_artifact(store: Store, challenge_id: str) -> dict[str, Any] | None:
+    """Return a validated non-secret catalog row for ``challenge_id``."""
+    rows = store.query(
+        "SELECT challenge_id, epoch, tier, seq, n_vars, cnf_sha256, cnf_bytes, "
+        "artifact_key, artifact_url, published_at_iso "
+        "FROM v2_cnf_artifacts WHERE challenge_id=?",
+        (str(challenge_id),),
     )
-    token = v2_bitset_submit.mint_submit_token(
-        secret=token_secret, miner_hotkey=hotkey, challenge_id=cid,
-        epoch=epoch, tier=tier, seq=seq, nvars=nvars, cnf_sha256=cnf_sha,
-        expires_at=expires_at, not_before=not_before,
-    )
-    item = {
-        "challenge_id": cid, "tier": tier, "seq": seq, "n_vars": nvars,
-        "cnf_sha256": cnf_sha, "cnf_key": f"cnf/{cnf_sha}.cnf",
-        "kind": kind, "assignment_encoding": "bitset/v1",
-        "submit_token": token, "submit_token_expires_at": expires_at,
+    if not rows:
+        return None
+    row = _row_dict(rows[0])
+    sha = str(row.get("cnf_sha256") or "").lower()
+    key = str(row.get("artifact_key") or "")
+    url = str(row.get("artifact_url") or "")
+    try:
+        expected_key = artifact_key(sha)
+        length = int(row.get("cnf_bytes") or 0)
+        n_vars = int(row.get("n_vars") or 0)
+    except (TypeError, ValueError):
+        return None
+    parsed_url = urlsplit(url)
+    if (
+        key != expected_key
+        or length <= 0
+        or n_vars <= 0
+        or parsed_url.scheme not in {"http", "https"}
+        or not parsed_url.netloc
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.query
+        or parsed_url.fragment
+        or not parsed_url.path.endswith(f"/{key}")
+    ):
+        return None
+    row["cnf_sha256"] = sha
+    row["cnf_bytes"] = length
+    row["n_vars"] = n_vars
+    row["epoch"] = int(row["epoch"])
+    row["tier"] = int(row["tier"])
+    row["seq"] = int(row["seq"])
+    return row
+
+
+def _register_artifact(
+    store: Store,
+    *,
+    challenge_id: str,
+    epoch: int,
+    tier: int,
+    seq: int,
+    n_vars: int,
+    identity: ArtifactIdentity,
+    artifact_url: str,
+    published_at: str,
+) -> dict[str, Any]:
+    def _insert(conn):
+        conn.execute(
+            "INSERT OR IGNORE INTO v2_cnf_artifacts("
+            "challenge_id, epoch, tier, seq, n_vars, cnf_sha256, cnf_bytes, "
+            "artifact_key, artifact_url, published_at_iso"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                challenge_id,
+                int(epoch),
+                int(tier),
+                int(seq),
+                int(n_vars),
+                identity.sha256,
+                identity.length,
+                identity.key,
+                artifact_url,
+                published_at,
+            ),
+        )
+
+    store.write(_insert)
+    row = get_artifact(store, challenge_id)
+    if row is None:
+        raise ArtifactMismatchError("cnf_artifact_catalog_missing_after_insert")
+    expected = {
+        "epoch": int(epoch),
+        "tier": int(tier),
+        "seq": int(seq),
+        "n_vars": int(n_vars),
+        "cnf_sha256": identity.sha256,
+        "cnf_bytes": identity.length,
+        "artifact_key": identity.key,
+        "artifact_url": artifact_url,
     }
-    return item, cnf_sha, cnf_bytes
+    if any(row.get(key) != value for key, value in expected.items()):
+        raise ArtifactMismatchError("cnf_artifact_catalog_mismatch")
+    return row
 
 
-def miner_assignment(hotkey: str, epoch: int, *, token_secret: str, expires_at: str,
-                     allotment_by_tier: dict[int, int],
-                     not_before: str | None = None) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
-    """Pure: full assignment for one miner this epoch + the CNF bytes to upload.
-
-    Returns (items, {cnf_sha: cnf_bytes}). CNF bytes are deduped by sha across the
-    miner's set (identical instances collapse to one upload).
-    """
-    items: list[dict[str, Any]] = []
-    cnfs: dict[str, bytes] = {}
-    for tier in sorted(allotment_by_tier):
-        for seq in range(allotment_by_tier[tier]):
-            item, sha, body = build_item(
-                hotkey, epoch, tier, seq,
-                token_secret=token_secret, expires_at=expires_at,
-                not_before=not_before)
-            items.append(item)
-            cnfs[sha] = body
-    return items, cnfs
-
-
-def sign_manifest(manifest: dict[str, Any], sign: Callable[[bytes], str]) -> dict[str, Any]:
-    """Attach an ed25519 publisher signature over the canonical manifest body.
-
-    The signature is defense-in-depth: submit RE-verifies token + sha
-    independently, so a tampered manifest cannot cause a bad score — but the
-    signature lets a miner detect tampering before wasting solve time.
-    """
-    body = {k: manifest[k] for k in manifest if k != "publisher_sig"}
-    canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    signed = dict(manifest)
-    signed["publisher_sig"] = sign(canonical)
-    return signed
-
-
-def publish_epoch(
+def _write_readiness(
+    store: Store,
     *,
     epoch: int,
-    hotkeys: Iterable[str],
-    token_secret: str,
-    expires_at: str,
-    published_at: str,
-    reveal_nonce: str,
-    not_before: str | None = None,
+    expected_current: int,
+    published_current: int,
+    expected_next: int,
+    published_next: int,
+    ready: bool,
+    updated_at: str,
+) -> None:
+    def _write(conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO v2_cnf_epoch_readiness("
+            "epoch, next_epoch, expected_current, published_current, "
+            "expected_next, published_next, ready, updated_at_iso"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                int(epoch),
+                int(epoch) + 1,
+                int(expected_current),
+                int(published_current),
+                int(expected_next),
+                int(published_next),
+                1 if ready else 0,
+                str(updated_at),
+            ),
+        )
+
+    store.write(_write)
+
+
+def epoch_readiness(store: Store, epoch: int) -> dict[str, Any] | None:
+    rows = store.query(
+        "SELECT epoch, next_epoch, expected_current, published_current, "
+        "expected_next, published_next, ready, updated_at_iso "
+        "FROM v2_cnf_epoch_readiness WHERE epoch=?",
+        (int(epoch),),
+    )
+    return _row_dict(rows[0]) if rows else None
+
+
+def epoch_is_ready(store: Store, epoch: int) -> bool:
+    row = epoch_readiness(store, epoch)
+    if row is None:
+        return False
+    try:
+        expected_current = int(row["expected_current"])
+        expected_next = int(row["expected_next"])
+        return (
+            int(row["ready"]) == 1
+            and int(row["next_epoch"]) == int(epoch) + 1
+            and expected_current > 0
+            and expected_next > 0
+            and int(row["published_current"]) == expected_current
+            and int(row["published_next"]) == expected_next
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _read_existing(get_object: GetObject, key: str) -> bytes | None:
+    try:
+        return get_object(key)
+    except FileNotFoundError:
+        return None
+
+
+def _publish_verified_object(
+    *,
+    identity: ArtifactIdentity,
+    body: bytes,
+    put_object: PutObject,
+    get_object: GetObject,
+) -> None:
+    existing = _read_existing(get_object, identity.key)
+    if existing is not None:
+        verify_artifact_bytes(existing, identity)
+        return
+    put_object(
+        identity.key,
+        body,
+        ARTIFACT_CONTENT_TYPE,
+        ARTIFACT_CACHE_CONTROL,
+    )
+    readback = _read_existing(get_object, identity.key)
+    if readback is None:
+        raise ArtifactPublicationError("cnf_artifact_readback_missing")
+    verify_artifact_bytes(readback, identity)
+
+
+def prepublish_epoch_pair(
+    store: Store,
+    *,
+    epoch: int,
+    assignment_identities: Iterable[str],
     allotment_by_tier: dict[int, int],
     cnf_base_url: str,
-    put_object: Callable[[str, bytes, str], str],
-    sign: Callable[[bytes], str],
-    on_progress: Callable[[str, dict[str, Any]], None] | None = None,
+    put_object: PutObject,
+    get_object: GetObject,
+    published_at: str,
+    on_progress: Progress | None = None,
 ) -> dict[str, Any]:
-    """Orchestrate a full epoch publish with an ATOMIC REVEAL. Side effects are
-    ALL via put_object, so this is testable with an in-memory sink.
+    """Publish and verify every CNF for ``epoch`` and ``epoch + 1``.
 
-    Atomic reveal (Codex gate-1 blocker fix): per-miner manifests are written
-    under an UNGUESSABLE prefix `epoch/<epoch>-<reveal_nonce>/<hotkey>.json`. The
-    nonce is a caller-supplied high-entropy string (never derived from clock/rng
-    in-module, matching the no-wall-clock discipline). latest.json is written
-    LAST and is the ONLY object that reveals the nonce, so the manifests are
-    undiscoverable until the pointer flips. CNFs live at the stable `cnf/<sha>`
-    path (deduped across epochs) but are just puzzle bodies — knowing a sha
-    without the manifest is useless (you don't know which challenge/token it maps
-    to, and the token carries not_before anyway).
+    ``assignment_identities`` are the coldkey-collapse-aware identities used by
+    ``per_miner.generate_instance``.  No raw miner hotkey, signature, auth
+    header, submit token, or planted witness is written to object storage or to
+    the artifact catalog.
 
-    put_object(key, data, content_type) -> public_url.
-    sign(bytes) -> base64 signature string.
-    not_before: earliest submit time baked into every token (defaults to
-    published_at when None).
-    Returns a summary {epoch, miners, items, unique_cnfs, pointer_url, reveal_prefix}.
+    The readiness row starts and remains false until both epochs are complete.
+    Any partial failure records exact progress and re-raises; a later identical
+    run safely resumes by verifying existing content-addressed objects.
     """
-    if not reveal_nonce or len(reveal_nonce) < 16:
-        raise ValueError("reveal_nonce must be a high-entropy string (>=16 chars)")
-    nbf = not_before or published_at
-    reveal_prefix = f"epoch/{epoch}-{reveal_nonce}"
-    uploaded_cnf: set[str] = set()
-    total_items = 0
-    manifest_keys: dict[str, str] = {}
+    identities = sorted(
+        {str(value).strip() for value in assignment_identities if str(value).strip()}
+    )
+    if not identities:
+        raise ValueError("assignment_identities_required")
+    tiers: list[tuple[int, int]] = []
+    for tier, count in sorted(allotment_by_tier.items()):
+        tier_i = int(tier)
+        count_i = int(count)
+        if tier_i not in pm.TIERS or count_i <= 0:
+            raise ValueError("invalid_artifact_allotment")
+        if count_i != pm.allotment_for(tier_i):
+            # A readiness marker is meaningful only for the full supply the
+            # authenticated handler can resolve.  Dogfood subsets may publish
+            # objects, but they must never use this ready-making operation.
+            raise ValueError("artifact_allotment_must_cover_full_epoch_supply")
+        tiers.append((tier_i, count_i))
+    if not tiers:
+        raise ValueError("artifact_allotment_required")
+    if {tier for tier, _count in tiers} != set(pm.TIERS):
+        raise ValueError("artifact_allotment_must_cover_all_tiers")
 
-    # Maps cnf sha -> the URL put_object returned for it. For a public-bucket
-    # backend this is base+key; for a presigned-URL backend (Hippius) it is a
-    # per-object signed GET url. Either way the manifest embeds the exact url a
-    # miner GETs, so the read path is backend-agnostic.
-    cnf_url_by_sha: dict[str, str] = {}
+    expected_per_epoch = len(identities) * sum(count for _tier, count in tiers)
+    counts = {int(epoch): 0, int(epoch) + 1: 0}
+    verified_objects: set[str] = set()
+    _write_readiness(
+        store,
+        epoch=epoch,
+        expected_current=expected_per_epoch,
+        published_current=0,
+        expected_next=expected_per_epoch,
+        published_next=0,
+        ready=False,
+        updated_at=published_at,
+    )
 
-    for hk in hotkeys:
-        items, cnfs = miner_assignment(
-            hk, epoch, token_secret=token_secret, expires_at=expires_at,
-            allotment_by_tier=allotment_by_tier, not_before=nbf)
-        # Upload any CNFs not already uploaded this run (dedup by sha).
-        for sha, body in cnfs.items():
-            if sha not in uploaded_cnf:
-                cnf_url_by_sha[sha] = put_object(
-                    f"cnf/{sha}.cnf", body, "text/plain; charset=utf-8")
-                uploaded_cnf.add(sha)
-        # Attach the concrete read url to each item so miners never construct it.
-        for it in items:
-            it["cnf_url"] = cnf_url_by_sha.get(it["cnf_sha256"], "")
-        manifest = {
-            "schema": ASSIGNMENT_SCHEMA, "epoch": epoch, "miner_hotkey": hk,
-            "published_at": published_at, "not_before": nbf, "expires_at": expires_at,
-            "cnf_base": cnf_base_url, "count": len(items), "items": items,
-        }
-        manifest = sign_manifest(manifest, sign)
-        body = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
-        key = f"{reveal_prefix}/{hk}.json"
-        put_object(key, body, "application/json")
-        manifest_keys[hk] = key
-        total_items += len(items)
-        if on_progress:
-            on_progress("miner_published", {"hotkey": hk, "items": len(items)})
+    try:
+        for artifact_epoch in (int(epoch), int(epoch) + 1):
+            for assignment_identity in identities:
+                for tier, count in tiers:
+                    for seq in range(count):
+                        challenge_id, claimed_sha, n_vars, _is_real, cnf_text = (
+                            pm.item_meta(assignment_identity, artifact_epoch, tier, seq)
+                        )
+                        body = cnf_text.encode("utf-8")
+                        identity = content_addressed_identity(body)
+                        if claimed_sha != identity.sha256:
+                            raise ArtifactMismatchError("generated_cnf_sha256_mismatch")
+                        if identity.sha256 not in verified_objects:
+                            _publish_verified_object(
+                                identity=identity,
+                                body=body,
+                                put_object=put_object,
+                                get_object=get_object,
+                            )
+                            verified_objects.add(identity.sha256)
+                        url = immutable_artifact_url(cnf_base_url, identity.key)
+                        _register_artifact(
+                            store,
+                            challenge_id=challenge_id,
+                            epoch=artifact_epoch,
+                            tier=tier,
+                            seq=seq,
+                            n_vars=n_vars,
+                            identity=identity,
+                            artifact_url=url,
+                            published_at=published_at,
+                        )
+                        # Keep the legacy body-plus-token endpoint and verifier on
+                        # the exact already-verified bytes.  This is best-effort;
+                        # their existing deterministic fallback remains intact.
+                        v2_cnf_store.put(store, challenge_id, cnf_text)
+                        counts[artifact_epoch] += 1
+                        if on_progress:
+                            on_progress(
+                                "artifact_verified",
+                                {
+                                    "epoch": artifact_epoch,
+                                    "challenge_id": challenge_id,
+                                    "tier": tier,
+                                    "seq": seq,
+                                    "cnf_sha256": identity.sha256,
+                                    "cnf_bytes": identity.length,
+                                    "artifact_key": identity.key,
+                                },
+                            )
+    except Exception:
+        _write_readiness(
+            store,
+            epoch=epoch,
+            expected_current=expected_per_epoch,
+            published_current=counts[int(epoch)],
+            expected_next=expected_per_epoch,
+            published_next=counts[int(epoch) + 1],
+            ready=False,
+            updated_at=published_at,
+        )
+        raise
 
-    # latest.json LAST — the only object that reveals the nonce, so manifests are
-    # undiscoverable until this flips.
-    pointer = {
-        "schema": POINTER_SCHEMA, "epoch": epoch, "published_at": published_at,
-        "not_before": nbf, "expires_at": expires_at,
-        "reveal_prefix": reveal_prefix, "miner_count": len(manifest_keys),
-    }
-    pointer = sign_manifest(pointer, sign)
-    pointer_url = put_object(
-        "latest.json", json.dumps(pointer, separators=(",", ":")).encode("utf-8"),
-        "application/json")
-
+    _write_readiness(
+        store,
+        epoch=epoch,
+        expected_current=expected_per_epoch,
+        published_current=counts[int(epoch)],
+        expected_next=expected_per_epoch,
+        published_next=counts[int(epoch) + 1],
+        ready=True,
+        updated_at=published_at,
+    )
     return {
-        "epoch": epoch, "miners": len(manifest_keys), "items": total_items,
-        "unique_cnfs": len(uploaded_cnf), "pointer_url": pointer_url,
-        "reveal_prefix": reveal_prefix,
+        "epoch": int(epoch),
+        "next_epoch": int(epoch) + 1,
+        "assignment_identities": len(identities),
+        "expected_current": expected_per_epoch,
+        "published_current": counts[int(epoch)],
+        "expected_next": expected_per_epoch,
+        "published_next": counts[int(epoch) + 1],
+        "unique_artifacts": len(verified_objects),
+        "ready": epoch_is_ready(store, epoch),
     }

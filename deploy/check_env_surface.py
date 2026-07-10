@@ -6,6 +6,7 @@ should set only the profile, role, shared store/secrets, and a few runtime
 guardrails. This checker makes that rule executable for local env files,
 systemd/Railway exports, and handoff reviews.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -105,6 +106,19 @@ SUPPORTING_OPTIONAL = {
     "CATHEDRAL_DASHBOARD_SNAPSHOT_REFRESH_SECS",
     "CATHEDRAL_DASHBOARD_SNAPSHOT_MAX_STALE_SECS",
     "CATHEDRAL_SLOW_REQUEST_LOG_SECS",
+    # Phase 2 immutable CNF publication/delivery. The publisher accepts either
+    # the existing Hippius helper credentials or the existing S3/R2 CNF bucket.
+    "CATHEDRAL_V2_CNF_ARTIFACTS_ENABLED",
+    "CATHEDRAL_V2_CNF_ARTIFACT_BASE_URL",
+    "CATHEDRAL_HIPPIUS_TOKEN",
+    "CATHEDRAL_HIPPIUS_BUCKET",
+    "CATHEDRAL_HIPPIUS_API",
+    "CATHEDRAL_CNF_BACKEND",
+    "CATHEDRAL_CNF_S3_ENDPOINT",
+    "CATHEDRAL_CNF_S3_BUCKET",
+    "CATHEDRAL_CNF_S3_ACCESS_KEY",
+    "CATHEDRAL_CNF_S3_SECRET_KEY",
+    "CATHEDRAL_CNF_S3_REGION",
     # Local/container plumbing.
     "CATHEDRAL_DB_PATH",
     "PORT",
@@ -234,14 +248,17 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         if not raw or raw.startswith("#"):
             continue
         if raw.startswith("export "):
-            raw = raw[len("export "):].strip()
+            raw = raw[len("export ") :].strip()
         if "=" not in raw:
             print(f"warn: {path}:{lineno}: ignored line without '='", file=sys.stderr)
             continue
         key, value = raw.split("=", 1)
         key = key.strip()
         if not KEY_RE.match(key):
-            print(f"warn: {path}:{lineno}: ignored invalid env name {key!r}", file=sys.stderr)
+            print(
+                f"warn: {path}:{lineno}: ignored invalid env name {key!r}",
+                file=sys.stderr,
+            )
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
@@ -272,7 +289,9 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
         errors.append("CATHEDRAL_LAUNCH_PROFILE must be v2-converged for relaunch")
 
     if role and role not in {"all", "read", "submit", "worker"}:
-        errors.append("CATHEDRAL_SERVICE_ROLE must be one of: all, read, submit, worker")
+        errors.append(
+            "CATHEDRAL_SERVICE_ROLE must be one of: all, read, submit, worker"
+        )
 
     db = env.get("DATABASE_URL", "").strip()
     if db and not db.startswith(("postgres://", "postgresql://")):
@@ -283,7 +302,9 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
         if value is None:
             continue
         if not minimum <= value <= maximum:
-            errors.append(f"{name} must be between {minimum} and {maximum} for relaunch")
+            errors.append(
+                f"{name} must be between {minimum} and {maximum} for relaunch"
+            )
 
     if _is_present(env.get("CATHEDRAL_WEIGHTS_WINDOW_HOURS")):
         try:
@@ -292,7 +313,9 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
             errors.append("CATHEDRAL_WEIGHTS_WINDOW_HOURS must be numeric")
         else:
             if window_hours < 48:
-                errors.append("CATHEDRAL_WEIGHTS_WINDOW_HOURS must be >= 48 for the relaunch bridge")
+                errors.append(
+                    "CATHEDRAL_WEIGHTS_WINDOW_HOURS must be >= 48 for the relaunch bridge"
+                )
 
     if _is_present(env.get("CATHEDRAL_V2_REAL_FRACTION")):
         try:
@@ -306,7 +329,9 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
     if _is_present(env.get("CATHEDRAL_PERMINER_SCORING_MODE")):
         mode = env["CATHEDRAL_PERMINER_SCORING_MODE"].strip().lower()
         if mode != "pm_primary":
-            errors.append("CATHEDRAL_PERMINER_SCORING_MODE must be pm_primary for relaunch")
+            errors.append(
+                "CATHEDRAL_PERMINER_SCORING_MODE must be pm_primary for relaunch"
+            )
 
     if _is_present(env.get("CATHEDRAL_WEIGHTS_MODE")):
         weights_mode = env["CATHEDRAL_WEIGHTS_MODE"].strip().lower()
@@ -329,7 +354,9 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
         if _is_falsy(env.get(name)):
             errors.append(f"{name} is explicitly off but v2-converged implies it on")
         else:
-            warnings.append(f"{name} is redundant under CATHEDRAL_LAUNCH_PROFILE=v2-converged")
+            warnings.append(
+                f"{name} is redundant under CATHEDRAL_LAUNCH_PROFILE=v2-converged"
+            )
 
     for name, why in sorted(DANGEROUS_DEPRECATED.items()):
         if name not in env:
@@ -348,15 +375,24 @@ def audit(env: dict[str, str]) -> tuple[list[str], list[str]]:
                 "make it identical so startup env pinning can proceed"
             )
 
-    known = set(CORE_REQUIRED) | CORE_OPTIONAL | PROFILE_IMPLIED_FLAGS | set(DANGEROUS_DEPRECATED)
+    known = (
+        set(CORE_REQUIRED)
+        | CORE_OPTIONAL
+        | PROFILE_IMPLIED_FLAGS
+        | set(DANGEROUS_DEPRECATED)
+    )
     known |= set(LEGACY_WARN_EXACT) | ALLOWED_GENERIC
     for name, value in _interesting(env).items():
         if name in known:
             continue
         if any(name.startswith(prefix) for prefix in LEGACY_WARN_PREFIXES):
-            warnings.append(f"{name} is outside the relaunch core; leave unset unless reviewing that subsystem")
+            warnings.append(
+                f"{name} is outside the relaunch core; leave unset unless reviewing that subsystem"
+            )
             continue
-        warnings.append(f"{name} is not in the relaunch env surface (value={_redact(name, value)})")
+        warnings.append(
+            f"{name} is not in the relaunch env surface (value={_redact(name, value)})"
+        )
 
     for name, why in sorted(LEGACY_WARN_EXACT.items()):
         if name in env:
@@ -385,7 +421,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    env: dict[str, str] = dict(os.environ) if (args.include_process_env or not args.env_file) else {}
+    env: dict[str, str] = (
+        dict(os.environ) if (args.include_process_env or not args.env_file) else {}
+    )
     for env_file in args.env_file or []:
         env.update(_parse_env_file(env_file))
 
@@ -393,7 +431,9 @@ def main(argv: list[str] | None = None) -> int:
     errors, warnings = audit(interesting)
 
     print("Cathedral V2 relaunch env audit")
-    print(f"source: {'process env' if not args.env_file else ', '.join(str(p) for p in args.env_file)}")
+    print(
+        f"source: {'process env' if not args.env_file else ', '.join(str(p) for p in args.env_file)}"
+    )
     print(f"visible envs: {len(interesting)}")
     print()
     print("Core required")
@@ -401,7 +441,9 @@ def main(argv: list[str] | None = None) -> int:
         status = "ok" if _is_present(interesting.get(name)) else "missing"
         print(f"  {status:7} {name:44} {_redact(name, interesting.get(name))}")
 
-    launch_optional_set = sorted(name for name in LAUNCH_CORE_OPTIONAL if name in interesting)
+    launch_optional_set = sorted(
+        name for name in LAUNCH_CORE_OPTIONAL if name in interesting
+    )
     if launch_optional_set:
         print()
         print("Launch core optional set")

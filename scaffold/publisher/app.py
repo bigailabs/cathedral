@@ -49,6 +49,7 @@ from .board_cache import BoardCache, board_cache_headers
 from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
 from . import v2_cnf_store
+from . import epoch_publisher as v2_cnf_artifacts
 from .sat_solution import verify_dimacs_solution
 from . import external_scores, submit_admission
 from . import solution_manifest
@@ -593,6 +594,11 @@ def build_app(
         for item in os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST", "").replace("\n", ",").split(",")
         if item.strip()
     }
+    # Phase 2 immutable CNF delivery.  Explicit rollout gate: the legacy
+    # body-plus-token endpoint remains authoritative until current+next epoch
+    # artifacts have been published and the operator enables metadata access.
+    v2_cnf_artifacts_enabled = _env_bool(
+        "CATHEDRAL_V2_CNF_ARTIFACTS_ENABLED", False)
     v2_submit_bitset_max_body_bytes = max(
         1024, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", 16_384))
     v2_submit_backpressure_enabled = _env_bool(
@@ -1286,8 +1292,10 @@ def build_app(
             f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/cnf",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
             f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/challenges",
             f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/cnf",
+            f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/cnf-access",
         }
         _V2_RECEIPT_POLL_PREFIXES = (
             "/v2/agents/submit-bitset/receipts/",
@@ -1458,6 +1466,7 @@ def build_app(
             "/v2/agents/submit-bitset/receipts/",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
             "/v2/validator/weights/next",
             "/v2/audit/epochs/",
             "/v2/receipts/",
@@ -1479,6 +1488,7 @@ def build_app(
             "/v2/agents/submit-bitset/receipts/",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
             "/v2/validator/weights/next",
             "/v2/audit/epochs/",
             "/v2/receipts/",
@@ -1557,6 +1567,45 @@ def build_app(
                 "more_body": False,
             })
 
+    class _V2CnfNoStoreMiddleware:
+        """Tokens/auth metadata on V2 CNF reads may never become cache entries."""
+
+        _PATHS = {
+            "/v2/synthetic-boolean/per-miner/challenges",
+            "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
+        }
+
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self._app(scope, receive, send)
+                return
+            path = scope.get("path", "")
+            if path.startswith(_LEGACY_PREFIX + "/"):
+                path = path[len(_LEGACY_PREFIX):]
+            if path not in self._PATHS:
+                await self._app(scope, receive, send)
+                return
+
+            async def _send_no_store(message):
+                if message.get("type") == "http.response.start":
+                    headers = [
+                        (name, value)
+                        for name, value in message.get("headers", [])
+                        if name.lower() not in {b"cache-control", b"pragma"}
+                    ]
+                    headers.extend([
+                        (b"cache-control", b"no-store"),
+                        (b"pragma", b"no-cache"),
+                    ])
+                    message = {**message, "headers": headers}
+                await send(message)
+
+            await self._app(scope, receive, _send_no_store)
+
     app.add_middleware(_StripLegacyPrefixMiddleware)
     app.add_middleware(_SlowRequestLogMiddleware)
 
@@ -1573,9 +1622,12 @@ def build_app(
     # later middleware outside earlier middleware, so this runs before the
     # saturation gate and does not consume a slot.
     app.add_middleware(AbuseLimitMiddleware)
-    # Role guard is now the true outer edge: role-mismatched traffic fails before
-    # rate-limit state, request body parsing, or expensive route work.
+    # Role guard stays outside all work-producing middleware: role-mismatched
+    # traffic fails before rate-limit state, body parsing, or route work.
     app.add_middleware(_ServiceRoleGuardMiddleware)
+    # Wrap every V2 CNF read response, including validation/errors, so a token or
+    # authenticated metadata response can never be cached by a browser or edge.
+    app.add_middleware(_V2CnfNoStoreMiddleware)
     # Outermost observability layer: count every final response status (incl.
     # role-guard/backpressure rejections) so the 5xx rate is complete. Cheap —
     # reads only the response-start status, no body buffering.
@@ -5706,6 +5758,100 @@ def build_app(
         if v2_submit_token_allowlist and str(hotkey).strip() not in v2_submit_token_allowlist:
             raise HTTPException(403, "v2_submit_token_hotkey_not_allowlisted")
 
+    def _authorize_v2_cnf_access(
+        request: Request,
+        *,
+        challenge_id: str,
+        tier: int | None,
+        seq: int | None,
+        hotkey: str,
+        signature: str,
+        submitted_at: str | None,
+        require_submit_token: bool,
+    ) -> dict[str, Any]:
+        """The single auth/ownership/grace contract for both V2 CNF paths."""
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        from . import per_miner as pm
+        if not v2_pipeline.v2_perminer_enabled():
+            raise HTTPException(404, "v2_per_miner_not_enabled")
+        _require_v2_perminer_ready(pm)
+        if submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        _verify_hotkey_claim(
+            hotkey,
+            signature,
+            submitted_at,
+            challenge_id="",
+            dimacs_solution_sha256="",
+        )
+        mark_verified_hotkey(request, hotkey)
+        parsed = pm.parse_challenge_id(challenge_id)
+        current_epoch = pm.current_epoch()
+        epoch = int(parsed["epoch"]) if parsed else current_epoch
+        if epoch not in (current_epoch, current_epoch - 1):
+            raise HTTPException(410, "per_miner_challenge_expired")
+        assignment_identity = _assignment_identity_for_hotkey(hotkey)
+        tier_seq = pm.resolve_tier_seq_for(
+            assignment_identity,
+            epoch,
+            challenge_id,
+            tier=tier,
+            seq=seq,
+        )
+        if tier_seq is None:
+            raise HTTPException(404, "challenge_id_not_in_miner_set")
+        tier_i, seq_i = tier_seq
+        if require_submit_token:
+            if not v2_submit_bitset_enabled:
+                raise HTTPException(404, "v2_submit_bitset_not_enabled")
+            _require_v2_submit_token_mint_allowed(hotkey)
+            if not v2_submit_token_secret:
+                raise HTTPException(503, "v2_submit_token_secret_missing")
+        return {
+            "pm": pm,
+            "challenge_id": challenge_id,
+            "hotkey": hotkey,
+            "assignment_identity": assignment_identity,
+            "epoch": epoch,
+            "tier": int(tier_i),
+            "seq": int(seq_i),
+        }
+
+    def _mint_v2_cnf_submit_token(
+        context: dict[str, Any],
+        *,
+        n_vars: int,
+        cnf_sha256: str,
+    ) -> tuple[str, str]:
+        expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+        token = v2_bitset_submit.mint_submit_token(
+            secret=v2_submit_token_secret,
+            miner_hotkey=str(context["hotkey"]),
+            challenge_id=str(context["challenge_id"]),
+            epoch=int(context["epoch"]),
+            tier=int(context["tier"]),
+            seq=int(context["seq"]),
+            nvars=int(n_vars),
+            cnf_sha256=str(cnf_sha256),
+            expires_at=expires_at,
+        )
+        return token, expires_at
+
+    def _artifact_for_v2_cnf_context(
+        context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        artifact = v2_cnf_artifacts.get_artifact(
+            v2_store, str(context["challenge_id"]))
+        if artifact is None:
+            return None
+        if any(
+            int(artifact[field]) != int(context[field])
+            for field in ("epoch", "tier", "seq")
+        ):
+            return None
+        return artifact
+
     @app.get("/v2/synthetic-boolean/per-miner/challenges")
     async def v2_per_miner_challenges(
         request: Request,
@@ -5815,10 +5961,89 @@ def build_app(
                     "blob_upload_path": "/v2/blobs/solutions",
                     "cnf_path": "/v2/synthetic-boolean/per-miner/cnf",
                     "cnf_params": ["challenge_id", "tier", "seq"],
+                    "cnf_access_path": (
+                        "/v2/synthetic-boolean/per-miner/cnf-access"
+                        if v2_cnf_artifacts_enabled else None
+                    ),
+                    "cnf_access_params": ["challenge_id", "tier", "seq"],
                 }
 
         import asyncio
-        return await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
+        payload = await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
+        return JSONResponse(
+            payload,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/synthetic-boolean/per-miner/cnf-access")
+    async def v2_per_miner_cnf_access(
+        request: Request,
+        challenge_id: str = Query(...),
+        tier: int | None = Query(None, ge=1),
+        seq: int | None = Query(None, ge=0),
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        def _run():
+            if not v2_cnf_artifacts_enabled:
+                raise HTTPException(404, "v2_cnf_artifacts_not_enabled")
+            with v2_pipeline.v2_pm_env():
+                context = _authorize_v2_cnf_access(
+                    request,
+                    challenge_id=challenge_id,
+                    tier=tier,
+                    seq=seq,
+                    hotkey=x_cathedral_hotkey,
+                    signature=x_cathedral_signature,
+                    submitted_at=x_cathedral_submitted_at,
+                    require_submit_token=True,
+                )
+                epoch = int(context["epoch"])
+                if not v2_cnf_artifacts.epoch_is_ready(v2_store, epoch):
+                    raise HTTPException(503, "v2_cnf_artifacts_not_ready")
+                artifact = _artifact_for_v2_cnf_context(context)
+                if artifact is None:
+                    # A ready epoch may never silently degrade to generation on
+                    # the metadata path: that would put unique bytes back on the
+                    # origin and make a partial publication look complete.
+                    raise HTTPException(503, "v2_cnf_artifact_missing")
+                token, expires_at = _mint_v2_cnf_submit_token(
+                    context,
+                    n_vars=int(artifact["n_vars"]),
+                    cnf_sha256=str(artifact["cnf_sha256"]),
+                )
+                return {
+                    "schema": v2_cnf_artifacts.ACCESS_SCHEMA,
+                    "challenge_id": challenge_id,
+                    "epoch": epoch,
+                    "tier": int(context["tier"]),
+                    "seq": int(context["seq"]),
+                    "n_vars": int(artifact["n_vars"]),
+                    "artifact_version": v2_cnf_artifacts.ARTIFACT_VERSION,
+                    "artifact_url": str(artifact["artifact_url"]),
+                    "artifact_key": str(artifact["artifact_key"]),
+                    "cnf_sha256": str(artifact["cnf_sha256"]),
+                    "cnf_bytes": int(artifact["cnf_bytes"]),
+                    "content_type": v2_cnf_artifacts.ARTIFACT_CONTENT_TYPE,
+                    "compression": "identity",
+                    "artifact_cache_control": v2_cnf_artifacts.ARTIFACT_CACHE_CONTROL,
+                    "assignment_encoding": "bitset/v1",
+                    "submit_path": "/v2/agents/submit-bitset",
+                    "submit_token": token,
+                    "submit_token_expires_at": expires_at,
+                }
+
+        import asyncio
+        payload = await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
+        return JSONResponse(
+            payload,
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
     @app.get("/v2/synthetic-boolean/per-miner/cnf")
     async def v2_per_miner_cnf(
@@ -5831,85 +6056,76 @@ def build_app(
         x_cathedral_submitted_at: str | None = Header(None),
     ):
         def _run():
-            if not solution_manifest_enabled:
-                raise HTTPException(404, "solution_manifest_v2_not_enabled")
-            from . import per_miner as pm
             with v2_pipeline.v2_pm_env():
-                if not v2_pipeline.v2_perminer_enabled():
-                    raise HTTPException(404, "v2_per_miner_not_enabled")
-                _require_v2_perminer_ready(pm)
-                if x_cathedral_submitted_at is None:
-                    raise HTTPException(401, "missing X-Cathedral-Submitted-At")
-                _verify_hotkey_claim(
-                    x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
-                    challenge_id="", dimacs_solution_sha256="",
+                context = _authorize_v2_cnf_access(
+                    request,
+                    challenge_id=challenge_id,
+                    tier=tier,
+                    seq=seq,
+                    hotkey=x_cathedral_hotkey,
+                    signature=x_cathedral_signature,
+                    submitted_at=x_cathedral_submitted_at,
+                    require_submit_token=False,
                 )
-                mark_verified_hotkey(request, x_cathedral_hotkey)
-                parsed = pm.parse_challenge_id(challenge_id)
-                current_epoch = pm.current_epoch()
-                epoch = int(parsed["epoch"]) if parsed else current_epoch
-                if epoch not in (current_epoch, current_epoch - 1):
-                    # V1 parity (_perminer_epoch_for): stale epochs never mint a
-                    # fresh submit token -- archived challenges cannot be
-                    # re-tokened into the current payout window.
-                    raise HTTPException(410, "per_miner_challenge_expired")
-                v2_assignment_identity = _assignment_identity_for_hotkey(
-                    x_cathedral_hotkey)
-                tier_seq = pm.resolve_tier_seq_for(
-                    v2_assignment_identity, epoch, challenge_id, tier=tier, seq=seq)
-                if tier_seq is None:
-                    raise HTTPException(404, "challenge_id_not_in_miner_set")
-                tier_i, seq_i = tier_seq
-                # Ownership is proven by resolve_tier_seq_for above (challenge_id is
-                # HMAC-bound to this hotkey), so the immutable cached body can be
-                # served without generating. Read-through: on a miss, generate exactly
-                # as before and best-effort bake so the next reader (this endpoint or
-                # the challenges page) hits. CATHEDRAL_V2_CNF_STORE_READ=0 makes
-                # get() return None, restoring always-generate.
-                cid = challenge_id
-                cnf_text = v2_cnf_store.get(v2_store, challenge_id)
+                pm = context["pm"]
+                epoch = int(context["epoch"])
+                tier_i = int(context["tier"])
+                seq_i = int(context["seq"])
+                assignment_identity = str(context["assignment_identity"])
+                artifact = _artifact_for_v2_cnf_context(context)
+                reused_published_bytes = False
+                if artifact is not None:
+                    cnf_text = v2_cnf_store.get(
+                        v2_store,
+                        challenge_id,
+                        expected_sha256=str(artifact["cnf_sha256"]),
+                    )
+                    reused_published_bytes = cnf_text is not None
+                else:
+                    cnf_text = v2_cnf_store.get(v2_store, challenge_id)
                 if cnf_text is None:
                     gen_cid, cnf_text, _ = pm.generate_instance(
-                        v2_assignment_identity, epoch, tier_i, seq_i)
+                        assignment_identity, epoch, tier_i, seq_i)
                     if gen_cid != challenge_id:
                         raise HTTPException(404, "challenge_id_not_in_miner_set")
                     try:
                         v2_cnf_store.put(v2_store, challenge_id, cnf_text)
                     except Exception:
                         pass
+                cnf_bytes = cnf_text.encode("utf-8")
+                cnf_sha = hashlib.sha256(cnf_bytes).hexdigest()
                 headers = {
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*",
                     "X-Cathedral-V2": "true",
-                    "X-Perminer-Challenge-Id": cid,
+                    "X-Perminer-Challenge-Id": challenge_id,
                     "X-Perminer-Tier": str(tier_i),
                     "X-Perminer-Seq": str(seq_i),
                     "X-Perminer-Epoch": str(epoch),
+                    "X-Cathedral-CNF-Sha256": cnf_sha,
+                    "X-Cathedral-CNF-Bytes": str(len(cnf_bytes)),
                 }
+                if reused_published_bytes and artifact is not None:
+                    headers.update({
+                        "X-Cathedral-CNF-Artifact-Reused": "true",
+                        "X-Cathedral-CNF-Artifact-Key": str(artifact["artifact_key"]),
+                    })
                 if v2_submit_bitset_enabled:
                     _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                     if not v2_submit_token_secret:
                         raise HTTPException(503, "v2_submit_token_secret_missing")
                     from ..dimacs import parse_cnf
-                    # Bind to the ACTUAL generated CNF's var count, not the nominal tier
-                    # shape — see the analogous fix in v2_per_miner_challenges above.
                     actual_nvars, _clauses = parse_cnf(cnf_text)
-                    cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
-                    expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                    token, expires_at = _mint_v2_cnf_submit_token(
+                        context,
+                        n_vars=actual_nvars,
+                        cnf_sha256=cnf_sha,
+                    )
                     headers.update({
                         "X-Cathedral-Submit-Path": "/v2/agents/submit-bitset",
-                        "X-Cathedral-Submit-Token": v2_bitset_submit.mint_submit_token(
-                            secret=v2_submit_token_secret,
-                            miner_hotkey=x_cathedral_hotkey,
-                            challenge_id=cid,
-                            epoch=epoch,
-                            tier=tier_i,
-                            seq=seq_i,
-                            nvars=actual_nvars,
-                            cnf_sha256=cnf_sha,
-                            expires_at=expires_at,
-                        ),
+                        "X-Cathedral-Submit-Token": token,
                         "X-Cathedral-Submit-Token-Expires-At": expires_at,
                         "X-Cathedral-Assignment-Encoding": "bitset/v1",
-                        "X-Cathedral-CNF-Sha256": cnf_sha,
                     })
                 return PlainTextResponse(
                     cnf_text,
