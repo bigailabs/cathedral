@@ -30,7 +30,14 @@ for i in $(seq 1 "$SAMPLES"); do
   if [ "$edge_ready" = "200" ]; then
     consec_fail=0
   else
-    consec_fail=$((consec_fail + 1))
+    # Distinguish a real edge failure from a local network/DNS flake: if a
+    # control domain is also unreachable, the operator machine is the problem
+    # (three false aborts on 2026-07-09/10 were all Mac-side DNS outages).
+    if curl -s -o /dev/null --max-time 5 "https://www.cloudflare.com/cdn-cgi/trace"; then
+      consec_fail=$((consec_fail + 1))
+    else
+      echo "$ts LOCAL_NET_FLAKE control domain unreachable - not counting toward abort"
+    fi
   fi
   if [ "$ABORT_AFTER" -gt 0 ] && [ "$consec_fail" -ge "$ABORT_AFTER" ]; then
     echo "$ts AUTO_ABORT edge readiness failed ${consec_fail}x consecutively - deploying V2_GATE_MODE:staged"
