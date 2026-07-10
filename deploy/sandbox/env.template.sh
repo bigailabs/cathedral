@@ -81,6 +81,8 @@ export CATHEDRAL_WEIGHTS_WINDOW_HOURS=72
 # Must stay >= WEIGHTS_WINDOW_HOURS (preflight retention consistency check).
 # Retention itself is currently disabled; this only bounds future pruning.
 export CATHEDRAL_RETENTION_SOLVE_LEDGER_HOURS=96
+export CATHEDRAL_RETENTION_EVAL_RUNS_HOURS=96
+export CATHEDRAL_RETENTION_PM_ATTEMPT_HOURS=96
 
 export CATHEDRAL_BOARD_TTL_SECS=60
 export CATHEDRAL_RECENT_CACHE_TTL_SECS=30
