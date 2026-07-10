@@ -22,6 +22,18 @@ const CANARY_HOTKEYS = new Set([
 
 const LEGACY_PREFIX = "/api/cathedral";
 const V2_GATE_OPEN = "open-v2";
+const RECEIPT_PENDING_TTL_SECS = 2;
+const RECEIPT_TERMINAL_TTL_SECS = 300;
+const SENSITIVE_CACHE_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+  "x-cathedral-signature",
+  "x-cathedral-submitted-at",
+  "x-cathedral-submit-token",
+  "x-cathedral-submit-token-expires-at",
+]);
 
 function stripLegacyPrefix(pathname) {
   return pathname.startsWith(LEGACY_PREFIX) ? pathname.slice(LEGACY_PREFIX.length) : pathname;
@@ -126,6 +138,60 @@ function isReceiptPoll(url, method) {
   if (method !== "GET") return false;
   const path = stripLegacyPrefix(url.pathname);
   return path.startsWith("/v2/agents/submit-bitset/receipts/");
+}
+
+function receiptIdFromPath(url) {
+  const path = stripLegacyPrefix(url.pathname);
+  const prefix = "/v2/agents/submit-bitset/receipts/";
+  if (!path.startsWith(prefix)) return null;
+  const encoded = path.slice(prefix.length);
+  if (!encoded || encoded.includes("/")) return null;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+function receiptCacheKey(url) {
+  // Keep the legacy and canonical routes isolated. Query parameters are not
+  // part of receipt identity and the origin handler ignores them.
+  return new Request(`${url.origin}${url.pathname}`, { method: "GET" });
+}
+
+function hasSensitiveCacheHeaders(headers) {
+  for (const name of SENSITIVE_CACHE_HEADERS) {
+    if (headers.has(name)) return true;
+  }
+  return false;
+}
+
+async function cacheableReceipt(response, receiptId) {
+  if (response.status !== 200 || hasSensitiveCacheHeaders(response.headers)) return null;
+  let payload;
+  try {
+    payload = await response.clone().json();
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object"
+      || payload.schema !== "cathedral.v2.submit_bitset_receipt.v1"
+      || payload.receipt_id !== receiptId
+      || typeof payload.terminal !== "boolean") {
+    return null;
+  }
+  return payload.terminal ? RECEIPT_TERMINAL_TTL_SECS : RECEIPT_PENDING_TTL_SECS;
+}
+
+function clientReceiptResponse(response, cacheStatus) {
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", "no-store");
+  headers.set("x-cathedral-v2-beta-cache", cacheStatus);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function isRateLimitedPath(url, method) {
@@ -277,6 +343,18 @@ export default {
       }
     }
 
+    const receiptId = request.method === "GET" ? receiptIdFromPath(incomingUrl) : null;
+    const receiptCache = env.RECEIPT_CACHE || globalThis.caches?.default;
+    const cacheKey = receiptId && receiptCache ? receiptCacheKey(incomingUrl) : null;
+    if (cacheKey) {
+      try {
+        const cached = await receiptCache.match(cacheKey);
+        if (cached) return clientReceiptResponse(cached, "HIT");
+      } catch {
+        // Cache availability must never become receipt availability.
+      }
+    }
+
     const originUrl = new URL(request.url);
     if (request.method === "GET" && isPerMinerRead(originUrl)) {
       const requestedLimit = Number(originUrl.searchParams.get("limit") || "0");
@@ -301,10 +379,28 @@ export default {
     const headers = new Headers(response.headers);
     headers.set("x-cathedral-v2-beta-router", "cloudflare-worker");
     headers.set("x-cathedral-v2-beta-origin", "polaris-sandbox");
-    return new Response(response.body, {
+    const proxied = new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
       headers,
     });
+    if (!cacheKey) return proxied;
+
+    const ttl = await cacheableReceipt(proxied, receiptId);
+    if (ttl === null) return clientReceiptResponse(proxied, "BYPASS");
+
+    const storedHeaders = new Headers(proxied.headers);
+    storedHeaders.set("cache-control", `public, max-age=${ttl}`);
+    const stored = new Response(proxied.clone().body, {
+      status: proxied.status,
+      statusText: proxied.statusText,
+      headers: storedHeaders,
+    });
+    try {
+      await receiptCache.put(cacheKey, stored);
+      return clientReceiptResponse(proxied, "MISS");
+    } catch {
+      return clientReceiptResponse(proxied, "ERROR");
+    }
   },
 };
