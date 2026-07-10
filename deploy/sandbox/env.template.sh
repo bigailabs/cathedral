@@ -71,7 +71,13 @@ export CATHEDRAL_V2_REAL_FRACTION=0
 export CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE=1
 export CATHEDRAL_WEIGHTS_MODE=proportional
 export CATHEDRAL_WEIGHTS_TIER2_MULT=3.0
-export CATHEDRAL_WEIGHTS_WINDOW_HOURS=48
+# 72h (was 48): 2026-07-10 all-miner reopen. With the gate closed since the
+# July 9 windows, the +18h coverage horizon collapsed to 44/256 live UIDs on
+# a 48h window (preflight FAIL at min ratio 0.50). 72h keeps the same
+# verified July 8-9 solve history paying through the horizon (154/256 =
+# 0.60) instead of concentrating weight on the few brief-window solvers.
+# Fairness-preserving: no history fabricated, guard untouched.
+export CATHEDRAL_WEIGHTS_WINDOW_HOURS=72
 
 export CATHEDRAL_BOARD_TTL_SECS=60
 export CATHEDRAL_RECENT_CACHE_TTL_SECS=30
