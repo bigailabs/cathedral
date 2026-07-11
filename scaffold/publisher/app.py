@@ -133,6 +133,86 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bytes(name: str, default: int) -> int:
+    """Parse environment variable as byte count with sane positive validation.
+    
+    Accepts:
+    - Plain integer (bytes): "1048576"
+    - With suffix: "1M", "1Mi", "1MiB" (1 MiB = 1024^2 bytes)
+    
+    Returns:
+    - Parsed byte count (positive integer)
+    - default if env var is missing, empty, or unparseable
+    - ValueError (via HTTPException) if negative or invalid suffix
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        raw_upper = raw.upper()
+        if raw_upper.endswith(("MIB", "MI", "M")):
+            if raw_upper.endswith("MIB"):
+                val_str = raw[:-3]
+            elif raw_upper.endswith("MI"):
+                val_str = raw[:-2]
+            else:
+                val_str = raw[:-1]
+            val = int(val_str.strip())
+            if val < 0:
+                raise ValueError(f"Negative byte count: {raw}")
+            return val * 1024 * 1024
+        else:
+            val = int(raw)
+            if val < 0:
+                raise ValueError(f"Negative byte count: {raw}")
+            return val
+    except (ValueError, AttributeError):
+        return default
+
+
+async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
+    """Read request body bounded by max_bytes.
+    
+    Strategy:
+    1. Check Content-Length header (if present and valid) — reject with 413 if over cap
+    2. For chunked or missing/misleading Content-Length, consume request.stream()
+       incrementally into a bytearray
+    3. Stop immediately with 413 once accumulated bytes exceed max_bytes
+    4. Preserve exact accumulated bytes for JSON parse and HMAC
+    
+    Returns:
+    - bytes: the exact accumulated body
+    
+    Raises:
+    - HTTPException(413): declared or actual size exceeds max_bytes
+    - HTTPException(400): malformed negative Content-Length
+    """
+    # Check Content-Length header first (fail-fast for declared oversize)
+    content_length_header = request.headers.get("content-length", "").strip()
+    if content_length_header:
+        try:
+            declared_size = int(content_length_header)
+            if declared_size < 0:
+                # Malformed negative Content-Length — treat as 400
+                raise HTTPException(400, "invalid_content_length_negative")
+            if declared_size > max_bytes:
+                # Declared size exceeds cap — fail fast with 413
+                raise HTTPException(413, "external_scores_body_too_large")
+        except ValueError:
+            # Unparseable Content-Length — fall through to stream consumption
+            pass
+    
+    # Consume stream incrementally (handles chunked, missing, or misleading Content-Length)
+    accumulated = bytearray()
+    async for chunk in request.stream():
+        accumulated.extend(chunk)
+        if len(accumulated) > max_bytes:
+            # Exceeded cap during streaming — fail with 413
+            raise HTTPException(413, "external_scores_body_too_large")
+    
+    return bytes(accumulated)
+
+
 def _cnf_token_secret(service_role: str) -> bytes:
     raw = (
         os.environ.get(_CNF_TOKEN_SECRET_ENV, "").lstrip("\ufeff").strip()
@@ -3065,10 +3145,17 @@ def build_app(
         This endpoint never sets weights directly. It stores source scores for
         weights.py to blend into the single Cathedral-signed vector that thin
         validators already verify and apply.
+        
+        Body is bounded by CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES (default 1 MiB).
+        Rejects with 413 if declared Content-Length exceeds cap or if streaming
+        consumption exceeds cap. Preserves exact bytes for JSON parse and HMAC.
+        Malformed negative Content-Length is rejected as 400.
         """
         if not external_scores.ingest_enabled():
             raise HTTPException(404, "external_scores_ingest_not_enabled")
-        body = await request.body()
+        # Read body bounded by CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES (default 1 MiB)
+        max_body_bytes = _env_bytes("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", 1024 * 1024)
+        body = await _read_bounded_body(request, max_body_bytes)
         # Parse JSON early so we can extract and validate source safely.
         try:
             payload = json.loads(body.decode("utf-8"))
