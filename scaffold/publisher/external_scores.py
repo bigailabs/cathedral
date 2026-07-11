@@ -22,6 +22,8 @@ INGEST_ENABLED_ENV = "CATHEDRAL_EXTERNAL_SCORES_INGEST_ENABLED"
 AUTH_TOKEN_ENV = "CATHEDRAL_EXTERNAL_SCORES_TOKEN"
 HMAC_SECRET_ENV = "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET"
 ALLOW_UNAUTH_ENV = "CATHEDRAL_EXTERNAL_SCORES_ALLOW_UNAUTHENTICATED"
+# Sources requiring their own mandatory HMAC secret (fail 503 if absent)
+MANDATORY_HMAC_SOURCES = {"cathedral_confidential_tdx"}
 MAX_SCORES_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_SCORES"
 # Maximum age (seconds) a report's generated_at may lag behind now.
 # Default 1 hour.  Reports older than this are rejected as stale.
@@ -148,6 +150,14 @@ def _source_token_env(source: str) -> str:
     return f"{AUTH_TOKEN_ENV}_{slug}" if slug else AUTH_TOKEN_ENV
 
 
+def _source_hmac_secret_env(source: str) -> str:
+    """Env var name for a per-source HMAC secret, e.g.
+    CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX for source
+    'cathedral_confidential_tdx'. Derived deterministically from source name."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", source.strip()).strip("_").upper()
+    return f"{HMAC_SECRET_ENV}_{slug}" if slug else HMAC_SECRET_ENV
+
+
 def source_token_configured(source: str) -> bool:
     """True iff *source* has its own dedicated bearer token configured."""
     return bool((os.environ.get(_source_token_env(source)) or "").strip())
@@ -200,6 +210,53 @@ def verify_hmac(body: bytes, signature: str | None) -> bool:
         supplied = supplied[len("sha256="):]
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(supplied, expected)
+
+
+def verify_hmac_for_source(source: str, body: bytes, signature: str | None) -> tuple[bool, bool]:
+    """Verify raw-body HMAC with source-specific enforcement.
+
+    Returns (is_valid: bool, should_fail_503: bool) where:
+    - is_valid: HMAC signature verified successfully
+    - should_fail_503: dedicated secret required but not configured (fail-closed)
+
+    For sources in MANDATORY_HMAC_SOURCES (e.g., cathedral_confidential_tdx):
+    - Dedicated source-scoped HMAC secret is required
+    - Global secret does NOT substitute
+    - Missing secret returns (False, True) -> 503
+    - Bad/missing signature returns (False, False) -> 401
+
+    For other sources:
+    - Optional global HMAC secret (backward compatible)
+    - Missing/invalid signature returns (False, False) -> 401
+    - No secret configured returns (True, False) -> pass (signature optional)
+    """
+    if source in MANDATORY_HMAC_SOURCES:
+        # Mandatory source-scoped HMAC: fail closed if secret missing
+        env_name = _source_hmac_secret_env(source)
+        secret = (os.environ.get(env_name) or "").strip()
+        if not secret:
+            return False, True  # 503: secret required but absent
+        if not signature:
+            return False, False  # 401: signature required but missing
+        supplied = signature.strip()
+        if supplied.startswith("sha256="):
+            supplied = supplied[len("sha256="):]
+        expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        is_valid = hmac.compare_digest(supplied, expected)
+        return is_valid, False
+    else:
+        # Optional global HMAC (backward compatible)
+        secret = (os.environ.get(HMAC_SECRET_ENV) or "").strip()
+        if not secret:
+            return True, False  # No secret configured, pass
+        if not signature:
+            return False, False  # 401: signature required but missing
+        supplied = signature.strip()
+        if supplied.startswith("sha256="):
+            supplied = supplied[len("sha256="):]
+        expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        is_valid = hmac.compare_digest(supplied, expected)
+        return is_valid, False
 
 
 def max_report_age_secs() -> float:

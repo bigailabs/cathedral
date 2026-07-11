@@ -3101,7 +3101,14 @@ def build_app(
         # credential matches.
         if not external_scores.bearer_authorized_for_source(source, authorization, x_cathedral_external_token):
             raise HTTPException(401, "invalid_external_scores_token")
-        if not external_scores.verify_hmac(body, x_cathedral_external_signature):
+        # Verify HMAC with source-specific enforcement: mandatory secrets for
+        # certain sources (e.g., cathedral_confidential_tdx).
+        is_valid, fail_503 = external_scores.verify_hmac_for_source(
+            source, body, x_cathedral_external_signature
+        )
+        if fail_503:
+            raise HTTPException(503, "external_scores_hmac_secret_required")
+        if not is_valid:
             raise HTTPException(401, "invalid_external_scores_signature")
         try:
             report = external_scores.normalize_report(payload, default_source="violet_audio")
