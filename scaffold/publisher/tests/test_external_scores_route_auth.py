@@ -188,3 +188,83 @@ def test_route_rejects_invalid_source_before_auth(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "source" in resp.json()["detail"].lower()
+
+
+def test_route_rejects_json_array(client, monkeypatch):
+    """JSON array payload is rejected with 400 invalid_report_contract."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-secret")
+    body = json.dumps([{"miner_hotkey": "5Alice"}]).encode("utf-8")
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer shared-secret",
+        }
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_report_contract"
+
+
+def test_route_rejects_json_null(client, monkeypatch):
+    """JSON null payload is rejected with 400 invalid_report_contract."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-secret")
+    body = json.dumps(None).encode("utf-8")
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer shared-secret",
+        }
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_report_contract"
+
+
+def test_route_rejects_json_scalar_string(client, monkeypatch):
+    """JSON scalar string payload is rejected with 400 invalid_report_contract."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-secret")
+    body = json.dumps("just a string").encode("utf-8")
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer shared-secret",
+        }
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_report_contract"
+
+
+def test_route_rejects_json_scalar_number(client, monkeypatch):
+    """JSON scalar number payload is rejected with 400 invalid_report_contract."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-secret")
+    body = json.dumps(42).encode("utf-8")
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer shared-secret",
+        }
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_report_contract"
+
+
+def test_route_rejects_json_scalar_boolean(client, monkeypatch):
+    """JSON scalar boolean payload is rejected with 400 invalid_report_contract."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-secret")
+    body = json.dumps(True).encode("utf-8")
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer shared-secret",
+        }
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_report_contract"
