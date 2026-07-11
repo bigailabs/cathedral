@@ -3074,6 +3074,9 @@ def build_app(
             payload = json.loads(body.decode("utf-8"))
         except Exception:
             raise HTTPException(400, "invalid_json_report")
+        # Payload must be an object/dict; reject arrays, null, and scalars.
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "invalid_report_contract")
         # Extract source early, before auth, so we can enforce source-scoped credentials.
         try:
             source = external_scores._source(
