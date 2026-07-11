@@ -3068,26 +3068,42 @@ def build_app(
         """
         if not external_scores.ingest_enabled():
             raise HTTPException(404, "external_scores_ingest_not_enabled")
-        # (#3) If these scores actually feed the real signed vector, refuse
-        # unauthenticated ingest regardless of ALLOW_UNAUTHENTICATED — a
-        # real-money credential must be present.
-        if weights_mod.external_scores_enabled() and not external_scores.token_configured():
-            raise HTTPException(503, "external_scores_token_required_while_blending")
         body = await request.body()
-        if not external_scores.bearer_authorized(authorization, x_cathedral_external_token):
-            raise HTTPException(401, "invalid_external_scores_token")
-        if not external_scores.verify_hmac(body, x_cathedral_external_signature):
-            raise HTTPException(401, "invalid_external_scores_signature")
+        # Parse JSON early so we can extract and validate source safely.
         try:
             payload = json.loads(body.decode("utf-8"))
         except Exception:
             raise HTTPException(400, "invalid_json_report")
+        # Extract source early, before auth, so we can enforce source-scoped credentials.
+        try:
+            source = external_scores._source(
+                payload.get("source") or payload.get("mechanism"),
+                default="violet_audio"
+            )
+        except external_scores.ExternalScoreError as exc:
+            raise HTTPException(400, exc.reason)
+        # Validate source is allowed for this endpoint.
+        if source not in external_scores.ALLOWED_ENDPOINT_SOURCES:
+            raise HTTPException(400, "invalid_source_for_violet_endpoint")
+        # (#3) If these scores actually feed the real signed vector, require some
+        # credential. When blending is live, accept either a dedicated token for
+        # this source OR the shared token. Fail 503 if neither is configured.
+        if weights_mod.external_scores_enabled():
+            has_shared = external_scores.token_configured()
+            has_dedicated = external_scores.source_token_configured(source)
+            if not (has_shared or has_dedicated):
+                raise HTTPException(503, "external_scores_token_required_while_blending")
+        # Authorize with source-scoped auth: dedicated token for this source if
+        # it exists, otherwise fall back to shared token. Fails closed if no
+        # credential matches.
+        if not external_scores.bearer_authorized_for_source(source, authorization, x_cathedral_external_token):
+            raise HTTPException(401, "invalid_external_scores_token")
+        if not external_scores.verify_hmac(body, x_cathedral_external_signature):
+            raise HTTPException(401, "invalid_external_scores_signature")
         try:
             report = external_scores.normalize_report(payload, default_source="violet_audio")
         except external_scores.ExternalScoreError as exc:
             raise HTTPException(400, exc.reason)
-        if report["source"] not in external_scores.ALLOWED_ENDPOINT_SOURCES:
-            raise HTTPException(400, "invalid_source_for_violet_endpoint")
         try:
             accepted = external_scores.store_report(store, report)
         except Exception as exc:
