@@ -107,6 +107,15 @@ EXTERNAL_SCORES_MAX_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION"
 EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV = "CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED"
 EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV = "CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM"
 
+# (#5) Sources whose live composition must never silently inherit the legacy
+# 50% BASE_WEIGHT/WEIGHT default. An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION
+# is required for these; without one the blend fails closed to base-only.
+EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
+# (#6) Sources that must never run in external_primary (100% external intent)
+# mode, confirmed or not. A confidential/attested source stays capped-blend
+# only; external_scores_mode() enforces this centrally.
+EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
+
 _CACHE_TTL_SECS = 60.0
 _PERSISTED_VECTOR_ID = "latest"
 _REFRESH_LOCK_NAME = "cathedral:weights:refresh"
@@ -743,8 +752,24 @@ def external_scores_source() -> str:
 
 
 def external_scores_mode() -> str:
+    """blend (default) or external_primary.
+
+    (#6) Confirmed/preserved behavior: external_primary has always been a
+    request-for-100%-external signal gated by
+    CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM -- it does not by itself change
+    the blend math in _apply_external_scores, which still allocates via
+    _external_blend_weights()'s fraction (explicit FRACTION or the capped
+    legacy weights). That composition is unchanged here. What IS enforced
+    here: a confidential/attested source (EXTERNAL_SCORES_NO_PRIMARY_SOURCES)
+    must never resolve to external_primary, confirmed or not -- it always
+    reports as "blend" so every downstream external_primary branch (the ack
+    warning, the score_source label) treats it as a capped blend.
+    """
     raw = os.environ.get(EXTERNAL_SCORES_MODE_ENV, "blend").strip().lower()
-    return raw if raw in {"blend", "external_primary"} else "blend"
+    resolved = raw if raw in {"blend", "external_primary"} else "blend"
+    if resolved == "external_primary" and external_scores_source() in EXTERNAL_SCORES_NO_PRIMARY_SOURCES:
+        return "blend"
+    return resolved
 
 
 def external_scores_window_secs() -> float:
@@ -806,14 +831,25 @@ def _compose_external_scores(
     now: datetime,
     ident=lambda hk: hk,
 ) -> dict[str, float]:
+    """Fetch the latest complete external snapshot and identity-collapse it.
+
+    Returns an empty dict when external scoring is disabled or no fresh
+    complete snapshot exists (fail-closed).
+    """
     if not external_scores_enabled():
         return {}
-    since = _ms_iso(now - timedelta(seconds=external_scores_window_secs()))
+    window = external_scores_window_secs()
     try:
-        raw = external_scores.recent_scores(
-            store, source=external_scores_source(), since_iso=since)
+        raw = external_scores.latest_snapshot_scores(
+            store,
+            source=external_scores_source(),
+            max_age_secs=window,
+            now=now,
+        )
     except Exception as exc:
         print(f"[weights] external_scores compose failed: {exc!r}")
+        return {}
+    if raw is None:
         return {}
     return _identity_collapse_scores(raw, ident=ident)
 
@@ -830,6 +866,10 @@ def _external_blend_weights() -> tuple[float, float, float]:
     if frac_raw:
         frac = min(max_frac, max(0.0, _env_float(EXTERNAL_SCORES_FRACTION_ENV, 0.0)))
         return (1.0 - frac), frac, frac
+    if external_scores_source() in EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES:
+        # (#5) Fail closed: this source must never inherit the legacy 1.0/1.0
+        # (50%) default. No explicit fraction => zero external share.
+        return 1.0, 0.0, 0.0
     base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
     external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))
     tot = base_weight + external_weight
@@ -842,51 +882,152 @@ def _external_blend_weights() -> tuple[float, float, float]:
     return base_weight, external_weight, share
 
 
+def _l1_normalize(scores: dict[str, float]) -> dict[str, float]:
+    """L1 (sum) normalize a positive score vector so entries sum to 1.0.
+
+    Drops non-positive entries.  Returns empty dict on zero mass.
+    """
+    clean: dict[str, float] = {}
+    for hk, raw in scores.items():
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v) and v > 0.0:
+            clean[str(hk)] = v
+    total = sum(clean.values())
+    if total <= 0.0:
+        return {}
+    return {hk: v / total for hk, v in clean.items()}
+
+
 def _apply_external_scores(
     store: Store,
     base: dict[str, float],
     *,
     now: datetime,
     ident=lambda hk: hk,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Blend base and external score vectors.
+
+    Returns (final_scores, blend_metadata).  The metadata exposes realized
+    base and external contribution mass for signed-vector policy logging.
+
+    Contract:
+    - Identity-collapse before allocation.
+    - L1/sum-normalize base and external vectors independently.
+    - When both have positive mass:
+        output = (1 - fraction) * base_norm + fraction * ext_norm
+    - Base only: preserve 100% base behavior.
+    - External only: fail closed to base (empty) result.  External must
+      never expand to 100% on its own.
+    - Neither: preserve existing downstream burn behavior (empty dict).
+    """
+    blend_meta: dict[str, Any] = {
+        "base_mass": 0.0,
+        "external_mass": 0.0,
+        "base_miner_count": 0,
+        "external_miner_count": 0,
+        "blended": False,
+    }
     if not external_scores_enabled():
-        return base
+        blend_meta["base_mass"] = 1.0 if base else 0.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
     ext = _compose_external_scores(store, now=now, ident=ident)
-    if not ext:
-        return base
-    # (#2) Registration gate: external scores may pay only REGISTERED miners.
-    # Fail-closed — if we cannot confirm the metagraph snapshot, do NOT blend
-    # unverified external scores into the real signed vector.
-    if _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True):
+
+    # Registration gate: external scores may pay only REGISTERED miners.
+    if ext and _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True):
         registered, _meta = _load_fresh_metagraph_hotkeys(store, now=now)
         if registered is None:
             print("[weights] external_scores: registration snapshot unavailable "
                   "-> NOT blending external scores (fail-closed)")
-            return base
-        ext = {hk: v for hk, v in ext.items() if hk in registered}
-        if not ext:
-            return base
-    # (#5) external_primary replaces the ENTIRE vector — require explicit ack.
-    if external_scores_mode() == "external_primary":
-        if _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False):
-            print("[weights] external_scores: EXTERNAL_PRIMARY active — external "
-                  "source is the ENTIRE weight vector")
-            return _normalize_positive_scores(ext)
-        print("[weights] external_scores: external_primary requested WITHOUT "
-              f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend")
-    # (#1) Blend with an explicit, capped external share.
-    base_norm = _normalize_positive_scores(base)
-    base_weight, external_weight, eff_share = _external_blend_weights()
-    if base_weight <= 0.0 and external_weight <= 0.0:
-        return base
-    print(f"[weights] external_scores blend: external share ~{eff_share:.3f} "
-          f"(source={external_scores_source()}, registered_scored={len(ext)})")
-    hotkeys = set(base_norm) | set(ext)
-    blended = {
-        hk: (base_norm.get(hk, 0.0) * base_weight) + (ext.get(hk, 0.0) * external_weight)
-        for hk in hotkeys
-    }
-    return _normalize_positive_scores(blended)
+            ext = {}
+        else:
+            ext = {hk: v for hk, v in ext.items() if hk in registered}
+
+    # external_primary mode: still require explicit ack.
+    if ext and external_scores_mode() == "external_primary":
+        if not _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False):
+            print("[weights] external_scores: external_primary requested WITHOUT "
+                  f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend")
+
+    # (#4) Payability/eligibility filtering MUST happen to each mechanism
+    # BEFORE it is L1-normalized and allocated, not after the blend. If a
+    # single post-blend filter pass (e.g. build_signed_vector's final
+    # _apply_payable_hotkey_policy call) removed hotkeys after allocation, it
+    # could strip base-only entries disproportionately and push the realized
+    # external share of the SURVIVING vector above the configured fraction.
+    # Filtering both mechanisms here, pre-normalization, makes the (1-f)/f
+    # split exact by construction on the final, already-filtered hotkey set;
+    # the later call in build_signed_vector is then a no-op for anything
+    # already filtered here (still run there so base-only vectors, and the
+    # off/mark modes, keep their existing policy-metadata surface).
+    if payable_hotkeys_mode() == "filter":
+        base, base_payable_meta = _apply_payable_hotkey_policy(store, base, now=now)
+        blend_meta["base_payable_filter"] = base_payable_meta
+        if ext:
+            ext, ext_payable_meta = _apply_payable_hotkey_policy(store, ext, now=now)
+            blend_meta["external_payable_filter"] = ext_payable_meta
+
+    has_base = bool(base) and any(v > 0 for v in base.values())
+    has_ext = bool(ext) and any(v > 0 for v in ext.values())
+
+    # Neither: return empty (downstream burn handles this).
+    if not has_base and not has_ext:
+        return {}, blend_meta
+
+    # External only: fail closed. Do NOT let external expand to 100%.
+    if not has_base and has_ext:
+        blend_meta["external_miner_count"] = len(ext)
+        blend_meta["degraded"] = "external_only_fail_closed"
+        return {}, blend_meta
+
+    # Base only: 100% base.
+    if has_base and not has_ext:
+        blend_meta["base_mass"] = 1.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
+    # Both have positive mass: blend.
+    _bw, _ew, fraction = _external_blend_weights()
+    if fraction <= 0.0:
+        blend_meta["base_mass"] = 1.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
+    base_norm = _l1_normalize(base)
+    ext_norm = _l1_normalize(ext)
+
+    if not base_norm:
+        blend_meta["degraded"] = "base_norm_zero"
+        return base, blend_meta
+    if not ext_norm:
+        blend_meta["base_mass"] = 1.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
+    base_coeff = 1.0 - fraction
+    ext_coeff = fraction
+
+    hotkeys = set(base_norm) | set(ext_norm)
+    blended: dict[str, float] = {}
+    for hk in hotkeys:
+        blended[hk] = base_coeff * base_norm.get(hk, 0.0) + ext_coeff * ext_norm.get(hk, 0.0)
+
+    blend_meta["blended"] = True
+    blend_meta["base_mass"] = round(base_coeff, 9)
+    blend_meta["external_mass"] = round(ext_coeff, 9)
+    blend_meta["base_miner_count"] = len(base_norm)
+    blend_meta["external_miner_count"] = len(ext_norm)
+    blend_meta["fraction"] = fraction
+
+    print(f"[weights] external_scores blend: fraction={fraction:.4f} "
+          f"base_mass={base_coeff:.4f} ext_mass={ext_coeff:.4f} "
+          f"(source={external_scores_source()}, ext_miners={len(ext_norm)})")
+
+    return blended, blend_meta
 
 
 def _external_scores_policy_status(
@@ -1277,6 +1418,7 @@ def _compose_proportional_hotkey_sql(store: Store, since: str) -> dict[str, floa
 def compose_scores(
     store: Store, *, now: datetime | None = None,
     coldkey_of: dict[str, str] | None = None,
+    blend_meta_out: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """One final number per hotkey, from solves inside the trailing window.
 
@@ -1313,16 +1455,31 @@ def compose_scores(
     def pm_ident(hk: str) -> str | None:
         return coldkey_of.get(hk, hk) if use_pm_ck else ident(hk)
 
+    # Container for blend metadata; populated by _apply_external_scores.
+    _blend_meta_box: list[dict[str, Any]] = []
+
+    def _finish_external(base: dict[str, float]) -> dict[str, float]:
+        result, meta = _apply_external_scores(store, base, now=now, ident=ident)
+        _blend_meta_box.clear()
+        _blend_meta_box.append(meta)
+        return result
+
     pm_scores = _perminer_compose_scores(store, ident=pm_ident, since=since)
     if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
-        return _apply_external_scores(store, pm_scores, now=now, ident=ident)
+        scores = _finish_external(pm_scores)
+        if blend_meta_out is not None and _blend_meta_box:
+            blend_meta_out.update(_blend_meta_box[0])
+        return scores
 
     def finish_base(base: dict[str, float]) -> dict[str, float]:
         if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
             base = _apply_perminer_primary(base, pm_scores)
         else:
             base = _apply_perminer_bonus(store, base, coldkey_of, now=now)
-        return _apply_external_scores(store, base, now=now, ident=ident)
+        scores = _finish_external(base)
+        if blend_meta_out is not None and _blend_meta_box:
+            blend_meta_out.update(_blend_meta_box[0])
+        return scores
 
     if mode() == "row_score_recent":
         return finish_base(_compose_row_score_recent(store, since, ident=ident))
@@ -1413,7 +1570,8 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     now = now or datetime.now(timezone.utc)
     coldkey_of = _load_scoring_coldkey_map(store)
     since = _ms_iso(now - timedelta(hours=window_hours()))
-    scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
+    blend_meta: dict[str, Any] = {}
+    scores = compose_scores(store, now=now, coldkey_of=coldkey_of, blend_meta_out=blend_meta)
     scores, payable_meta = _apply_payable_hotkey_policy(store, scores, now=now)
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
@@ -1462,6 +1620,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "coldkey_map_loaded": bool(coldkey_of),
             "payable_hotkeys": payable_meta,
             "external_scores": external_status,
+            "blend": blend_meta,
             "perminer_scoring_mode": pm_status["scoring_mode"],
             "perminer": {
                 "enabled": pm_status["perminer_enabled"],
