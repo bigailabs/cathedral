@@ -549,7 +549,7 @@ def test_payable_filter_pre_allocation_preserves_fraction(monkeypatch):
     assert meta["blended"] is True, "Should blend with both mechanisms present"
     assert abs(meta["external_mass"] - 0.1) < 1e-9, \
         f"external mass {meta['external_mass']} != 0.1 (payable filtering should happen pre-allocation)"
-    
+
     # Verify only payable miners are in output
     for hk in result:
         assert hk in payable, f"unpayable hotkey {hk} appeared in output"

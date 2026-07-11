@@ -129,7 +129,7 @@ def test_report_accepted_by_normalize_report():
     this is the whole point of reusing the hardened blend rather than
     building a new one."""
     report = poster.build_report(SAMPLE_SCOREBOARD, now=NOW)
-    normalized = external_scores.normalize_report(report, default_source="violet_audio")
+    normalized = external_scores.normalize_report(report, default_source="violet_audio", now=NOW)
     assert normalized["source"] == "cathedral_sat_fast"
     assert normalized["source"] in external_scores.ALLOWED_ENDPOINT_SOURCES
     assert len(normalized["scores"]) == len(report["scores"])
@@ -224,6 +224,7 @@ def test_run_once_posts_normalized_report_on_success(monkeypatch):
     assert posted["report"]["source"] == "cathedral_sat_fast"
     assert posted["token"] == "secret-token"
     # the report itself must validate against the real hardened intake
+    # use current time since run_once uses datetime.now() to set generated_at
     external_scores.normalize_report(posted["report"], default_source="violet_audio")
 
 
