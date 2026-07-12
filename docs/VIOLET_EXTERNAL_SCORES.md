@@ -136,6 +136,30 @@ Confidential/attested sources have stricter requirements:
 | Per-source dedicated token | Isolates credentials; shared token cannot authorize confidential reports |
 | Empty scores list allowed (with complete=true) | Allows source to revoke all miners explicitly |
 
+#### Confidential final-attribution cap
+
+For `cathedral_confidential_tdx`, `FRACTION` must be finite and in `(0, 0.10]`;
+invalid explicit values stop vector construction. The existing Cathedral score
+remains the base. For each signed row the publisher stores base attribution
+`a_i`, confidential attribution `c_i`, and weight `w_i = a_i + c_i`, and enforces
+
+```text
+c_i <= (f / (1 - f)) * a_i * (1 - 1e-6)
+```
+
+If `a_i < 1e-15`, `c_i` is exactly zero. This pointwise rule survives payable
+hotkey drops, duplicate-UID summation, positive renormalization, and u16
+quantization: each resulting row's attributed confidential ratio is
+`c_i / (a_i + c_i)`, and the final audit is
+
+```text
+confidential_share = sum(q_i * c_i / (a_i + c_i)) / sum(q_i) <= f
+```
+
+where `q_i` is the final u16 weight. A zero-mass vector has zero confidential
+share. Operators should audit the signed per-row component fields, not rounded
+aggregate metadata.
+
 ---
 
 ## Report Schema

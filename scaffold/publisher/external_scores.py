@@ -595,7 +595,12 @@ def latest_snapshot_scores(
         try:
             score = float(r["score"])
         except (TypeError, ValueError):
+            if source in COMPLETE_REQUIRED_SOURCES:
+                raise ExternalScoreError("invalid_stored_confidential_score")
             continue
+        if source in COMPLETE_REQUIRED_SOURCES and (
+                not math.isfinite(score) or not 0.0 <= score <= 1.0):
+            raise ExternalScoreError("invalid_stored_confidential_score")
         if math.isfinite(score) and score > 0.0:
             scores[hk] = min(1.0, max(0.0, score))
         # Explicit zero or omitted: not included -> revoked.

@@ -115,15 +115,10 @@ EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
 # mode, confirmed or not. A confidential/attested source stays capped-blend
 # only; external_scores_mode() enforces this centrally.
 EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
-# Sources subject to the pointwise accounting control (contract §1-§6).
-# Hard per-source fraction cap: configured FRACTION is clamped to this value;
-# MAX_FRACTION cannot override it upward for these sources.
+# Sources subject to the final-attribution accounting control.
 EXTERNAL_SCORES_POINTWISE_CAP_SOURCES = {"cathedral_confidential_tdx"}
-# Hard fraction ceiling for sources in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES.
-# Operator env may configure LOWER values; this is an absolute ceiling.
 CONFIDENTIAL_TDX_HARD_CAP: float = 0.10
-# Safety margin for float serialization boundary (§2). Small enough to be
-# invisible in practice but large enough to absorb JSON float round-trips.
+CONFIDENTIAL_TDX_BASE_FLOOR: float = 1e-15
 CONFIDENTIAL_TDX_POINTWISE_MARGIN: float = 1e-6
 
 _CACHE_TTL_SECS = 60.0
@@ -804,7 +799,7 @@ def _normalize_positive_scores(scores: dict[str, float]) -> dict[str, float]:
 
 
 def _identity_collapse_scores(
-    raw: dict[str, float], *, ident=lambda hk: hk
+    raw: dict[str, float], *, ident=lambda hk: hk, strict_unit_interval: bool = False
 ) -> dict[str, float]:
     """Normalize hotkey scores and split one identity's score across its hotkeys."""
     groups: dict[str, set[str]] = {}
@@ -813,7 +808,12 @@ def _identity_collapse_scores(
         try:
             score = float(raw_score)
         except (TypeError, ValueError):
+            if strict_unit_interval:
+                raise VectorError(f"confidential score for {hk!r} is not numeric")
             continue
+        if strict_unit_interval and (not math.isfinite(score) or not 0.0 <= score <= 1.0):
+            raise VectorError(
+                f"confidential score for {hk!r} must be finite and in [0, 1]: {score!r}")
         if not math.isfinite(score) or score <= 0.0:
             continue
         idk = str(ident(str(hk)))
@@ -861,7 +861,27 @@ def _compose_external_scores(
         return {}
     if raw is None:
         return {}
-    return _identity_collapse_scores(raw, ident=ident)
+    return _identity_collapse_scores(
+        raw,
+        ident=ident,
+        strict_unit_interval=external_scores_source() in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES,
+    )
+
+
+def _confidential_tdx_fraction() -> float | None:
+    """Parse the explicit confidential fraction without clamping bad config."""
+    raw = os.environ.get(EXTERNAL_SCORES_FRACTION_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        fraction = float(raw)
+    except ValueError as exc:
+        raise VectorError(f"confidential_tdx fraction is not numeric: {raw!r}") from exc
+    if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
+        raise VectorError(
+            "confidential_tdx fraction must be finite and in (0, 0.10]: "
+            f"{fraction!r}")
+    return fraction
 
 
 def _external_blend_weights() -> tuple[float, float, float]:
@@ -897,35 +917,11 @@ def _apply_confidential_tdx_pointwise_cap(
     ext_norm: dict[str, float],
     fraction: float,
 ) -> "tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, Any]]":
-    """Pointwise accounting control for cathedral_confidential_tdx (contract §1-§6).
-
-    Before combining, define:
-      a_i = (1-f) * base_norm_i   -- base contribution
-      c_i = f * ext_norm_i        -- desired compute contribution
-
-    Enforce pointwise  c_i <= (f/(1-f)) * a_i * (1-margin).
-    Equivalently at f=0.10:  c_i <= a_i/9 * (1-margin).
-
-    Compute-only hotkeys (a_i = 0) receive c_i = 0 (§3).
-    Excess is withheld, never redistributed (§3).
-    Hard-asserts all pointwise inequalities and the aggregate realized external
-    fraction <= configured fraction; raises VectorError on any violation (§6).
-
-    Components are NOT rounded independently. Instead, signed w_i = a_i + c_i
-    is computed from raw finite values, then the components are extracted from
-    the same w_i to ensure perfect equality and survive JSON round-trip (§5).
-
-    Returns:
-      blended         -- {hotkey: w_i = a_i + c_i} (excludes zero-weight entries)
-      base_components -- {hotkey: a_i} for every hotkey in base_norm | ext_norm
-      ext_components  -- {hotkey: c_i} (actual, capped) same universe
-      cap_meta        -- aggregate metadata dict (§5)
-    """
-    if fraction <= 0.0 or (1.0 - fraction) <= 0.0:
-        raise VectorError(
-            f"confidential_tdx fraction {fraction!r} invalid for pointwise cap")
+    """Build capped components whose ratio survives drops, merges and rescaling."""
+    if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
+        raise VectorError(f"confidential_tdx fraction invalid: {fraction!r}")
     margin = CONFIDENTIAL_TDX_POINTWISE_MARGIN
-    # (f/(1-f)) * (1-margin) -- the scalar cap on c_i relative to a_i
+    base_floor = CONFIDENTIAL_TDX_BASE_FLOOR
     cap_coeff = (fraction / (1.0 - fraction)) * (1.0 - margin)
 
     base_comp: dict[str, float] = {}
@@ -934,14 +930,21 @@ def _apply_confidential_tdx_pointwise_cap(
     withheld_mass = 0.0
     capped_count = 0
     compute_only_count = 0
+    floor_floored_count = 0
 
-    for hk in set(base_norm) | set(ext_norm):
+    for hk in sorted(set(base_norm) | set(ext_norm)):
         a_i = (1.0 - fraction) * base_norm.get(hk, 0.0)
         desired_c_i = fraction * ext_norm.get(hk, 0.0)
+        if (not math.isfinite(a_i) or a_i < 0.0 or
+                not math.isfinite(desired_c_i) or desired_c_i < 0.0):
+            raise VectorError(
+                f"{hk}: invalid component a_i={a_i!r}, desired_c_i={desired_c_i!r}")
 
-        if a_i <= 0.0:
-            # Compute-only: external contribution forced to zero (§3)
-            compute_only_count += 1
+        if a_i < base_floor:
+            if a_i == 0.0:
+                compute_only_count += 1
+            else:
+                floor_floored_count += 1
             withheld_mass += desired_c_i
             actual_c_i = 0.0
         else:
@@ -953,55 +956,89 @@ def _apply_confidential_tdx_pointwise_cap(
             else:
                 actual_c_i = desired_c_i
 
-        # Compute the weight from raw finite values first
         w_i = a_i + actual_c_i
         if w_i > 0.0:
             blended[hk] = w_i
-        # Store components extracted from w_i (not rounded independently)
-        # to ensure w_i = a_i + c_i exactly
         base_comp[hk] = a_i
         ext_comp[hk] = actual_c_i
 
-    realized_base_mass = sum(base_comp.values())
-    realized_ext_mass = sum(ext_comp.values())
-    total_mass = realized_base_mass + realized_ext_mass
-    realized_ext_fraction = realized_ext_mass / total_mass if total_mass > 0.0 else 0.0
-
-    # Hard-assert pointwise inequalities (§6) -- fail closed before signing
-    violations: list[str] = []
-    for hk in set(base_norm) | set(ext_norm):
-        a_i = (1.0 - fraction) * base_norm.get(hk, 0.0)
-        c_i = ext_comp.get(hk, 0.0)
-        if a_i <= 0.0 and c_i > 1e-12:
-            violations.append(
-                f"{hk}: compute-only but c_i={c_i:.4e}")
-        elif a_i > 0.0 and c_i > cap_coeff * a_i + 1e-9:
-            violations.append(
-                f"{hk}: c_i={c_i:.4e} exceeds cap={cap_coeff * a_i:.4e}")
-    if realized_ext_fraction > fraction + 1e-9:
-        violations.append(
-            f"aggregate realized_ext_fraction={realized_ext_fraction:.9f} > fraction={fraction:.9f}")
+    totals = _validate_confidential_tdx_components(
+        blended, base_comp, ext_comp, fraction, context="blend")
 
     cap_meta: dict[str, Any] = {
         "configured_cap": CONFIDENTIAL_TDX_HARD_CAP,
-        "configured_fraction": round(fraction, 9),
-        "actual_base_mass": round(realized_base_mass, 9),
-        "actual_external_mass": round(realized_ext_mass, 9),
-        "realized_external_fraction": round(realized_ext_fraction, 9),
-        "withheld_external_mass": round(withheld_mass, 9),
-        "cap_version": "v1",
+        "configured_fraction": fraction,
+        "actual_base_mass": totals["base_mass"],
+        "actual_external_mass": totals["external_mass"],
+        "realized_external_fraction": totals["external_fraction"],
+        "withheld_external_mass": withheld_mass,
+        "cap_version": "v2",
         "pointwise_margin": margin,
+        "base_floor": base_floor,
         "capped_hotkey_count": capped_count,
         "compute_only_zero_count": compute_only_count,
-        "pointwise_cap_assertion_ok": not violations,
+        "floor_floored_count": floor_floored_count,
+        "pointwise_cap_assertion_ok": True,
     }
-
-    if violations:
-        raise VectorError(
-            f"confidential_tdx pointwise cap assertion failed "
-            f"(f={fraction}): {'; '.join(violations[:3])}")
-
     return blended, base_comp, ext_comp, cap_meta
+
+
+def _machine_precision_equal(left: float, right: float) -> bool:
+    if left == right:
+        return True
+    return abs(left - right) <= max(math.ulp(left), math.ulp(right))
+
+
+def _validate_confidential_tdx_components(
+    scores: dict[str, float],
+    base_comp: dict[str, float],
+    ext_comp: dict[str, float],
+    fraction: float,
+    *,
+    context: str,
+) -> dict[str, float]:
+    """Validate the exact components represented by a rebuilt/signed vector."""
+    if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
+        raise VectorError(f"{context}: invalid confidential fraction {fraction!r}")
+    cap_coeff = ((fraction / (1.0 - fraction)) *
+                 (1.0 - CONFIDENTIAL_TDX_POINTWISE_MARGIN))
+    base_mass = 0.0
+    ext_mass = 0.0
+    for hk, raw_weight in scores.items():
+        if hk not in base_comp or hk not in ext_comp:
+            raise VectorError(f"{context}: {hk} missing signed attribution component")
+        weight = float(raw_weight)
+        a_i = float(base_comp[hk])
+        c_i = float(ext_comp[hk])
+        if not all(math.isfinite(value) for value in (weight, a_i, c_i)):
+            raise VectorError(f"{context}: {hk} has non-finite weight/component")
+        if weight < 0.0 or a_i < 0.0 or c_i < 0.0:
+            raise VectorError(f"{context}: {hk} has negative weight/component")
+        if a_i < CONFIDENTIAL_TDX_BASE_FLOOR:
+            if c_i != 0.0:
+                raise VectorError(f"{context}: {hk} below base floor with c_i={c_i!r}")
+        elif c_i > cap_coeff * a_i:
+            raise VectorError(f"{context}: {hk} exceeds confidential pointwise cap")
+        component_sum = a_i + c_i
+        if not _machine_precision_equal(weight, component_sum):
+            raise VectorError(
+                f"{context}: {hk} weight {weight!r} != components {component_sum!r}")
+        base_mass += a_i
+        ext_mass += c_i
+
+    total_mass = base_mass + ext_mass
+    external_fraction = ext_mass / total_mass if total_mass > 0.0 else 0.0
+    if total_mass == 0.0 and ext_mass != 0.0:
+        raise VectorError(f"{context}: zero total mass has nonzero confidential mass")
+    if total_mass > 0.0 and ext_mass > fraction * total_mass:
+        raise VectorError(
+            f"{context}: confidential attribution {ext_mass!r}/{total_mass!r} "
+            f"exceeds {fraction!r}")
+    return {
+        "base_mass": base_mass,
+        "external_mass": ext_mass,
+        "external_fraction": external_fraction,
+    }
 
 
 def _l1_normalize(scores: dict[str, float]) -> dict[str, float]:
@@ -1056,6 +1093,16 @@ def _apply_external_scores(
         blend_meta["base_mass"] = 1.0 if base else 0.0
         blend_meta["base_miner_count"] = len(base)
         return base, blend_meta
+
+    src = external_scores_source()
+    confidential_fraction = None
+    if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
+        confidential_fraction = _confidential_tdx_fraction()
+        if confidential_fraction is None:
+            blend_meta["base_mass"] = 1.0 if base else 0.0
+            blend_meta["base_miner_count"] = len(base)
+            blend_meta["degraded"] = "confidential_fraction_missing"
+            return base, blend_meta
 
     ext = _compose_external_scores(store, now=now, ident=ident)
 
@@ -1114,11 +1161,8 @@ def _apply_external_scores(
 
     # Both have positive mass: blend.
     _bw, _ew, fraction = _external_blend_weights()
-    # Contract §1: apply source-specific hard cap before blend.  Lower configured
-    # values are allowed; this ceiling cannot be overridden by MAX_FRACTION.
-    src = external_scores_source()
-    if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
-        fraction = min(fraction, CONFIDENTIAL_TDX_HARD_CAP)
+    if confidential_fraction is not None:
+        fraction = confidential_fraction
     if fraction <= 0.0:
         blend_meta["base_mass"] = 1.0
         blend_meta["base_miner_count"] = len(base)
@@ -1730,43 +1774,30 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     since = _ms_iso(now - timedelta(hours=window_hours()))
     blend_meta: dict[str, Any] = {}
     scores = compose_scores(store, now=now, coldkey_of=coldkey_of, blend_meta_out=blend_meta)
-    # Store original blend state before payable filter
-    orig_blend_meta = dict(blend_meta)
     scores, payable_meta = _apply_payable_hotkey_policy(store, scores, now=now)
-    # After payable filter, recompute aggregate masses and caps for TDX sources
-    if payable_meta.get("enforced"):
-        # Payable filter removed hotkeys; recompute components
-        if orig_blend_meta.get("confidential_tdx_cap"):
-            src = external_scores_source()
-            if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
-                base_comp = orig_blend_meta.get("_internal_base_components") or {}
-                ext_comp = orig_blend_meta.get("_internal_ext_components") or {}
-                # Filter to surviving hotkeys
-                filt_base = {hk: base_comp[hk] for hk in scores if hk in base_comp}
-                filt_ext = {hk: ext_comp[hk] for hk in scores if hk in ext_comp}
-                # Recompute aggregates
-                recomp_base_mass = sum(filt_base.values())
-                recomp_ext_mass = sum(filt_ext.values())
-                recomp_total = recomp_base_mass + recomp_ext_mass
-                recomp_ext_frac = recomp_ext_mass / recomp_total if recomp_total > 0.0 else 0.0
-                configured_frac = orig_blend_meta.get("fraction", CONFIDENTIAL_TDX_HARD_CAP)
-                # Hard-assert the recomputed fraction fits the cap
-                if recomp_ext_frac > configured_frac + 1e-9:
-                    raise VectorError(
-                        f"after payable filter, realized_ext_fraction={recomp_ext_frac:.9f} "
-                        f"exceeds configured fraction={configured_frac:.9f}")
-                # Update metadata with recomputed values
-                blend_meta["_internal_base_components"] = filt_base
-                blend_meta["_internal_ext_components"] = filt_ext
-                if "confidential_tdx_cap" in blend_meta and blend_meta["confidential_tdx_cap"]:
-                    blend_meta["confidential_tdx_cap"]["actual_base_mass"] = round(recomp_base_mass, 9)
-                    blend_meta["confidential_tdx_cap"]["actual_external_mass"] = round(recomp_ext_mass, 9)
-                    blend_meta["confidential_tdx_cap"]["realized_external_fraction"] = round(recomp_ext_frac, 9)
-            # Update blend metadata mass fields
-            blend_meta["base_miner_count"] = len([hk for hk in scores if hk in
-                orig_blend_meta.get("_internal_base_components", {})])
-            blend_meta["external_miner_count"] = len([hk for hk in scores if hk in
-                orig_blend_meta.get("_internal_ext_components", {})])
+    cap_meta = blend_meta.get("confidential_tdx_cap")
+    if cap_meta:
+        base_comp = blend_meta.get("_internal_base_components") or {}
+        ext_comp = blend_meta.get("_internal_ext_components") or {}
+        filtered_base = {hk: base_comp[hk] for hk in scores if hk in base_comp}
+        filtered_ext = {hk: ext_comp[hk] for hk in scores if hk in ext_comp}
+        blend_meta["_internal_base_components"] = filtered_base
+        blend_meta["_internal_ext_components"] = filtered_ext
+        totals = _validate_confidential_tdx_components(
+            scores,
+            filtered_base,
+            filtered_ext,
+            float(blend_meta["fraction"]),
+            context="post-payable-filter",
+        )
+        cap_meta.update({
+            "actual_base_mass": totals["base_mass"],
+            "actual_external_mass": totals["external_mass"],
+            "realized_external_fraction": totals["external_fraction"],
+        })
+        blend_meta["base_miner_count"] = len(filtered_base)
+        blend_meta["external_miner_count"] = sum(
+            1 for value in filtered_ext.values() if value > 0.0)
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
@@ -1857,15 +1888,21 @@ def _build_weights_list(
     """
     base_comp: dict[str, float] = blend_meta.get("_internal_base_components") or {}
     ext_comp: dict[str, float] = blend_meta.get("_internal_ext_components") or {}
+    capped = bool(blend_meta.get("confidential_tdx_cap"))
+    if capped:
+        _validate_confidential_tdx_components(
+            scores,
+            base_comp,
+            ext_comp,
+            float(blend_meta["fraction"]),
+            context="pre-sign",
+        )
     entries: list[dict[str, Any]] = []
     for hk in sorted(scores):
         entry: dict[str, Any] = {"miner_hotkey": hk, "weight": scores[hk]}
-        if base_comp or ext_comp:
-            # Extract raw components (not rounded independently)
-            a_i = base_comp.get(hk, 0.0)
-            c_i = ext_comp.get(hk, 0.0)
-            entry["base_component"] = a_i
-            entry["external_component"] = c_i
+        if capped:
+            entry["base_component"] = base_comp[hk]
+            entry["external_component"] = ext_comp[hk]
         entries.append(entry)
     return entries
 

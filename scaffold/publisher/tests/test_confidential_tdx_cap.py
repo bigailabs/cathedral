@@ -190,17 +190,12 @@ def _drop_and_renorm(
 # §1: Hard cap tests
 # ---------------------------------------------------------------------------
 
-def test_env_requests_50pct_effective_cap_is_10pct(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§1: FRACTION=0.5 for cathedral_confidential_tdx is clamped to 0.10."""
+def test_env_requests_50pct_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§1: invalid confidential fractions fail closed instead of being clamped."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_FRACTION", "0.5")
     base = {"A": 0.7, "B": 0.3}
-    out, meta = _blend(base, [("A", 0.9), ("B", 0.5)])
-    cap = meta.get("confidential_tdx_cap") or {}
-    assert cap.get("configured_fraction", 1.0) <= CONFIDENTIAL_TDX_HARD_CAP + TOL, (
-        f"configured_fraction {cap.get('configured_fraction')} must be <= 0.10")
-    ext_frac = cap.get("realized_external_fraction", 1.0)
-    assert ext_frac <= CONFIDENTIAL_TDX_HARD_CAP + TOL, (
-        f"realized_external_fraction {ext_frac} exceeds hard cap {CONFIDENTIAL_TDX_HARD_CAP}")
+    with pytest.raises(VectorError, match="fraction must be finite"):
+        _blend(base, [("A", 0.9), ("B", 0.5)])
 
 
 def test_max_fraction_cannot_override_hard_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -926,3 +921,91 @@ def test_build_signed_vector_invariants(monkeypatch: pytest.MonkeyPatch) -> None
     # But components ARE in the signed weights entries
     assert any("base_component" in w for w in weights_list), (
         "base_component must be in signed weight entries for TDX blend")
+# ---------------------------------------------------------------------------
+# Numeric and final-attribution regressions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("configured", ["0", "-0.01", "0.1000001", "nan", "inf", "oops"])
+def test_invalid_configured_fraction_rejected(
+    monkeypatch: pytest.MonkeyPatch, configured: str
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_FRACTION", configured)
+    with pytest.raises(VectorError, match="confidential_tdx fraction"):
+        _blend({"A": 1.0}, [("A", 1.0)])
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), -0.01, 1.01])
+def test_invalid_confidential_score_fails_closed_to_base(score: float) -> None:
+    out, meta = _blend({"A": 1.0}, [("A", score)])
+    assert out == {"A": 1.0}
+    assert meta["blended"] is False
+
+
+def test_tiny_base_and_compute_only_are_exact_zero() -> None:
+    floor = weights.CONFIDENTIAL_TDX_BASE_FLOOR
+    out, base_comp, ext_comp, _ = _apply_confidential_tdx_pointwise_cap(
+        {"tiny": floor / (2.0 * 0.9), "compute-only": 0.0, "normal": 1.0},
+        {"tiny": 0.4, "compute-only": 0.4, "normal": 0.2},
+        0.10,
+    )
+    assert base_comp["tiny"] < floor
+    assert ext_comp["tiny"] == 0.0
+    assert ext_comp["compute-only"] == 0.0
+    assert "compute-only" not in out
+
+
+def test_singleton_tiny_base_has_no_confidential_attribution() -> None:
+    floor = weights.CONFIDENTIAL_TDX_BASE_FLOOR
+    out, _, ext_comp, meta = _apply_confidential_tdx_pointwise_cap(
+        {"tiny": floor / (2.0 * 0.9)}, {"tiny": 1.0}, 0.10)
+    assert ext_comp["tiny"] == 0.0
+    assert meta["realized_external_fraction"] == 0.0
+    assert out["tiny"] > 0.0
+
+
+def test_signing_rejects_missing_component_and_weight_mismatch() -> None:
+    validate = weights._validate_confidential_tdx_components
+    with pytest.raises(VectorError, match="missing signed attribution component"):
+        validate({"A": 0.9}, {"A": 0.9}, {}, 0.10, context="test")
+    with pytest.raises(VectorError, match="!= components"):
+        validate({"A": 0.9001}, {"A": 0.9}, {"A": 0.0}, 0.10, context="test")
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_adversarial_drop_uid_merge_renormalize_and_u16_stays_capped(seed: int) -> None:
+    """Exercise all downstream positive transforms in one adversarial pipeline."""
+    rng = random.Random(seed)
+    base = {f"hk{i}": 10.0 ** rng.uniform(-10.0, 2.0) for i in range(24)}
+    ext = [(hk, rng.random()) for hk in base]
+    ext.extend((f"compute{i}", rng.random()) for i in range(4))
+    out, meta = _blend(base, ext)
+    base_comp = meta["_internal_base_components"]
+    ext_comp = meta["_internal_ext_components"]
+
+    survivors = [hk for hk in out if rng.random() > 0.45]
+    if not survivors:
+        survivors = [next(iter(out))]
+
+    # Duplicate UID merge, then global renormalization.
+    merged: dict[int, dict[str, float]] = {}
+    for index, hk in enumerate(survivors):
+        uid = index % max(1, len(survivors) // 3)
+        row = merged.setdefault(uid, {"weight": 0.0, "base": 0.0, "external": 0.0})
+        row["weight"] += out[hk]
+        row["base"] += base_comp[hk]
+        row["external"] += ext_comp[hk]
+    total = sum(row["weight"] for row in merged.values())
+    for row in merged.values():
+        row["weight"] /= total
+        row["base"] /= total
+        row["external"] /= total
+        assert row["external"] <= 0.10 * (row["base"] + row["external"])
+
+    # Quantization changes row masses, so audit by each row's stored attribution ratio.
+    quantized = [
+        (round(row["weight"] * 65535), row["external"] / row["weight"])
+        for row in merged.values()
+    ]
+    total_u16 = sum(q for q, _ in quantized)
+    attributed_u16 = sum(q * ratio for q, ratio in quantized)
+    assert attributed_u16 <= 0.10 * total_u16
