@@ -134,20 +134,24 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _env_bytes(name: str, default: int) -> int:
-    """Parse environment variable as byte count with sane positive validation.
-    
+    """Parse environment variable as byte count with sane positive default.
+
     Accepts:
     - Plain integer (bytes): "1048576"
     - With suffix: "1M", "1Mi", "1MiB" (1 MiB = 1024^2 bytes)
-    
+
     Returns:
-    - Parsed byte count (positive integer)
-    - default if env var is missing, empty, or unparseable
-    - ValueError (via HTTPException) if negative or invalid suffix
+    - Parsed byte count (strictly positive integer)
+    - default (sane positive integer) if env var is missing, empty, or unparseable
     """
+    positive_default = (
+        default
+        if isinstance(default, int) and not isinstance(default, bool) and default > 0
+        else 1
+    )
     raw = os.environ.get(name, "").strip()
     if not raw:
-        return default
+        return positive_default
     try:
         raw_upper = raw.upper()
         if raw_upper.endswith(("MIB", "MI", "M")):
@@ -158,31 +162,31 @@ def _env_bytes(name: str, default: int) -> int:
             else:
                 val_str = raw[:-1]
             val = int(val_str.strip())
-            if val < 0:
-                raise ValueError(f"Negative byte count: {raw}")
+            if val <= 0:
+                return positive_default
             return val * 1024 * 1024
         else:
             val = int(raw)
-            if val < 0:
-                raise ValueError(f"Negative byte count: {raw}")
+            if val <= 0:
+                return positive_default
             return val
     except (ValueError, AttributeError):
-        return default
+        return positive_default
 
 
 async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
     """Read request body bounded by max_bytes.
-    
+
     Strategy:
     1. Check Content-Length header (if present and valid) — reject with 413 if over cap
     2. For chunked or missing/misleading Content-Length, consume request.stream()
        incrementally into a bytearray
     3. Stop immediately with 413 once accumulated bytes exceed max_bytes
     4. Preserve exact accumulated bytes for JSON parse and HMAC
-    
+
     Returns:
     - bytes: the exact accumulated body
-    
+
     Raises:
     - HTTPException(413): declared or actual size exceeds max_bytes
     - HTTPException(400): malformed negative Content-Length
@@ -201,7 +205,7 @@ async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
         except ValueError:
             # Unparseable Content-Length — fall through to stream consumption
             pass
-    
+
     # Consume stream incrementally (handles chunked, missing, or misleading Content-Length)
     accumulated = bytearray()
     async for chunk in request.stream():
@@ -209,7 +213,7 @@ async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
         if len(accumulated) > max_bytes:
             # Exceeded cap during streaming — fail with 413
             raise HTTPException(413, "external_scores_body_too_large")
-    
+
     return bytes(accumulated)
 
 
@@ -3145,7 +3149,7 @@ def build_app(
         This endpoint never sets weights directly. It stores source scores for
         weights.py to blend into the single Cathedral-signed vector that thin
         validators already verify and apply.
-        
+
         Body is bounded by CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES (default 1 MiB).
         Rejects with 413 if declared Content-Length exceeds cap or if streaming
         consumption exceeds cap. Preserves exact bytes for JSON parse and HMAC.

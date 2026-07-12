@@ -5,11 +5,16 @@ dedicated vs. shared token boundaries, and proper 401/503 error codes.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import json
 from datetime import datetime, timezone
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from scaffold.publisher import app as app_mod
 
@@ -512,18 +517,16 @@ def test_route_other_sources_pass_when_no_global_hmac_configured(client, monkeyp
 def test_route_rejects_declared_oversize_with_413(client, monkeypatch):
     """Declared Content-Length over cap is rejected with 413 before reading."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
-    # Cap at 512 bytes for this test
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", "512")
     report = _sample_report("violet_audio")
     body = json.dumps(report).encode("utf-8")
-    # Claim a larger size than actual (2 KiB declared, small actual payload)
     resp = client.post(
         "/v1/external-scores/violet",
         content=body,
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
-            "Content-Length": str(2048),  # Over cap
+            "Content-Length": str(2048),
         }
     )
     assert resp.status_code == 413
@@ -533,10 +536,8 @@ def test_route_rejects_declared_oversize_with_413(client, monkeypatch):
 def test_route_accepts_exact_cap_boundary(client, monkeypatch):
     """Payload exactly at cap is accepted."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
-    # Create a small report
     report = {"source": "violet_audio", "generated_at": _now_iso(), "scores": [], "complete": True, "epoch": 1}
     body = json.dumps(report).encode("utf-8")
-    # Set cap to exactly the body size
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", str(len(body)))
     resp = client.post(
         "/v1/external-scores/violet",
@@ -553,41 +554,10 @@ def test_route_accepts_exact_cap_boundary(client, monkeypatch):
 def test_route_rejects_one_byte_over_cap(client, monkeypatch):
     """Payload one byte over cap is rejected with 413."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
-    # Create a small report
     report = {"source": "violet_audio", "generated_at": _now_iso(), "scores": [], "complete": True, "epoch": 1}
     body = json.dumps(report).encode("utf-8")
-    # Set cap to one byte less than the body
     cap = len(body) - 1
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", str(cap))
-    resp = client.post(
-        "/v1/external-scores/violet",
-        content=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer shared-token",
-        }
-    )
-    assert resp.status_code == 413
-    assert resp.json()["detail"] == "external_scores_body_too_large"
-
-
-def test_route_rejects_stream_oversize_attempt(client, monkeypatch):
-    """Chunked/streaming payload exceeding cap is rejected with 413."""
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
-    # Cap at 512 bytes
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", "512")
-    # Create a large payload (1 KiB), no Content-Length declared
-    large_report = {
-        "source": "violet_audio",
-        "generated_at": _now_iso(),
-        "scores": [{"miner_hotkey": f"hotkey_{i}", "score": 0.5} for i in range(20)],
-        "complete": True,
-        "epoch": 1,
-    }
-    body = json.dumps(large_report).encode("utf-8")
-    # Verify the body is indeed larger than cap
-    assert len(body) > 512, f"Test setup error: body size {len(body)} is not > 512"
-    # Send without Content-Length to trigger streaming consumption
     resp = client.post(
         "/v1/external-scores/violet",
         content=body,
@@ -611,30 +581,88 @@ def test_route_rejects_negative_content_length_with_400(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
-            "Content-Length": "-123",  # Malformed
+            "Content-Length": "-123",
         }
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid_content_length_negative"
 
 
+def test_bounded_body_counts_asgi_chunks_despite_small_content_length():
+    """Actual ASGI chunks, not a misleading Content-Length, enforce the cap."""
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", b"1"),
+        ],
+    }
+    chunks = (b"x" * 128, b"y" * 129)
+    chunk_index = 0
+
+    async def receive():
+        nonlocal chunk_index
+        chunk = chunks[chunk_index]
+        chunk_index += 1
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": chunk_index < len(chunks),
+        }
+
+    async def read_body():
+        request = Request(scope, receive=receive)
+        return await app_mod._read_bounded_body(request, 256)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(read_body())
+
+    assert chunk_index == 2
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == "external_scores_body_too_large"
+
+
+@pytest.mark.parametrize("body", [b"", b'{"source":'])
+def test_route_rejects_missing_or_malformed_body(client, monkeypatch, body):
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
+
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={"Authorization": "Bearer shared-token"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_json_report"
+
+
 def test_route_preserves_exact_bytes_for_json_and_hmac(client, monkeypatch):
-    """Bounded body consumption preserves exact bytes for JSON parse and HMAC verification."""
-    import hmac
-    import hashlib
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-token")
-    secret = "sat-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_SAT_FAST", secret)
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", "10M")  # Large cap
-    report = _sample_report("cathedral_sat_fast")
-    body = json.dumps(report).encode("utf-8")
+    """Bounded body consumption preserves exact bytes for HMAC with cathedral_confidential_tdx.
+
+    Uses cathedral_confidential_tdx with dedicated bearer and HMAC secret.
+    A modified body or signature will fail verification, proving HMAC is active.
+    """
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
+    secret = "tdx-hmac-secret"
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", "10M")
+    generated_at = _now_iso()
+    body = (
+        b'{\n  "scores": [{"score": 0.5, "miner_hotkey": "5Alice"}],\n'
+        b'  "epoch": 1,\n  "source": "cathedral_confidential_tdx",\n'
+        b'  "complete": true,\n  "generated_at": "'
+        + generated_at.encode("utf-8")
+        + b'"\n}'
+    )
+    assert json.dumps(json.loads(body)).encode("utf-8") != body
     sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     resp = client.post(
         "/v1/external-scores/violet",
         content=body,
         headers={
             "Content-Type": "application/json",
-            "Authorization": "Bearer sat-token",
+            "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": f"sha256={sig}",
         }
     )
@@ -644,26 +672,24 @@ def test_route_preserves_exact_bytes_for_json_and_hmac(client, monkeypatch):
 def test_route_env_bytes_parsing_with_suffix(monkeypatch):
     """Test that CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES parses suffixes correctly."""
     from scaffold.publisher.app import _env_bytes
-    
-    # Test 1M suffix
+
     monkeypatch.setenv("TEST_BYTES", "1M")
-    assert _env_bytes("TEST_BYTES", 0) == 1024 * 1024
-    
-    # Test 1Mi suffix
+    assert _env_bytes("TEST_BYTES", 999) == 1024 * 1024
+
     monkeypatch.setenv("TEST_BYTES", "1Mi")
-    assert _env_bytes("TEST_BYTES", 0) == 1024 * 1024
-    
-    # Test 1MiB suffix
+    assert _env_bytes("TEST_BYTES", 999) == 1024 * 1024
+
     monkeypatch.setenv("TEST_BYTES", "1MiB")
-    assert _env_bytes("TEST_BYTES", 0) == 1024 * 1024
-    
-    # Test plain number
+    assert _env_bytes("TEST_BYTES", 999) == 1024 * 1024
+
     monkeypatch.setenv("TEST_BYTES", "2048")
-    assert _env_bytes("TEST_BYTES", 0) == 2048
-    
-    # Test missing/empty falls back to default
+    assert _env_bytes("TEST_BYTES", 999) == 2048
+
+    for invalid in ("", "bogus", "0", "-1", "0M", "-2MiB"):
+        monkeypatch.setenv("TEST_BYTES", invalid)
+        assert _env_bytes("TEST_BYTES", 999) == 999
+
     monkeypatch.delenv("TEST_BYTES", raising=False)
     assert _env_bytes("TEST_BYTES", 999) == 999
-    
-    # Test default 1 MiB when env var is not set
     assert _env_bytes("TEST_BYTES_NONEXISTENT", 1024 * 1024) == 1024 * 1024
+    assert _env_bytes("TEST_BYTES_NONEXISTENT", 0) == 1
