@@ -9,18 +9,22 @@ import asyncio
 import hashlib
 import hmac
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from scaffold.publisher import app as app_mod
+from scaffold.publisher import app as app_mod, external_scores
 
 
 def _now_iso():
     dt = datetime.now(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -36,6 +40,42 @@ def _sample_report(source: str = "cathedral_sat_fast") -> dict:
     }
 
 
+def _tdx_auth(monkeypatch):
+    token = "tdx-token"
+    secret = "tdx-hmac-secret"
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX",
+        token,
+    )
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX",
+        secret,
+    )
+    return token, secret
+
+
+def _tdx_headers(token: str, secret: str, body: bytes) -> dict[str, str]:
+    signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "X-Cathedral-External-Signature": f"sha256={signature}",
+    }
+
+
+def _freeze_external_scores_now(monkeypatch, now: datetime):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls.current.replace(tzinfo=None)
+            return cls.current.astimezone(tz)
+
+    FrozenDateTime.current = now
+    monkeypatch.setattr(external_scores, "datetime", FrozenDateTime)
+    return FrozenDateTime
+
+
 @pytest.fixture
 def client(monkeypatch):
     """Build the app with external scores enabled but no weights blending yet."""
@@ -43,6 +83,34 @@ def client(monkeypatch):
     # Weights blending OFF by default in these tests (we test it separately).
     monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", raising=False)
     return TestClient(app_mod.build_app())
+
+
+@pytest.fixture
+def accepted_tdx_report(client, monkeypatch):
+    now = datetime(2026, 7, 11, 18, 0, tzinfo=timezone.utc)
+    clock = _freeze_external_scores_now(monkeypatch, now)
+    token, secret = _tdx_auth(monkeypatch)
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_AGE_SECS", "3600")
+    report = _sample_report("cathedral_confidential_tdx")
+    report["generated_at"] = _iso(now)
+    body = json.dumps(report).encode("utf-8")
+
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers=_tdx_headers(token, secret, body),
+    )
+    assert resp.status_code == 202
+    assert resp.json()["idempotent"] is False
+
+    return {
+        "body": body,
+        "clock": clock,
+        "report": report,
+        "response": resp.json(),
+        "secret": secret,
+        "token": token,
+    }
 
 
 def test_route_rejects_missing_bearer_when_shared_token_required(client, monkeypatch):
@@ -667,6 +735,104 @@ def test_route_preserves_exact_bytes_for_json_and_hmac(client, monkeypatch):
         }
     )
     assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+
+
+def test_route_accepts_exact_authenticated_tdx_retry_after_report_ages_out(
+    client,
+    accepted_tdx_report,
+):
+    accepted_tdx_report["clock"].current += timedelta(seconds=3601)
+
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=accepted_tdx_report["body"],
+        headers=_tdx_headers(
+            accepted_tdx_report["token"],
+            accepted_tdx_report["secret"],
+            accepted_tdx_report["body"],
+        ),
+    )
+
+    assert resp.status_code == 202
+    assert resp.json()["idempotent"] is True
+    assert resp.json().keys() == accepted_tdx_report["response"].keys()
+    for key in ("status", "report_id", "source", "epoch", "score_count", "report_sha256"):
+        assert resp.json()[key] == accepted_tdx_report["response"][key]
+
+
+def test_route_rejects_stale_authenticated_tdx_new_epoch(client, accepted_tdx_report):
+    accepted_tdx_report["clock"].current += timedelta(seconds=3601)
+    report = dict(accepted_tdx_report["report"])
+    report["epoch"] += 1
+    body = json.dumps(report).encode("utf-8")
+
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers=_tdx_headers(
+            accepted_tdx_report["token"],
+            accepted_tdx_report["secret"],
+            body,
+        ),
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "report_too_old"
+
+
+def test_route_rejects_stale_authenticated_tdx_same_epoch_different_digest(
+    client,
+    accepted_tdx_report,
+):
+    accepted_tdx_report["clock"].current += timedelta(seconds=3601)
+    report = json.loads(accepted_tdx_report["body"])
+    report["scores"][0]["score"] = 0.75
+    body = json.dumps(report).encode("utf-8")
+
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers=_tdx_headers(
+            accepted_tdx_report["token"],
+            accepted_tdx_report["secret"],
+            body,
+        ),
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "report_too_old"
+
+
+def test_route_authenticates_stale_tdx_retry_before_idempotency(
+    client,
+    accepted_tdx_report,
+):
+    accepted_tdx_report["clock"].current += timedelta(seconds=3601)
+    body = accepted_tdx_report["body"]
+    signature = hmac.new(
+        accepted_tdx_report["secret"].encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    missing_bearer = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={"X-Cathedral-External-Signature": f"sha256={signature}"},
+    )
+    bad_hmac = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Authorization": f"Bearer {accepted_tdx_report['token']}",
+            "X-Cathedral-External-Signature": f"sha256={'0' * 64}",
+        },
+    )
+
+    assert missing_bearer.status_code == 401
+    assert missing_bearer.json()["detail"] == "invalid_external_scores_token"
+    assert bad_hmac.status_code == 401
+    assert bad_hmac.json()["detail"] == "invalid_external_scores_signature"
 
 
 def test_route_env_bytes_parsing_with_suffix(monkeypatch):

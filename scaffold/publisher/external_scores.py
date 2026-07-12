@@ -283,11 +283,12 @@ def _parse_iso_dt(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def normalize_report(
+def _normalize_report(
     payload: Any,
     *,
     default_source: str = _DEFAULT_SOURCE,
     now: datetime | None = None,
+    enforce_max_age: bool,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ExternalScoreError("invalid_report")
@@ -302,7 +303,7 @@ def normalize_report(
     except Exception:
         raise ExternalScoreError("invalid_generated_at")
     age = (ref - gen_dt).total_seconds()
-    if age > max_report_age_secs():
+    if enforce_max_age and age > max_report_age_secs():
         raise ExternalScoreError("report_too_old")
     if age < -max_report_future_secs():
         raise ExternalScoreError("report_in_future")
@@ -383,6 +384,48 @@ def normalize_report(
     normalized["report_sha256"] = digest
     normalized["report_id"] = str(payload.get("report_id") or f"ext-{digest[:32]}")
     return normalized
+
+
+def normalize_report(
+    payload: Any,
+    *,
+    default_source: str = _DEFAULT_SOURCE,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    return _normalize_report(
+        payload,
+        default_source=default_source,
+        now=now,
+        enforce_max_age=True,
+    )
+
+
+def normalize_stale_idempotent_retry(
+    store: Store,
+    payload: Any,
+    *,
+    default_source: str = _DEFAULT_SOURCE,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Normalize an over-age report only when its exact digest is persisted.
+
+    This disables only the maximum-age check. Future-time validation and the
+    full report contract remain enforced by the shared normalization path.
+    """
+    report = _normalize_report(
+        payload,
+        default_source=default_source,
+        now=now,
+        enforce_max_age=False,
+    )
+    rows = store.query(
+        "SELECT report_sha256 FROM external_score_reports "
+        "WHERE source=? AND epoch=? AND report_sha256=? LIMIT 1",
+        (report["source"], report["epoch"], report["report_sha256"]),
+    )
+    if not rows:
+        raise ExternalScoreError("report_too_old")
+    return report
 
 
 def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:

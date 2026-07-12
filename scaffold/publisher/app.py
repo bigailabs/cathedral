@@ -3204,7 +3204,16 @@ def build_app(
         try:
             report = external_scores.normalize_report(payload, default_source="violet_audio")
         except external_scores.ExternalScoreError as exc:
-            raise HTTPException(400, exc.reason)
+            if exc.reason != "report_too_old":
+                raise HTTPException(400, exc.reason)
+            try:
+                report = external_scores.normalize_stale_idempotent_retry(
+                    store,
+                    payload,
+                    default_source="violet_audio",
+                )
+            except external_scores.ExternalScoreError as retry_exc:
+                raise HTTPException(400, retry_exc.reason)
         try:
             accepted = external_scores.store_report(store, report)
         except Exception as exc:
