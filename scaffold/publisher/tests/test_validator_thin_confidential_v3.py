@@ -20,9 +20,13 @@ def _row(hotkey: str, base: float, external: float) -> dict[str, object]:
 def _v3_payload(
     rows: list[dict[str, object]],
     *,
+    configured_fraction: object = 0.10,
     burn_uid: int | None = None,
     forced_burn_percentage: float = 0.0,
 ) -> dict[str, object]:
+    cap: dict[str, object] = {"cap_version": "v3"}
+    if configured_fraction is not None:
+        cap["configured_fraction"] = configured_fraction
     return {
         "weights": rows,
         "burn_snapshot": {
@@ -30,7 +34,7 @@ def _v3_payload(
             "forced_burn_percentage": forced_burn_percentage,
         },
         "policy_metadata": {
-            "confidential_tdx_cap": {"cap_version": "v3"},
+            "confidential_tdx_cap": cap,
         },
     }
 
@@ -95,22 +99,55 @@ def test_incomplete_v3_fallback_applies_existing_burn_to_base_only() -> None:
     assert result == {10: 0.4, 11: 0.4, 99: 0.2}
 
 
-def test_compute_only_row_is_retained_when_fully_mapped() -> None:
-    payload = _v3_payload([_row("compute", 0.0, 0.10)])
+def test_compute_only_row_is_retained_within_valid_base_union() -> None:
+    payload = _v3_payload([
+        _row("base", 0.9, 0.0),
+        _row("compute", 0.0, 0.10),
+    ])
 
-    result = validator_thin.vector_to_uid_weights(payload, {"compute": 12})
+    result = validator_thin.vector_to_uid_weights(
+        payload, {"base": 10, "compute": 12}
+    )
 
-    assert result == {12: 1.0}
+    assert result == {10: 0.9, 12: 0.1}
 
 
 def test_duplicate_uid_fails_for_v3_even_when_rows_overlap() -> None:
     payload = _v3_payload([
-        _row("base", 0.45, 0.0),
-        _row("overlap", 0.45, 0.05),
+        _row("base", 0.5, 0.0),
+        _row("overlap", 0.4, 0.1),
     ])
 
     with pytest.raises(validator_thin.wire.VectorError, match="duplicate UID"):
         validator_thin.vector_to_uid_weights(payload, {"base": 10, "overlap": 10})
+
+
+@pytest.mark.parametrize("configured_fraction", [None, 0.0, -0.1, 0.100001, math.nan])
+def test_malformed_global_fraction_fails(configured_fraction: object) -> None:
+    payload = _v3_payload(
+        [_row("base", 0.9, 0.0), _row("compute", 0.0, 0.1)],
+        configured_fraction=configured_fraction,
+    )
+
+    with pytest.raises(validator_thin.wire.VectorError, match="fraction"):
+        validator_thin.vector_to_uid_weights(payload, {"base": 10, "compute": 12})
+
+
+def test_base_empty_v3_vector_fails_before_normalization() -> None:
+    payload = _v3_payload([_row("compute", 0.0, 0.10)])
+
+    with pytest.raises(validator_thin.wire.VectorError, match="positive base"):
+        validator_thin.vector_to_uid_weights(payload, {"compute": 12})
+
+
+def test_duplicate_signed_hotkey_fails_before_uid_mapping() -> None:
+    payload = _v3_payload([
+        _row("same", 0.9, 0.0),
+        _row("same", 0.0, 0.1),
+    ])
+
+    with pytest.raises(validator_thin.wire.VectorError, match="duplicate hotkey"):
+        validator_thin.vector_to_uid_weights(payload, {"same": 12})
 
 
 @pytest.mark.parametrize(
