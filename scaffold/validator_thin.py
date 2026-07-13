@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import time
@@ -117,9 +118,78 @@ def accept_vector(payload: dict[str, Any], *, public_key_hex: str, key_id: str,
             f"rollback/replay: vector policy_version {pv} <= last accepted {fence_version}")
 
 
+def _confidential_tdx_v3_rows(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
+    metadata = payload.get("policy_metadata") or {}
+    cap = metadata.get("confidential_tdx_cap") or {}
+    if cap.get("cap_version") != "v3":
+        return None
+
+    rows = payload.get("weights")
+    if not isinstance(rows, list):
+        raise wire.VectorError("confidential_tdx v3 weights must be a list")
+    for row in rows:
+        if not isinstance(row, dict):
+            raise wire.VectorError("confidential_tdx v3 weight row must be an object")
+        try:
+            weight = float(row["weight"])
+            base = float(row["base_component"])
+            external = float(row["external_component"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise wire.VectorError(
+                "confidential_tdx v3 row missing or invalid attribution component"
+            ) from exc
+        if not all(math.isfinite(value) and value >= 0.0
+                   for value in (weight, base, external)):
+            raise wire.VectorError(
+                f"confidential_tdx v3 row {row.get('miner_hotkey')!r} "
+                "has non-finite or negative attribution"
+            )
+        if not math.isclose(weight, base + external, rel_tol=0.0, abs_tol=1e-12):
+            raise wire.VectorError(
+                f"confidential_tdx v3 row {row.get('miner_hotkey')!r} "
+                f"weight {weight!r} != base+external {base + external!r}"
+            )
+        if not row.get("miner_hotkey"):
+            raise wire.VectorError("confidential_tdx v3 row missing miner_hotkey")
+    return rows
+
+
 def vector_to_uid_weights(payload: dict[str, Any],
                           hotkey_to_uid: dict[str, int]) -> dict[int, float]:
     snap = payload["burn_snapshot"]
+    v3_rows = _confidential_tdx_v3_rows(payload)
+    if v3_rows is not None:
+        mapped_uids: set[int] = set()
+        missing = False
+        for row in v3_rows:
+            hotkey = row["miner_hotkey"]
+            if hotkey not in hotkey_to_uid:
+                missing = True
+                continue
+            uid = hotkey_to_uid[hotkey]
+            if uid in mapped_uids:
+                raise wire.VectorError(
+                    f"confidential_tdx v3 duplicate UID {uid} in signed vector"
+                )
+            mapped_uids.add(uid)
+
+        if missing:
+            print("  confidential_tdx v3 map incomplete; falling back to signed base components")
+        scores: dict[int, float] = {}
+        for row in v3_rows:
+            hotkey = row["miner_hotkey"]
+            if hotkey not in hotkey_to_uid:
+                continue
+            uid = hotkey_to_uid[hotkey]
+            value = row["base_component"] if missing else row["weight"]
+            if value > 0.0:
+                scores[uid] = value
+        return apply_burn(
+            scores,
+            burn_uid=snap.get("burn_uid"),
+            forced_burn_percentage=float(snap["forced_burn_percentage"]),
+        )
+
     scores: dict[int, float] = {}
     skipped = 0
     for w in payload["weights"]:
