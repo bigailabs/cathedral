@@ -112,10 +112,12 @@ def _components(meta: dict[str, Any]) -> tuple[dict[str, float], dict[str, float
 
 def test_global_union_exact_10_percent_and_v3_metadata(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     base = {"base-only": 1.0, "overlap": 1.0}
     ext = [("overlap", 1.0), ("compute-only", 0.5)]
     out, meta = _blend(monkeypatch, base, ext)
+    assert capsys.readouterr().out == "[weights] confidential_tdx blend applied\n"
     base_comp, ext_comp = _components(meta)
     cap = meta["confidential_tdx_cap"]
 
