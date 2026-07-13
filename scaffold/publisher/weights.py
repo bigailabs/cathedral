@@ -116,7 +116,7 @@ EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
 # only; external_scores_mode() enforces this centrally.
 EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
 # Sources subject to the final-attribution accounting control.
-EXTERNAL_SCORES_POINTWISE_CAP_SOURCES = {"cathedral_confidential_tdx"}
+EXTERNAL_SCORES_GLOBAL_CAP_SOURCES = {"cathedral_confidential_tdx"}
 CONFIDENTIAL_TDX_HARD_CAP: float = 0.10
 
 _CACHE_TTL_SECS = 60.0
@@ -862,7 +862,7 @@ def _compose_external_scores(
     return _identity_collapse_scores(
         raw,
         ident=ident,
-        strict_unit_interval=external_scores_source() in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES,
+        strict_unit_interval=external_scores_source() in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES,
     )
 
 
@@ -910,7 +910,7 @@ def _external_blend_weights() -> tuple[float, float, float]:
     return base_weight, external_weight, share
 
 
-def _apply_confidential_tdx_pointwise_cap(
+def _apply_confidential_tdx_global_cap(
     base_norm: dict[str, float],
     ext_norm: dict[str, float],
     fraction: float,
@@ -1080,7 +1080,7 @@ def _apply_external_scores(
 
     src = external_scores_source()
     confidential_fraction = None
-    if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
+    if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
         confidential_fraction = _confidential_tdx_fraction()
         if confidential_fraction is None:
             blend_meta["base_mass"] = 1.0 if base else 0.0
@@ -1093,7 +1093,7 @@ def _apply_external_scores(
     # Confidential TDX must always have a fresh metagraph snapshot before any
     # external mass is admitted, regardless of the legacy registration flag.
     require_registered = (
-        src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES
+        src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES
         or _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True)
     )
     if ext and require_registered:
@@ -1102,7 +1102,7 @@ def _apply_external_scores(
             print("[weights] external_scores: registration snapshot unavailable "
                   "-> NOT blending external scores (fail-closed)")
             ext = {}
-            if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
+            if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
                 blend_meta["degraded"] = "confidential_registration_snapshot_unavailable"
         else:
             ext = {hk: v for hk, v in ext.items() if hk in registered}
@@ -1171,8 +1171,8 @@ def _apply_external_scores(
         return base, blend_meta
 
     # Confidential TDX uses a global union composition with auditable row parts.
-    if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
-        blended, base_comp, ext_comp, cap_meta = _apply_confidential_tdx_pointwise_cap(
+    if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
+        blended, base_comp, ext_comp, cap_meta = _apply_confidential_tdx_global_cap(
             base_norm, ext_norm, fraction)
         realized_base = cap_meta["actual_base_mass"]
         realized_ext = cap_meta["actual_external_mass"]
