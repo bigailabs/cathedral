@@ -488,7 +488,21 @@ def build_app(
 ) -> FastAPI:
     key_hex = signing_key_hex or keys.load_signing_key()
     pub_hex = rows.public_key_hex(key_hex)
-    jwks_doc = rows.jwks_from_key(key_hex)
+    weight_policy_key_hex = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip()
+    try:
+        jwks_doc = rows.jwks_from_key(
+            key_hex,
+            weight_policy_private_key_hex=weight_policy_key_hex or None,
+            weight_policy_kid=os.environ.get(
+                weights_mod.KEY_ID_ENV, "cathedral-weight-policy"),
+        )
+    except ValueError as exc:
+        if weight_policy_key_hex:
+            raise ValueError(
+                f"invalid {weights_mod.SIGNING_KEY_ENV}: expected a 32-byte "
+                "Ed25519 private key encoded as hex"
+            ) from exc
+        raise
     store = Store(database_path)
     v2_database_path = (
         os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()

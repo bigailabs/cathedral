@@ -27,10 +27,7 @@ def _hash16(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
-def jwks_from_key(private_key_hex: str, kid: str = "cathedral-eval-signing") -> dict[str, Any]:
-    """Derive the JWKS document from the loaded signing key — same shape as
-    fixtures/live-20260609/jwks.json (kty OKP, crv Ed25519, x base64url, plus the
-    convenience public_key_hex validators pin)."""
+def _jwk_from_key(private_key_hex: str, *, kid: str, purpose: str) -> dict[str, Any]:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     raw = bytes.fromhex(private_key_hex.strip())
@@ -42,14 +39,43 @@ def jwks_from_key(private_key_hex: str, kid: str = "cathedral-eval-signing") -> 
     )
     x_b64url = base64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode("ascii")
     return {
-        "issuer": "cathedral.computer",
-        "keys": [{
-            "kid": kid, "use": "sig", "alg": "EdDSA", "kty": "OKP", "crv": "Ed25519",
-            "x": x_b64url, "public_key_hex": pub_raw.hex(),
-            "purpose": "Cathedral signs every EvalRun projection served from "
-                       "/v1/leaderboard/recent. Pin this key in your validator config.",
-        }],
+        "kid": kid, "use": "sig", "alg": "EdDSA", "kty": "OKP", "crv": "Ed25519",
+        "x": x_b64url, "public_key_hex": pub_raw.hex(), "purpose": purpose,
     }
+
+
+def jwks_from_key(
+    private_key_hex: str,
+    kid: str = "cathedral-eval-signing",
+    *,
+    weight_policy_private_key_hex: str | None = None,
+    weight_policy_kid: str = "cathedral-weight-policy",
+) -> dict[str, Any]:
+    """Derive the publisher JWKS from its configured private signing keys.
+
+    The eval key retains the exact shape published in
+    fixtures/live-20260609/jwks.json. The weight-policy key defaults to the eval
+    key, matching the vector signer's fallback behavior. Exact duplicate key
+    entries are omitted, while the same public key under distinct key IDs
+    remains discoverable by either ID.
+    """
+    eval_key = _jwk_from_key(
+        private_key_hex,
+        kid=kid,
+        purpose="Cathedral signs every EvalRun projection served from "
+                "/v1/leaderboard/recent. Pin this key in your validator config.",
+    )
+    keys = [eval_key]
+    weight_policy_key = _jwk_from_key(
+        weight_policy_private_key_hex or private_key_hex,
+        kid=weight_policy_kid,
+        purpose="Cathedral signs weight-policy vectors served from "
+                "/v1/validator/weights/next. Pin this key in your validator config.",
+    )
+    identity = (weight_policy_key["kid"], weight_policy_key["public_key_hex"])
+    if identity != (eval_key["kid"], eval_key["public_key_hex"]):
+        keys.append(weight_policy_key)
+    return {"issuer": "cathedral.computer", "keys": keys}
 
 
 def public_key_hex(private_key_hex: str) -> str:
