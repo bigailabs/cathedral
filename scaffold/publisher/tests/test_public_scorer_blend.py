@@ -735,3 +735,86 @@ def test_status_ignores_stale_snapshot(store):
     assert status["latest_fresh"] is False, "Snapshot older than cutoff is stale"
     assert status["active_score_count"] == 0, \
         "Stale snapshot should not contribute to active count"
+
+
+# ===========================================================================
+# Blocker 2: confidential_primary intent fails closed (never base, never blend)
+# ===========================================================================
+
+def test_confidential_primary_intent_preserved_wrong_source(monkeypatch):
+    """mode=confidential_primary must NOT resolve to blend when the source is
+    wrong/absent. The intent is preserved so composition degrades to a signed
+    burn vector rather than re-admitting base scores."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "confidential_primary")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_SOURCE", "violet_audio")
+    assert weights.external_scores_mode() == "confidential_primary"
+
+
+def test_confidential_primary_intent_preserved_absent_source(monkeypatch):
+    """Default source (violet_audio, i.e. no explicit confidential source) still
+    keeps the confidential_primary intent rather than silently blending."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "confidential_primary")
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_SOURCE", raising=False)
+    assert weights.external_scores_mode() == "confidential_primary"
+
+
+def test_unknown_mode_fails_closed(monkeypatch):
+    """An unknown nonempty mode string must raise, not silently become blend."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "totally_bogus")
+    with pytest.raises(weights.VectorError, match="unknown CATHEDRAL_EXTERNAL_SCORES_MODE"):
+        weights.external_scores_mode()
+
+
+def test_empty_and_unset_mode_default_blend(monkeypatch):
+    """Unset or empty mode preserves the default 'blend' so unrelated
+    deployments do not break."""
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_MODE", raising=False)
+    assert weights.external_scores_mode() == "blend"
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "   ")
+    assert weights.external_scores_mode() == "blend"
+
+
+def test_confidential_primary_wrong_source_degrades_to_burn(store, monkeypatch):
+    """Wrong source under confidential_primary intent -> signed degraded empty
+    vector (confidential_mass=0, reason=invalid_source), never base."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "confidential_primary")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_SOURCE", "violet_audio")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM", "true")
+    base = {"5BASE_MINER": 1.0}
+    result, meta = weights._apply_external_scores(store, base, now=_now())
+    assert result == {}, "must not re-admit base scores"
+    cp = meta["confidential_primary"]
+    assert cp["degradation_reason"] == "invalid_source"
+    assert cp["confidential_mass"] == 0.0
+    assert cp["base_mass"] == 0.0
+    assert meta["blended"] is False
+
+
+def test_confidential_primary_missing_confirm_degrades_to_burn(store, monkeypatch):
+    """Correct source but PRIMARY_CONFIRM absent -> signed degraded empty vector
+    (reason=primary_confirm_missing), never base."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "confidential_primary")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_SOURCE", "cathedral_confidential_tdx")
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM", raising=False)
+    base = {"5BASE_MINER": 1.0}
+    result, meta = weights._apply_external_scores(store, base, now=_now())
+    assert result == {}, "must not re-admit base scores"
+    cp = meta["confidential_primary"]
+    assert cp["degradation_reason"] == "primary_confirm_missing"
+    assert cp["confidential_mass"] == 0.0
+    assert cp["source"] == "cathedral_confidential_tdx"
+
+
+def test_confidential_primary_disabled_ingestion_degrades_not_base(store, monkeypatch):
+    """Even with ingestion disabled, primary intent degrades to burn, never
+    falls through to a base-only blend."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "confidential_primary")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_SOURCE", "cathedral_confidential_tdx")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM", "true")
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", raising=False)
+    base = {"5BASE_MINER": 1.0}
+    result, meta = weights._apply_external_scores(store, base, now=_now())
+    assert result == {}, "disabled ingestion must not fall through to base"
+    cp = meta["confidential_primary"]
+    assert cp["confidential_mass"] == 0.0
+    assert cp["degradation_reason"] is not None
