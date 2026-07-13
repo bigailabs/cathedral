@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from base64 import b64decode
 from datetime import datetime, timezone
 from typing import Any
 
@@ -84,7 +85,7 @@ def _tdx_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", "1")
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_SOURCE", SOURCE)
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_FRACTION", str(FRACTION))
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED", "0")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED", "1")
     monkeypatch.setenv("CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS", "off")
 
 
@@ -127,6 +128,20 @@ def test_global_union_exact_10_percent_and_v3_metadata(
     assert cap["global_cap_assertion_ok"] is True
     assert "compute_only_zero_count" not in cap
     assert "pointwise_cap_assertion_ok" not in cap
+
+
+def test_ten_base_and_ten_compute_liveness_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = {f"base-{index}": 1.0 for index in range(10)}
+    ext = [(f"compute-{index}", 1.0) for index in range(10)]
+
+    out, meta = _blend(monkeypatch, base, ext)
+    base_comp, ext_comp = _components(meta)
+
+    assert len(out) == 20
+    assert abs(sum(base_comp.values()) - 0.90) <= TOL
+    assert abs(sum(ext_comp.values()) - 0.10) <= TOL
 
 
 def test_compute_only_payable_hotkey_gets_external_component_and_weight(
@@ -205,6 +220,21 @@ def test_payable_filter_keeps_compute_only_and_reallocates_globally(
     assert abs(sum(ext_comp.values()) / sum(out.values()) - FRACTION) <= TOL
 
 
+def test_confidential_tdx_missing_metagraph_snapshot_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED", "0")
+    base = {"base": 1.0}
+    ext = [("base", 1.0), ("compute-only", 1.0)]
+    store = FakeStoreTDX(ext, ["base", "compute-only"], payable=[])
+
+    out, meta = weights._apply_external_scores(store, base, now=_now())
+
+    assert out == base
+    assert meta["blended"] is False
+    assert meta["degraded"] == "confidential_registration_snapshot_unavailable"
+
+
 @pytest.mark.parametrize("configured", ["0", "-0.01", "0.1000001", "nan", "inf"])
 def test_fraction_must_be_explicit_finite_and_at_most_10pct(
     monkeypatch: pytest.MonkeyPatch,
@@ -251,3 +281,59 @@ def test_global_components_validate_after_json_round_trip(
         scores, decoded_base, decoded_ext, FRACTION, context="json"
     )
     assert abs(totals["external_fraction"] - FRACTION) <= TOL
+
+
+def test_build_signed_vector_emits_valid_v3_components_and_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = {"base-a": 0.7, "base-b": 0.3}
+    ext = [("base-a", 0.8), ("compute-only", 0.2)]
+    expected_scores, expected_meta = _blend(monkeypatch, base, ext)
+
+    def mock_compose(
+        _store: Any,
+        *,
+        now: datetime | None = None,
+        coldkey_of: dict[str, str] | None = None,
+        blend_meta_out: dict[str, Any] | None = None,
+    ) -> dict[str, float]:
+        if blend_meta_out is not None:
+            blend_meta_out.update(expected_meta)
+        return expected_scores
+
+    monkeypatch.setattr(weights, "compose_scores", mock_compose)
+    monkeypatch.setattr(weights, "next_policy_version", lambda _store: 12345)
+
+    vector = weights.build_signed_vector(
+        FakeStoreTDX(ext, list(expected_scores)),
+        signing_key_hex=(
+            "7a08bfba91c24d4b23a6dea9bd81c3e65dda7ad86b05d79a7e12e4c12f9a6f5c"
+        ),
+        now=_now(),
+    )
+    rows = vector["weights"]
+    cap = vector["policy_metadata"]["confidential_tdx_cap"]
+    base_mass = sum(float(row["base_component"]) for row in rows)
+    external_mass = sum(float(row["external_component"]) for row in rows)
+    weight_mass = sum(float(row["weight"]) for row in rows)
+
+    assert len(rows) == len({row["miner_hotkey"] for row in rows})
+    assert abs(base_mass - 0.90) <= TOL
+    assert abs(external_mass - 0.10) <= TOL
+    assert abs(weight_mass - (base_mass + external_mass)) <= TOL
+    assert abs(external_mass / weight_mass - FRACTION) <= TOL
+    assert abs(cap["actual_base_mass"] - base_mass) <= TOL
+    assert abs(cap["actual_external_mass"] - external_mass) <= TOL
+    assert abs(cap["realized_external_fraction"] - FRACTION) <= TOL
+    assert b64decode(vector["signature"], validate=True)
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), -0.01, 1.01])
+def test_invalid_stored_confidential_score_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    score: float,
+) -> None:
+    out, meta = _blend(monkeypatch, {"base": 1.0}, [("base", score)])
+
+    assert out == {"base": 1.0}
+    assert meta["blended"] is False

@@ -1012,7 +1012,7 @@ def _validate_confidential_tdx_components(
     if total_mass == 0.0 and ext_mass != 0.0:
         raise VectorError(f"{context}: zero total mass has nonzero confidential mass")
     score_mass = math.fsum(float(value) for value in scores.values())
-    if not _machine_precision_equal(score_mass, total_mass):
+    if not math.isclose(score_mass, total_mass, rel_tol=0.0, abs_tol=1e-12):
         raise VectorError(
             f"{context}: score mass {score_mass!r} != component mass {total_mass!r}")
     if total_mass > 0.0 and abs(external_fraction - fraction) > 1e-12:
@@ -1090,13 +1090,20 @@ def _apply_external_scores(
 
     ext = _compose_external_scores(store, now=now, ident=ident)
 
-    # Registration gate: external scores may pay only REGISTERED miners.
-    if ext and _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True):
+    # Confidential TDX must always have a fresh metagraph snapshot before any
+    # external mass is admitted, regardless of the legacy registration flag.
+    require_registered = (
+        src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES
+        or _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True)
+    )
+    if ext and require_registered:
         registered, _meta = _load_fresh_metagraph_hotkeys(store, now=now)
         if registered is None:
             print("[weights] external_scores: registration snapshot unavailable "
                   "-> NOT blending external scores (fail-closed)")
             ext = {}
+            if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
+                blend_meta["degraded"] = "confidential_registration_snapshot_unavailable"
         else:
             ext = {hk: v for hk, v in ext.items() if hk in registered}
 
