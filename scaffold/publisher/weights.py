@@ -1187,10 +1187,7 @@ def _apply_external_scores(
         # not in policy_metadata. Keep as internal state for _build_weights_list to use.
         blend_meta["_internal_base_components"] = base_comp
         blend_meta["_internal_ext_components"] = ext_comp
-        print(
-            f"[weights] confidential_tdx blend: fraction={fraction:.4f} "
-            f"realized_ext={cap_meta['realized_external_fraction']:.4f} "
-            f"withheld={cap_meta['withheld_external_mass']:.4f}")
+        print("[weights] confidential_tdx blend applied")
         return blended, blend_meta
 
     base_coeff = 1.0 - fraction
@@ -1208,9 +1205,7 @@ def _apply_external_scores(
     blend_meta["external_miner_count"] = len(ext_norm)
     blend_meta["fraction"] = fraction
 
-    print(f"[weights] external_scores blend: fraction={fraction:.4f} "
-          f"base_mass={base_coeff:.4f} ext_mass={ext_coeff:.4f} "
-          f"(source={external_scores_source()}, ext_miners={len(ext_norm)})")
+    print("[weights] external_scores blend applied")
 
     return blended, blend_meta
 

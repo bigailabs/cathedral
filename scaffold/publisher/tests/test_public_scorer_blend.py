@@ -16,8 +16,6 @@ Required tests:
 from __future__ import annotations
 
 import json
-import math
-import os
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -174,7 +172,7 @@ def _make_report(
 # Test 1: fraction=.10, one base miner and 100 equal external miners
 # ===========================================================================
 
-def test_fraction_10pct_base_and_100_external(monkeypatch):
+def test_fraction_10pct_base_and_100_external(monkeypatch, capsys):
     """base contribution .9, each external .001, tolerance 1e-9."""
     _enable_blend(monkeypatch, 0.10)
     base_hk = "5BASE_MINER_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -185,6 +183,7 @@ def test_fraction_10pct_base_and_100_external(monkeypatch):
     base = {base_hk: 1.0}
     now = _now()
     result, meta = weights._apply_external_scores(fake, base, now=now)
+    assert capsys.readouterr().out == "[weights] external_scores blend applied\n"
     assert meta["blended"] is True
 
     # L1-normalize: base has 1 miner with score 1.0 -> base_norm = {base: 1.0}
@@ -607,8 +606,6 @@ def test_source_token_authorizes_only_that_source(monkeypatch):
     """A per-source dedicated token must authorize ONLY reports claiming
     that source label. The shared token cannot authorize a confidential
     report; the dedicated token cannot authorize another source."""
-    now = _now()
-
     # Configure a dedicated token for cathedral_confidential_tdx
     monkeypatch.setenv(
         "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX",
