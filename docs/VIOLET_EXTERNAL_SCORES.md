@@ -136,29 +136,41 @@ Confidential/attested sources have stricter requirements:
 | Per-source dedicated token | Isolates credentials; shared token cannot authorize confidential reports |
 | Empty scores list allowed (with complete=true) | Allows source to revoke all miners explicitly |
 
-#### Confidential final-attribution cap
+#### Confidential global v3 blend
 
 For `cathedral_confidential_tdx`, `FRACTION` must be finite and in `(0, 0.10]`;
-invalid explicit values stop vector construction. The existing Cathedral score
-remains the base. For each signed row the publisher stores base attribution
-`a_i`, confidential attribution `c_i`, and weight `w_i = a_i + c_i`, and enforces
+invalid explicit values stop vector construction. With the release value
+`FRACTION=0.10`, the publisher independently L1-normalizes the payable base and
+confidential vectors, then builds the final vector over the union of their
+hotkeys:
 
 ```text
-c_i <= (f / (1 - f)) * a_i * (1 - 1e-6)
+base_component[hotkey]         = 0.90 * base_norm[hotkey]
+confidential_component[hotkey] = 0.10 * confidential_norm[hotkey]
+weight[hotkey]                 = base_component[hotkey]
+                               + confidential_component[hotkey]
 ```
 
-If `a_i < 1e-15`, `c_i` is exactly zero. This pointwise rule survives payable
-hotkey drops, duplicate-UID summation, positive renormalization, and u16
-quantization: each resulting row's attributed confidential ratio is
-`c_i / (a_i + c_i)`, and the final audit is
+Compute-only hotkeys may therefore earn confidential mass, and hotkeys present
+in both vectors receive the sum of their base and confidential components. Each
+signed row carries `base_component`, `external_component`, and their sum as
+`weight`; the v3 validator verifies that the signed rows contain exactly 90%
+base mass and 10% confidential mass before mapping hotkeys to UIDs.
 
-```text
-confidential_share = sum(q_i * c_i / (a_i + c_i)) / sum(q_i) <= f
-```
+The boundary behavior is fail-closed:
 
-where `q_i` is the final u16 weight. A zero-mass vector has zero confidential
-share. Operators should audit the signed per-row component fields, not rounded
-aggregate metadata.
+| Scenario | Result |
+|----------|--------|
+| **Base only** | Return the L1-normalized base vector (100% base) |
+| **Confidential only** (no base) | Return an **empty vector** |
+| **Neither** | Return an **empty vector** |
+| **Both** | Return the 90% base + 10% confidential union vector |
+| **Thin validator lacks any signed hotkey** | Drop all confidential mass and reconstruct a base-only vector from mapped signed base components |
+| **Two signed hotkeys map to one UID** | Reject the vector as a duplicate UID |
+
+The fallback reconstruction is all-or-nothing for confidential mass: it does
+not retain a partial confidential vector when the thin validator's current
+hotkey map is incomplete.
 
 ---
 
