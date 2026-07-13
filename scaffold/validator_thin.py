@@ -120,13 +120,30 @@ def accept_vector(payload: dict[str, Any], *, public_key_hex: str, key_id: str,
 
 def _confidential_tdx_v3_rows(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
     metadata = payload.get("policy_metadata") or {}
-    cap = metadata.get("confidential_tdx_cap") or {}
-    if cap.get("cap_version") != "v3":
+    if not isinstance(metadata, dict):
         return None
+    cap = metadata.get("confidential_tdx_cap") or {}
+    if not isinstance(cap, dict) or cap.get("cap_version") != "v3":
+        return None
+
+    try:
+        configured_fraction = float(cap["configured_fraction"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "confidential_tdx v3 missing configured_fraction"
+        ) from exc
+    if not math.isfinite(configured_fraction) or not 0.0 < configured_fraction <= 0.10:
+        raise wire.VectorError(
+            f"confidential_tdx v3 invalid configured_fraction {configured_fraction!r}"
+        )
 
     rows = payload.get("weights")
     if not isinstance(rows, list):
         raise wire.VectorError("confidential_tdx v3 weights must be a list")
+    hotkeys: set[str] = set()
+    weight_mass = 0.0
+    base_mass = 0.0
+    external_mass = 0.0
     for row in rows:
         if not isinstance(row, dict):
             raise wire.VectorError("confidential_tdx v3 weight row must be an object")
@@ -149,8 +166,32 @@ def _confidential_tdx_v3_rows(payload: dict[str, Any]) -> list[dict[str, Any]] |
                 f"confidential_tdx v3 row {row.get('miner_hotkey')!r} "
                 f"weight {weight!r} != base+external {base + external!r}"
             )
-        if not row.get("miner_hotkey"):
+        hotkey = row.get("miner_hotkey")
+        if not isinstance(hotkey, str) or not hotkey:
             raise wire.VectorError("confidential_tdx v3 row missing miner_hotkey")
+        if hotkey in hotkeys:
+            raise wire.VectorError(f"confidential_tdx v3 duplicate hotkey {hotkey!r}")
+        hotkeys.add(hotkey)
+        weight_mass = math.fsum((weight_mass, weight))
+        base_mass = math.fsum((base_mass, base))
+        external_mass = math.fsum((external_mass, external))
+
+    component_mass = base_mass + external_mass
+    if not math.isclose(weight_mass, component_mass, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError(
+            f"confidential_tdx v3 weight mass {weight_mass!r} != "
+            f"component mass {component_mass!r}"
+        )
+    if base_mass <= 0.0 or external_mass <= 0.0:
+        raise wire.VectorError(
+            "confidential_tdx v3 requires positive base and external mass"
+        )
+    realized_fraction = external_mass / component_mass
+    if abs(realized_fraction - configured_fraction) > 1e-12:
+        raise wire.VectorError(
+            f"confidential_tdx v3 external fraction {realized_fraction!r} != "
+            f"configured_fraction {configured_fraction!r}"
+        )
     return rows
 
 
