@@ -118,8 +118,6 @@ EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
 # Sources subject to the final-attribution accounting control.
 EXTERNAL_SCORES_POINTWISE_CAP_SOURCES = {"cathedral_confidential_tdx"}
 CONFIDENTIAL_TDX_HARD_CAP: float = 0.10
-CONFIDENTIAL_TDX_BASE_FLOOR: float = 1e-15
-CONFIDENTIAL_TDX_POINTWISE_MARGIN: float = 1e-6
 
 _CACHE_TTL_SECS = 60.0
 _PERSISTED_VECTOR_ID = "latest"
@@ -917,50 +915,27 @@ def _apply_confidential_tdx_pointwise_cap(
     ext_norm: dict[str, float],
     fraction: float,
 ) -> "tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, Any]]":
-    """Build capped components whose ratio survives drops, merges and rescaling."""
+    """Build global-cap components over the union of both normalized vectors."""
     if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
         raise VectorError(f"confidential_tdx fraction invalid: {fraction!r}")
-    margin = CONFIDENTIAL_TDX_POINTWISE_MARGIN
-    base_floor = CONFIDENTIAL_TDX_BASE_FLOOR
-    cap_coeff = (fraction / (1.0 - fraction)) * (1.0 - margin)
 
     base_comp: dict[str, float] = {}
     ext_comp: dict[str, float] = {}
     blended: dict[str, float] = {}
-    withheld_mass = 0.0
-    capped_count = 0
-    compute_only_count = 0
-    floor_floored_count = 0
 
     for hk in sorted(set(base_norm) | set(ext_norm)):
         a_i = (1.0 - fraction) * base_norm.get(hk, 0.0)
-        desired_c_i = fraction * ext_norm.get(hk, 0.0)
+        c_i = fraction * ext_norm.get(hk, 0.0)
         if (not math.isfinite(a_i) or a_i < 0.0 or
-                not math.isfinite(desired_c_i) or desired_c_i < 0.0):
+                not math.isfinite(c_i) or c_i < 0.0):
             raise VectorError(
-                f"{hk}: invalid component a_i={a_i!r}, desired_c_i={desired_c_i!r}")
+                f"{hk}: invalid component a_i={a_i!r}, c_i={c_i!r}")
 
-        if a_i < base_floor:
-            if a_i == 0.0:
-                compute_only_count += 1
-            else:
-                floor_floored_count += 1
-            withheld_mass += desired_c_i
-            actual_c_i = 0.0
-        else:
-            cap_i = cap_coeff * a_i
-            if desired_c_i > cap_i:
-                capped_count += 1
-                withheld_mass += desired_c_i - cap_i
-                actual_c_i = cap_i
-            else:
-                actual_c_i = desired_c_i
-
-        w_i = a_i + actual_c_i
+        w_i = a_i + c_i
         if w_i > 0.0:
             blended[hk] = w_i
         base_comp[hk] = a_i
-        ext_comp[hk] = actual_c_i
+        ext_comp[hk] = c_i
 
     totals = _validate_confidential_tdx_components(
         blended, base_comp, ext_comp, fraction, context="blend")
@@ -971,14 +946,9 @@ def _apply_confidential_tdx_pointwise_cap(
         "actual_base_mass": totals["base_mass"],
         "actual_external_mass": totals["external_mass"],
         "realized_external_fraction": totals["external_fraction"],
-        "withheld_external_mass": withheld_mass,
-        "cap_version": "v2",
-        "pointwise_margin": margin,
-        "base_floor": base_floor,
-        "capped_hotkey_count": capped_count,
-        "compute_only_zero_count": compute_only_count,
-        "floor_floored_count": floor_floored_count,
-        "pointwise_cap_assertion_ok": True,
+        "withheld_external_mass": 0.0,
+        "cap_version": "v3",
+        "global_cap_assertion_ok": True,
     }
     return blended, base_comp, ext_comp, cap_meta
 
@@ -997,16 +967,32 @@ def _validate_confidential_tdx_components(
     *,
     context: str,
 ) -> dict[str, float]:
-    """Validate the exact components represented by a rebuilt/signed vector."""
+    """Validate signed attribution rows and the global confidential fraction."""
     if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
         raise VectorError(f"{context}: invalid confidential fraction {fraction!r}")
-    cap_coeff = ((fraction / (1.0 - fraction)) *
-                 (1.0 - CONFIDENTIAL_TDX_POINTWISE_MARGIN))
     base_mass = 0.0
     ext_mass = 0.0
-    for hk, raw_weight in scores.items():
+    component_keys = set(base_comp) | set(ext_comp)
+    for hk in component_keys | set(scores):
+        if hk not in scores:
+            for label, raw_value in (
+                ("base", base_comp.get(hk, 0.0)),
+                ("external", ext_comp.get(hk, 0.0)),
+            ):
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError) as exc:
+                    raise VectorError(
+                        f"{context}: {hk} has non-numeric {label} component"
+                    ) from exc
+                if not math.isfinite(value) or value < 0.0:
+                    raise VectorError(f"{context}: {hk} has invalid {label} component")
+                if value != 0.0:
+                    raise VectorError(f"{context}: {hk} attribution has no signed weight")
+            continue
         if hk not in base_comp or hk not in ext_comp:
             raise VectorError(f"{context}: {hk} missing signed attribution component")
+        raw_weight = scores[hk]
         weight = float(raw_weight)
         a_i = float(base_comp[hk])
         c_i = float(ext_comp[hk])
@@ -1014,26 +1000,24 @@ def _validate_confidential_tdx_components(
             raise VectorError(f"{context}: {hk} has non-finite weight/component")
         if weight < 0.0 or a_i < 0.0 or c_i < 0.0:
             raise VectorError(f"{context}: {hk} has negative weight/component")
-        if a_i < CONFIDENTIAL_TDX_BASE_FLOOR:
-            if c_i != 0.0:
-                raise VectorError(f"{context}: {hk} below base floor with c_i={c_i!r}")
-        elif c_i > cap_coeff * a_i:
-            raise VectorError(f"{context}: {hk} exceeds confidential pointwise cap")
         component_sum = a_i + c_i
         if not _machine_precision_equal(weight, component_sum):
             raise VectorError(
                 f"{context}: {hk} weight {weight!r} != components {component_sum!r}")
-        base_mass += a_i
-        ext_mass += c_i
+        base_mass = math.fsum((base_mass, a_i))
+        ext_mass = math.fsum((ext_mass, c_i))
 
     total_mass = base_mass + ext_mass
     external_fraction = ext_mass / total_mass if total_mass > 0.0 else 0.0
     if total_mass == 0.0 and ext_mass != 0.0:
         raise VectorError(f"{context}: zero total mass has nonzero confidential mass")
-    if total_mass > 0.0 and ext_mass > fraction * total_mass:
+    score_mass = math.fsum(float(value) for value in scores.values())
+    if not _machine_precision_equal(score_mass, total_mass):
         raise VectorError(
-            f"{context}: confidential attribution {ext_mass!r}/{total_mass!r} "
-            f"exceeds {fraction!r}")
+            f"{context}: score mass {score_mass!r} != component mass {total_mass!r}")
+    if total_mass > 0.0 and abs(external_fraction - fraction) > 1e-12:
+        raise VectorError(
+            f"{context}: confidential aggregate {external_fraction!r} != {fraction!r}")
     return {
         "base_mass": base_mass,
         "external_mass": ext_mass,
@@ -1179,8 +1163,7 @@ def _apply_external_scores(
         blend_meta["base_miner_count"] = len(base)
         return base, blend_meta
 
-    # Contract §2-§6: for pointwise-cap sources, enforce per-hotkey constraint
-    # c_i <= (f/(1-f))*a_i*(1-margin) before combining.  Hard-asserts before sign.
+    # Confidential TDX uses a global union composition with auditable row parts.
     if src in EXTERNAL_SCORES_POINTWISE_CAP_SOURCES:
         blended, base_comp, ext_comp, cap_meta = _apply_confidential_tdx_pointwise_cap(
             base_norm, ext_norm, fraction)
@@ -1200,9 +1183,7 @@ def _apply_external_scores(
         print(
             f"[weights] confidential_tdx blend: fraction={fraction:.4f} "
             f"realized_ext={cap_meta['realized_external_fraction']:.4f} "
-            f"withheld={cap_meta['withheld_external_mass']:.4f} "
-            f"capped={cap_meta['capped_hotkey_count']} "
-            f"compute_only_zero={cap_meta['compute_only_zero_count']}")
+            f"withheld={cap_meta['withheld_external_mass']:.4f}")
         return blended, blend_meta
 
     base_coeff = 1.0 - fraction
@@ -1699,7 +1680,8 @@ def compose_scores(
         hks: dict[str, set] = {}     # identity -> set of its solving hotkeys
         weights_by_tier = tier_weights()
         for r in rows:
-            hk = str(r["miner_hotkey"]); idk = ident(hk)
+            hk = str(r["miner_hotkey"])
+            idk = ident(hk)
             cid = str(r["challenge_id"])
             if cid not in seen.get(idk, set()):
                 seen.setdefault(idk, set()).add(cid)
@@ -1764,8 +1746,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     served verbatim by /v1/validator/weights/next.
 
     After the final payable filter, recomputes aggregate component masses and
-    fractions for pointwise-cap sources, and reasserts every pointwise cap
-    plus the configured fraction limit.
+    fractions for global-cap sources and reasserts the configured fraction.
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -1880,7 +1861,7 @@ def _build_weights_list(
     blend_meta: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Build the weights list, annotating each entry with per-hotkey components
-    when a confidential_tdx pointwise blend was performed (§5).
+    when a confidential_tdx global blend was performed.
     Components are emitted ONLY in each signed weight entry, not in policy_metadata.
     Existing thin validators ignore the extra fields.
 
