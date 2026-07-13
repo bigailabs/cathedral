@@ -58,9 +58,43 @@ CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_FUTURE_SECS=120   # Reject if generated_at 
 ```bash
 CATHEDRAL_EXTERNAL_SCORES_MODE=blend                   # Default: blend (capped)
                                                          # "external_primary" = 100% external (requires explicit confirm)
-CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM=true         # Required to use external_primary mode
-                                                         # Ignored for confidential sources (always blend)
+                                                         # "confidential_primary" = 100% confidential TDX (see below)
+CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM=true         # Required for both external_primary and confidential_primary
+                                                         # Vectors degrade to signed burn when this is absent
 ```
+
+### `confidential_primary` Mode (100% Confidential TDX)
+
+Sets `CATHEDRAL_EXTERNAL_SCORES_MODE=confidential_primary` to route the **entire** signed weight vector through the confidential compute scorer. Base scores are never a positive source in this mode.
+
+```bash
+# Required env for confidential_primary
+CATHEDRAL_EXTERNAL_SCORES_MODE=confidential_primary
+CATHEDRAL_EXTERNAL_SCORES_SOURCE=cathedral_confidential_tdx  # ONLY valid source for this mode
+CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM=true               # Mandatory; absent = degraded burn vector
+CATHEDRAL_EXTERNAL_SCORES_ENABLED=1                          # Composition must be enabled
+CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX=<secret>  # Per-source token
+```
+
+**Degradation contract:** if any requirement is unmet (ingestion disabled, snapshot unavailable/incomplete/stale, `PRIMARY_CONFIRM` absent, wrong/absent source, no registered scores), the publisher signs a **zero-mass burn vector** (`confidential_mass=0`) carrying `confidential_primary` metadata plus a `degradation_reason` (e.g. `invalid_source`, `primary_confirm_missing`, `confidential_snapshot_unavailable`). The thin validator maps this to the signed burn UID only. Base scores are **never** substituted, even on degradation.
+
+**Policy status:** `effective_external_share` reports `1.0` in `confidential_primary` mode regardless of the legacy base/external weight config.
+
+**Fail-closed source guard:** `confidential_primary` intent is preserved even when `CATHEDRAL_EXTERNAL_SCORES_SOURCE` is not `cathedral_confidential_tdx`. It does **not** fall back to `blend` (which would re-admit base scores). Instead it degrades to a signed burn vector with `degradation_reason=invalid_source`. Only `cathedral_confidential_tdx` can receive 100% of the vector via this mode.
+
+**Unknown mode is rejected:** any nonempty `CATHEDRAL_EXTERNAL_SCORES_MODE` other than `blend`, `external_primary`, or `confidential_primary` raises `VectorError` and aborts the build. It is never silently treated as `blend`. An unset/empty value stays the default `blend`.
+
+**Thin-validator contract (mass=1):** The signed vector must carry `mode=confidential_primary`, `complete=true`, `fresh=true`, and `confirmed=true` in its policy metadata. Rows must explicitly include both `base_component` (always 0.0) and `external_component` (equals weight). Any deviation raises `VectorError` and aborts the tick.
+
+**Validator policy pin (`confidential_primary_v1`):** operators who run confidential-primary can pin the thin validator so it applies ONLY this contract:
+
+```bash
+# CLI flag or env; default is unpinned (accepts legacy, v3, and confidential_primary)
+cathedral-validator serve --require-policy confidential_primary_v1
+export CATHEDRAL_VALIDATOR_REQUIRE_POLICY=confidential_primary_v1
+```
+
+When pinned, every vector lacking a valid `confidential_primary` v1 policy block is rejected with `VectorError`, and the legacy and v3 fallback mapping paths are unreachable. Validators that do not set the pin keep the existing behavior (all signed shapes accepted).
 
 ### Per-Source Tokens (Optional)
 

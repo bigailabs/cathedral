@@ -118,10 +118,15 @@ EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
 # Sources subject to the final-attribution accounting control.
 EXTERNAL_SCORES_GLOBAL_CAP_SOURCES = {"cathedral_confidential_tdx"}
 CONFIDENTIAL_TDX_HARD_CAP: float = 0.10
+# Sources eligible for the explicit 100%-confidential-compute scoring mode
+# (CATHEDRAL_EXTERNAL_SCORES_MODE=confidential_primary). The mode is valid ONLY
+# for these sources; for any other source it resolves back to blend so this env
+# can never hand a public source the whole vector.
+CONFIDENTIAL_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
+CONFIDENTIAL_PRIMARY_CONTRACT_VERSION = "v1"
 
 _CACHE_TTL_SECS = 60.0
-_PERSISTED_VECTOR_ID = "latest"
-_REFRESH_LOCK_NAME = "cathedral:weights:refresh"
+_LEGACY_PERSISTED_VECTOR_ID = "latest"
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # Serializes the cache-miss build so concurrent misses can't each call
 # next_policy_version() and emit two different vectors with the same
@@ -168,15 +173,46 @@ def _cache_write(vec: dict[str, Any]) -> None:
         _vector_cache["v"] = (time.time(), vec)
 
 
+def _vector_scope() -> tuple[str, int]:
+    """Return the signed subnet identity used to isolate shared scorer state."""
+    network = os.environ.get(NETWORK_ENV, "finney").strip() or "finney"
+    try:
+        netuid = int(os.environ.get(NETUID_ENV, "39") or "39")
+    except ValueError as exc:
+        raise ValueError(f"invalid {NETUID_ENV}") from exc
+    return network, netuid
+
+
+def _persisted_vector_id() -> str:
+    network, netuid = _vector_scope()
+    return f"latest:{network}:{netuid}"
+
+
+def _refresh_lock_name() -> str:
+    network, netuid = _vector_scope()
+    return f"cathedral:weights:refresh:{network}:{netuid}"
+
+
 def _load_persisted_vector(store: Store) -> dict[str, Any] | None:
     rows = store.query(
         "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
-        (_PERSISTED_VECTOR_ID,),
+        (_persisted_vector_id(),),
     )
     if not rows:
-        return None
-    raw = rows[0]["vector_json"]
-    return json.loads(raw)
+        # One-time compatibility with the pre-scope singleton. Never adopt a
+        # legacy row for a different subnet; that was the cross-subnet race.
+        rows = store.query(
+            "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
+            (_LEGACY_PERSISTED_VECTOR_ID,),
+        )
+        if not rows:
+            return None
+        legacy = json.loads(rows[0]["vector_json"])
+        network, netuid = _vector_scope()
+        if legacy.get("network") != network or legacy.get("netuid") != netuid:
+            return None
+        return legacy
+    return json.loads(rows[0]["vector_json"])
 
 
 def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
@@ -192,7 +228,7 @@ def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
             "INSERT OR REPLACE INTO signed_weight_vectors"
             "(id, generated_at_iso, policy_version, vector_json, updated_at_iso) "
             "VALUES (?, ?, ?, ?, ?)",
-            (_PERSISTED_VECTOR_ID, generated_at, policy_version, payload, updated_at),
+            (_persisted_vector_id(), generated_at, policy_version, payload, updated_at),
         )
 
     store.write(_write)
@@ -755,7 +791,7 @@ def external_scores_source() -> str:
 
 
 def external_scores_mode() -> str:
-    """blend (default) or external_primary.
+    """blend (default), external_primary, or confidential_primary.
 
     (#6) Confirmed/preserved behavior: external_primary has always been a
     request-for-100%-external signal gated by
@@ -768,11 +804,23 @@ def external_scores_mode() -> str:
     reports as "blend" so every downstream external_primary branch (the ack
     warning, the score_source label) treats it as a capped blend.
     """
-    raw = os.environ.get(EXTERNAL_SCORES_MODE_ENV, "blend").strip().lower()
-    resolved = raw if raw in {"blend", "external_primary"} else "blend"
-    if resolved == "external_primary" and external_scores_source() in EXTERNAL_SCORES_NO_PRIMARY_SOURCES:
+    raw = os.environ.get(EXTERNAL_SCORES_MODE_ENV, "").strip().lower()
+    if raw in ("", "blend"):
         return "blend"
-    return resolved
+    if raw == "confidential_primary":
+        # Explicit 100% confidential-compute intent. Preserved regardless of
+        # source; source validity is enforced fail-closed (degrade to burn,
+        # never base) in _apply_confidential_primary. NEVER silently blend.
+        return "confidential_primary"
+    if raw == "external_primary":
+        if external_scores_source() in EXTERNAL_SCORES_NO_PRIMARY_SOURCES:
+            return "blend"
+        return "external_primary"
+    # Unknown nonempty mode: fail closed with a clear error instead of
+    # silently resolving to blend.
+    raise VectorError(
+        f"unknown {EXTERNAL_SCORES_MODE_ENV}={raw!r}; expected one of "
+        "blend, external_primary, confidential_primary")
 
 
 def external_scores_window_secs() -> float:
@@ -1044,6 +1092,111 @@ def _l1_normalize(scores: dict[str, float]) -> dict[str, float]:
     return {hk: v / total for hk, v in clean.items()}
 
 
+def _apply_confidential_primary(
+    store: Store,
+    base: dict[str, float],
+    *,
+    now: datetime,
+    ident=lambda hk: hk,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Explicit 100% confidential-compute composition (confidential_primary).
+
+    The latest fresh COMPLETE confidential snapshot is the ONLY positive score
+    source. Base scores are ignored entirely (base_mass == 0). Positive
+    confidential scores are L1-normalized to exactly all miner mass (sum == 1.0
+    before the signed burn). Explicit zero / omission in the complete snapshot
+    stays a revocation. If the report, confirmation, freshness, or eligibility
+    is absent/invalid, return an empty vector so the signed burn fallback
+    applies downstream. Never blends, never falls back to base scores.
+    """
+    src = external_scores_source()
+    cp_meta: dict[str, Any] = {
+        "contract_version": CONFIDENTIAL_PRIMARY_CONTRACT_VERSION,
+        "mode": "confidential_primary",
+        "source": src,
+        "base_mass": 0.0,
+        "confidential_mass": 0.0,
+        "complete": False,
+        "fresh": False,
+        "confirmed": _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False),
+        "require_registered": _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True),
+        "external_miner_count": 0,
+        "degradation_reason": None,
+    }
+    blend_meta: dict[str, Any] = {
+        "base_mass": 0.0,
+        "external_mass": 0.0,
+        "base_miner_count": 0,
+        "external_miner_count": 0,
+        "blended": False,
+        "confidential_primary": cp_meta,
+    }
+
+    def _degrade(reason: str) -> tuple[dict[str, float], dict[str, Any]]:
+        cp_meta["degradation_reason"] = reason
+        print(f"[weights] confidential_primary degraded: {reason} "
+              "-> empty vector (signed burn fallback)")
+        return {}, blend_meta
+
+    # Source validity is fail-closed here, NOT in external_scores_mode(): an
+    # absent/wrong source under confidential_primary intent must degrade to a
+    # signed burn vector, never resolve to blend/base. Only the confidential
+    # source can receive 100% of the vector via this mode.
+    if src not in CONFIDENTIAL_PRIMARY_SOURCES:
+        return _degrade("invalid_source")
+
+    # Snapshot status for the signed metadata (complete/fresh). Best-effort.
+    try:
+        since = _ms_iso(now - timedelta(seconds=external_scores_window_secs()))
+        st = external_scores.status(store, source=src, since_iso=since)
+        cp_meta["complete"] = bool(st.get("latest_complete"))
+        cp_meta["fresh"] = bool(st.get("latest_fresh"))
+    except Exception as exc:
+        cp_meta["status_error"] = repr(exc)
+
+    # Explicit confirmation is mandatory for 100% confidential intent.
+    if not cp_meta["confirmed"]:
+        return _degrade("primary_confirm_missing")
+
+    # The only positive source: the latest fresh complete confidential snapshot.
+    ext = _compose_external_scores(store, now=now, ident=ident)
+    if not ext:
+        if cp_meta["complete"] and cp_meta["fresh"]:
+            return _degrade("confidential_snapshot_revoked_all")
+        return _degrade("confidential_snapshot_unavailable")
+
+    # Scorer-side metagraph filtering stays configurable. When disabled, the
+    # thin validator is the authoritative registration check.
+    if cp_meta["require_registered"]:
+        registered, _snap = _load_fresh_metagraph_hotkeys(store, now=now)
+        if registered is None:
+            return _degrade("registration_snapshot_unavailable")
+        ext = {hk: v for hk, v in ext.items() if hk in registered}
+        if not ext:
+            return _degrade("no_registered_confidential_scores")
+
+    # Payable-hotkey filter (configurable) applied pre-normalization so the
+    # normalized mass stays exactly 1.0 after any downstream no-op re-filter.
+    if payable_hotkeys_mode() == "filter":
+        ext, payable_meta = _apply_payable_hotkey_policy(store, ext, now=now)
+        blend_meta["external_payable_filter"] = payable_meta
+        if not ext:
+            return _degrade("no_payable_confidential_scores")
+
+    normalized = _l1_normalize(ext)
+    if not normalized:
+        return _degrade("confidential_norm_zero")
+
+    cp_meta["confidential_mass"] = 1.0
+    cp_meta["complete"] = True
+    cp_meta["fresh"] = True
+    cp_meta["external_miner_count"] = len(normalized)
+    blend_meta["external_mass"] = 1.0
+    blend_meta["external_miner_count"] = len(normalized)
+    print(f"[weights] confidential_primary vector composed: miners={len(normalized)}")
+    return normalized, blend_meta
+
+
 def _apply_external_scores(
     store: Store,
     base: dict[str, float],
@@ -1073,6 +1226,12 @@ def _apply_external_scores(
         "external_miner_count": 0,
         "blended": False,
     }
+    # Explicit 100% confidential-compute mode: base is never a positive source,
+    # even when ingestion is disabled. Disabled ingestion in primary mode must
+    # produce empty/burn, never fall through to base.
+    if external_scores_mode() == "confidential_primary":
+        return _apply_confidential_primary(store, base, now=now, ident=ident)
+
     if not external_scores_enabled():
         blend_meta["base_mass"] = 1.0 if base else 0.0
         blend_meta["base_miner_count"] = len(base)
@@ -1225,7 +1384,7 @@ def _external_scores_policy_status(
         "window_secs": window_secs,
         "base_weight": max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0)),
         "external_weight": max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0)),
-        "effective_external_share": round(_external_blend_weights()[2], 6),
+        "effective_external_share": 1.0 if external_scores_mode() == "confidential_primary" else round(_external_blend_weights()[2], 6),
         "require_registered": _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True),
         "primary_confirmed": _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False),
         "has_scores": False,
@@ -1787,7 +1946,9 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
     external_status = _external_scores_policy_status(store, now=now)
     score_source = pm_status["score_source"] or effective_mode
-    if external_status.get("enabled") and external_status.get("has_scores"):
+    if external_scores_mode() == "confidential_primary":
+        score_source = f"confidential_primary:{external_scores_source()}"
+    elif external_status.get("enabled") and external_status.get("has_scores"):
         ext_source = f"external:{external_status.get('source')}"
         score_source = ext_source if external_scores_mode() == "external_primary" else f"{score_source}+{ext_source}"
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
@@ -1853,6 +2014,11 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         },
         "weights": _build_weights_list(scores, blend_meta),
     }
+    # Signed confidential-primary contract metadata is added ONLY when the mode
+    # is selected, so default and 10% blend vectors stay byte-compatible.
+    cp_policy = blend_meta.get("confidential_primary")
+    if cp_policy is not None:
+        payload["policy_metadata"]["confidential_primary"] = cp_policy
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
     return payload
@@ -1872,6 +2038,9 @@ def _build_weights_list(
     base_comp: dict[str, float] = blend_meta.get("_internal_base_components") or {}
     ext_comp: dict[str, float] = blend_meta.get("_internal_ext_components") or {}
     capped = bool(blend_meta.get("confidential_tdx_cap"))
+    cp_meta = blend_meta.get("confidential_primary")
+    confidential_primary = bool(cp_meta) and float(
+        cp_meta.get("confidential_mass") or 0.0) > 0.0
     if capped:
         _validate_confidential_tdx_components(
             scores,
@@ -1886,6 +2055,10 @@ def _build_weights_list(
         if capped:
             entry["base_component"] = base_comp[hk]
             entry["external_component"] = ext_comp[hk]
+        elif confidential_primary:
+            # 100% confidential: base share is exactly 0, external == weight.
+            entry["base_component"] = 0.0
+            entry["external_component"] = scores[hk]
         entries.append(entry)
     return entries
 
@@ -2060,7 +2233,7 @@ def start_background_refresh(store: Store, *, signing_key_hex: str) -> None:
 
 def _refresh_once(store: Store, *, signing_key_hex: str) -> dict[str, Any] | None:
     """Refresh once without allowing every process to rebuild at once."""
-    with store.advisory_lock(_REFRESH_LOCK_NAME) as acquired:
+    with store.advisory_lock(_refresh_lock_name()) as acquired:
         if acquired:
             vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
             _persist_vector(store, vec)
