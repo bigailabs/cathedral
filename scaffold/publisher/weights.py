@@ -126,8 +126,7 @@ CONFIDENTIAL_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
 CONFIDENTIAL_PRIMARY_CONTRACT_VERSION = "v1"
 
 _CACHE_TTL_SECS = 60.0
-_PERSISTED_VECTOR_ID = "latest"
-_REFRESH_LOCK_NAME = "cathedral:weights:refresh"
+_LEGACY_PERSISTED_VECTOR_ID = "latest"
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # Serializes the cache-miss build so concurrent misses can't each call
 # next_policy_version() and emit two different vectors with the same
@@ -174,15 +173,46 @@ def _cache_write(vec: dict[str, Any]) -> None:
         _vector_cache["v"] = (time.time(), vec)
 
 
+def _vector_scope() -> tuple[str, int]:
+    """Return the signed subnet identity used to isolate shared scorer state."""
+    network = os.environ.get(NETWORK_ENV, "finney").strip() or "finney"
+    try:
+        netuid = int(os.environ.get(NETUID_ENV, "39") or "39")
+    except ValueError as exc:
+        raise ValueError(f"invalid {NETUID_ENV}") from exc
+    return network, netuid
+
+
+def _persisted_vector_id() -> str:
+    network, netuid = _vector_scope()
+    return f"latest:{network}:{netuid}"
+
+
+def _refresh_lock_name() -> str:
+    network, netuid = _vector_scope()
+    return f"cathedral:weights:refresh:{network}:{netuid}"
+
+
 def _load_persisted_vector(store: Store) -> dict[str, Any] | None:
     rows = store.query(
         "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
-        (_PERSISTED_VECTOR_ID,),
+        (_persisted_vector_id(),),
     )
     if not rows:
-        return None
-    raw = rows[0]["vector_json"]
-    return json.loads(raw)
+        # One-time compatibility with the pre-scope singleton. Never adopt a
+        # legacy row for a different subnet; that was the cross-subnet race.
+        rows = store.query(
+            "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
+            (_LEGACY_PERSISTED_VECTOR_ID,),
+        )
+        if not rows:
+            return None
+        legacy = json.loads(rows[0]["vector_json"])
+        network, netuid = _vector_scope()
+        if legacy.get("network") != network or legacy.get("netuid") != netuid:
+            return None
+        return legacy
+    return json.loads(rows[0]["vector_json"])
 
 
 def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
@@ -198,7 +228,7 @@ def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
             "INSERT OR REPLACE INTO signed_weight_vectors"
             "(id, generated_at_iso, policy_version, vector_json, updated_at_iso) "
             "VALUES (?, ?, ?, ?, ?)",
-            (_PERSISTED_VECTOR_ID, generated_at, policy_version, payload, updated_at),
+            (_persisted_vector_id(), generated_at, policy_version, payload, updated_at),
         )
 
     store.write(_write)
@@ -2203,7 +2233,7 @@ def start_background_refresh(store: Store, *, signing_key_hex: str) -> None:
 
 def _refresh_once(store: Store, *, signing_key_hex: str) -> dict[str, Any] | None:
     """Refresh once without allowing every process to rebuild at once."""
-    with store.advisory_lock(_REFRESH_LOCK_NAME) as acquired:
+    with store.advisory_lock(_refresh_lock_name()) as acquired:
         if acquired:
             vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
             _persist_vector(store, vec)
