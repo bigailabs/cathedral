@@ -135,6 +135,90 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bytes(name: str, default: int) -> int:
+    """Parse environment variable as byte count with sane positive default.
+
+    Accepts:
+    - Plain integer (bytes): "1048576"
+    - With suffix: "1M", "1Mi", "1MiB" (1 MiB = 1024^2 bytes)
+
+    Returns:
+    - Parsed byte count (strictly positive integer)
+    - default (sane positive integer) if env var is missing, empty, or unparseable
+    """
+    positive_default = (
+        default
+        if isinstance(default, int) and not isinstance(default, bool) and default > 0
+        else 1
+    )
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return positive_default
+    try:
+        raw_upper = raw.upper()
+        if raw_upper.endswith(("MIB", "MI", "M")):
+            if raw_upper.endswith("MIB"):
+                val_str = raw[:-3]
+            elif raw_upper.endswith("MI"):
+                val_str = raw[:-2]
+            else:
+                val_str = raw[:-1]
+            val = int(val_str.strip())
+            if val <= 0:
+                return positive_default
+            return val * 1024 * 1024
+        else:
+            val = int(raw)
+            if val <= 0:
+                return positive_default
+            return val
+    except (ValueError, AttributeError):
+        return positive_default
+
+
+async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
+    """Read request body bounded by max_bytes.
+
+    Strategy:
+    1. Check Content-Length header (if present and valid) — reject with 413 if over cap
+    2. For chunked or missing/misleading Content-Length, consume request.stream()
+       incrementally into a bytearray
+    3. Stop immediately with 413 once accumulated bytes exceed max_bytes
+    4. Preserve exact accumulated bytes for JSON parse and HMAC
+
+    Returns:
+    - bytes: the exact accumulated body
+
+    Raises:
+    - HTTPException(413): declared or actual size exceeds max_bytes
+    - HTTPException(400): malformed negative Content-Length
+    """
+    # Check Content-Length header first (fail-fast for declared oversize)
+    content_length_header = request.headers.get("content-length", "").strip()
+    if content_length_header:
+        try:
+            declared_size = int(content_length_header)
+            if declared_size < 0:
+                # Malformed negative Content-Length — treat as 400
+                raise HTTPException(400, "invalid_content_length_negative")
+            if declared_size > max_bytes:
+                # Declared size exceeds cap — fail fast with 413
+                raise HTTPException(413, "external_scores_body_too_large")
+        except ValueError:
+            # Unparseable Content-Length — fall through to stream consumption
+            pass
+
+    # Consume stream incrementally (handles chunked, missing, or misleading Content-Length)
+    accumulated = bytearray()
+    async for chunk in request.stream():
+        accumulated.extend(chunk)
+        if len(accumulated) > max_bytes:
+            # Exceeded cap during streaming — fail with 413
+            raise HTTPException(413, "external_scores_body_too_large")
+
+    return bytes(accumulated)
+
+
 def _cnf_token_secret(service_role: str) -> bytes:
     raw = (
         os.environ.get(_CNF_TOKEN_SECRET_ENV, "").lstrip("\ufeff").strip()
@@ -413,7 +497,21 @@ def build_app(
             + "; ".join(_profile_errors))
     key_hex = signing_key_hex or keys.load_signing_key()
     pub_hex = rows.public_key_hex(key_hex)
-    jwks_doc = rows.jwks_from_key(key_hex)
+    weight_policy_key_hex = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip()
+    try:
+        jwks_doc = rows.jwks_from_key(
+            key_hex,
+            weight_policy_private_key_hex=weight_policy_key_hex or None,
+            weight_policy_kid=os.environ.get(
+                weights_mod.KEY_ID_ENV, "cathedral-weight-policy"),
+        )
+    except ValueError as exc:
+        if weight_policy_key_hex:
+            raise ValueError(
+                f"invalid {weights_mod.SIGNING_KEY_ENV}: expected a 32-byte "
+                "Ed25519 private key encoded as hex"
+            ) from exc
+        raise
     store = Store(database_path)
     v2_database_path = (
         os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
@@ -3194,29 +3292,71 @@ def build_app(
         This endpoint never sets weights directly. It stores source scores for
         weights.py to blend into the single Cathedral-signed vector that thin
         validators already verify and apply.
+
+        Body is bounded by CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES (default 1 MiB).
+        Rejects with 413 if declared Content-Length exceeds cap or if streaming
+        consumption exceeds cap. Preserves exact bytes for JSON parse and HMAC.
+        Malformed negative Content-Length is rejected as 400.
         """
         if not external_scores.ingest_enabled():
             raise HTTPException(404, "external_scores_ingest_not_enabled")
-        # (#3) If these scores actually feed the real signed vector, refuse
-        # unauthenticated ingest regardless of ALLOW_UNAUTHENTICATED — a
-        # real-money credential must be present.
-        if weights_mod.external_scores_enabled() and not external_scores.token_configured():
-            raise HTTPException(503, "external_scores_token_required_while_blending")
-        body = await request.body()
-        if not external_scores.bearer_authorized(authorization, x_cathedral_external_token):
-            raise HTTPException(401, "invalid_external_scores_token")
-        if not external_scores.verify_hmac(body, x_cathedral_external_signature):
-            raise HTTPException(401, "invalid_external_scores_signature")
+        # Read body bounded by CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES (default 1 MiB)
+        max_body_bytes = _env_bytes("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", 1024 * 1024)
+        body = await _read_bounded_body(request, max_body_bytes)
+        # Parse JSON early so we can extract and validate source safely.
         try:
             payload = json.loads(body.decode("utf-8"))
         except Exception:
             raise HTTPException(400, "invalid_json_report")
+        # Payload must be an object/dict; reject arrays, null, and scalars.
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "invalid_report_contract")
+        # Extract source early, before auth, so we can enforce source-scoped credentials.
+        try:
+            source = external_scores._source(
+                payload.get("source") or payload.get("mechanism"),
+                default="violet_audio"
+            )
+        except external_scores.ExternalScoreError as exc:
+            raise HTTPException(400, exc.reason)
+        # Validate source is allowed for this endpoint.
+        if source not in external_scores.ALLOWED_ENDPOINT_SOURCES:
+            raise HTTPException(400, "invalid_source_for_violet_endpoint")
+        # (#3) If these scores actually feed the real signed vector, require some
+        # credential. When blending is live, accept either a dedicated token for
+        # this source OR the shared token. Fail 503 if neither is configured.
+        if weights_mod.external_scores_enabled():
+            has_shared = external_scores.token_configured()
+            has_dedicated = external_scores.source_token_configured(source)
+            if not (has_shared or has_dedicated):
+                raise HTTPException(503, "external_scores_token_required_while_blending")
+        # Authorize with source-scoped auth: dedicated token for this source if
+        # it exists, otherwise fall back to shared token. Fails closed if no
+        # credential matches.
+        if not external_scores.bearer_authorized_for_source(source, authorization, x_cathedral_external_token):
+            raise HTTPException(401, "invalid_external_scores_token")
+        # Verify HMAC with source-specific enforcement: mandatory secrets for
+        # certain sources (e.g., cathedral_confidential_tdx).
+        is_valid, fail_503 = external_scores.verify_hmac_for_source(
+            source, body, x_cathedral_external_signature
+        )
+        if fail_503:
+            raise HTTPException(503, "external_scores_hmac_secret_required")
+        if not is_valid:
+            raise HTTPException(401, "invalid_external_scores_signature")
         try:
             report = external_scores.normalize_report(payload, default_source="violet_audio")
         except external_scores.ExternalScoreError as exc:
-            raise HTTPException(400, exc.reason)
-        if report["source"] not in external_scores.ALLOWED_ENDPOINT_SOURCES:
-            raise HTTPException(400, "invalid_source_for_violet_endpoint")
+            if exc.reason != "report_too_old":
+                raise HTTPException(400, exc.reason)
+            try:
+                report = external_scores.normalize_stale_idempotent_retry(
+                    store,
+                    payload,
+                    default_source="violet_audio",
+                )
+            except external_scores.ExternalScoreError as retry_exc:
+                raise HTTPException(400, retry_exc.reason)
         try:
             accepted = external_scores.store_report(store, report)
         except Exception as exc:

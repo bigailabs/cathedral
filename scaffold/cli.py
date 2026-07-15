@@ -40,6 +40,7 @@ _DEFAULTS = {
     "once": False,
     "offline": False,         # set by --offline (verify+print, no chain access)
     "broadcast": True,        # `serve` is a live validator by default (legacy parity)
+    "require_policy": None,   # optional signed-policy pin (confidential_primary_v1)
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
@@ -52,6 +53,7 @@ _CONFIG_MAP = {
     ("weight_policy", "public_key_hex"): "public_key_hex",
     ("weight_policy", "key_id"): "key_id",
     ("weight_policy", "state_file"): "state_file",
+    ("weight_policy", "require_policy"): "require_policy",
     ("weights", "interval_secs"): "interval_secs",
 }
 
@@ -66,6 +68,7 @@ _ENV_MAP = {
     "BT_WALLET_NAME": "wallet_name",
     "BT_WALLET_HOTKEY": "wallet_hotkey",
     "CATHEDRAL_VALIDATOR_STATE": "state_file",
+    "CATHEDRAL_VALIDATOR_REQUIRE_POLICY": "require_policy",
 }
 
 
@@ -91,7 +94,8 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
             cfg[flat] = v
     # explicit flags win
     for flat in ("publisher_url", "public_key_hex", "key_id", "network", "netuid",
-                 "wallet_name", "wallet_hotkey", "state_file", "interval_secs"):
+                 "wallet_name", "wallet_hotkey", "state_file", "interval_secs",
+                 "require_policy"):
         v = getattr(ns, flat, None)
         if v is not None:
             cfg[flat] = v
@@ -120,9 +124,16 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
               "It is the key published at "
               "https://api.cathedral.computer/.well-known/cathedral-jwks.json", file=sys.stderr)
         return 2
+    if cfg.require_policy and cfg.require_policy not in validator_thin.REQUIRE_POLICY_CHOICES:
+        print(f"error: require_policy must be one of "
+              f"{', '.join(validator_thin.REQUIRE_POLICY_CHOICES)}; got {cfg.require_policy!r}",
+              file=sys.stderr)
+        return 2
     mode = "BROADCAST (setting weights)" if cfg.broadcast else "DRY-RUN (no chain writes)"
     print(f"cathedral-validator serve — netuid {cfg.netuid} on {cfg.network} — {mode}")
     print(f"  publisher={cfg.publisher_url}  key_id={cfg.key_id}  pinned={cfg.public_key_hex[:16]}…")
+    if cfg.require_policy:
+        print(f"  policy pin: {cfg.require_policy} (legacy/v3 vectors rejected)")
     return validator_thin.run(cfg)
 
 
@@ -160,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--wallet-hotkey", dest="wallet_hotkey", default=None)
     sp.add_argument("--state-file", dest="state_file", default=None)
     sp.add_argument("--interval-secs", dest="interval_secs", type=float, default=None)
+    sp.add_argument("--require-policy", dest="require_policy", default=None,
+                    help="pin the validator to a signed policy contract "
+                         "(confidential_primary_v1); legacy/v3 vectors are rejected")
     sp.add_argument("--dry-run", action="store_true",
                     help="verify and print the weights without setting them on chain")
     sp.add_argument("--offline", action="store_true",

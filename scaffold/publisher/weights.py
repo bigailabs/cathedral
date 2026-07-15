@@ -107,9 +107,26 @@ EXTERNAL_SCORES_MAX_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION"
 EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV = "CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED"
 EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV = "CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM"
 
+# (#5) Sources whose live composition must never silently inherit the legacy
+# 50% BASE_WEIGHT/WEIGHT default. An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION
+# is required for these; without one the blend fails closed to base-only.
+EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
+# (#6) Sources that must never run in external_primary (100% external intent)
+# mode, confirmed or not. A confidential/attested source stays capped-blend
+# only; external_scores_mode() enforces this centrally.
+EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
+# Sources subject to the final-attribution accounting control.
+EXTERNAL_SCORES_GLOBAL_CAP_SOURCES = {"cathedral_confidential_tdx"}
+CONFIDENTIAL_TDX_HARD_CAP: float = 0.10
+# Sources eligible for the explicit 100%-confidential-compute scoring mode
+# (CATHEDRAL_EXTERNAL_SCORES_MODE=confidential_primary). The mode is valid ONLY
+# for these sources; for any other source it resolves back to blend so this env
+# can never hand a public source the whole vector.
+CONFIDENTIAL_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
+CONFIDENTIAL_PRIMARY_CONTRACT_VERSION = "v1"
+
 _CACHE_TTL_SECS = 60.0
-_PERSISTED_VECTOR_ID = "latest"
-_REFRESH_LOCK_NAME = "cathedral:weights:refresh"
+_LEGACY_PERSISTED_VECTOR_ID = "latest"
 _vector_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # Serializes the cache-miss build so concurrent misses can't each call
 # next_policy_version() and emit two different vectors with the same
@@ -156,15 +173,46 @@ def _cache_write(vec: dict[str, Any]) -> None:
         _vector_cache["v"] = (time.time(), vec)
 
 
+def _vector_scope() -> tuple[str, int]:
+    """Return the signed subnet identity used to isolate shared scorer state."""
+    network = os.environ.get(NETWORK_ENV, "finney").strip() or "finney"
+    try:
+        netuid = int(os.environ.get(NETUID_ENV, "39") or "39")
+    except ValueError as exc:
+        raise ValueError(f"invalid {NETUID_ENV}") from exc
+    return network, netuid
+
+
+def _persisted_vector_id() -> str:
+    network, netuid = _vector_scope()
+    return f"latest:{network}:{netuid}"
+
+
+def _refresh_lock_name() -> str:
+    network, netuid = _vector_scope()
+    return f"cathedral:weights:refresh:{network}:{netuid}"
+
+
 def _load_persisted_vector(store: Store) -> dict[str, Any] | None:
     rows = store.query(
         "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
-        (_PERSISTED_VECTOR_ID,),
+        (_persisted_vector_id(),),
     )
     if not rows:
-        return None
-    raw = rows[0]["vector_json"]
-    return json.loads(raw)
+        # One-time compatibility with the pre-scope singleton. Never adopt a
+        # legacy row for a different subnet; that was the cross-subnet race.
+        rows = store.query(
+            "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
+            (_LEGACY_PERSISTED_VECTOR_ID,),
+        )
+        if not rows:
+            return None
+        legacy = json.loads(rows[0]["vector_json"])
+        network, netuid = _vector_scope()
+        if legacy.get("network") != network or legacy.get("netuid") != netuid:
+            return None
+        return legacy
+    return json.loads(rows[0]["vector_json"])
 
 
 def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
@@ -180,7 +228,7 @@ def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
             "INSERT OR REPLACE INTO signed_weight_vectors"
             "(id, generated_at_iso, policy_version, vector_json, updated_at_iso) "
             "VALUES (?, ?, ?, ?, ?)",
-            (_PERSISTED_VECTOR_ID, generated_at, policy_version, payload, updated_at),
+            (_persisted_vector_id(), generated_at, policy_version, payload, updated_at),
         )
 
     store.write(_write)
@@ -761,8 +809,36 @@ def external_scores_source() -> str:
 
 
 def external_scores_mode() -> str:
-    raw = os.environ.get(EXTERNAL_SCORES_MODE_ENV, "blend").strip().lower()
-    return raw if raw in {"blend", "external_primary"} else "blend"
+    """blend (default), external_primary, or confidential_primary.
+
+    (#6) Confirmed/preserved behavior: external_primary has always been a
+    request-for-100%-external signal gated by
+    CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM -- it does not by itself change
+    the blend math in _apply_external_scores, which still allocates via
+    _external_blend_weights()'s fraction (explicit FRACTION or the capped
+    legacy weights). That composition is unchanged here. What IS enforced
+    here: a confidential/attested source (EXTERNAL_SCORES_NO_PRIMARY_SOURCES)
+    must never resolve to external_primary, confirmed or not -- it always
+    reports as "blend" so every downstream external_primary branch (the ack
+    warning, the score_source label) treats it as a capped blend.
+    """
+    raw = os.environ.get(EXTERNAL_SCORES_MODE_ENV, "").strip().lower()
+    if raw in ("", "blend"):
+        return "blend"
+    if raw == "confidential_primary":
+        # Explicit 100% confidential-compute intent. Preserved regardless of
+        # source; source validity is enforced fail-closed (degrade to burn,
+        # never base) in _apply_confidential_primary. NEVER silently blend.
+        return "confidential_primary"
+    if raw == "external_primary":
+        if external_scores_source() in EXTERNAL_SCORES_NO_PRIMARY_SOURCES:
+            return "blend"
+        return "external_primary"
+    # Unknown nonempty mode: fail closed with a clear error instead of
+    # silently resolving to blend.
+    raise VectorError(
+        f"unknown {EXTERNAL_SCORES_MODE_ENV}={raw!r}; expected one of "
+        "blend, external_primary, confidential_primary")
 
 
 def external_scores_window_secs() -> float:
@@ -787,7 +863,7 @@ def _normalize_positive_scores(scores: dict[str, float]) -> dict[str, float]:
 
 
 def _identity_collapse_scores(
-    raw: dict[str, float], *, ident=lambda hk: hk
+    raw: dict[str, float], *, ident=lambda hk: hk, strict_unit_interval: bool = False
 ) -> dict[str, float]:
     """Normalize hotkey scores and split one identity's score across its hotkeys."""
     groups: dict[str, set[str]] = {}
@@ -796,7 +872,12 @@ def _identity_collapse_scores(
         try:
             score = float(raw_score)
         except (TypeError, ValueError):
+            if strict_unit_interval:
+                raise VectorError(f"confidential score for {hk!r} is not numeric")
             continue
+        if strict_unit_interval and (not math.isfinite(score) or not 0.0 <= score <= 1.0):
+            raise VectorError(
+                f"confidential score for {hk!r} must be finite and in [0, 1]: {score!r}")
         if not math.isfinite(score) or score <= 0.0:
             continue
         idk = str(ident(str(hk)))
@@ -824,16 +905,47 @@ def _compose_external_scores(
     now: datetime,
     ident=lambda hk: hk,
 ) -> dict[str, float]:
+    """Fetch the latest complete external snapshot and identity-collapse it.
+
+    Returns an empty dict when external scoring is disabled or no fresh
+    complete snapshot exists (fail-closed).
+    """
     if not external_scores_enabled():
         return {}
-    since = _ms_iso(now - timedelta(seconds=external_scores_window_secs()))
+    window = external_scores_window_secs()
     try:
-        raw = external_scores.recent_scores(
-            store, source=external_scores_source(), since_iso=since)
+        raw = external_scores.latest_snapshot_scores(
+            store,
+            source=external_scores_source(),
+            max_age_secs=window,
+            now=now,
+        )
     except Exception as exc:
         print(f"[weights] external_scores compose failed: {exc!r}")
         return {}
-    return _identity_collapse_scores(raw, ident=ident)
+    if raw is None:
+        return {}
+    return _identity_collapse_scores(
+        raw,
+        ident=ident,
+        strict_unit_interval=external_scores_source() in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES,
+    )
+
+
+def _confidential_tdx_fraction() -> float | None:
+    """Parse the explicit confidential fraction without clamping bad config."""
+    raw = os.environ.get(EXTERNAL_SCORES_FRACTION_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        fraction = float(raw)
+    except ValueError as exc:
+        raise VectorError(f"confidential_tdx fraction is not numeric: {raw!r}") from exc
+    if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
+        raise VectorError(
+            "confidential_tdx fraction must be finite and in (0, 0.10]: "
+            f"{fraction!r}")
+    return fraction
 
 
 def _external_blend_weights() -> tuple[float, float, float]:
@@ -848,6 +960,10 @@ def _external_blend_weights() -> tuple[float, float, float]:
     if frac_raw:
         frac = min(max_frac, max(0.0, _env_float(EXTERNAL_SCORES_FRACTION_ENV, 0.0)))
         return (1.0 - frac), frac, frac
+    if external_scores_source() in EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES:
+        # (#5) Fail closed: this source must never inherit the legacy 1.0/1.0
+        # (50%) default. No explicit fraction => zero external share.
+        return 1.0, 0.0, 0.0
     base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
     external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))
     tot = base_weight + external_weight
@@ -860,51 +976,415 @@ def _external_blend_weights() -> tuple[float, float, float]:
     return base_weight, external_weight, share
 
 
+def _apply_confidential_tdx_global_cap(
+    base_norm: dict[str, float],
+    ext_norm: dict[str, float],
+    fraction: float,
+) -> "tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, Any]]":
+    """Build global-cap components over the union of both normalized vectors."""
+    if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
+        raise VectorError(f"confidential_tdx fraction invalid: {fraction!r}")
+
+    base_comp: dict[str, float] = {}
+    ext_comp: dict[str, float] = {}
+    blended: dict[str, float] = {}
+
+    for hk in sorted(set(base_norm) | set(ext_norm)):
+        a_i = (1.0 - fraction) * base_norm.get(hk, 0.0)
+        c_i = fraction * ext_norm.get(hk, 0.0)
+        if (not math.isfinite(a_i) or a_i < 0.0 or
+                not math.isfinite(c_i) or c_i < 0.0):
+            raise VectorError(
+                f"{hk}: invalid component a_i={a_i!r}, c_i={c_i!r}")
+
+        w_i = a_i + c_i
+        if w_i > 0.0:
+            blended[hk] = w_i
+        base_comp[hk] = a_i
+        ext_comp[hk] = c_i
+
+    totals = _validate_confidential_tdx_components(
+        blended, base_comp, ext_comp, fraction, context="blend")
+
+    cap_meta: dict[str, Any] = {
+        "configured_cap": CONFIDENTIAL_TDX_HARD_CAP,
+        "configured_fraction": fraction,
+        "actual_base_mass": totals["base_mass"],
+        "actual_external_mass": totals["external_mass"],
+        "realized_external_fraction": totals["external_fraction"],
+        "withheld_external_mass": 0.0,
+        "cap_version": "v3",
+        "global_cap_assertion_ok": True,
+    }
+    return blended, base_comp, ext_comp, cap_meta
+
+
+def _machine_precision_equal(left: float, right: float) -> bool:
+    if left == right:
+        return True
+    return abs(left - right) <= max(math.ulp(left), math.ulp(right))
+
+
+def _validate_confidential_tdx_components(
+    scores: dict[str, float],
+    base_comp: dict[str, float],
+    ext_comp: dict[str, float],
+    fraction: float,
+    *,
+    context: str,
+) -> dict[str, float]:
+    """Validate signed attribution rows and the global confidential fraction."""
+    if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
+        raise VectorError(f"{context}: invalid confidential fraction {fraction!r}")
+    base_mass = 0.0
+    ext_mass = 0.0
+    component_keys = set(base_comp) | set(ext_comp)
+    for hk in component_keys | set(scores):
+        if hk not in scores:
+            for label, raw_value in (
+                ("base", base_comp.get(hk, 0.0)),
+                ("external", ext_comp.get(hk, 0.0)),
+            ):
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError) as exc:
+                    raise VectorError(
+                        f"{context}: {hk} has non-numeric {label} component"
+                    ) from exc
+                if not math.isfinite(value) or value < 0.0:
+                    raise VectorError(f"{context}: {hk} has invalid {label} component")
+                if value != 0.0:
+                    raise VectorError(f"{context}: {hk} attribution has no signed weight")
+            continue
+        if hk not in base_comp or hk not in ext_comp:
+            raise VectorError(f"{context}: {hk} missing signed attribution component")
+        raw_weight = scores[hk]
+        weight = float(raw_weight)
+        a_i = float(base_comp[hk])
+        c_i = float(ext_comp[hk])
+        if not all(math.isfinite(value) for value in (weight, a_i, c_i)):
+            raise VectorError(f"{context}: {hk} has non-finite weight/component")
+        if weight < 0.0 or a_i < 0.0 or c_i < 0.0:
+            raise VectorError(f"{context}: {hk} has negative weight/component")
+        component_sum = a_i + c_i
+        if not _machine_precision_equal(weight, component_sum):
+            raise VectorError(
+                f"{context}: {hk} weight {weight!r} != components {component_sum!r}")
+        base_mass = math.fsum((base_mass, a_i))
+        ext_mass = math.fsum((ext_mass, c_i))
+
+    total_mass = base_mass + ext_mass
+    external_fraction = ext_mass / total_mass if total_mass > 0.0 else 0.0
+    if total_mass == 0.0 and ext_mass != 0.0:
+        raise VectorError(f"{context}: zero total mass has nonzero confidential mass")
+    score_mass = math.fsum(float(value) for value in scores.values())
+    if not math.isclose(score_mass, total_mass, rel_tol=0.0, abs_tol=1e-12):
+        raise VectorError(
+            f"{context}: score mass {score_mass!r} != component mass {total_mass!r}")
+    if total_mass > 0.0 and abs(external_fraction - fraction) > 1e-12:
+        raise VectorError(
+            f"{context}: confidential aggregate {external_fraction!r} != {fraction!r}")
+    return {
+        "base_mass": base_mass,
+        "external_mass": ext_mass,
+        "external_fraction": external_fraction,
+    }
+
+
+def _l1_normalize(scores: dict[str, float]) -> dict[str, float]:
+    """L1 (sum) normalize a positive score vector so entries sum to 1.0.
+
+    Drops non-positive entries.  Returns empty dict on zero mass.
+    """
+    clean: dict[str, float] = {}
+    for hk, raw in scores.items():
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v) and v > 0.0:
+            clean[str(hk)] = v
+    total = sum(clean.values())
+    if total <= 0.0:
+        return {}
+    return {hk: v / total for hk, v in clean.items()}
+
+
+def _apply_confidential_primary(
+    store: Store,
+    base: dict[str, float],
+    *,
+    now: datetime,
+    ident=lambda hk: hk,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Explicit 100% confidential-compute composition (confidential_primary).
+
+    The latest fresh COMPLETE confidential snapshot is the ONLY positive score
+    source. Base scores are ignored entirely (base_mass == 0). Positive
+    confidential scores are L1-normalized to exactly all miner mass (sum == 1.0
+    before the signed burn). Explicit zero / omission in the complete snapshot
+    stays a revocation. If the report, confirmation, freshness, or eligibility
+    is absent/invalid, return an empty vector so the signed burn fallback
+    applies downstream. Never blends, never falls back to base scores.
+    """
+    src = external_scores_source()
+    cp_meta: dict[str, Any] = {
+        "contract_version": CONFIDENTIAL_PRIMARY_CONTRACT_VERSION,
+        "mode": "confidential_primary",
+        "source": src,
+        "base_mass": 0.0,
+        "confidential_mass": 0.0,
+        "complete": False,
+        "fresh": False,
+        "confirmed": _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False),
+        "require_registered": _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True),
+        "external_miner_count": 0,
+        "degradation_reason": None,
+    }
+    blend_meta: dict[str, Any] = {
+        "base_mass": 0.0,
+        "external_mass": 0.0,
+        "base_miner_count": 0,
+        "external_miner_count": 0,
+        "blended": False,
+        "confidential_primary": cp_meta,
+    }
+
+    def _degrade(reason: str) -> tuple[dict[str, float], dict[str, Any]]:
+        cp_meta["degradation_reason"] = reason
+        print(f"[weights] confidential_primary degraded: {reason} "
+              "-> empty vector (signed burn fallback)")
+        return {}, blend_meta
+
+    # Source validity is fail-closed here, NOT in external_scores_mode(): an
+    # absent/wrong source under confidential_primary intent must degrade to a
+    # signed burn vector, never resolve to blend/base. Only the confidential
+    # source can receive 100% of the vector via this mode.
+    if src not in CONFIDENTIAL_PRIMARY_SOURCES:
+        return _degrade("invalid_source")
+
+    # Snapshot status for the signed metadata (complete/fresh). Best-effort.
+    try:
+        since = _ms_iso(now - timedelta(seconds=external_scores_window_secs()))
+        st = external_scores.status(store, source=src, since_iso=since)
+        cp_meta["complete"] = bool(st.get("latest_complete"))
+        cp_meta["fresh"] = bool(st.get("latest_fresh"))
+    except Exception as exc:
+        cp_meta["status_error"] = repr(exc)
+
+    # Explicit confirmation is mandatory for 100% confidential intent.
+    if not cp_meta["confirmed"]:
+        return _degrade("primary_confirm_missing")
+
+    # The only positive source: the latest fresh complete confidential snapshot.
+    ext = _compose_external_scores(store, now=now, ident=ident)
+    if not ext:
+        if cp_meta["complete"] and cp_meta["fresh"]:
+            return _degrade("confidential_snapshot_revoked_all")
+        return _degrade("confidential_snapshot_unavailable")
+
+    # Scorer-side metagraph filtering stays configurable. When disabled, the
+    # thin validator is the authoritative registration check.
+    if cp_meta["require_registered"]:
+        registered, _snap = _load_fresh_metagraph_hotkeys(store, now=now)
+        if registered is None:
+            return _degrade("registration_snapshot_unavailable")
+        ext = {hk: v for hk, v in ext.items() if hk in registered}
+        if not ext:
+            return _degrade("no_registered_confidential_scores")
+
+    # Payable-hotkey filter (configurable) applied pre-normalization so the
+    # normalized mass stays exactly 1.0 after any downstream no-op re-filter.
+    if payable_hotkeys_mode() == "filter":
+        ext, payable_meta = _apply_payable_hotkey_policy(store, ext, now=now)
+        blend_meta["external_payable_filter"] = payable_meta
+        if not ext:
+            return _degrade("no_payable_confidential_scores")
+
+    normalized = _l1_normalize(ext)
+    if not normalized:
+        return _degrade("confidential_norm_zero")
+
+    cp_meta["confidential_mass"] = 1.0
+    cp_meta["complete"] = True
+    cp_meta["fresh"] = True
+    cp_meta["external_miner_count"] = len(normalized)
+    blend_meta["external_mass"] = 1.0
+    blend_meta["external_miner_count"] = len(normalized)
+    print(f"[weights] confidential_primary vector composed: miners={len(normalized)}")
+    return normalized, blend_meta
+
+
 def _apply_external_scores(
     store: Store,
     base: dict[str, float],
     *,
     now: datetime,
     ident=lambda hk: hk,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Blend base and external score vectors.
+
+    Returns (final_scores, blend_metadata).  The metadata exposes realized
+    base and external contribution mass for signed-vector policy logging.
+
+    Contract:
+    - Identity-collapse before allocation.
+    - L1/sum-normalize base and external vectors independently.
+    - When both have positive mass:
+        output = (1 - fraction) * base_norm + fraction * ext_norm
+    - Base only: preserve 100% base behavior.
+    - External only: fail closed to base (empty) result.  External must
+      never expand to 100% on its own.
+    - Neither: preserve existing downstream burn behavior (empty dict).
+    """
+    blend_meta: dict[str, Any] = {
+        "base_mass": 0.0,
+        "external_mass": 0.0,
+        "base_miner_count": 0,
+        "external_miner_count": 0,
+        "blended": False,
+    }
+    # Explicit 100% confidential-compute mode: base is never a positive source,
+    # even when ingestion is disabled. Disabled ingestion in primary mode must
+    # produce empty/burn, never fall through to base.
+    if external_scores_mode() == "confidential_primary":
+        return _apply_confidential_primary(store, base, now=now, ident=ident)
+
     if not external_scores_enabled():
-        return base
+        blend_meta["base_mass"] = 1.0 if base else 0.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
+    src = external_scores_source()
+    confidential_fraction = None
+    if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
+        confidential_fraction = _confidential_tdx_fraction()
+        if confidential_fraction is None:
+            blend_meta["base_mass"] = 1.0 if base else 0.0
+            blend_meta["base_miner_count"] = len(base)
+            blend_meta["degraded"] = "confidential_fraction_missing"
+            return base, blend_meta
+
     ext = _compose_external_scores(store, now=now, ident=ident)
-    if not ext:
-        return base
-    # (#2) Registration gate: external scores may pay only REGISTERED miners.
-    # Fail-closed — if we cannot confirm the metagraph snapshot, do NOT blend
-    # unverified external scores into the real signed vector.
-    if _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True):
+
+    # Confidential TDX must always have a fresh metagraph snapshot before any
+    # external mass is admitted, regardless of the legacy registration flag.
+    require_registered = (
+        src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES
+        or _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True)
+    )
+    if ext and require_registered:
         registered, _meta = _load_fresh_metagraph_hotkeys(store, now=now)
         if registered is None:
             print("[weights] external_scores: registration snapshot unavailable "
                   "-> NOT blending external scores (fail-closed)")
-            return base
-        ext = {hk: v for hk, v in ext.items() if hk in registered}
-        if not ext:
-            return base
-    # (#5) external_primary replaces the ENTIRE vector — require explicit ack.
-    if external_scores_mode() == "external_primary":
-        if _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False):
-            print("[weights] external_scores: EXTERNAL_PRIMARY active — external "
-                  "source is the ENTIRE weight vector")
-            return _normalize_positive_scores(ext)
-        print("[weights] external_scores: external_primary requested WITHOUT "
-              f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend")
-    # (#1) Blend with an explicit, capped external share.
-    base_norm = _normalize_positive_scores(base)
-    base_weight, external_weight, eff_share = _external_blend_weights()
-    if base_weight <= 0.0 and external_weight <= 0.0:
-        return base
-    print(f"[weights] external_scores blend: external share ~{eff_share:.3f} "
-          f"(source={external_scores_source()}, registered_scored={len(ext)})")
-    hotkeys = set(base_norm) | set(ext)
-    blended = {
-        hk: (base_norm.get(hk, 0.0) * base_weight) + (ext.get(hk, 0.0) * external_weight)
-        for hk in hotkeys
-    }
-    return _normalize_positive_scores(blended)
+            ext = {}
+            if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
+                blend_meta["degraded"] = "confidential_registration_snapshot_unavailable"
+        else:
+            ext = {hk: v for hk, v in ext.items() if hk in registered}
+
+    # external_primary mode: still require explicit ack.
+    if ext and external_scores_mode() == "external_primary":
+        if not _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False):
+            print("[weights] external_scores: external_primary requested WITHOUT "
+                  f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend")
+
+    # (#4) Payability/eligibility filtering MUST happen to each mechanism
+    # BEFORE it is L1-normalized and allocated, not after the blend. If a
+    # single post-blend filter pass (e.g. build_signed_vector's final
+    # _apply_payable_hotkey_policy call) removed hotkeys after allocation, it
+    # could strip base-only entries disproportionately and push the realized
+    # external share of the SURVIVING vector above the configured fraction.
+    # Filtering both mechanisms here, pre-normalization, makes the (1-f)/f
+    # split exact by construction on the final, already-filtered hotkey set;
+    # the later call in build_signed_vector is then a no-op for anything
+    # already filtered here (still run there so base-only vectors, and the
+    # off/mark modes, keep their existing policy-metadata surface).
+    if payable_hotkeys_mode() == "filter":
+        base, base_payable_meta = _apply_payable_hotkey_policy(store, base, now=now)
+        blend_meta["base_payable_filter"] = base_payable_meta
+        if ext:
+            ext, ext_payable_meta = _apply_payable_hotkey_policy(store, ext, now=now)
+            blend_meta["external_payable_filter"] = ext_payable_meta
+
+    has_base = bool(base) and any(v > 0 for v in base.values())
+    has_ext = bool(ext) and any(v > 0 for v in ext.values())
+
+    # Neither: return empty (downstream burn handles this).
+    if not has_base and not has_ext:
+        return {}, blend_meta
+
+    # External only: fail closed. Do NOT let external expand to 100%.
+    if not has_base and has_ext:
+        blend_meta["external_miner_count"] = len(ext)
+        blend_meta["degraded"] = "external_only_fail_closed"
+        return {}, blend_meta
+
+    # Base only: 100% base.
+    if has_base and not has_ext:
+        blend_meta["base_mass"] = 1.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
+    # Both have positive mass: blend.
+    _bw, _ew, fraction = _external_blend_weights()
+    if confidential_fraction is not None:
+        fraction = confidential_fraction
+    if fraction <= 0.0:
+        blend_meta["base_mass"] = 1.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
+    base_norm = _l1_normalize(base)
+    ext_norm = _l1_normalize(ext)
+
+    if not base_norm:
+        blend_meta["degraded"] = "base_norm_zero"
+        return base, blend_meta
+    if not ext_norm:
+        blend_meta["base_mass"] = 1.0
+        blend_meta["base_miner_count"] = len(base)
+        return base, blend_meta
+
+    # Confidential TDX uses a global union composition with auditable row parts.
+    if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
+        blended, base_comp, ext_comp, cap_meta = _apply_confidential_tdx_global_cap(
+            base_norm, ext_norm, fraction)
+        realized_base = cap_meta["actual_base_mass"]
+        realized_ext = cap_meta["actual_external_mass"]
+        blend_meta["blended"] = True
+        blend_meta["base_mass"] = round(realized_base, 9)
+        blend_meta["external_mass"] = round(realized_ext, 9)
+        blend_meta["base_miner_count"] = len(base_norm)
+        blend_meta["external_miner_count"] = len(ext_norm)
+        blend_meta["fraction"] = fraction
+        blend_meta["confidential_tdx_cap"] = cap_meta
+        # Per-hotkey auditable components (§5) stored ONLY in signed weight entries,
+        # not in policy_metadata. Keep as internal state for _build_weights_list to use.
+        blend_meta["_internal_base_components"] = base_comp
+        blend_meta["_internal_ext_components"] = ext_comp
+        print("[weights] confidential_tdx blend applied")
+        return blended, blend_meta
+
+    base_coeff = 1.0 - fraction
+    ext_coeff = fraction
+
+    hotkeys = set(base_norm) | set(ext_norm)
+    blended: dict[str, float] = {}
+    for hk in hotkeys:
+        blended[hk] = base_coeff * base_norm.get(hk, 0.0) + ext_coeff * ext_norm.get(hk, 0.0)
+
+    blend_meta["blended"] = True
+    blend_meta["base_mass"] = round(base_coeff, 9)
+    blend_meta["external_mass"] = round(ext_coeff, 9)
+    blend_meta["base_miner_count"] = len(base_norm)
+    blend_meta["external_miner_count"] = len(ext_norm)
+    blend_meta["fraction"] = fraction
+
+    print("[weights] external_scores blend applied")
+
+    return blended, blend_meta
 
 
 def _external_scores_policy_status(
@@ -922,7 +1402,7 @@ def _external_scores_policy_status(
         "window_secs": window_secs,
         "base_weight": max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0)),
         "external_weight": max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0)),
-        "effective_external_share": round(_external_blend_weights()[2], 6),
+        "effective_external_share": 1.0 if external_scores_mode() == "confidential_primary" else round(_external_blend_weights()[2], 6),
         "require_registered": _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True),
         "primary_confirmed": _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False),
         "has_scores": False,
@@ -1295,6 +1775,7 @@ def _compose_proportional_hotkey_sql(store: Store, since: str) -> dict[str, floa
 def compose_scores(
     store: Store, *, now: datetime | None = None,
     coldkey_of: dict[str, str] | None = None,
+    blend_meta_out: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """One final number per hotkey, from solves inside the trailing window.
 
@@ -1331,16 +1812,31 @@ def compose_scores(
     def pm_ident(hk: str) -> str | None:
         return coldkey_of.get(hk, hk) if use_pm_ck else ident(hk)
 
+    # Container for blend metadata; populated by _apply_external_scores.
+    _blend_meta_box: list[dict[str, Any]] = []
+
+    def _finish_external(base: dict[str, float]) -> dict[str, float]:
+        result, meta = _apply_external_scores(store, base, now=now, ident=ident)
+        _blend_meta_box.clear()
+        _blend_meta_box.append(meta)
+        return result
+
     pm_scores = _perminer_compose_scores(store, ident=pm_ident, since=since)
     if pm_scores is not None and perminer_scoring_mode() == "assigned_only":
-        return _apply_external_scores(store, pm_scores, now=now, ident=ident)
+        scores = _finish_external(pm_scores)
+        if blend_meta_out is not None and _blend_meta_box:
+            blend_meta_out.update(_blend_meta_box[0])
+        return scores
 
     def finish_base(base: dict[str, float]) -> dict[str, float]:
         if pm_scores is not None and perminer_scoring_mode() == "pm_primary":
             base = _apply_perminer_primary(base, pm_scores)
         else:
             base = _apply_perminer_bonus(store, base, coldkey_of, now=now)
-        return _apply_external_scores(store, base, now=now, ident=ident)
+        scores = _finish_external(base)
+        if blend_meta_out is not None and _blend_meta_box:
+            blend_meta_out.update(_blend_meta_box[0])
+        return scores
 
     if mode() == "row_score_recent":
         return finish_base(_compose_row_score_recent(store, since, ident=ident))
@@ -1363,7 +1859,8 @@ def compose_scores(
         hks: dict[str, set] = {}     # identity -> set of its solving hotkeys
         weights_by_tier = tier_weights()
         for r in rows:
-            hk = str(r["miner_hotkey"]); idk = ident(hk)
+            hk = str(r["miner_hotkey"])
+            idk = ident(hk)
             cid = str(r["challenge_id"])
             if cid not in seen.get(idk, set()):
                 seen.setdefault(idk, set()).add(cid)
@@ -1425,21 +1922,51 @@ def next_policy_version(store: Store) -> int:
 def build_signed_vector(store: Store, *, signing_key_hex: str,
                         now: datetime | None = None) -> dict[str, Any]:
     """Compose scores, assemble the wire payload, sign. Returns the dict
-    served verbatim by /v1/validator/weights/next."""
+    served verbatim by /v1/validator/weights/next.
+
+    After the final payable filter, recomputes aggregate component masses and
+    fractions for global-cap sources and reasserts the configured fraction.
+    """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     now = now or datetime.now(timezone.utc)
     coldkey_of = _load_scoring_coldkey_map(store)
     since = _ms_iso(now - timedelta(hours=window_hours()))
-    scores = compose_scores(store, now=now, coldkey_of=coldkey_of)
+    blend_meta: dict[str, Any] = {}
+    scores = compose_scores(store, now=now, coldkey_of=coldkey_of, blend_meta_out=blend_meta)
     scores, payable_meta = _apply_payable_hotkey_policy(store, scores, now=now)
+    cap_meta = blend_meta.get("confidential_tdx_cap")
+    if cap_meta:
+        base_comp = blend_meta.get("_internal_base_components") or {}
+        ext_comp = blend_meta.get("_internal_ext_components") or {}
+        filtered_base = {hk: base_comp[hk] for hk in scores if hk in base_comp}
+        filtered_ext = {hk: ext_comp[hk] for hk in scores if hk in ext_comp}
+        blend_meta["_internal_base_components"] = filtered_base
+        blend_meta["_internal_ext_components"] = filtered_ext
+        totals = _validate_confidential_tdx_components(
+            scores,
+            filtered_base,
+            filtered_ext,
+            float(blend_meta["fraction"]),
+            context="post-payable-filter",
+        )
+        cap_meta.update({
+            "actual_base_mass": totals["base_mass"],
+            "actual_external_mass": totals["external_mass"],
+            "realized_external_fraction": totals["external_fraction"],
+        })
+        blend_meta["base_miner_count"] = len(filtered_base)
+        blend_meta["external_miner_count"] = sum(
+            1 for value in filtered_ext.values() if value > 0.0)
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
     pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
     external_status = _external_scores_policy_status(store, now=now)
     score_source = pm_status["score_source"] or effective_mode
-    if external_status.get("enabled") and external_status.get("has_scores"):
+    if external_scores_mode() == "confidential_primary":
+        score_source = f"confidential_primary:{external_scores_source()}"
+    elif external_status.get("enabled") and external_status.get("has_scores"):
         ext_source = f"external:{external_status.get('source')}"
         score_source = ext_source if external_scores_mode() == "external_primary" else f"{score_source}+{ext_source}"
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
@@ -1480,6 +2007,11 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "coldkey_map_loaded": bool(coldkey_of),
             "payable_hotkeys": payable_meta,
             "external_scores": external_status,
+            "blend": {
+                k: v for k, v in blend_meta.items()
+                if not k.startswith("_internal")
+            },
+            "confidential_tdx_cap": blend_meta.get("confidential_tdx_cap"),
             "perminer_scoring_mode": pm_status["scoring_mode"],
             "perminer": {
                 "enabled": pm_status["perminer_enabled"],
@@ -1498,13 +2030,55 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
                 "degraded_reason": pm_status.get("degraded_reason"),
             },
         },
-        "weights": [
-            {"miner_hotkey": hk, "weight": scores[hk]} for hk in sorted(scores)
-        ],
+        "weights": _build_weights_list(scores, blend_meta),
     }
+    # Signed confidential-primary contract metadata is added ONLY when the mode
+    # is selected, so default and 10% blend vectors stay byte-compatible.
+    cp_policy = blend_meta.get("confidential_primary")
+    if cp_policy is not None:
+        payload["policy_metadata"]["confidential_primary"] = cp_policy
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
     return payload
+
+
+def _build_weights_list(
+    scores: dict[str, float],
+    blend_meta: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build the weights list, annotating each entry with per-hotkey components
+    when a confidential_tdx global blend was performed.
+    Components are emitted ONLY in each signed weight entry, not in policy_metadata.
+    Existing thin validators ignore the extra fields.
+
+    Components are NOT rounded independently; w_i = a_i + c_i is preserved exactly.
+    """
+    base_comp: dict[str, float] = blend_meta.get("_internal_base_components") or {}
+    ext_comp: dict[str, float] = blend_meta.get("_internal_ext_components") or {}
+    capped = bool(blend_meta.get("confidential_tdx_cap"))
+    cp_meta = blend_meta.get("confidential_primary")
+    confidential_primary = bool(cp_meta) and float(
+        cp_meta.get("confidential_mass") or 0.0) > 0.0
+    if capped:
+        _validate_confidential_tdx_components(
+            scores,
+            base_comp,
+            ext_comp,
+            float(blend_meta["fraction"]),
+            context="pre-sign",
+        )
+    entries: list[dict[str, Any]] = []
+    for hk in sorted(scores):
+        entry: dict[str, Any] = {"miner_hotkey": hk, "weight": scores[hk]}
+        if capped:
+            entry["base_component"] = base_comp[hk]
+            entry["external_component"] = ext_comp[hk]
+        elif confidential_primary:
+            # 100% confidential: base share is exactly 0, external == weight.
+            entry["base_component"] = 0.0
+            entry["external_component"] = scores[hk]
+        entries.append(entry)
+    return entries
 
 
 def _mark_refresh(status: str, error: "BaseException | None" = None) -> None:
@@ -1677,7 +2251,7 @@ def start_background_refresh(store: Store, *, signing_key_hex: str) -> None:
 
 def _refresh_once(store: Store, *, signing_key_hex: str) -> dict[str, Any] | None:
     """Refresh once without allowing every process to rebuild at once."""
-    with store.advisory_lock(_REFRESH_LOCK_NAME) as acquired:
+    with store.advisory_lock(_refresh_lock_name()) as acquired:
         if acquired:
             vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
             _persist_vector(store, vec)
