@@ -1,5 +1,6 @@
 const DEFAULT_READ_ORIGIN = "https://read.cathedral.computer";
 const DEFAULT_SUBMIT_ORIGIN = "https://submit.cathedral.computer";
+const DEFAULT_WEIGHTS_ORIGIN = "";
 
 const LEGACY_PREFIX = "/api/cathedral";
 
@@ -159,11 +160,23 @@ function cloneHeaders(headers) {
 export function originRequest(request, originBase, options = {}) {
   const incoming = new URL(request.url);
   const origin = new URL(originBase);
-  origin.pathname = canonicalPath(incoming.pathname);
+  const path = canonicalPath(incoming.pathname);
+  if (options.preserveOriginPath) {
+    const basePath = origin.pathname.endsWith("/") ? origin.pathname.slice(0, -1) : origin.pathname;
+    origin.pathname = `${basePath}${path}`;
+  } else {
+    origin.pathname = path;
+  }
   origin.search = options.search !== undefined ? options.search : incoming.search;
   const headers = cloneHeaders(request.headers);
   if (options.hostHeader) {
     headers.set("Host", options.hostHeader);
+  }
+  if (options.acceptHeader) {
+    headers.set("Accept", options.acceptHeader);
+  }
+  if (options.userAgent) {
+    headers.set("User-Agent", options.userAgent);
   }
   const init = {
     method: request.method,
@@ -397,6 +410,7 @@ async function fetchReadThroughCache(
   timeoutMs,
   originHost = "",
   resolveOverride = "",
+  originRequestOptions = {},
 ) {
   const unsupportedParams = unsupportedCacheQueryParams(request.url, path);
   if (unsupportedParams.length) {
@@ -418,8 +432,11 @@ async function fetchReadThroughCache(
     headers: { accept: request.headers.get("accept") || "application/json" },
   });
   const originReq = originRequest(request, originBase, {
-    search: new URL(normalizedUrl).search,
+    search: originRequestOptions.search !== undefined ? originRequestOptions.search : new URL(normalizedUrl).search,
     hostHeader: originHost,
+    preserveOriginPath: originRequestOptions.preserveOriginPath,
+    acceptHeader: originRequestOptions.acceptHeader,
+    userAgent: originRequestOptions.userAgent,
   });
   const cached = await cache.match(cacheKey);
   const cachedCanServe = cached && cached.status >= 200 && cached.status < 500;
@@ -503,17 +520,33 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
     );
   }
 
-  const originBase = route.role === "read"
+  const weightsOrigin = route.role === "read" && route.path === "/v1/validator/weights/next"
+    ? envUrl(env, "WEIGHTS_ORIGIN", DEFAULT_WEIGHTS_ORIGIN)
+    : "";
+  const originBase = weightsOrigin || (route.role === "read"
     ? envUrl(env, "READ_ORIGIN", DEFAULT_READ_ORIGIN)
-    : envUrl(env, "SUBMIT_ORIGIN", DEFAULT_SUBMIT_ORIGIN);
-  const originHost = route.role === "read"
-    ? envUrl(env, "READ_ORIGIN_HOST", "")
-    : envUrl(env, "SUBMIT_ORIGIN_HOST", "");
-  const resolveOverride = route.role === "read"
-    ? envUrl(env, "READ_ORIGIN_RESOLVE_OVERRIDE", "")
-    : envUrl(env, "SUBMIT_ORIGIN_RESOLVE_OVERRIDE", "");
+    : envUrl(env, "SUBMIT_ORIGIN", DEFAULT_SUBMIT_ORIGIN));
+  const originHost = weightsOrigin
+    ? envUrl(env, "WEIGHTS_ORIGIN_HOST", "")
+    : (route.role === "read"
+      ? envUrl(env, "READ_ORIGIN_HOST", "")
+      : envUrl(env, "SUBMIT_ORIGIN_HOST", ""));
+  const resolveOverride = weightsOrigin
+    ? envUrl(env, "WEIGHTS_ORIGIN_RESOLVE_OVERRIDE", "")
+    : (route.role === "read"
+      ? envUrl(env, "READ_ORIGIN_RESOLVE_OVERRIDE", "")
+      : envUrl(env, "SUBMIT_ORIGIN_RESOLVE_OVERRIDE", ""));
+  const originRequestOptions = weightsOrigin ? {
+    preserveOriginPath: true,
+    search: envUrl(env, "WEIGHTS_ORIGIN_SEARCH", "?ref=main"),
+    acceptHeader: envUrl(env, "WEIGHTS_ORIGIN_ACCEPT", "application/vnd.github.raw"),
+    userAgent: envUrl(env, "WEIGHTS_ORIGIN_USER_AGENT", "cathedral-edge-router"),
+  } : {};
   const mirrorSource = shouldMirrorV1Submit(env, route, request) ? request.clone() : null;
-  const originReq = originRequest(mirrorSource ? request.clone() : request, originBase, { hostHeader: originHost });
+  const originReq = originRequest(mirrorSource ? request.clone() : request, originBase, {
+    hostHeader: originHost,
+    ...originRequestOptions,
+  });
   if (mirrorSource) {
     ctx.waitUntil(mirrorV1Submit(mirrorSource, env));
   }
@@ -527,6 +560,7 @@ export async function handleRequest(request, env = {}, ctx = { waitUntil() {} })
       originTimeoutForRoute(env, route.role, route.path, true),
       originHost,
       resolveOverride,
+      originRequestOptions,
     );
   }
 

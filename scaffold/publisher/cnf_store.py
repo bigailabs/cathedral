@@ -172,6 +172,46 @@ class CNFStore:
             CacheControl=f"public, max-age={CNF_CACHE_MAX_AGE}, immutable",
             Metadata=meta)
 
+    # ---- generic immutable object seam (V2 content-addressed artifacts) ---
+    def immutable_object_backend_ready(self) -> bool:
+        """Whether the existing S3/R2-compatible backend is fully configured."""
+        return self.backend == "bucket" and self._s3 is not None and self._bucket is not None
+
+    def put_immutable_object(
+        self,
+        key: str,
+        data: bytes,
+        content_type: str,
+        cache_control: str,
+    ) -> None:
+        """Write an exact-key immutable object through the existing bucket seam."""
+        if not self.immutable_object_backend_ready():
+            raise RuntimeError("cnf_bucket_backend_not_configured")
+        self._s3.put_object(
+            Bucket=self._bucket,
+            Key=str(key),
+            Body=bytes(data),
+            ContentType=str(content_type),
+            CacheControl=str(cache_control),
+        )
+
+    def get_immutable_object(self, key: str) -> bytes | None:
+        """Read an exact-key object, returning ``None`` only for not-found."""
+        if not self.immutable_object_backend_ready():
+            raise RuntimeError("cnf_bucket_backend_not_configured")
+        try:
+            response = self._s3.get_object(Bucket=self._bucket, Key=str(key))
+        except Exception as exc:
+            details = getattr(exc, "response", {}) or {}
+            error = details.get("Error", {}) if isinstance(details, dict) else {}
+            code = str(error.get("Code") or "") if isinstance(error, dict) else ""
+            status = (details.get("ResponseMetadata", {}) or {}).get("HTTPStatusCode") \
+                if isinstance(details, dict) else None
+            if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
+                return None
+            raise
+        return bytes(response["Body"].read())
+
     # ---- read side (called by the gated route, AFTER token check) ---------
     def serve(self, challenge_id: str) -> CNFServeResult:
         """Resolve how to serve a CNF the caller has already token-authorised.

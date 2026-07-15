@@ -5,9 +5,9 @@ seq) via `per_miner.generate_instance`. That generation is cheap for the
 default planted path (LRU-cached in per_miner.py) but expensive for REAL
 (unplanted) instances — combinatorial coloring/latin-square generation with
 internal retries (see real_corpus.py, CATHEDRAL_V2_CHALLENGE_SOURCE /
-CATHEDRAL_PERMINER_REAL_FRACTION). The V2 async verify worker
-(`v2_pipeline.verify_one`) regenerates the CNF from scratch for every event,
-which is the dominant cost of a verify.
+CATHEDRAL_PERMINER_REAL_FRACTION). The V2 async verify paths consult this store
+before falling back to from-seed regeneration, which is the dominant cost of a
+cold verify.
 
 This module is a tiny, best-effort cache of the CNF body keyed by
 challenge_id, populated once at mint time (challenge list) and at submit
@@ -138,6 +138,24 @@ def get(store: Store, challenge_id: str, expected_sha256: str | None = None) -> 
         return cnf_text
     except Exception:
         return None
+
+
+def retention_hours() -> float:
+    """Purge window for baked CNFs, in hours.
+
+    Default 4h: epochs are hourly, so current epoch (<=1h old) + previous
+    epoch grace + verify-backlog headroom. The old 24h default let the store
+    accumulate ~8.7GB/day under all-miner load and filled the disk
+    (2026-07-09 incident). Clamped to >=2h so a bad env value can never purge
+    the current epoch's CNFs out from under the verifier.
+
+    Env: CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS
+    """
+    try:
+        val = float(os.environ.get("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "4") or "4")
+    except Exception:
+        val = 4.0
+    return max(2.0, val)
 
 
 def purge_older_than(store: Store, hours: float = 24) -> int:

@@ -2,11 +2,13 @@
 """Cathedral V2 bitset miner E2E smoke.
 
 Flow:
-  fetch V2 per-miner challenge + submit_token -> fetch CNF -> solve locally ->
-  submit tiny signed bitset -> check receipt -> check V2 shadow weights.
+  fetch V2 per-miner challenge descriptor -> fetch CNF + submit token header ->
+  solve locally -> submit tiny signed bitset -> check receipt -> check V2
+  shadow weights.
 
-This script writes only to isolated V2 beta tables. It does not affect V1
-production weights, rewards, or payouts.
+On converged deployments, verified bitset events can bridge into that
+deployment's `per_miner_solves` payout rows. Run it only against a base URL you
+intend to dogfood.
 """
 from __future__ import annotations
 
@@ -259,10 +261,8 @@ def main() -> int:
     seq = int(item.get("seq") or 0)
     epoch = int(item.get("epoch") or payload.get("epoch") or 0)
     submit_token = str(item.get("submit_token") or "")
-    print(f"selected={challenge_id} tier={tier} seq={seq} epoch={epoch} token={'yes' if submit_token else 'no'}")
-    if not submit_token:
-        print("E2E_FAILED missing_submit_token")
-        return 1
+    print(f"selected={challenge_id} tier={tier} seq={seq} epoch={epoch} "
+          f"page_token={'yes' if submit_token else 'no'} issuance={payload.get('issuance', 'eager')}")
 
     query = urlencode({"challenge_id": challenge_id, "tier": tier, "seq": seq})
     r = session.get(challenge_base + "/v2/synthetic-boolean/per-miner/cnf?" + query, headers=read_headers(kp), timeout=30)
@@ -271,6 +271,13 @@ def main() -> int:
         print(r.text[:1000])
         return 1
     cnf_text = r.text
+    if not submit_token:
+        # Lazy issuance: the token is minted at CNF fetch, not at listing.
+        submit_token = str(r.headers.get("X-Cathedral-Submit-Token") or "")
+        print(f"header_token={'yes' if submit_token else 'no'}")
+    if not submit_token:
+        print("E2E_FAILED missing_submit_token")
+        return 1
     print(f"cnf_sha={hashlib.sha256(cnf_text.encode('utf-8')).hexdigest()[:12]}...")
 
     t0 = time.time()

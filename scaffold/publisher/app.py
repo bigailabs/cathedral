@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -48,6 +49,7 @@ from .board_cache import BoardCache, board_cache_headers
 from .materialized_snapshot import MaterializedSnapshot, snapshot_headers
 from .cnf_store import CNFStore
 from . import v2_cnf_store
+from . import epoch_publisher as v2_cnf_artifacts
 from .sat_solution import verify_dimacs_solution
 from . import external_scores, submit_admission
 from . import solution_manifest
@@ -486,6 +488,13 @@ def build_app(
     signing_key_hex: str | None = None,
     submit_min_interval_secs: int | None = None,
 ) -> FastAPI:
+    from . import launch_profile
+    _profile_errors = launch_profile.validate_env(
+        signing_key_hex_provided=signing_key_hex is not None)
+    if _profile_errors:
+        raise RuntimeError(
+            "launch profile misconfiguration (fail-closed): "
+            + "; ".join(_profile_errors))
     key_hex = signing_key_hex or keys.load_signing_key()
     pub_hex = rows.public_key_hex(key_hex)
     weight_policy_key_hex = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip()
@@ -535,6 +544,25 @@ def build_app(
     # live-adjacent tests cannot mutate the current subnet payout DB. If unset,
     # local tests share the app store.
     v2_store = _build_v2_store(v2_database_path) if v2_database_path else store
+    if (launch_profile.converged() and store.backend != "postgres"
+            and "PYTEST_CURRENT_TEST" not in os.environ):
+        # Two deployment processes with a SQLite fallback would silently stop
+        # sharing the scoring/V2 store (DATABASE_URL unset or malformed).
+        # Payout-critical: fail closed outside tests.
+        raise RuntimeError(
+            "launch profile v2-converged requires a shared Postgres store: "
+            "set DATABASE_URL (postgresql://...); refusing SQLite fallback")
+    if v2_pipeline.pm_payout_bridge_enabled() and v2_database_path:
+        # The bridge records per_miner_solves rows via the verify worker's store
+        # handle (the V2 store). Scoring reads the MAIN store. With a split V2
+        # DB the bridged payout rows would be invisible to weights -- miners
+        # would verify but never earn. Payout code fails closed: refuse to boot.
+        raise RuntimeError(
+            "CATHEDRAL_V2_PM_PAYOUT_BRIDGE requires V2 to share the main store: "
+            "unset CATHEDRAL_V2_DATABASE_URL/CATHEDRAL_V2_DB_PATH or disable "
+            "the bridge. Bridged per_miner_solves rows in a split V2 DB never "
+            "reach the payout store (miners verify but never earn)."
+        )
     v2_blob_store = blob_store_mod.store_from_env()
     # Hippius presign client for flat results-file pushes. None when env is
     # unset; gated in results_publisher so missing config is always a no-op.
@@ -543,8 +571,9 @@ def build_app(
     # once, while build_app is still single-threaded, so the V2 per-miner
     # handlers and verify worker skip v2_pm_env()'s process-global lock (it
     # serialized every V2 per-miner request to one-at-a-time per process).
-    # Opt-in via CATHEDRAL_V2_PERMINER_ENV_PIN and guarded -- refusal reasons
-    # are logged inside pin_v2_pm_env().
+    # Implied by CATHEDRAL_LAUNCH_PROFILE=v2-converged, with an explicit opt-in
+    # still available for surgical rollout. Refusal reasons are logged inside
+    # pin_v2_pm_env().
     v2_pm_env_pinned = v2_pipeline.pin_v2_pm_env()
     print(f"[v2_pm_env] pinned={v2_pm_env_pinned}")
     # Best-effort hotkey->coldkey resolver for the public receipts feed,
@@ -627,7 +656,8 @@ def build_app(
     # V2 off-chain manifest submit is phase-1/2 only: signature-verified,
     # durable, no payout/scoring until workers are wired. Default off so deploys
     # are inert unless explicitly enabled.
-    solution_manifest_enabled = _env_bool("CATHEDRAL_V2_ENABLED", False)
+    solution_manifest_enabled = _env_bool(
+        "CATHEDRAL_V2_ENABLED", launch_profile.converged())
     solution_manifest_max_bytes = _env_int("CATHEDRAL_V2_MAX_SOLUTION_BYTES", 0)
     solution_blob_upload_enabled = _env_bool(
         "CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", solution_manifest_enabled)
@@ -644,7 +674,17 @@ def build_app(
     v2_shadow_v1_enabled = _env_bool("CATHEDRAL_V2_SHADOW_V1_ENABLED", False)
     v2_shadow_v1_max_solution_bytes = _env_int(
         "CATHEDRAL_V2_SHADOW_V1_MAX_SOLUTION_BYTES", solution_blob_upload_max_bytes)
-    v2_submit_bitset_enabled = _env_bool("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", False)
+    v2_submit_bitset_enabled = _env_bool(
+        "CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", launch_profile.converged())
+    # V1-style lazy issuance for the V2 challenges page: descriptors only, no
+    # CNF generation or token minting at listing time. The miner gets the
+    # (time-bound) submit token, actual nvars, and cnf_sha256 from the CNF
+    # fetch headers -- it must fetch the CNF to solve it anyway. This removes
+    # the per-page CPU cost that melted the origin on 2026-07-08. Default off
+    # (on under the v2-converged launch profile) so existing page-token
+    # clients keep working until they migrate.
+    v2_lazy_issuance = _env_bool(
+        "CATHEDRAL_V2_LAZY_ISSUANCE", launch_profile.converged())
     v2_submit_token_secret = os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip()
     v2_submit_token_ttl_secs = max(1, _env_int("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", 300))
     v2_submit_token_allowlist = {
@@ -652,8 +692,34 @@ def build_app(
         for item in os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_ALLOWLIST", "").replace("\n", ",").split(",")
         if item.strip()
     }
+    # Phase 2 immutable CNF delivery.  Explicit rollout gate: the legacy
+    # body-plus-token endpoint remains authoritative until current+next epoch
+    # artifacts have been published and the operator enables metadata access.
+    v2_cnf_artifacts_enabled = _env_bool(
+        "CATHEDRAL_V2_CNF_ARTIFACTS_ENABLED", False)
     v2_submit_bitset_max_body_bytes = max(
         1024, _env_int("CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", 16_384))
+    v2_submit_backpressure_enabled = _env_bool(
+        "CATHEDRAL_V2_SUBMIT_BACKPRESSURE_ENABLED", False)
+    v2_submit_backpressure_max_pending = max(
+        0, _env_int("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_PENDING", 0))
+    v2_submit_backpressure_max_oldest_age_secs = max(
+        0.0, _env_float("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_OLDEST_AGE_SECS", 0.0))
+    v2_submit_backpressure_retry_after_secs = max(
+        1, _env_int("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_RETRY_AFTER_SECS", 5))
+    # Front-door shed for DB connection pressure (open-v2 incident 2026-07-08):
+    # under real all-miner load, submit admission and receipt polling exhausted
+    # PG connection acquisition (psycopg2.OperationalError from psycopg2.connect
+    # inside _pool.getconn) and surfaced as raw 500s + readiness flaps. When the
+    # DB is briefly unreachable/saturated, return a controlled 503 with a
+    # distinct reason + Retry-After instead of an unhandled OperationalError.
+    v2_db_unavailable_retry_after_secs = max(
+        1, _env_int("CATHEDRAL_V2_DB_UNAVAILABLE_RETRY_AFTER_SECS", 2))
+    # Receipt pollers hammer the origin immediately after submit and every poll
+    # is a DB read; a small dedicated concurrency gate keeps a poll flood from
+    # exhausting the PG pool before the shed above ever fires. 0 disables.
+    v2_receipt_poll_max_concurrency = max(
+        0, _env_int("CATHEDRAL_V2_RECEIPT_POLL_MAX_CONCURRENCY", 16))
     # /v2/agents/submit-bitset is an async handler, but the verify+admit body it
     # runs is sync CPU (CNF regeneration, witness check) + sync DB. Running that
     # inline on the event loop froze the whole worker (health checks, connection
@@ -734,6 +800,7 @@ def build_app(
         "pm_read_hard_cap": pm_read_hard_cap,
         "configured_pm_read_hard_cap": configured_pm_read_hard_cap,
         "pm_read_min_cap": pm_read_min_cap,
+        "v2_receipt_poll_max_concurrency": v2_receipt_poll_max_concurrency,
         "min_interval_secs": min_interval,
         "total": 0,
         "by_outcome": {},
@@ -858,6 +925,7 @@ def build_app(
                 "pm_read_hard_cap": submit_metrics["pm_read_hard_cap"],
                 "configured_pm_read_hard_cap": submit_metrics["configured_pm_read_hard_cap"],
                 "pm_read_min_cap": submit_metrics["pm_read_min_cap"],
+                "v2_receipt_poll_max_concurrency": submit_metrics["v2_receipt_poll_max_concurrency"],
                 "min_interval_secs": submit_metrics["min_interval_secs"],
                 "total": submit_metrics["total"],
                 "by_outcome": dict(submit_metrics["by_outcome"]),
@@ -1322,9 +1390,15 @@ def build_app(
             f"{_LEGACY_PREFIX}/v1/synthetic-boolean/per-miner/cnf",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
             f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/challenges",
             f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/cnf",
+            f"{_LEGACY_PREFIX}/v2/synthetic-boolean/per-miner/cnf-access",
         }
+        _V2_RECEIPT_POLL_PREFIXES = (
+            "/v2/agents/submit-bitset/receipts/",
+            f"{_LEGACY_PREFIX}/v2/agents/submit-bitset/receipts/",
+        )
 
         def __init__(self, asgi_app):
             self._app = asgi_app
@@ -1335,6 +1409,13 @@ def build_app(
             self._pm_read_gate = (
                 threading.BoundedSemaphore(pm_read_hard_cap)
                 if pm_read_hard_cap > 0 else None
+            )
+            # Dedicated gate for V2 receipt polling: each uncached poll is a DB
+            # read and live miners poll aggressively right after submit. Bounding
+            # concurrency here protects the PG pool (open-v2 incident 2026-07-08).
+            self._receipt_poll_gate = (
+                threading.BoundedSemaphore(v2_receipt_poll_max_concurrency)
+                if v2_receipt_poll_max_concurrency > 0 else None
             )
 
         async def __call__(self, scope, receive, send):
@@ -1352,6 +1433,9 @@ def build_app(
             elif method == "GET" and path in self._PM_READ_PATHS:
                 gate = self._pm_read_gate
                 reason = "per_miner_busy_retry"
+            elif method == "GET" and path.startswith(self._V2_RECEIPT_POLL_PREFIXES):
+                gate = self._receipt_poll_gate
+                reason = "receipt_poll_busy_retry"
 
             # Track 2 (item 7): per-hotkey fairness check BEFORE the global gate.
             # A single hotkey over its budget is rejected with the distinct
@@ -1480,6 +1564,7 @@ def build_app(
             "/v2/agents/submit-bitset/receipts/",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
             "/v2/validator/weights/next",
             "/v2/audit/epochs/",
             "/v2/receipts/",
@@ -1501,6 +1586,7 @@ def build_app(
             "/v2/agents/submit-bitset/receipts/",
             "/v2/synthetic-boolean/per-miner/challenges",
             "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
             "/v2/validator/weights/next",
             "/v2/audit/epochs/",
             "/v2/receipts/",
@@ -1579,6 +1665,45 @@ def build_app(
                 "more_body": False,
             })
 
+    class _V2CnfNoStoreMiddleware:
+        """Tokens/auth metadata on V2 CNF reads may never become cache entries."""
+
+        _PATHS = {
+            "/v2/synthetic-boolean/per-miner/challenges",
+            "/v2/synthetic-boolean/per-miner/cnf",
+            "/v2/synthetic-boolean/per-miner/cnf-access",
+        }
+
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self._app(scope, receive, send)
+                return
+            path = scope.get("path", "")
+            if path.startswith(_LEGACY_PREFIX + "/"):
+                path = path[len(_LEGACY_PREFIX):]
+            if path not in self._PATHS:
+                await self._app(scope, receive, send)
+                return
+
+            async def _send_no_store(message):
+                if message.get("type") == "http.response.start":
+                    headers = [
+                        (name, value)
+                        for name, value in message.get("headers", [])
+                        if name.lower() not in {b"cache-control", b"pragma"}
+                    ]
+                    headers.extend([
+                        (b"cache-control", b"no-store"),
+                        (b"pragma", b"no-cache"),
+                    ])
+                    message = {**message, "headers": headers}
+                await send(message)
+
+            await self._app(scope, receive, _send_no_store)
+
     app.add_middleware(_StripLegacyPrefixMiddleware)
     app.add_middleware(_SlowRequestLogMiddleware)
 
@@ -1595,9 +1720,12 @@ def build_app(
     # later middleware outside earlier middleware, so this runs before the
     # saturation gate and does not consume a slot.
     app.add_middleware(AbuseLimitMiddleware)
-    # Role guard is now the true outer edge: role-mismatched traffic fails before
-    # rate-limit state, request body parsing, or expensive route work.
+    # Role guard stays outside all work-producing middleware: role-mismatched
+    # traffic fails before rate-limit state, body parsing, or route work.
     app.add_middleware(_ServiceRoleGuardMiddleware)
+    # Wrap every V2 CNF read response, including validation/errors, so a token or
+    # authenticated metadata response can never be cached by a browser or edge.
+    app.add_middleware(_V2CnfNoStoreMiddleware)
     # Outermost observability layer: count every final response status (incl.
     # role-guard/backpressure rejections) so the 5xx rate is complete. Cheap —
     # reads only the response-start status, no body buffering.
@@ -2462,9 +2590,10 @@ def build_app(
         lane as if nothing changed.
         """
         try:
+            from . import launch_profile
             from . import per_miner as pm
             if (
-                pm.perminer_enabled()
+                (pm.perminer_enabled() or launch_profile.converged())
                 and not pm.perminer_shadow()
                 and weights_mod.perminer_scoring_mode() == "pm_primary"
             ):
@@ -3306,15 +3435,75 @@ def build_app(
     async def health_live():
         return _health_base("live", "not_checked")
 
-    @app.get("/health/ready")
-    async def health_ready():
+    # Readiness DB probe: OFF the event loop, single-flight, briefly cached.
+    # The old inline `store.query("SELECT 1")` was a blocking psycopg2 call in
+    # an async handler: under the 2026-07-08 open-v2 flood, one slow probe
+    # (pool churn / fresh connect, up to connect_timeout) stalled the whole
+    # event loop, so readiness itself timed out (edge 000/520) while the origin
+    # was otherwise admitting fine. Same failure class the submit path fixed
+    # with its dedicated executor. Probe rules: at most ONE DB ping in flight
+    # (1-thread executor + single-flight flag), concurrent callers serve the
+    # last-known state (stale-while-revalidate), result cached ~2s, probe
+    # bounded by a timeout so readiness answers promptly even when the DB
+    # hangs.
+    _ready_ttl_secs = max(0.5, _env_float("CATHEDRAL_READY_CACHE_SECS", 2.0))
+    _ready_timeout_secs = max(0.5, _env_float("CATHEDRAL_READY_TIMEOUT_SECS", 3.0))
+    # Disk headroom gate (2026-07-09 incident): Postgres dies ungracefully at
+    # 0 bytes free (WAL write PANIC -> crash -> failed recovery -> 8.5h outage).
+    # Failing readiness while headroom remains lets the edge watcher auto-abort
+    # an open window BEFORE the DB is damaged. 0 disables the check.
+    _ready_min_disk_free_mb = max(0.0, _env_float("CATHEDRAL_READY_MIN_DISK_FREE_MB", 2048.0))
+    _ready_disk_path = os.environ.get("CATHEDRAL_READY_DISK_PATH", "/") or "/"
+    _ready_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readyz")
+    _ready_lock = threading.Lock()
+    # Start stale-but-ok: build_app already ran store.migrate() against the DB,
+    # so "reachable at startup" is the honest initial state; at=0 forces the
+    # first request to refresh.
+    _ready_state: dict[str, Any] = {"at": 0.0, "ok": True, "error": "", "refreshing": False}
+
+    def _ready_db_probe() -> tuple[bool, str]:
         try:
             store.query("SELECT 1 AS ok")
-            return _health_base("ready", "ok")
         except Exception as exc:
-            payload = _health_base("ready", "error")
-            payload["error"] = type(exc).__name__
-            return JSONResponse(payload, status_code=503)
+            return False, type(exc).__name__
+        if _ready_min_disk_free_mb > 0:
+            try:
+                free_mb = shutil.disk_usage(_ready_disk_path).free / (1024 * 1024)
+            except Exception:
+                free_mb = None  # broken statfs must never fail readiness
+            if free_mb is not None and free_mb < _ready_min_disk_free_mb:
+                return False, f"DiskLow:{int(free_mb)}MB<{int(_ready_min_disk_free_mb)}MB"
+        return True, ""
+
+    @app.get("/health/ready")
+    async def health_ready():
+        refresh = False
+        with _ready_lock:
+            stale = (time.monotonic() - _ready_state["at"]) >= _ready_ttl_secs
+            if stale and not _ready_state["refreshing"]:
+                _ready_state["refreshing"] = True
+                refresh = True
+            ok, err = _ready_state["ok"], _ready_state["error"]
+        if refresh:
+            try:
+                ok, err = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        _ready_executor, _ready_db_probe),
+                    timeout=_ready_timeout_secs,
+                )
+            except asyncio.TimeoutError:
+                ok, err = False, "ReadyProbeTimeout"
+            except Exception as exc:
+                ok, err = False, type(exc).__name__
+            finally:
+                with _ready_lock:
+                    _ready_state.update(
+                        at=time.monotonic(), ok=ok, error=err, refreshing=False)
+        if ok:
+            return _health_base("ready", "ok")
+        payload = _health_base("ready", "error")
+        payload["error"] = err
+        return JSONResponse(payload, status_code=503)
 
     @app.get("/health")
     async def health():
@@ -5709,6 +5898,100 @@ def build_app(
         if v2_submit_token_allowlist and str(hotkey).strip() not in v2_submit_token_allowlist:
             raise HTTPException(403, "v2_submit_token_hotkey_not_allowlisted")
 
+    def _authorize_v2_cnf_access(
+        request: Request,
+        *,
+        challenge_id: str,
+        tier: int | None,
+        seq: int | None,
+        hotkey: str,
+        signature: str,
+        submitted_at: str | None,
+        require_submit_token: bool,
+    ) -> dict[str, Any]:
+        """The single auth/ownership/grace contract for both V2 CNF paths."""
+        if not solution_manifest_enabled:
+            raise HTTPException(404, "solution_manifest_v2_not_enabled")
+        from . import per_miner as pm
+        if not v2_pipeline.v2_perminer_enabled():
+            raise HTTPException(404, "v2_per_miner_not_enabled")
+        _require_v2_perminer_ready(pm)
+        if submitted_at is None:
+            raise HTTPException(401, "missing X-Cathedral-Submitted-At")
+        _verify_hotkey_claim(
+            hotkey,
+            signature,
+            submitted_at,
+            challenge_id="",
+            dimacs_solution_sha256="",
+        )
+        mark_verified_hotkey(request, hotkey)
+        parsed = pm.parse_challenge_id(challenge_id)
+        current_epoch = pm.current_epoch()
+        epoch = int(parsed["epoch"]) if parsed else current_epoch
+        if epoch not in (current_epoch, current_epoch - 1):
+            raise HTTPException(410, "per_miner_challenge_expired")
+        assignment_identity = _assignment_identity_for_hotkey(hotkey)
+        tier_seq = pm.resolve_tier_seq_for(
+            assignment_identity,
+            epoch,
+            challenge_id,
+            tier=tier,
+            seq=seq,
+        )
+        if tier_seq is None:
+            raise HTTPException(404, "challenge_id_not_in_miner_set")
+        tier_i, seq_i = tier_seq
+        if require_submit_token:
+            if not v2_submit_bitset_enabled:
+                raise HTTPException(404, "v2_submit_bitset_not_enabled")
+            _require_v2_submit_token_mint_allowed(hotkey)
+            if not v2_submit_token_secret:
+                raise HTTPException(503, "v2_submit_token_secret_missing")
+        return {
+            "pm": pm,
+            "challenge_id": challenge_id,
+            "hotkey": hotkey,
+            "assignment_identity": assignment_identity,
+            "epoch": epoch,
+            "tier": int(tier_i),
+            "seq": int(seq_i),
+        }
+
+    def _mint_v2_cnf_submit_token(
+        context: dict[str, Any],
+        *,
+        n_vars: int,
+        cnf_sha256: str,
+    ) -> tuple[str, str]:
+        expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+        token = v2_bitset_submit.mint_submit_token(
+            secret=v2_submit_token_secret,
+            miner_hotkey=str(context["hotkey"]),
+            challenge_id=str(context["challenge_id"]),
+            epoch=int(context["epoch"]),
+            tier=int(context["tier"]),
+            seq=int(context["seq"]),
+            nvars=int(n_vars),
+            cnf_sha256=str(cnf_sha256),
+            expires_at=expires_at,
+        )
+        return token, expires_at
+
+    def _artifact_for_v2_cnf_context(
+        context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        artifact = v2_cnf_artifacts.get_artifact(
+            v2_store, str(context["challenge_id"]))
+        if artifact is None:
+            return None
+        if any(
+            int(artifact[field]) != int(context[field])
+            for field in ("epoch", "tier", "seq")
+        ):
+            return None
+        return artifact
+
     @app.get("/v2/synthetic-boolean/per-miner/challenges")
     async def v2_per_miner_challenges(
         request: Request,
@@ -5735,10 +6018,21 @@ def build_app(
                 )
                 mark_verified_hotkey(request, x_cathedral_hotkey)
                 epoch = pm.current_epoch()
+                # V1 parity: instances derive from the scoring identity (coldkey
+                # collapse aware). Signing/receipts stay on the raw hotkey.
+                v2_assignment_identity = _assignment_identity_for_hotkey(
+                    x_cathedral_hotkey)
                 effective_limit = pm.assignment_page_limit(limit)
                 items = pm.miner_instance_set(
-                    x_cathedral_hotkey, epoch, offset=offset, limit=effective_limit)
-                if v2_submit_bitset_enabled:
+                    v2_assignment_identity, epoch, offset=offset, limit=effective_limit)
+                if v2_submit_bitset_enabled and v2_lazy_issuance:
+                    _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
+                    if not v2_submit_token_secret:
+                        raise HTTPException(503, "v2_submit_token_secret_missing")
+                    for item in items:
+                        item["assignment_encoding"] = "bitset/v1"
+                        item["token_source"] = "cnf_fetch"
+                elif v2_submit_bitset_enabled:
                     _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                     if not v2_submit_token_secret:
                         raise HTTPException(503, "v2_submit_token_secret_missing")
@@ -5756,7 +6050,7 @@ def build_app(
                         cnf_text = v2_cnf_store.get(v2_store, cid)
                         if cnf_text is None:
                             meta_cid, cnf_sha, actual_nvars, is_real, cnf_text = pm.item_meta(
-                                x_cathedral_hotkey, epoch, tier_i, seq_i)
+                                v2_assignment_identity, epoch, tier_i, seq_i)
                             if meta_cid != cid:
                                 raise HTTPException(500, "v2_challenge_generation_mismatch")
                             try:
@@ -5767,10 +6061,10 @@ def build_app(
                             actual_nvars, _clauses = parse_cnf(cnf_text)
                             cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
                             is_real = pm.uses_real_instance(
-                                x_cathedral_hotkey, epoch, tier_i, seq_i)
+                                v2_assignment_identity, epoch, tier_i, seq_i)
                         item["n_vars"] = actual_nvars
                         item["kind"] = (
-                            real_corpus.kind_for(epoch, tier_i, seq_i, salt=x_cathedral_hotkey)
+                            real_corpus.kind_for(epoch, tier_i, seq_i, salt=v2_assignment_identity)
                             if is_real else "random_3sat_perminer"
                         )
                         item["cnf_sha256"] = cnf_sha
@@ -5790,9 +6084,10 @@ def build_app(
                 return {
                     "family_id": _FAMILY,
                     "kind": "per_miner_v2",
+                    "issuance": "lazy" if (v2_submit_bitset_enabled and v2_lazy_issuance) else "eager",
                     "epoch": epoch,
                     "miner_hotkey": x_cathedral_hotkey,
-                    "assignment_identity": x_cathedral_hotkey,
+                    "assignment_identity": v2_assignment_identity,
                     "offset": offset,
                     "requested_limit": limit,
                     "limit": effective_limit,
@@ -5806,10 +6101,89 @@ def build_app(
                     "blob_upload_path": "/v2/blobs/solutions",
                     "cnf_path": "/v2/synthetic-boolean/per-miner/cnf",
                     "cnf_params": ["challenge_id", "tier", "seq"],
+                    "cnf_access_path": (
+                        "/v2/synthetic-boolean/per-miner/cnf-access"
+                        if v2_cnf_artifacts_enabled else None
+                    ),
+                    "cnf_access_params": ["challenge_id", "tier", "seq"],
                 }
 
         import asyncio
-        return await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
+        payload = await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
+        return JSONResponse(
+            payload,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/v2/synthetic-boolean/per-miner/cnf-access")
+    async def v2_per_miner_cnf_access(
+        request: Request,
+        challenge_id: str = Query(...),
+        tier: int | None = Query(None, ge=1),
+        seq: int | None = Query(None, ge=0),
+        x_cathedral_hotkey: str = Header(...),
+        x_cathedral_signature: str = Header(...),
+        x_cathedral_submitted_at: str | None = Header(None),
+    ):
+        def _run():
+            if not v2_cnf_artifacts_enabled:
+                raise HTTPException(404, "v2_cnf_artifacts_not_enabled")
+            with v2_pipeline.v2_pm_env():
+                context = _authorize_v2_cnf_access(
+                    request,
+                    challenge_id=challenge_id,
+                    tier=tier,
+                    seq=seq,
+                    hotkey=x_cathedral_hotkey,
+                    signature=x_cathedral_signature,
+                    submitted_at=x_cathedral_submitted_at,
+                    require_submit_token=True,
+                )
+                epoch = int(context["epoch"])
+                if not v2_cnf_artifacts.epoch_is_ready(v2_store, epoch):
+                    raise HTTPException(503, "v2_cnf_artifacts_not_ready")
+                artifact = _artifact_for_v2_cnf_context(context)
+                if artifact is None:
+                    # A ready epoch may never silently degrade to generation on
+                    # the metadata path: that would put unique bytes back on the
+                    # origin and make a partial publication look complete.
+                    raise HTTPException(503, "v2_cnf_artifact_missing")
+                token, expires_at = _mint_v2_cnf_submit_token(
+                    context,
+                    n_vars=int(artifact["n_vars"]),
+                    cnf_sha256=str(artifact["cnf_sha256"]),
+                )
+                return {
+                    "schema": v2_cnf_artifacts.ACCESS_SCHEMA,
+                    "challenge_id": challenge_id,
+                    "epoch": epoch,
+                    "tier": int(context["tier"]),
+                    "seq": int(context["seq"]),
+                    "n_vars": int(artifact["n_vars"]),
+                    "artifact_version": v2_cnf_artifacts.ARTIFACT_VERSION,
+                    "artifact_url": str(artifact["artifact_url"]),
+                    "artifact_key": str(artifact["artifact_key"]),
+                    "cnf_sha256": str(artifact["cnf_sha256"]),
+                    "cnf_bytes": int(artifact["cnf_bytes"]),
+                    "content_type": v2_cnf_artifacts.ARTIFACT_CONTENT_TYPE,
+                    "compression": "identity",
+                    "artifact_cache_control": v2_cnf_artifacts.ARTIFACT_CACHE_CONTROL,
+                    "assignment_encoding": "bitset/v1",
+                    "submit_path": "/v2/agents/submit-bitset",
+                    "submit_token": token,
+                    "submit_token_expires_at": expires_at,
+                }
+
+        import asyncio
+        payload = await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
+        return JSONResponse(
+            payload,
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
     @app.get("/v2/synthetic-boolean/per-miner/cnf")
     async def v2_per_miner_cnf(
@@ -5822,77 +6196,76 @@ def build_app(
         x_cathedral_submitted_at: str | None = Header(None),
     ):
         def _run():
-            if not solution_manifest_enabled:
-                raise HTTPException(404, "solution_manifest_v2_not_enabled")
-            from . import per_miner as pm
             with v2_pipeline.v2_pm_env():
-                if not v2_pipeline.v2_perminer_enabled():
-                    raise HTTPException(404, "v2_per_miner_not_enabled")
-                _require_v2_perminer_ready(pm)
-                if x_cathedral_submitted_at is None:
-                    raise HTTPException(401, "missing X-Cathedral-Submitted-At")
-                _verify_hotkey_claim(
-                    x_cathedral_hotkey, x_cathedral_signature, x_cathedral_submitted_at,
-                    challenge_id="", dimacs_solution_sha256="",
+                context = _authorize_v2_cnf_access(
+                    request,
+                    challenge_id=challenge_id,
+                    tier=tier,
+                    seq=seq,
+                    hotkey=x_cathedral_hotkey,
+                    signature=x_cathedral_signature,
+                    submitted_at=x_cathedral_submitted_at,
+                    require_submit_token=False,
                 )
-                mark_verified_hotkey(request, x_cathedral_hotkey)
-                parsed = pm.parse_challenge_id(challenge_id)
-                epoch = int(parsed["epoch"]) if parsed else pm.current_epoch()
-                tier_seq = pm.resolve_tier_seq_for(
-                    x_cathedral_hotkey, epoch, challenge_id, tier=tier, seq=seq)
-                if tier_seq is None:
-                    raise HTTPException(404, "challenge_id_not_in_miner_set")
-                tier_i, seq_i = tier_seq
-                # Ownership is proven by resolve_tier_seq_for above (challenge_id is
-                # HMAC-bound to this hotkey), so the immutable cached body can be
-                # served without generating. Read-through: on a miss, generate exactly
-                # as before and best-effort bake so the next reader (this endpoint or
-                # the challenges page) hits. CATHEDRAL_V2_CNF_STORE_READ=0 makes
-                # get() return None, restoring always-generate.
-                cid = challenge_id
-                cnf_text = v2_cnf_store.get(v2_store, challenge_id)
+                pm = context["pm"]
+                epoch = int(context["epoch"])
+                tier_i = int(context["tier"])
+                seq_i = int(context["seq"])
+                assignment_identity = str(context["assignment_identity"])
+                artifact = _artifact_for_v2_cnf_context(context)
+                reused_published_bytes = False
+                if artifact is not None:
+                    cnf_text = v2_cnf_store.get(
+                        v2_store,
+                        challenge_id,
+                        expected_sha256=str(artifact["cnf_sha256"]),
+                    )
+                    reused_published_bytes = cnf_text is not None
+                else:
+                    cnf_text = v2_cnf_store.get(v2_store, challenge_id)
                 if cnf_text is None:
                     gen_cid, cnf_text, _ = pm.generate_instance(
-                        x_cathedral_hotkey, epoch, tier_i, seq_i)
+                        assignment_identity, epoch, tier_i, seq_i)
                     if gen_cid != challenge_id:
                         raise HTTPException(404, "challenge_id_not_in_miner_set")
                     try:
                         v2_cnf_store.put(v2_store, challenge_id, cnf_text)
                     except Exception:
                         pass
+                cnf_bytes = cnf_text.encode("utf-8")
+                cnf_sha = hashlib.sha256(cnf_bytes).hexdigest()
                 headers = {
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*",
                     "X-Cathedral-V2": "true",
-                    "X-Perminer-Challenge-Id": cid,
+                    "X-Perminer-Challenge-Id": challenge_id,
                     "X-Perminer-Tier": str(tier_i),
                     "X-Perminer-Seq": str(seq_i),
                     "X-Perminer-Epoch": str(epoch),
+                    "X-Cathedral-CNF-Sha256": cnf_sha,
+                    "X-Cathedral-CNF-Bytes": str(len(cnf_bytes)),
                 }
+                if reused_published_bytes and artifact is not None:
+                    headers.update({
+                        "X-Cathedral-CNF-Artifact-Reused": "true",
+                        "X-Cathedral-CNF-Artifact-Key": str(artifact["artifact_key"]),
+                    })
                 if v2_submit_bitset_enabled:
                     _require_v2_submit_token_mint_allowed(x_cathedral_hotkey)
                     if not v2_submit_token_secret:
                         raise HTTPException(503, "v2_submit_token_secret_missing")
                     from ..dimacs import parse_cnf
-                    # Bind to the ACTUAL generated CNF's var count, not the nominal tier
-                    # shape — see the analogous fix in v2_per_miner_challenges above.
                     actual_nvars, _clauses = parse_cnf(cnf_text)
-                    cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
-                    expires_at = _now_iso_ms_plus(v2_submit_token_ttl_secs)
+                    token, expires_at = _mint_v2_cnf_submit_token(
+                        context,
+                        n_vars=actual_nvars,
+                        cnf_sha256=cnf_sha,
+                    )
                     headers.update({
                         "X-Cathedral-Submit-Path": "/v2/agents/submit-bitset",
-                        "X-Cathedral-Submit-Token": v2_bitset_submit.mint_submit_token(
-                            secret=v2_submit_token_secret,
-                            miner_hotkey=x_cathedral_hotkey,
-                            challenge_id=cid,
-                            epoch=epoch,
-                            tier=tier_i,
-                            seq=seq_i,
-                            nvars=actual_nvars,
-                            cnf_sha256=cnf_sha,
-                            expires_at=expires_at,
-                        ),
+                        "X-Cathedral-Submit-Token": token,
                         "X-Cathedral-Submit-Token-Expires-At": expires_at,
                         "X-Cathedral-Assignment-Encoding": "bitset/v1",
-                        "X-Cathedral-CNF-Sha256": cnf_sha,
                     })
                 return PlainTextResponse(
                     cnf_text,
@@ -6385,6 +6758,97 @@ def build_app(
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
+    def _v2_submit_existing_receipt(submit: dict[str, Any]) -> dict[str, Any] | None:
+        idem = v2_bitset_submit.idempotency_key(
+            miner_hotkey=submit["miner_hotkey"],
+            challenge_id=submit["challenge_id"],
+        )
+        rows = v2_store.query(
+            "SELECT * FROM v2_submit_events WHERE idempotency_key=? LIMIT 1",
+            (idem,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        try:
+            return {k: row[k] for k in row.keys()}
+        except Exception:
+            return dict(row)
+
+    def _is_db_unavailable_error(exc: BaseException) -> bool:
+        """True when exc (or its cause/context chain) is a DB availability
+        failure: psycopg2 OperationalError (connect refused/timeout under
+        connection pressure), psycopg2 pool PoolError (pool exhausted), or
+        sqlite3 OperationalError ("database is locked"). Matching by class
+        name/module keeps psycopg2 an optional import on sqlite deployments."""
+        seen: set[int] = set()
+        cur: BaseException | None = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            name = type(cur).__name__
+            module = getattr(type(cur), "__module__", "") or ""
+            if name in {"OperationalError", "PoolError"} and (
+                    module.startswith("psycopg2") or module == "sqlite3"):
+                return True
+            cur = cur.__cause__ or cur.__context__
+        return False
+
+    def _v2_db_unavailable_response() -> JSONResponse:
+        """Controlled shed for transient DB connection pressure on the V2
+        submit/receipt hot path (open-v2 incident 2026-07-08): a distinct 503 +
+        Retry-After instead of an unhandled psycopg2.OperationalError 500."""
+        reason = "v2_db_unavailable_retry"
+        return JSONResponse(
+            {
+                "schema": "cathedral.v2.db_unavailable.v1",
+                "detail": reason,
+                "reason": reason,
+                "message": "V2 origin database is briefly saturated. Retry shortly.",
+                "retry_after_seconds": v2_db_unavailable_retry_after_secs,
+            },
+            status_code=503,
+            headers={
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+                "Retry-After": str(v2_db_unavailable_retry_after_secs),
+                # Literal on purpose: the miner error contract drift-check
+                # (test_miner_error_contract.py) greps static header values.
+                "X-Cathedral-Rejection-Reason": "v2_db_unavailable_retry",
+            },
+        )
+
+    def _v2_submit_backpressure_snapshot() -> dict[str, Any] | None:
+        if not v2_submit_backpressure_enabled:
+            return None
+        pending = _v2_verify_pending_metrics_uncached()
+        pending_count = int(pending.get("pending_count") or 0)
+        oldest_age = pending.get("oldest_pending_age_secs")
+        reasons: list[str] = []
+        if (
+            v2_submit_backpressure_max_pending > 0
+            and pending_count >= v2_submit_backpressure_max_pending
+        ):
+            reasons.append("pending_count")
+        if (
+            v2_submit_backpressure_max_oldest_age_secs > 0
+            and oldest_age is not None
+            and float(oldest_age) >= v2_submit_backpressure_max_oldest_age_secs
+        ):
+            reasons.append("oldest_pending_age")
+        if not reasons:
+            return None
+        return {
+            "schema": "cathedral.v2.submit_backpressure.v1",
+            "detail": "v2_submit_backpressure",
+            "reason": "v2_submit_backpressure",
+            "reasons": reasons,
+            "pending_count": pending_count,
+            "oldest_pending_age_secs": oldest_age,
+            "max_pending": v2_submit_backpressure_max_pending,
+            "max_oldest_pending_age_secs": v2_submit_backpressure_max_oldest_age_secs,
+            "retry_after_seconds": v2_submit_backpressure_retry_after_secs,
+        }
+
     @app.post("/v2/agents/submit-bitset")
     async def submit_bitset_v2(
         request: Request,
@@ -6460,6 +6924,39 @@ def build_app(
         except v2_bitset_submit.BitsetSubmitError as exc:
             raise HTTPException(400, exc.reason)
 
+        try:
+            existing = _v2_submit_existing_receipt(submit)
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
+        if existing is not None:
+            payload = v2_bitset_submit.receipt_payload(existing, inserted=False)
+            payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
+            return JSONResponse(
+                payload,
+                status_code=200,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+
+        try:
+            backpressure = _v2_submit_backpressure_snapshot()
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
+        if backpressure is not None:
+            return JSONResponse(
+                backpressure,
+                status_code=503,
+                headers={
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*",
+                    "Retry-After": str(v2_submit_backpressure_retry_after_secs),
+                    "X-Cathedral-Rejection-Reason": "v2_submit_backpressure",
+                },
+            )
+
         def _admit_received():
             with v2_pipeline.v2_pm_env():
                 if not v2_pipeline.v2_perminer_enabled():
@@ -6468,14 +6965,21 @@ def build_app(
                 tier_i = int(token_payload["tier"])
                 seq_i = int(token_payload["seq"])
                 epoch_i = int(token_payload["epoch"])
+                current_epoch = pm.current_epoch()
+                if epoch_i not in (current_epoch, current_epoch - 1):
+                    # V1 parity: stale-epoch tokens are refused at admit, so the
+                    # verify worker and payout bridge only ever see in-window work.
+                    raise HTTPException(410, "per_miner_challenge_expired")
+                v2_assignment_identity = _assignment_identity_for_hotkey(
+                    x_cathedral_hotkey)
                 resolved = pm.resolve_tier_seq_for(
-                    x_cathedral_hotkey, epoch_i, submit["challenge_id"],
+                    v2_assignment_identity, epoch_i, submit["challenge_id"],
                     tier=tier_i, seq=seq_i)
                 if resolved is None:
                     raise HTTPException(400, "challenge_id_not_in_miner_set")
                 challenge_kind = (
-                    real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=x_cathedral_hotkey)
-                    if pm.uses_real_instance(x_cathedral_hotkey, epoch_i, tier_i, seq_i)
+                    real_corpus.kind_for(epoch_i, tier_i, seq_i, salt=v2_assignment_identity)
+                    if pm.uses_real_instance(v2_assignment_identity, epoch_i, tier_i, seq_i)
                     else "random_3sat_perminer"
                 )
             return v2_bitset_submit.admit_received_event(
@@ -6488,8 +6992,13 @@ def build_app(
                 challenge_kind=challenge_kind,
             )
 
-        row, inserted = await asyncio.get_running_loop().run_in_executor(
-            v2_submit_executor, _admit_received)
+        try:
+            row, inserted = await asyncio.get_running_loop().run_in_executor(
+                v2_submit_executor, _admit_received)
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
         payload = v2_bitset_submit.receipt_payload(row, inserted=inserted)
         payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
         return JSONResponse(
@@ -6502,7 +7011,12 @@ def build_app(
     def submit_bitset_receipt_v2(receipt_id: str):
         if not (solution_manifest_enabled and v2_submit_bitset_enabled):
             raise HTTPException(404, "v2_submit_bitset_not_enabled")
-        row = v2_bitset_submit.get_receipt(v2_store, receipt_id)
+        try:
+            row = v2_bitset_submit.get_receipt(v2_store, receipt_id)
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return _v2_db_unavailable_response()
+            raise
         if row is None:
             raise HTTPException(404, "receipt_not_found")
         return JSONResponse(

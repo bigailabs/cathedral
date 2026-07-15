@@ -347,6 +347,63 @@ def test_verify_worker_hits_cache_when_prebaked(tmp_path, monkeypatch):
     assert after["cnf_store_misses"] == before["cnf_store_misses"]
 
 
+def test_bitset_verify_worker_hits_cache_when_prebaked(tmp_path, monkeypatch):
+    app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=True)
+    client = TestClient(app)
+    kp = _keypair("//CnfStoreBitsetHit")
+    item = _fetch_item(client, kp)  # mint-time bake happens here
+
+    with v2_pipeline.v2_pm_env():
+        _cid, cnf_text, assignment = pm.generate_instance(
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+
+    baked = v2_cnf_store.get(
+        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
+    assert baked == cnf_text
+
+    assignment_b64 = base64.b64encode(
+        v2_pipeline.encode_bitset_assignment(assignment)
+    ).decode("ascii")
+    body = {
+        "schema": "cathedral.v2.submit_bitset.v1",
+        "card_id": _FAMILY,
+        "challenge_id": item["challenge_id"],
+        "submit_token": item["submit_token"],
+        "assignment_encoding": "bitset/v1",
+        "assignment_b64": assignment_b64,
+    }
+    from scaffold.publisher import v2_bitset_submit
+    submitted_at = _now_iso()
+    submit = v2_bitset_submit.normalize_submit_body(
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY)
+    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+    r = client.post(
+        "/v2/agents/submit-bitset", json=body,
+        headers={
+            "X-Cathedral-Hotkey": kp.ss58_address,
+            "X-Cathedral-Signature": sig,
+            "X-Cathedral-Submitted-At": submitted_at,
+        },
+    )
+    assert r.status_code == 202, r.text
+    assert r.json()["status"] == "received"
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("generate_instance called despite a prebaked bitset row")
+
+    monkeypatch.setattr(pm, "generate_instance", _boom)
+
+    before = v2_pipeline.cnf_store_metrics()
+    results = v2_pipeline.process_bitset_batch(
+        v2_store, worker_id="test-bitset-hit", batch_size=8, lock_secs=60)
+    after = v2_pipeline.cnf_store_metrics()
+
+    assert len(results) == 1
+    assert results[0]["status"] == v2_pipeline.STATUS_VERIFIED, results[0]
+    assert after["cnf_store_hits"] == before["cnf_store_hits"] + 1
+    assert after["cnf_store_misses"] == before["cnf_store_misses"]
+
+
 def test_verify_worker_falls_back_and_backfills_on_cache_miss(tmp_path, monkeypatch):
     # submit_bitset disabled so the challenge-list mint-time write never runs —
     # the store starts empty for this challenge_id.
@@ -577,3 +634,29 @@ def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch
     monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_READ", raising=False)
     on = _fetch_item(client, kp)
     assert on["cnf_sha256"] == poison_sha
+
+
+# ---- retention_hours (env knob, 2026-07-09 disk-full incident) -------------
+
+def test_retention_hours_default_is_4(monkeypatch):
+    monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", raising=False)
+    assert v2_cnf_store.retention_hours() == 4.0
+
+
+def test_retention_hours_env_override(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "8.5")
+    assert v2_cnf_store.retention_hours() == 8.5
+
+
+def test_retention_hours_clamped_to_2h_floor(monkeypatch):
+    """A too-small window could purge the current epoch's CNFs out from under
+    the verifier; the floor makes that misconfiguration impossible."""
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "0.25")
+    assert v2_cnf_store.retention_hours() == 2.0
+
+
+def test_retention_hours_garbage_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "banana")
+    assert v2_cnf_store.retention_hours() == 4.0
+    monkeypatch.setenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "")
+    assert v2_cnf_store.retention_hours() == 4.0

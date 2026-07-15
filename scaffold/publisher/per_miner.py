@@ -572,13 +572,20 @@ def record_perminer_solve(
     tier: int,
     seq: int,
     verified: bool,
+    *,
+    difficulty_weight: float | None = None,
 ) -> bool:
     """Record a per-miner solve attempt (idempotent — one solve per hotkey+challenge).
     Returns True if newly recorded, False if already existed.
+
+    difficulty_weight overrides the recomputed weight_for(tier) so a caller that
+    already scored the solve under its own env (the V2 verifier inside
+    v2_pm_env) records EXACTLY what it verified, never a legacy/default value.
     """
     def _do(conn):
         return int(record_perminer_solve_tx(
-            conn, hotkey, epoch, challenge_id, tier, seq, verified) or 0)
+            conn, hotkey, epoch, challenge_id, tier, seq, verified,
+            difficulty_weight=difficulty_weight) or 0)
 
     return bool(store.write(_do))
 
@@ -593,9 +600,13 @@ def record_perminer_solve_tx(
     verified: bool,
     *,
     solved_at_iso: str | None = None,
+    difficulty_weight: float | None = None,
 ) -> bool:
     """Transaction-local per-miner solve insert."""
-    dw = weight_for(tier) if verified else 0.0
+    if difficulty_weight is not None:
+        dw = float(difficulty_weight)
+    else:
+        dw = weight_for(tier) if verified else 0.0
     cur = conn.execute(
         "INSERT OR IGNORE INTO per_miner_solves"
         "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, verified, solved_at_iso) "

@@ -13,6 +13,7 @@ from scaffold.publisher import ratelimit
 def test_v2_per_miner_reads_are_exempt_from_global_limiter():
     assert ratelimit._is_exempt("/v2/synthetic-boolean/per-miner/challenges")
     assert ratelimit._is_exempt("/v2/synthetic-boolean/per-miner/cnf")
+    assert ratelimit._is_exempt("/v2/synthetic-boolean/per-miner/cnf-access")
 
 
 def test_v1_per_miner_reads_still_exempt():
@@ -37,3 +38,4 @@ def test_v2_per_miner_reads_are_abuse_targets():
     # when the abuse limiter is enabled, v2 hot reads get graduated backoff too
     assert ("GET", "/v2/synthetic-boolean/per-miner/challenges") in ratelimit._ABUSE_TARGETS
     assert ("GET", "/v2/synthetic-boolean/per-miner/cnf") in ratelimit._ABUSE_TARGETS
+    assert ("GET", "/v2/synthetic-boolean/per-miner/cnf-access") in ratelimit._ABUSE_TARGETS

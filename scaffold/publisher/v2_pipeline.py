@@ -83,6 +83,30 @@ _V2_PM_ENV_MAP = {
 }
 
 
+def _scoring_identity(store: Store, hotkey: str) -> str:
+    """V1-parity assignment identity (coldkey collapse aware).
+
+    Same semantics as app._assignment_identity_for_hotkey: when collapse is on
+    and a coldkey_map row exists, instances derive from the coldkey; otherwise
+    the raw hotkey. Signing and receipts always stay on the raw hotkey."""
+    from . import weights as weights_mod
+    return weights_mod.scoring_identity_for_hotkey(
+        store, hotkey, require_mapped=False) or hotkey
+
+
+def pm_payout_bridge_enabled() -> bool:
+    """When on, a VERIFIED bitset event also records a per_miner_solves row so
+    the existing pm_primary scoring path pays V2 submits. This is the V1->V2
+    convergence bridge: validators keep consuming the identical signed vector;
+    only the miner-facing protocol changes. Default off; implied on by the
+    v2-converged launch profile."""
+    from . import launch_profile
+    if launch_profile.converged():
+        return True
+    return os.environ.get(
+        "CATHEDRAL_V2_PM_PAYOUT_BRIDGE", "").strip().lower() in _ENV_TRUTHY
+
+
 def v2_perminer_enabled() -> bool:
     """Enabled-gate for the V2 per-miner surface, read from env directly.
 
@@ -93,6 +117,11 @@ def v2_perminer_enabled() -> bool:
     once pin_v2_pm_env() runs, because the pin deliberately never sets the
     legacy CATHEDRAL_PERMINER_ENABLED.
     """
+    from . import launch_profile
+    if launch_profile.converged() and "CATHEDRAL_V2_PERMINER_ENABLED" not in os.environ:
+        # The converged launch profile implies the V2 per-miner surface;
+        # an explicit env still wins (contradictions fail closed at boot).
+        return True
     if "CATHEDRAL_V2_PERMINER_ENABLED" in os.environ:
         raw = os.environ["CATHEDRAL_V2_PERMINER_ENABLED"]
     else:
@@ -109,8 +138,10 @@ def pin_v2_pm_env() -> bool:
     (challenges fetch, CNF fetch, submit) and the verify worker to
     one-at-a-time per process.
 
-    Opt-in via CATHEDRAL_V2_PERMINER_ENV_PIN (default off: behavior stays
-    byte-identical to the bridged path). Refuses, leaving the bridge in place:
+    Enabled automatically by the v2-converged launch profile, which is the
+    deployment path that promises one coherent env surface. Legacy/surgical
+    rollouts can still opt in via CATHEDRAL_V2_PERMINER_ENV_PIN. Refuses,
+    leaving the bridge in place:
       - when the unprefixed CATHEDRAL_PERMINER_ENABLED is truthy -- the V1
         per-miner surface is live in this process and overwriting its config
         would corrupt it;
@@ -122,8 +153,14 @@ def pin_v2_pm_env() -> bool:
     pm_primary /leaderboard/recent compatibility path keys off it). The V2
     handlers gate on v2_perminer_enabled() instead.
     """
+    from . import launch_profile
+
     global _PM_ENV_PINNED
-    if os.environ.get("CATHEDRAL_V2_PERMINER_ENV_PIN", "").strip().lower() not in _ENV_TRUTHY:
+    explicit_pin = (
+        os.environ.get("CATHEDRAL_V2_PERMINER_ENV_PIN", "").strip().lower()
+        in _ENV_TRUTHY
+    )
+    if not (explicit_pin or launch_profile.converged()):
         return False
     if os.environ.get("CATHEDRAL_PERMINER_ENABLED", "").strip().lower() in _ENV_TRUTHY:
         print(
@@ -437,7 +474,11 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
             _finish_rejected(store, rid, "unsupported_challenge_kind")
             return {"id": rid, "status": STATUS_REJECTED, "reason": "unsupported_challenge_kind"}
         epoch = int(parsed["epoch"])
-        tier_seq = pm.resolve_tier_seq_for(miner_hotkey, epoch, challenge_id)
+        # V1 parity: ownership resolves against the scoring identity (coldkey
+        # collapse aware), matching the mint/admit sites. Raw hotkey stays the
+        # signing/receipt identity.
+        _manifest_identity = _scoring_identity(store, miner_hotkey)
+        tier_seq = pm.resolve_tier_seq_for(_manifest_identity, epoch, challenge_id)
         if tier_seq is None:
             _finish_rejected(store, rid, "assignment_required_fetch_challenges_first")
             return {"id": rid, "status": STATUS_REJECTED, "reason": "assignment_required_fetch_challenges_first"}
@@ -460,7 +501,7 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
         else:
             _record_cnf_store_miss()
             # Fallback: EXACT existing regeneration path, unchanged.
-            generated = pm.get_miner_cnf(miner_hotkey, epoch, tier, seq)
+            generated = pm.get_miner_cnf(_manifest_identity, epoch, tier, seq)
             if generated is None:
                 _finish_rejected(store, rid, "challenge_id_not_in_miner_set")
                 return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_not_in_miner_set"}
@@ -501,7 +542,7 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
         return {"id": rid, "status": STATUS_REJECTED, "reason": "unsupported_assignment_encoding"}
 
     with v2_pm_env():
-        ok, reason = pm.verify_miner_submission_for(miner_hotkey, epoch, tier, seq, challenge_id, assignment)
+        ok, reason = pm.verify_miner_submission_for(_manifest_identity, epoch, tier, seq, challenge_id, assignment)
         weight = pm.weight_for(tier)
     if not ok:
         _finish_rejected(store, rid, reason or "witness_check_failed")
@@ -580,8 +621,12 @@ def process_batch(
     # Opportunistic purge of old baked CNFs — self-throttled to at most once
     # per ~10 minutes inside v2_cnf_store, so it is cheap to call every tick.
     # Best-effort: maybe_purge_older_than swallows all errors internally.
+    # Window is env-tunable (CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS, default
+    # 4h, clamped >=2h) — the old hardcoded 24h accumulated ~8.7GB/day under
+    # all-miner load and filled the disk (2026-07-09 incident).
     try:
-        v2_cnf_store.maybe_purge_older_than(store, hours=24, min_interval_secs=600.0)
+        v2_cnf_store.maybe_purge_older_than(
+            store, hours=v2_cnf_store.retention_hours(), min_interval_secs=600.0)
     except Exception:
         pass
     return results
@@ -629,10 +674,14 @@ def claim_bitset_batch(store: Store, *, worker_id: str, batch_size: int = 8,
 
 def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
     """Witness-check + score ONE received bitset event, then mark it verified (or
-    rejected). Regenerates the CNF from seed (the token already bound the
-    cnf_sha256, so a mismatch means config drift -> reject, never score). This is
-    the async half of the thin-submit design: the heavy work the submit handler
-    used to do inline now runs here."""
+    rejected).
+
+    The token already bound the exact cnf_sha256, so the verifier first tries the
+    baked CNF store with that hash. On a miss it falls back to deterministic
+    generation and keeps the old drift checks. This is the async half of the
+    thin-submit design: the heavy work the submit handler used to do inline now
+    runs here, and warm baked rows avoid doing it again.
+    """
     import hashlib as _h
     from . import per_miner as pm
     from ..dimacs import parse_cnf
@@ -644,12 +693,33 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
     epoch_i, tier_i, seq_i = int(row["epoch"]), int(row["tier"]), int(row["seq"])
     now_iso = _now_iso_ms()
 
-    def _finish(status, *, score=None, ah=None, vdh=None, reason=None):
+    def _finish(status, *, score=None, ah=None, vdh=None, reason=None, payout=None):
         # weighted_score/answer_hash/verifier_details_hash are NOT NULL, so a
         # reject path MUST write the zero/empty defaults (not None) or the UPDATE
         # is rejected and the row stays 'received' -> unlocks -> retries forever
         # (poison queue). On verify we write the real values.
+        #
+        # payout (bridge): the per_miner_solves insert rides the SAME transaction
+        # as the terminal status update, so a paid row and a verified receipt are
+        # atomic -- no pay-without-terminal-receipt dispute window. The insert is
+        # INSERT OR IGNORE on (challenge_id, miner_hotkey) with the RAW signing
+        # hotkey (V1 accept parity), so the same identity-derived challenge can
+        # never double-pay across protocols. difficulty_weight is the EXACT
+        # weight the verifier scored under v2_pm_env, never a recompute.
         def _tx(conn):
+            if payout is not None:
+                inserted = pm.record_perminer_solve_tx(
+                    conn, hk, payout["epoch"], payout["challenge_id"],
+                    tier_i, seq_i, True,
+                    solved_at_iso=now_iso,
+                    difficulty_weight=payout["weight"])
+                if not inserted:
+                    # Existing ledger row (e.g. written earlier by the V1 accept
+                    # path) wins; audit-log so a weight mismatch between the V2
+                    # receipt and the paid row is visible in a dispute.
+                    print(f"[v2_pm_payout_bridge] duplicate_ledger_row "
+                          f"challenge_id={payout['challenge_id']} hotkey={hk} "
+                          f"v2_weight={payout['weight']}")
             conn.execute(
                 "UPDATE v2_submit_events SET status=?, weighted_score=?, "
                 "answer_hash=?, verifier_details_hash=?, verified_at_iso=?, "
@@ -668,19 +738,42 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
 
     try:
         with v2_pm_env():
-            cid, cnf_text, planted = pm.generate_instance(hk, epoch_i, tier_i, seq_i)
+            current_epoch = pm.current_epoch()
+            if epoch_i not in (current_epoch, current_epoch - 1):
+                # Same gate as V1's _perminer_epoch_for. Stale epochs are 410 at
+                # mint and admit; an event that slipped through anyway must
+                # terminal-reject here BEFORE the payout bridge can see it.
+                _finish(STATUS_REJECTED, reason="per_miner_challenge_expired")
+                return {"id": rid, "status": STATUS_REJECTED,
+                        "reason": "per_miner_challenge_expired"}
+            # V1 parity: instances derive from the scoring identity (coldkey
+            # collapse aware); receipts and the payout row keep the RAW hotkey.
+            identity = _scoring_identity(store, hk)
+            cid = pm.instance_id(identity, epoch_i, tier_i, seq_i)
             if cid != str(row["challenge_id"]):
                 _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
                 return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
-            cnf_sha = _h.sha256(cnf_text.encode("utf-8")).hexdigest()
-            if cnf_sha != str(row["cnf_sha256"]).lower():
-                # config drift since mint — cannot fairly score. Reject, never credit.
-                _finish(STATUS_REJECTED, reason="cnf_sha_drift")
-                return {"id": rid, "status": STATUS_REJECTED, "reason": "cnf_sha_drift"}
-            try:
-                v2_cnf_store.put(store, cid, cnf_text)
-            except Exception:
-                pass
+            expected_cnf_sha = str(row["cnf_sha256"]).lower()
+            cnf_text = v2_cnf_store.get(store, cid, expected_sha256=expected_cnf_sha)
+            if cnf_text is not None:
+                _record_cnf_store_hit()
+                cnf_sha = expected_cnf_sha
+            else:
+                _record_cnf_store_miss()
+                generated_cid, cnf_text, _planted = pm.generate_instance(
+                    identity, epoch_i, tier_i, seq_i)
+                if generated_cid != cid:
+                    _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
+                    return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
+                cnf_sha = _h.sha256(cnf_text.encode("utf-8")).hexdigest()
+                if cnf_sha != expected_cnf_sha:
+                    # config drift since mint — cannot fairly score. Reject, never credit.
+                    _finish(STATUS_REJECTED, reason="cnf_sha_drift")
+                    return {"id": rid, "status": STATUS_REJECTED, "reason": "cnf_sha_drift"}
+                try:
+                    v2_cnf_store.put(store, cid, cnf_text)
+                except Exception:
+                    pass
             nvars, _clauses = parse_cnf(cnf_text)
             from . import v2_bitset_submit as _bs
             assignment_raw, assignment = _bs.decode_assignment_b64(
@@ -698,9 +791,14 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
             "assignment_sha256": ah, "verified_at": now_iso,
         }
         vdh = _h.sha256(json.dumps(details, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        _finish(STATUS_VERIFIED, score=weight, ah=ah, vdh=vdh)
+        payout = (
+            {"epoch": epoch_i, "challenge_id": cid, "weight": weight}
+            if pm_payout_bridge_enabled() else None
+        )
+        _finish(STATUS_VERIFIED, score=weight, ah=ah, vdh=vdh, payout=payout)
         return {"id": rid, "status": STATUS_VERIFIED, "weighted_score": weight,
-                "miner_hotkey": hk, "challenge_id": cid}
+                "miner_hotkey": hk, "challenge_id": cid,
+                "pm_payout_bridged": pm_payout_bridge_enabled()}
     except Exception as exc:  # keep it claimable next tick rather than lost
         def _unlock(conn):
             conn.execute(
@@ -717,10 +815,11 @@ def process_bitset_batch(store: Store, *, worker_id: str | None = None,
                          batch_size: int = 8, lock_secs: float = 120.0) -> list[dict[str, Any]]:
     """Claim + verify + score a batch of received bitset events.
 
-    The verification work is per-row independent after claim: regenerate the CNF,
-    sha-gate the token, decode/verify the bitset, then write that row's terminal
-    status. Run those row checks in a bounded local pool so a burst of thin
-    submits drains faster than one serial CNF verification loop.
+    The verification work is per-row independent after claim: read the baked CNF
+    or regenerate on a cache miss, sha-gate the token, decode/verify the bitset,
+    then write that row's terminal status. Run those row checks in a bounded local
+    pool so a burst of thin submits drains faster than one serial CNF verification
+    loop.
     """
     worker_id = worker_id or f"v2b-{uuid.uuid4().hex[:12]}"
     rows = claim_bitset_batch(store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs)

@@ -697,6 +697,35 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_external_score_entries_hotkey_received
             ON external_score_entries(miner_hotkey, received_at_iso);
     """),
+    ("0046_v2_cnf_artifacts", """
+        CREATE TABLE IF NOT EXISTS v2_cnf_artifacts (
+            challenge_id TEXT PRIMARY KEY,
+            epoch INTEGER NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            n_vars INTEGER NOT NULL,
+            cnf_sha256 TEXT NOT NULL,
+            cnf_bytes INTEGER NOT NULL,
+            artifact_key TEXT NOT NULL,
+            artifact_url TEXT NOT NULL,
+            published_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_cnf_artifacts_key
+            ON v2_cnf_artifacts(artifact_key);
+        CREATE INDEX IF NOT EXISTS idx_v2_cnf_artifacts_epoch
+            ON v2_cnf_artifacts(epoch, tier, seq);
+
+        CREATE TABLE IF NOT EXISTS v2_cnf_epoch_readiness (
+            epoch INTEGER PRIMARY KEY,
+            next_epoch INTEGER NOT NULL,
+            expected_current INTEGER NOT NULL,
+            published_current INTEGER NOT NULL,
+            expected_next INTEGER NOT NULL,
+            published_next INTEGER NOT NULL,
+            ready INTEGER NOT NULL DEFAULT 0,
+            updated_at_iso TEXT NOT NULL
+        );
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1297,6 +1326,35 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_external_score_entries_hotkey_received
             ON external_score_entries(miner_hotkey, received_at_iso);
     """),
+    ("0046_v2_cnf_artifacts", """
+        CREATE TABLE IF NOT EXISTS v2_cnf_artifacts (
+            challenge_id TEXT PRIMARY KEY,
+            epoch BIGINT NOT NULL,
+            tier INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            n_vars INTEGER NOT NULL,
+            cnf_sha256 TEXT NOT NULL,
+            cnf_bytes BIGINT NOT NULL,
+            artifact_key TEXT NOT NULL,
+            artifact_url TEXT NOT NULL,
+            published_at_iso TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_v2_cnf_artifacts_key
+            ON v2_cnf_artifacts(artifact_key);
+        CREATE INDEX IF NOT EXISTS idx_v2_cnf_artifacts_epoch
+            ON v2_cnf_artifacts(epoch, tier, seq);
+
+        CREATE TABLE IF NOT EXISTS v2_cnf_epoch_readiness (
+            epoch BIGINT PRIMARY KEY,
+            next_epoch BIGINT NOT NULL,
+            expected_current BIGINT NOT NULL,
+            published_current BIGINT NOT NULL,
+            expected_next BIGINT NOT NULL,
+            published_next BIGINT NOT NULL,
+            ready INTEGER NOT NULL DEFAULT 0,
+            updated_at_iso TEXT NOT NULL
+        );
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -1329,6 +1387,8 @@ _PK_BY_TABLE: dict[str, str] = {
     "attest_nonces": "nonce",
     "attestations": "id",
     "v2_worker_heartbeat": "key",
+    "v2_cnf_artifacts": "challenge_id",
+    "v2_cnf_epoch_readiness": "epoch",
 }
 
 

@@ -91,6 +91,7 @@ _EXEMPT_SUFFIXES: tuple[str, ...] = (
     # a shared upstream IP) throttled the whole fast-path fleet into one bucket.
     "/v2/synthetic-boolean/per-miner/challenges",
     "/v2/synthetic-boolean/per-miner/cnf",
+    "/v2/synthetic-boolean/per-miner/cnf-access",
 )
 
 # Prefix for the legacy path-strip compat so exempt check works both ways.
@@ -190,6 +191,7 @@ _ABUSE_TARGETS: set[tuple[str, str]] = {
     ("GET", "/v1/synthetic-boolean/per-miner/cnf"),
     ("GET", "/v1/synthetic-boolean/per-miner/challenges"),
     ("GET", "/v2/synthetic-boolean/per-miner/cnf"),
+    ("GET", "/v2/synthetic-boolean/per-miner/cnf-access"),
     ("GET", "/v2/synthetic-boolean/per-miner/challenges"),
 }
 

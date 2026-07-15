@@ -436,16 +436,26 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     )
     assert first.status_code == 202
     assert second.status_code == 200
-    receipt = first.json()
+    received = first.json()
+    assert received["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
+    assert received["status"] == "received"
+    assert received["open"] is True
+    assert received["terminal"] is False
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    results = v2_pipeline.process_bitset_batch(v2_store, batch_size=1)
+    assert results[0]["status"] == "verified"
+
+    fetched = client.get(received["receipt_url"])
+    assert fetched.status_code == 200
+    receipt = fetched.json()
+    assert receipt["receipt_id"] == received["receipt_id"]
     assert receipt["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
     assert receipt["status"] == "verified"
+    assert receipt["open"] is False
+    assert receipt["terminal"] is True
     assert receipt["weighted_score"] == item["difficulty_weight"]
-    assert second.json()["receipt_id"] == receipt["receipt_id"]
+    assert second.json()["receipt_id"] == received["receipt_id"]
     assert second.json()["idempotent_replay"] is True
-
-    fetched = client.get(receipt["receipt_url"])
-    assert fetched.status_code == 200
-    assert fetched.json()["receipt_id"] == receipt["receipt_id"]
 
     weights = client.get("/v2/validator/weights/next")
     assert weights.status_code == 200
@@ -462,9 +472,59 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     assert bundle["status_counts"]["bitset:verified"] == 1
     assert any(r["id"] == receipt["receipt_id"] and r["source"] == "bitset" for r in bundle["receipts"])
 
-    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
     assert v2_store.query("SELECT COUNT(*) AS n FROM v2_submit_events")[0]["n"] == 1
     assert v2_store.query("SELECT COUNT(*) AS n FROM solution_manifests")[0]["n"] == 0
+
+
+def test_solution_manifest_v2_submit_bitset_backpressure_sheds_new_work_not_replays(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_MAX_PENDING", "1")
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BACKPRESSURE_RETRY_AFTER_SECS", "7")
+    app, _store = _build(
+        tmp_path, monkeypatch, enabled=True, role="all", separate_v2=True,
+        bitset_submit=True)
+    client = TestClient(app)
+
+    def build_submit(uri: str):
+        kp = _keypair(uri)
+        board = client.get(
+            "/v2/synthetic-boolean/per-miner/challenges?limit=1",
+            headers=_read_headers(kp),
+        )
+        assert board.status_code == 200
+        item = board.json()["items"][0]
+        with v2_pipeline.v2_pm_env():
+            _cid, _cnf, assignment = pm.generate_instance(
+                kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+        body = {
+            "schema": v2_bitset_submit.SCHEMA,
+            "card_id": _FAMILY,
+            "challenge_id": item["challenge_id"],
+            "submit_token": item["submit_token"],
+            "assignment_encoding": "bitset/v1",
+            "assignment_b64": base64.b64encode(
+                v2_pipeline.encode_bitset_assignment(assignment)
+            ).decode("ascii"),
+        }
+        submitted_at = _now_iso()
+        return kp, body, _bitset_headers(kp, body, submitted_at=submitted_at)
+
+    _kp1, body1, headers1 = build_submit("//BitsetBackpressureOne")
+    first = client.post("/v2/agents/submit-bitset", json=body1, headers=headers1)
+    assert first.status_code == 202, first.text
+
+    replay = client.post("/v2/agents/submit-bitset", json=body1, headers=headers1)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["receipt_id"] == first.json()["receipt_id"]
+    assert replay.json()["idempotent_replay"] is True
+
+    _kp2, body2, headers2 = build_submit("//BitsetBackpressureTwo")
+    shed = client.post("/v2/agents/submit-bitset", json=body2, headers=headers2)
+    assert shed.status_code == 503
+    assert shed.headers["retry-after"] == "7"
+    assert shed.headers["x-cathedral-rejection-reason"] == "v2_submit_backpressure"
+    assert shed.json()["reason"] == "v2_submit_backpressure"
+    assert shed.json()["pending_count"] == 1
 
 
 def test_solution_manifest_v2_manifest_and_bitset_same_challenge_count_once(tmp_path, monkeypatch):
@@ -522,6 +582,10 @@ def test_solution_manifest_v2_manifest_and_bitset_same_challenge_count_once(tmp_
         headers=_bitset_headers(kp, bitset_body),
     )
     assert bitset.status_code == 202
+    # Thin submit: drain the async verify worker before asserting scored state.
+    v2_store = Store(str(tmp_path / "v2.sqlite"), prefer_env_database_url=False)
+    results = v2_pipeline.process_bitset_batch(v2_store, batch_size=1)
+    assert results and results[0]["status"] == "verified"
 
     vector = client.get("/v2/validator/weights/next").json()
     row = next(w for w in vector["weights"] if w["miner_hotkey"] == kp.ss58_address)

@@ -6,7 +6,8 @@ CATHEDRAL_V2_PERMINER_* names onto the legacy names per_miner reads directly),
 serializing all V2 per-miner traffic to one request at a time per process.
 pin_v2_pm_env() copies the mapping into os.environ once at startup instead,
 making v2_pm_env() a lock-free no-op. Guards covered here:
-  - opt-in via CATHEDRAL_V2_PERMINER_ENV_PIN (default off: zero change);
+  - implied by CATHEDRAL_LAUNCH_PROFILE=v2-converged, or explicit opt-in via
+    CATHEDRAL_V2_PERMINER_ENV_PIN (default off outside the profile: zero change);
   - refuses when unprefixed CATHEDRAL_PERMINER_ENABLED is truthy (the V1
     per-miner surface is active in-process);
   - refuses when a mapped legacy name is set to a conflicting value;
@@ -34,6 +35,7 @@ def _clean_pin_env(monkeypatch):
         monkeypatch.delenv(legacy, raising=False)
         monkeypatch.delenv(v2_name, raising=False)
     monkeypatch.delenv("CATHEDRAL_V2_PERMINER_ENV_PIN", raising=False)
+    monkeypatch.delenv("CATHEDRAL_LAUNCH_PROFILE", raising=False)
     monkeypatch.setattr(v2_pipeline, "_PM_ENV_PINNED", False)
 
 
@@ -61,6 +63,58 @@ def test_pin_copies_values_except_enabled(monkeypatch):
     # ... but the V1 gate stays closed while the V2 gate is open.
     assert pm.perminer_enabled() is False
     assert v2_pipeline.v2_perminer_enabled() is True
+
+
+def test_converged_profile_pins_canonical_env_without_extra_flag(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
+    monkeypatch.setenv("CATHEDRAL_PERMINER_SEED_SECRET", "canonical-seed")
+    monkeypatch.setenv("CATHEDRAL_PERMINER_ALLOTMENT_T1", "7")
+    assert v2_pipeline.pin_v2_pm_env() is True
+    assert v2_pipeline._PM_ENV_PINNED is True
+    assert os.environ["CATHEDRAL_PERMINER_SEED_SECRET"] == "canonical-seed"
+    assert os.environ["CATHEDRAL_PERMINER_ALLOTMENT_T1"] == "7"
+    assert "CATHEDRAL_PERMINER_ENABLED" not in os.environ
+    assert pm.allotment_for(1) == 7
+    assert pm.seed_secret_configured() is True
+    assert pm.perminer_enabled() is False
+    assert v2_pipeline.v2_perminer_enabled() is True
+
+
+def test_converged_profile_pinned_v2_pm_env_is_lock_free(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
+    monkeypatch.setenv("CATHEDRAL_PERMINER_SEED_SECRET", "canonical-seed")
+    assert v2_pipeline.pin_v2_pm_env() is True
+    entered = threading.Event()
+
+    def use_env():
+        with v2_pipeline.v2_pm_env():
+            entered.set()
+
+    with v2_pipeline._PM_ENV_LOCK:
+        t = threading.Thread(target=use_env)
+        t.start()
+        assert entered.wait(timeout=5.0), "v2_pm_env blocked on _PM_ENV_LOCK despite profile pin"
+        t.join(timeout=5.0)
+
+
+def test_converged_profile_pin_refuses_when_v1_perminer_enabled(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
+    monkeypatch.setenv("CATHEDRAL_PERMINER_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_PERMINER_SEED_SECRET", "canonical-seed")
+    assert v2_pipeline.pin_v2_pm_env() is False
+    assert v2_pipeline._PM_ENV_PINNED is False
+
+
+def test_converged_profile_pin_refuses_on_conflicting_v2_twin(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
+    monkeypatch.setenv("CATHEDRAL_PERMINER_SEED_SECRET", "canonical-seed")
+    monkeypatch.setenv("CATHEDRAL_V2_PERMINER_SEED_SECRET", "v2-twin-seed")
+    monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ALLOTMENT_T1", "7")
+    assert v2_pipeline.pin_v2_pm_env() is False
+    assert v2_pipeline._PM_ENV_PINNED is False
+    # Refusal happens before copying any V2 twin into the canonical env.
+    assert "CATHEDRAL_PERMINER_ALLOTMENT_T1" not in os.environ
+    assert os.environ["CATHEDRAL_PERMINER_SEED_SECRET"] == "canonical-seed"
 
 
 def test_pin_ignores_falsy_legacy_enabled(monkeypatch):
