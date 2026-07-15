@@ -39,14 +39,24 @@ function jsonResponse(payloadText, status, source, extraHeaders = {}) {
   return new Response(payloadText, { status, headers });
 }
 
-function validatePayload(text) {
+export function validatePayload(text) {
   const payload = JSON.parse(text);
   if (!payload || typeof payload !== "object") throw new Error("payload_not_object");
   if (payload.network !== "finney") throw new Error("bad_network");
   if (Number(payload.netuid) !== 39) throw new Error("bad_netuid");
   if (payload.key_id !== "cathedral-weight-policy") throw new Error("bad_key_id");
   if (!payload.signature || typeof payload.signature !== "string") throw new Error("missing_signature");
-  if (!Array.isArray(payload.weights) || payload.weights.length < 300) throw new Error("bad_weights");
+  if (!Array.isArray(payload.weights) || payload.weights.length === 0) throw new Error("bad_weights");
+  const payable = payload.policy_metadata?.payable_hotkeys;
+  if (!payable || payable.mode !== "filter" || payable.enforced !== true) {
+    throw new Error("payable_filter_not_enforced");
+  }
+  if (payable.snapshot_fresh !== true || Number(payable.snapshot_hotkey_count) < 200) {
+    throw new Error("bad_metagraph_snapshot");
+  }
+  if (Number(payable.final_miner_count) !== payload.weights.length) {
+    throw new Error("filtered_count_mismatch");
+  }
   if (!payload.expires_at || Date.parse(payload.expires_at) <= Date.now()) throw new Error("expired_vector");
   return payload;
 }
