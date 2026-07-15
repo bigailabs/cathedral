@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import time
@@ -48,6 +49,19 @@ DEFAULT_PUBLIC_KEY_HEX = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69a
 def _ms_iso_now() -> str:
     dt = datetime.now(timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+def _lifecycle(event: str, detail: str = "") -> None:
+    """Compact timestamped ASCII lifecycle event. No secrets.
+
+    Format: ``<ts> <EVENT> <detail>`` — one line per state transition
+    (VECTOR accepted/rejected, MAP complete, WEIGHTS dry-run, CHAIN
+    submitted/failed).
+    """
+    line = f"{_ms_iso_now()} {event}"
+    if detail:
+        line += f" {detail}"
+    print(line)
 
 
 def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
@@ -117,9 +131,289 @@ def accept_vector(payload: dict[str, Any], *, public_key_hex: str, key_id: str,
             f"rollback/replay: vector policy_version {pv} <= last accepted {fence_version}")
 
 
-def vector_to_uid_weights(payload: dict[str, Any],
-                          hotkey_to_uid: dict[str, int]) -> dict[int, float]:
+def _confidential_tdx_v3_rows(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
+    metadata = payload.get("policy_metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    cap = metadata.get("confidential_tdx_cap") or {}
+    if not isinstance(cap, dict) or cap.get("cap_version") != "v3":
+        return None
+
+    try:
+        configured_fraction = float(cap["configured_fraction"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "confidential_tdx v3 missing configured_fraction"
+        ) from exc
+    if not math.isfinite(configured_fraction) or not 0.0 < configured_fraction <= 0.10:
+        raise wire.VectorError(
+            f"confidential_tdx v3 invalid configured_fraction {configured_fraction!r}"
+        )
+
+    rows = payload.get("weights")
+    if not isinstance(rows, list):
+        raise wire.VectorError("confidential_tdx v3 weights must be a list")
+    hotkeys: set[str] = set()
+    weight_mass = 0.0
+    base_mass = 0.0
+    external_mass = 0.0
+    for row in rows:
+        if not isinstance(row, dict):
+            raise wire.VectorError("confidential_tdx v3 weight row must be an object")
+        try:
+            weight = float(row["weight"])
+            base = float(row["base_component"])
+            external = float(row["external_component"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise wire.VectorError(
+                "confidential_tdx v3 row missing or invalid attribution component"
+            ) from exc
+        if not all(math.isfinite(value) and value >= 0.0
+                   for value in (weight, base, external)):
+            raise wire.VectorError(
+                f"confidential_tdx v3 row {row.get('miner_hotkey')!r} "
+                "has non-finite or negative attribution"
+            )
+        if not math.isclose(weight, base + external, rel_tol=0.0, abs_tol=1e-12):
+            raise wire.VectorError(
+                f"confidential_tdx v3 row {row.get('miner_hotkey')!r} "
+                f"weight {weight!r} != base+external {base + external!r}"
+            )
+        hotkey = row.get("miner_hotkey")
+        if not isinstance(hotkey, str) or not hotkey:
+            raise wire.VectorError("confidential_tdx v3 row missing miner_hotkey")
+        if hotkey in hotkeys:
+            raise wire.VectorError(f"confidential_tdx v3 duplicate hotkey {hotkey!r}")
+        hotkeys.add(hotkey)
+        weight_mass = math.fsum((weight_mass, weight))
+        base_mass = math.fsum((base_mass, base))
+        external_mass = math.fsum((external_mass, external))
+
+    component_mass = base_mass + external_mass
+    if not math.isclose(weight_mass, component_mass, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError(
+            f"confidential_tdx v3 weight mass {weight_mass!r} != "
+            f"component mass {component_mass!r}"
+        )
+    if base_mass <= 0.0 or external_mass <= 0.0:
+        raise wire.VectorError(
+            "confidential_tdx v3 requires positive base and external mass"
+        )
+    realized_fraction = external_mass / component_mass
+    if abs(realized_fraction - configured_fraction) > 1e-12:
+        raise wire.VectorError(
+            f"confidential_tdx v3 external fraction {realized_fraction!r} != "
+            f"configured_fraction {configured_fraction!r}"
+        )
+    return rows
+
+
+def _confidential_primary_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Detect and strictly validate the v1 confidential-primary policy metadata.
+
+    Returns the metadata dict when the signed contract is present, else None.
+    Raises VectorError on a malformed/incompatible contract (never falls back).
+    """
+    metadata = payload.get("policy_metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    cp = metadata.get("confidential_primary")
+    if cp is None:
+        return None
+    if not isinstance(cp, dict):
+        raise wire.VectorError("confidential_primary metadata must be an object")
+    if cp.get("contract_version") != "v1":
+        raise wire.VectorError(
+            "confidential_primary unsupported contract_version "
+            f"{cp.get('contract_version')!r}")
+    if cp.get("source") != "cathedral_confidential_tdx":
+        raise wire.VectorError(
+            f"confidential_primary invalid source {cp.get('source')!r}")
+    try:
+        base_mass = float(cp["base_mass"])
+        confidential_mass = float(cp["confidential_mass"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "confidential_primary missing base/confidential mass") from exc
+    if base_mass != 0.0:
+        raise wire.VectorError(
+            f"confidential_primary base_mass must be 0, got {base_mass!r}")
+    if confidential_mass not in (0.0, 1.0):
+        raise wire.VectorError(
+            "confidential_primary confidential_mass must be 0 or 1, got "
+            f"{confidential_mass!r}")
+    if not isinstance(cp.get("complete"), bool):
+        raise wire.VectorError("confidential_primary complete flag must be a bool")
+    # When the signed contract claims positive mass (mass=1), every liveness
+    # field must be explicitly asserted. A degraded vector carries mass=0 and
+    # these fields may be absent/false; that is the correct signed burn state.
+    if confidential_mass == 1.0:
+        if cp.get("mode") != "confidential_primary":
+            raise wire.VectorError(
+                "confidential_primary mass=1 requires mode=confidential_primary, "
+                f"got {cp.get('mode')!r}")
+        if cp.get("complete") is not True:
+            raise wire.VectorError(
+                "confidential_primary mass=1 requires complete=true")
+        if cp.get("fresh") is not True:
+            raise wire.VectorError(
+                "confidential_primary mass=1 requires fresh=true")
+        if cp.get("confirmed") is not True:
+            raise wire.VectorError(
+                "confidential_primary mass=1 requires confirmed=true")
+    return cp
+
+
+def _confidential_primary_to_uid_weights(
+        payload: dict[str, Any], cp: dict[str, Any],
+        hotkey_to_uid: dict[str, int]) -> dict[int, float]:
+    """Map a signed confidential-primary vector to UID weights, all-or-nothing.
+
+    Every positive signed hotkey MUST map to exactly one current metagraph UID.
+    Duplicate hotkeys, duplicate UIDs, nonfinite/negative attribution, and
+    metadata/sum drift all reject the whole vector. There is no partial apply
+    and no fallback. The signed burn is applied ONLY after a fully successful
+    mapping.
+    """
     snap = payload["burn_snapshot"]
+    confidential_mass = float(cp["confidential_mass"])
+    rows = payload.get("weights")
+    if not isinstance(rows, list):
+        raise wire.VectorError("confidential_primary weights must be a list")
+
+    hotkeys: set[str] = set()
+    weight_mass = 0.0
+    positive: list[tuple[str, float]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise wire.VectorError("confidential_primary weight row must be an object")
+        if "base_component" not in row or "external_component" not in row:
+            raise wire.VectorError(
+                f"confidential_primary row {row.get('miner_hotkey')!r} "
+                "must carry both base_component and external_component")
+        try:
+            weight = float(row["weight"])
+            base = float(row["base_component"])
+            external = float(row["external_component"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise wire.VectorError(
+                "confidential_primary row has invalid attribution") from exc
+        if not all(math.isfinite(v) and v >= 0.0 for v in (weight, base, external)):
+            raise wire.VectorError(
+                f"confidential_primary row {row.get('miner_hotkey')!r} "
+                "has non-finite or negative attribution")
+        if base != 0.0:
+            raise wire.VectorError(
+                f"confidential_primary row {row.get('miner_hotkey')!r} "
+                "base_component must be 0")
+        if not math.isclose(weight, external, rel_tol=0.0, abs_tol=1e-12):
+            raise wire.VectorError(
+                f"confidential_primary row {row.get('miner_hotkey')!r} "
+                "weight != external_component")
+        hotkey = row.get("miner_hotkey")
+        if not isinstance(hotkey, str) or not hotkey:
+            raise wire.VectorError("confidential_primary row missing miner_hotkey")
+        if hotkey in hotkeys:
+            raise wire.VectorError(f"confidential_primary duplicate hotkey {hotkey!r}")
+        hotkeys.add(hotkey)
+        weight_mass = math.fsum((weight_mass, weight))
+        if weight > 0.0:
+            positive.append((hotkey, weight))
+
+    # Signed metadata mass must agree with the signed rows.
+    if confidential_mass == 1.0:
+        if not positive:
+            raise wire.VectorError(
+                "confidential_primary claims mass 1 but has no positive weight")
+        if not math.isclose(weight_mass, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise wire.VectorError(
+                f"confidential_primary weight mass {weight_mass!r} != 1.0")
+    else:  # confidential_mass == 0.0
+        if positive:
+            raise wire.VectorError(
+                "confidential_primary claims mass 0 but has positive weight")
+        if weight_mass != 0.0:
+            raise wire.VectorError(
+                f"confidential_primary weight mass {weight_mass!r} != 0.0")
+
+    # Every positive signed hotkey must map to exactly one current metagraph UID.
+    scores: dict[int, float] = {}
+    mapped_uids: set[int] = set()
+    for hotkey, weight in positive:
+        if hotkey not in hotkey_to_uid:
+            raise wire.VectorError(
+                f"confidential_primary hotkey {hotkey!r} has no current metagraph UID")
+        uid = hotkey_to_uid[hotkey]
+        if uid in mapped_uids:
+            raise wire.VectorError(
+                f"confidential_primary duplicate UID {uid} in signed vector")
+        mapped_uids.add(uid)
+        scores[uid] = weight
+
+    # Signed burn applied ONLY after a fully successful mapping.
+    return apply_burn(
+        scores,
+        burn_uid=snap.get("burn_uid"),
+        forced_burn_percentage=float(snap["forced_burn_percentage"]),
+    )
+
+
+# The one supported policy pin. When a validator opts in, ONLY this signed
+# contract is applied; every other vector shape (legacy, v3 blend) is rejected.
+REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1 = "confidential_primary_v1"
+REQUIRE_POLICY_CHOICES = (REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1,)
+
+
+def vector_to_uid_weights(payload: dict[str, Any],
+                          hotkey_to_uid: dict[str, int],
+                          *, require_policy: str | None = None) -> dict[int, float]:
+    snap = payload["burn_snapshot"]
+    cp = _confidential_primary_meta(payload)
+    # Pinned validators apply ONLY confidential_primary v1. A vector without a
+    # valid v1 policy block is rejected here; a malformed block already raised
+    # in _confidential_primary_meta. The legacy and v3 branches below are
+    # unreachable while the pin is active.
+    if require_policy == REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1:
+        if cp is None:
+            raise wire.VectorError(
+                "validator pinned to confidential_primary_v1 but vector carries "
+                "no confidential_primary policy block")
+        return _confidential_primary_to_uid_weights(payload, cp, hotkey_to_uid)
+    if cp is not None:
+        return _confidential_primary_to_uid_weights(payload, cp, hotkey_to_uid)
+    v3_rows = _confidential_tdx_v3_rows(payload)
+    if v3_rows is not None:
+        mapped_uids: set[int] = set()
+        missing = False
+        for row in v3_rows:
+            hotkey = row["miner_hotkey"]
+            if hotkey not in hotkey_to_uid:
+                missing = True
+                continue
+            uid = hotkey_to_uid[hotkey]
+            if uid in mapped_uids:
+                raise wire.VectorError(
+                    f"confidential_tdx v3 duplicate UID {uid} in signed vector"
+                )
+            mapped_uids.add(uid)
+
+        if missing:
+            print("  confidential_tdx v3 map incomplete; falling back to signed base components")
+        scores: dict[int, float] = {}
+        for row in v3_rows:
+            hotkey = row["miner_hotkey"]
+            if hotkey not in hotkey_to_uid:
+                continue
+            uid = hotkey_to_uid[hotkey]
+            value = row["base_component"] if missing else row["weight"]
+            if value > 0.0:
+                scores[uid] = value
+        return apply_burn(
+            scores,
+            burn_uid=snap.get("burn_uid"),
+            forced_burn_percentage=float(snap["forced_burn_percentage"]),
+        )
+
     scores: dict[int, float] = {}
     skipped = 0
     for w in payload["weights"]:
@@ -158,24 +452,28 @@ def _isolated_argv():
 def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid: int,
                          wallet_name: str, wallet_hotkey: str, broadcast: bool) -> bool:
     ordered = sorted(uid_weights.items())
-    print(f"  vector ({len(ordered)} uids): " +
-          ", ".join(f"{u}={w:.4f}" for u, w in ordered[:12]) +
-          (" …" if len(ordered) > 12 else ""))
+    preview = ",".join(f"{u}={w:.4f}" for u, w in ordered[:12]) + (
+        " ..." if len(ordered) > 12 else "")
     if not broadcast:
-        print("  DRY-RUN — pass --broadcast to submit")
+        _lifecycle("WEIGHTS dry-run", f"uids={len(ordered)} vector={preview}")
         return True
     uids = [u for u, _ in ordered]
     vals = [w for _, w in ordered]
-    with _isolated_argv():
-        import bittensor as bt   # import under blanked argv — bittensor parses
-        wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
-        sub = _bt_subtensor(bt)(network=connection_target(network))
-        resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
-                               wait_for_inclusion=True)
+    try:
+        with _isolated_argv():
+            import bittensor as bt   # import under blanked argv — bittensor parses
+            wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
+            sub = _bt_subtensor(bt)(network=connection_target(network))
+            resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
+                                   wait_for_inclusion=True)
+    except Exception as exc:
+        _lifecycle("CHAIN failed", f"uids={len(ordered)} reason={type(exc).__name__}")
+        raise
     # newer bittensor returns an ExtrinsicResponse object (truthy even on
     # failure) — judge success by the field, not truthiness.
     ok = bool(getattr(resp, "success", resp))
-    print(f"  set_weights submitted: success={ok} ({resp})")
+    _lifecycle("CHAIN submitted" if ok else "CHAIN failed",
+               f"uids={len(ordered)} success={ok}")
     return ok
 
 
@@ -200,21 +498,33 @@ def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
 def tick(args) -> bool:
     payload = fetch_vector(args.publisher_url)
     fence = load_fence(Path(args.state_file))
-    accept_vector(payload, public_key_hex=args.public_key_hex, key_id=args.key_id,
-                  network=args.network, netuid=args.netuid, fence_version=fence)
-    print(f"accepted vector {payload['vector_id'][:8]}… policy_version={payload['policy_version']} "
-          f"miners={len(payload['weights'])} "
-          f"burn={payload['burn_snapshot']['forced_burn_percentage']}%")
+    try:
+        accept_vector(payload, public_key_hex=args.public_key_hex, key_id=args.key_id,
+                      network=args.network, netuid=args.netuid, fence_version=fence)
+    except Exception as e:
+        _lifecycle("VECTOR rejected", f"stage=accept reason={type(e).__name__}")
+        raise
+    _lifecycle("VECTOR accepted",
+               f"id={str(payload.get('vector_id', ''))[:8]} "
+               f"policy_version={payload['policy_version']} "
+               f"miners={len(payload['weights'])} "
+               f"burn={payload['burn_snapshot']['forced_burn_percentage']}%")
     # offline is authoritative: no chain read AND no broadcast, even if
     # --broadcast was also passed (the two are contradictory; offline wins).
     if args.offline:
         hk2uid = {w["miner_hotkey"]: i for i, w in enumerate(payload["weights"])}
-        print("  (offline: synthetic uid map, no chain access)")
+        _lifecycle("MAP offline", "synthetic uid map, no chain access")
         broadcast = False
     else:
         hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
         broadcast = args.broadcast
-    uid_weights = vector_to_uid_weights(payload, hk2uid)
+    try:
+        uid_weights = vector_to_uid_weights(
+            payload, hk2uid, require_policy=getattr(args, "require_policy", None))
+    except Exception as e:
+        _lifecycle("VECTOR rejected", f"stage=map reason={type(e).__name__}")
+        raise
+    _lifecycle("MAP complete", f"uids={len(uid_weights)}")
     ok = set_weights_on_chain(uid_weights, network=args.network, netuid=args.netuid,
                               wallet_name=args.wallet_name, wallet_hotkey=args.wallet_hotkey,
                               broadcast=broadcast)
@@ -231,6 +541,9 @@ def run(args) -> int:
     `cathedral-validator serve` console command. `args` is any object carrying
     the tick attributes (an argparse Namespace or a SimpleNamespace from the
     CLI's config loader)."""
+    require_policy = getattr(args, "require_policy", None)
+    if require_policy:
+        _lifecycle("PIN active", f"policy={require_policy}")
     while True:
         try:
             tick(args)
@@ -268,6 +581,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="no chain access: verify + print only (CI / smoke)")
     p.add_argument("--broadcast", action="store_true",
                    help="actually submit weights (default: dry-run)")
+    p.add_argument("--require-policy", dest="require_policy",
+                   default=os.environ.get("CATHEDRAL_VALIDATOR_REQUIRE_POLICY", "").strip() or None,
+                   help="pin the validator to a signed policy contract. "
+                        "'confidential_primary_v1' rejects every vector lacking a valid "
+                        "confidential_primary v1 policy block and makes the legacy/v3 "
+                        "fallback paths unreachable. Default: unpinned (accept all "
+                        "signed shapes).")
     return p
 
 
@@ -277,6 +597,9 @@ def main() -> int:
     if not args.public_key_hex:
         p.error("--public-key-hex (or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY) is required — "
                 "validators must pin the orchestrator's signing key")
+    if args.require_policy and args.require_policy not in REQUIRE_POLICY_CHOICES:
+        p.error(f"--require-policy (or CATHEDRAL_VALIDATOR_REQUIRE_POLICY) must be one of "
+                f"{', '.join(REQUIRE_POLICY_CHOICES)}; got {args.require_policy!r}")
     # --chain-endpoint populates the env the resolver reads, so both the
     # validator_thin path and the ChainClient path honor it from one source.
     if args.chain_endpoint:
