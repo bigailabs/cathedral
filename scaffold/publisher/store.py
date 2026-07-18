@@ -726,6 +726,15 @@ _MIGRATIONS: list[tuple[str, str]] = [
             updated_at_iso TEXT NOT NULL
         );
     """),
+    ("0047_external_score_audience", """
+        ALTER TABLE external_score_reports ADD COLUMN network TEXT;
+        ALTER TABLE external_score_reports ADD COLUMN netuid INTEGER;
+        CREATE INDEX IF NOT EXISTS idx_external_score_reports_audience_epoch
+            ON external_score_reports(source, network, netuid, epoch);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_external_score_reports_audience_epoch
+            ON external_score_reports(source, network, netuid, epoch)
+            WHERE network IS NOT NULL AND netuid IS NOT NULL;
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1354,6 +1363,15 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ready INTEGER NOT NULL DEFAULT 0,
             updated_at_iso TEXT NOT NULL
         );
+    """),
+    ("0047_external_score_audience", """
+        ALTER TABLE external_score_reports ADD COLUMN IF NOT EXISTS network TEXT;
+        ALTER TABLE external_score_reports ADD COLUMN IF NOT EXISTS netuid INTEGER;
+        CREATE INDEX IF NOT EXISTS idx_external_score_reports_audience_epoch
+            ON external_score_reports(source, network, netuid, epoch);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_external_score_reports_audience_epoch
+            ON external_score_reports(source, network, netuid, epoch)
+            WHERE network IS NOT NULL AND netuid IS NOT NULL;
     """),
 ]
 

@@ -3347,6 +3347,8 @@ def build_app(
         try:
             report = external_scores.normalize_report(payload, default_source="violet_audio")
         except external_scores.ExternalScoreError as exc:
+            if exc.reason == "score_audience_not_configured":
+                raise HTTPException(503, exc.reason)
             if exc.reason != "report_too_old":
                 raise HTTPException(400, exc.reason)
             try:
@@ -3356,6 +3358,8 @@ def build_app(
                     default_source="violet_audio",
                 )
             except external_scores.ExternalScoreError as retry_exc:
+                if retry_exc.reason == "score_audience_not_configured":
+                    raise HTTPException(503, retry_exc.reason)
                 raise HTTPException(400, retry_exc.reason)
         try:
             accepted = external_scores.store_report(store, report)

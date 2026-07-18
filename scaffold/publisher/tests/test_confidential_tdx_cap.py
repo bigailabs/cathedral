@@ -40,6 +40,8 @@ class FakeStoreTDX:
         generated_at = _iso(_now())
         self._report = {
             "source": SOURCE,
+            "network": "finney",
+            "netuid": 39,
             "epoch": 1,
             "complete": True,
             "generated_at": generated_at,
@@ -87,6 +89,8 @@ def _tdx_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_FRACTION", str(FRACTION))
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED", "1")
     monkeypatch.setenv("CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS", "off")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
 
 
 def _blend(
