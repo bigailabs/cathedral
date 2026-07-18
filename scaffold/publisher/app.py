@@ -3359,6 +3359,13 @@ def build_app(
                 raise HTTPException(400, retry_exc.reason)
         try:
             accepted = external_scores.store_report(store, report)
+        except external_scores.ExternalScoreError as exc:
+            # A validly authenticated report can still lose the per-source
+            # monotonic epoch race. Preserve that exact, non-retryable verdict
+            # instead of misreporting it as an infrastructure outage.
+            if exc.reason in {"epoch_too_old", "epoch_conflict"}:
+                raise HTTPException(409, exc.reason)
+            raise HTTPException(400, exc.reason)
         except Exception as exc:
             print(f"[external_scores] store failed: {exc!r}")
             raise HTTPException(503, "external_scores_store_failed")

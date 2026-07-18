@@ -760,6 +760,42 @@ def test_route_accepts_exact_authenticated_tdx_retry_after_report_ages_out(
         assert resp.json()[key] == accepted_tdx_report["response"][key]
 
 
+def test_route_preserves_exact_monotonic_epoch_rejection(client, accepted_tdx_report):
+    newer = dict(accepted_tdx_report["report"])
+    newer["epoch"] = int(newer["epoch"]) + 1
+    newer_body = json.dumps(newer).encode("utf-8")
+    newer_response = client.post(
+        "/v1/external-scores/violet",
+        content=newer_body,
+        headers=_tdx_headers(
+            accepted_tdx_report["token"],
+            accepted_tdx_report["secret"],
+            newer_body,
+        ),
+    )
+    assert newer_response.status_code == 202
+
+    replay = client.post(
+        "/v1/external-scores/violet",
+        content=accepted_tdx_report["body"],
+        headers=_tdx_headers(
+            accepted_tdx_report["token"],
+            accepted_tdx_report["secret"],
+            accepted_tdx_report["body"],
+        ),
+    )
+
+    assert replay.status_code == 409
+    assert replay.json()["detail"] == "epoch_too_old"
+    latest = client.app.state.store.query(
+        "SELECT epoch, report_sha256 FROM external_score_reports "
+        "WHERE source=? ORDER BY epoch DESC LIMIT 1",
+        ("cathedral_confidential_tdx",),
+    )
+    assert int(latest[0]["epoch"]) == newer["epoch"]
+    assert latest[0]["report_sha256"] == newer_response.json()["report_sha256"]
+
+
 def test_route_rejects_stale_authenticated_tdx_new_epoch(client, accepted_tdx_report):
     accepted_tdx_report["clock"].current += timedelta(seconds=3601)
     report = dict(accepted_tdx_report["report"])
