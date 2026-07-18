@@ -29,7 +29,7 @@ def _iso(dt: datetime) -> str:
 
 
 def _sample_report(source: str = "cathedral_sat_fast") -> dict:
-    return {
+    report = {
         "source": source,
         "generated_at": _now_iso(),
         "scores": [
@@ -38,6 +38,10 @@ def _sample_report(source: str = "cathedral_sat_fast") -> dict:
         "complete": True,
         "epoch": 1,
     }
+    if source == "cathedral_confidential_tdx":
+        report["network"] = "finney"
+        report["netuid"] = 39
+    return report
 
 
 def _tdx_auth(monkeypatch):
@@ -80,9 +84,111 @@ def _freeze_external_scores_now(monkeypatch, now: datetime):
 def client(monkeypatch):
     """Build the app with external scores enabled but no weights blending yet."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_INGEST_ENABLED", "1")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
     # Weights blending OFF by default in these tests (we test it separately).
     monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", raising=False)
     return TestClient(app_mod.build_app())
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "detail"),
+    [
+        ("network", "test", "score_audience_mismatch"),
+        ("netuid", 40, "score_audience_mismatch"),
+        ("netuid", True, "invalid_score_audience"),
+    ],
+)
+def test_confidential_route_rejects_wrong_audience_without_advancing_epoch(
+    client, monkeypatch, field, value, detail
+):
+    token, secret = _tdx_auth(monkeypatch)
+    wrong = _sample_report("cathedral_confidential_tdx")
+    wrong["epoch"] = 100
+    wrong[field] = value
+    wrong_body = json.dumps(wrong).encode("utf-8")
+    rejected = client.post(
+        "/v1/external-scores/violet",
+        content=wrong_body,
+        headers=_tdx_headers(token, secret, wrong_body),
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == detail
+
+    local = _sample_report("cathedral_confidential_tdx")
+    local_body = json.dumps(local).encode("utf-8")
+    accepted = client.post(
+        "/v1/external-scores/violet",
+        content=local_body,
+        headers=_tdx_headers(token, secret, local_body),
+    )
+    assert accepted.status_code == 202
+    assert accepted.json()["epoch"] == 1
+
+
+def test_confidential_route_fails_closed_when_local_audience_is_unconfigured(
+    client, monkeypatch
+):
+    token, secret = _tdx_auth(monkeypatch)
+    monkeypatch.delenv("CATHEDRAL_WEIGHT_POLICY_NETWORK")
+    report = _sample_report("cathedral_confidential_tdx")
+    body = json.dumps(report).encode("utf-8")
+    response = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers=_tdx_headers(token, secret, body),
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "score_audience_not_configured"
+
+
+def test_legacy_unscoped_high_epoch_cannot_block_or_feed_local_audience(
+    client, monkeypatch
+):
+    token, secret = _tdx_auth(monkeypatch)
+    store = client.app.state.store
+    legacy_json = json.dumps(
+        {
+            "complete": True,
+            "epoch": 999,
+            "generated_at": _now_iso(),
+            "scores": [{"miner_hotkey": "legacy", "score": 1.0}],
+            "source": "cathedral_confidential_tdx",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    def insert_legacy(conn):
+        conn.execute(
+            "INSERT INTO external_score_reports"
+            "(id, source, epoch, generated_at_iso, received_at_iso, "
+            "report_sha256, score_count, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-unscoped",
+                "cathedral_confidential_tdx",
+                999,
+                _now_iso(),
+                _now_iso(),
+                "0" * 64,
+                1,
+                legacy_json,
+            ),
+        )
+
+    store.write(insert_legacy)
+    local = _sample_report("cathedral_confidential_tdx")
+    local_body = json.dumps(local).encode("utf-8")
+    accepted = client.post(
+        "/v1/external-scores/violet",
+        content=local_body,
+        headers=_tdx_headers(token, secret, local_body),
+    )
+    assert accepted.status_code == 202
+    assert external_scores.latest_snapshot_scores(
+        store,
+        source="cathedral_confidential_tdx",
+    ) == {"5Alice": 0.5}
 
 
 @pytest.fixture
@@ -719,7 +825,8 @@ def test_route_preserves_exact_bytes_for_json_and_hmac(client, monkeypatch):
     body = (
         b'{\n  "scores": [{"score": 0.5, "miner_hotkey": "5Alice"}],\n'
         b'  "epoch": 1,\n  "source": "cathedral_confidential_tdx",\n'
-        b'  "complete": true,\n  "generated_at": "'
+        b'  "network": "finney",\n  "netuid": 39,\n  "complete": true,\n'
+        b'  "generated_at": "'
         + generated_at.encode("utf-8")
         + b'"\n}'
     )

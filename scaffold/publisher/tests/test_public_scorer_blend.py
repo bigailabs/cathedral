@@ -404,6 +404,55 @@ def test_conflicting_epoch_rejected(store):
         external_scores.store_report(store, r2)
 
 
+def test_postgres_epoch_fence_locks_exact_audience_before_latest_read(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    now = _now()
+    report = external_scores.normalize_report(
+        {
+            "complete": True,
+            "epoch": 7,
+            "generated_at": _iso(now),
+            "network": "finney",
+            "netuid": 39,
+            "scores": [{"miner_hotkey": "5A", "score": 1.0}],
+            "source": "cathedral_confidential_tdx",
+        },
+        now=now,
+    )
+
+    class Cursor:
+        @staticmethod
+        def fetchone():
+            return None
+
+    class Connection:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params=()):
+            self.calls.append((sql, params))
+            return Cursor()
+
+    class PostgresStore:
+        backend = "postgres"
+
+        def __init__(self):
+            self.connection = Connection()
+
+        def write(self, fn):
+            return fn(self.connection)
+
+    postgres = PostgresStore()
+    accepted = external_scores.store_report(postgres, report)
+
+    assert accepted["status"] == "accepted"
+    assert postgres.connection.calls[0][0] == "SELECT pg_advisory_xact_lock(?)"
+    lock_key = postgres.connection.calls[0][1][0]
+    assert -(2**63) <= lock_key < 2**63
+    assert "WHERE source=? AND network=? AND netuid=?" in postgres.connection.calls[1][0]
+
+
 # ===========================================================================
 # Test 7: external outage/expired snapshot degrades to base-only
 # ===========================================================================
@@ -558,17 +607,21 @@ def test_payable_filter_pre_allocation_preserves_fraction(monkeypatch):
 # Executable Proof 2: cathedral_confidential_tdx requires complete=true
 # ===========================================================================
 
-def test_confidential_tdx_requires_complete_true():
+def test_confidential_tdx_requires_complete_true(monkeypatch):
     """The cathedral_confidential_tdx source must never accept an incomplete
     (or legacy omitted-complete) report. This is the whole trust model:
     'the report is the full truth at its epoch.'"""
     now = _now()
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
 
     # Attempt 1: complete omitted (None)
     with pytest.raises(external_scores.ExternalScoreError,
                       match="complete_required_for_source"):
         external_scores.normalize_report({
             "source": "cathedral_confidential_tdx",
+            "network": "finney",
+            "netuid": 39,
             "epoch": 1,
             # complete omitted
             "generated_at": _iso(now),
@@ -580,6 +633,8 @@ def test_confidential_tdx_requires_complete_true():
                       match="complete_required_for_source"):
         external_scores.normalize_report({
             "source": "cathedral_confidential_tdx",
+            "network": "finney",
+            "netuid": 39,
             "epoch": 1,
             "complete": False,
             "generated_at": _iso(now),
@@ -589,6 +644,8 @@ def test_confidential_tdx_requires_complete_true():
     # Attempt 3: complete=true succeeds (even with empty scores list)
     report = external_scores.normalize_report({
         "source": "cathedral_confidential_tdx",
+        "network": "finney",
+        "netuid": 39,
         "epoch": 1,
         "complete": True,
         "generated_at": _iso(now),
