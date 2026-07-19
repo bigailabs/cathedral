@@ -4,6 +4,7 @@
   Documentation:
   <a href="VALIDATOR.md">Validator</a> |
   <a href="docs/THIN_SUBNET_RUNBOOK.md">No-infrastructure subnet</a> |
+  <a href="docs/VERIFIED_AGENT_WORK.md">Verified Agent Work</a> |
   <a href="CATHEDRAL_V0_LANES.md">v0 Lanes</a> |
   <a href="LAUNCH_V0_RUNBOOK.md">v0 Launch Runbook</a> |
   <a href="game/arena/ARENA.md">Arena</a> |
@@ -243,6 +244,22 @@ findings, remediation, and accepted follow-up. The
 composition, Cathedral Confidential integration, replay/equivocation handling,
 source-subnet owner onboarding, and the no-central-infrastructure scaling
 model.
+
+The same thin path now includes a first concrete Verified Agent Work commodity:
+miners distill structured agent decisions into compact rule policies;
+validators replay them on committed hidden cases and assign separate budgets
+for fidelity, rare-case retention, evidence faithfulness, compactness, and
+attested execution. It uses the score-class and owner-registration contracts
+above, so a testnet subnet owner can contribute measurements without receiving
+the validator's weight key or control over its final allocation.
+
+```bash
+python -m cathedral_thin.policy_cli demo
+```
+
+The demo constructs a complete UID-aligned weight vector without services or a
+chain write. See the [architecture, threat model, operator commands, and
+production gates](docs/VERIFIED_AGENT_WORK.md).
 
 The production-style audit scanner bridge lives at `/v1/audit-scanner/*`.
 It is default-off, signed, replay-scored, and not connected to payment weights

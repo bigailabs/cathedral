@@ -1,0 +1,104 @@
+{
+  "compactness_max_terms": 64,
+  "feature_names": [
+    "approved",
+    "sensitive",
+    "writes"
+  ],
+  "hidden_cases": [
+    {
+      "example_id": "h01",
+      "features": {
+        "approved": false,
+        "sensitive": false,
+        "writes": false
+      },
+      "label": "allow"
+    },
+    {
+      "example_id": "h02",
+      "features": {
+        "approved": false,
+        "sensitive": false,
+        "writes": true
+      },
+      "label": "review"
+    },
+    {
+      "example_id": "h03",
+      "features": {
+        "approved": false,
+        "sensitive": true,
+        "writes": false
+      },
+      "label": "deny"
+    },
+    {
+      "example_id": "h04",
+      "features": {
+        "approved": true,
+        "sensitive": true,
+        "writes": true
+      },
+      "label": "allow"
+    }
+  ],
+  "labels": [
+    "allow",
+    "deny",
+    "review"
+  ],
+  "public_examples": [
+    {
+      "example_id": "p01",
+      "features": {
+        "approved": false,
+        "sensitive": false,
+        "writes": false
+      },
+      "label": "allow"
+    },
+    {
+      "example_id": "p02",
+      "features": {
+        "approved": true,
+        "sensitive": false,
+        "writes": true
+      },
+      "label": "allow"
+    },
+    {
+      "example_id": "p03",
+      "features": {
+        "approved": false,
+        "sensitive": false,
+        "writes": true
+      },
+      "label": "review"
+    },
+    {
+      "example_id": "p04",
+      "features": {
+        "approved": false,
+        "sensitive": true,
+        "writes": false
+      },
+      "label": "deny"
+    },
+    {
+      "example_id": "p05",
+      "features": {
+        "approved": false,
+        "sensitive": true,
+        "writes": true
+      },
+      "label": "deny"
+    }
+  ],
+  "quality_floor": "0.7",
+  "rare_floor": "0.5",
+  "rare_labels": [
+    "deny"
+  ],
+  "task_class": "agent_tool_policy"
+}
