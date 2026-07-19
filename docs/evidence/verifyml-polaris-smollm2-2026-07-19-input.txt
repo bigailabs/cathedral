@@ -1,0 +1,1 @@
+In one sentence, explain why exact model weight hashes matter in an AI inference receipt.

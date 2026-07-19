@@ -1,9 +1,15 @@
 # Cathedral Thin Subnet
 
 Status: independently reviewed release candidate; testnet broadcast remains gated  
-Scope: a validator-owned SAT and federated score-class subnet with no required owner data plane
+Scope: a validator-owned VerifyML and federated score-class subnet with no required owner data plane
 
 ## Outcome
+
+The subnet's focused utility is portable verification of ML inference: model,
+runtime, request, output, and execution evidence are committed in miner-signed
+receipts that validators can independently verify and assign into locally
+chosen classes. SAT is retained as a bounded hidden integrity canary, not the
+market-facing utility. See [`VERIFYML.md`](VERIFYML.md).
 
 The subnet owner hosts no scoring API, challenge service, database, object
 store, queue, or solver farm. Miners host SAT solvers. Each Bittensor validator

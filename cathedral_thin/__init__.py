@@ -1,4 +1,4 @@
-"""Owner-infrastructure-free Bittensor SAT subnet."""
+"""Owner-infrastructure-free Bittensor VerifyML subnet."""
 
 from .core import PROTOCOL_VERSION
 

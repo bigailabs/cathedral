@@ -8,7 +8,7 @@ This record separates locally proven behavior from launch gates. It is not a
 claim that the subnet is uncheatable or already broadcasting weights.
 
 Review scope is `cathedral_thin/`, `tests/thin/`, `deploy/thin/`, the thin-subnet
-documents and score-policy example, packaging, and the added CI job. The review
+and VerifyML documents, score-policy examples, packaging, and the added CI job. The review
 question was: can an invalid, stale, copied, replayed, identity-swapped,
 Sybil-duplicated, or currently offline miner receive weight; can an external
 score source bypass validator-local class policy, provenance, or replay gates;
@@ -24,7 +24,8 @@ Command:
 python -m pytest -q tests/thin
 ```
 
-Result: **88 passed** in 0.73 seconds. The only output was two upstream
+Result after the VerifyML/Fable remediation: **106 passed** in 1.91 seconds. The
+only output was two upstream
 Bittensor/Pydantic deprecation warnings from reading `Synapse.body_hash`.
 
 The suite covers deterministic HMAC challenge generation, strict payload
@@ -44,6 +45,12 @@ evidence kinds, coldkey collapse within each class, exact budget composition,
 mirror selection/equivocation, rollback and broken-chain checkpoints,
 source-only validation with zero miner queries, immutable report publication,
 decision-record integrity, and vector/provenance binding across retry.
+VerifyML coverage adds validator-signed, miner-targeted, epoch-bound requests;
+separate model/image/runner/policy/verifier pins; TDX report-data reconstruction;
+cross-epoch fresh-execution rejection; deterministic partial bundle admission;
+network-bound O(1) checkpoints; serialized checkpoint transactions; verifier
+provenance matching; bounded aggregation; and the score-body-to-validator-class
+handoff.
 Owner-registration coverage verifies source-owner SR25519 signatures, live
 source ownership, target delegate hotkey/coldkey registration, exact
 source/target/class binding, delegated report keys, time/block expiry,
@@ -121,19 +128,54 @@ solver, registry service, or owner score proxy.
 
 ## Built artifact
 
-`pip wheel . --no-deps --no-build-isolation` produced a 794,041-byte universal
+`pip wheel . --no-deps --no-build-isolation` produced an 811,574-byte universal
 wheel after the reviewed remediation:
 
 ```text
 cathedral_scaffold-4.0.0rc4-py3-none-any.whl
-sha256 e503e4c6d588bb1f8514e31bd1fbaaead9dd4cbfd92481441551c02e4ebe1b2f
+sha256 737aaabe675bd99f057eb50fd084ce06c14976961d249297b49487a42fb8692e
 ```
 
 The wheel was installed into an isolated target outside the checkout. Import
-resolved from that target, the packaged registration preflight, score-report,
-and source-owner contributor tools were present, and the packaged composed E2E
-returned `ok=true`, `owner_hosted_services=0`,
+resolved from that target; the packaged registration preflight, score-report,
+source-owner contributor, and VerifyML tools were present; and the packaged
+composed E2E returned `ok=true`, `owner_hosted_services=0`,
 `owner_registration_verified=true`, and `delegate_registered=true`.
+The installed VerifyML parser exposed `authorize`, `issue`, `run-local`,
+`verify`, `bundle`, `verify-bundle`, and `score-body`.
+
+## Real open-model receipt proof on Polaris
+
+One explicitly authorized Polaris `CPU Small (4 vCPU / 16 GB)` rental ran
+`smollm2:135m-instruct-q8_0` through a container pinned to
+`sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0`.
+The 144,811,072-byte model blob was independently hashed on the rental as
+`sha256:40f7094960b6ede829145d102ca79451b364b27d9d8694d4406e002024cff357`;
+the runner binary hash was
+`sha256:2318056c74f47b813860e7ef80ab2e67aca7e3935a5d97c0a6115575cff66480`.
+
+The model answered a public prompt in 1.074848034 seconds with 48 input and 28
+output tokens. The `cathedral/serge_sat_test` hotkey signed the resulting input,
+parameter, output, model, and runtime commitments. Independent CLI
+verification reproduced every reveal commitment and accepted receipt
+`sha256:cc11d04839a5e4d5563bd306953341e2b6fc90a9ef70d4656421a1bb18b62f72`
+at Finney block 8,653,533.
+
+This is deliberately recorded as `attestation_verified=false`: the cheapest
+ordinary CPU rental proves the real-model and portable-receipt plumbing, not a
+genuine TDX execution. The receipt therefore cannot produce production
+`verified_work_units`. The final schema also records
+`validator_request_authorized=false`; the historical run predates the added
+validator-signed demand gate and cannot be upgraded into production credit.
+Exact prompt, parameters, output, signed receipt, model hashes, runtime hashes,
+latency/token metadata, rental ID, and proof scope are
+under [`docs/evidence/`](evidence/verifyml-polaris-smollm2-2026-07-19-run.json).
+
+The rental deployment was
+`c990822f-0df3-43fe-9d55-dbdb47f800a1`. It was terminated immediately after
+the hashes were captured; the API then reported `status=stopped`,
+`provider_status=stopped`, and zero active rentals. Account balance moved from
+$181.50 to $181.45, an observed $0.05 test cost.
 
 ## Current Bittensor compatibility
 
@@ -154,23 +196,20 @@ confirmed, failed, ambiguous, and retry responses.
 Candidate full suite:
 
 ```text
-79 failed, 1029 passed, 5410 warnings in 79.50s
+75 failed, 1051 passed, 5410 warnings in 129.28s
 ```
 
 Clean `origin/main` full suite in a detached worktree:
 
 ```text
-80 failed, 940 passed, 5409 warnings in 81.03s
+75 failed, 945 passed, 5408 warnings in 121.80s
 ```
 
-The candidate has no branch-only failing node. Its 79 failures are a strict
-subset of the clean base's 80 failures. The base-only failure is the
-order-sensitive legacy publisher test
-`test_solution_manifest_v2_submit_bitset_rejects_auth_failures_without_rows`,
-which passes under the candidate's expanded collection order. The remaining
-failures come from absent external audit corpora, forbidden local socket,
-process, or renderer capabilities, and legacy publisher global state. The
-candidate adds 88 focused passing tests and introduces no full-suite failure.
+The candidate and clean base have **exactly the same 75 failing node IDs**:
+candidate-only 0, base-only 0. The failures come from absent external audit
+corpora, forbidden local socket, process, or renderer capabilities, and legacy
+publisher global state. The candidate adds 106 passing thin-subnet tests and
+two upstream Bittensor warnings without adding a whole-repository failure.
 
 ## Live SN39 Finney dry-run
 
@@ -207,6 +246,17 @@ small in-memory/disk mutation window, and replace string-prefix exception
 classification with typed exceptions if that path grows. The full record is
 [`THIN_SUBNET_FABLE_REVIEW.md`](THIN_SUBNET_FABLE_REVIEW.md).
 
+VerifyML then received four fresh read-only Fable passes. The first exposed
+three high-priority receipt/bundle defects; the second rejected an incomplete
+fix because one validator authorization could still mint a fresh receipt in a
+later epoch. The final protocol binds each authorization to one source epoch at
+every signature and attestation layer. The third pass returned **REMEDIATION
+ACCEPTED**; a fourth narrow pass reviewed the last checkpoint-lock hardening and
+returned **FOLLOW-UP ACCEPTED — no actionable defects found**. Fable could not
+run pytest under its read-only plan mode, so its static review is independent
+of the locally executed test evidence. The full finding/remediation record is
+[`VERIFYML_FABLE_REVIEW.md`](VERIFYML_FABLE_REVIEW.md).
+
 ## Launch gates not represented as completed
 
 - No subnet create/register/start transaction or weight broadcast was made.
@@ -226,6 +276,11 @@ classification with typed exceptions if that path grows. The full record is
   ingest stream; it must export `verified_work_units`, exact assurance-receipt
   IDs and digests, explicit zeros, and the new Ed25519 class report before this
   class is enabled by a real validator.
+- The VerifyML receipt schema, pinned-verifier adapter, bundle replay gates,
+  score-body handoff, and real open-model unattested run are complete. A
+  genuine TDX quote whose report data follows this new schema has not yet been
+  verified independently; until that happens, no VerifyML receipt should earn
+  production `verified_work_units`.
 Until the remaining testnet gates are closed, this is an independently reviewed
 release candidate, not a
 mainnet-production attestation.
