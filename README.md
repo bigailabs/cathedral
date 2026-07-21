@@ -3,6 +3,8 @@
 <p align="center">
   Documentation:
   <a href="VALIDATOR.md">Validator</a> |
+  <a href="docs/THIN_SUBNET_RUNBOOK.md">No-infrastructure subnet</a> |
+  <a href="docs/VERIFIED_AGENT_WORK.md">Verified Agent Work</a> |
   <a href="CATHEDRAL_V0_LANES.md">v0 Lanes</a> |
   <a href="LAUNCH_V0_RUNBOOK.md">v0 Launch Runbook</a> |
   <a href="game/arena/ARENA.md">Arena</a> |
@@ -208,6 +210,56 @@ python -m game.arena.bundle game/arena/out/proof_bundle.json
 ```
 
 Full guide: [`game/arena/ARENA.md`](game/arena/ARENA.md).
+
+### Owner-infrastructure-free subnet
+
+The `cathedral_thin` runtime is the complete validator-owned weight path. Its
+default mode uses no publisher, database, object storage, queue, scorer, or
+owner-hosted challenge service: each validator sends private SAT challenges,
+verifies witnesses, collapses hotkeys by coldkey, and sets its own Subtensor
+weights. Its optional federated score-class mode lets Cathedral Confidential or
+another subnet component contribute small signed, evidence-backed facts while
+the validator retains class allocation, assignment, provenance, and sole chain
+signing authority. A source-subnet owner can also register a delegate hotkey on
+the target subnet and sign a bounded class/report-key delegation; every
+validator independently verifies current ownership and registration before
+using it, and the contributor never receives direct `set_weights` authority.
+
+Prove the full local loop first:
+
+```bash
+cathedral-thin-e2e --pretty
+python -m pytest -q tests/thin
+```
+
+Then follow the [thin subnet runbook](docs/THIN_SUBNET_RUNBOOK.md) for wallets,
+registration, miner service, validator dry-run, commit-reveal, and broadcast.
+The [design and threat model](docs/THIN_SUBNET_DESIGN.md) states the explicit
+non-claims and residual risks. The
+[evidence record](docs/THIN_SUBNET_EVIDENCE.md) separates completed checks from
+the remaining testnet-write launch gates, and the
+[Fable review record](docs/THIN_SUBNET_FABLE_REVIEW.md) records the independent
+findings, remediation, and accepted follow-up. The
+[score-class contract](docs/THIN_SCORE_CLASSES.md) specifies decentralized
+composition, Cathedral Confidential integration, replay/equivocation handling,
+source-subnet owner onboarding, and the no-central-infrastructure scaling
+model.
+
+The same thin path now includes a first concrete Verified Agent Work commodity:
+miners distill structured agent decisions into compact rule policies;
+validators replay them on committed hidden cases and assign separate budgets
+for fidelity, rare-case retention, evidence faithfulness, compactness, and
+attested execution. It uses the score-class and owner-registration contracts
+above, so a testnet subnet owner can contribute measurements without receiving
+the validator's weight key or control over its final allocation.
+
+```bash
+python -m cathedral_thin.policy_cli demo
+```
+
+The demo constructs a complete UID-aligned weight vector without services or a
+chain write. See the [architecture, threat model, operator commands, and
+production gates](docs/VERIFIED_AGENT_WORK.md).
 
 The production-style audit scanner bridge lives at `/v1/audit-scanner/*`.
 It is default-off, signed, replay-scored, and not connected to payment weights

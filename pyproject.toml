@@ -5,15 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cathedral-scaffold"
 version = "4.0.0-rc.4"
-description = "Cathedral SN39 v4 - thin orchestrator + validator for verifiable SAT compute"
+description = "Cathedral SN39 - thin validator for verifiable ML inference and integrity canaries"
 requires-python = ">=3.11"
-# Validator-runtime deps only. The thin validator fetches a signed vector,
-# verifies it (cryptography), and sets weights (bittensor). The publisher's
-# server stack (FastAPI, psycopg2, boto3) is the optional [publisher] extra so a
-# validator install stays lean.
+# Validator-runtime deps only. The thin validator generates challenges, scores
+# miners locally, and sets weights through Bittensor. The publisher's server
+# stack (FastAPI, psycopg2, boto3) remains optional so this path needs no owner
+# API, database, queue, object store, or solver farm.
 dependencies = [
     "cryptography>=42",
-    "bittensor>=8",
+    "bittensor>=10.4,<11",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,10 @@ publisher = [
     "psycopg2-binary>=2.9",
     "boto3>=1.35",
 ]
+test = [
+    "pytest>=8",
+    "ruff>=0.15",
+]
 
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
@@ -38,7 +43,15 @@ cathedral-arena-verify = "game.arena.bundle:main"
 cathedral-arena-playthrough = "game.arena.playthrough:main"
 cathedral-arena-round-verify = "game.arena.verify:main"
 cathedral-audit-scanner-smoke = "game.arena.audit_scanner_smoke:main"
+cathedral-thin-miner = "cathedral_thin.miner:main"
+cathedral-thin-validator = "cathedral_thin.validator:main"
+cathedral-thin-e2e = "cathedral_thin.e2e:main"
+cathedral-thin-preflight = "cathedral_thin.preflight:main"
+cathedral-thin-score-report = "cathedral_thin.report_cli:main"
+cathedral-thin-contributor = "cathedral_thin.contributor_cli:main"
+cathedral-verifyml = "cathedral_thin.verifyml_cli:main"
+cathedral-verified-policy = "cathedral_thin.policy_cli:main"
 
 [tool.setuptools.packages.find]
-include = ["scaffold*", "game*"]
+include = ["scaffold*", "game*", "cathedral_thin*"]
 exclude = ["game.tests*", "game.arena.tests*"]

@@ -1,0 +1,25 @@
+[Unit]
+Description=Cathedral thin SAT miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cathedral
+Group=cathedral
+WorkingDirectory=/opt/cathedral-thin
+EnvironmentFile=/etc/cathedral-thin/miner.env
+Environment=HOME=/var/lib/cathedral-thin
+ExecStart=/opt/cathedral-thin/.venv/bin/cathedral-thin-miner
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/cathedral-thin
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

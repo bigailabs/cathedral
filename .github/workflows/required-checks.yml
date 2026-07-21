@@ -12,6 +12,25 @@ permissions:
   security-events: write
 
 jobs:
+  thin-subnet:
+    name: Thin subnet tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install thin runtime and tests
+        run: python -m pip install -e ".[test]"
+      - name: Run adversarial, recovery, and end-to-end tests
+        run: |
+          ruff check cathedral_thin tests/thin
+          ruff format --check cathedral_thin tests/thin
+          python -m pytest -q tests/thin
+          cathedral-thin-e2e
+
   codeql:
     name: CodeQL
     runs-on: ubuntu-latest
