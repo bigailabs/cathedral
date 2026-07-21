@@ -92,7 +92,24 @@ def solve_wire(synapse: Any) -> str:
     return encode_assignment(assignment, n_vars=cnf.n_vars)
 
 
-async def run_e2e() -> dict[str, Any]:
+async def run_e2e(
+    *,
+    external_report_raw: bytes | None = None,
+    external_public_key: bytes | None = None,
+) -> dict[str, Any]:
+    """Run the local validator, optionally with a real external score report.
+
+    The paired arguments are intentionally bytes-only so the cross-repository
+    proof exercises the same parser and signature path as an operator-loaded
+    report instead of passing trusted Python objects across the boundary.
+    """
+
+    if (external_report_raw is None) != (external_public_key is None):
+        raise ValueError(
+            "external report bytes and public key must be supplied together"
+        )
+    if external_public_key is not None and len(external_public_key) != 32:
+        raise ValueError("external report public key must be 32 bytes")
     config = ValidatorConfig(
         network="local",
         netuid=1,
@@ -203,10 +220,17 @@ async def run_e2e() -> dict[str, Any]:
         # Exercise the federated class path with a Cathedral Confidential-shaped
         # signed report. The source supplies facts and receipt provenance; the
         # validator chooses both the 40% class budget and the work-unit metric.
-        score_key = Ed25519PrivateKey.generate()
-        score_public = score_key.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        score_key = (
+            Ed25519PrivateKey.generate() if external_report_raw is None else None
         )
+        score_public = (
+            score_key.public_key().public_bytes(
+                serialization.Encoding.Raw, serialization.PublicFormat.Raw
+            )
+            if score_key is not None
+            else external_public_key
+        )
+        assert score_public is not None
         source_owner = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
         source_delegate = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
         report_path = Path(tmpdir) / "confidential-class.json"
@@ -291,49 +315,53 @@ async def run_e2e() -> dict[str, Any]:
                 source_owner,
             )
         )
-        report_body = {
-            "schema": "cathedral_score_class_report_v1",
-            "network": "local",
-            "netuid": 1,
-            "class_id": "confidential_compute",
-            "source_id": "cathedralconfidential",
-            "source_epoch": 7,
-            "generated_at": format_time(issued),
-            "valid_until": format_time(issued + timedelta(minutes=5)),
-            "valid_from_block": 70,
-            "valid_until_block": 80,
-            "complete": True,
-            "policy_digest": "sha256:" + "11" * 32,
-            "verifier_digest": "sha256:" + "22" * 32,
-            "previous_report_id": None,
-            "entries": [
-                {
-                    "miner_hotkey": hotkey,
-                    "metrics": {"verified_work_units": units},
-                    "asserted_score": None,
-                    "reason_codes": ["receipt_verified", "work_verified"],
-                    "evidence": [
-                        {
-                            "kind": "cathedral_assurance_receipt_v2",
-                            "id": "receipt-sha256:"
-                            + hashlib.sha256(hotkey.encode()).hexdigest(),
-                            "digest": "sha256:"
-                            + hashlib.sha256(
-                                ("receipt:" + hotkey).encode()
-                            ).hexdigest(),
-                            "uri": None,
-                        }
-                    ],
-                }
-                for hotkey, units in (
-                    ("honest-a", "1"),
-                    ("honest-a2", "1"),
-                    ("honest-b", "2"),
-                )
-            ],
-            "signing_key_id": "e2e-score-key",
-        }
-        report_path.write_bytes(sign_report(report_body, score_key))
+        if external_report_raw is None:
+            assert score_key is not None
+            report_body = {
+                "schema": "cathedral_score_class_report_v1",
+                "network": "local",
+                "netuid": 1,
+                "class_id": "confidential_compute",
+                "source_id": "cathedralconfidential",
+                "source_epoch": 7,
+                "generated_at": format_time(issued),
+                "valid_until": format_time(issued + timedelta(minutes=5)),
+                "valid_from_block": 70,
+                "valid_until_block": 80,
+                "complete": True,
+                "policy_digest": "sha256:" + "11" * 32,
+                "verifier_digest": "sha256:" + "22" * 32,
+                "previous_report_id": None,
+                "entries": [
+                    {
+                        "miner_hotkey": hotkey,
+                        "metrics": {"verified_work_units": units},
+                        "asserted_score": None,
+                        "reason_codes": ["receipt_verified", "work_verified"],
+                        "evidence": [
+                            {
+                                "kind": "cathedral_assurance_receipt_v2",
+                                "id": "receipt-sha256:"
+                                + hashlib.sha256(hotkey.encode()).hexdigest(),
+                                "digest": "sha256:"
+                                + hashlib.sha256(
+                                    ("receipt:" + hotkey).encode()
+                                ).hexdigest(),
+                                "uri": None,
+                            }
+                        ],
+                    }
+                    for hotkey, units in (
+                        ("honest-a", "1"),
+                        ("honest-a2", "1"),
+                        ("honest-b", "2"),
+                    )
+                ],
+                "signing_key_id": "e2e-score-key",
+            }
+            report_path.write_bytes(sign_report(report_body, score_key))
+        else:
+            report_path.write_bytes(external_report_raw)
         configured_external_policy = score_policy.external_classes[0]
         owner_registration, registration_checkpoint = verify_owner_registration(
             registration_path.read_bytes(),
@@ -486,6 +514,11 @@ async def run_e2e() -> dict[str, Any]:
             and weights.get("offline", 0.0) == 0.0,
             "weight_sum": round(sum(uid_weights), 12),
             "score_classes": {
+                "report_origin": (
+                    "external_report_bytes"
+                    if external_report_raw is not None
+                    else "self_contained_fixture"
+                ),
                 "allocations": {"local_sat": 0.6, "confidential_compute": 0.4},
                 "confidential_report_id": report.report_id,
                 "confidential_checkpoint": checkpoint.source_epoch,
@@ -494,9 +527,19 @@ async def run_e2e() -> dict[str, Any]:
                 "owner_registration_verified": True,
                 "delegate_registered": True,
                 "validator_assignment": "verified_work_units",
+                "external_hotkeys": sorted(external_decision.raw_scores),
+                "receipt_evidence_ids": sorted(
+                    item["id"]
+                    for provenance in external_decision.provenance.values()
+                    for item in provenance["evidence"]
+                ),
                 "decision_digest": decision_digest,
                 "decision_record_written": decision_path.exists(),
             },
+            "onchain_vector": [
+                {"uid": uid, "weight": round(weight, 12)}
+                for uid, weight in zip(uids, uid_weights)
+            ],
             "pending_digest": pending_digest,
             "retry_identical_after_restart": retry_same,
             "secret_stable_after_restart": secret_stable,

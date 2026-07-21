@@ -15,6 +15,37 @@ cathedral-thin-e2e --pretty
 python -m pytest -q tests/thin
 ```
 
+## Cathedral Confidential score classes
+
+Cathedral Confidential can now export a frozen epoch directly as a
+`cathedral_score_class_report_v1`. Positive `verified_work_units` are accepted
+only when the ledger contains the exact atomically stored
+`cathedral_assurance_receipt_v2`; zero rows remain in the complete snapshot to
+revoke prior work. The report gives the validator the receipt ID, digest and
+optional HTTPS location, while the validator retains the class policy, wallet,
+decision record and final `set_weights` call.
+
+The producer freezes the first exported bytes per epoch/target class and
+automatically chains the next source epoch to the last durable report ID. This
+keeps upload retries and mirror repair from looking like source equivocation.
+An out-of-grammar work-unit value zeros only its own entry with an explicit
+reason rather than invalidating the whole class.
+
+From the Cathedral Confidential checkout, run the local cross-repository proof:
+
+```console
+PYTHONPATH="$PWD:/path/to/cathedralsubnet-production-ready" \
+  /path/to/python scripts/thin_subnet_e2e.py \
+  --validator-repo /path/to/cathedralsubnet-production-ready \
+  --pretty
+```
+
+The proof supplies external report bytes through the validator's normal strict
+parser and Ed25519 verification path. It also records receipt provenance in the
+weight decision and proves an altered metric is rejected. See
+`cathedralconfidential/docs/THIN_SUBNET_INTEGRATION.md` for the producer command
+and remaining assumptions.
+
 Acceptance is `"ok": true`, all thin-subnet tests passing, zero owner-hosted
 services, positive honest weights, rejected copy/replay/identity attacks, and a
 pending vector that survives restart and confirms on retry. The E2E also signs
