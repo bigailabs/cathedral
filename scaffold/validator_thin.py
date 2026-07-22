@@ -29,6 +29,7 @@ import os
 import sys
 import time
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -344,6 +345,10 @@ def _confidential_primary_to_uid_weights(
             raise wire.VectorError(
                 f"confidential_primary hotkey {hotkey!r} has no current metagraph UID")
         uid = hotkey_to_uid[hotkey]
+        if uid == snap.get("burn_uid"):
+            raise wire.VectorError(
+                f"confidential_primary hotkey {hotkey!r} resolves to burn UID"
+            )
         if uid in mapped_uids:
             raise wire.VectorError(
                 f"confidential_primary duplicate UID {uid} in signed vector")
@@ -358,15 +363,99 @@ def _confidential_primary_to_uid_weights(
     )
 
 
-# The one supported policy pin. When a validator opts in, ONLY this signed
+# Supported policy pins. When a validator opts in, ONLY the selected signed
 # contract is applied; every other vector shape (legacy, v3 blend) is rejected.
 REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1 = "confidential_primary_v1"
-REQUIRE_POLICY_CHOICES = (REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1,)
+REQUIRE_POLICY_VALIDATED_SUPPLY_V1 = "validated_supply_v1"
+REQUIRE_POLICY_CHOICES = (
+    REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1,
+    REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
+)
+
+
+def _validated_supply_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate the launch-locked 90/10 validated-supply allocation.
+
+    Version 1 admits only Intel TDX rows. The independently approved GPU class
+    is deliberately empty, so its exact 10% allocation is routed to burn. A
+    later GPU admission requires a new, explicitly reviewed contract version.
+    """
+    metadata = payload.get("policy_metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    policy = metadata.get("validated_supply")
+    if policy is None:
+        return None
+    if not isinstance(policy, dict):
+        raise wire.VectorError("validated_supply metadata must be an object")
+    expected = {
+        "contract_version",
+        "intel_tdx_allocation",
+        "verified_gpu_allocation",
+        "verified_gpu_admitted",
+        "burn_hotkey",
+    }
+    if set(policy) != expected:
+        raise wire.VectorError("validated_supply metadata fields mismatch")
+    if policy["contract_version"] != "v1":
+        raise wire.VectorError("validated_supply unsupported contract_version")
+    try:
+        tdx = float(policy["intel_tdx_allocation"])
+        gpu = float(policy["verified_gpu_allocation"])
+    except (TypeError, ValueError) as exc:
+        raise wire.VectorError("validated_supply allocations must be numeric") from exc
+    if not math.isclose(tdx, 0.90, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError("validated_supply Intel TDX allocation must equal 0.90")
+    if not math.isclose(gpu, 0.10, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError("validated_supply Verified GPU allocation must equal 0.10")
+    if not math.isclose(tdx + gpu, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError("validated_supply allocations must sum to 1")
+    if policy["verified_gpu_admitted"] is not False:
+        raise wire.VectorError("validated_supply v1 cannot admit Verified GPU")
+    burn_hotkey = policy["burn_hotkey"]
+    snap = payload.get("burn_snapshot") or {}
+    if not isinstance(burn_hotkey, str) or not burn_hotkey:
+        raise wire.VectorError("validated_supply burn_hotkey is missing")
+    if snap.get("burn_hotkey") != burn_hotkey:
+        raise wire.VectorError("validated_supply burn_hotkey does not match snapshot")
+    if snap.get("burn_uid") is not None:
+        raise wire.VectorError("validated_supply burn destination must not pin a UID")
+    try:
+        burn_percentage = float(snap["forced_burn_percentage"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise wire.VectorError("validated_supply burn percentage is missing") from exc
+    if not math.isclose(burn_percentage, 10.0, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError("validated_supply unused GPU allocation must burn 10%")
+    return policy
+
+
+def _resolve_burn_hotkey(
+    payload: dict[str, Any], hotkey_to_uid: dict[str, int]
+) -> dict[str, Any]:
+    """Resolve a signed burn hotkey against this tick's metagraph snapshot."""
+    snap = payload.get("burn_snapshot") or {}
+    burn_hotkey = snap.get("burn_hotkey")
+    if burn_hotkey is None:
+        return payload
+    if burn_hotkey not in hotkey_to_uid:
+        raise wire.VectorError(
+            f"burn hotkey {burn_hotkey!r} has no current metagraph UID"
+        )
+    resolved_uid = hotkey_to_uid[burn_hotkey]
+    signed_uid = snap.get("burn_uid")
+    if signed_uid is not None and int(signed_uid) != resolved_uid:
+        raise wire.VectorError("signed burn UID does not match current burn hotkey")
+    resolved = dict(payload)
+    resolved["burn_snapshot"] = {**snap, "burn_uid": resolved_uid}
+    return resolved
 
 
 def vector_to_uid_weights(payload: dict[str, Any],
                           hotkey_to_uid: dict[str, int],
                           *, require_policy: str | None = None) -> dict[int, float]:
+    original_payload = payload
+    validated_supply = _validated_supply_meta(original_payload)
+    payload = _resolve_burn_hotkey(original_payload, hotkey_to_uid)
     snap = payload["burn_snapshot"]
     cp = _confidential_primary_meta(payload)
     # Pinned validators apply ONLY confidential_primary v1. A vector without a
@@ -378,6 +467,17 @@ def vector_to_uid_weights(payload: dict[str, Any],
             raise wire.VectorError(
                 "validator pinned to confidential_primary_v1 but vector carries "
                 "no confidential_primary policy block")
+        return _confidential_primary_to_uid_weights(payload, cp, hotkey_to_uid)
+    if require_policy == REQUIRE_POLICY_VALIDATED_SUPPLY_V1:
+        if validated_supply is None:
+            raise wire.VectorError(
+                "validator pinned to validated_supply_v1 but vector carries "
+                "no validated_supply policy block"
+            )
+        if cp is None:
+            raise wire.VectorError(
+                "validated_supply_v1 requires confidential_primary evidence"
+            )
         return _confidential_primary_to_uid_weights(payload, cp, hotkey_to_uid)
     if cp is not None:
         return _confidential_primary_to_uid_weights(payload, cp, hotkey_to_uid)
@@ -430,6 +530,18 @@ def vector_to_uid_weights(payload: dict[str, Any],
 
 # -- chain ----------------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class ChainPreflight:
+    wallet: Any
+    subtensor: Any
+    hotkey_to_uid: dict[str, int]
+    validator_hotkey: str
+    validator_uid: int
+    block: int | None
+    min_allowed_weights: int
+    max_weight_limit: float
+
 @contextlib.contextmanager
 def _isolated_argv():
     """Hide sys.argv from bittensor while it builds its own config.
@@ -449,8 +561,91 @@ def _isolated_argv():
         sys.argv = saved
 
 
+def _validate_emission_vector(uid_weights: dict[int, float]) -> None:
+    if not uid_weights:
+        raise wire.VectorError("chain preflight requires a non-empty vector")
+    if any(
+        isinstance(uid, bool)
+        or not isinstance(uid, int)
+        or uid < 0
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+        for uid, value in uid_weights.items()
+    ):
+        raise wire.VectorError("chain preflight vector is invalid")
+    total = math.fsum(float(value) for value in uid_weights.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise wire.VectorError(f"chain preflight vector mass {total!r} != 1.0")
+
+
+def _validate_chain_constraints(
+    uid_weights: dict[int, float], preflight: ChainPreflight
+) -> None:
+    positive = [float(value) for value in uid_weights.values() if float(value) > 0.0]
+    if len(positive) < preflight.min_allowed_weights:
+        raise wire.VectorError(
+            "chain preflight vector has fewer positives than min_allowed_weights"
+        )
+    limit = preflight.max_weight_limit
+    if not math.isfinite(limit) or not 0.0 < limit <= 1.0:
+        raise wire.VectorError("chain preflight max_weight_limit is invalid")
+    if any(value > limit + 1e-9 for value in positive):
+        raise wire.VectorError("chain preflight vector exceeds max_weight_limit")
+    if len(positive) * limit < 1.0 - 1e-9:
+        raise wire.VectorError("chain preflight vector cannot conserve mass")
+
+
+def chain_preflight(*, network: str, netuid: int, wallet_name: str,
+                    wallet_hotkey: str) -> ChainPreflight:
+    """Resolve the signing validator and all UIDs from one fresh metagraph."""
+    with _isolated_argv():
+        import bittensor as bt
+        wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
+        subtensor = _bt_subtensor(bt)(network=connection_target(network))
+        metagraph = subtensor.metagraph(netuid)
+    raw_uids = metagraph.uids.tolist() if hasattr(metagraph.uids, "tolist") else metagraph.uids
+    uids = [int(value) for value in raw_uids]
+    hotkeys = [str(value) for value in metagraph.hotkeys]
+    permits = [bool(value) for value in metagraph.validator_permit]
+    if not (len(uids) == len(hotkeys) == len(permits)):
+        raise wire.VectorError("metagraph arrays are inconsistent")
+    if len(set(uids)) != len(uids) or len(set(hotkeys)) != len(hotkeys):
+        raise wire.VectorError("metagraph contains duplicate UID or hotkey")
+    hotkey_to_uid = dict(zip(hotkeys, uids))
+    validator_hotkey = str(wallet.hotkey.ss58_address)
+    if validator_hotkey not in hotkey_to_uid:
+        raise wire.VectorError("validator hotkey is not registered on this subnet")
+    index = hotkeys.index(validator_hotkey)
+    if not permits[index]:
+        raise wire.VectorError("validator hotkey lacks validator permit")
+    block_raw = getattr(metagraph, "block", None)
+    try:
+        block = int(block_raw) if block_raw is not None else None
+    except (TypeError, ValueError):
+        block = None
+    result = ChainPreflight(
+        wallet=wallet,
+        subtensor=subtensor,
+        hotkey_to_uid=hotkey_to_uid,
+        validator_hotkey=validator_hotkey,
+        validator_uid=hotkey_to_uid[validator_hotkey],
+        block=block,
+        min_allowed_weights=int(subtensor.min_allowed_weights(netuid=netuid)),
+        max_weight_limit=float(subtensor.max_weight_limit(netuid=netuid)),
+    )
+    _lifecycle(
+        "PREFLIGHT complete",
+        f"validator_hotkey={validator_hotkey} validator_uid={result.validator_uid} "
+        f"block={block if block is not None else 'unknown'} "
+        f"min_allowed={result.min_allowed_weights} max_limit={result.max_weight_limit}",
+    )
+    return result
+
+
 def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid: int,
-                         wallet_name: str, wallet_hotkey: str, broadcast: bool) -> bool:
+                         wallet_name: str, wallet_hotkey: str, broadcast: bool,
+                         preflight: ChainPreflight | None = None) -> bool:
+    _validate_emission_vector(uid_weights)
     ordered = sorted(uid_weights.items())
     preview = ",".join(f"{u}={w:.4f}" for u, w in ordered[:12]) + (
         " ..." if len(ordered) > 12 else "")
@@ -460,20 +655,38 @@ def set_weights_on_chain(uid_weights: dict[int, float], *, network: str, netuid:
     uids = [u for u, _ in ordered]
     vals = [w for _, w in ordered]
     try:
-        with _isolated_argv():
-            import bittensor as bt   # import under blanked argv — bittensor parses
-            wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
-            sub = _bt_subtensor(bt)(network=connection_target(network))
-            resp = sub.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=vals,
-                                   wait_for_inclusion=True)
+        if preflight is None:
+            preflight = chain_preflight(
+                network=network,
+                netuid=netuid,
+                wallet_name=wallet_name,
+                wallet_hotkey=wallet_hotkey,
+            )
+        _validate_chain_constraints(uid_weights, preflight)
+        resp = preflight.subtensor.set_weights(
+            wallet=preflight.wallet,
+            netuid=netuid,
+            uids=uids,
+            weights=vals,
+            wait_for_inclusion=True,
+            wait_for_finalization=True,
+        )
     except Exception as exc:
         _lifecycle("CHAIN failed", f"uids={len(ordered)} reason={type(exc).__name__}")
         raise
     # newer bittensor returns an ExtrinsicResponse object (truthy even on
     # failure) — judge success by the field, not truthiness.
     ok = bool(getattr(resp, "success", resp))
-    _lifecycle("CHAIN submitted" if ok else "CHAIN failed",
-               f"uids={len(ordered)} success={ok}")
+    response_details = []
+    receipt = getattr(resp, "extrinsic_receipt", None)
+    for name in ("extrinsic_hash", "block_hash", "block_number"):
+        value = getattr(receipt, name, None) or getattr(resp, name, None)
+        if value:
+            response_details.append(f"{name}={str(value)[:96]}")
+    _lifecycle(
+        "CHAIN submitted" if ok else "CHAIN failed",
+        " ".join([f"uids={len(ordered)}", f"success={ok}", *response_details]),
+    )
     return ok
 
 
@@ -511,13 +724,26 @@ def tick(args) -> bool:
                f"burn={payload['burn_snapshot']['forced_burn_percentage']}%")
     # offline is authoritative: no chain read AND no broadcast, even if
     # --broadcast was also passed (the two are contradictory; offline wins).
+    preflight = None
     if args.offline:
         hk2uid = {w["miner_hotkey"]: i for i, w in enumerate(payload["weights"])}
+        burn_hotkey = (payload.get("burn_snapshot") or {}).get("burn_hotkey")
+        if burn_hotkey is not None and burn_hotkey not in hk2uid:
+            hk2uid[burn_hotkey] = len(hk2uid)
         _lifecycle("MAP offline", "synthetic uid map, no chain access")
         broadcast = False
     else:
-        hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
         broadcast = args.broadcast
+        if broadcast:
+            preflight = chain_preflight(
+                network=args.network,
+                netuid=args.netuid,
+                wallet_name=args.wallet_name,
+                wallet_hotkey=args.wallet_hotkey,
+            )
+            hk2uid = preflight.hotkey_to_uid
+        else:
+            hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
     try:
         uid_weights = vector_to_uid_weights(
             payload, hk2uid, require_policy=getattr(args, "require_policy", None))
@@ -527,7 +753,7 @@ def tick(args) -> bool:
     _lifecycle("MAP complete", f"uids={len(uid_weights)}")
     ok = set_weights_on_chain(uid_weights, network=args.network, netuid=args.netuid,
                               wallet_name=args.wallet_name, wallet_hotkey=args.wallet_hotkey,
-                              broadcast=broadcast)
+                              broadcast=broadcast, preflight=preflight)
     # Advance the fence ONLY on a real broadcast — a dry-run/offline pass must
     # not consume a version (with the pv<=fence rule that would otherwise block
     # the subsequent live broadcast of the same vector).
@@ -584,10 +810,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--require-policy", dest="require_policy",
                    default=os.environ.get("CATHEDRAL_VALIDATOR_REQUIRE_POLICY", "").strip() or None,
                    help="pin the validator to a signed policy contract. "
-                        "'confidential_primary_v1' rejects every vector lacking a valid "
-                        "confidential_primary v1 policy block and makes the legacy/v3 "
-                        "fallback paths unreachable. Default: unpinned (accept all "
-                        "signed shapes).")
+                        "validated_supply_v1 locks the launch 90%% Intel TDX / "
+                        "10%% unadmitted GPU-to-burn allocation. Default: unpinned.")
     return p
 
 

@@ -463,6 +463,6 @@ def test_unpinned_still_accepts_legacy_and_v3() -> None:
 
 
 def test_pin_choice_constant() -> None:
-    """The only supported pin value is confidential_primary_v1."""
+    """The legacy confidential-primary pin remains supported."""
     assert PIN == "confidential_primary_v1"
-    assert validator_thin.REQUIRE_POLICY_CHOICES == (PIN,)
+    assert PIN in validator_thin.REQUIRE_POLICY_CHOICES

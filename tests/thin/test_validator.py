@@ -202,6 +202,135 @@ def test_all_zero_local_round_retains_prior_vector_and_completes(tmp_path, capsy
     assert reloaded.confirmed_decision_digest == "sha256:" + "b" * 64
 
 
+def test_expired_validated_supply_revokes_to_burn_and_restart_cannot_restore(tmp_path):
+    class SupplyRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.peers = [
+                Peer(
+                    0,
+                    "burn-hotkey",
+                    "burn-cold",
+                    SimpleNamespace(hotkey="burn-hotkey", port=0, is_serving=False),
+                    False,
+                ),
+                Peer(7, "tdx-miner", "tdx-cold", Axon("tdx-miner"), True),
+            ]
+            self.responses = [
+                SimpleNamespace(success=True),
+                SimpleNamespace(success=True),
+                SimpleNamespace(success=True),
+            ]
+
+        def metagraph(self):
+            return SimpleNamespace(
+                uids=[peer.uid for peer in self.peers],
+                hotkeys=[peer.hotkey for peer in self.peers],
+                coldkeys=[peer.coldkey for peer in self.peers],
+                axons=[peer.axon for peer in self.peers],
+            )
+
+    def external(class_id: str, allocation: str) -> ExternalClassPolicy:
+        return ExternalClassPolicy(
+            class_id=class_id,
+            allocation=Decimal(allocation),
+            source_id="cathedralconfidential",
+            locations=("unused",),
+            trusted_keys={"key": b"0" * 32},
+            max_age_seconds=600,
+            max_future_seconds=30,
+            max_block_span=100,
+            require_evidence=True,
+            assignment=AssignmentPolicy(
+                "metric", "verified_work_units", "linear", None
+            ),
+        )
+
+    tdx = external("intel_tdx", "0.9")
+    gpu = external("verified_gpu", "0.1")
+    policy = ScorePolicy(
+        network="local",
+        netuid=1,
+        classes=(tdx, gpu),
+        digest="sha256:" + "99" * 32,
+        burn_hotkey="burn-hotkey",
+    )
+    report = VerifiedReport(
+        class_id=tdx.class_id,
+        source_id=tdx.source_id,
+        source_epoch=4,
+        report_id="sha256:" + "11" * 32,
+        previous_report_id=None,
+        generated_at=datetime.now(UTC),
+        valid_until=datetime.now(UTC),
+        valid_from_block=0,
+        valid_until_block=100,
+        policy_digest="sha256:" + "22" * 32,
+        verifier_digest="sha256:" + "33" * 32,
+        signing_key_id="key",
+        entries=(
+            ScoreEntry(
+                "tdx-miner",
+                {"verified_work_units": Decimal(1)},
+                None,
+                ("receipt_verified",),
+                (
+                    EvidenceRef(
+                        "receipt",
+                        "sha256:" + "44" * 32,
+                        "sha256:" + "55" * 32,
+                        None,
+                    ),
+                ),
+            ),
+        ),
+        document={},
+    )
+    runtime = SupplyRuntime()
+
+    def loader(class_policy, **_kwargs):
+        if class_policy.class_id == tdx.class_id and runtime._block == 20:
+            return report, SourceCheckpoint(report.source_epoch, report.report_id)
+        raise ThinSubnetError("evidence expired")
+
+    cfg = config()
+    store = StateStore(tmp_path / "state.json", fingerprint=cfg.fingerprint())
+    state = store.load_or_create()
+    runner = ValidatorRunner(
+        config=cfg,
+        runtime=runtime,
+        store=store,
+        state=state,
+        broadcast=True,
+        score_policy=policy,
+        report_loader=loader,
+    )
+
+    assert asyncio.run(runner.tick())
+    assert runtime.submissions[-1][1:] == ([0, 7], [0.1, 0.9])
+
+    runtime._block = 30
+    assert asyncio.run(runner.tick())
+    assert runtime.submissions[-1][1:] == ([0], [1.0])
+    assert state.class_checkpoints[tdx.class_id] == {
+        "source_epoch": 4,
+        "report_id": report.report_id,
+    }
+
+    runtime._block = 40
+    restarted = ValidatorRunner(
+        config=cfg,
+        runtime=runtime,
+        store=store,
+        state=store.load_or_create(),
+        broadcast=True,
+        score_policy=policy,
+        report_loader=loader,
+    )
+    assert asyncio.run(restarted.tick())
+    assert runtime.submissions[-1][1:] == ([0], [1.0])
+
+
 def test_external_only_class_sets_weights_without_validator_scoring_infra(tmp_path):
     class MultiPeerRuntime(FakeRuntime):
         def __init__(self):

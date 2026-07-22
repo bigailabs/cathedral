@@ -63,8 +63,10 @@ KEY_ID_ENV = "CATHEDRAL_WEIGHT_POLICY_KEY_ID"
 NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
 NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
 BURN_UID_ENV = "CATHEDRAL_WEIGHT_POLICY_BURN_UID"
+BURN_HOTKEY_ENV = "CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY"
 BURN_PERCENTAGE_ENV = "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2"
 VALID_FOR_ENV = "CATHEDRAL_WEIGHT_POLICY_VALID_FOR_SECS"
+VALIDATED_SUPPLY_ENABLED_ENV = "CATHEDRAL_VALIDATED_SUPPLY_ENABLED"
 # v4-only composition knobs.
 WINDOW_HOURS_ENV = "CATHEDRAL_WEIGHTS_WINDOW_HOURS"
 MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"                       # flat_recent | proportional | row_score_recent
@@ -276,6 +278,33 @@ def burn_percentage() -> float:
 def burn_uid() -> int | None:
     raw = os.environ.get(BURN_UID_ENV, "204").strip()
     return int(raw) if raw else None
+
+
+def burn_hotkey() -> str | None:
+    raw = os.environ.get(BURN_HOTKEY_ENV, "").strip()
+    return raw or None
+
+
+def validated_supply_metadata() -> dict[str, Any] | None:
+    """Return the launch-locked 90/10 policy or fail closed on drift."""
+    if not _env_bool(VALIDATED_SUPPLY_ENABLED_ENV, False):
+        return None
+    if external_scores_mode() != "confidential_primary":
+        raise VectorError("validated_supply requires confidential_primary mode")
+    destination = burn_hotkey()
+    if destination is None:
+        raise VectorError("validated_supply requires an explicit burn hotkey")
+    if burn_uid() is not None:
+        raise VectorError("validated_supply must resolve burn by hotkey, not UID")
+    if not math.isclose(burn_percentage(), 10.0, rel_tol=0.0, abs_tol=1e-12):
+        raise VectorError("validated_supply requires exactly 10% forced burn")
+    return {
+        "contract_version": "v1",
+        "intel_tdx_allocation": 0.90,
+        "verified_gpu_allocation": 0.10,
+        "verified_gpu_admitted": False,
+        "burn_hotkey": destination,
+    }
 
 
 def _ms_iso(dt: datetime) -> str:
@@ -1930,6 +1959,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     now = now or datetime.now(timezone.utc)
+    supply_policy = validated_supply_metadata()
     coldkey_of = _load_scoring_coldkey_map(store)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     blend_meta: dict[str, Any] = {}
@@ -1976,6 +2006,8 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         "external_scores": external_status,
         "window_hours": window_hours(),
         "burn": burn_percentage(), "burn_uid": burn_uid(),
+        "burn_hotkey": burn_hotkey(),
+        "validated_supply": supply_policy,
         "tier_weights": tier_weights(),
         "payable_hotkeys": payable_meta,
         "hotkeys": sorted(scores), "scores": [scores[k] for k in sorted(scores)],
@@ -1989,6 +2021,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         "expires_at": _ms_iso(now + timedelta(seconds=valid_for)),
         "burn_snapshot": {
             "burn_uid": burn_uid(),
+            "burn_hotkey": burn_hotkey(),
             "forced_burn_percentage": burn_percentage(),
         },
         "policy_hash": "sha256:" + hashlib.sha256(
@@ -2037,6 +2070,12 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     cp_policy = blend_meta.get("confidential_primary")
     if cp_policy is not None:
         payload["policy_metadata"]["confidential_primary"] = cp_policy
+    if supply_policy is not None:
+        if cp_policy is None:
+            raise VectorError(
+                "validated_supply requires signed confidential_primary metadata"
+            )
+        payload["policy_metadata"]["validated_supply"] = supply_policy
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
     return payload

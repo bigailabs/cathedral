@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from scaffold import validator_thin
 from scaffold.publisher import external_scores, weights
 from scaffold.publisher.store import Store
 
@@ -57,6 +58,10 @@ def _clean_env(monkeypatch):
         "CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_AGE_SECS",
         "CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_FUTURE_SECS",
         "CATHEDRAL_EXTERNAL_SCORES_INGEST_ENABLED",
+        "CATHEDRAL_VALIDATED_SUPPLY_ENABLED",
+        "CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY",
+        "CATHEDRAL_WEIGHT_POLICY_BURN_UID",
+        "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2",
     ):
         monkeypatch.delenv(k, raising=False)
     yield
@@ -875,3 +880,41 @@ def test_confidential_primary_disabled_ingestion_degrades_not_base(store, monkey
     cp = meta["confidential_primary"]
     assert cp["confidential_mass"] == 0.0
     assert cp["degradation_reason"] is not None
+
+
+def test_validated_supply_emitter_signs_90_10_revocation_contract(
+    store, monkeypatch
+):
+    monkeypatch.setenv("CATHEDRAL_VALIDATED_SUPPLY_ENABLED", "true")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "confidential_primary")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_SOURCE", "cathedral_confidential_tdx"
+    )
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM", "true")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY", "burn-hotkey")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_BURN_UID", "")
+    monkeypatch.setenv(
+        "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2", "10"
+    )
+
+    vector = weights.build_signed_vector(
+        store, signing_key_hex="11" * 32, now=_now()
+    )
+
+    assert vector["policy_metadata"]["validated_supply"] == {
+        "contract_version": "v1",
+        "intel_tdx_allocation": 0.9,
+        "verified_gpu_allocation": 0.1,
+        "verified_gpu_admitted": False,
+        "burn_hotkey": "burn-hotkey",
+    }
+    assert vector["burn_snapshot"] == {
+        "burn_uid": None,
+        "burn_hotkey": "burn-hotkey",
+        "forced_burn_percentage": 10.0,
+    }
+    assert validator_thin.vector_to_uid_weights(
+        vector,
+        {"burn-hotkey": 17},
+        require_policy=validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
+    ) == {17: 1.0}

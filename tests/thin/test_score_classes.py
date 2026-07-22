@@ -35,7 +35,9 @@ def key_material():
     return private, base64.b64encode(public).decode("ascii")
 
 
-def write_policy(tmp_path, public_b64, *, asserted=False, locations=None):
+def write_policy(
+    tmp_path, public_b64, *, asserted=False, locations=None, burn_hotkey=None
+):
     assignment = {
         "mode": "asserted_score" if asserted else "metric",
         "metric": None if asserted else "verified_work_units",
@@ -65,6 +67,8 @@ def write_policy(tmp_path, public_b64, *, asserted=False, locations=None):
             },
         ],
     }
+    if burn_hotkey is not None:
+        document["burn_hotkey"] = burn_hotkey
     path = tmp_path / "policy.json"
     path.write_bytes(canonical_json(document))
     return load_score_policy(path, network="finney", netuid=39)
@@ -343,6 +347,27 @@ def test_empty_local_class_cannot_donate_its_budget_to_external_class(tmp_path):
 
     with pytest.raises(ThinSubnetError, match="class weights are not normalized"):
         compose_class_decisions(policy, [local, external])
+
+
+def test_empty_class_allocation_moves_to_configured_burn_hotkey(tmp_path):
+    _private, public = key_material()
+    policy = write_policy(tmp_path, public, burn_hotkey="burn-hotkey")
+    _, report, _, _ = verified(tmp_path)
+    coldkeys = {"hotkey-a": "cold-a", "hotkey-b": "cold-b"}
+    local = local_class_decision(
+        policy.local_class,
+        {"hotkey-a": 0.0, "hotkey-b": 0.0},
+        coldkey_of=coldkeys,
+        reasons={"hotkey-a": "timeout", "hotkey-b": "witness_failed"},
+    )
+    external = external_class_decision(
+        policy.external_classes[0], report, coldkey_of=coldkeys
+    )
+
+    final = compose_class_decisions(policy, [local, external])
+    assert final["burn-hotkey"] == pytest.approx(0.4)
+    assert final["hotkey-a"] + final["hotkey-b"] == pytest.approx(0.6)
+    assert sum(final.values()) == pytest.approx(1.0)
 
 
 def test_positive_metric_requires_evidence_and_missing_class_holds(tmp_path):
