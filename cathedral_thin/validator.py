@@ -40,6 +40,7 @@ from .core import (
 )
 from .protocol import SatChallenge
 from .score_classes import (
+    ClassDecision,
     DecisionStore,
     RegistrationCheckpoint,
     ScorePolicy,
@@ -651,9 +652,17 @@ class ValidatorRunner:
         next_checkpoints = dict(self.state.class_checkpoints)
         next_registration_checkpoints = dict(self.state.registration_checkpoints)
         source_semaphore = asyncio.Semaphore(8)
-        owner_registrations = await self._load_owner_registrations(
-            peers=peers, block=block
-        )
+        try:
+            owner_registrations = await self._load_owner_registrations(
+                peers=peers, block=block
+            )
+        except ThinSubnetError:
+            if self.score_policy.burn_hotkey is None:
+                raise
+            # A policy with an explicit burn destination treats unavailable or
+            # invalid owner authorization as an empty class. Per-class loading
+            # below converts that absence into the signed revocation vector.
+            owner_registrations = {}
 
         async def load_external(
             class_policy: Any,
@@ -694,16 +703,38 @@ class ValidatorRunner:
                 registration_checkpoint,
             )
 
+        external_policies = self.score_policy.external_classes
         loaded_external = await asyncio.gather(
-            *(load_external(item) for item in self.score_policy.external_classes)
+            *(load_external(item) for item in external_policies),
+            return_exceptions=True,
         )
-        for (
-            class_policy,
-            report,
-            accepted_checkpoint,
-            registration,
-            registration_checkpoint,
-        ) in loaded_external:
+        for configured_policy, loaded in zip(external_policies, loaded_external):
+            if isinstance(loaded, Exception):
+                if self.score_policy.burn_hotkey is None:
+                    raise loaded
+                reason = f"{type(loaded).__name__}:{str(loaded)[:200]}"
+                decisions.append(
+                    ClassDecision(
+                        class_id=configured_policy.class_id,
+                        kind=configured_policy.kind,
+                        allocation=str(configured_policy.allocation),
+                        source_id=configured_policy.source_id,
+                        source_epoch=None,
+                        report_id=None,
+                        assignment={"mode": "revoked_to_burn"},
+                        raw_scores={},
+                        normalized_weights={},
+                        provenance={"class_failure": reason},
+                    )
+                )
+                continue
+            (
+                class_policy,
+                report,
+                accepted_checkpoint,
+                registration,
+                registration_checkpoint,
+            ) = loaded
             decisions.append(
                 external_class_decision(
                     class_policy,
@@ -729,7 +760,10 @@ class ValidatorRunner:
         ]
         hotkey_weights = compose_class_decisions(self.score_policy, decisions)
         uids, weights = uid_vector(hotkey_weights, peers)
-        if uids and hasattr(self.runtime, "prepare_weights"):
+        burn_only = self.score_policy.burn_hotkey is not None and hotkey_weights == {
+            self.score_policy.burn_hotkey: 1.0
+        }
+        if uids and hasattr(self.runtime, "prepare_weights") and not burn_only:
             original = dict(zip(uids, weights))
             uids, weights = await asyncio.to_thread(
                 self.runtime.prepare_weights, uids, weights, metagraph

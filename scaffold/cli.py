@@ -40,7 +40,7 @@ _DEFAULTS = {
     "once": False,
     "offline": False,         # set by --offline (verify+print, no chain access)
     "broadcast": True,        # `serve` is a live validator by default (legacy parity)
-    "require_policy": None,   # optional signed-policy pin (confidential_primary_v1)
+    "require_policy": None,   # optional signed-policy pin
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
@@ -173,7 +173,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--interval-secs", dest="interval_secs", type=float, default=None)
     sp.add_argument("--require-policy", dest="require_policy", default=None,
                     help="pin the validator to a signed policy contract "
-                         "(confidential_primary_v1); legacy/v3 vectors are rejected")
+                         "(confidential_primary_v1 or validated_supply_v1); "
+                         "legacy/v3 vectors are rejected")
     sp.add_argument("--dry-run", action="store_true",
                     help="verify and print the weights without setting them on chain")
     sp.add_argument("--offline", action="store_true",

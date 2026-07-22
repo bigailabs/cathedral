@@ -92,6 +92,7 @@ _ENTRY_KEYS = frozenset(
 _EVIDENCE_KEYS = frozenset({"kind", "id", "digest", "uri"})
 _SIGNATURE_KEYS = frozenset({"algorithm", "value_base64"})
 _POLICY_KEYS = frozenset({"schema", "network", "netuid", "classes"})
+_POLICY_OPTIONAL_KEYS = frozenset({"burn_hotkey"})
 _LOCAL_CLASS_KEYS = frozenset({"class_id", "kind", "allocation"})
 _EXTERNAL_CLASS_KEYS = frozenset(
     {
@@ -397,6 +398,7 @@ class ScorePolicy:
     netuid: int
     classes: tuple[LocalClassPolicy | ExternalClassPolicy, ...]
     digest: str
+    burn_hotkey: str | None = None
 
     @property
     def local_class(self) -> LocalClassPolicy | None:
@@ -539,7 +541,16 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
     document = parse_strict_json(encoded)
     if encoded != canonical_json(document):
         raise ThinSubnetError("score policy JSON must be canonical")
-    _require_exact_keys(document, _POLICY_KEYS, "score policy")
+    policy_keys = frozenset(document)
+    if (
+        not _POLICY_KEYS <= policy_keys
+        or not (policy_keys - _POLICY_KEYS) <= _POLICY_OPTIONAL_KEYS
+    ):
+        missing = sorted(_POLICY_KEYS - policy_keys)
+        unknown = sorted(policy_keys - _POLICY_KEYS - _POLICY_OPTIONAL_KEYS)
+        raise ThinSubnetError(
+            f"score policy fields mismatch missing={missing} unknown={unknown}"
+        )
     if document["schema"] != POLICY_SCHEMA:
         raise ThinSubnetError("unsupported score policy schema")
     if (
@@ -663,9 +674,19 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
         )
     if total != Decimal(1):
         raise ThinSubnetError("class allocations must sum exactly to 1")
+    burn_destination = document.get("burn_hotkey")
+    if burn_destination is not None and (
+        not isinstance(burn_destination, str)
+        or not 1 <= len(burn_destination.encode("utf-8")) <= 128
+    ):
+        raise ThinSubnetError("score policy burn_hotkey is invalid")
     digest = "sha256:" + hashlib.sha256(POLICY_DOMAIN + encoded).hexdigest()
     return ScorePolicy(
-        network=network, netuid=netuid, classes=tuple(classes), digest=digest
+        network=network,
+        netuid=netuid,
+        classes=tuple(classes),
+        digest=digest,
+        burn_hotkey=burn_destination,
     )
 
 
@@ -1495,7 +1516,11 @@ def compose_class_decisions(
         item.class_id for item in policy.classes
     }:
         raise ThinSubnetError("class decisions do not cover the configured policy")
-    if decisions and all(not item.normalized_weights for item in decisions):
+    if (
+        policy.burn_hotkey is None
+        and decisions
+        and all(not item.normalized_weights for item in decisions)
+    ):
         # A fully empty round is a valid fail-closed outcome. The validator
         # records it and retains its prior on-chain vector without submitting.
         return {}
@@ -1504,12 +1529,21 @@ def compose_class_decisions(
         decision = by_id[class_policy.class_id]
         if decision.kind != class_policy.kind:
             raise ThinSubnetError("class decision kind mismatch")
+        if not decision.normalized_weights:
+            if policy.burn_hotkey is None:
+                raise ThinSubnetError("class weights are not normalized")
+            final[policy.burn_hotkey] = (
+                final.get(policy.burn_hotkey, Decimal(0)) + class_policy.allocation
+            )
+            continue
         class_total = sum(
             Decimal(str(value)) for value in decision.normalized_weights.values()
         )
         if abs(class_total - Decimal(1)) > Decimal("0.000000001"):
             raise ThinSubnetError("class weights are not normalized")
         for hotkey, raw_weight in decision.normalized_weights.items():
+            if hotkey == policy.burn_hotkey:
+                raise ThinSubnetError("burn hotkey cannot earn validated supply")
             value = Decimal(str(raw_weight))
             final[hotkey] = (
                 final.get(hotkey, Decimal(0)) + class_policy.allocation * value

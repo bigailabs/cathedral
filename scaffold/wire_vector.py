@@ -56,21 +56,27 @@ def invariant_check(payload: dict[str, Any], *, network: str, netuid: int,
     """Structural sanity — mirrors the deployed validator's checks."""
     weights = payload.get("weights") or []
     snap = payload.get("burn_snapshot") or {}
-    b_uid, b_pct = snap.get("burn_uid"), float(snap.get("forced_burn_percentage", -1))
+    b_uid = snap.get("burn_uid")
+    b_hotkey = snap.get("burn_hotkey")
+    b_pct = float(snap.get("forced_burn_percentage", -1))
     if len(weights) > MAX_VECTOR_ENTRIES:
         raise VectorError(f"weights vector exceeds {MAX_VECTOR_ENTRIES}")
     if not 0.0 <= b_pct <= 100.0:
         raise VectorError(f"forced_burn_percentage out of range: {b_pct!r}")
-    if b_pct > 0.0 and b_uid is None:
-        raise VectorError("forced_burn_percentage requires burn_uid")
+    if b_hotkey is not None and (
+        not isinstance(b_hotkey, str) or not 1 <= len(b_hotkey) <= 128
+    ):
+        raise VectorError("burn_hotkey must be a non-empty bounded string")
+    if b_pct > 0.0 and b_uid is None and b_hotkey is None:
+        raise VectorError("forced_burn_percentage requires a burn destination")
     total = 0.0
     for w in weights:
         v = float(w["weight"])
         if not math.isfinite(v) or v < 0:
             raise VectorError(f"bad weight for {w.get('miner_hotkey')!r}: {v!r}")
         total += v
-    if total <= 0 and b_uid is None:
-        raise VectorError("empty/zero-sum weights without burn_uid fallback")
+    if total <= 0 and b_uid is None and b_hotkey is None:
+        raise VectorError("empty/zero-sum weights without burn fallback")
     if payload.get("network") != network:
         raise VectorError(f"network mismatch: {payload.get('network')!r} != {network!r}")
     if int(payload.get("netuid", -1)) != netuid:
