@@ -192,7 +192,10 @@ def test_all_zero_local_round_retains_prior_vector_and_completes(tmp_path, capsy
     decision = json.loads(next((tmp_path / "decisions").glob("*.json")).read_text())
     assert decision["onchain_vector"] == []
     assert decision["classes"][0]["normalized_weights"] == {}
-    assert "no positive scores; retained prior on-chain vector" in capsys.readouterr().out
+    assert (
+        "no positive scores; retained prior on-chain vector"
+        in capsys.readouterr().out
+    )
 
     reloaded = store.load_or_create()
     assert reloaded.last_completed_round == 2
