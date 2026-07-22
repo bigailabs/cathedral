@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import stat
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +40,82 @@ def test_state_secret_and_pending_vector_survive_restart(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_schema_five_replay_lists_migrate_with_safe_expiry(tmp_path):
+    path = tmp_path / "validator.json"
+    store = StateStore(path, fingerprint="x")
+    store.load_or_create()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    receipt_id = "cc-gpu-receipt-sha256:" + "22" * 32
+    payload["schema"] = 5
+    payload["cc_gpu_replay_claims"] = {
+        "attempt_ids": [],
+        "evidence_digests": [],
+        "job_ids": [],
+        "receipt_ids": [receipt_id],
+        "worker_ids": [],
+    }
+    payload.pop("cc_gpu_replay_watermark_ms")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    before_ms = time.time_ns() // 1_000_000
+    migrated = store.load_or_create()
+    assert migrated.schema == STATE_SCHEMA
+    assert migrated.cc_gpu_replay_watermark_ms >= before_ms
+    assert migrated.cc_gpu_replay_claims["receipt_ids"][receipt_id] > before_ms
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_schema_four_state_migrates_atomically_without_reset(tmp_path):
+    path = tmp_path / "validator.json"
+    store = StateStore(path, fingerprint="fingerprint")
+    state = store.load_or_create()
+    state.last_completed_round = 9
+    state.ema_scores = {"miner": 0.75}
+    state.class_checkpoints = {
+        "external": {"source_epoch": 3, "report_id": "sha256:" + "11" * 32}
+    }
+    state.registration_checkpoints = {
+        "external": {
+            "owner_coldkey": "owner",
+            "delegate_hotkey": "delegate",
+            "sequence": 2,
+            "registration_id": "sha256:" + "22" * 32,
+        }
+    }
+    pending = mark_pending(
+        state,
+        uids=[1],
+        weights=[1.0],
+        hotkeys=["miner"],
+        provenance_digest="sha256:" + "33" * 32,
+    )
+    store.save(state)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema"] = 4
+    payload.pop("cc_gpu_replay_claims")
+    payload.pop("cc_gpu_replay_watermark_ms")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = store.load_or_create()
+    assert migrated.schema == STATE_SCHEMA
+    assert migrated.master_secret_hex == state.master_secret_hex
+    assert migrated.last_completed_round == 9
+    assert migrated.ema_scores == {"miner": 0.75}
+    assert migrated.pending_vector is not None
+    assert migrated.pending_vector.digest == pending.digest
+    assert migrated.class_checkpoints == state.class_checkpoints
+    assert migrated.registration_checkpoints == state.registration_checkpoints
+    assert migrated.cc_gpu_replay_claims == {
+        "attempt_ids": {},
+        "evidence_digests": {},
+        "job_ids": {},
+        "receipt_ids": {},
+        "worker_ids": {},
+    }
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == STATE_SCHEMA
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_state_lease_rejects_a_second_validator(tmp_path):
     store = StateStore(tmp_path / "validator.json", fingerprint="x")
     with store.lease():
@@ -55,7 +133,10 @@ def test_corrupt_state_and_vector_fail_closed(tmp_path):
     path.write_text(
         f'{{"schema":{STATE_SCHEMA},"config_fingerprint":"x","master_secret_hex":"'
         + "00" * 32
-        + '","pending_vector":{"digest":"bad","uids":[1],"weights":[1.0],"hotkeys":["h"]}}'
+        + '","cc_gpu_replay_claims":{"attempt_ids":{},"evidence_digests":{},'
+        + '"job_ids":{},"receipt_ids":{},"worker_ids":{}},'
+        + '"cc_gpu_replay_watermark_ms":0,"pending_vector":{"digest":"bad",'
+        + '"uids":[1],"weights":[1.0],"hotkeys":["h"]}}'
     )
     with pytest.raises(ThinSubnetError, match="digest"):
         StateStore(path, fingerprint="x").load_or_create()
@@ -97,6 +178,38 @@ def test_owner_registration_checkpoint_survives_restart_and_rejects_corruption(
         store.load_or_create()
 
 
+def test_cc_gpu_replay_claims_survive_restart_and_use_typed_identifiers(tmp_path):
+    store = StateStore(tmp_path / "validator.json", fingerprint="x")
+    state = store.load_or_create()
+    state.cc_gpu_replay_claims = {
+        "attempt_ids": {"00000000-0000-4000-8000-000000000003": 2_000_000_000_000},
+        "evidence_digests": {"sha256:" + "11" * 32: 2_000_000_000_000},
+        "job_ids": {"00000000-0000-4000-8000-000000000002": 2_000_000_000_000},
+        "receipt_ids": {"cc-gpu-receipt-sha256:" + "22" * 32: 2_000_000_000_000},
+        "worker_ids": {"00000000-0000-4000-8000-000000000001": 2_000_000_000_000},
+    }
+    store.save(state)
+    assert store.load_or_create().cc_gpu_replay_claims == state.cc_gpu_replay_claims
+
+    state.cc_gpu_replay_claims["receipt_ids"] = {
+        "sha256:" + "22" * 32: 2_000_000_000_000
+    }
+    store.save(state)
+    with pytest.raises(ThinSubnetError, match="replay claim ledger"):
+        store.load_or_create()
+
+
+def test_cc_gpu_replay_watermark_rejects_type_coercion(tmp_path):
+    path = tmp_path / "validator.json"
+    store = StateStore(path, fingerprint="x")
+    store.load_or_create()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["cc_gpu_replay_watermark_ms"] = "123"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ThinSubnetError, match="replay watermark"):
+        store.load_or_create()
+
+
 def test_pending_vector_digest_binds_owner_registration_ids(tmp_path):
     store = StateStore(tmp_path / "validator.json", fingerprint="x")
     state = store.load_or_create()
@@ -128,13 +241,21 @@ def test_pending_vector_rejects_type_coercion(uids, weights, hotkeys):
 
 def test_config_change_requires_explicit_acceptance(tmp_path):
     path = tmp_path / "validator.json"
-    StateStore(path, fingerprint="old").load_or_create()
+    old_store = StateStore(path, fingerprint="old")
+    old_state = old_store.load_or_create()
+    old_state.cc_gpu_replay_claims["receipt_ids"] = {
+        "cc-gpu-receipt-sha256:" + "22" * 32: 2_000_000_000_000
+    }
+    old_store.save(old_state)
     with pytest.raises(ThinSubnetError, match="fingerprint"):
         StateStore(path, fingerprint="new").load_or_create()
     state = StateStore(path, fingerprint="new").load_or_create(allow_config_change=True)
     assert state.config_fingerprint == "new"
     assert state.ema_scores == {}
     assert state.last_completed_round == -1
+    assert state.cc_gpu_replay_claims["receipt_ids"] == {
+        "cc-gpu-receipt-sha256:" + "22" * 32: 2_000_000_000_000
+    }
 
 
 def test_config_change_cannot_discard_a_pending_vector(tmp_path):

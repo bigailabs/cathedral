@@ -103,10 +103,14 @@ pinned Ed25519 key. It binds:
 - signing key ID, content-derived report ID, and domain-separated signature.
 
 Each evidence reference records a typed ID, digest, and optional retrieval URI.
-For Cathedral Confidential, use `cathedral_assurance_receipt_v2` references and
-the exact policy-registry and verifier digests that authorized those receipts.
-Do not include raw quotes, credentials, customer data, or stable hardware
-identifiers.
+For Cathedral Confidential TDX CPU work, use
+`cathedral_assurance_receipt_v2` references and the exact policy-registry and
+verifier digests that authorized those receipts. Policy-compliant `cc_gpu` work
+is a separate class using `cathedral_cc_gpu_job_receipt_v1`; it must not accept a
+TDX CPU receipt or a `hybrid_gpu_preview` receipt. The complete flat contract
+and fail-closed validator path are documented in
+[`CC_GPU_RECEIPTS.md`](CC_GPU_RECEIPTS.md). Do not include raw quotes,
+credentials, customer data, or stable hardware identifiers.
 
 Reports are bounded to 1 MiB, 4,096 miner entries, 32 metrics and 32 evidence
 references per entry. Duplicate JSON keys, floats, noncanonical JSON, unknown
@@ -133,6 +137,22 @@ example, require both `receipt_verified` and `work_verified` plus a
 `cathedral_assurance_receipt_v2` reference. A source cannot earn credit with a
 different explanation merely because it supplied a positive number.
 
+For a confidential GPU class, require `verified_cc_gpu_jobs`, the four reason
+codes emitted by `cc_gpu_score_report_body`, and
+`cathedral_cc_gpu_job_receipt_v1`. `ValidatorRunner` then requires a configured
+CC GPU receipt loader and rederives the metric from the independently verified
+receipt bytes. A signed source report alone is insufficient.
+
+Configure the production loader with `--cc-gpu-loader-config`. It consumes the
+owner-scoped Polaris evidence-export route or a pinned local acceptance
+artifact, checks every raw artifact digest, and invokes a pinned external
+composite verifier. The verifier must be a static native ELF executed from the
+exact already-hashed descriptor with a minimal environment. Scripts and dynamic
+runtimes are rejected. One batch is limited to 128 receipts, 256 MiB, and one
+shared monotonic deadline. No loader is configured by default. A CC GPU class in
+the score policy without the loader configuration fails closed before validator
+network initialization.
+
 Each class is coldkey-collapsed and normalized independently before its local
 allocation is applied:
 
@@ -154,6 +174,17 @@ next contiguous epoch must name the accepted report ID. Multiple configured
 locations are untrusted mirrors: the validator verifies every available
 artifact, selects the highest valid epoch, and rejects same-epoch disagreement.
 Freshness and short block windows limit an old but correctly signed report.
+
+For CC GPU work, report checkpoints are not sufficient replay protection. The
+validator also persists every rewarded receipt, worker, job, attempt, and
+evidence digest before submitting the pending weight vector. Reuse across a
+later report, another class, a later round, or a restarted validator fails
+closed. Retrying an already pending vector does not reload or reclaim the
+receipt. Schema-6 replay claims retain an expiry beyond the maximum receipt
+validity and future-skew window; only expired claims are pruned, and a durable
+clock watermark rejects rollback. Existing schema-4 state migrates with an empty
+ledger, while schema-5 list claims migrate with a conservative full retention
+window. Both migrations preserve all earlier validator state.
 
 Key rotation is validator-controlled. Pin old and replacement public keys
 during a bounded overlap, move producers to the replacement key, then remove
@@ -240,10 +271,16 @@ store, scorer fleet, or proxy in the weight-setting path.
 Full provenance is not the same as zero trust. In `metric` mode the validator
 chooses the assignment but still trusts the pinned source to report the metric
 that corresponds to the referenced evidence. Receipt IDs and digests make that
-claim auditable; validators that require independent Cathedral receipt
-verification must run the published receipt verifier against the referenced
-registry before pinning or accepting that source. The thin core deliberately
-does not duplicate Cathedral's TDX/DCAP and receipt-verification stack.
+claim auditable. TDX CPU classes still require operators to connect the
+appropriate Cathedral verifier when independent receipt verification is part
+of policy. Confidential GPU classes are stricter: the validator refuses a
+positive assignment unless the configured loader supplies independently
+verified receipt bytes and evidence for every reference.
+
+The CC GPU software path does not prove that supported hardware is currently
+available or that a live confidential job has completed. Until the hardware,
+attestation, job, receipt, and validator-ingestion chain is observed, the launch
+gate remains NOT PROVEN and the class must remain disabled.
 
 Base-layer limits remain: a validator-stake majority can collude, separate
 coldkeys cannot be linked, a compromised accepted source key can lie within its

@@ -51,7 +51,10 @@ MAX_METRICS_PER_ENTRY = 32
 
 _IDENTIFIER_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-_DIGEST_RE = re.compile(r"(?:sha256|receipt-sha256):[0-9a-f]{64}")
+_CONTENT_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_EVIDENCE_ID_RE = re.compile(
+    r"(?:sha256|receipt-sha256|cc-gpu-receipt-sha256):[0-9a-f]{64}"
+)
 _DECIMAL_RE = re.compile(r"(?:0|[1-9][0-9]{0,29})(?:\.[0-9]{1,12})?")
 _TIME_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z"
@@ -248,8 +251,14 @@ def _key_id(value: Any) -> str:
 
 
 def _digest(value: Any, label: str) -> str:
-    if not isinstance(value, str) or _DIGEST_RE.fullmatch(value) is None:
+    if not isinstance(value, str) or _CONTENT_DIGEST_RE.fullmatch(value) is None:
         raise ThinSubnetError(f"invalid {label}")
+    return value
+
+
+def _evidence_id(value: Any) -> str:
+    if not isinstance(value, str) or _EVIDENCE_ID_RE.fullmatch(value) is None:
+        raise ThinSubnetError("invalid evidence id")
     return value
 
 
@@ -646,6 +655,15 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
             trusted_keys = {
                 _key_id(key): _decode_public_key(value) for key, value in keys.items()
             }
+        assignment = _parse_assignment(raw_class["assignment"])
+        if "cathedral_cc_gpu_job_receipt_v1" in (
+            assignment.required_evidence_kinds
+        ) and (
+            assignment.mode != "metric" or assignment.metric != "verified_cc_gpu_jobs"
+        ):
+            raise ThinSubnetError(
+                "CC GPU score class must derive metric=verified_cc_gpu_jobs from receipts"
+            )
         classes.append(
             ExternalClassPolicy(
                 class_id=class_id,
@@ -657,7 +675,7 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
                 max_future_seconds=raw_class["max_future_seconds"],
                 max_block_span=raw_class["max_block_span"],
                 require_evidence=raw_class["require_evidence"],
-                assignment=_parse_assignment(raw_class["assignment"]),
+                assignment=assignment,
                 owner_registration=owner_registration,
             )
         )
@@ -1025,7 +1043,7 @@ def _parse_entry(value: Any) -> ScoreEntry:
             raise ThinSubnetError("evidence reference must be an object")
         _require_exact_keys(item, _EVIDENCE_KEYS, "evidence reference")
         kind = _identifier(item["kind"], "evidence kind")
-        evidence_id = _digest(item["id"], "evidence id")
+        evidence_id = _evidence_id(item["id"])
         digest = _digest(item["digest"], "evidence digest")
         uri = item["uri"]
         if uri is not None:
@@ -1037,6 +1055,7 @@ def _parse_entry(value: Any) -> ScoreEntry:
                 or not parsed_uri.netloc
                 or parsed_uri.username
                 or parsed_uri.password
+                or parsed_uri.query
                 or parsed_uri.fragment
             ):
                 raise ThinSubnetError(
@@ -1375,13 +1394,71 @@ def assignment_score(entry: ScoreEntry, assignment: AssignmentPolicy) -> float:
     return score
 
 
+def _validate_cc_gpu_receipt_evidence(
+    policy: ExternalClassPolicy,
+    report: VerifiedReport,
+    verified_receipts: Mapping[str, Any] | None,
+) -> None:
+    from .cc_gpu_receipts import (
+        CC_GPU_RECEIPT_SCHEMA,
+        VerifiedCcGpuReceipt,
+        verify_unique_cc_gpu_receipts,
+    )
+
+    if CC_GPU_RECEIPT_SCHEMA not in policy.assignment.required_evidence_kinds:
+        return
+    if (
+        policy.assignment.mode != "metric"
+        or policy.assignment.metric != "verified_cc_gpu_jobs"
+    ):
+        raise ThinSubnetError(
+            "CC GPU score class must derive metric=verified_cc_gpu_jobs from receipts"
+        )
+    if verified_receipts is None:
+        raise ThinSubnetError(
+            "CC GPU score class requires validator-verified receipt bytes"
+        )
+    admitted: list[VerifiedCcGpuReceipt] = []
+    for entry in report.entries:
+        if assignment_score(entry, policy.assignment) <= 0:
+            continue
+        references = [
+            item for item in entry.evidence if item.kind == CC_GPU_RECEIPT_SCHEMA
+        ]
+        if not references:
+            raise ThinSubnetError(
+                f"positive CC GPU score for {entry.miner_hotkey} lacks a verified receipt"
+            )
+        for reference in references:
+            receipt = verified_receipts.get(reference.id)
+            if not isinstance(receipt, VerifiedCcGpuReceipt):
+                raise ThinSubnetError(
+                    f"CC GPU receipt {reference.id} was not verified by this validator"
+                )
+            if reference.digest != receipt.receipt_digest:
+                raise ThinSubnetError("CC GPU score evidence digest mismatch")
+            if receipt.subject_hotkey != entry.miner_hotkey:
+                raise ThinSubnetError(
+                    "CC GPU receipt subject does not match scored miner hotkey"
+                )
+            admitted.append(receipt)
+        metric = entry.metrics.get("verified_cc_gpu_jobs")
+        if metric != Decimal(len(references)):
+            raise ThinSubnetError(
+                "CC GPU verified job metric is not derived from unique receipts"
+            )
+    verify_unique_cc_gpu_receipts(admitted)
+
+
 def external_class_decision(
     policy: ExternalClassPolicy,
     report: VerifiedReport,
     *,
     coldkey_of: dict[str, str],
     owner_registration: VerifiedOwnerRegistration | None = None,
+    verified_cc_gpu_receipts: Mapping[str, Any] | None = None,
 ) -> ClassDecision:
+    _validate_cc_gpu_receipt_evidence(policy, report, verified_cc_gpu_receipts)
     raw_scores: dict[str, float] = {}
     provenance: dict[str, Any] = {}
     for entry in report.entries:
@@ -1576,7 +1653,7 @@ class DecisionStore:
 
     def write(self, document: Mapping[str, Any]) -> Path:
         digest = document.get("decision_digest")
-        if not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None:
+        if not isinstance(digest, str) or _CONTENT_DIGEST_RE.fullmatch(digest) is None:
             raise ThinSubnetError("decision record lacks a valid digest")
         body = {
             key: value for key, value in document.items() if key != "decision_digest"

@@ -49,6 +49,7 @@ cathedral-thin-e2e = "cathedral_thin.e2e:main"
 cathedral-thin-preflight = "cathedral_thin.preflight:main"
 cathedral-thin-score-report = "cathedral_thin.report_cli:main"
 cathedral-thin-contributor = "cathedral_thin.contributor_cli:main"
+cathedral-thin-cc-gpu-accept = "cathedral_thin.cc_gpu_acceptance:main"
 cathedral-verifyml = "cathedral_thin.verifyml_cli:main"
 cathedral-verified-policy = "cathedral_thin.policy_cli:main"
 

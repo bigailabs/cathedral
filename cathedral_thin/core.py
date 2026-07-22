@@ -14,6 +14,7 @@ import hmac
 import json
 import math
 import os
+import re
 import time
 import zlib
 from dataclasses import asdict, dataclass, field
@@ -22,9 +23,26 @@ from typing import Any, Iterable
 
 
 PROTOCOL_VERSION = 1
-STATE_SCHEMA = 5
+STATE_SCHEMA = 6
 MAX_COMPRESSED_CNF_BYTES = 512_000
 MAX_DIMACS_BYTES = 4_000_000
+CC_GPU_REPLAY_CLAIM_KEYS = (
+    "attempt_ids",
+    "evidence_digests",
+    "job_ids",
+    "receipt_ids",
+    "worker_ids",
+)
+MAX_CC_GPU_ID_REPLAY_CLAIMS = 100_000
+MAX_CC_GPU_EVIDENCE_REPLAY_CLAIMS = 1_000_000
+MAX_CC_GPU_RECEIPT_AGE_SECONDS = 7 * 24 * 60 * 60
+MAX_CC_GPU_FUTURE_SKEW_SECONDS = 5 * 60
+CC_GPU_REPLAY_RETENTION_SAFETY_SECONDS = 60
+_CONTENT_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_CC_GPU_RECEIPT_ID_RE = re.compile(r"cc-gpu-receipt-sha256:[0-9a-f]{64}")
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
 
 
 class ThinSubnetError(ValueError):
@@ -633,6 +651,10 @@ class PendingVector:
     ambiguous: bool = False
 
 
+def empty_cc_gpu_replay_claims() -> dict[str, dict[str, int]]:
+    return {key: {} for key in CC_GPU_REPLAY_CLAIM_KEYS}
+
+
 @dataclass
 class ValidatorState:
     schema: int
@@ -645,6 +667,10 @@ class ValidatorState:
     confirmed_decision_digest: str | None = None
     class_checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
     registration_checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
+    cc_gpu_replay_claims: dict[str, dict[str, int]] = field(
+        default_factory=empty_cc_gpu_replay_claims
+    )
+    cc_gpu_replay_watermark_ms: int = 0
 
     @property
     def master_secret(self) -> bytes:
@@ -684,8 +710,43 @@ class StateStore:
             raise ThinSubnetError(
                 "could not secure validator state permissions"
             ) from exc
+        migrated_schema = False
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
+            loaded_at_ms = time.time_ns() // 1_000_000
+            if payload.get("schema") == 4:
+                if "cc_gpu_replay_claims" in payload:
+                    raise ThinSubnetError(
+                        "schema-4 state cannot contain CC GPU replay claims"
+                    )
+                payload = dict(payload)
+                payload["schema"] = STATE_SCHEMA
+                payload["cc_gpu_replay_claims"] = empty_cc_gpu_replay_claims()
+                payload["cc_gpu_replay_watermark_ms"] = loaded_at_ms
+                migrated_schema = True
+            elif payload.get("schema") == 5:
+                legacy_claims = payload.get("cc_gpu_replay_claims")
+                if not isinstance(legacy_claims, dict):
+                    raise ThinSubnetError("schema-5 CC GPU replay claims are invalid")
+                legacy_expiry_ms = loaded_at_ms + 1000 * (
+                    MAX_CC_GPU_RECEIPT_AGE_SECONDS
+                    + MAX_CC_GPU_FUTURE_SKEW_SECONDS
+                    + CC_GPU_REPLAY_RETENTION_SAFETY_SECONDS
+                )
+                payload = dict(payload)
+                payload["schema"] = STATE_SCHEMA
+                payload["cc_gpu_replay_claims"] = {
+                    str(category): {str(claim): legacy_expiry_ms for claim in claims}
+                    for category, claims in legacy_claims.items()
+                    if isinstance(claims, list)
+                }
+                payload["cc_gpu_replay_watermark_ms"] = loaded_at_ms
+                migrated_schema = True
+            elif payload.get("schema") == STATE_SCHEMA and (
+                "cc_gpu_replay_claims" not in payload
+                or "cc_gpu_replay_watermark_ms" not in payload
+            ):
+                raise ThinSubnetError("schema-6 state is missing CC GPU replay state")
             pending_raw = payload.get("pending_vector")
             pending = PendingVector(**pending_raw) if pending_raw is not None else None
             state = ValidatorState(
@@ -707,8 +768,22 @@ class StateStore:
                     str(k): dict(v)
                     for k, v in payload.get("registration_checkpoints", {}).items()
                 },
+                cc_gpu_replay_claims={
+                    k: dict(v)
+                    for k, v in payload.get(
+                        "cc_gpu_replay_claims", empty_cc_gpu_replay_claims()
+                    ).items()
+                },
+                cc_gpu_replay_watermark_ms=payload.get("cc_gpu_replay_watermark_ms", 0),
             )
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            AttributeError,
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise ThinSubnetError(f"validator state is corrupt: {self.path}") from exc
         if state.schema != STATE_SCHEMA:
             raise ThinSubnetError(f"unsupported validator state schema {state.schema}")
@@ -790,9 +865,46 @@ class StateStore:
                 bytes.fromhex(checkpoint["registration_id"].removeprefix("sha256:"))
             except ValueError as exc:
                 raise ThinSubnetError("invalid owner registration checkpoint") from exc
+        claims = state.cc_gpu_replay_claims
+        if not isinstance(claims, dict) or tuple(sorted(claims)) != (
+            CC_GPU_REPLAY_CLAIM_KEYS
+        ):
+            raise ThinSubnetError("invalid CC GPU replay claim ledger")
+        if (
+            isinstance(state.cc_gpu_replay_watermark_ms, bool)
+            or not isinstance(state.cc_gpu_replay_watermark_ms, int)
+            or state.cc_gpu_replay_watermark_ms < 0
+        ):
+            raise ThinSubnetError("invalid CC GPU replay watermark")
+        for category, values in claims.items():
+            maximum = (
+                MAX_CC_GPU_EVIDENCE_REPLAY_CLAIMS
+                if category == "evidence_digests"
+                else MAX_CC_GPU_ID_REPLAY_CLAIMS
+            )
+            if not isinstance(values, dict) or len(values) > maximum:
+                raise ThinSubnetError("invalid CC GPU replay claim ledger")
+            pattern = (
+                _CC_GPU_RECEIPT_ID_RE
+                if category == "receipt_ids"
+                else _CONTENT_DIGEST_RE
+                if category == "evidence_digests"
+                else _UUID_RE
+            )
+            if any(
+                not isinstance(value, str)
+                or pattern.fullmatch(value) is None
+                or isinstance(expiry, bool)
+                or not isinstance(expiry, int)
+                or not 0 < expiry <= 2**63 - 1
+                for value, expiry in values.items()
+            ):
+                raise ThinSubnetError("invalid CC GPU replay claim ledger")
         for score in state.ema_scores.values():
             if not math.isfinite(score) or score < 0:
                 raise ThinSubnetError("invalid score in validator state")
+        if migrated_schema:
+            self.save(state)
         return state
 
     def save(self, state: ValidatorState) -> None:

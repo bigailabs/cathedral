@@ -371,11 +371,22 @@ def test_positive_metric_requires_evidence_and_missing_class_holds(tmp_path):
 
 
 def test_evidence_uri_cannot_smuggle_credentials_or_local_paths(tmp_path):
-    for uri in ("file:///private/receipt.json", "https://token@example.test/r"):
+    for uri in (
+        "file:///private/receipt.json",
+        "https://token@example.test/r",
+        "https://example.test/r?token=secret",
+    ):
         entries = report_body()["entries"]
         entries[0]["evidence"][0]["uri"] = uri
         with pytest.raises(ThinSubnetError, match="credential-free"):
             verified(tmp_path, entries=entries)
+
+
+def test_receipt_identifier_cannot_be_used_as_content_digest(tmp_path):
+    entries = report_body()["entries"]
+    entries[0]["evidence"][0]["digest"] = "receipt-sha256:" + "44" * 32
+    with pytest.raises(ThinSubnetError, match="invalid evidence digest"):
+        verified(tmp_path, entries=entries)
 
 
 def test_decision_record_is_vector_bound_and_immutable(tmp_path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -9,6 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from cathedral_thin import validator as validator_module
+from cathedral_thin.cc_gpu_receipts import (
+    CC_GPU_PROFILE_ID,
+    CC_GPU_RECEIPT_SCHEMA,
+    VerifiedCcGpuReceipt,
+)
 from cathedral_thin.core import StateStore, ThinSubnetError, mark_pending
 from cathedral_thin.e2e import Axon, solve_wire, wire_response
 from cathedral_thin.score_classes import (
@@ -257,6 +263,252 @@ def test_external_only_class_sets_weights_without_validator_scoring_infra(tmp_pa
     }
     assert state.confirmed_decision_digest is not None
     assert len(list((tmp_path / "decisions").glob("*.json"))) == 1
+
+
+def test_cc_gpu_class_requires_validator_receipt_loader_and_passes_verified_bytes(
+    tmp_path,
+):
+    receipt_id = "cc-gpu-receipt-sha256:" + "44" * 32
+    receipt_digest = "sha256:" + "55" * 32
+    verified_receipt = VerifiedCcGpuReceipt(
+        receipt_id=receipt_id,
+        receipt_digest=receipt_digest,
+        worker_id="00000000-0000-4000-8000-000000000001",
+        job_id="00000000-0000-4000-8000-000000000002",
+        attempt_id="00000000-0000-4000-8000-000000000003",
+        subject_hotkey="miner",
+        profile_id=CC_GPU_PROFILE_ID,
+        issued_at=datetime.now(UTC),
+        replay_expires_at_ms=4_102_444_800_000,
+        verifier_digest="sha256:" + "33" * 32,
+        evidence_digests=tuple("sha256:" + f"{value:064x}" for value in range(10)),
+        document={},
+    )
+    required_reasons = (
+        "cc_gpu_admission_verified",
+        "cc_gpu_completion_verified",
+        "confirmed_deletion",
+        "receipt_signature_verified",
+    )
+    external = ExternalClassPolicy(
+        class_id="confidential_gpu_jobs",
+        allocation=Decimal(1),
+        source_id="cathedralconfidential",
+        locations=("unused",),
+        trusted_keys={"key": b"0" * 32},
+        max_age_seconds=600,
+        max_future_seconds=30,
+        max_block_span=100,
+        require_evidence=True,
+        assignment=AssignmentPolicy(
+            "metric",
+            "verified_cc_gpu_jobs",
+            "linear",
+            None,
+            required_reasons,
+            (CC_GPU_RECEIPT_SCHEMA,),
+        ),
+    )
+    score_policy = ScorePolicy(
+        network="local",
+        netuid=1,
+        classes=(external,),
+        digest="sha256:" + "99" * 32,
+    )
+    report = VerifiedReport(
+        class_id=external.class_id,
+        source_id=external.source_id,
+        source_epoch=1,
+        report_id="sha256:" + "11" * 32,
+        previous_report_id=None,
+        generated_at=datetime.now(UTC),
+        valid_until=datetime.now(UTC),
+        valid_from_block=0,
+        valid_until_block=100,
+        policy_digest="sha256:" + "22" * 32,
+        verifier_digest=verified_receipt.verifier_digest,
+        signing_key_id="key",
+        entries=(
+            ScoreEntry(
+                "miner",
+                {"verified_cc_gpu_jobs": Decimal(1)},
+                None,
+                required_reasons,
+                (
+                    EvidenceRef(
+                        CC_GPU_RECEIPT_SCHEMA,
+                        receipt_id,
+                        receipt_digest,
+                        None,
+                    ),
+                ),
+            ),
+        ),
+        document={},
+    )
+
+    def report_loader(_policy, **_kwargs):
+        return report, SourceCheckpoint(report.source_epoch, report.report_id)
+
+    loader_calls = []
+
+    def receipt_loader(class_policy, loaded_report, *, block):
+        loader_calls.append((class_policy.class_id, loaded_report.report_id, block))
+        return {receipt_id: verified_receipt}
+
+    cfg = config()
+    store = StateStore(
+        tmp_path / "with-loader-state.json", fingerprint=cfg.fingerprint()
+    )
+    state = store.load_or_create()
+    runtime = FakeRuntime()
+    runtime.responses = [SimpleNamespace(success=True)]
+    submit_weights = runtime.submit_weights
+
+    async def assert_claims_persisted_before_submit(pending):
+        persisted = store.load_or_create()
+        assert persisted.pending_vector is not None
+        assert persisted.pending_vector.digest == pending.digest
+        assert persisted.cc_gpu_replay_claims["receipt_ids"] == {
+            receipt_id: verified_receipt.replay_expires_at_ms
+        }
+        return await submit_weights(pending)
+
+    runtime.submit_weights = assert_claims_persisted_before_submit
+    runner = ValidatorRunner(
+        config=cfg,
+        runtime=runtime,
+        store=store,
+        state=state,
+        broadcast=True,
+        score_policy=score_policy,
+        decision_store=DecisionStore(tmp_path / "with-loader-decisions"),
+        report_loader=report_loader,
+        cc_gpu_receipt_loader=receipt_loader,
+    )
+    assert asyncio.run(runner.tick())
+    assert loader_calls == [(external.class_id, report.report_id, 20)]
+    assert runtime.query_calls == 0
+    assert state.cc_gpu_replay_claims == {
+        "attempt_ids": {
+            verified_receipt.attempt_id: verified_receipt.replay_expires_at_ms
+        },
+        "evidence_digests": {
+            digest: verified_receipt.replay_expires_at_ms
+            for digest in verified_receipt.evidence_digests
+        },
+        "job_ids": {verified_receipt.job_id: verified_receipt.replay_expires_at_ms},
+        "receipt_ids": {
+            verified_receipt.receipt_id: verified_receipt.replay_expires_at_ms
+        },
+        "worker_ids": {
+            verified_receipt.worker_id: verified_receipt.replay_expires_at_ms
+        },
+    }
+
+    replayed_report = replace(
+        report,
+        source_epoch=2,
+        report_id="sha256:" + "12" * 32,
+        previous_report_id=report.report_id,
+    )
+
+    def replayed_report_loader(_policy, **_kwargs):
+        return replayed_report, SourceCheckpoint(
+            replayed_report.source_epoch, replayed_report.report_id
+        )
+
+    runtime._block += cfg.round_blocks
+    runner.report_loader = replayed_report_loader
+    with pytest.raises(ThinSubnetError, match="replayed CC GPU receipt_ids"):
+        asyncio.run(runner.tick())
+
+    restarted_runtime = FakeRuntime()
+    restarted_runtime._block = runtime._block
+    restarted_runner = ValidatorRunner(
+        config=cfg,
+        runtime=restarted_runtime,
+        store=store,
+        state=store.load_or_create(),
+        broadcast=True,
+        score_policy=score_policy,
+        decision_store=DecisionStore(tmp_path / "restarted-loader-decisions"),
+        report_loader=replayed_report_loader,
+        cc_gpu_receipt_loader=receipt_loader,
+    )
+    with pytest.raises(ThinSubnetError, match="replayed CC GPU receipt_ids"):
+        asyncio.run(restarted_runner.tick())
+
+    missing_store = StateStore(
+        tmp_path / "missing-loader-state.json", fingerprint=cfg.fingerprint()
+    )
+    missing_runner = ValidatorRunner(
+        config=cfg,
+        runtime=FakeRuntime(),
+        store=missing_store,
+        state=missing_store.load_or_create(),
+        broadcast=False,
+        score_policy=score_policy,
+        decision_store=DecisionStore(tmp_path / "missing-loader-decisions"),
+        report_loader=report_loader,
+    )
+    with pytest.raises(ThinSubnetError, match="validator-verified receipt bytes"):
+        asyncio.run(missing_runner.tick())
+
+
+def test_async_main_refuses_cc_gpu_score_policy_without_loader_before_network(
+    tmp_path, monkeypatch
+):
+    external = ExternalClassPolicy(
+        class_id="confidential_gpu_jobs",
+        allocation=Decimal(1),
+        source_id="cathedralconfidential",
+        locations=("unused",),
+        trusted_keys={"key": b"0" * 32},
+        max_age_seconds=600,
+        max_future_seconds=30,
+        max_block_span=100,
+        require_evidence=True,
+        assignment=AssignmentPolicy(
+            "metric",
+            "verified_cc_gpu_jobs",
+            "linear",
+            None,
+            (),
+            (CC_GPU_RECEIPT_SCHEMA,),
+        ),
+    )
+    score_policy = ScorePolicy(
+        network="local",
+        netuid=1,
+        classes=(external,),
+        digest="sha256:" + "99" * 32,
+    )
+    monkeypatch.setattr(
+        validator_module, "load_score_policy", lambda *_args, **_kwargs: score_policy
+    )
+    network_called = False
+
+    def unexpected_wallet(*_args, **_kwargs):
+        nonlocal network_called
+        network_called = True
+        raise AssertionError("wallet initialization should not run")
+
+    monkeypatch.setattr(validator_module, "make_wallet", unexpected_wallet)
+    args = validator_module.build_parser().parse_args(
+        [
+            "--network",
+            "local",
+            "--netuid",
+            "1",
+            "--score-policy",
+            str(tmp_path / "policy.json"),
+            "--once",
+        ]
+    )
+    with pytest.raises(ThinSubnetError, match="requires --cc-gpu-loader-config"):
+        asyncio.run(validator_module.async_main(args))
+    assert not network_called
 
 
 def test_registered_subnet_owner_contributes_class_without_weight_key(tmp_path):

@@ -11,7 +11,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 import bittensor as bt
 
@@ -95,6 +95,7 @@ class ValidatorConfig:
     concurrency: int
     round_blocks: int
     score_policy_digest: str | None = None
+    cc_gpu_loader_config_digest: str | None = None
 
     def fingerprint(self) -> str:
         return config_fingerprint(
@@ -111,6 +112,7 @@ class ValidatorConfig:
                 "ema_alpha": self.ema_alpha,
                 "round_blocks": self.round_blocks,
                 "score_policy_digest": self.score_policy_digest,
+                "cc_gpu_loader_config_digest": self.cc_gpu_loader_config_digest,
             }
         )
 
@@ -358,6 +360,7 @@ class ValidatorRunner:
         decision_store: DecisionStore | None = None,
         report_loader: Callable[..., Any] = load_best_report,
         registration_loader: Callable[..., Any] = load_best_owner_registration,
+        cc_gpu_receipt_loader: Callable[..., Mapping[str, Any]] | None = None,
     ):
         self.config = config
         self.runtime = runtime
@@ -376,6 +379,7 @@ class ValidatorRunner:
         self.decision_store = decision_store
         self.report_loader = report_loader
         self.registration_loader = registration_loader
+        self.cc_gpu_receipt_loader = cc_gpu_receipt_loader
         self._last_dry_run_round: int | None = None
 
     async def _load_owner_registrations(
@@ -657,7 +661,7 @@ class ValidatorRunner:
 
         async def load_external(
             class_policy: Any,
-        ) -> tuple[Any, Any, Any, Any, Any]:
+        ) -> tuple[Any, Any, Any, Any, Any, Any]:
             raw_checkpoint = self.state.class_checkpoints.get(class_policy.class_id)
             checkpoint = (
                 None
@@ -686,32 +690,57 @@ class ValidatorRunner:
                     current_block=block,
                     checkpoint=checkpoint,
                 )
+            verified_cc_gpu_receipts = None
+            if "cathedral_cc_gpu_job_receipt_v1" in (
+                class_policy.assignment.required_evidence_kinds
+            ):
+                if self.cc_gpu_receipt_loader is not None:
+                    verified_cc_gpu_receipts = await asyncio.to_thread(
+                        self.cc_gpu_receipt_loader,
+                        effective_policy,
+                        report,
+                        block=block,
+                    )
             return (
                 effective_policy,
                 report,
                 accepted_checkpoint,
                 registration,
                 registration_checkpoint,
+                verified_cc_gpu_receipts,
             )
 
         loaded_external = await asyncio.gather(
             *(load_external(item) for item in self.score_policy.external_classes)
         )
+        cc_gpu_receipts_to_claim: list[Any] = []
         for (
             class_policy,
             report,
             accepted_checkpoint,
             registration,
             registration_checkpoint,
+            verified_cc_gpu_receipts,
         ) in loaded_external:
-            decisions.append(
-                external_class_decision(
-                    class_policy,
-                    report,
-                    coldkey_of=coldkey_of,
-                    owner_registration=registration,
-                )
+            external_decision = external_class_decision(
+                class_policy,
+                report,
+                coldkey_of=coldkey_of,
+                owner_registration=registration,
+                verified_cc_gpu_receipts=verified_cc_gpu_receipts,
             )
+            decisions.append(external_decision)
+            if verified_cc_gpu_receipts is not None:
+                admitted_ids = {
+                    evidence["id"]
+                    for provenance in external_decision.provenance.values()
+                    for evidence in provenance["evidence"]
+                    if evidence["kind"] == "cathedral_cc_gpu_job_receipt_v1"
+                }
+                cc_gpu_receipts_to_claim.extend(
+                    verified_cc_gpu_receipts[receipt_id]
+                    for receipt_id in sorted(admitted_ids)
+                )
             next_checkpoints[class_policy.class_id] = {
                 "source_epoch": accepted_checkpoint.source_epoch,
                 "report_id": accepted_checkpoint.report_id,
@@ -727,6 +756,19 @@ class ValidatorRunner:
         decisions = [
             decision_by_id[item.class_id] for item in self.score_policy.classes
         ]
+        next_cc_gpu_replay_claims = self.state.cc_gpu_replay_claims
+        next_cc_gpu_replay_watermark_ms = self.state.cc_gpu_replay_watermark_ms
+        if cc_gpu_receipts_to_claim:
+            from .cc_gpu_receipts import merge_cc_gpu_replay_claims
+
+            (
+                next_cc_gpu_replay_claims,
+                next_cc_gpu_replay_watermark_ms,
+            ) = merge_cc_gpu_replay_claims(
+                self.state.cc_gpu_replay_claims,
+                cc_gpu_receipts_to_claim,
+                prior_watermark_ms=self.state.cc_gpu_replay_watermark_ms,
+            )
         hotkey_weights = compose_class_decisions(self.score_policy, decisions)
         uids, weights = uid_vector(hotkey_weights, peers)
         if uids and hasattr(self.runtime, "prepare_weights"):
@@ -800,6 +842,8 @@ class ValidatorRunner:
         self.state.ema_scores = new_ema
         self.state.class_checkpoints = next_checkpoints
         self.state.registration_checkpoints = next_registration_checkpoints
+        self.state.cc_gpu_replay_claims = next_cc_gpu_replay_claims
+        self.state.cc_gpu_replay_watermark_ms = next_cc_gpu_replay_watermark_ms
         self.state.last_completed_round = round_id
         if not uids:
             self.store.save(self.state)
@@ -900,6 +944,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="immutable local provenance records (default: beside validator state)",
     )
     parser.add_argument(
+        "--cc-gpu-loader-config",
+        default=os.environ.get("CATHEDRAL_THIN_CC_GPU_LOADER_CONFIG", ""),
+        help=(
+            "canonical local/HTTPS evidence-loader policy; required only when a "
+            "score class opts into cathedral_cc_gpu_job_receipt_v1"
+        ),
+    )
+    parser.add_argument(
         "--vars", type=int, default=int(os.environ.get("CATHEDRAL_THIN_VARS", "384"))
     )
     parser.add_argument(
@@ -965,6 +1017,20 @@ async def async_main(args: argparse.Namespace) -> int:
         if args.score_policy
         else default_score_policy(network=args.network, netuid=args.netuid)
     )
+    cc_gpu_receipt_loader = None
+    cc_gpu_loader_digest = None
+    if args.cc_gpu_loader_config:
+        from .cc_gpu_loader import load_cc_gpu_loader_config
+
+        cc_gpu_receipt_loader = load_cc_gpu_loader_config(args.cc_gpu_loader_config)
+        cc_gpu_loader_digest = cc_gpu_receipt_loader.config_digest
+    cc_gpu_required = any(
+        "cathedral_cc_gpu_job_receipt_v1"
+        in class_policy.assignment.required_evidence_kinds
+        for class_policy in score_policy.external_classes
+    )
+    if cc_gpu_required and cc_gpu_receipt_loader is None:
+        raise ThinSubnetError("CC GPU score class requires --cc-gpu-loader-config")
     wallet = make_wallet(
         bt,
         name=args.wallet_name,
@@ -988,6 +1054,7 @@ async def async_main(args: argparse.Namespace) -> int:
             concurrency=args.concurrency,
             round_blocks=args.round_blocks,
             score_policy_digest=score_policy.digest,
+            cc_gpu_loader_config_digest=cc_gpu_loader_digest,
         )
         store = StateStore(args.state_file, fingerprint=config.fingerprint())
         with store.lease():
@@ -1012,6 +1079,7 @@ async def async_main(args: argparse.Namespace) -> int:
                     args.decision_dir
                     or Path(args.state_file).expanduser().parent / "decisions"
                 ),
+                cc_gpu_receipt_loader=cc_gpu_receipt_loader,
             )
             print(
                 f"cathedral-thin validator hotkey={hotkey} "
