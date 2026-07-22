@@ -193,8 +193,7 @@ def test_all_zero_local_round_retains_prior_vector_and_completes(tmp_path, capsy
     assert decision["onchain_vector"] == []
     assert decision["classes"][0]["normalized_weights"] == {}
     assert (
-        "no positive scores; retained prior on-chain vector"
-        in capsys.readouterr().out
+        "no positive scores; retained prior on-chain vector" in capsys.readouterr().out
     )
 
     reloaded = store.load_or_create()
