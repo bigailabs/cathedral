@@ -327,6 +327,24 @@ def test_class_composition_preserves_budgets_and_collapses_coldkeys(tmp_path):
     assert final["hotkey-c"] == pytest.approx(0.2)
 
 
+def test_empty_local_class_cannot_donate_its_budget_to_external_class(tmp_path):
+    policy, report, _, _ = verified(tmp_path)
+    coldkeys = {"hotkey-a": "cold-a", "hotkey-b": "cold-b"}
+    local = local_class_decision(
+        policy.local_class,
+        {"hotkey-a": 0.0, "hotkey-b": 0.0},
+        coldkey_of=coldkeys,
+        reasons={"hotkey-a": "timeout", "hotkey-b": "witness_failed"},
+    )
+    assert local.normalized_weights == {}
+    external = external_class_decision(
+        policy.external_classes[0], report, coldkey_of=coldkeys
+    )
+
+    with pytest.raises(ThinSubnetError, match="class weights are not normalized"):
+        compose_class_decisions(policy, [local, external])
+
+
 def test_positive_metric_requires_evidence_and_missing_class_holds(tmp_path):
     empty_evidence = report_body()["entries"]
     empty_evidence[0]["evidence"] = []

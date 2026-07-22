@@ -180,6 +180,53 @@ def test_continuous_dry_run_queries_each_round_only_once(tmp_path):
     assert runtime.query_calls == 2
 
 
+def test_all_zero_local_round_retains_prior_vector_and_completes(tmp_path, capsys):
+    class ZeroRuntime(FakeRuntime):
+        async def query(self, peer, synapse, timeout):
+            self.query_calls += 1
+            return wire_response(
+                synapse,
+                hotkey=peer.hotkey,
+                assignment_b64="",
+            )
+
+    cfg = config()
+    store = StateStore(tmp_path / "state.json", fingerprint=cfg.fingerprint())
+    state = store.load_or_create()
+    state.confirmed_vector_digest = "sha256:" + "a" * 64
+    state.confirmed_decision_digest = "sha256:" + "b" * 64
+    store.save(state)
+    runtime = ZeroRuntime()
+    runner = ValidatorRunner(
+        config=cfg,
+        runtime=runtime,
+        store=store,
+        state=state,
+        broadcast=True,
+        decision_store=DecisionStore(tmp_path / "decisions"),
+    )
+
+    assert asyncio.run(runner.tick())
+    assert runtime.query_calls == 1
+    assert runtime.submissions == []
+    assert state.pending_vector is None
+    assert state.last_completed_round == 2
+    assert state.ema_scores == {"miner": 0.0}
+    assert state.confirmed_vector_digest == "sha256:" + "a" * 64
+    assert state.confirmed_decision_digest == "sha256:" + "b" * 64
+    decision = json.loads(next((tmp_path / "decisions").glob("*.json")).read_text())
+    assert decision["onchain_vector"] == []
+    assert decision["classes"][0]["normalized_weights"] == {}
+    assert (
+        "no positive scores; retained prior on-chain vector" in capsys.readouterr().out
+    )
+
+    reloaded = store.load_or_create()
+    assert reloaded.last_completed_round == 2
+    assert reloaded.confirmed_vector_digest == "sha256:" + "a" * 64
+    assert reloaded.confirmed_decision_digest == "sha256:" + "b" * 64
+
+
 def test_external_only_class_sets_weights_without_validator_scoring_infra(tmp_path):
     class MultiPeerRuntime(FakeRuntime):
         def __init__(self):
