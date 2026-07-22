@@ -1470,10 +1470,6 @@ def local_class_decision(
     reasons: dict[str, str],
 ) -> ClassDecision:
     normalized = coldkey_collapsed_weights(raw_scores, coldkey_of)
-    if not normalized:
-        raise ThinSubnetError(
-            f"configured class {policy.class_id} has no positive scores"
-        )
     return ClassDecision(
         class_id=policy.class_id,
         kind="local_sat",
@@ -1499,6 +1495,10 @@ def compose_class_decisions(
         item.class_id for item in policy.classes
     }:
         raise ThinSubnetError("class decisions do not cover the configured policy")
+    if decisions and all(not item.normalized_weights for item in decisions):
+        # A fully empty round is a valid fail-closed outcome. The validator
+        # records it and retains its prior on-chain vector without submitting.
+        return {}
     final: dict[str, Decimal] = {}
     for class_policy in policy.classes:
         decision = by_id[class_policy.class_id]
