@@ -65,6 +65,37 @@ def test_schema_five_replay_lists_migrate_with_safe_expiry(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_mainline_schema_five_without_cc_gpu_fields_migrates(tmp_path):
+    path = tmp_path / "validator.json"
+    payload = {
+        "schema": 5,
+        "config_fingerprint": "x",
+        "master_secret_hex": "00" * 32,
+        "last_completed_round": 17,
+        "ema_scores": {"miner": 0.5},
+        "pending_vector": None,
+        "confirmed_vector_digest": None,
+        "confirmed_decision_digest": None,
+        "class_checkpoints": {},
+        "registration_checkpoints": {},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = StateStore(path, fingerprint="x").load_or_create()
+
+    assert migrated.schema == STATE_SCHEMA
+    assert migrated.last_completed_round == 17
+    assert migrated.ema_scores == {"miner": 0.5}
+    assert migrated.cc_gpu_replay_claims == {
+        "attempt_ids": {},
+        "evidence_digests": {},
+        "job_ids": {},
+        "receipt_ids": {},
+        "worker_ids": {},
+    }
+    assert migrated.cc_gpu_replay_watermark_ms > 0
+
+
 def test_schema_four_state_migrates_atomically_without_reset(tmp_path):
     path = tmp_path / "validator.json"
     store = StateStore(path, fingerprint="fingerprint")

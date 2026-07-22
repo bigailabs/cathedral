@@ -49,7 +49,10 @@ from cathedral_thin.cc_gpu_loader import (
     verify_cc_gpu_evidence_export,
 )
 from cathedral_thin.core import (
+    CC_GPU_REPLAY_RETENTION_SAFETY_SECONDS,
+    MAX_CC_GPU_FUTURE_SKEW_SECONDS,
     MAX_CC_GPU_ID_REPLAY_CLAIMS,
+    MAX_CC_GPU_RECEIPT_AGE_SECONDS,
     ThinSubnetError,
     empty_cc_gpu_replay_claims,
 )
@@ -606,6 +609,44 @@ def test_replay_claims_expire_safely_and_roll_over_capacity() -> None:
         )
 
 
+def test_replay_claim_retention_does_not_shrink_with_active_policy() -> None:
+    raw, evidence = receipt()
+    short_policy = replace(policy(), max_age_seconds=60, max_future_seconds=1)
+    verified = verify_cc_gpu_receipt(
+        raw,
+        short_policy,
+        now=NOW,
+        evidence_by_digest=evidence,
+        evidence_verifier=verifier,
+    )
+    protocol_expiry_ms = int(
+        (
+            verified.issued_at
+            + timedelta(
+                seconds=(
+                    MAX_CC_GPU_RECEIPT_AGE_SECONDS
+                    + MAX_CC_GPU_FUTURE_SKEW_SECONDS
+                    + CC_GPU_REPLAY_RETENTION_SAFETY_SECONDS
+                )
+            )
+        ).timestamp()
+        * 1000
+    )
+    assert verified.replay_expires_at_ms == protocol_expiry_ms
+
+    ledger, watermark = merge_cc_gpu_replay_claims(
+        empty_cc_gpu_replay_claims(), [verified], now=NOW
+    )
+    after_short_policy_expiry = NOW + timedelta(minutes=2)
+    with pytest.raises(ThinSubnetError, match="replayed CC GPU"):
+        merge_cc_gpu_replay_claims(
+            ledger,
+            [verified],
+            now=after_short_policy_expiry,
+            prior_watermark_ms=watermark,
+        )
+
+
 def test_polaris_evidence_export_is_bounded_digest_keyed_and_duplicate_safe(
     tmp_path,
 ) -> None:
@@ -1060,6 +1101,15 @@ def test_score_decision_rederives_jobs_from_validator_verified_receipts(
             report,
             coldkey_of={"miner-a": "cold-a"},
             verified_cc_gpu_receipts={verified.receipt_id: wrong_subject},
+        )
+
+    wrong_verifier = replace(verified, verifier_digest="sha256:" + "ff" * 32)
+    with pytest.raises(ThinSubnetError, match="receipt verifier"):
+        external_class_decision(
+            score_policy.external_classes[0],
+            report,
+            coldkey_of={"miner-a": "cold-a"},
+            verified_cc_gpu_receipts={verified.receipt_id: wrong_verifier},
         )
 
     asserted_policy = replace(

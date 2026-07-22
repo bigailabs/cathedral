@@ -726,20 +726,32 @@ class StateStore:
                 migrated_schema = True
             elif payload.get("schema") == 5:
                 legacy_claims = payload.get("cc_gpu_replay_claims")
-                if not isinstance(legacy_claims, dict):
-                    raise ThinSubnetError("schema-5 CC GPU replay claims are invalid")
                 legacy_expiry_ms = loaded_at_ms + 1000 * (
                     MAX_CC_GPU_RECEIPT_AGE_SECONDS
                     + MAX_CC_GPU_FUTURE_SKEW_SECONDS
                     + CC_GPU_REPLAY_RETENTION_SAFETY_SECONDS
                 )
+                if legacy_claims is None:
+                    migrated_claims = empty_cc_gpu_replay_claims()
+                elif (
+                    not isinstance(legacy_claims, dict)
+                    or tuple(sorted(legacy_claims)) != CC_GPU_REPLAY_CLAIM_KEYS
+                    or any(
+                        not isinstance(claims, list)
+                        for claims in legacy_claims.values()
+                    )
+                ):
+                    raise ThinSubnetError("schema-5 CC GPU replay claims are invalid")
+                else:
+                    migrated_claims = {
+                        str(category): {
+                            str(claim): legacy_expiry_ms for claim in claims
+                        }
+                        for category, claims in legacy_claims.items()
+                    }
                 payload = dict(payload)
                 payload["schema"] = STATE_SCHEMA
-                payload["cc_gpu_replay_claims"] = {
-                    str(category): {str(claim): legacy_expiry_ms for claim in claims}
-                    for category, claims in legacy_claims.items()
-                    if isinstance(claims, list)
-                }
+                payload["cc_gpu_replay_claims"] = migrated_claims
                 payload["cc_gpu_replay_watermark_ms"] = loaded_at_ms
                 migrated_schema = True
             elif payload.get("schema") == STATE_SCHEMA and (

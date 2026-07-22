@@ -98,23 +98,23 @@ class ValidatorConfig:
     cc_gpu_loader_config_digest: str | None = None
 
     def fingerprint(self) -> str:
-        return config_fingerprint(
-            {
-                "protocol": 1,
-                "network": self.network,
-                "netuid": self.netuid,
-                "validator_hotkey": self.validator_hotkey,
-                "n_vars": self.n_vars,
-                "n_clauses": self.n_clauses,
-                "timeout_secs": self.timeout_secs,
-                "reference_ms": self.reference_ms,
-                "correctness_share": self.correctness_share,
-                "ema_alpha": self.ema_alpha,
-                "round_blocks": self.round_blocks,
-                "score_policy_digest": self.score_policy_digest,
-                "cc_gpu_loader_config_digest": self.cc_gpu_loader_config_digest,
-            }
-        )
+        body = {
+            "protocol": 1,
+            "network": self.network,
+            "netuid": self.netuid,
+            "validator_hotkey": self.validator_hotkey,
+            "n_vars": self.n_vars,
+            "n_clauses": self.n_clauses,
+            "timeout_secs": self.timeout_secs,
+            "reference_ms": self.reference_ms,
+            "correctness_share": self.correctness_share,
+            "ema_alpha": self.ema_alpha,
+            "round_blocks": self.round_blocks,
+            "score_policy_digest": self.score_policy_digest,
+        }
+        if self.cc_gpu_loader_config_digest is not None:
+            body["cc_gpu_loader_config_digest"] = self.cc_gpu_loader_config_digest
+        return config_fingerprint(body)
 
 
 def snapshot_peers(metagraph: Any) -> list[Peer]:

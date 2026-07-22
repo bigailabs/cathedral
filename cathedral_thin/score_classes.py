@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -1440,6 +1441,10 @@ def _validate_cc_gpu_receipt_evidence(
             if receipt.subject_hotkey != entry.miner_hotkey:
                 raise ThinSubnetError(
                     "CC GPU receipt subject does not match scored miner hotkey"
+                )
+            if not hmac.compare_digest(receipt.verifier_digest, report.verifier_digest):
+                raise ThinSubnetError(
+                    "CC GPU receipt verifier does not match score report verifier"
                 )
             admitted.append(receipt)
         metric = entry.metrics.get("verified_cc_gpu_jobs")

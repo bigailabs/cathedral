@@ -690,8 +690,8 @@ def verify_cc_gpu_receipt(
                 issued_at
                 + timedelta(
                     seconds=(
-                        policy.max_age_seconds
-                        + policy.max_future_seconds
+                        MAX_CC_GPU_RECEIPT_AGE_SECONDS
+                        + MAX_CC_GPU_FUTURE_SKEW_SECONDS
                         + CC_GPU_REPLAY_RETENTION_SAFETY_SECONDS
                     )
                 )

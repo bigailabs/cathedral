@@ -46,6 +46,25 @@ def config() -> ValidatorConfig:
     return ValidatorConfig("local", 1, "validator", 16, 60, 5.0, 100.0, 0.8, 1.0, 4, 10)
 
 
+def test_cc_gpu_disabled_preserves_mainline_config_fingerprint():
+    cfg = config()
+    mainline_body = {
+        "protocol": 1,
+        "network": cfg.network,
+        "netuid": cfg.netuid,
+        "validator_hotkey": cfg.validator_hotkey,
+        "n_vars": cfg.n_vars,
+        "n_clauses": cfg.n_clauses,
+        "timeout_secs": cfg.timeout_secs,
+        "reference_ms": cfg.reference_ms,
+        "correctness_share": cfg.correctness_share,
+        "ema_alpha": cfg.ema_alpha,
+        "round_blocks": cfg.round_blocks,
+        "score_policy_digest": cfg.score_policy_digest,
+    }
+    assert cfg.fingerprint() == validator_module.config_fingerprint(mainline_body)
+
+
 def test_metagraph_requires_coldkeys_for_sybil_collapse():
     metagraph = SimpleNamespace(uids=[0], hotkeys=["h"], axons=[Axon("h")])
     with pytest.raises(Exception, match="coldkeys"):
