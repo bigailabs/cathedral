@@ -760,10 +760,9 @@ class ValidatorRunner:
         ]
         hotkey_weights = compose_class_decisions(self.score_policy, decisions)
         uids, weights = uid_vector(hotkey_weights, peers)
-        burn_only = (
-            self.score_policy.burn_hotkey is not None
-            and hotkey_weights == {self.score_policy.burn_hotkey: 1.0}
-        )
+        burn_only = self.score_policy.burn_hotkey is not None and hotkey_weights == {
+            self.score_policy.burn_hotkey: 1.0
+        }
         if uids and hasattr(self.runtime, "prepare_weights") and not burn_only:
             original = dict(zip(uids, weights))
             uids, weights = await asyncio.to_thread(

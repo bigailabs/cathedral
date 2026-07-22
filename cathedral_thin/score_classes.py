@@ -542,9 +542,10 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
     if encoded != canonical_json(document):
         raise ThinSubnetError("score policy JSON must be canonical")
     policy_keys = frozenset(document)
-    if not _POLICY_KEYS <= policy_keys or not (
-        policy_keys - _POLICY_KEYS
-    ) <= _POLICY_OPTIONAL_KEYS:
+    if (
+        not _POLICY_KEYS <= policy_keys
+        or not (policy_keys - _POLICY_KEYS) <= _POLICY_OPTIONAL_KEYS
+    ):
         missing = sorted(_POLICY_KEYS - policy_keys)
         unknown = sorted(policy_keys - _POLICY_KEYS - _POLICY_OPTIONAL_KEYS)
         raise ThinSubnetError(

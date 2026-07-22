@@ -2012,6 +2012,13 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         "payable_hotkeys": payable_meta,
         "hotkeys": sorted(scores), "scores": [scores[k] for k in sorted(scores)],
     }
+    burn_snapshot = {
+        "burn_uid": burn_uid(),
+        "forced_burn_percentage": burn_percentage(),
+    }
+    configured_burn_hotkey = burn_hotkey()
+    if configured_burn_hotkey is not None:
+        burn_snapshot["burn_hotkey"] = configured_burn_hotkey
     payload: dict[str, Any] = {
         "vector_id": str(uuid.uuid4()),
         "policy_version": next_policy_version(store),
@@ -2019,11 +2026,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         "netuid": int(os.environ.get(NETUID_ENV, "39")),
         "generated_at": _ms_iso(now),
         "expires_at": _ms_iso(now + timedelta(seconds=valid_for)),
-        "burn_snapshot": {
-            "burn_uid": burn_uid(),
-            "burn_hotkey": burn_hotkey(),
-            "forced_burn_percentage": burn_percentage(),
-        },
+        "burn_snapshot": burn_snapshot,
         "policy_hash": "sha256:" + hashlib.sha256(
             json.dumps(policy_inputs, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
