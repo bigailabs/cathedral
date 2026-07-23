@@ -121,13 +121,13 @@ cathedral-validator serve --config my-validator.toml --offline --once
 Then run a metagraph-backed dry-run, still without a chain write:
 
 ```bash
-cathedral-validator serve --config my-validator.toml --once
+cathedral-validator serve --config my-validator.toml --dry-run --once
 ```
 
 Only after both pass may an authorized operator start the continuous service:
 
 ```bash
-cathedral-validator serve --config my-validator.toml --broadcast
+cathedral-validator serve --config my-validator.toml
 ```
 
 The rollback fence advances only after a successful broadcast and survives a
