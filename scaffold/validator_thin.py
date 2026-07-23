@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
@@ -63,6 +64,19 @@ def _lifecycle(event: str, detail: str = "") -> None:
     if detail:
         line += f" {detail}"
     print(line)
+
+
+def _feed_label(publisher_url: str) -> str:
+    """Return a log-safe feed identity without credentials, query, or fragment."""
+    parsed = urlsplit(publisher_url)
+    scheme = parsed.scheme or "https"
+    host = parsed.hostname or "<invalid-host>"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    suffix = f":{port}" if port is not None else ""
+    return f"{scheme}://{host}{suffix}"
 
 
 def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
@@ -709,14 +723,31 @@ def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
 # -- main loop --------------------------------------------------------------------
 
 def tick(args) -> bool:
+    _lifecycle("FEED fetch", f"source={_feed_label(args.publisher_url)}")
     payload = fetch_vector(args.publisher_url)
+    _lifecycle(
+        "FEED fetched",
+        f"id={str(payload.get('vector_id', ''))[:8]} "
+        f"policy_version={payload.get('policy_version')}",
+    )
     fence = load_fence(Path(args.state_file))
     try:
         accept_vector(payload, public_key_hex=args.public_key_hex, key_id=args.key_id,
                       network=args.network, netuid=args.netuid, fence_version=fence)
     except Exception as e:
+        _lifecycle("VERIFY failed", f"reason={type(e).__name__}")
         _lifecycle("VECTOR rejected", f"stage=accept reason={type(e).__name__}")
         raise
+    _lifecycle("SIGNATURE valid", f"key_id={payload.get('key_id')}")
+    _lifecycle(
+        "FRESHNESS valid",
+        f"network={payload.get('network')} netuid={payload.get('netuid')} "
+        f"generated_at={payload.get('generated_at')} expires_at={payload.get('expires_at')}",
+    )
+    _lifecycle(
+        "ROLLBACK valid",
+        f"policy_version={payload.get('policy_version')} prior_fence={fence}",
+    )
     _lifecycle("VECTOR accepted",
                f"id={str(payload.get('vector_id', ''))[:8]} "
                f"policy_version={payload['policy_version']} "
@@ -750,7 +781,20 @@ def tick(args) -> bool:
     except Exception as e:
         _lifecycle("VECTOR rejected", f"stage=map reason={type(e).__name__}")
         raise
-    _lifecycle("MAP complete", f"uids={len(uid_weights)}")
+    ordered = sorted(uid_weights.items())
+    preview = ",".join(f"{uid}:{weight:.6f}" for uid, weight in ordered[:12])
+    if len(ordered) > 12:
+        preview += ",..."
+    burn_hotkey = (payload.get("burn_snapshot") or {}).get("burn_hotkey")
+    burn_uid = hk2uid.get(burn_hotkey) if burn_hotkey is not None else (
+        payload.get("burn_snapshot") or {}
+    ).get("burn_uid")
+    burn_share = uid_weights.get(int(burn_uid), 0.0) if burn_uid is not None else 0.0
+    _lifecycle(
+        "MAP complete",
+        f"uids={len(uid_weights)} burn_uid={burn_uid} burn_share={burn_share:.6f} "
+        f"vector={preview}",
+    )
     ok = set_weights_on_chain(uid_weights, network=args.network, netuid=args.netuid,
                               wallet_name=args.wallet_name, wallet_hotkey=args.wallet_hotkey,
                               broadcast=broadcast, preflight=preflight)
