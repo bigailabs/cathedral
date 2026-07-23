@@ -7,7 +7,7 @@ Runs the plan's validator release-gate checks (deploy/RELIABILITY_UPGRADE_PLAN.m
   - ALL THREE public weight-feed URLs over HTTPS (no auth) — canonical,
     legacy-prefixed, and the read-service direct host — for 5xx, signed-vector
     age, and identical signed bytes across URLs, and
-  - the finney metagraph (READ ONLY) for UID200 update age and the count of
+  - the finney metagraph (READ ONLY) for the Cathedral validator update age and the count of
     validators fresh within one tempo (360 blocks / 72 min).
 
 Two required gate items cannot be verified by a read-only probe (burn-snapshot
@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import math
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -69,8 +69,14 @@ except Exception:
 # wrong fields. Bump this constant when the env is intentionally upgraded.
 BITTENSOR_REQUIRED_MAJOR = 10
 
-# Default UIDs. UID200 = Cathedral (our validator); overridable via flag.
-DEFAULT_UID200 = 200
+# Current Cathedral SN39 validator identity and live service cadence. The UID is
+# only a CLI default: operators still resolve their validator by hotkey before
+# any write. The cadence matches config/validator.toml and scaffold.cli.
+DEFAULT_VALIDATOR_UID = 30
+DEFAULT_VALIDATOR_INTERVAL_SECONDS = 1500.0
+# One bounded allowance for block timing, RPC latency, finalization, and systemd
+# scheduling. The gate still fails after one missed configured cycle.
+UID_UPDATE_SCHEDULING_GRACE_SECONDS = 120.0
 DEFAULT_FEED_BASE = "https://api.cathedral.computer"
 DEFAULT_READ_BASE = "https://read.cathedral.computer"
 WEIGHTS_PATH = "/v1/validator/weights/next"
@@ -157,22 +163,55 @@ def evaluate_uid_update_age(
     blocks_since_update: int | None,
     *,
     block_seconds: float = ht.BLOCK_SECONDS,
-    uid: int = DEFAULT_UID200,
+    uid: int = DEFAULT_VALIDATOR_UID,
+    validator_interval_seconds: float = DEFAULT_VALIDATOR_INTERVAL_SECONDS,
+    weights_rate_limit_blocks: int | None = None,
+    scheduling_grace_seconds: float = UID_UPDATE_SCHEDULING_GRACE_SECONDS,
 ) -> dict[str, Any]:
-    """Check: UID200 on-chain update age <= GATE_UID200_MAX_AGE_SECONDS (10 min).
+    """Check the validator update age against a feasible one-cycle deadline.
 
     `blocks_since_update` comes from chain (current_block - last_update[uid]).
+    The live chain can forbid updates longer than the historical static gate
+    limit, so the deadline is the largest of the static floor, configured
+    validator interval, and live weight-rate limit, plus bounded scheduling
+    grace. This prevents an impossible gate while still detecting one missed
+    configured cycle.
     """
     if blocks_since_update is None:
         return {"name": f"uid{uid}_update_age", "passed": False,
                 "detail": "no chain data (uid not found / chain unavailable)"}
+    numeric = (block_seconds, validator_interval_seconds, scheduling_grace_seconds)
+    if any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or value <= 0
+        for value in numeric
+    ):
+        return {"name": f"uid{uid}_update_age", "passed": False,
+                "detail": "invalid block/cadence/grace configuration"}
+    if weights_rate_limit_blocks is not None and weights_rate_limit_blocks < 0:
+        return {"name": f"uid{uid}_update_age", "passed": False,
+                "detail": "invalid chain weights rate limit"}
     age = blocks_since_update * block_seconds
-    passed = age <= ht.GATE_UID200_MAX_AGE_SECONDS
+    chain_minimum = (
+        weights_rate_limit_blocks * block_seconds
+        if weights_rate_limit_blocks is not None else 0.0
+    )
+    deadline = max(
+        ht.GATE_UID200_MAX_AGE_SECONDS,
+        validator_interval_seconds,
+        chain_minimum,
+    ) + scheduling_grace_seconds
+    passed = age <= deadline
     return {
         "name": f"uid{uid}_update_age",
         "passed": passed,
         "detail": (f"{blocks_since_update} blocks (~{age:.0f}s); "
-                   f"require <= {ht.GATE_UID200_MAX_AGE_SECONDS:.0f}s"),
+                   f"require <= {deadline:.0f}s "
+                   f"(interval={validator_interval_seconds:.0f}s, "
+                   f"rate_limit={weights_rate_limit_blocks}, "
+                   f"grace={scheduling_grace_seconds:.0f}s)"),
     }
 
 
@@ -342,8 +381,8 @@ def fetch_chain(netuid: int, network: str = "finney") -> dict[str, Any]:
     """READ-ONLY metagraph snapshot for update-age checks. Never writes.
 
     Returns {available, current_block, blocks_since: {uid: int},
-    permits: {uid: bool}, reason}. Uses last_update (blocks of last weight set)
-    per UID where exposed by the bittensor metagraph.
+    permits: {uid: bool}, weights_rate_limit_blocks, reason}. Uses last_update
+    (blocks of last weight set) per UID where exposed by the metagraph.
     """
     try:
         import bittensor  # lazy; not installed in every env
@@ -372,11 +411,13 @@ def fetch_chain(netuid: int, network: str = "finney") -> dict[str, Any]:
             uid: max(0, current_block - lu) for uid, lu in enumerate(last_update)
         }
         permits_by_uid = {uid: ok for uid, ok in enumerate(permits)}
+        weights_rate_limit_blocks = int(sub.weights_rate_limit(netuid=netuid))
         return {
             "available": True,
             "current_block": current_block,
             "blocks_since": blocks_since,
             "permits": permits_by_uid,
+            "weights_rate_limit_blocks": weights_rate_limit_blocks,
             "reason": None,
         }
     except Exception as e:
@@ -430,8 +471,14 @@ def run_gate(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, 
             blocks_since = chain["blocks_since"]
             permits = chain["permits"]
             context["current_block"] = chain.get("current_block")
+            context["weights_rate_limit_blocks"] = chain.get(
+                "weights_rate_limit_blocks")
             checks.append(evaluate_uid_update_age(
-                blocks_since.get(args.uid), uid=args.uid))
+                blocks_since.get(args.uid),
+                uid=args.uid,
+                validator_interval_seconds=args.validator_interval_seconds,
+                weights_rate_limit_blocks=chain.get("weights_rate_limit_blocks"),
+            ))
             checks.append(evaluate_fresh_validators(
                 blocks_since, permits, min_fresh=args.min_fresh_validators))
         else:
@@ -469,8 +516,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="base URL of the read-service direct host (read.*)")
     p.add_argument("--network", default="finney", help="bittensor network")
     p.add_argument("--netuid", type=int, default=DEFAULT_NETUID)
-    p.add_argument("--uid", type=int, default=DEFAULT_UID200,
-                   help="our validator UID (Cathedral = 200)")
+    p.add_argument("--uid", type=int, default=DEFAULT_VALIDATOR_UID,
+                   help="validator UID for this read-only check (Cathedral = 30)")
+    p.add_argument(
+        "--validator-interval-seconds",
+        type=float,
+        default=DEFAULT_VALIDATOR_INTERVAL_SECONDS,
+        dest="validator_interval_seconds",
+        help="configured validator loop interval (default: 1500)",
+    )
     p.add_argument("--min-fresh-validators", type=int, default=1, dest="min_fresh_validators",
                    help="minimum permitted validators fresh within one tempo")
     p.add_argument("--no-chain", action="store_true",
@@ -478,6 +532,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=float, default=10.0)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     args = p.parse_args(argv)
+    if (
+        not math.isfinite(args.validator_interval_seconds)
+        or args.validator_interval_seconds <= 0
+    ):
+        p.error("--validator-interval-seconds must be positive")
 
     checks, context = run_gate(args)
     ok = gate_passed(checks)
