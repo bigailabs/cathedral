@@ -12,6 +12,8 @@ import math
 import os
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from scaffold.publisher import health_thresholds as ht
 
 # Load the script module by path (scripts/ is not an importable package).
@@ -128,6 +130,12 @@ def test_uid_update_age_rejects_invalid_cadence_configuration():
     assert gate.evaluate_uid_update_age(
         1, validator_interval_seconds=math.nan
     )["passed"] is False
+
+
+def test_cli_rejects_nonfinite_validator_interval():
+    with pytest.raises(SystemExit) as exc:
+        gate.main(["--validator-interval-seconds", "nan"])
+    assert exc.value.code == 2
 
 
 def test_uid_update_age_no_chain_fails():
