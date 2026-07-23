@@ -532,7 +532,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=float, default=10.0)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     args = p.parse_args(argv)
-    if args.validator_interval_seconds <= 0:
+    if (
+        not math.isfinite(args.validator_interval_seconds)
+        or args.validator_interval_seconds <= 0
+    ):
         p.error("--validator-interval-seconds must be positive")
 
     checks, context = run_gate(args)
