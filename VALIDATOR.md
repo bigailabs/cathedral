@@ -83,6 +83,59 @@ The pinned key is the whole point: the validator refuses any vector not signed
 by exactly this key (published at `https://api.cathedral.computer/.well-known/cathedral-jwks.json`
 — verify it there first).
 
+## Production SN39 operator contract
+
+The one canonical publisher is `https://api.cathedral.computer`. Before starting
+a validator, fetch its JWKS and confirm that the entry whose `kid` is
+`cathedral-weight-policy` has this pinned public key:
+
+```
+10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26
+```
+
+For the validated-supply launch policy, set:
+
+```toml
+[publisher]
+url = "https://api.cathedral.computer"
+
+[weight_policy]
+public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
+key_id = "cathedral-weight-policy"
+require_policy = "validated_supply_v1"
+state_file = "~/.cathedral/thin_validator.json"
+```
+
+Admission, registration, uptime, self-reporting, and historical receipts alone
+earn zero. Only fresh independently verified Intel TDX evidence is eligible.
+The GPU class stays on burn until separately admitted. The signed vector must
+carry the burn hotkey; each validator resolves it and every miner hotkey against
+its fresh metagraph immediately before a write.
+
+Run a single non-chain acceptance tick first:
+
+```bash
+cathedral-validator serve --config my-validator.toml --offline --once
+```
+
+Then run a metagraph-backed dry-run, still without a chain write:
+
+```bash
+cathedral-validator serve --config my-validator.toml --once
+```
+
+Only after both pass may an authorized operator start the continuous service:
+
+```bash
+cathedral-validator serve --config my-validator.toml --broadcast
+```
+
+The rollback fence advances only after a successful broadcast and survives a
+restart. Monitor timestamped `FEED`, `SIGNATURE`, `FRESHNESS`, `ROLLBACK`,
+`VECTOR`, `PREFLIGHT`, `MAP`, `WEIGHTS`, and `CHAIN` lifecycle events. Any
+signature, freshness, subnet, policy, rollback, receipt, or identity failure
+must leave the miner at zero and its class allocation on burn.
+
 ### Use your own RPC node
 
 By default the validator connects to the public `finney` entrypoint resolved
