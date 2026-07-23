@@ -8,6 +8,7 @@ here; it has no decision logic.
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -86,23 +87,47 @@ def test_vector_age_missing_fails():
     assert gate.evaluate_vector_age(None)["passed"] is False
 
 
-# ---- UID200 update age check ----------------------------------------------
+# ---- Cathedral validator update age check --------------------------------
 def test_uid_update_age_fresh_passes():
-    # 30 blocks * 12s = 360s == 6 min, under the 10-min gate.
+    # 30 blocks * 12s = 360s, well within one configured cycle.
     res = gate.evaluate_uid_update_age(30)
     assert res["passed"] is True
 
 
 def test_uid_update_age_at_limit_passes():
-    # exactly 10 min: 600s / 12s = 50 blocks
-    res = gate.evaluate_uid_update_age(50)
+    # 1500s cadence + 120s scheduling grace = 135 blocks.
+    res = gate.evaluate_uid_update_age(135)
     assert res["passed"] is True
 
 
 def test_uid_update_age_stale_fails():
-    # 100 blocks = 1200s = 20 min, over the 10-min gate.
-    res = gate.evaluate_uid_update_age(100)
+    # One block beyond the configured cycle plus bounded grace fails.
+    res = gate.evaluate_uid_update_age(136)
     assert res["passed"] is False
+
+
+def test_uid_update_age_respects_longer_chain_rate_limit():
+    # A 100-block chain rate limit plus 120s grace permits 110 blocks,
+    # even when a caller configures an impossible 600s loop interval.
+    assert gate.evaluate_uid_update_age(
+        110,
+        validator_interval_seconds=600,
+        weights_rate_limit_blocks=100,
+    )["passed"] is True
+    assert gate.evaluate_uid_update_age(
+        111,
+        validator_interval_seconds=600,
+        weights_rate_limit_blocks=100,
+    )["passed"] is False
+
+
+def test_uid_update_age_rejects_invalid_cadence_configuration():
+    res = gate.evaluate_uid_update_age(1, validator_interval_seconds=0)
+    assert res["passed"] is False
+    assert "invalid" in res["detail"]
+    assert gate.evaluate_uid_update_age(
+        1, validator_interval_seconds=math.nan
+    )["passed"] is False
 
 
 def test_uid_update_age_no_chain_fails():
