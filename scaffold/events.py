@@ -30,9 +30,15 @@ INFO = "INFO"
 _STATUSES = (PASS, FAIL, NOT_PROVEN, INFO)
 
 _EVENT_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+# Full credential grammar: key=value / key: value forms AND scheme-prefixed
+# header values ("Authorization: Bearer <secret>", "Basic <secret>").
 _SECRET_RE = re.compile(
-    r"(?i)(bearer|token|secret|hmac|api_key|authorization|password|private_key)"
-    r"\s*[=:]\s*\S+"
+    r"(?i)(bearer|basic|token|secret|hmac|api_key|authorization|password|"
+    r"private_key)((\s*[=:]\s*)|\s+)(?:(?:bearer|basic)\s+)?\S+"
+)
+_SENSITIVE_FIELD_RE = re.compile(
+    r"(?i)^(authorization|.*(token|secret|password|credential|api_key|"
+    r"private_key|hmac).*)$"
 )
 
 _COLORS = {
@@ -55,7 +61,9 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 def _neutralize(value: str) -> str:
     """Strip ANSI/control characters, redact secrets, bound the length."""
     cleaned = _CONTROL_RE.sub(" ", value)
-    cleaned = _SECRET_RE.sub(lambda match: match.group(1) + "=[REDACTED]", cleaned)
+    cleaned = _SECRET_RE.sub(
+        lambda match: (match.group(1) or "credential") + "=[REDACTED]", cleaned
+    )
     return cleaned[:2048]
 
 
@@ -64,7 +72,15 @@ def _scrub(value):
     if isinstance(value, str):
         return _neutralize(value)
     if isinstance(value, dict):
-        return {_neutralize(str(key)): _scrub(item) for key, item in value.items()}
+        # Sensitive FIELD NAMES redact the entire value regardless of shape.
+        return {
+            _neutralize(str(key)): (
+                "[REDACTED]"
+                if _SENSITIVE_FIELD_RE.match(str(key))
+                else _scrub(item)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_scrub(item) for item in value]
     if isinstance(value, (int, float, bool)) or value is None:
