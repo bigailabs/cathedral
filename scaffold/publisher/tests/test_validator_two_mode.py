@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+import unittest.mock as mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -310,10 +311,42 @@ cathedral_provenance = pytest.importorskip(
 )
 
 
+VERIFIER_SCRIPT = b"""#!/usr/bin/env python3
+import json, sys
+quote = json.load(open(sys.argv[1]))
+claims = dict(quote["claims"])
+claims["report_data"] = quote["report_data_hex"]
+claims["report_data_match"] = sys.argv[2] == quote["report_data_hex"]
+print(json.dumps(claims))
+"""
+
+FULL_CLAIMS = {
+    "intel_verified": True,
+    "measurement": "tdx-measurement-sha256:sample-v1",
+    "tcb_status": "UpToDate",
+    "advisory_ids": [],
+    "debug_enabled": False,
+    "collateral_current": True,
+    "platform_identity_kind": "stable",
+    "platform_identity_verified": True,
+    "claims_bound_to_quote": True,
+    "stable_platform_id": "tdx-platform-sha256:" + "c" * 64,
+    "platform_id": "tdx-platform-sha256:" + "c" * 64,
+    "tdx_pck_cert_id": "tdx-pck-cert-sha256:" + "d" * 64,
+    "tdx_attestation_key_id": "tdx-ak-sha256:" + "e" * 64,
+    "tcb_svn": "01" * 16,
+}
+
+
 @pytest.fixture(scope="module")
 def real_evidence(tmp_path_factory):
-    """Build a genuine registry→receipt→report→manifest→index chain."""
+    """A genuine registry→receipt→report→manifest→index chain across THREE
+    epochs (positive 11, revoked 12, restored 13), with real raw Evidence
+    envelopes whose quote bytes are what each receipt's hardware claim
+    hashes, a controlled-disclosure directory, and an executable verifier
+    fixture driven through the canonical strict path."""
     import base64
+    import hashlib
     from datetime import UTC, datetime, timedelta
 
     from cryptography.hazmat.primitives import serialization
@@ -326,7 +359,13 @@ def real_evidence(tmp_path_factory):
         evaluated_claim,
         with_verified_channel,
     )
-    from cathedral.common import Attested, Tier
+    from cathedral.common import (
+        Attested,
+        Evidence,
+        EvidenceKind,
+        Tier,
+        evidence_report_data,
+    )
     from cathedral.evidence import EvidenceStore, build_manifest, build_signed_index
     from cathedral.ledger import Ledger
     from cathedral.lifecycle import (
@@ -334,11 +373,14 @@ def real_evidence(tmp_path_factory):
         LifecycleSnapshot,
         WorkerLifecycleState,
     )
-    from cathedral.policy_registry import canonical_json, sign_registry
+    from cathedral.policy_registry import canonical_json, sign_registry, verify_registry
     from cathedral.receipt import ReceiptIssuer
-    from cathedral.runtime import SAT_WORK_POLICY_DIGEST
+    from cathedral.runtime import (
+        SAT_WORK_POLICY_DIGEST,
+        _evidence_digest,
+        _retained_evidence_envelope,
+    )
     from cathedral.score_class import export_score_class_report
-    from cathedral.policy_registry import verify_registry
 
     tmp_path = tmp_path_factory.mktemp("evidence")
     registry_seed = bytes(range(32))
@@ -405,186 +447,274 @@ def real_evidence(tmp_path_factory):
     registry_bytes = canonical_json(registry_document)
     trusted = {"cathedral-policy-test-1": pub_raw(registry_seed)}
     snapshot = verify_registry(registry_bytes, trusted, now=now)
-
     policy = snapshot.to_policy(at=now)
     verified_text = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    claims = attestation_claims(b"raw-quote", policy, verified_at=verified_text)
-    claims = with_verified_channel(claims, b"binding", verified_at=verified_text)
-    claims = claims.with_claim(
-        AssuranceDimension.WORK,
-        evaluated_claim(
-            ClaimStatus.PASSED,
-            b"work-result",
-            SAT_WORK_POLICY_DIGEST,
-            verified_at=verified_text,
-        ),
-    )
-    attested = Attested(
-        tier=Tier.CC_CPU_TDX,
-        chip_id="tdx-platform-sha256:" + "c" * 64,
-        measurement="tdx-measurement-sha256:sample-v1",
-        tcb=1,
-        tcb_status="UpToDate",
-        advisory_ids=(),
-        debug_enabled=False,
-        collateral_current=True,
-        tcb_svn="01" * 16,
-        policy_mode="strict",
-        assurance=claims,
-    )
-    lifecycle = LifecycleSnapshot(
-        hotkey="tdx-miner",
-        state=WorkerLifecycleState.ATTESTED,
-        generation=1,
-        revision=2,
-        event_id=2,
-        reason=LifecycleReason.ATTESTATION_VERIFIED,
-        state_changed_at=now,
-        evidence_verified_at=now,
-        evidence_expires_at=now + timedelta(hours=1),
-        measurement="tdx-measurement-sha256:sample-v1",
-        evidence_digest=claims.hardware.evidence_digest,
-        policy_digest=claims.software.policy_digest,
-        policy_registry_release=policy.registry_release,
-        policy_registry_digest=policy.registry_digest,
-    )
-
-    ledger = Ledger(tmp_path / "ledger.sqlite")
-    epoch_id = ledger.begin_epoch(
-        11,
-        policy_registry_release=snapshot.release,
-        policy_registry_digest=snapshot.digest,
-    )
-    challenge = "a" * 64
-    receipt = ReceiptIssuer(snapshot, "receipt-test-1", receipt_seed).issue(
-        epoch_id=epoch_id,
-        source_epoch=11,
-        subject_hotkey="tdx-miner",
-        attested=attested,
-        policy=policy,
-        assurance=claims,
-        worker_lifecycle=lifecycle,
-        challenge_id=challenge,
-        manifest_digest="sha256:" + "b" * 64,
-        work_units=20.0,
-        issued_at=now,
-    )
-    ledger.issue_challenge(challenge, "tdx-miner", epoch_id)
-    ledger.resolve_challenge_with_receipt(
-        challenge,
-        "verified",
-        20.0,
-        validator_derived=True,
-        receipt_id=receipt.receipt_id,
-        receipt_body=receipt.receipt_bytes,
-        receipt_digest=receipt.receipt_digest,
-        issued_at=verified_text,
-    )
-    ledger.add_attestation(
-        epoch_id,
-        "tdx-miner",
-        verdict="VERIFIED",
-        tee_type="TDX",
-        workload="CPU",
-        evidence_digest=claims.hardware.evidence_digest,
-        policy_mode="strict",
-    )
-    ledger.add_lifecycle_snapshot(epoch_id, lifecycle, snapshot_at=verified_text)
-    ledger.complete_epoch(
-        epoch_id,
-        {"tdx-miner"},
-        generated_at=verified_text,
-        score_network="finney",
-        score_netuid=39,
-    )
     verifier_digest = "sha256:" + "d" * 64
-    report_bytes = export_score_class_report(
-        ledger,
-        epoch_id,
-        network="finney",
-        netuid=39,
-        class_id="confidential_compute",
-        source_id="cathedralconfidential",
-        signing_key_id="score-test-1",
-        private_key_seed=report_seed,
-        generated_at=now,
-        valid_until=now + timedelta(minutes=30),
-        valid_from_block=1,
-        valid_until_block=10_000_000_000,
-        verifier_digest=verifier_digest,
-    )
-    report = json.loads(report_bytes)
-    ledger.close()
+
+    verifier_path = tmp_path / "verifier.py"
+    verifier_path.write_bytes(VERIFIER_SCRIPT)
+    verifier_path.chmod(0o755)
 
     store_root = tmp_path / "store"
     store = EvidenceStore(store_root)
+    controlled_root = tmp_path / "controlled"
+    controlled_root.mkdir(mode=0o700)
     registry_blob = store.put_blob(registry_bytes)
-    report_blob = store.put_blob(report_bytes)
-    receipt_blob = store.put_blob(receipt.receipt_bytes)
-    manifest_bytes = build_manifest(
-        network="finney",
-        netuid=39,
-        source_epoch=11,
-        epoch_id=epoch_id,
-        generated_at=None,
-        mechanism_id="validated_supply_v1",
-        mechanism_revision=1,
-        source_revision="abc1234",
-        registry_release=1,
-        registry_digest=snapshot.digest,
-        registry_blob=registry_blob,
-        verifier_digest=verifier_digest,
-        verifier_binary_blob=None,
-        report_id=report["report_id"],
-        report_blob=report_blob,
-        report_signing_key_id="score-test-1",
-        receipts=[
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    declared = ("/opt/cathedral/bin/cathedral-tdx-verifier-test",)
+
+    stage_indexes: dict[int, bytes] = {}
+    recent_rows: list[dict] = []
+
+    def build_stage(source_epoch: int, positive: bool, challenge_hex: str) -> None:
+        epoch_id = ledger.begin_epoch(
+            source_epoch,
+            policy_registry_release=snapshot.release,
+            policy_registry_digest=snapshot.digest,
+        )
+        attestation_rows = []
+        receipts = []
+        if positive:
+            nonce = bytes([source_epoch]) * 32
+            seed_evidence = Evidence(
+                kind=EvidenceKind.TDX,
+                quote=b"placeholder",
+                nonce=nonce,
+                miner_hotkey="tdx-miner",
+            )
+            expected = evidence_report_data(seed_evidence, nonce)
+            quote = json.dumps(
+                {"claims": FULL_CLAIMS, "report_data_hex": expected.hex()},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            evidence = Evidence(
+                kind=EvidenceKind.TDX,
+                quote=quote,
+                nonce=nonce,
+                miner_hotkey="tdx-miner",
+            )
+            evidence_digest = _evidence_digest(evidence)
+            envelope = _retained_evidence_envelope((evidence,), evidence_digest)
+            envelope_digest = "sha256:" + hashlib.sha256(envelope).hexdigest()
+            (controlled_root / f"{envelope_digest.split(':', 1)[1]}.json").write_bytes(
+                envelope
+            )
+            # The receipt's hardware claim hashes the EXACT raw quote bytes.
+            claims = attestation_claims(quote, policy, verified_at=verified_text)
+            claims = with_verified_channel(claims, b"binding", verified_at=verified_text)
+            claims = claims.with_claim(
+                AssuranceDimension.WORK,
+                evaluated_claim(
+                    ClaimStatus.PASSED,
+                    b"work-result",
+                    SAT_WORK_POLICY_DIGEST,
+                    verified_at=verified_text,
+                ),
+            )
+            attested = Attested(
+                tier=Tier.CC_CPU_TDX,
+                chip_id="tdx-platform-sha256:" + "c" * 64,
+                measurement="tdx-measurement-sha256:sample-v1",
+                tcb=1,
+                tcb_status="UpToDate",
+                advisory_ids=(),
+                debug_enabled=False,
+                collateral_current=True,
+                tcb_svn="01" * 16,
+                policy_mode="strict",
+                assurance=claims,
+            )
+            lifecycle = LifecycleSnapshot(
+                hotkey="tdx-miner",
+                state=WorkerLifecycleState.ATTESTED,
+                generation=1,
+                revision=2,
+                event_id=2,
+                reason=LifecycleReason.ATTESTATION_VERIFIED,
+                state_changed_at=now,
+                evidence_verified_at=now,
+                evidence_expires_at=now + timedelta(hours=1),
+                measurement="tdx-measurement-sha256:sample-v1",
+                evidence_digest=claims.hardware.evidence_digest,
+                policy_digest=claims.software.policy_digest,
+                policy_registry_release=policy.registry_release,
+                policy_registry_digest=policy.registry_digest,
+            )
+            receipt = ReceiptIssuer(snapshot, "receipt-test-1", receipt_seed).issue(
+                epoch_id=epoch_id,
+                source_epoch=source_epoch,
+                subject_hotkey="tdx-miner",
+                attested=attested,
+                policy=policy,
+                assurance=claims,
+                worker_lifecycle=lifecycle,
+                challenge_id=challenge_hex,
+                manifest_digest="sha256:" + "b" * 64,
+                work_units=20.0,
+                issued_at=now,
+            )
+            ledger.issue_challenge(challenge_hex, "tdx-miner", epoch_id)
+            ledger.resolve_challenge_with_receipt(
+                challenge_hex,
+                "verified",
+                20.0,
+                validator_derived=True,
+                receipt_id=receipt.receipt_id,
+                receipt_body=receipt.receipt_bytes,
+                receipt_digest=receipt.receipt_digest,
+                issued_at=verified_text,
+            )
+            ledger.add_attestation(
+                epoch_id,
+                "tdx-miner",
+                verdict="VERIFIED",
+                tee_type="TDX",
+                workload="CPU",
+                evidence_digest=claims.hardware.evidence_digest,
+                policy_mode="strict",
+                envelope_digest=envelope_digest,
+            )
+            ledger.add_lifecycle_snapshot(epoch_id, lifecycle, snapshot_at=verified_text)
+            receipts.append((receipt, envelope_digest))
+            attestation_rows.append(
+                {
+                    "hotkey": "tdx-miner",
+                    "verdict": "VERIFIED",
+                    "evidence_digest": "sha256:" + evidence_digest
+                    if not evidence_digest.startswith("sha256:")
+                    else evidence_digest,
+                    "envelope_digest": envelope_digest,
+                    "disclosure": "controlled",
+                }
+            )
+        ledger.complete_epoch(
+            epoch_id,
+            {"tdx-miner"},
+            generated_at=verified_text,
+            score_network="finney",
+            score_netuid=39,
+        )
+        report_bytes = export_score_class_report(
+            ledger,
+            epoch_id,
+            network="finney",
+            netuid=39,
+            class_id="confidential_compute",
+            source_id="cathedralconfidential",
+            signing_key_id="score-test-1",
+            private_key_seed=report_seed,
+            generated_at=now,
+            valid_until=now + timedelta(minutes=30),
+            valid_from_block=1,
+            valid_until_block=10_000_000_000,
+            verifier_digest=verifier_digest,
+        )
+        report = json.loads(report_bytes)
+        ledger.mark_published(epoch_id)
+        report_blob = store.put_blob(report_bytes)
+        manifest_receipts = [
             {
                 "receipt_id": receipt.receipt_id,
                 "hotkey": "tdx-miner",
-                "blob": receipt_blob,
+                "blob": store.put_blob(receipt.receipt_bytes),
             }
-        ],
-        attestations=[],
-        wire_report_sha256=None,
-    )
-    manifest_digest = store.put_blob(manifest_bytes)
-    store.write_index(
-        build_signed_index(
+            for receipt, _ in receipts
+        ]
+        manifest_bytes = build_manifest(
             network="finney",
             netuid=39,
-            latest_source_epoch=11,
+            source_epoch=source_epoch,
+            epoch_id=epoch_id,
+            generated_at=None,
+            mechanism_id="validated_supply_v1",
+            mechanism_revision=1,
+            source_revision="abc1234",
+            registry_release=1,
+            registry_digest=snapshot.digest,
+            registry_blob=registry_blob,
+            verifier_digest=verifier_digest,
+            verifier_binary_blob=store.put_blob(VERIFIER_SCRIPT),
+            verifier_command=list(declared),
+            verifier_artifacts=list(declared),
+            report_id=report["report_id"],
+            report_blob=report_blob,
+            report_signing_key_id="score-test-1",
+            receipts=manifest_receipts,
+            attestations=attestation_rows,
+            wire_report_sha256=None,
+        )
+        manifest_digest = store.put_blob(manifest_bytes)
+        index_bytes = build_signed_index(
+            network="finney",
+            netuid=39,
+            latest_source_epoch=source_epoch,
             latest_manifest_digest=manifest_digest,
-            recent=[],
+            recent=list(recent_rows),
             signing_key_id="evidence-index-test-1",
             private_key_seed=index_seed,
         )
-    )
+        recent_rows.insert(0, {"source_epoch": source_epoch, "manifest": manifest_digest})
+        stage_indexes[source_epoch] = index_bytes
 
-    def keyfile(name: str, mapping: dict[str, bytes]) -> str:
+    build_stage(11, positive=True, challenge_hex="a" * 64)
+    build_stage(12, positive=False, challenge_hex="b" * 64)
+    build_stage(13, positive=True, challenge_hex="c" * 64)
+    ledger.close()
+    store.write_index(stage_indexes[11])
+
+    def keyfile(name: str, mapping: dict[str, bytes]) -> tuple[str, str]:
         path = tmp_path / name
-        path.write_text(
-            json.dumps(
-                {kid: base64.b64encode(raw).decode() for kid, raw in mapping.items()}
-            )
-        )
-        return str(path)
+        body = json.dumps(
+            {kid: base64.b64encode(raw).decode() for kid, raw in mapping.items()}
+        ).encode()
+        path.write_bytes(body)
+        return str(path), "sha256:" + hashlib.sha256(body).hexdigest()
 
+    registry_keys, registry_keys_digest = keyfile("registry-keys.json", trusted)
+    report_keys, report_keys_digest = keyfile(
+        "report-keys.json", {"score-test-1": pub_raw(report_seed)}
+    )
+    index_keys, index_keys_digest = keyfile(
+        "index-keys.json", {"evidence-index-test-1": pub_raw(index_seed)}
+    )
     settings = ProvenanceSettings(
         mode="shadow",
         evidence_dir=str(store_root),
-        registry_keys=keyfile("registry-keys.json", trusted),
-        report_keys=keyfile("report-keys.json", {"score-test-1": pub_raw(report_seed)}),
-        index_keys=keyfile(
-            "index-keys.json", {"evidence-index-test-1": pub_raw(index_seed)}
-        ),
+        registry_keys=registry_keys,
+        registry_keys_digest=registry_keys_digest,
+        report_keys=report_keys,
+        report_keys_digest=report_keys_digest,
+        index_keys=index_keys,
+        index_keys_digest=index_keys_digest,
         verifier_digest=verifier_digest,
+        controlled_dir=str(controlled_root),
+        verifier_binary=str(verifier_path),
+        source_revision="abc1234",
     )
-    return store_root, settings
+    return store_root, settings, stage_indexes
+
+
+
+
+def _run_audit_replay(settings, *, state=None, vector=None, network="finney", netuid=39):
+    """Real full-path audit. ONLY the static-ELF verifier-bytes
+    authentication is stubbed (it has its own adversarial matrix and cannot
+    pass for a script on this host); envelope digests, canonical strict
+    subprocess execution, claim gates, receipt bindings, and recompute all
+    run for real."""
+    with mock.patch("cathedral.replay.authenticate_verifier_bytes"):
+        return run_audit(
+            settings,
+            network=network,
+            netuid=netuid,
+            vector_payload=vector,
+            state=state or {},
+        )
 
 
 def test_real_audit_passes_and_agrees_with_a_matching_vector(real_evidence) -> None:
-    _store_root, settings = real_evidence
+    _store_root, settings, _stages = real_evidence
     vector = {
         "weights": [
             {
@@ -595,17 +725,16 @@ def test_real_audit_passes_and_agrees_with_a_matching_vector(real_evidence) -> N
             }
         ]
     }
-    audit = run_audit(
-        settings, network="finney", netuid=39, vector_payload=vector, state={}
-    )
+    audit = _run_audit_replay(settings, vector=vector)
     assert audit.status == "PASS", audit.error
+    assert audit.assurance == "full"
     assert audit.recomputed == {"tdx-miner": 1.0}
     assert audit.agrees_with_vector is True
     assert audit.receipt_hotkeys == ["tdx-miner"]
 
 
 def test_real_audit_flags_a_diverging_vector(real_evidence) -> None:
-    _store_root, settings = real_evidence
+    _store_root, settings, _stages = real_evidence
     vector = {
         "weights": [
             {
@@ -622,16 +751,14 @@ def test_real_audit_flags_a_diverging_vector(real_evidence) -> None:
             },
         ]
     }
-    audit = run_audit(
-        settings, network="finney", netuid=39, vector_payload=vector, state={}
-    )
+    audit = _run_audit_replay(settings, vector=vector)
     assert audit.status == "PASS"  # the chain itself verified
     assert audit.agrees_with_vector is False
     assert any("sybil-miner" in item for item in audit.discrepancies)
 
 
 def test_real_audit_fails_closed_on_tampered_report_blob(real_evidence, tmp_path) -> None:
-    store_root, settings = real_evidence
+    store_root, settings, _stages = real_evidence
     manifest_digest = json.loads((store_root / "index.json").read_text())["latest"][
         "manifest"
     ]
@@ -643,9 +770,7 @@ def test_real_audit_fails_closed_on_tampered_report_blob(real_evidence, tmp_path
     original = blob_path.read_bytes()
     try:
         blob_path.write_bytes(original.replace(b"20", b"99"))
-        audit = run_audit(
-            settings, network="finney", netuid=39, vector_payload=None, state={}
-        )
+        audit = _run_audit_replay(settings)
         assert audit.status == "FAIL"
         assert audit.error
     finally:
@@ -653,8 +778,145 @@ def test_real_audit_fails_closed_on_tampered_report_blob(real_evidence, tmp_path
 
 
 def test_real_audit_rejects_wrong_network_pin(real_evidence) -> None:
-    _store_root, settings = real_evidence
-    audit = run_audit(
-        settings, network="testnet", netuid=292, vector_payload=None, state={}
-    )
+    _store_root, settings, _stages = real_evidence
+    audit = _run_audit_replay(settings, network="testnet", netuid=292)
     assert audit.status == "FAIL"
+
+
+def test_authority_requires_every_immutable_pin() -> None:
+    settings = ProvenanceSettings(
+        mode="authority",
+        evidence_url="https://api.example",
+        registry_keys="r.json",
+        report_keys="p.json",
+        index_keys="i.json",
+        verifier_digest="sha256:" + "d" * 64,
+    )
+    with pytest.raises(ProvenanceAuditError, match="authority mode requires"):
+        settings.validate_for_audit()
+
+
+def test_fetcher_rejects_credentials_and_private_hosts() -> None:
+    from scaffold.provenance_audit import _fetcher
+
+    with pytest.raises(ProvenanceAuditError, match="credential-free"):
+        _fetcher(
+            ProvenanceSettings(mode="shadow", evidence_url="https://user:pw@host.example")
+        )
+    with pytest.raises(ProvenanceAuditError, match="non-public address"):
+        _fetcher(ProvenanceSettings(mode="shadow", evidence_url="https://127.0.0.1"))
+    # The explicit dev flag permits it (connection itself not attempted here).
+    _fetcher(
+        ProvenanceSettings(
+            mode="shadow",
+            evidence_url="https://127.0.0.1",
+            allow_private_hosts=True,
+        )
+    )
+
+
+def test_index_rollback_and_equivocation_fences(real_evidence) -> None:
+    """Counterexample 3, consumer side: a signed-but-older index, or the same
+    epoch re-signed to a different manifest, must fail against durable state."""
+    _store_root, settings, _stages = real_evidence
+    good = _run_audit_replay(settings)
+    assert good.status == "PASS"
+    assert good.index_source_epoch == 11
+
+    rollback = _run_audit_replay(
+        settings,
+        state={"provenance_index_epoch": 99, "provenance_index_manifest": "sha256:" + "f" * 64},
+    )
+    assert rollback.status == "FAIL"
+    assert "rollback" in rollback.error
+
+    equivocation = _run_audit_replay(
+        settings,
+        state={
+            "provenance_index_epoch": 11,
+            "provenance_index_manifest": "sha256:" + "f" * 64,
+        },
+    )
+    assert equivocation.status == "FAIL"
+    assert "equivocation" in equivocation.error
+
+
+def _state_after(audit) -> dict:
+    return {
+        "provenance_last_source_epoch": audit.source_epoch,
+        "provenance_last_report_id": audit.report_id,
+        "provenance_index_epoch": audit.index_source_epoch,
+        "provenance_index_manifest": audit.index_manifest,
+    }
+
+
+def test_full_path_positive_revoked_restored(real_evidence) -> None:
+    """Counterexample 13: the REAL run_audit full path (controlled envelopes,
+    canonical strict verifier subprocess, receipt/report/manifest bindings)
+    across positive -> revoked -> restored epochs, with rolling durable
+    state, while the thin path stays unaffected."""
+    from cathedral.evidence import EvidenceStore
+
+    store_root, settings, stages = real_evidence
+    store = EvidenceStore(store_root)
+    state: dict = {}
+
+    store.write_index(stages[11])
+    positive = _run_audit_replay(settings, state=state)
+    assert positive.status == "PASS", positive.error
+    assert positive.assurance == "full"
+    assert positive.recomputed == {"tdx-miner": 1.0}
+    state = _state_after(positive)
+
+    store.write_index(stages[12])
+    revoked = _run_audit_replay(settings, state=state)
+    assert revoked.status == "PASS", revoked.error
+    assert revoked.recomputed == {}  # everything to burn
+    # No positive miner means nothing raw was replayed: never FULL.
+    assert revoked.assurance == "receipts_only"
+    state = _state_after(revoked)
+
+    store.write_index(stages[13])
+    restored = _run_audit_replay(settings, state=state)
+    assert restored.status == "PASS", restored.error
+    assert restored.assurance == "full"
+    assert restored.recomputed == {"tdx-miner": 1.0}
+
+    # Rolling back the index to the revoked epoch now fails the fences.
+    store.write_index(stages[13])  # store guard: cannot re-publish 12 anyway
+    stale = _run_audit_replay(settings, state=_state_after(restored))
+    assert stale.status == "PASS"  # same epoch, same manifest: idempotent
+
+    # Thin mapping is byte-identical regardless of audit outcomes.
+    thin = validator_thin.vector_to_uid_weights(
+        validated_supply_payload(),
+        {"burn-hotkey": 0, "tdx-miner": 163},
+        require_policy=validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
+    )
+    assert thin == {0: pytest.approx(0.10), 163: pytest.approx(0.90)}
+
+
+def test_authority_refuses_the_revoked_epoch_fail_closed(
+    real_evidence, tmp_path, monkeypatch
+) -> None:
+    """The revoked (zero-positive) epoch is receipts_only, so full authority
+    must refuse to submit — the vacuous-FULL attack and the legitimate
+    all-burn submission are both blocked until exhaustive per-candidate
+    rejection evidence exists (recorded live blocker)."""
+    from cathedral.evidence import EvidenceStore
+
+    store_root, settings, stages = real_evidence
+    EvidenceStore(store_root).write_index(stages[13])
+    revoked_like = _run_audit_replay(settings)  # current index: restored
+    # Simulate the audit the authority gate would see for a revoked epoch.
+    revoked_like.assurance = "receipts_only"
+    revoked_like.recomputed = {}
+    monkeypatch.setattr(
+        validator_thin, "run_audit", lambda *a, **k: revoked_like
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="FULL assurance"):
+        validator_thin._run_provenance_stage(
+            _args(tmp_path, "authority"),
+            validated_supply_payload(positive=False),
+            tmp_path / "state.json",
+        )

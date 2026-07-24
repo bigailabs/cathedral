@@ -70,6 +70,8 @@ class ProvenanceSettings:
     controlled_dir: str | None = None
     verifier_binary: str | None = None
     source_revision: str | None = None
+    # Testing only: permit evidence hosts that resolve to private ranges.
+    allow_private_hosts: bool = False
     index_max_age_secs: float = 3600.0
     # Fail closed on a registry published more than 24 hours ago. Freshness
     # is restored by same-policy reissues at higher releases, never by
@@ -94,12 +96,31 @@ class ProvenanceSettings:
                 "Configure the trusted key files and verifier digest from "
                 "VALIDATOR.md (or set --provenance off to silence this).",
             )
+        if self.mode == "authority":
+            # Authority has NO optional security pins: every immutable pin
+            # and the raw-evidence source are mandatory.
+            required = [
+                ("registry_keys_digest", "--provenance-registry-keys-digest"),
+                ("report_keys_digest", "--provenance-report-keys-digest"),
+                ("index_keys_digest", "--provenance-index-keys-digest"),
+                ("source_revision", "--provenance-source-revision"),
+                ("verifier_binary", "--provenance-verifier-binary"),
+                ("controlled_dir", "--provenance-controlled-dir"),
+            ]
+            absent = [flag for name, flag in required if not getattr(self, name)]
+            if absent:
+                raise ProvenanceAuditError(
+                    "authority mode requires immutable pins and a raw-evidence "
+                    "source: missing " + ", ".join(absent)
+                )
 
 
 @dataclass
 class ProvenanceAudit:
     status: str  # PASS | FAIL | NOT_PROVEN
     assurance: str = "receipts_only"  # full | receipts_only
+    index_source_epoch: int | None = None
+    index_manifest: str | None = None
     source_epoch: int | None = None
     report_id: str | None = None
     previous_report_id: str | None = None
@@ -168,6 +189,38 @@ def _fetcher(settings: ProvenanceSettings):
     base = (settings.evidence_url or "").rstrip("/")
     if not base.startswith("https://"):
         raise ProvenanceAuditError("evidence URL must be https")
+    import ipaddress
+    import socket
+    import urllib.parse
+
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.username or parsed.password:
+        raise ProvenanceAuditError("evidence URL must be credential-free")
+    host = parsed.hostname or ""
+    if not host:
+        raise ProvenanceAuditError("evidence URL has no host")
+    if not settings.allow_private_hosts:
+        try:
+            infos = socket.getaddrinfo(
+                host, parsed.port or 443, proto=socket.IPPROTO_TCP
+            )
+        except OSError as exc:
+            raise ProvenanceAuditError(
+                f"evidence host does not resolve: {host}"
+            ) from exc
+        for info in infos:
+            address = ipaddress.ip_address(info[4][0])
+            if (
+                address.is_private
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_reserved
+                or address.is_multicast
+                or address.is_unspecified
+            ):
+                raise ProvenanceAuditError(
+                    f"evidence host resolves to a non-public address: {host}"
+                )
 
     MAX_FETCH_BYTES = 4 * 1024 * 1024
 
@@ -177,15 +230,29 @@ def _fetcher(settings: ProvenanceSettings):
 
     opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler())
 
-    def fetch(path: str) -> bytes:
+    def fetch(path: str, timeout: float = 30.0) -> bytes:
         request = urllib.request.Request(
             base + path, headers={"User-Agent": "cathedral-two-mode-validator/1.0"}
         )
-        with opener.open(request, timeout=30) as response:
-            data = response.read(MAX_FETCH_BYTES + 1)
-        if len(data) > MAX_FETCH_BYTES:
-            raise ProvenanceAuditError("evidence response exceeds the bounded limit")
-        return data
+        deadline = time.monotonic() + timeout
+        with opener.open(request, timeout=timeout) as response:
+            chunks: list[bytes] = []
+            received = 0
+            while True:
+                if time.monotonic() > deadline:
+                    raise ProvenanceAuditError(
+                        "evidence fetch exceeded the total deadline"
+                    )
+                chunk = response.read(min(65536, MAX_FETCH_BYTES + 1 - received))
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > MAX_FETCH_BYTES:
+                    raise ProvenanceAuditError(
+                        "evidence response exceeds the bounded limit"
+                    )
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     def load_index() -> bytes:
         return fetch("/index.json")
@@ -256,9 +323,31 @@ def run_audit(
             max_age_seconds=settings.index_max_age_secs,
         )
         manifest_digest = index_document["latest"]["manifest"]
+        index_epoch = int(index_document["latest"]["source_epoch"])
+        # Durable anti-rollback fences for the SIGNED INDEX itself: an older
+        # signed index, or the same epoch re-signed with a different
+        # manifest, must never verify.
+        last_index_epoch = state.get("provenance_index_epoch")
+        last_index_manifest = state.get("provenance_index_manifest")
+        if isinstance(last_index_epoch, int):
+            if index_epoch < last_index_epoch:
+                raise ProvenanceAuditError(
+                    f"index rollback: latest epoch {index_epoch} < recorded "
+                    f"high-water {last_index_epoch}"
+                )
+            if index_epoch == last_index_epoch and (
+                manifest_digest != last_index_manifest
+            ):
+                raise ProvenanceAuditError(
+                    "index equivocation: same epoch, different manifest"
+                )
         manifest = parse_manifest(load_blob(manifest_digest))
         if manifest["network"] != network or manifest["netuid"] != netuid:
             raise ProvenanceAuditError("evidence manifest network/netuid mismatch")
+        if int(manifest["source_epoch"]) != index_epoch:
+            raise ProvenanceAuditError(
+                "index latest.source_epoch does not match the manifest it points to"
+            )
         if manifest["reward_mechanism"]["id"] != settings.mechanism:
             raise ProvenanceAuditError(
                 f"manifest mechanism {manifest['reward_mechanism']['id']!r} does not "
@@ -361,6 +450,8 @@ def run_audit(
         audit = ProvenanceAudit(
             status="PASS",
             assurance=result.assurance_level,
+            index_source_epoch=index_epoch,
+            index_manifest=manifest_digest,
             source_epoch=result.source_epoch,
             report_id=result.report_id,
             previous_report_id=result.previous_report_id,

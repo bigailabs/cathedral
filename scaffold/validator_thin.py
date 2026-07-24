@@ -217,6 +217,7 @@ def _provenance_settings(args) -> ProvenanceSettings:
         controlled_dir=getattr(args, "provenance_controlled_dir", None),
         verifier_binary=getattr(args, "provenance_verifier_binary", None),
         source_revision=getattr(args, "provenance_source_revision", None),
+        allow_private_hosts=bool(getattr(args, "provenance_allow_private_hosts", False)),
         index_max_age_secs=float(getattr(args, "provenance_index_max_age_secs", 3600.0)),
     )
 
@@ -403,6 +404,8 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
         _write_state(state_file, {
             "provenance_last_source_epoch": audit.source_epoch,
             "provenance_last_report_id": audit.report_id,
+            "provenance_index_epoch": audit.index_source_epoch,
+            "provenance_index_manifest": audit.index_manifest,
         })
     else:
         events.event(
@@ -1354,6 +1357,8 @@ def build_parser() -> argparse.ArgumentParser:
              "10%% mechanism burn goes here; never taken from Cathedral's "
              "signed vector)")
     p.add_argument("--provenance-index-max-age-secs", type=float, default=3600.0)
+    p.add_argument("--provenance-allow-private-hosts", action="store_true",
+                   help="testing only: permit evidence hosts on private ranges")
     p.add_argument("--jsonl", default=os.environ.get(
         "CATHEDRAL_VALIDATOR_JSONL") or None,
         help="append the stable JSONL event stream to this file")
