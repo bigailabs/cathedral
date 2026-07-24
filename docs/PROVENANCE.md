@@ -7,6 +7,14 @@ Two concurrent modes ship in `cathedral-validator serve`:
 | `shadow` (default) | Cathedral's signed vector (thin gates) | audits the published evidence every tick in a single-flight background worker; never delays or changes the thin submission |
 | `authority` | the validator's OWN recomputation | requires **FULL assurance**: raw-evidence replay through the pinned verifier |
 
+**Mainnet launch mode is `shadow`.** Thin validation remains the submission
+authority while the independent provenance audit runs concurrently. Authority
+mode refuses an epoch unless every historically anchored candidate is
+independently replayable as `verified`; the launch artifact model does not
+publish candidate-specific raw negative evidence, so any `rejected` or
+`retired` row truthfully downgrades that epoch to `receipts_only`. Do not
+describe such an epoch as FULL, and do not expect authority mode to submit it.
+
 **Assurance levels.** `receipts_only` means Cathedral's signed registry →
 receipt → report chain is internally consistent — PARTIAL provenance, always
 reported `NOT_PROVEN`, never a submission basis. `full` additionally proves,

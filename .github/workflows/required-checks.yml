@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - feat/**
+      - feature/**
 
 permissions:
   contents: read

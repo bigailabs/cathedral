@@ -2114,7 +2114,8 @@ def build_parser() -> argparse.ArgumentParser:
         or REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
         help="pin the validator to a signed policy contract. "
         "validated_supply_v1 locks the launch 90%% Intel TDX / "
-        "10%% unadmitted GPU-to-burn allocation. Default: unpinned.",
+        "10%% unadmitted GPU-to-burn allocation. "
+        "Default: validated_supply_v1.",
     )
     p.add_argument(
         "--provenance",

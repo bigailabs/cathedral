@@ -2,15 +2,15 @@ name: two-mode-provenance
 # Required CI for the SN39 two-mode validator: collects the two-mode suites
 # WITH the provenance extra installed, runs the unmocked static-ELF
 # verifier-bytes authenticator matrix on Linux x86_64, and lints changed
-# launch files. NOTE: the provenance extra pin resolves only after the
-# cathedralconfidential launch branch is pushed; until then this workflow
-# is inert by design (local-only candidate).
+# launch files. The provenance extra is pinned to the reviewed, public
+# cathedralconfidential main commit; dependency resolution is a hard gate.
 on:
   pull_request:
   push:
-    branches: [main, "feature/sn39-provenance-launch"]
+    branches: [main, "feature/**"]
 jobs:
   two-mode:
+    name: Two-mode provenance
     runs-on: ubuntu-latest   # x86_64: ELF authenticator runs UNMOCKED
     steps:
       - uses: actions/checkout@v4
