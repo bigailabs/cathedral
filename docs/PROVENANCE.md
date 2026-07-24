@@ -19,6 +19,21 @@ x86-64 ELF enforced); and the canonical strict verification path re-verifies
 the quote against the original nonce/worker/channel binding and the receipt's
 measurement under the signed registry policy at receipt time.
 
+**Chain-anchored freshness and candidates.** The TDX challenge nonce is not
+issuer-random: it is derived as `sha256("cathedral-tdx-challenge-v1\0" ||
+canonical{block_hash, network, netuid, source_epoch, miner_hotkey})` from
+the finalized SN39 block anchored in the manifest, so the audit recomputes
+the expected nonce itself and cross-epoch evidence reuse fails
+cryptographically (no replay cache is a security dependency). The
+manifest's `candidate_set` is a versioned snapshot
+(network/netuid/block/block_hash + exact hotkeys); each validator tick
+takes ONE independently fetched metagraph snapshot that supplies the UID
+map, the current block, and the candidate-membership cross-check, and
+authority mode additionally verifies the anchored block hash against its
+own chain query when the historical lookup resolves. Every registered
+hotkey must be accounted for (verified/rejected/retired) — omission is a
+manifest defect, not a scoring choice.
+
 ## Operator pins (never self-authorized by the manifest)
 
 Configure ALL of these independently — from the release notes / key bundle,
