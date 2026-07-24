@@ -63,6 +63,13 @@ class ProvenanceSettings:
     index_keys_digest: str | None = None
     verifier_digest: str | None = None
     mechanism: str = MECHANISM_DEFAULT
+    # FULL assurance inputs: the controlled-disclosure envelope directory and
+    # a local verifier binary whose bytes must match the manifest's blob pin
+    # AND reproduce the operator-pinned implementation digest. Without them
+    # the audit is receipts-only (NOT_PROVEN for authority purposes).
+    controlled_dir: str | None = None
+    verifier_binary: str | None = None
+    source_revision: str | None = None
     index_max_age_secs: float = 3600.0
     # Fail closed on a registry published more than 24 hours ago. Freshness
     # is restored by same-policy reissues at higher releases, never by
@@ -92,6 +99,7 @@ class ProvenanceSettings:
 @dataclass
 class ProvenanceAudit:
     status: str  # PASS | FAIL | NOT_PROVEN
+    assurance: str = "receipts_only"  # full | receipts_only
     source_epoch: int | None = None
     report_id: str | None = None
     previous_report_id: str | None = None
@@ -161,12 +169,23 @@ def _fetcher(settings: ProvenanceSettings):
     if not base.startswith("https://"):
         raise ProvenanceAuditError("evidence URL must be https")
 
+    MAX_FETCH_BYTES = 4 * 1024 * 1024
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *arguments, **keywords):
+            raise ProvenanceAuditError("evidence fetches must not follow redirects")
+
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler())
+
     def fetch(path: str) -> bytes:
         request = urllib.request.Request(
             base + path, headers={"User-Agent": "cathedral-two-mode-validator/1.0"}
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read()
+        with opener.open(request, timeout=30) as response:
+            data = response.read(MAX_FETCH_BYTES + 1)
+        if len(data) > MAX_FETCH_BYTES:
+            raise ProvenanceAuditError("evidence response exceeds the bounded limit")
+        return data
 
     def load_index() -> bytes:
         return fetch("/index.json")
@@ -280,9 +299,68 @@ def run_audit(
             )
         if result.report_id != manifest["score_report"]["report_id"]:
             raise ProvenanceAuditError("verified report id differs from the manifest")
+        if settings.source_revision and (
+            manifest["source_revision"] != settings.source_revision
+        ):
+            raise ProvenanceAuditError(
+                "manifest source revision does not match the operator's pin"
+            )
+
+        if settings.controlled_dir:
+            from pathlib import Path as _Path
+
+            bindings = {row["hotkey"]: row for row in manifest["attestations"]}
+            envelopes: dict[str, bytes] = {}
+            for miner in result.miners:
+                if not miner.receipt_verified:
+                    continue
+                binding = bindings.get(miner.hotkey) or {}
+                envelope_digest = binding.get("envelope_digest")
+                if not envelope_digest:
+                    raise ProvenanceUnavailable(
+                        f"no controlled envelope for {miner.hotkey!r}",
+                        "request the controlled-disclosure package for this epoch",
+                    )
+                envelope_path = (
+                    _Path(settings.controlled_dir)
+                    / f"{str(envelope_digest).split(':', 1)[1]}.json"
+                )
+                if envelope_path.is_symlink() or not envelope_path.is_file():
+                    raise ProvenanceUnavailable(
+                        f"controlled envelope file missing for {miner.hotkey!r}",
+                        "request the controlled-disclosure package for this epoch",
+                    )
+                envelopes[miner.hotkey] = envelope_path.read_bytes()
+            verifier_info = manifest["verifier"]
+            if not settings.verifier_binary:
+                raise ProvenanceUnavailable(
+                    "no verifier binary configured for full assurance",
+                    "set --provenance-verifier-binary to the pinned verifier",
+                )
+            if not verifier_info.get("binary_blob") or not verifier_info.get("command"):
+                raise ProvenanceAuditError(
+                    "manifest lacks verifier binary/command bindings for full mode"
+                )
+            result = provenance.replay_positive_miners(
+                result,
+                registry=provenance.load_registry(
+                    registry_bytes,
+                    registry_keys,
+                    max_age_seconds=settings.registry_max_age_secs,
+                ),
+                envelopes_by_hotkey=envelopes,
+                attestation_bindings=bindings,
+                verifier_binary=_Path(settings.verifier_binary).read_bytes(),
+                verifier_blob_digest=verifier_info["binary_blob"],
+                verifier_command=tuple(verifier_info["command"]),
+                verifier_artifacts=tuple(
+                    verifier_info.get("artifacts") or verifier_info["command"]
+                ),
+            )
 
         audit = ProvenanceAudit(
             status="PASS",
+            assurance=result.assurance_level,
             source_epoch=result.source_epoch,
             report_id=result.report_id,
             previous_report_id=result.previous_report_id,

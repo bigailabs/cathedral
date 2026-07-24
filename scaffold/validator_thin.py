@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import threading
 import json
 import math
 import os
@@ -85,20 +86,59 @@ def _feed_label(publisher_url: str) -> str:
     return f"{scheme}://{host}{suffix}"
 
 
+MAX_VECTOR_FETCH_BYTES = 4 * 1024 * 1024
+
+
 def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
+    """Bounded HTTPS-only fetch: no redirects, no oversized bodies, and a
+    strict JSON parse rejecting duplicate keys and non-finite numbers."""
+    url = publisher_url.rstrip("/") + "/v1/validator/weights/next"
+    if not url.startswith("https://"):
+        raise wire.VectorError("publisher URL must be https")
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *arguments, **keywords):
+            raise wire.VectorError("publisher must not redirect the vector fetch")
+
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler())
     req = urllib.request.Request(
-        publisher_url.rstrip("/") + "/v1/validator/weights/next",
-        headers={"User-Agent": "cathedral-thin-validator/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        url, headers={"User-Agent": "cathedral-thin-validator/1.0"})
+    with opener.open(req, timeout=timeout) as resp:
+        data = resp.read(MAX_VECTOR_FETCH_BYTES + 1)
+    if len(data) > MAX_VECTOR_FETCH_BYTES:
+        raise wire.VectorError("vector response exceeds the bounded size limit")
+
+    def _no_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise wire.VectorError("vector JSON has duplicate keys")
+            result[key] = value
+        return result
+
+    document = json.loads(
+        data.decode("utf-8"),
+        object_pairs_hook=_no_duplicates,
+        parse_constant=lambda _v: (_ for _ in ()).throw(
+            wire.VectorError("vector JSON has non-finite numbers")
+        ),
+    )
+    if not isinstance(document, dict):
+        raise wire.VectorError("vector payload is not a JSON object")
+    return document
 
 
 # -- rollback fence ------------------------------------------------------------
 
 def _read_state(state_file: Path) -> dict[str, Any]:
-    """Read the whole durable state document (fence + provenance chain)."""
-    if not state_file.exists():
+    """Read the whole durable state document (fence + provenance chain).
+
+    FAIL CLOSED on symlinks and non-regular files: silently following a
+    planted link could reopen the rollback window."""
+    if not os.path.lexists(state_file):
         return {}
+    if state_file.is_symlink() or not state_file.is_file():
+        raise ValueError("validator state file must be a regular non-symlink file")
     document = json.loads(state_file.read_text())
     if not isinstance(document, dict):
         raise ValueError("validator state file is corrupt")
@@ -106,14 +146,33 @@ def _read_state(state_file: Path) -> dict[str, Any]:
 
 
 def _write_state(state_file: Path, updates: dict[str, Any]) -> None:
-    """Atomic read-merge-write so fence and provenance state never clobber
-    each other and a crash mid-write can't corrupt the fail-closed load."""
+    """Locked atomic read-merge-write (0600, fsync, parent fsync) so the
+    fence writer and the background shadow auditor never clobber each other
+    and a crash mid-write can't corrupt the fail-closed load."""
+    import fcntl
+
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    document = _read_state(state_file)
-    document.update(updates)
-    tmp = state_file.with_suffix(".tmp")
-    tmp.write_text(json.dumps(document, indent=2))
-    os.replace(tmp, state_file)
+    lock_path = state_file.with_suffix(".lock")
+    lock_descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        document = _read_state(state_file)
+        document.update(updates)
+        tmp = state_file.with_suffix(".tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(tmp, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(document, indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, state_file)
+        parent = os.open(state_file.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        os.close(lock_descriptor)
 
 
 def load_fence(state_file: Path) -> int:
@@ -155,6 +214,9 @@ def _provenance_settings(args) -> ProvenanceSettings:
         verifier_digest=getattr(args, "provenance_verifier_digest", None),
         mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
         or MECHANISM_DEFAULT,
+        controlled_dir=getattr(args, "provenance_controlled_dir", None),
+        verifier_binary=getattr(args, "provenance_verifier_binary", None),
+        source_revision=getattr(args, "provenance_source_revision", None),
         index_max_age_secs=float(getattr(args, "provenance_index_max_age_secs", 3600.0)),
     )
 
@@ -178,62 +240,140 @@ def _get_events(args) -> EventLogger:
     return logger
 
 
+# The versioned mechanism fixes the burn fraction; the burn DESTINATION is
+# the operator's configured pin resolved against the live metagraph. The
+# signed Cathedral vector's burn row is comparison input only — authority
+# mode never derives allocation from it.
+MECHANISM_BURN_FRACTION = {MECHANISM_DEFAULT: 0.10}
+
+
 def _provenance_uid_weights(
     recomputed: dict[str, float],
-    payload: dict[str, Any],
+    *,
+    mechanism: str,
+    burn_hotkey: str,
     hotkey_to_uid: dict[str, int],
 ) -> dict[int, float]:
-    """Authority mode: build the UID vector from OUR recomputation.
+    """Authority mode: the COMPLETE UID vector from OUR recomputation.
 
-    Mapping is all-or-nothing exactly like the confidential-primary path; the
-    signed burn snapshot still supplies the burn destination and the 10%
-    forced-burn floor, which the validated_supply_v1 contract has already
-    validated against the pinned policy.
+    Inputs are the pinned versioned mechanism's shares, the operator's
+    configured burn hotkey, and the live chain metagraph — nothing from
+    Cathedral's signed vector. All-or-nothing mapping; nonfinite, negative,
+    duplicate, or unmappable weights reject the whole vector.
     """
-    snap = payload.get("burn_snapshot") or {}
+    burn_fraction = MECHANISM_BURN_FRACTION.get(mechanism)
+    if burn_fraction is None:
+        raise wire.VectorError(f"mechanism {mechanism!r} has no pinned burn contract")
+    if not isinstance(burn_hotkey, str) or not burn_hotkey:
+        raise wire.VectorError(
+            "authority mode requires --provenance-burn-hotkey (the configured "
+            "burn destination; never taken from Cathedral's vector)"
+        )
+    if burn_hotkey not in hotkey_to_uid:
+        raise wire.VectorError(
+            f"configured burn hotkey {burn_hotkey!r} has no current metagraph UID"
+        )
+    burn_uid = hotkey_to_uid[burn_hotkey]
+
     scores: dict[int, float] = {}
     seen: set[int] = set()
+    total = 0.0
     for hotkey, weight in sorted(recomputed.items()):
-        if weight <= 0.0:
+        value = float(weight)
+        if not math.isfinite(value) or value < 0.0:
+            raise wire.VectorError(
+                f"recomputed weight for {hotkey!r} is non-finite or negative"
+            )
+        if value == 0.0:
             continue
         if hotkey not in hotkey_to_uid:
             raise wire.VectorError(
                 f"provenance hotkey {hotkey!r} has no current metagraph UID"
             )
         uid = hotkey_to_uid[hotkey]
-        if uid == snap.get("burn_uid"):
+        if uid == burn_uid:
             raise wire.VectorError(
                 f"provenance hotkey {hotkey!r} resolves to the burn UID"
             )
         if uid in seen:
             raise wire.VectorError(f"provenance duplicate UID {uid}")
         seen.add(uid)
-        scores[uid] = weight
-    return apply_burn(
-        scores,
-        burn_uid=snap.get("burn_uid"),
-        forced_burn_percentage=float(snap["forced_burn_percentage"]),
+        scores[uid] = value
+        total += value
+    if scores and not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise wire.VectorError(
+            f"recomputed shares sum to {total!r}, expected 1.0"
+        )
+    out = {uid: value * (1.0 - burn_fraction) for uid, value in scores.items()}
+    out[burn_uid] = out.get(burn_uid, 0.0) + (
+        burn_fraction if scores else 1.0
     )
+    norm = math.fsum(out.values())
+    return {uid: value / norm for uid, value in out.items()}
 
 
-def _run_provenance_stage(
-    args, payload: dict[str, Any], state_file: Path
-) -> "tuple[str, dict[str, float] | None]":
-    """Run the concurrent full-provenance audit for this tick.
+class _ShadowAuditor:
+    """Single-flight background worker for the shadow provenance audit.
 
-    Returns ``(status, recomputed_weights_or_None)``. Shadow mode never blocks
-    submission; authority mode raises on anything but a clean PASS.
+    tick() submits non-blocking; while an audit is in flight further
+    submissions are skipped (single-flight). Results are drained and logged
+    by the MAIN thread on a later tick, so a slow or broken audit can never
+    delay, reorder, or fail the thin submission path.
     """
-    settings = _provenance_settings(args)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._result = None  # (audit, state_file)
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def submit(self, settings, *, network, netuid, payload, state, state_file) -> bool:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+
+            def _run() -> None:
+                audit = run_audit(
+                    settings,
+                    network=network,
+                    netuid=netuid,
+                    vector_payload=payload,
+                    state=state,
+                )
+                with self._lock:
+                    self._result = (audit, state_file)
+
+            self._thread = threading.Thread(
+                target=_run, name="cathedral-shadow-audit", daemon=True
+            )
+            self._thread.start()
+            return True
+
+    def drain(self):
+        with self._lock:
+            result = self._result
+            self._result = None
+            return result
+
+
+def _get_shadow_auditor(args) -> _ShadowAuditor:
+    existing = getattr(args, "_shadow_auditor", None)
+    if existing is not None:
+        return existing
+    auditor = _ShadowAuditor()
+    try:
+        args._shadow_auditor = auditor
+    except AttributeError:
+        pass
+    return auditor
+
+
+def _log_audit_events(args, audit, state_file: Path) -> None:
+    """Log one completed audit and persist chain state (main thread only)."""
     events = _get_events(args)
-    state = _read_state(state_file)
-    audit = run_audit(
-        settings,
-        network=args.network,
-        netuid=args.netuid,
-        vector_payload=payload,
-        state=state,
-    )
     status_map = {"PASS": PASS, "FAIL": FAIL, "NOT_PROVEN": NOT_PROVEN}
     if audit.status == "PASS":
         events.event(
@@ -249,8 +389,6 @@ def _run_provenance_stage(
             ),
         )
         if audit.agrees_with_vector is False:
-            # The chain verified but Cathedral's signed vector does not match
-            # the independent recomputation. Loud in both streams.
             events.event(
                 "PROVENANCE_VECTOR_MISMATCH",
                 stage="provenance",
@@ -280,14 +418,62 @@ def _run_provenance_stage(
             "PROVENANCE " + audit.status.lower(),
             f"error={audit.error!r}" if audit.error else "",
         )
+
+
+def _run_provenance_stage(
+    args, payload: dict[str, Any], state_file: Path
+) -> "tuple[str, dict[str, float] | None]":
+    """Provenance stage for this tick.
+
+    Shadow: a bounded SINGLE-FLIGHT background worker — the previous audit's
+    result is drained and logged, a new audit is submitted without blocking,
+    and the thin submission proceeds untouched regardless of audit speed or
+    health. Authority: synchronous; the tick refuses to submit anything
+    unless the audit PASSes at FULL assurance.
+    """
+    settings = _provenance_settings(args)
     if settings.mode == "authority":
+        state = _read_state(state_file)
+        audit = run_audit(
+            settings,
+            network=args.network,
+            netuid=args.netuid,
+            vector_payload=payload,
+            state=state,
+        )
+        _log_audit_events(args, audit, state_file)
         if audit.status != "PASS":
             raise wire.VectorError(
                 f"full-provenance authority audit did not PASS ({audit.status}): "
                 f"{audit.error or 'see events'}"
             )
+        if getattr(audit, "assurance", "receipts_only") != "full":
+            raise wire.VectorError(
+                "authority requires FULL assurance (raw-evidence replay); "
+                "receipts-only recomputation is NOT PROVEN and never submits"
+            )
         return audit.status, dict(audit.recomputed)
-    return audit.status, None
+
+    auditor = _get_shadow_auditor(args)
+    finished = auditor.drain()
+    if finished is not None:
+        _log_audit_events(args, finished[0], finished[1])
+    submitted = auditor.submit(
+        settings,
+        network=args.network,
+        netuid=args.netuid,
+        payload=dict(payload),
+        state=_read_state(state_file),
+        state_file=state_file,
+    )
+    if not submitted:
+        _get_events(args).event(
+            "PROVENANCE_AUDIT_SKIPPED",
+            stage="provenance",
+            status=INFO,
+            detail="previous shadow audit still in flight (single-flight)",
+        )
+    return "PENDING", None
 
 
 # -- burn + uid mapping ---------------------------------------------------------
@@ -986,12 +1172,18 @@ def tick(args) -> bool:
         _, recomputed = _run_provenance_stage(args, payload, Path(args.state_file))
         if provenance_mode == "authority":
             submission_authority = "full_provenance"
-            resolved = _resolve_burn_hotkey(payload, hk2uid) if not args.offline else payload
-            uid_weights = _provenance_uid_weights(recomputed, resolved, hk2uid)
+            uid_weights = _provenance_uid_weights(
+                recomputed,
+                mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
+                or MECHANISM_DEFAULT,
+                burn_hotkey=getattr(args, "provenance_burn_hotkey", None),
+                hotkey_to_uid=hk2uid,
+            )
             _lifecycle(
                 "AUTHORITY provenance",
                 f"submitting the independently recomputed vector "
-                f"({len(recomputed)} verified miners)",
+                f"({len(recomputed)} verified miners, fixed 10% burn to the "
+                f"configured destination)",
             )
 
     ordered = sorted(uid_weights.items())
@@ -1147,6 +1339,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provenance-mechanism", default=os.environ.get(
         "CATHEDRAL_PROVENANCE_MECHANISM", MECHANISM_DEFAULT),
         help="pinned versioned reward mechanism (default validated_supply_v1)")
+    p.add_argument("--provenance-controlled-dir", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_CONTROLLED_DIR") or None,
+        help="controlled-disclosure envelope directory (enables FULL assurance)")
+    p.add_argument("--provenance-verifier-binary", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_VERIFIER_BINARY") or None,
+        help="local pinned verifier binary for raw-evidence replay")
+    p.add_argument("--provenance-source-revision", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_SOURCE_REVISION") or None,
+        help="independent pin of the expected manifest source revision")
+    p.add_argument("--provenance-burn-hotkey", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_BURN_HOTKEY") or None,
+        help="authority mode's configured burn destination hotkey (the fixed "
+             "10%% mechanism burn goes here; never taken from Cathedral's "
+             "signed vector)")
     p.add_argument("--provenance-index-max-age-secs", type=float, default=3600.0)
     p.add_argument("--jsonl", default=os.environ.get(
         "CATHEDRAL_VALIDATOR_JSONL") or None,

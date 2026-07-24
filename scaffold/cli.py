@@ -55,6 +55,10 @@ _DEFAULTS = {
     "provenance_index_keys_digest": None,
     "provenance_verifier_digest": None,
     "provenance_mechanism": "validated_supply_v1",
+    "provenance_controlled_dir": None,
+    "provenance_verifier_binary": None,
+    "provenance_source_revision": None,
+    "provenance_burn_hotkey": None,
     "provenance_index_max_age_secs": 3600.0,
     "jsonl": None,            # JSONL event stream file
 }
@@ -81,6 +85,10 @@ _CONFIG_MAP = {
     ("provenance", "index_keys_digest"): "provenance_index_keys_digest",
     ("provenance", "verifier_digest"): "provenance_verifier_digest",
     ("provenance", "mechanism"): "provenance_mechanism",
+    ("provenance", "controlled_dir"): "provenance_controlled_dir",
+    ("provenance", "verifier_binary"): "provenance_verifier_binary",
+    ("provenance", "source_revision"): "provenance_source_revision",
+    ("provenance", "burn_hotkey"): "provenance_burn_hotkey",
     ("logs", "jsonl"): "jsonl",
 }
 
@@ -106,6 +114,10 @@ _ENV_MAP = {
     "CATHEDRAL_PROVENANCE_INDEX_KEYS_DIGEST": "provenance_index_keys_digest",
     "CATHEDRAL_PROVENANCE_VERIFIER_DIGEST": "provenance_verifier_digest",
     "CATHEDRAL_PROVENANCE_MECHANISM": "provenance_mechanism",
+    "CATHEDRAL_PROVENANCE_CONTROLLED_DIR": "provenance_controlled_dir",
+    "CATHEDRAL_PROVENANCE_VERIFIER_BINARY": "provenance_verifier_binary",
+    "CATHEDRAL_PROVENANCE_SOURCE_REVISION": "provenance_source_revision",
+    "CATHEDRAL_PROVENANCE_BURN_HOTKEY": "provenance_burn_hotkey",
     "CATHEDRAL_VALIDATOR_JSONL": "jsonl",
 }
 
@@ -137,7 +149,9 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
                  "provenance_registry_keys", "provenance_registry_keys_digest",
                  "provenance_report_keys", "provenance_report_keys_digest",
                  "provenance_index_keys", "provenance_index_keys_digest",
-                 "provenance_verifier_digest", "provenance_mechanism", "jsonl"):
+                 "provenance_verifier_digest", "provenance_mechanism",
+                 "provenance_controlled_dir", "provenance_verifier_binary",
+                 "provenance_source_revision", "provenance_burn_hotkey", "jsonl"):
         v = getattr(ns, flat, None)
         if v is not None:
             cfg[flat] = v
@@ -253,6 +267,14 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--provenance-verifier-digest", dest="provenance_verifier_digest",
                     default=None)
     sp.add_argument("--provenance-mechanism", dest="provenance_mechanism", default=None)
+    sp.add_argument("--provenance-controlled-dir", dest="provenance_controlled_dir",
+                    default=None)
+    sp.add_argument("--provenance-verifier-binary", dest="provenance_verifier_binary",
+                    default=None)
+    sp.add_argument("--provenance-source-revision", dest="provenance_source_revision",
+                    default=None)
+    sp.add_argument("--provenance-burn-hotkey", dest="provenance_burn_hotkey",
+                    default=None)
     sp.add_argument("--jsonl", dest="jsonl", default=None,
                     help="append the stable JSONL event stream to this file")
     sp.add_argument("--dry-run", action="store_true",

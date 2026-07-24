@@ -49,8 +49,31 @@ def _now_iso() -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _neutralize(value: str) -> str:
+    """Strip ANSI/control characters, redact secrets, bound the length."""
+    cleaned = _CONTROL_RE.sub(" ", value)
+    cleaned = _SECRET_RE.sub(lambda match: match.group(1) + "=[REDACTED]", cleaned)
+    return cleaned[:2048]
+
+
+def _scrub(value):
+    """Recursive scrub of every string in nested dict/list payloads."""
+    if isinstance(value, str):
+        return _neutralize(value)
+    if isinstance(value, dict):
+        return {_neutralize(str(key)): _scrub(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub(item) for item in value]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _neutralize(str(value))
+
+
 def _redact(value: str) -> str:
-    return _SECRET_RE.sub(lambda match: match.group(1) + "=[REDACTED]", value)
+    return _neutralize(value)
 
 
 class EventLogger:
@@ -63,11 +86,29 @@ class EventLogger:
         tty: IO[str] | None = None,
         color: bool | None = None,
     ) -> None:
-        self.mode = mode
+        self.mode = _neutralize(mode)[:32]
         self._jsonl = jsonl
         self._jsonl_file: IO[str] | None = None
         if jsonl_path:
-            self._jsonl_file = open(jsonl_path, "a", encoding="utf-8")  # noqa: SIM115
+            # Secure append: refuse symlinks/non-regular files, create 0600,
+            # refuse group/world-accessible existing logs.
+            flags = (
+                os.O_WRONLY
+                | os.O_APPEND
+                | os.O_CREAT
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(jsonl_path, flags, 0o600)
+            import stat as _stat
+
+            opened = os.fstat(descriptor)
+            if not _stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o077:
+                os.close(descriptor)
+                raise ValueError(
+                    "event log must be a private (0600) regular file"
+                )
+            self._jsonl_file = os.fdopen(descriptor, "a", encoding="utf-8")
         self._tty = tty if tty is not None else sys.stdout
         if color is None:
             color = (
@@ -103,12 +144,12 @@ class EventLogger:
         record: dict[str, Any] = {
             "ts": _now_iso(),
             "event": code,
-            "stage": stage,
+            "stage": _neutralize(stage)[:32],
             "mode": self.mode,
             "status": status,
         }
         if hotkey is not None:
-            record["hotkey"] = hotkey
+            record["hotkey"] = _neutralize(hotkey)
         if duration_ms is not None:
             record["duration_ms"] = round(float(duration_ms), 3)
         if artifact is not None:
@@ -119,7 +160,7 @@ class EventLogger:
             record["remediation"] = _redact(str(remediation))
         for key, value in fields.items():
             if key not in record:
-                record[key] = _redact(value) if isinstance(value, str) else value
+                record[key] = _scrub(value)
         line = json.dumps(record, separators=(",", ":"))
         for target in (self._jsonl, self._jsonl_file):
             if target is not None:

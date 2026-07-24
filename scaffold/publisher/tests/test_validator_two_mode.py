@@ -7,6 +7,7 @@ the ``provenance`` extra) and run the actual audit against it.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,33 +29,58 @@ from test_validator_thin_validated_supply import payload as validated_supply_pay
 # Authority-mode UID vector construction
 # ---------------------------------------------------------------------------
 
-def test_authority_weights_apply_signed_burn_to_recomputed_vector() -> None:
-    document = validated_supply_payload()
-    resolved = validator_thin._resolve_burn_hotkey(
-        document, {"burn-hotkey": 0, "tdx-miner": 163}
-    )
+def test_authority_weights_use_configured_burn_and_fixed_fraction() -> None:
     weights = validator_thin._provenance_uid_weights(
-        {"tdx-miner": 1.0}, resolved, {"burn-hotkey": 0, "tdx-miner": 163}
+        {"tdx-miner": 1.0},
+        mechanism="validated_supply_v1",
+        burn_hotkey="burn-hotkey",
+        hotkey_to_uid={"burn-hotkey": 0, "tdx-miner": 163},
     )
     assert weights == {0: pytest.approx(0.10), 163: pytest.approx(0.90)}
+    # Empty verified set: everything to the configured burn destination.
+    empty = validator_thin._provenance_uid_weights(
+        {},
+        mechanism="validated_supply_v1",
+        burn_hotkey="burn-hotkey",
+        hotkey_to_uid={"burn-hotkey": 7},
+    )
+    assert empty == {7: 1.0}
 
 
-def test_authority_weights_fail_closed_on_unmapped_hotkey() -> None:
-    document = validated_supply_payload()
+def test_authority_weights_fail_closed_on_bad_inputs() -> None:
+    base = dict(mechanism="validated_supply_v1", burn_hotkey="burn-hotkey")
+    mapping = {"burn-hotkey": 0, "tdx-miner": 163}
     with pytest.raises(validator_thin.wire.VectorError, match="no current metagraph"):
         validator_thin._provenance_uid_weights(
-            {"tdx-miner": 1.0}, document, {"burn-hotkey": 0}
+            {"tdx-miner": 1.0}, hotkey_to_uid={"burn-hotkey": 0}, **base
         )
-
-
-def test_authority_weights_reject_hotkey_resolving_to_burn_uid() -> None:
-    document = validated_supply_payload()
-    resolved = validator_thin._resolve_burn_hotkey(
-        document, {"burn-hotkey": 0, "tdx-miner": 0}
-    )
+    with pytest.raises(validator_thin.wire.VectorError, match="non-finite or negative"):
+        validator_thin._provenance_uid_weights(
+            {"tdx-miner": float("nan")}, hotkey_to_uid=mapping, **base
+        )
+    with pytest.raises(validator_thin.wire.VectorError, match="non-finite or negative"):
+        validator_thin._provenance_uid_weights(
+            {"tdx-miner": -0.2}, hotkey_to_uid=mapping, **base
+        )
+    with pytest.raises(validator_thin.wire.VectorError, match="sum to"):
+        validator_thin._provenance_uid_weights(
+            {"tdx-miner": 0.5}, hotkey_to_uid=mapping, **base
+        )
     with pytest.raises(validator_thin.wire.VectorError, match="burn UID"):
         validator_thin._provenance_uid_weights(
-            {"tdx-miner": 1.0}, resolved, {"burn-hotkey": 0, "tdx-miner": 0}
+            {"tdx-miner": 1.0},
+            hotkey_to_uid={"burn-hotkey": 163, "tdx-miner": 163},
+            **base,
+        )
+    with pytest.raises(validator_thin.wire.VectorError, match="requires --provenance-burn-hotkey"):
+        validator_thin._provenance_uid_weights(
+            {"tdx-miner": 1.0}, mechanism="validated_supply_v1",
+            burn_hotkey=None, hotkey_to_uid=mapping,
+        )
+    with pytest.raises(validator_thin.wire.VectorError, match="no pinned burn"):
+        validator_thin._provenance_uid_weights(
+            {"tdx-miner": 1.0}, mechanism="validated_supply_v99",
+            burn_hotkey="burn-hotkey", hotkey_to_uid=mapping,
         )
 
 
@@ -91,16 +117,60 @@ def _stub_audit(monkeypatch, audit: ProvenanceAudit) -> list[dict]:
     return calls
 
 
-def test_shadow_mode_never_blocks_on_audit_failure(tmp_path, monkeypatch) -> None:
-    _stub_audit(
+def _drain_shadow(args, timeout: float = 5.0) -> None:
+    auditor = validator_thin._get_shadow_auditor(args)
+    deadline = time.monotonic() + timeout
+    while auditor.busy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_shadow_mode_never_blocks_and_logs_on_next_tick(tmp_path, monkeypatch) -> None:
+    calls = _stub_audit(
         monkeypatch,
         ProvenanceAudit(status="FAIL", error="evidence endpoint unreachable"),
     )
+    args = _args(tmp_path, "shadow")
+    started = time.monotonic()
     status, recomputed = validator_thin._run_provenance_stage(
-        _args(tmp_path, "shadow"), validated_supply_payload(), tmp_path / "state.json"
+        args, validated_supply_payload(), tmp_path / "state.json"
     )
-    assert status == "FAIL"
-    assert recomputed is None  # thin submission proceeds
+    assert time.monotonic() - started < 1.0  # never blocks the thin path
+    assert status == "PENDING"
+    assert recomputed is None  # thin submission proceeds untouched
+    _drain_shadow(args)
+    # The completed audit is drained and logged on the NEXT tick.
+    validator_thin._run_provenance_stage(
+        args, validated_supply_payload(), tmp_path / "state.json"
+    )
+    assert len(calls) >= 1
+
+
+def test_slow_shadow_audit_is_single_flight_and_cannot_delay_thin(
+    tmp_path, monkeypatch
+) -> None:
+    import threading as threading_module
+
+    release = threading_module.Event()
+
+    def slow_audit(settings, *, network, netuid, vector_payload, state):
+        release.wait(10.0)
+        return ProvenanceAudit(status="PASS", source_epoch=1, report_id="sha256:" + "a" * 64)
+
+    monkeypatch.setattr(validator_thin, "run_audit", slow_audit)
+    args = _args(tmp_path, "shadow")
+    started = time.monotonic()
+    status1, _ = validator_thin._run_provenance_stage(
+        args, validated_supply_payload(), tmp_path / "state.json"
+    )
+    status2, _ = validator_thin._run_provenance_stage(
+        args, validated_supply_payload(), tmp_path / "state.json"
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0  # a 10s audit cannot delay two thin ticks
+    assert status1 == "PENDING" and status2 == "PENDING"
+    assert validator_thin._get_shadow_auditor(args).busy()  # single flight
+    release.set()
+    _drain_shadow(args)
 
 
 def test_shadow_mode_records_chain_state_on_pass(tmp_path, monkeypatch) -> None:
@@ -115,10 +185,10 @@ def test_shadow_mode_records_chain_state_on_pass(tmp_path, monkeypatch) -> None:
         ),
     )
     state_file = tmp_path / "state.json"
-    status, _ = validator_thin._run_provenance_stage(
-        _args(tmp_path, "shadow"), validated_supply_payload(), state_file
-    )
-    assert status == "PASS"
+    args = _args(tmp_path, "shadow")
+    validator_thin._run_provenance_stage(args, validated_supply_payload(), state_file)
+    _drain_shadow(args)
+    validator_thin._run_provenance_stage(args, validated_supply_payload(), state_file)
     state = json.loads(state_file.read_text())
     assert state["provenance_last_source_epoch"] == 77
     assert state["provenance_last_report_id"] == "sha256:" + "a" * 64
@@ -134,11 +204,31 @@ def test_authority_mode_refuses_to_submit_without_a_pass(tmp_path, monkeypatch) 
         )
 
 
+def test_authority_mode_requires_full_assurance(tmp_path, monkeypatch) -> None:
+    _stub_audit(
+        monkeypatch,
+        ProvenanceAudit(
+            status="PASS",
+            assurance="receipts_only",
+            source_epoch=78,
+            report_id="sha256:" + "b" * 64,
+            recomputed={"tdx-miner": 1.0},
+        ),
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="FULL assurance"):
+        validator_thin._run_provenance_stage(
+            args=_args(tmp_path, "authority"),
+            payload=validated_supply_payload(),
+            state_file=tmp_path / "state.json",
+        )
+
+
 def test_authority_mode_returns_the_recomputation(tmp_path, monkeypatch) -> None:
     _stub_audit(
         monkeypatch,
         ProvenanceAudit(
             status="PASS",
+            assurance="full",
             source_epoch=78,
             report_id="sha256:" + "b" * 64,
             recomputed={"tdx-miner": 1.0},
