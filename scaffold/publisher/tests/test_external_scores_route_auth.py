@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from scaffold.publisher import app as app_mod, external_scores
+from scaffold.publisher import app as app_mod, external_scores, weights
 
 
 def _now_iso():
@@ -217,6 +217,122 @@ def accepted_tdx_report(client, monkeypatch):
         "secret": secret,
         "token": token,
     }
+
+
+def test_confidential_store_rejects_unbound_normalized_report(
+    client,
+):
+    report = external_scores.normalize_report(
+        _sample_report("cathedral_confidential_tdx")
+    )
+
+    with pytest.raises(
+        external_scores.ExternalScoreError,
+        match="authenticated_body_digest_required",
+    ):
+        external_scores.store_report(client.app.state.store, report)
+
+
+def test_confidential_route_persists_exact_body_digest_and_signs_it(
+    client,
+    monkeypatch,
+):
+    token, secret = _tdx_auth(monkeypatch)
+    report = _sample_report("cathedral_confidential_tdx")
+    body = json.dumps(report, indent=2, sort_keys=False).encode("utf-8")
+    expected = hashlib.sha256(body).hexdigest()
+
+    response = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers=_tdx_headers(token, secret, body),
+    )
+
+    assert response.status_code == 202
+    store = client.app.state.store
+    rows = store.query(
+        "SELECT report_json FROM external_score_reports "
+        "WHERE source=? AND network=? AND netuid=? AND epoch=?",
+        ("cathedral_confidential_tdx", "finney", 39, report["epoch"]),
+    )
+    assert json.loads(rows[0]["report_json"])["body_sha256"] == expected
+    status = external_scores.status(
+        store,
+        source="cathedral_confidential_tdx",
+        since_iso=_iso(datetime.now(timezone.utc) - timedelta(minutes=1)),
+    )
+    assert status["latest_body_sha256"] == expected
+
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", "1")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_SOURCE",
+        "cathedral_confidential_tdx",
+    )
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MODE", "confidential_primary")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM", "true")
+    vector = weights.build_signed_vector(
+        store,
+        signing_key_hex="11" * 32,
+        now=datetime.now(timezone.utc),
+    )
+    assert (
+        vector["policy_metadata"]["external_scores"]["latest_body_sha256"]
+        == expected
+    )
+
+
+def test_confidential_idempotent_reencoding_keeps_original_body_digest(
+    client,
+    accepted_tdx_report,
+):
+    original_digest = hashlib.sha256(accepted_tdx_report["body"]).hexdigest()
+    reencoded = json.dumps(
+        json.loads(accepted_tdx_report["body"]),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert reencoded != accepted_tdx_report["body"]
+
+    response = client.post(
+        "/v1/external-scores/violet",
+        content=reencoded,
+        headers=_tdx_headers(
+            accepted_tdx_report["token"],
+            accepted_tdx_report["secret"],
+            reencoded,
+        ),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["idempotent"] is True
+    stored = client.app.state.store.query(
+        "SELECT report_json FROM external_score_reports "
+        "WHERE source=? AND network=? AND netuid=? AND epoch=?",
+        ("cathedral_confidential_tdx", "finney", 39, 1),
+    )
+    assert json.loads(stored[0]["report_json"])["body_sha256"] == original_digest
+
+
+def test_confidential_same_epoch_semantic_change_is_conflict(
+    client,
+    accepted_tdx_report,
+):
+    changed = json.loads(accepted_tdx_report["body"])
+    changed["scores"][0]["score"] = 0.75
+    body = json.dumps(changed).encode("utf-8")
+
+    response = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers=_tdx_headers(
+            accepted_tdx_report["token"],
+            accepted_tdx_report["secret"],
+            body,
+        ),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "epoch_conflict"
 
 
 def test_route_rejects_missing_bearer_when_shared_token_required(client, monkeypatch):
