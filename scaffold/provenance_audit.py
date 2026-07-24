@@ -171,6 +171,74 @@ def _load_pubkeys(path: str, pinned_digest: str | None, label: str) -> dict[str,
     return keys
 
 
+RESOLVER_SLOT_CAP = 16
+_RESOLVER_SLOTS = None
+_RESOLVER_SLOTS_GUARD = None
+
+
+def _resolver_slots():
+    """Process-global bounded resolver slot pool (defect 5): every in-flight
+    getaddrinfo — including abandoned timed-out calls — holds one slot until
+    the resolver thread actually returns, so repeated timeouts can never
+    accumulate unbounded daemon threads; exhaustion fails promptly."""
+    global _RESOLVER_SLOTS, _RESOLVER_SLOTS_GUARD
+    import threading as threading_module
+
+    if _RESOLVER_SLOTS_GUARD is None:
+        _RESOLVER_SLOTS_GUARD = threading_module.Lock()
+    with _RESOLVER_SLOTS_GUARD:
+        if _RESOLVER_SLOTS is None:
+            _RESOLVER_SLOTS = threading_module.BoundedSemaphore(RESOLVER_SLOT_CAP)
+    return _RESOLVER_SLOTS
+
+
+def _getaddrinfo_bounded(host: str, port: int, timeout: float) -> list:
+    """Resolve on a daemon thread from the bounded slot pool, waiting at
+    most ``timeout`` seconds. An abandoned slow call retains its slot only
+    until the resolver returns; a full pool fails promptly."""
+    import queue as queue_module
+    import socket
+    import threading as threading_module
+
+    slots = _resolver_slots()
+    if not slots.acquire(timeout=max(0.0, min(timeout, 5.0))):
+        raise ProvenanceAuditError(
+            f"DNS resolver capacity exhausted while resolving {host}: "
+            f"{RESOLVER_SLOT_CAP} lookups are already in flight"
+        )
+    channel: queue_module.Queue = queue_module.Queue(maxsize=1)
+
+    def _resolve() -> None:
+        try:
+            try:
+                channel.put(
+                    ("ok", socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP))
+                )
+            except OSError as exc:
+                channel.put(("err", exc))
+        finally:
+            slots.release()
+
+    try:
+        threading_module.Thread(
+            target=_resolve, name="cathedral-dns", daemon=True
+        ).start()
+    except BaseException:
+        slots.release()
+        raise
+    try:
+        kind, value = channel.get(timeout=max(0.0, timeout))
+    except queue_module.Empty:
+        raise ProvenanceAuditError(
+            f"DNS resolution for {host} exceeded the audit deadline"
+        ) from None
+    if kind == "err":
+        raise ProvenanceAuditError(
+            f"evidence host does not resolve: {host}"
+        ) from value
+    return value
+
+
 def _fetcher(settings: ProvenanceSettings):
     if settings.evidence_dir:
         root = Path(settings.evidence_dir)
@@ -209,36 +277,9 @@ def _fetcher(settings: ProvenanceSettings):
     host = parsed.hostname or ""
     if not host:
         raise ProvenanceAuditError("evidence URL has no host")
-    import queue as queue_module
-    import threading as threading_module
-
-    channel: queue_module.Queue = queue_module.Queue(maxsize=1)
-
-    def _resolve() -> None:
-        try:
-            channel.put(
-                (
-                    "ok",
-                    socket.getaddrinfo(
-                        host, parsed.port or 443, proto=socket.IPPROTO_TCP
-                    ),
-                )
-            )
-        except OSError as exc:
-            channel.put(("err", exc))
-
-    threading_module.Thread(target=_resolve, name="cathedral-dns", daemon=True).start()
-    try:
-        kind, value = channel.get(timeout=min(30.0, settings.audit_deadline_secs))
-    except queue_module.Empty:
-        raise ProvenanceAuditError(
-            f"DNS resolution for {host} exceeded the audit deadline"
-        ) from None
-    if kind == "err":
-        raise ProvenanceAuditError(
-            f"evidence host does not resolve: {host}"
-        ) from value
-    infos = value
+    infos = _getaddrinfo_bounded(
+        host, parsed.port or 443, min(30.0, settings.audit_deadline_secs)
+    )
     if not infos:
         raise ProvenanceAuditError(f"evidence host does not resolve: {host}")
     for info in infos:

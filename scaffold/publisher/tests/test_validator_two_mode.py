@@ -1465,3 +1465,48 @@ def test_fenced_state_pins_the_chain_identity(tmp_path) -> None:
         validator_thin._write_state_fenced(
             state_file, {"provenance_network": "finney", "provenance_netuid": 40}
         )
+
+
+# ---------------------------------------------------------------------------
+# Round-four defect 5: bounded resolver slot pool (subnet side)
+# ---------------------------------------------------------------------------
+
+def test_audit_resolver_slot_pool_bounds_abandoned_lookups(monkeypatch) -> None:
+    import socket
+    import threading
+    import time
+
+    monkeypatch.setattr(provenance_audit, "_RESOLVER_SLOTS", None)
+    release = threading.Event()
+
+    def hung_resolver(*_a, **_k):
+        release.wait(10)
+        return [(socket.AF_INET, 0, 6, "", ("34.71.88.140", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", hung_resolver)
+    baseline_threads = threading.active_count()
+
+    for _ in range(provenance_audit.RESOLVER_SLOT_CAP):
+        started = time.monotonic()
+        with pytest.raises(ProvenanceAuditError, match="exceeded the audit deadline"):
+            provenance_audit._getaddrinfo_bounded("example.com", 443, 0.001)
+        assert time.monotonic() - started < 0.5
+
+    started = time.monotonic()
+    with pytest.raises(ProvenanceAuditError, match="capacity exhausted"):
+        provenance_audit._getaddrinfo_bounded("example.com", 443, 0.001)
+    assert time.monotonic() - started < 0.5
+    assert threading.active_count() <= (
+        baseline_threads + provenance_audit.RESOLVER_SLOT_CAP + 1
+    )
+
+    release.set()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            assert provenance_audit._getaddrinfo_bounded("example.com", 443, 1.0)
+            break
+        except ProvenanceAuditError:
+            time.sleep(0.05)
+    else:
+        pytest.fail("resolver slots were never released after completion")
