@@ -40,7 +40,9 @@ _DEFAULTS = {
     "once": False,
     "offline": False,         # set by --offline (verify+print, no chain access)
     "broadcast": True,        # `serve` is a live validator by default (legacy parity)
-    "require_policy": None,   # optional signed-policy pin
+    # Supported SN39 operation is PINNED to the launch policy contract;
+    # operators must explicitly override to run unpinned (unsupported).
+    "require_policy": "validated_supply_v1",
     # Two-mode operation: thin submits by default while the full-provenance
     # audit runs concurrently in shadow. "authority" submits the independent
     # recomputation instead; "off" disables the audit.

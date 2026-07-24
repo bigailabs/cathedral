@@ -642,6 +642,19 @@ def real_evidence(tmp_path_factory):
             report_signing_key_id="score-test-1",
             receipts=manifest_receipts,
             attestations=attestation_rows,
+            candidate_set={
+                "source": "enrollment_registry",
+                "finalized_block": None,
+                "candidates": [
+                    {
+                        "hotkey": "tdx-miner",
+                        "outcome": "verified" if positive else "rejected",
+                        "reason": (
+                            "receipt_verified" if positive else "no_verified_work"
+                        ),
+                    }
+                ],
+            },
             wire_report_sha256=None,
         )
         manifest_digest = store.put_blob(manifest_bytes)
@@ -872,8 +885,10 @@ def test_full_path_positive_revoked_restored(real_evidence) -> None:
     revoked = _run_audit_replay(settings, state=state)
     assert revoked.status == "PASS", revoked.error
     assert revoked.recomputed == {}  # everything to burn
-    # No positive miner means nothing raw was replayed: never FULL.
-    assert revoked.assurance == "receipts_only"
+    # The manifest's exhaustive candidate accounting proves every active
+    # candidate was explicitly rejected: the all-burn state is FULL and
+    # authority can submit 100% burn (old positive weights cannot survive).
+    assert revoked.assurance == "full"
     state = _state_after(revoked)
 
     store.write_index(stages[13])
@@ -896,24 +911,46 @@ def test_full_path_positive_revoked_restored(real_evidence) -> None:
     assert thin == {0: pytest.approx(0.10), 163: pytest.approx(0.90)}
 
 
-def test_authority_refuses_the_revoked_epoch_fail_closed(
+def test_authority_submits_full_burn_on_proven_revocation(
     real_evidence, tmp_path, monkeypatch
 ) -> None:
-    """The revoked (zero-positive) epoch is receipts_only, so full authority
-    must refuse to submit — the vacuous-FULL attack and the legitimate
-    all-burn submission are both blocked until exhaustive per-candidate
-    rejection evidence exists (recorded live blocker)."""
+    """Counterexample N: on a PROVEN all-rejected epoch (FULL via exhaustive
+    candidate accounting) authority derives and would submit 100% configured
+    burn, so prior positive weights cannot survive revocation. A merely
+    unproven zero-positive audit (receipts_only) still refuses."""
+    import dataclasses
+    import shutil
+
     from cathedral.evidence import EvidenceStore
 
     store_root, settings, stages = real_evidence
-    EvidenceStore(store_root).write_index(stages[13])
-    revoked_like = _run_audit_replay(settings)  # current index: restored
-    # Simulate the audit the authority gate would see for a revoked epoch.
-    revoked_like.assurance = "receipts_only"
-    revoked_like.recomputed = {}
-    monkeypatch.setattr(
-        validator_thin, "run_audit", lambda *a, **k: revoked_like
+    # Private store copy: the shared store's producer guard (correctly)
+    # refuses to move latest backwards after the lifecycle test ends at 13.
+    private_root = tmp_path / "store-copy"
+    shutil.copytree(store_root, private_root)
+    (private_root / "index.json").unlink()
+    EvidenceStore(private_root).write_index(stages[12])
+    settings = dataclasses.replace(settings, evidence_dir=str(private_root))
+    revoked = _run_audit_replay(settings)
+    assert revoked.assurance == "full" and revoked.recomputed == {}
+    monkeypatch.setattr(validator_thin, "run_audit", lambda *a, **k: revoked)
+    _, recomputed = validator_thin._run_provenance_stage(
+        _args(tmp_path, "authority"),
+        validated_supply_payload(positive=False),
+        tmp_path / "state.json",
     )
+    weights = validator_thin._provenance_uid_weights(
+        recomputed,
+        mechanism="validated_supply_v1",
+        burn_hotkey="burn-hotkey",
+        hotkey_to_uid={"burn-hotkey": 204},
+    )
+    assert weights == {204: 1.0}  # 100% configured burn submitted
+
+    unproven = _run_audit_replay(settings)
+    unproven.assurance = "receipts_only"
+    unproven.recomputed = {}
+    monkeypatch.setattr(validator_thin, "run_audit", lambda *a, **k: unproven)
     with pytest.raises(validator_thin.wire.VectorError, match="FULL assurance"):
         validator_thin._run_provenance_stage(
             _args(tmp_path, "authority"),

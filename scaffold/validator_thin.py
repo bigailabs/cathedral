@@ -23,15 +23,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import threading
 import json
 import math
 import os
 import sys
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -45,7 +45,6 @@ from .provenance_audit import (
     run_audit,
 )
 
-
 # Cathedral's published weight-policy signing key (kid: cathedral-weight-policy).
 # This is a PUBLIC verification key — shipping it as the default means operators
 # don't have to pin it by hand; the validator still applies only what this key
@@ -56,7 +55,7 @@ DEFAULT_PUBLIC_KEY_HEX = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69a
 
 
 def _ms_iso_now() -> str:
-    dt = datetime.now(timezone.utc)
+    dt = datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -141,7 +140,7 @@ def _read_state(state_file: Path) -> dict[str, Any]:
         raise ValueError("validator state file must be a regular non-symlink file")
     document = json.loads(state_file.read_text())
     if not isinstance(document, dict):
-        raise ValueError("validator state file is corrupt")
+        raise ValueError("validator state file is corrupt")  # noqa: TRY004 - intentional fail-closed/UTC-text semantics
     return document
 
 
@@ -159,6 +158,13 @@ def _write_state(state_file: Path, updates: dict[str, Any]) -> None:
         document = _read_state(state_file)
         document.update(updates)
         tmp = state_file.with_suffix(".tmp")
+        # A crash can leave a stale .tmp behind; under the lock it is safe
+        # to clear so restart never bricks on O_EXCL.
+        try:
+            if os.path.lexists(tmp) and not Path(tmp).is_symlink():
+                os.unlink(tmp)
+        except FileNotFoundError:
+            pass
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(tmp, flags, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -401,12 +407,23 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
                 "PROVENANCE mismatch",
                 f"discrepancies={len(audit.discrepancies)}",
             )
-        _write_state(state_file, {
-            "provenance_last_source_epoch": audit.source_epoch,
-            "provenance_last_report_id": audit.report_id,
-            "provenance_index_epoch": audit.index_source_epoch,
-            "provenance_index_manifest": audit.index_manifest,
-        })
+        try:
+            _write_state(state_file, {
+                "provenance_last_source_epoch": audit.source_epoch,
+                "provenance_last_report_id": audit.report_id,
+                "provenance_index_epoch": audit.index_source_epoch,
+                "provenance_index_manifest": audit.index_manifest,
+                "provenance_policy_release": audit.policy_release,
+                "provenance_policy_digest": audit.policy_digest,
+            })
+        except Exception as exc:  # noqa: BLE001 - shadow is observational only
+            events.event(
+                "PROVENANCE_STATE_WRITE_FAILED",
+                stage="provenance",
+                status=NOT_PROVEN,
+                detail=str(exc)[:200],
+                remediation="fix the state file path/permissions; thin is unaffected",
+            )
     else:
         events.event(
             "PROVENANCE_AUDIT_" + audit.status,
@@ -425,7 +442,7 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
 
 def _run_provenance_stage(
     args, payload: dict[str, Any], state_file: Path
-) -> "tuple[str, dict[str, float] | None]":
+) -> tuple[str, dict[str, float] | None]:
     """Provenance stage for this tick.
 
     Shadow: a bounded SINGLE-FLIGHT background worker — the previous audit's
@@ -1083,7 +1100,7 @@ def _bt_wallet(bt):
 
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
     with _isolated_argv():
-        import bittensor as bt   # import under blanked argv — bittensor parses
+        import bittensor as bt  # import under blanked argv — bittensor parses
         mg = _bt_subtensor(bt)(network=connection_target(network)).metagraph(netuid)
     return {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
 
@@ -1091,7 +1108,18 @@ def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
 # -- main loop --------------------------------------------------------------------
 
 def tick(args) -> bool:
+    provenance_mode_early = getattr(args, "provenance", "shadow") or "shadow"
     _lifecycle("FEED fetch", f"source={_feed_label(args.publisher_url)}")
+    if provenance_mode_early == "authority":
+        # Authority's basis is the evidence chain + pins + chain snapshot.
+        # Cathedral's vector is best-effort comparison input only; a down,
+        # stale, or malformed endpoint must not stop independent audit.
+        try:
+            payload = fetch_vector(args.publisher_url)
+        except Exception as exc:  # noqa: BLE001
+            _lifecycle("FEED unavailable", f"reason={type(exc).__name__}")
+            payload = None
+        return _authority_tick(args, payload)
     payload = fetch_vector(args.publisher_url)
     _lifecycle(
         "FEED fetched",
@@ -1171,23 +1199,8 @@ def tick(args) -> bool:
     # submitted vector with the independent recomputation).
     provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
     submission_authority = "thin"
-    if provenance_mode != "off":
-        _, recomputed = _run_provenance_stage(args, payload, Path(args.state_file))
-        if provenance_mode == "authority":
-            submission_authority = "full_provenance"
-            uid_weights = _provenance_uid_weights(
-                recomputed,
-                mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
-                or MECHANISM_DEFAULT,
-                burn_hotkey=getattr(args, "provenance_burn_hotkey", None),
-                hotkey_to_uid=hk2uid,
-            )
-            _lifecycle(
-                "AUTHORITY provenance",
-                f"submitting the independently recomputed vector "
-                f"({len(recomputed)} verified miners, fixed 10% burn to the "
-                f"configured destination)",
-            )
+    if provenance_mode == "shadow":
+        _run_provenance_stage(args, payload, Path(args.state_file))
 
     ordered = sorted(uid_weights.items())
     preview = ",".join(f"{uid}:{weight:.6f}" for uid, weight in ordered[:12])
@@ -1221,6 +1234,78 @@ def tick(args) -> bool:
     # the subsequent live broadcast of the same vector).
     if ok and broadcast:
         save_fence(Path(args.state_file), int(payload["policy_version"]), payload["vector_id"])
+    return ok
+
+
+def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
+    """Full-authority tick: audit the published evidence, recompute, and
+    submit the independently derived UID vector (fixed mechanism burn to the
+    configured destination). The signed Cathedral vector, when reachable and
+    valid, is used for comparison inside the audit only — it is never
+    UID-mapped and never a precondition."""
+    comparison = None
+    if payload is not None:
+        try:
+            wire.verify_signature(
+                payload,
+                public_key_hex=args.public_key_hex,
+                expected_key_id=args.key_id,
+            )
+            comparison = payload
+        except Exception as exc:  # noqa: BLE001 - comparison-only input
+            _lifecycle("FEED invalid", f"reason={type(exc).__name__}")
+    _, recomputed = _run_provenance_stage(
+        args, comparison if comparison is not None else {}, Path(args.state_file)
+    )
+    if args.offline:
+        hk2uid = {hotkey: index for index, hotkey in enumerate(sorted(recomputed))}
+        hk2uid.setdefault(getattr(args, "provenance_burn_hotkey", None) or "", len(hk2uid))
+        broadcast = False
+        preflight = None
+    else:
+        broadcast = args.broadcast
+        if broadcast:
+            preflight = chain_preflight(
+                network=args.network,
+                netuid=args.netuid,
+                wallet_name=args.wallet_name,
+                wallet_hotkey=args.wallet_hotkey,
+            )
+            hk2uid = preflight.hotkey_to_uid
+        else:
+            preflight = None
+            hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
+    uid_weights = _provenance_uid_weights(
+        recomputed,
+        mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
+        or MECHANISM_DEFAULT,
+        burn_hotkey=getattr(args, "provenance_burn_hotkey", None),
+        hotkey_to_uid=hk2uid,
+    )
+    ordered = sorted(uid_weights.items())
+    preview = ",".join(f"{uid}:{weight:.6f}" for uid, weight in ordered[:12])
+    _lifecycle(
+        "AUTHORITY provenance",
+        f"independently derived vector ({len(recomputed)} verified miners) "
+        f"vector={preview}",
+    )
+    ok = set_weights_on_chain(
+        uid_weights,
+        network=args.network,
+        netuid=args.netuid,
+        wallet_name=args.wallet_name,
+        wallet_hotkey=args.wallet_hotkey,
+        broadcast=broadcast,
+        preflight=preflight,
+    )
+    _get_events(args).event(
+        "WEIGHTS_SUBMITTED" if (ok and broadcast) else "WEIGHTS_DRY_RUN",
+        stage="submit",
+        status=PASS if ok else FAIL,
+        detail=(
+            f"authority=full_provenance uids={len(ordered)} vector={preview}"
+        ),
+    )
     return ok
 
 
@@ -1260,7 +1345,7 @@ def run(args) -> int:
     while True:
         try:
             tick(args)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - intentional fail-closed/UTC-text semantics
             print(f"tick failed: {e}")
             _get_events(args).event(
                 "TICK_FAILED",
@@ -1306,7 +1391,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--broadcast", action="store_true",
                    help="actually submit weights (default: dry-run)")
     p.add_argument("--require-policy", dest="require_policy",
-                   default=os.environ.get("CATHEDRAL_VALIDATOR_REQUIRE_POLICY", "").strip() or None,
+                   default=os.environ.get(
+                       "CATHEDRAL_VALIDATOR_REQUIRE_POLICY", ""
+                   ).strip() or REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
                    help="pin the validator to a signed policy contract. "
                         "validated_supply_v1 locks the launch 90%% Intel TDX / "
                         "10%% unadmitted GPU-to-burn allocation. Default: unpinned.")

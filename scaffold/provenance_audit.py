@@ -25,10 +25,10 @@ import hashlib
 import json
 import re
 import time
-import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 MECHANISM_DEFAULT = "validated_supply_v1"
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -121,6 +121,7 @@ class ProvenanceAudit:
     assurance: str = "receipts_only"  # full | receipts_only
     index_source_epoch: int | None = None
     index_manifest: str | None = None
+    policy_digest: str | None = None
     source_epoch: int | None = None
     report_id: str | None = None
     previous_report_id: str | None = None
@@ -364,6 +365,25 @@ def run_audit(
         report_keys = _load_pubkeys(
             settings.report_keys, settings.report_keys_digest, "report keys"
         )
+        # Durable policy fences: a lower registry release, or the same
+        # release with a different digest, must never verify again.
+        last_policy_release = state.get("provenance_policy_release")
+        last_policy_digest = state.get("provenance_policy_digest")
+        manifest_release = int(manifest["policy_registry"]["release"])
+        manifest_policy_digest = str(manifest["policy_registry"]["digest"])
+        if isinstance(last_policy_release, int):
+            if manifest_release < last_policy_release:
+                raise ProvenanceAuditError(
+                    f"policy rollback: release {manifest_release} < recorded "
+                    f"high-water {last_policy_release}"
+                )
+            if (
+                manifest_release == last_policy_release
+                and manifest_policy_digest != last_policy_digest
+            ):
+                raise ProvenanceAuditError(
+                    "policy equivocation: same release, different digest"
+                )
         registry_bytes = load_blob(manifest["policy_registry"]["blob"])
         report_bytes = load_blob(manifest["score_report"]["blob"])
         receipts_by_id = {
@@ -381,7 +401,21 @@ def run_audit(
             expected_verifier_digest=settings.verifier_digest,
             mechanism_id=settings.mechanism,
             registry_max_age_seconds=settings.registry_max_age_secs,
+            candidate_set=manifest["candidate_set"],
         )
+        # Report predecessor continuity is ALWAYS enforced across audits:
+        # a new export must chain from the last audited report.
+        last_report = state.get("provenance_last_report_id")
+        last_epoch = state.get("provenance_last_source_epoch")
+        if (
+            isinstance(last_epoch, int)
+            and result.source_epoch > last_epoch
+            and last_report is not None
+            and result.previous_report_id != last_report
+        ):
+            raise ProvenanceAuditError(
+                "score report does not chain from the last audited report"
+            )
         if result.policy_release != manifest["policy_registry"]["release"]:
             raise ProvenanceAuditError(
                 "verified registry release differs from the manifest"
@@ -430,8 +464,14 @@ def run_audit(
                 raise ProvenanceAuditError(
                     "manifest lacks verifier binary/command bindings for full mode"
                 )
+            candidates = manifest["candidate_set"]["candidates"]
+            active = [row for row in candidates if row["outcome"] != "retired"]
+            all_rejected = bool(active) and all(
+                row["outcome"] == "rejected" for row in active
+            )
             result = provenance.replay_positive_miners(
                 result,
+                candidates_all_rejected=all_rejected,
                 registry=provenance.load_registry(
                     registry_bytes,
                     registry_keys,
@@ -452,6 +492,7 @@ def run_audit(
             assurance=result.assurance_level,
             index_source_epoch=index_epoch,
             index_manifest=manifest_digest,
+            policy_digest=result.policy_digest,
             source_epoch=result.source_epoch,
             report_id=result.report_id,
             previous_report_id=result.previous_report_id,

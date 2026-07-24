@@ -20,8 +20,8 @@ import json
 import os
 import re
 import sys
-from datetime import timezone, datetime
-from typing import Any, IO
+from datetime import UTC, datetime
+from typing import IO, Any
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -45,7 +45,7 @@ _RESET = "\x1b[0m"
 
 
 def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
+    dt = datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
