@@ -30,7 +30,6 @@ import os
 import sys
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +38,7 @@ from urllib.parse import urlsplit
 
 from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
-from .events import FAIL, INFO, NOT_PROVEN, PASS, EventLogger
+from .events import FAIL, INFO, NOT_PROVEN, PASS, EventLogger, stable_error
 from .provenance_audit import (
     MECHANISM_DEFAULT,
     ProvenanceSettings,
@@ -69,9 +68,11 @@ def _lifecycle(event: str, detail: str = "") -> None:
     (VECTOR accepted/rejected, MAP complete, WEIGHTS dry-run, CHAIN
     submitted/failed).
     """
-    line = f"{_ms_iso_now()} {event}"
+    from .events import _neutralize
+
+    line = f"{_ms_iso_now()} {_neutralize(event)}"
     if detail:
-        line += f" {detail}"
+        line += f" {_neutralize(detail)}"
     print(line)
 
 
@@ -92,24 +93,114 @@ MAX_VECTOR_FETCH_BYTES = 4 * 1024 * 1024
 
 
 def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
-    """Bounded HTTPS-only fetch: no redirects, no oversized bodies, and a
-    strict JSON parse rejecting duplicate keys and non-finite numbers."""
-    url = publisher_url.rstrip("/") + "/v1/validator/weights/next"
-    if not url.startswith("https://"):
+    """Hardened bounded fetch of the thin feed (public HTTPS only).
+
+    Beyond the scheme check: userinfo, query, fragment, and ambiguous URL
+    shapes are rejected outright; EVERY resolved peer must be a public
+    routable address (pooled bounded DNS); the TCP connection is pinned to
+    the validated peer while TLS still verifies the certificate for the
+    ORIGINAL hostname via SNI; ONE total deadline spans DNS, connect, TLS,
+    request/headers, and every body read; redirects are never followed
+    (any non-200 fails); the body is size-bounded; and the strict JSON
+    parse rejects duplicate keys and non-finite numbers. Fail closed."""
+    import http.client
+    import ipaddress
+    import socket
+    import ssl
+
+    from .provenance_audit import ProvenanceAuditError, _getaddrinfo_bounded
+
+    if not isinstance(publisher_url, str) or any(
+        character.isspace() or character == "\\" for character in publisher_url
+    ):
+        raise wire.VectorError("publisher URL is malformed")
+    parsed = urlsplit(publisher_url.rstrip("/"))
+    if parsed.scheme != "https":
         raise wire.VectorError("publisher URL must be https")
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or "@" in parsed.netloc
+    ):
+        raise wire.VectorError("publisher URL must be credential-free")
+    if parsed.query or parsed.fragment:
+        raise wire.VectorError("publisher URL must carry no query or fragment")
+    host = parsed.hostname
+    if not host:
+        raise wire.VectorError("publisher URL has no host")
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise wire.VectorError("publisher URL port is malformed") from exc
+    target_path = (parsed.path or "") + "/v1/validator/weights/next"
 
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *arguments, **keywords):
-            raise wire.VectorError("publisher must not redirect the vector fetch")
+    deadline = time.monotonic() + timeout
 
-    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler())
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "cathedral-thin-validator/1.0"}
+    def _phase_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise wire.VectorError("vector fetch exceeded its total deadline")
+        return remaining
+
+    try:
+        infos = _getaddrinfo_bounded(host, port, _phase_timeout())
+    except ProvenanceAuditError as exc:
+        raise wire.VectorError(f"publisher DNS failed: {exc}") from exc
+    if not infos:
+        raise wire.VectorError("publisher host does not resolve")
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            raise wire.VectorError(
+                "publisher resolves to a non-public address; the production "
+                "endpoint is public HTTPS"
+            )
+    peer_ip = infos[0][4][0]
+
+    class _PinnedConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            raw = socket.create_connection((peer_ip, port), self.timeout)
+            self.sock = self._context.wrap_socket(raw, server_hostname=host)
+
+    connection = _PinnedConnection(
+        host, port, timeout=_phase_timeout(), context=ssl.create_default_context()
     )
-    with opener.open(req, timeout=timeout) as resp:
-        data = resp.read(MAX_VECTOR_FETCH_BYTES + 1)
-    if len(data) > MAX_VECTOR_FETCH_BYTES:
-        raise wire.VectorError("vector response exceeds the bounded size limit")
+    try:
+        connection.connect()  # TCP + TLS under a freshly computed bound
+        connection.sock.settimeout(_phase_timeout())
+        connection.request(
+            "GET",
+            target_path,
+            headers={"Host": host, "User-Agent": "cathedral-thin-validator/1.0"},
+        )
+        connection.sock.settimeout(_phase_timeout())
+        response = connection.getresponse()
+        if response.status != 200:
+            raise wire.VectorError(
+                f"vector fetch failed with status {response.status} "
+                "(redirects are never followed)"
+            )
+        chunks: list[bytes] = []
+        received = 0
+        while True:
+            connection.sock.settimeout(_phase_timeout())
+            chunk = response.read(min(65536, MAX_VECTOR_FETCH_BYTES + 1 - received))
+            if not chunk:
+                break
+            received += len(chunk)
+            if received > MAX_VECTOR_FETCH_BYTES:
+                raise wire.VectorError("vector response exceeds the bounded size limit")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+    finally:
+        connection.close()
 
     def _no_duplicates(pairs):
         result = {}
@@ -498,6 +589,27 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
     PASS event is emitted (main thread only)."""
     events = _get_events(args)
     status_map = {"PASS": PASS, "FAIL": FAIL, "NOT_PROVEN": NOT_PROVEN}
+    if (
+        audit.status == "PASS"
+        and getattr(audit, "assurance", "receipts_only") != "full"
+    ):
+        # Receipts-only recomputation is PARTIAL provenance: internally
+        # consistent signatures, NO raw-evidence replay. It must never be
+        # announced as a provenance PASS and must never persist the durable
+        # reservation state as if it were FULL.
+        events.event(
+            "PROVENANCE_AUDIT_NOT_PROVEN",
+            stage="provenance",
+            status=NOT_PROVEN,
+            duration_ms=audit.duration_ms,
+            artifact=audit.manifest_digest,
+            detail=(
+                "receipts-only recomputation; the signed chain is internally "
+                "consistent but raw evidence was not replayed"
+            ),
+            remediation="provide the controlled package and verifier pins for FULL",
+        )
+        return
     if audit.status == "PASS":
         events.event(
             "PROVENANCE_AUDIT_PASS",
@@ -541,7 +653,7 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
                 "PROVENANCE_STATE_STALE_SKIPPED",
                 stage="provenance",
                 status=NOT_PROVEN,
-                detail=str(exc)[:200],
+                detail=stable_error(exc),
                 remediation="a newer reservation exists; shadow stays observational",
             )
         except Exception as exc:  # noqa: BLE001 - shadow is observational only
@@ -549,7 +661,7 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
                 "PROVENANCE_STATE_WRITE_FAILED",
                 stage="provenance",
                 status=NOT_PROVEN,
-                detail=str(exc)[:200],
+                detail=stable_error(exc),
                 remediation="fix the state file path/permissions; thin is unaffected",
             )
     else:
@@ -1358,12 +1470,35 @@ def _block_hash_lookup(network: str):
     return lookup
 
 
+def _validated_historical_hotkeys(raw_hotkeys, *, metagraph_block, requested_block):
+    """Validate the RAW historical hotkey sequence BEFORE any set
+    construction: sequence type, per-hotkey validity, exact count with
+    uniqueness (a set would silently swallow duplicates), and the returned
+    metagraph's block equal to the REQUESTED block. Any violation returns
+    None — malformed or misaligned history is unavailable history."""
+    if isinstance(metagraph_block, bool):
+        return None
+    try:
+        if int(metagraph_block) != int(requested_block):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(raw_hotkeys, (list, tuple)) or not raw_hotkeys:
+        return None
+    for hotkey in raw_hotkeys:
+        if not isinstance(hotkey, str) or not 1 <= len(hotkey.encode("utf-8")) <= 512:
+            return None
+    if len(set(raw_hotkeys)) != len(raw_hotkeys):
+        return None
+    return frozenset(raw_hotkeys)
+
+
 def _historical_metagraph_lookup(network: str, netuid: int):
     """A callable resolving the SN39 metagraph AT a historical block to its
     exact hotkey set via the validator's own subtensor connection
     (Subtensor.metagraph(netuid, block=block)). Returns None when the
-    history is unavailable — the audit treats that as NOT_PROVEN, never a
-    pass."""
+    history is unavailable, malformed, or not actually at the requested
+    block — the audit treats that as NOT_PROVEN, never a pass."""
 
     def lookup(block: int):
         try:
@@ -1373,7 +1508,11 @@ def _historical_metagraph_lookup(network: str, netuid: int):
                 mg = _bt_subtensor(bt)(network=connection_target(network)).metagraph(
                     netuid, block=int(block)
                 )
-            return {str(hk) for hk in mg.hotkeys}
+            return _validated_historical_hotkeys(
+                list(getattr(mg, "hotkeys", None) or ()),
+                metagraph_block=getattr(mg, "block", None),
+                requested_block=block,
+            )
         except Exception:  # noqa: BLE001 - unavailable history is None, not a pass
             return None
 
@@ -1603,13 +1742,35 @@ def _authority_tick_lock(state_file: Path):
     state_file.parent.mkdir(parents=True, exist_ok=True)
     lock_path = state_file.with_suffix(".authority.lock")
     try:
-        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        descriptor = os.open(
+            lock_path,
+            os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
     except OSError as exc:
         raise wire.VectorError(
-            f"authority submission lock unavailable ({exc}); refusing "
-            "before audit or submission"
+            f"authority submission lock unavailable ({stable_error(exc)}); "
+            "refusing before audit or submission"
         ) from exc
     try:
+        import stat as stat_module
+
+        info = os.fstat(descriptor)
+        if not stat_module.S_ISREG(info.st_mode):
+            raise wire.VectorError(
+                "authority submission lock is not a regular file; refusing "
+                "before audit or submission"
+            )
+        if info.st_uid != os.geteuid():
+            raise wire.VectorError(
+                "authority submission lock has an unexpected owner; refusing "
+                "before audit or submission"
+            )
+        if info.st_mode & 0o077:
+            raise wire.VectorError(
+                "authority submission lock mode is unsafe (group/other "
+                "access); refusing before audit or submission"
+            )
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
@@ -1763,9 +1924,7 @@ def run(args) -> int:
         try:
             tick_ok = tick(args)
         except Exception as e:  # noqa: BLE001 - loop resilience; sanitized below
-            from .events import _neutralize
-
-            print(f"tick failed: {_neutralize(str(e))}")
+            print(f"tick failed: {stable_error(e)}")
             _get_events(args).event(
                 "TICK_FAILED",
                 stage="result",

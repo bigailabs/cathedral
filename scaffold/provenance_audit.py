@@ -664,6 +664,7 @@ def run_audit(
                 epoch_generated_at=manifest["generated_at"],
                 deadline_monotonic=audit_deadline,
                 challenge_anchor={
+                    "block": anchored_block,
                     "block_hash": candidate_snapshot["block_hash"],
                     "network": network,
                     "netuid": netuid,

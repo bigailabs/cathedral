@@ -188,6 +188,7 @@ def test_shadow_mode_records_chain_state_on_pass(tmp_path, monkeypatch) -> None:
         monkeypatch,
         ProvenanceAudit(
             status="PASS",
+            assurance="full",
             source_epoch=77,
             report_id="sha256:" + "a" * 64,
             recomputed={"tdx-miner": 1.0},
@@ -534,6 +535,7 @@ def real_evidence(tmp_path_factory):
             from cathedral.challenge import derive_challenge_nonce
 
             nonce = derive_challenge_nonce(
+                block=ANCHOR_BLOCK,
                 block_hash=ANCHOR_HASH,
                 network="finney",
                 netuid=39,
@@ -679,7 +681,7 @@ def real_evidence(tmp_path_factory):
             private_key_seed=report_seed,
             generated_at=now,
             valid_until=now + timedelta(minutes=30),
-            valid_from_block=1,
+            valid_from_block=ANCHOR_BLOCK,
             valid_until_block=10_000_000_000,
             verifier_digest=verifier_digest,
             candidate_snapshot={
@@ -1089,6 +1091,7 @@ def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
 
     _store_root, _settings, _stages = real_evidence
     epoch_11 = expected_challenge_digest(
+        block=100,
         block_hash="0x" + "ab" * 32,
         network="finney",
         netuid=39,
@@ -1096,6 +1099,7 @@ def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
         miner_hotkey="tdx-miner",
     )
     epoch_13 = expected_challenge_digest(
+        block=100,
         block_hash="0x" + "ab" * 32,
         network="finney",
         netuid=39,
@@ -1146,6 +1150,7 @@ def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
             verifier_artifacts=("/x",),
             epoch_generated_at="2026-07-24T00:00:00.000000Z",
             challenge_anchor={
+                "block": 100,
                 "block_hash": "0x" + "ab" * 32,
                 "network": "finney",
                 "netuid": 39,
@@ -1704,3 +1709,238 @@ def test_shadow_ticks_never_touch_the_authority_lock(tmp_path, monkeypatch) -> N
     _drain_shadow(args)
     assert status == "PENDING"
     assert not state_file.with_suffix(".authority.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# Round-six adversarial regressions
+# ---------------------------------------------------------------------------
+
+
+def test_thin_feed_fetch_rejects_malformed_and_private_endpoints(monkeypatch) -> None:
+    """Round-six S2: userinfo, query, fragment, ambiguity, and non-public
+    peers are all rejected fail-closed before any request is sent."""
+    import socket
+
+    for url, message in (
+        ("http://publisher.example", "must be https"),
+        ("https://user:pw@publisher.example", "credential-free"),
+        ("https://publisher.example/?q=1", "no query or fragment"),
+        ("https://publisher.example/#frag", "no query or fragment"),
+        ("https://publisher.example/a b", "malformed"),
+        ("https://publisher.example:notaport/x", "port is malformed"),
+        ("https://", "no host"),
+    ):
+        with pytest.raises(validator_thin.wire.VectorError, match=message):
+            validator_thin.fetch_vector(url)
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
+            (socket.AF_INET, 0, 6, "", ("127.0.0.1", 443)),  # ONE bad peer
+        ],
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="non-public address"):
+        validator_thin.fetch_vector("https://publisher.example")
+
+
+def test_thin_feed_fetch_refuses_redirects_and_oversized_bodies(monkeypatch) -> None:
+    """Round-six S2: any non-200 (a redirect included) fails; the body is
+    size-bounded; both under the pinned-peer connection."""
+    import http.client
+    import socket
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, 0, 6, "", ("34.71.88.140", 443))],
+    )
+
+    import ssl
+
+    class _FakeSock:
+        def settimeout(self, _t):
+            pass
+
+        def close(self):
+            pass
+
+    responses = {}
+
+    class _FakeContext:
+        def wrap_socket(self, _raw, server_hostname=None):
+            assert server_hostname == "publisher.example"  # SNI hostname kept
+            return _FakeSock()
+
+    def fake_request(self, *_a, **_k):
+        pass
+
+    def fake_getresponse(self):
+        return responses["current"]
+
+    monkeypatch.setattr(socket, "create_connection", lambda _addr, _t: _FakeSock())
+    monkeypatch.setattr(ssl, "create_default_context", lambda: _FakeContext())
+    monkeypatch.setattr(http.client.HTTPSConnection, "request", fake_request)
+    monkeypatch.setattr(http.client.HTTPSConnection, "getresponse", fake_getresponse)
+
+    responses["current"] = NS(status=302, read=lambda n: b"")
+    with pytest.raises(validator_thin.wire.VectorError, match="redirects are never"):
+        validator_thin.fetch_vector("https://publisher.example")
+
+    remaining = {"bytes": validator_thin.MAX_VECTOR_FETCH_BYTES + 2}
+
+    def endless_read(n):
+        chunk = b"x" * min(n, remaining["bytes"])
+        remaining["bytes"] -= len(chunk)
+        return chunk
+
+    responses["current"] = NS(status=200, read=endless_read)
+    with pytest.raises(validator_thin.wire.VectorError, match="bounded size limit"):
+        validator_thin.fetch_vector("https://publisher.example")
+
+
+def test_receipts_only_shadow_pass_is_not_proven_and_never_persists(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-six S3: a receipts-only shadow PASS emits NOT_PROVEN — never
+    PROVENANCE_AUDIT_PASS — and persists nothing."""
+    events_seen: list[str] = []
+
+    class _Recorder:
+        def event(self, name, **_kw):
+            events_seen.append(name)
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda args: _Recorder())
+    _stub_audit(
+        monkeypatch,
+        ProvenanceAudit(
+            status="PASS",
+            assurance="receipts_only",
+            source_epoch=77,
+            report_id="sha256:" + "a" * 64,
+            index_source_epoch=77,
+            index_manifest="sha256:" + "b" * 64,
+            policy_release=3,
+            policy_digest="sha256:" + "c" * 64,
+            recomputed={"tdx-miner": 1.0},
+        ),
+    )
+    state_file = tmp_path / "state.json"
+    args = _args(tmp_path, "shadow")
+    validator_thin._run_provenance_stage(args, {}, state_file)
+    _drain_shadow(args)
+    validator_thin._run_provenance_stage(args, {}, state_file)
+    _drain_shadow(args)
+    assert "PROVENANCE_AUDIT_NOT_PROVEN" in events_seen
+    assert "PROVENANCE_AUDIT_PASS" not in events_seen
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    assert "provenance_last_source_epoch" not in state
+    assert "provenance_index_epoch" not in state
+
+
+def test_output_surfaces_redact_paths_and_use_stable_error_codes(capsys) -> None:
+    """Round-six S4: absolute filesystem paths and usernames never reach
+    TTY/JSONL/lifecycle output; OS errors become stable errno codes."""
+    import errno
+
+    from scaffold.events import _neutralize, stable_error
+
+    assert "<path>" in _neutralize(
+        "state write failed at /Users/alice/secret/state.json"
+    )
+    assert "alice" not in _neutralize(
+        "state write failed at /Users/alice/secret/state.json"
+    )
+    assert "<path>" in _neutralize("lock ~bob/launch/state.lock is held")
+    assert "bob" not in _neutralize("lock ~bob/launch/state.lock is held")
+    assert (
+        stable_error(OSError(errno.EACCES, "denied", "/home/carol/x"))
+        == "OSError[EACCES]"
+    )
+    assert "carol" not in stable_error(OSError(errno.EACCES, "denied", "/home/carol/x"))
+    assert stable_error(ValueError("plain reason")).startswith(
+        "ValueError: plain reason"
+    )
+
+    validator_thin._lifecycle("STATE failed", "path=/Users/dave/launch/state.json")
+    line = capsys.readouterr().out
+    assert "dave" not in line and "<path>" in line
+
+
+def test_historical_lookup_validates_the_raw_sequence(real_evidence) -> None:
+    """Round-six S5: duplicates, wrong-block metagraphs, malformed hotkeys,
+    and non-sequences are all unavailable history (NOT_PROVEN) — never a
+    silently deduplicated set."""
+    validate = validator_thin._validated_historical_hotkeys
+    assert validate(["a", "b"], metagraph_block=100, requested_block=100) == frozenset(
+        {"a", "b"}
+    )
+    assert validate(["a", "a"], metagraph_block=100, requested_block=100) is None
+    assert validate(["a"], metagraph_block=101, requested_block=100) is None
+    assert validate(["a"], metagraph_block=None, requested_block=100) is None
+    assert validate(["a"], metagraph_block=True, requested_block=100) is None
+    assert validate("not-a-sequence", metagraph_block=100, requested_block=100) is None
+    assert validate(["a", 7], metagraph_block=100, requested_block=100) is None
+    assert validate([""], metagraph_block=100, requested_block=100) is None
+    assert validate([], metagraph_block=100, requested_block=100) is None
+
+    # End to end: a duplicated historical answer is NOT_PROVEN, not a pass.
+    _store_root, settings, _stages = real_evidence
+    audit = _run_audit_replay(
+        settings,
+        historical_hotkeys_lookup=lambda block: (
+            validator_thin._validated_historical_hotkeys(
+                ["tdx-miner", "tdx-miner"], metagraph_block=100, requested_block=block
+            )
+        ),
+    )
+    assert audit.status == "NOT_PROVEN"
+
+
+def test_authority_lock_refuses_symlinks_and_unsafe_modes(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-six S6: a symlinked or group/other-accessible lock target is
+    refused BEFORE any audit or submission; nonblocking semantics and the
+    shadow path stay untouched."""
+    import os
+
+    called = {"audit": 0, "submit": 0}
+    monkeypatch.setattr(
+        validator_thin,
+        "run_audit",
+        lambda *a, **k: (
+            called.__setitem__("audit", called["audit"] + 1)
+            or _epoch_audit(12, "a", "b")
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "set_weights_on_chain",
+        lambda *a, **k: called.__setitem__("submit", called["submit"] + 1) or True,
+    )
+    args = _authority_args(tmp_path)
+    state_file = Path(args.state_file)
+    lock_path = state_file.with_suffix(".authority.lock")
+
+    # Symlinked lock target: O_NOFOLLOW refuses at open.
+    victim = tmp_path / "victim.file"
+    victim.write_text("x")
+    lock_path.symlink_to(victim)
+    with pytest.raises(validator_thin.wire.VectorError, match="refusing"):
+        validator_thin._authority_tick(args, None)
+    lock_path.unlink()
+
+    # Unsafe pre-existing mode (group/other access) is refused.
+    lock_path.touch(mode=0o600)
+    os.chmod(lock_path, 0o666)
+    with pytest.raises(validator_thin.wire.VectorError, match="unsafe"):
+        validator_thin._authority_tick(args, None)
+    os.chmod(lock_path, 0o600)
+    assert called == {"audit": 0, "submit": 0}
+
+    # A safe lock file proceeds normally (nonblocking semantics intact).
+    assert validator_thin._authority_tick(args, None) is True
+    assert called == {"audit": 1, "submit": 1}

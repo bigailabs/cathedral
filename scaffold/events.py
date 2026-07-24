@@ -64,13 +64,34 @@ def _now_iso() -> str:
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
+_PATH_RE = re.compile(
+    r"(?:file |path )?"
+    r"(?:/(?:Users|home|root|private|var|tmp|etc|opt|srv|mnt)|~[A-Za-z0-9_-]*)"
+    r"[^\s'\"]*"
+)
+
+
 def _neutralize(value: str) -> str:
-    """Strip ANSI/control characters, redact secrets, bound the length."""
+    """Strip ANSI/control characters, redact secrets and absolute
+    filesystem paths/usernames, bound the length."""
     cleaned = _CONTROL_RE.sub(" ", value)
     cleaned = _SECRET_RE.sub(
         lambda match: (match.group(2) or "credential") + "=[REDACTED]", cleaned
     )
+    cleaned = _PATH_RE.sub("<path>", cleaned)
     return cleaned[:2048]
+
+
+def stable_error(exc: BaseException) -> str:
+    """A stable, redacted error code for output surfaces: OS errors become
+    errno codes (no paths, no usernames), everything else keeps its type
+    name with a neutralized message."""
+    if isinstance(exc, OSError) and exc.errno is not None:
+        import errno as errno_module
+
+        code = errno_module.errorcode.get(exc.errno, str(exc.errno))
+        return f"OSError[{code}]"
+    return f"{type(exc).__name__}: {_neutralize(str(exc))}"[:200]
 
 
 def _scrub(value):
