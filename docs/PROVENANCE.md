@@ -20,11 +20,14 @@ the quote against the original nonce/worker/channel binding and the receipt's
 measurement under the signed registry policy at receipt time.
 
 **Chain-anchored freshness and candidates.** The TDX challenge nonce is not
-issuer-random: it is derived as `sha256("cathedral-tdx-challenge-v1\0" ||
-canonical{block_hash, network, netuid, source_epoch, miner_hotkey})` from
-the finalized SN39 block durably anchored on the producing epoch, so the
-audit recomputes the expected nonce itself and cross-epoch evidence reuse
-fails cryptographically (no replay cache is a security dependency).
+issuer-random: it is derived as `sha256("cathedral-tdx-challenge-v2\0" ||
+canonical{block, block_hash, network, netuid, source_epoch, miner_hotkey})`
+— the normalized finalized HEIGHT is bound alongside the hash — from the
+SN39 block durably anchored on the producing epoch, so the audit recomputes
+the expected nonce itself and cross-epoch evidence reuse fails
+cryptographically (no replay cache is a security dependency). A
+receipts-only shadow audit is reported NOT_PROVEN: it never emits a
+provenance PASS and never persists the durable reservation state.
 
 Candidate membership is proven against HISTORY, never the present. The
 signed score report binds the exact `cathedral_candidate_snapshot_v1` it
