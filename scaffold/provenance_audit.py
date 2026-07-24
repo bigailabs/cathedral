@@ -149,6 +149,8 @@ class ProvenanceAudit:
     agrees_with_vector: bool | None = None
     discrepancies: list[str] = field(default_factory=list)
     receipt_hotkeys: list[str] = field(default_factory=list)
+    raw_replayed_hotkeys: list[str] = field(default_factory=list)
+    not_proven_reasons: list[str] = field(default_factory=list)
     duration_ms: float | None = None
     error: str | None = None
     remediation: str | None = None
@@ -919,6 +921,12 @@ def run_audit(
             receipt_hotkeys=[
                 miner.hotkey for miner in result.miners if miner.receipt_verified
             ],
+            raw_replayed_hotkeys=[
+                miner.hotkey
+                for miner in result.miners
+                if getattr(miner, "raw_verified", False)
+            ],
+            not_proven_reasons=list(getattr(result, "not_proven_reasons", ())),
         )
         check_chain_state(audit, state)
 
