@@ -144,6 +144,74 @@ def _read_state(state_file: Path) -> dict[str, Any]:
     return document
 
 
+def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
+    """Atomic CHECK-AND-RESERVE under the state lock (authority path).
+
+    The high-water comparison and the write happen inside ONE flock hold:
+    a concurrent writer that reserved a newer epoch, an equivocating
+    manifest, or a diverging policy/report line makes THIS reservation
+    RAISE — a stale read can never overwrite or silently coexist.
+    """
+    import fcntl
+
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_file.with_suffix(".lock")
+    lock_descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        current = _read_state(state_file)
+        new_epoch = updates.get("provenance_index_epoch")
+        stored_epoch = current.get("provenance_index_epoch")
+        if isinstance(new_epoch, int) and isinstance(stored_epoch, int):
+            if new_epoch < stored_epoch:
+                raise ValueError(
+                    f"stale reservation: index epoch {new_epoch} < reserved "
+                    f"{stored_epoch}"
+                )
+            if new_epoch == stored_epoch and current.get(
+                "provenance_index_manifest"
+            ) != updates.get("provenance_index_manifest"):
+                raise ValueError(
+                    "reservation equivocation: same epoch, different manifest"
+                )
+        new_release = updates.get("provenance_policy_release")
+        stored_release = current.get("provenance_policy_release")
+        if isinstance(new_release, int) and isinstance(stored_release, int):
+            if new_release < stored_release:
+                raise ValueError(
+                    f"stale reservation: policy release {new_release} < "
+                    f"reserved {stored_release}"
+                )
+            if new_release == stored_release and current.get(
+                "provenance_policy_digest"
+            ) != updates.get("provenance_policy_digest"):
+                raise ValueError(
+                    "reservation equivocation: same release, different digest"
+                )
+        document = dict(current)
+        document.update(updates)
+        tmp = state_file.with_suffix(".tmp")
+        try:
+            if os.path.lexists(tmp) and not Path(tmp).is_symlink():
+                os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(tmp, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(document, indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, state_file)
+        parent = os.open(state_file.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        os.close(lock_descriptor)
+
+
 def _write_state(state_file: Path, updates: dict[str, Any]) -> None:
     """Locked atomic read-merge-write (0600, fsync, parent fsync) so the
     fence writer and the background shadow auditor never clobber each other
@@ -339,7 +407,7 @@ class _ShadowAuditor:
 
     def submit(
         self, settings, *, network, netuid, payload, state, state_file,
-        current_block=None,
+        current_block=None, chain_hotkeys=None,
     ) -> bool:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -353,6 +421,7 @@ class _ShadowAuditor:
                     vector_payload=payload,
                     state=state,
                     current_block=current_block,
+                    chain_hotkeys=chain_hotkeys,
                 )
                 with self._lock:
                     self._result = (audit, state_file)
@@ -419,11 +488,6 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
                 "provenance_index_manifest": audit.index_manifest,
                 "provenance_policy_release": audit.policy_release,
                 "provenance_policy_digest": audit.policy_digest,
-                **(
-                    {"provenance_seen_challenges": audit.seen_challenges}
-                    if audit.seen_challenges is not None
-                    else {}
-                ),
             })
         except Exception as exc:  # noqa: BLE001 - shadow is observational only
             events.event(
@@ -452,6 +516,8 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
 def _run_provenance_stage(
     args, payload: dict[str, Any], state_file: Path,
     current_block: int | None = None,
+    chain_hotkeys: set[str] | None = None,
+    block_hash_lookup=None,
 ) -> tuple[str, dict[str, float] | None]:
     """Provenance stage for this tick.
 
@@ -471,6 +537,8 @@ def _run_provenance_stage(
             vector_payload=payload,
             state=state,
             current_block=current_block,
+            chain_hotkeys=chain_hotkeys,
+            block_hash_lookup=block_hash_lookup,
         )
         _log_audit_events(args, audit, state_file)
         if audit.status != "PASS":
@@ -480,19 +548,15 @@ def _run_provenance_stage(
             )
         # Durable fences are MANDATORY for authority: if the reservation
         # cannot be persisted, nothing is submitted (fail closed) - unlike
-        # shadow, where persistence failures are observational.
-        _write_state(state_file, {
+        # shadow, where persistence failures are observational. The check
+        # and the reservation are ONE atomic locked transaction.
+        _write_state_fenced(state_file, {
             "provenance_last_source_epoch": audit.source_epoch,
             "provenance_last_report_id": audit.report_id,
             "provenance_index_epoch": audit.index_source_epoch,
             "provenance_index_manifest": audit.index_manifest,
             "provenance_policy_release": audit.policy_release,
             "provenance_policy_digest": audit.policy_digest,
-            **(
-                {"provenance_seen_challenges": audit.seen_challenges}
-                if audit.seen_challenges is not None
-                else {}
-            ),
         })
         if getattr(audit, "assurance", "receipts_only") != "full":
             raise wire.VectorError(
@@ -513,6 +577,7 @@ def _run_provenance_stage(
         state=_read_state(state_file),
         state_file=state_file,
         current_block=current_block,
+        chain_hotkeys=chain_hotkeys,
     )
     if not submitted:
         _get_events(args).event(
@@ -1126,6 +1191,24 @@ def _bt_wallet(bt):
     return getattr(bt, "wallet", None) or bt.Wallet
 
 
+def _block_hash_lookup(network: str):
+    """A callable resolving a historical block number to its hash via the
+    validator's own subtensor connection (independent of Cathedral)."""
+
+    def lookup(block: int):
+        try:
+            with _isolated_argv():
+                import bittensor as bt
+
+                return _bt_subtensor(bt)(
+                    network=connection_target(network)
+                ).get_block_hash(block)
+        except Exception:  # noqa: BLE001 - unavailable lookup is None, not a pass
+            return None
+
+    return lookup
+
+
 def _metagraph_snapshot(
     *, network: str, netuid: int
 ) -> tuple[dict[str, int], int | None]:
@@ -1227,8 +1310,11 @@ def tick(args) -> bool:
                 wallet_hotkey=args.wallet_hotkey,
             )
             hk2uid = preflight.hotkey_to_uid
+            tick_block = preflight.block
         else:
-            hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
+            hk2uid, tick_block = _metagraph_snapshot(
+                network=args.network, netuid=args.netuid
+            )
     try:
         uid_weights = vector_to_uid_weights(
             payload, hk2uid, require_policy=getattr(args, "require_policy", None))
@@ -1246,7 +1332,15 @@ def tick(args) -> bool:
     provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
     submission_authority = "thin"
     if provenance_mode == "shadow":
-        _run_provenance_stage(args, payload, Path(args.state_file))
+        # ONE metagraph snapshot supplies the UID map, the finalized block,
+        # and the independent candidate-membership set for the audit.
+        _run_provenance_stage(
+            args,
+            payload,
+            Path(args.state_file),
+            current_block=None if args.offline else tick_block,
+            chain_hotkeys=None if args.offline else set(hk2uid),
+        )
 
     ordered = sorted(uid_weights.items())
     preview = ",".join(f"{uid}:{weight:.6f}" for uid, weight in ordered[:12])
@@ -1328,6 +1422,10 @@ def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
         comparison if comparison is not None else {},
         Path(args.state_file),
         current_block=current_block,
+        chain_hotkeys=None if args.offline else set(hk2uid),
+        block_hash_lookup=(
+            None if args.offline else _block_hash_lookup(args.network)
+        ),
     )
     if args.offline:
         hk2uid = {hotkey: index for index, hotkey in enumerate(sorted(recomputed))}
@@ -1403,10 +1501,13 @@ def run(args) -> int:
         ),
     )
     while True:
+        tick_ok = False
         try:
-            tick(args)
-        except Exception as e:  # noqa: BLE001 - intentional fail-closed/UTC-text semantics
-            print(f"tick failed: {e}")
+            tick_ok = tick(args)
+        except Exception as e:  # noqa: BLE001 - loop resilience; sanitized below
+            from .events import _neutralize
+
+            print(f"tick failed: {_neutralize(str(e))}")
             _get_events(args).event(
                 "TICK_FAILED",
                 stage="result",
@@ -1421,7 +1522,8 @@ def run(args) -> int:
             if args.once:
                 return 1
         if args.once:
-            return 0
+            # A tick that ran but did not succeed is a FAILED single run.
+            return 0 if tick_ok else 1
         time.sleep(args.interval_secs)
 
 

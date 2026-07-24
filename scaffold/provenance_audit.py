@@ -129,7 +129,6 @@ class ProvenanceAudit:
     index_source_epoch: int | None = None
     index_manifest: str | None = None
     policy_digest: str | None = None
-    seen_challenges: dict | None = None
     source_epoch: int | None = None
     report_id: str | None = None
     previous_report_id: str | None = None
@@ -210,10 +209,36 @@ def _fetcher(settings: ProvenanceSettings):
     host = parsed.hostname or ""
     if not host:
         raise ProvenanceAuditError("evidence URL has no host")
+    import queue as queue_module
+    import threading as threading_module
+
+    channel: queue_module.Queue = queue_module.Queue(maxsize=1)
+
+    def _resolve() -> None:
+        try:
+            channel.put(
+                (
+                    "ok",
+                    socket.getaddrinfo(
+                        host, parsed.port or 443, proto=socket.IPPROTO_TCP
+                    ),
+                )
+            )
+        except OSError as exc:
+            channel.put(("err", exc))
+
+    threading_module.Thread(target=_resolve, name="cathedral-dns", daemon=True).start()
     try:
-        infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
-    except OSError as exc:
-        raise ProvenanceAuditError(f"evidence host does not resolve: {host}") from exc
+        kind, value = channel.get(timeout=min(30.0, settings.audit_deadline_secs))
+    except queue_module.Empty:
+        raise ProvenanceAuditError(
+            f"DNS resolution for {host} exceeded the audit deadline"
+        ) from None
+    if kind == "err":
+        raise ProvenanceAuditError(
+            f"evidence host does not resolve: {host}"
+        ) from value
+    infos = value
     if not infos:
         raise ProvenanceAuditError(f"evidence host does not resolve: {host}")
     for info in infos:
@@ -337,6 +362,8 @@ def run_audit(
     vector_payload: Mapping[str, Any] | None,
     state: Mapping[str, Any],
     current_block: int | None = None,
+    chain_hotkeys: set[str] | None = None,
+    block_hash_lookup=None,
 ) -> ProvenanceAudit:
     """Run one full-provenance audit. Never raises; the status carries the verdict."""
     started = time.monotonic()
@@ -484,29 +511,6 @@ def run_audit(
             from pathlib import Path as _Path
 
             bindings = {row["hotkey"]: row for row in manifest["attestations"]}
-            # Cross-epoch evidence-reuse fence: a challenge commitment seen in
-            # an EARLIER epoch must never upgrade a later epoch to FULL. The
-            # durable state maps recently seen challenge digests to their
-            # source epoch (bounded, monotonic).
-            seen_challenges = dict(state.get("provenance_seen_challenges") or {})
-            manifest_epoch = int(manifest["source_epoch"])
-            manifest_challenges: set[str] = set()
-            for row in manifest["attestations"]:
-                challenge = row.get("challenge_digest")
-                if not challenge:
-                    continue
-                if challenge in manifest_challenges:
-                    raise ProvenanceAuditError(
-                        "manifest reuses one challenge commitment for two "
-                        "attestations"
-                    )
-                manifest_challenges.add(challenge)
-                recorded_epoch = seen_challenges.get(challenge)
-                if recorded_epoch is not None and int(recorded_epoch) != manifest_epoch:
-                    raise ProvenanceAuditError(
-                        f"challenge commitment reuse across epochs: seen in "
-                        f"epoch {recorded_epoch}, replayed in {manifest_epoch}"
-                    )
             envelopes: dict[str, bytes] = {}
             for miner in result.miners:
                 if not miner.receipt_verified:
@@ -543,11 +547,44 @@ def run_audit(
             all_rejected = bool(active) and all(
                 row["outcome"] == "rejected" for row in active
             )
+            candidate_snapshot = manifest["candidate_set"]
+            # Independent chain cross-checks: every committed candidate must
+            # be registered on the SN39 metagraph, and the anchored block
+            # hash must match the independently queried historical chain
+            # when a lookup is available.
+            if chain_hotkeys is not None:
+                foreign = {
+                    row["hotkey"]
+                    for row in candidate_snapshot["candidates"]
+                } - set(chain_hotkeys)
+                if foreign:
+                    raise ProvenanceAuditError(
+                        f"manifest candidates are not registered on the "
+                        f"independently fetched metagraph: {sorted(foreign)}"
+                    )
+            if block_hash_lookup is not None:
+                independent_hash = block_hash_lookup(
+                    int(candidate_snapshot["block"])
+                )
+                if independent_hash is not None and str(
+                    independent_hash
+                ).lower().removeprefix("0x") != str(
+                    candidate_snapshot["block_hash"]
+                ).lower().removeprefix("0x"):
+                    raise ProvenanceAuditError(
+                        "anchored block hash does not match the independently "
+                        "queried chain"
+                    )
             result = provenance.replay_positive_miners(
                 result,
                 candidates_all_rejected=all_rejected,
                 epoch_generated_at=manifest["generated_at"],
                 deadline_monotonic=audit_deadline,
+                challenge_anchor={
+                    "block_hash": candidate_snapshot["block_hash"],
+                    "network": network,
+                    "netuid": netuid,
+                },
                 registry=provenance.load_registry(
                     registry_bytes,
                     registry_keys,
@@ -563,22 +600,11 @@ def run_audit(
                 ),
             )
 
-        seen_update = None
-        if settings.controlled_dir:
-            merged = dict(seen_challenges)
-            for challenge in manifest_challenges:
-                merged[challenge] = manifest_epoch
-            if len(merged) > 512:
-                # Bounded: drop the oldest epochs first.
-                ordered = sorted(merged.items(), key=lambda kv: int(kv[1]))
-                merged = dict(ordered[-512:])
-            seen_update = merged
         audit = ProvenanceAudit(
             status="PASS",
             assurance=result.assurance_level,
             index_source_epoch=index_epoch,
             index_manifest=manifest_digest,
-            seen_challenges=seen_update,
             policy_digest=result.policy_digest,
             source_epoch=result.source_epoch,
             report_id=result.report_id,

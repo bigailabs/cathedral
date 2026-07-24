@@ -476,6 +476,9 @@ def real_evidence(tmp_path_factory):
     stage_indexes: dict[int, bytes] = {}
     recent_rows: list[dict] = []
 
+    ANCHOR_BLOCK = 100
+    ANCHOR_HASH = "0x" + "ab" * 32
+
     def build_stage(source_epoch: int, positive: bool, challenge_hex: str) -> None:
         epoch_id = ledger.begin_epoch(
             source_epoch,
@@ -506,7 +509,15 @@ def real_evidence(tmp_path_factory):
             )
             work_item_bytes = _sat_manifest_bytes(sat_item)
             result_bytes = _sat_result_bytes(sat_item, sat_certificate)
-            nonce = bytes([source_epoch]) * 32
+            from cathedral.challenge import derive_challenge_nonce
+
+            nonce = derive_challenge_nonce(
+                block_hash=ANCHOR_HASH,
+                network="finney",
+                netuid=39,
+                source_epoch=source_epoch,
+                miner_hotkey="tdx-miner",
+            )
             seed_evidence = Evidence(
                 kind=EvidenceKind.TDX,
                 quote=b"placeholder",
@@ -683,8 +694,11 @@ def real_evidence(tmp_path_factory):
             receipts=manifest_receipts,
             attestations=attestation_rows,
             candidate_set={
-                "source": "enrollment_registry",
-                "finalized_block": None,
+                "source": "sn39_metagraph",
+                "network": "finney",
+                "netuid": 39,
+                "block": ANCHOR_BLOCK,
+                "block_hash": ANCHOR_HASH,
                 "candidates": [
                     {
                         "hotkey": "tdx-miner",
@@ -1001,21 +1015,80 @@ def test_authority_submits_full_burn_on_proven_revocation(
 
 
 def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
-    """Defect-2 proof: the same envelope/challenge commitment seen in an
-    earlier epoch must never make a later epoch FULL."""
-    from cathedral.evidence import EvidenceStore
-
-    store_root, settings, stages = real_evidence
-    EvidenceStore(store_root).write_index(stages[13])
-    clean = _run_audit_replay(settings)
-    assert clean.status == "PASS" and clean.assurance == "full"
-    challenge = next(iter((clean.seen_challenges or {}).keys()))
-    reused = _run_audit_replay(
-        settings,
-        state={"provenance_seen_challenges": {challenge: 11}},
+    """Defect-5 proof: the challenge is DERIVED from the anchored block hash,
+    audience, epoch, and hotkey — a commitment from another epoch cannot
+    derive for this one, so stale envelopes fail cryptographically (no
+    forgetful replay cache involved)."""
+    from cathedral.challenge import expected_challenge_digest
+    from cathedral.provenance import (
+        ProvenanceError,
+        replay_positive_miners,
     )
-    assert reused.status == "FAIL"
-    assert "reuse across epochs" in reused.error
+
+    _store_root, _settings, _stages = real_evidence
+    epoch_11 = expected_challenge_digest(
+        block_hash="0x" + "ab" * 32,
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        miner_hotkey="tdx-miner",
+    )
+    epoch_13 = expected_challenge_digest(
+        block_hash="0x" + "ab" * 32,
+        network="finney",
+        netuid=39,
+        source_epoch=13,
+        miner_hotkey="tdx-miner",
+    )
+    assert epoch_11 != epoch_13  # every (epoch, hotkey) slot is distinct
+
+    import cathedral.provenance as provenance_module
+
+    class _Miner:
+        hotkey = "tdx-miner"
+        receipt_verified = True
+        measurement = "tdx-measurement-sha256:sample-v1"
+        issued_at = "2026-07-24T00:00:00.000000Z"
+        hardware_evidence_digest = "sha256:" + "0" * 64
+        work_verified = True
+
+    result = provenance_module.ProvenanceResult(
+        report_id="sha256:" + "1" * 64,
+        previous_report_id=None,
+        signing_key_id="score-test-1",
+        policy_release=1,
+        policy_digest="sha256:" + "2" * 64,
+        verifier_digest="sha256:" + "d" * 64,
+        mechanism_id="validated_supply_v1",
+        source_epoch=13,
+        generated_at="2026-07-24T00:00:00.000000Z",
+        valid_until="2026-07-24T01:00:00.000000Z",
+        miners=[_Miner()],
+        recomputed_hotkey_weights={"tdx-miner": 1.0},
+    )
+    with pytest.raises(ProvenanceError, match="does not derive"):
+        replay_positive_miners(
+            result,
+            registry=None,
+            envelopes_by_hotkey={},
+            attestation_bindings={
+                "tdx-miner": {
+                    "envelope_digest": "sha256:" + "3" * 64,
+                    "evidence_digest": "sha256:" + "4" * 64,
+                    "challenge_digest": epoch_11,  # stale epoch's commitment
+                }
+            },
+            verifier_binary=b"",
+            verifier_blob_digest="sha256:" + "5" * 64,
+            verifier_command=("/x",),
+            verifier_artifacts=("/x",),
+            epoch_generated_at="2026-07-24T00:00:00.000000Z",
+            challenge_anchor={
+                "block_hash": "0x" + "ab" * 32,
+                "network": "finney",
+                "netuid": 39,
+            },
+        )
 
 
 def test_authority_mode_refuses_private_host_bypass(tmp_path) -> None:
@@ -1037,3 +1110,104 @@ def test_authority_mode_refuses_private_host_bypass(tmp_path) -> None:
     )
     with pytest.raises(ProvenanceAuditError, match="testing-only"):
         settings.validate_for_audit()
+
+
+def test_fenced_state_two_thread_stale_and_equivocation(tmp_path) -> None:
+    """Defect-8 counterexample: the authority high-water check and the
+    reservation are ONE atomic flock transaction. Under real concurrent
+    threads, a writer holding a STALE view (older epoch) RAISES instead of
+    overwriting the newer reservation, and a same-epoch writer with a
+    DIFFERENT manifest RAISES equivocation."""
+    import threading
+
+    state_file = tmp_path / "validator-state.json"
+    reserved_12 = threading.Event()
+    outcomes: dict[str, object] = {}
+
+    def _writer(name, updates, wait_for=None, then_set=None):
+        try:
+            if wait_for is not None:
+                assert wait_for.wait(timeout=10)
+            validator_thin._write_state_fenced(state_file, updates)
+            outcomes[name] = "ok"
+        except BaseException as exc:  # noqa: BLE001 - the outcome IS the assertion
+            outcomes[name] = exc
+        finally:
+            if then_set is not None:
+                then_set.set()
+
+    fresh = threading.Thread(
+        target=_writer,
+        args=(
+            "fresh",
+            {
+                "provenance_index_epoch": 12,
+                "provenance_index_manifest": "sha256:" + "a" * 64,
+                "provenance_policy_release": 3,
+                "provenance_policy_digest": "sha256:" + "b" * 64,
+            },
+        ),
+        kwargs={"then_set": reserved_12},
+    )
+    stale = threading.Thread(
+        target=_writer,
+        args=(
+            "stale",
+            {
+                "provenance_index_epoch": 11,
+                "provenance_index_manifest": "sha256:" + "c" * 64,
+            },
+        ),
+        kwargs={"wait_for": reserved_12},
+    )
+    equivocator = threading.Thread(
+        target=_writer,
+        args=(
+            "equivocator",
+            {
+                "provenance_index_epoch": 12,
+                "provenance_index_manifest": "sha256:" + "e" * 64,
+            },
+        ),
+        kwargs={"wait_for": reserved_12},
+    )
+    for thread in (fresh, stale, equivocator):
+        thread.start()
+    for thread in (fresh, stale, equivocator):
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert outcomes["fresh"] == "ok"
+    assert isinstance(outcomes["stale"], ValueError)
+    assert "stale reservation" in str(outcomes["stale"])
+    assert isinstance(outcomes["equivocator"], ValueError)
+    assert "reservation equivocation" in str(outcomes["equivocator"])
+    final = validator_thin._read_state(state_file)
+    assert final["provenance_index_epoch"] == 12
+    assert final["provenance_index_manifest"] == "sha256:" + "a" * 64
+
+    # The policy line is fenced the same way ...
+    with pytest.raises(ValueError, match="policy release 2 <"):
+        validator_thin._write_state_fenced(
+            state_file,
+            {
+                "provenance_policy_release": 2,
+                "provenance_policy_digest": "sha256:" + "b" * 64,
+            },
+        )
+    with pytest.raises(ValueError, match="same release, different digest"):
+        validator_thin._write_state_fenced(
+            state_file,
+            {
+                "provenance_policy_release": 3,
+                "provenance_policy_digest": "sha256:" + "f" * 64,
+            },
+        )
+    # ... while re-reserving the SAME (epoch, manifest) stays idempotent.
+    validator_thin._write_state_fenced(
+        state_file,
+        {
+            "provenance_index_epoch": 12,
+            "provenance_index_manifest": "sha256:" + "a" * 64,
+        },
+    )
