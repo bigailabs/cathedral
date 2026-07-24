@@ -1510,3 +1510,162 @@ def test_audit_resolver_slot_pool_bounds_abandoned_lookups(monkeypatch) -> None:
             time.sleep(0.05)
     else:
         pytest.fail("resolver slots were never released after completion")
+
+
+# ---------------------------------------------------------------------------
+# Round-five: linearized authority tick (cross-process audit→reserve→submit)
+# ---------------------------------------------------------------------------
+
+def _authority_args(tmp_path: Path) -> SimpleNamespace:
+    args = _args(tmp_path, "authority")
+    args.offline = True
+    args.broadcast = False
+    args.wallet_name = "wallet"
+    args.wallet_hotkey = "hotkey"
+    args.provenance_burn_hotkey = "burn-hotkey"
+    return args
+
+
+def _epoch_audit(source_epoch: int, manifest_seed: str, report_seed: str):
+    return ProvenanceAudit(
+        status="PASS",
+        assurance="full",
+        index_source_epoch=source_epoch,
+        index_manifest="sha256:" + manifest_seed * 64,
+        policy_digest="sha256:" + "c" * 64,
+        source_epoch=source_epoch,
+        report_id="sha256:" + report_seed * 64,
+        policy_release=3,
+        recomputed={"tdx-miner": 1.0},
+    )
+
+
+def test_authority_tick_lock_forbids_newer_then_older_submission(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-five proof: the previously demonstrated interleaving — older
+    epoch reserves, newer reserves AND submits, older still submits last —
+    is impossible. The whole audit→reserve→submit sequence is ONE critical
+    section per state file: while the older tick is inside (held at its
+    submission point), the newer tick REFUSES before even auditing; run
+    sequentially afterwards, submissions land strictly oldest→newest, so
+    the newest submission is always last on-chain."""
+    import threading
+
+    audits = {"stale": _epoch_audit(11, "d", "e"), "fresh": _epoch_audit(12, "a", "b")}
+    audit_calls: list[str] = []
+    submissions: list[str] = []
+    record_lock = threading.Lock()
+    stale_at_submission = threading.Event()
+    release_stale = threading.Event()
+
+    def fake_run_audit(settings, **_kw):
+        name = threading.current_thread().name
+        with record_lock:
+            audit_calls.append(name)
+        return audits[name]
+
+    def fake_set_weights(uid_weights, **_kw):
+        name = threading.current_thread().name
+        if name == "stale":
+            # Hold the critical section AT THE SUBMISSION POINT: the fence
+            # reservation already happened, the on-chain write has not.
+            stale_at_submission.set()
+            assert release_stale.wait(10)
+        with record_lock:
+            submissions.append(name)
+        return True
+
+    monkeypatch.setattr(validator_thin, "run_audit", fake_run_audit)
+    monkeypatch.setattr(validator_thin, "set_weights_on_chain", fake_set_weights)
+
+    args = _authority_args(tmp_path)
+    state_file = Path(args.state_file)
+    outcomes: dict[str, object] = {}
+
+    def runner(name):
+        try:
+            outcomes[name] = validator_thin._authority_tick(args, None)
+        except BaseException as exc:  # noqa: BLE001 - the outcome IS the assertion
+            outcomes[name] = exc
+
+    stale = threading.Thread(target=runner, args=("stale",), name="stale")
+    stale.start()
+    assert stale_at_submission.wait(10)
+
+    # The newer tick arrives while the older one is mid-critical-section:
+    # it must refuse BEFORE auditing and BEFORE submitting anything.
+    fresh = threading.Thread(target=runner, args=("fresh",), name="fresh")
+    fresh.start()
+    fresh.join(timeout=10)
+    assert not fresh.is_alive()
+    assert isinstance(outcomes["fresh"], validator_thin.wire.VectorError)
+    assert "refusing before audit or submission" in str(outcomes["fresh"])
+    assert "fresh" not in audit_calls  # refused before the audit ran
+    assert submissions == []  # and before ANY submission happened
+
+    release_stale.set()
+    stale.join(timeout=10)
+    assert not stale.is_alive()
+    assert outcomes["stale"] is True
+    assert submissions == ["stale"]
+    assert json.loads(state_file.read_text())["provenance_last_source_epoch"] == 11
+
+    # Run the newer tick sequentially: submissions are strictly
+    # oldest→newest, so the NEWEST weights are last on-chain — the reviewed
+    # newer-then-older ordering cannot be produced.
+    outcomes.clear()
+    runner_thread = threading.Thread(target=runner, args=("fresh",), name="fresh")
+    runner_thread.start()
+    runner_thread.join(timeout=10)
+    assert outcomes["fresh"] is True
+    assert submissions == ["stale", "fresh"]
+    state = json.loads(state_file.read_text())
+    assert state["provenance_last_source_epoch"] == 12
+    assert state["provenance_index_manifest"] == "sha256:" + "a" * 64
+
+
+def test_authority_tick_lock_errors_refuse_before_submission(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-five: a broken lock (flock raising) refuses the tick before
+    any audit or on-chain submission — fail closed, never fail open."""
+    import fcntl
+    import threading
+
+    called = {"audit": 0, "submit": 0}
+
+    def fake_run_audit(settings, **_kw):
+        called["audit"] += 1
+        return _epoch_audit(12, "a", "b")
+
+    def fake_set_weights(uid_weights, **_kw):
+        called["submit"] += 1
+        return True
+
+    monkeypatch.setattr(validator_thin, "run_audit", fake_run_audit)
+    monkeypatch.setattr(validator_thin, "set_weights_on_chain", fake_set_weights)
+
+    def broken_flock(descriptor, flags):
+        raise OSError("lock storage failed")
+
+    monkeypatch.setattr(fcntl, "flock", broken_flock)
+    args = _authority_args(tmp_path)
+    with pytest.raises(
+        validator_thin.wire.VectorError, match="refusing before audit or submission"
+    ):
+        validator_thin._authority_tick(args, None)
+    assert called == {"audit": 0, "submit": 0}
+    assert threading.active_count() >= 1  # trivial liveness sanity
+
+
+def test_shadow_ticks_never_touch_the_authority_lock(tmp_path, monkeypatch) -> None:
+    """Round-five: thin/shadow concurrency is NOT weakened — the shadow
+    stage never creates or acquires the authority submission lock."""
+    _stub_audit(monkeypatch, ProvenanceAudit(status="PASS", source_epoch=5))
+    args = _args(tmp_path, "shadow")
+    state_file = tmp_path / "state.json"
+    status, _ = validator_thin._run_provenance_stage(args, {}, state_file)
+    _drain_shadow(args)
+    assert status == "PENDING"
+    assert not state_file.with_suffix(".authority.lock").exists()

@@ -1481,13 +1481,66 @@ def tick(args) -> bool:
     return ok
 
 
+@contextlib.contextmanager
+def _authority_tick_lock(state_file: Path):
+    """ONE linearized audit→reserve→submit critical section per state file.
+
+    The durable fence alone cannot order SUBMISSIONS: two concurrent
+    authority ticks could reserve in epoch order (11 then 12) yet submit in
+    the opposite order, leaving stale weights last on-chain while the state
+    file still reads 12. This cross-process flock closes that window: the
+    whole authority tick — chain snapshot, audit, fenced reservation, and
+    the on-chain submission — runs under one exclusive lock per state file.
+
+    FAIL CLOSED, non-blocking: a second concurrent authority tick REFUSES
+    before any audit or submission (single-flight; the next tick simply
+    runs later) instead of queueing stale work behind the holder, and any
+    lock error likewise refuses before submission. Thin and shadow ticks
+    never touch this lock — their concurrency is unchanged.
+    """
+    import fcntl
+
+    state_file = Path(state_file)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_file.with_suffix(".authority.lock")
+    try:
+        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise wire.VectorError(
+            f"authority submission lock unavailable ({exc}); refusing "
+            "before audit or submission"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise wire.VectorError(
+                "authority submission lock is unavailable or already held "
+                "for this state file; refusing before audit or submission "
+                "(linearized single-flight authority)"
+            ) from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
-    """Full-authority tick: audit the published evidence, recompute, and
+    """Full-authority tick, linearized: the entire audit→reserve→submit
+    sequence runs inside ONE cross-process critical section per state file,
+    so no interleaving of concurrent authority ticks can put stale weights
+    on-chain after newer ones."""
+    with _authority_tick_lock(Path(args.state_file)):
+        return _authority_tick_locked(args, payload)
+
+
+def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
+    """Full-authority tick body: audit the published evidence, recompute, and
     submit the independently derived UID vector (fixed mechanism burn to the
     configured destination). The signed Cathedral vector, when reachable and
     valid, is used for comparison inside the audit only — it is never
     UID-mapped and never a precondition. The chain snapshot is taken FIRST
-    so its finalized block anchors the report validity window."""
+    so its finalized block anchors the report validity window. Callers MUST
+    hold the authority tick lock (see _authority_tick)."""
     comparison = None
     if payload is not None:
         try:
