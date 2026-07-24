@@ -110,7 +110,7 @@ def _args(tmp_path: Path, mode: str) -> SimpleNamespace:
 def _stub_audit(monkeypatch, audit: ProvenanceAudit) -> list[dict]:
     calls: list[dict] = []
 
-    def fake_run_audit(settings, *, network, netuid, vector_payload, state):
+    def fake_run_audit(settings, *, network, netuid, vector_payload, state, **_kw):
         calls.append({"settings": settings, "state": dict(state)})
         return audit
 
@@ -153,7 +153,7 @@ def test_slow_shadow_audit_is_single_flight_and_cannot_delay_thin(
 
     release = threading_module.Event()
 
-    def slow_audit(settings, *, network, netuid, vector_payload, state):
+    def slow_audit(settings, *, network, netuid, vector_payload, state, **_kw):
         release.wait(10.0)
         return ProvenanceAudit(status="PASS", source_epoch=1, report_id="sha256:" + "a" * 64)
 
@@ -585,6 +585,8 @@ def real_evidence(tmp_path_factory):
                     if not evidence_digest.startswith("sha256:")
                     else evidence_digest,
                     "envelope_digest": envelope_digest,
+                    "challenge_digest": "sha256:"
+                    + hashlib.sha256(nonce).hexdigest(),
                     "disclosure": "controlled",
                 }
             )

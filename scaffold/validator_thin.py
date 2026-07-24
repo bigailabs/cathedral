@@ -337,7 +337,10 @@ class _ShadowAuditor:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
 
-    def submit(self, settings, *, network, netuid, payload, state, state_file) -> bool:
+    def submit(
+        self, settings, *, network, netuid, payload, state, state_file,
+        current_block=None,
+    ) -> bool:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False
@@ -349,6 +352,7 @@ class _ShadowAuditor:
                     netuid=netuid,
                     vector_payload=payload,
                     state=state,
+                    current_block=current_block,
                 )
                 with self._lock:
                     self._result = (audit, state_file)
@@ -441,7 +445,8 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
 
 
 def _run_provenance_stage(
-    args, payload: dict[str, Any], state_file: Path
+    args, payload: dict[str, Any], state_file: Path,
+    current_block: int | None = None,
 ) -> tuple[str, dict[str, float] | None]:
     """Provenance stage for this tick.
 
@@ -460,6 +465,7 @@ def _run_provenance_stage(
             netuid=args.netuid,
             vector_payload=payload,
             state=state,
+            current_block=current_block,
         )
         _log_audit_events(args, audit, state_file)
         if audit.status != "PASS":
@@ -485,6 +491,7 @@ def _run_provenance_stage(
         payload=dict(payload),
         state=_read_state(state_file),
         state_file=state_file,
+        current_block=current_block,
     )
     if not submitted:
         _get_events(args).event(
@@ -1098,6 +1105,24 @@ def _bt_wallet(bt):
     return getattr(bt, "wallet", None) or bt.Wallet
 
 
+def _metagraph_snapshot(
+    *, network: str, netuid: int
+) -> tuple[dict[str, int], int | None]:
+    """One fresh metagraph read returning the UID map AND the chain block
+    (the finalized-block anchor for report validity windows)."""
+    with _isolated_argv():
+        import bittensor as bt
+
+        mg = _bt_subtensor(bt)(network=connection_target(network)).metagraph(netuid)
+    mapping = {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
+    block_raw = getattr(mg, "block", None)
+    try:
+        block = int(block_raw) if block_raw is not None else None
+    except (TypeError, ValueError):
+        block = None
+    return mapping, block
+
+
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
     with _isolated_argv():
         import bittensor as bt  # import under blanked argv — bittensor parses
@@ -1242,7 +1267,8 @@ def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
     submit the independently derived UID vector (fixed mechanism burn to the
     configured destination). The signed Cathedral vector, when reachable and
     valid, is used for comparison inside the audit only — it is never
-    UID-mapped and never a precondition."""
+    UID-mapped and never a precondition. The chain snapshot is taken FIRST
+    so its finalized block anchors the report validity window."""
     comparison = None
     if payload is not None:
         try:
@@ -1254,14 +1280,12 @@ def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
             comparison = payload
         except Exception as exc:  # noqa: BLE001 - comparison-only input
             _lifecycle("FEED invalid", f"reason={type(exc).__name__}")
-    _, recomputed = _run_provenance_stage(
-        args, comparison if comparison is not None else {}, Path(args.state_file)
-    )
+
+    current_block: int | None = None
+    preflight = None
     if args.offline:
-        hk2uid = {hotkey: index for index, hotkey in enumerate(sorted(recomputed))}
-        hk2uid.setdefault(getattr(args, "provenance_burn_hotkey", None) or "", len(hk2uid))
         broadcast = False
-        preflight = None
+        hk2uid: dict[str, int] = {}
     else:
         broadcast = args.broadcast
         if broadcast:
@@ -1272,9 +1296,23 @@ def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
                 wallet_hotkey=args.wallet_hotkey,
             )
             hk2uid = preflight.hotkey_to_uid
+            current_block = preflight.block
         else:
-            preflight = None
-            hk2uid = metagraph_hotkey_to_uid(network=args.network, netuid=args.netuid)
+            hk2uid, current_block = _metagraph_snapshot(
+                network=args.network, netuid=args.netuid
+            )
+
+    _, recomputed = _run_provenance_stage(
+        args,
+        comparison if comparison is not None else {},
+        Path(args.state_file),
+        current_block=current_block,
+    )
+    if args.offline:
+        hk2uid = {hotkey: index for index, hotkey in enumerate(sorted(recomputed))}
+        hk2uid.setdefault(
+            getattr(args, "provenance_burn_hotkey", None) or "", len(hk2uid)
+        )
     uid_weights = _provenance_uid_weights(
         recomputed,
         mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
@@ -1287,7 +1325,7 @@ def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
     _lifecycle(
         "AUTHORITY provenance",
         f"independently derived vector ({len(recomputed)} verified miners) "
-        f"vector={preview}",
+        f"block={current_block} vector={preview}",
     )
     ok = set_weights_on_chain(
         uid_weights,
@@ -1303,7 +1341,8 @@ def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
         stage="submit",
         status=PASS if ok else FAIL,
         detail=(
-            f"authority=full_provenance uids={len(ordered)} vector={preview}"
+            f"authority=full_provenance uids={len(ordered)} "
+            f"block={current_block} vector={preview}"
         ),
     )
     return ok

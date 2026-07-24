@@ -72,6 +72,8 @@ class ProvenanceSettings:
     source_revision: str | None = None
     # Testing only: permit evidence hosts that resolve to private ranges.
     allow_private_hosts: bool = False
+    # One whole-audit wall-clock budget (DNS, connect, TLS, every blob).
+    audit_deadline_secs: float = 120.0
     index_max_age_secs: float = 3600.0
     # Fail closed on a registry published more than 24 hours ago. Freshness
     # is restored by same-policy reissues at higher releases, never by
@@ -190,8 +192,10 @@ def _fetcher(settings: ProvenanceSettings):
     base = (settings.evidence_url or "").rstrip("/")
     if not base.startswith("https://"):
         raise ProvenanceAuditError("evidence URL must be https")
+    import http.client
     import ipaddress
     import socket
+    import ssl
     import urllib.parse
 
     parsed = urllib.parse.urlsplit(base)
@@ -200,50 +204,73 @@ def _fetcher(settings: ProvenanceSettings):
     host = parsed.hostname or ""
     if not host:
         raise ProvenanceAuditError("evidence URL has no host")
-    if not settings.allow_private_hosts:
-        try:
-            infos = socket.getaddrinfo(
-                host, parsed.port or 443, proto=socket.IPPROTO_TCP
-            )
-        except OSError as exc:
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ProvenanceAuditError(f"evidence host does not resolve: {host}") from exc
+    if not infos:
+        raise ProvenanceAuditError(f"evidence host does not resolve: {host}")
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if not settings.allow_private_hosts and (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
             raise ProvenanceAuditError(
-                f"evidence host does not resolve: {host}"
-            ) from exc
-        for info in infos:
-            address = ipaddress.ip_address(info[4][0])
-            if (
-                address.is_private
-                or address.is_loopback
-                or address.is_link_local
-                or address.is_reserved
-                or address.is_multicast
-                or address.is_unspecified
-            ):
-                raise ProvenanceAuditError(
-                    f"evidence host resolves to a non-public address: {host}"
-                )
+                f"evidence host resolves to a non-public address: {host}"
+            )
+    peer_ip = infos[0][4][0]
+    peer_port = parsed.port or 443
+    base_path = parsed.path.rstrip("/")
 
     MAX_FETCH_BYTES = 4 * 1024 * 1024
+    # Whole-audit caps: one monotonic deadline plus aggregate byte and
+    # artifact limits shared by EVERY remote operation in this audit.
+    audit_deadline = time.monotonic() + settings.audit_deadline_secs
+    remaining = {"bytes": 64 * 1024 * 1024, "artifacts": 256}
 
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *arguments, **keywords):
-            raise ProvenanceAuditError("evidence fetches must not follow redirects")
+    def _check_budget() -> float:
+        seconds_left = audit_deadline - time.monotonic()
+        if seconds_left <= 0:
+            raise ProvenanceAuditError("audit exceeded its total deadline")
+        return seconds_left
 
-    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler())
+    class _PinnedConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            raw = socket.create_connection((peer_ip, peer_port), self.timeout)
+            self.sock = self._context.wrap_socket(raw, server_hostname=host)
 
     def fetch(path: str, timeout: float = 30.0) -> bytes:
-        request = urllib.request.Request(
-            base + path, headers={"User-Agent": "cathedral-two-mode-validator/1.0"}
+        remaining["artifacts"] -= 1
+        if remaining["artifacts"] < 0:
+            raise ProvenanceAuditError("audit exceeded its artifact cap")
+        timeout = min(timeout, _check_budget())
+        connection = _PinnedConnection(
+            host, peer_port, timeout=timeout, context=ssl.create_default_context()
         )
-        deadline = time.monotonic() + timeout
-        with opener.open(request, timeout=timeout) as response:
+        try:
+            connection.request(
+                "GET",
+                base_path + path,
+                headers={
+                    "Host": host,
+                    "User-Agent": "cathedral-two-mode-validator/1.0",
+                },
+            )
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ProvenanceAuditError(
+                    f"evidence fetch failed with status {response.status} "
+                    "(redirects are never followed)"
+                )
             chunks: list[bytes] = []
             received = 0
             while True:
-                if time.monotonic() > deadline:
-                    raise ProvenanceAuditError(
-                        "evidence fetch exceeded the total deadline"
-                    )
+                _check_budget()
                 chunk = response.read(min(65536, MAX_FETCH_BYTES + 1 - received))
                 if not chunk:
                     break
@@ -252,8 +279,15 @@ def _fetcher(settings: ProvenanceSettings):
                     raise ProvenanceAuditError(
                         "evidence response exceeds the bounded limit"
                     )
+                remaining["bytes"] -= len(chunk)
+                if remaining["bytes"] < 0:
+                    raise ProvenanceAuditError(
+                        "audit exceeded its aggregate byte cap"
+                    )
                 chunks.append(chunk)
-        return b"".join(chunks)
+            return b"".join(chunks)
+        finally:
+            connection.close()
 
     def load_index() -> bytes:
         return fetch("/index.json")
@@ -296,6 +330,7 @@ def run_audit(
     netuid: int,
     vector_payload: Mapping[str, Any] | None,
     state: Mapping[str, Any],
+    current_block: int | None = None,
 ) -> ProvenanceAudit:
     """Run one full-provenance audit. Never raises; the status carries the verdict."""
     started = time.monotonic()
@@ -402,6 +437,7 @@ def run_audit(
             mechanism_id=settings.mechanism,
             registry_max_age_seconds=settings.registry_max_age_secs,
             candidate_set=manifest["candidate_set"],
+            current_block=current_block,
         )
         # Report predecessor continuity is ALWAYS enforced across audits:
         # a new export must chain from the last audited report.
@@ -472,6 +508,7 @@ def run_audit(
             result = provenance.replay_positive_miners(
                 result,
                 candidates_all_rejected=all_rejected,
+                epoch_generated_at=manifest["generated_at"],
                 registry=provenance.load_registry(
                     registry_bytes,
                     registry_keys,
