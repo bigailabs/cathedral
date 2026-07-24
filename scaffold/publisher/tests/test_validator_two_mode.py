@@ -21,6 +21,7 @@ from scaffold.provenance_audit import (
     ProvenanceAudit,
     ProvenanceAuditError,
     ProvenanceSettings,
+    ProvenanceUnavailable,
     check_chain_state,
     run_audit,
 )
@@ -1377,6 +1378,30 @@ def test_full_audit_is_not_proven_when_history_is_unavailable(real_evidence) -> 
     assert "malformed" in malformed.error
 
 
+def test_full_audit_bounds_a_hung_historical_chain_client(real_evidence) -> None:
+    import threading
+    from dataclasses import replace
+
+    _store_root, settings, _stages = real_evidence
+    release = threading.Event()
+
+    def hung_history(_block):
+        release.wait(10)
+        return {"tdx-miner"}
+
+    started = time.monotonic()
+    try:
+        audit = _run_audit_replay(
+            replace(settings, audit_deadline_secs=0.5),
+            historical_hotkeys_lookup=hung_history,
+        )
+    finally:
+        release.set()
+    assert audit.status == "NOT_PROVEN"
+    assert "historical metagraph lookup exceeded the audit deadline" in audit.error
+    assert time.monotonic() - started < 1.5
+
+
 def test_full_audit_is_not_proven_without_the_block_hash(real_evidence) -> None:
     _store_root, settings, _stages = real_evidence
     audit = _run_audit_replay(settings, block_hash_lookup=lambda block: None)
@@ -1567,6 +1592,82 @@ def test_audit_resolver_slot_pool_bounds_abandoned_lookups(monkeypatch) -> None:
             time.sleep(0.05)
     else:
         pytest.fail("resolver slots were never released after completion")
+
+
+def test_chain_lookup_obeys_audit_deadline_and_bounds_abandoned_clients(
+    monkeypatch,
+) -> None:
+    import threading
+    import time
+
+    monkeypatch.setattr(provenance_audit, "_CHAIN_LOOKUP_SLOTS", None)
+    release = threading.Event()
+
+    initialization_barrier = threading.Barrier(12)
+    initialized_slots: list[object] = []
+    initialized_lock = threading.Lock()
+
+    def initialize_concurrently() -> None:
+        initialization_barrier.wait()
+        candidate = provenance_audit._chain_lookup_slots()
+        with initialized_lock:
+            initialized_slots.append(candidate)
+
+    initializers = [threading.Thread(target=initialize_concurrently) for _ in range(12)]
+    for initializer in initializers:
+        initializer.start()
+    for initializer in initializers:
+        initializer.join(timeout=2)
+    assert all(not initializer.is_alive() for initializer in initializers)
+    assert len(initialized_slots) == 12
+    assert len({id(candidate) for candidate in initialized_slots}) == 1
+
+    def hung_lookup(_block):
+        release.wait(10)
+        return {"tdx-miner"}
+
+    baseline_threads = threading.active_count()
+    try:
+        for _ in range(provenance_audit.CHAIN_LOOKUP_SLOT_CAP):
+            started = time.monotonic()
+            with pytest.raises(ProvenanceUnavailable, match="audit deadline"):
+                provenance_audit._chain_lookup_bounded(
+                    hung_lookup,
+                    100,
+                    time.monotonic() + 0.01,
+                    "historical metagraph lookup",
+                )
+            assert time.monotonic() - started < 0.5
+
+        started = time.monotonic()
+        with pytest.raises(ProvenanceUnavailable, match="capacity is exhausted"):
+            provenance_audit._chain_lookup_bounded(
+                hung_lookup,
+                100,
+                time.monotonic() + 0.01,
+                "historical metagraph lookup",
+            )
+        assert time.monotonic() - started < 0.5
+        assert threading.active_count() <= (
+            baseline_threads + provenance_audit.CHAIN_LOOKUP_SLOT_CAP + 1
+        )
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            assert provenance_audit._chain_lookup_bounded(
+                lambda block: {str(block)},
+                100,
+                time.monotonic() + 1,
+                "historical metagraph lookup",
+            ) == {"100"}
+            break
+        except ProvenanceUnavailable:
+            time.sleep(0.05)
+    else:
+        pytest.fail("chain lookup slots were never released after completion")
 
 
 # ---------------------------------------------------------------------------

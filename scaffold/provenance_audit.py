@@ -25,6 +25,7 @@ import binascii
 import hashlib
 import json
 import re
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -77,7 +78,8 @@ class ProvenanceSettings:
     source_revision: str | None = None
     # Testing only: permit evidence hosts that resolve to private ranges.
     allow_private_hosts: bool = False
-    # One whole-audit wall-clock budget (DNS, connect, TLS, every blob).
+    # One whole-audit wall-clock budget (DNS, transport, every blob, archive
+    # lookups, and controlled-evidence replay).
     audit_deadline_secs: float = 120.0
     index_max_age_secs: float = 3600.0
     # Fail closed on a registry published more than 24 hours ago. Freshness
@@ -186,6 +188,9 @@ def _load_pubkeys(path: str, pinned_digest: str | None, label: str) -> dict[str,
 RESOLVER_SLOT_CAP = 16
 _RESOLVER_SLOTS = None
 _RESOLVER_SLOTS_GUARD = None
+CHAIN_LOOKUP_SLOT_CAP = 2
+_CHAIN_LOOKUP_SLOTS = threading.BoundedSemaphore(CHAIN_LOOKUP_SLOT_CAP)
+_CHAIN_LOOKUP_SLOTS_GUARD = threading.Lock()
 
 
 def _resolver_slots():
@@ -246,6 +251,78 @@ def _getaddrinfo_bounded(host: str, port: int, timeout: float) -> list:
         ) from None
     if kind == "err":
         raise ProvenanceAuditError(f"evidence host does not resolve: {host}") from value
+    return value
+
+
+def _chain_lookup_slots():
+    """Bound abandoned archive-node lookup threads process-wide."""
+    global _CHAIN_LOOKUP_SLOTS
+    import threading as threading_module
+
+    with _CHAIN_LOOKUP_SLOTS_GUARD:
+        if _CHAIN_LOOKUP_SLOTS is None:
+            _CHAIN_LOOKUP_SLOTS = threading_module.BoundedSemaphore(
+                CHAIN_LOOKUP_SLOT_CAP
+            )
+    return _CHAIN_LOOKUP_SLOTS
+
+
+def _chain_lookup_bounded(callback, block: int, deadline: float, label: str):
+    """Run an operator-supplied historical-chain lookup under the audit's
+    one wall-clock deadline.
+
+    Some substrate clients do not expose a reliable request timeout. A daemon
+    thread keeps thin authority non-blocking, while a process-wide bounded
+    slot pool prevents an unavailable archive node from creating unbounded
+    abandoned clients across repeated shadow audits.
+    """
+    import queue as queue_module
+    import threading as threading_module
+
+    remaining = deadline - time.monotonic()
+    remediation = "restore bounded archive-node access and re-run the provenance audit"
+    if remaining <= 0:
+        raise ProvenanceUnavailable(
+            f"{label} could not start before the audit deadline", remediation
+        )
+    slots = _chain_lookup_slots()
+    if not slots.acquire(timeout=max(0.0, min(remaining, 1.0))):
+        raise ProvenanceUnavailable(
+            f"{label} capacity is exhausted by prior timed-out lookups",
+            remediation,
+        )
+    channel: queue_module.Queue = queue_module.Queue(maxsize=1)
+
+    def _lookup() -> None:
+        try:
+            try:
+                channel.put(("ok", callback(block)))
+            except Exception as exc:  # noqa: BLE001 - re-raised on audit thread
+                channel.put(("err", exc))
+        finally:
+            slots.release()
+
+    try:
+        threading_module.Thread(
+            target=_lookup,
+            name="cathedral-chain-lookup",
+            daemon=True,
+        ).start()
+    except BaseException:
+        slots.release()
+        raise
+    try:
+        kind, value = channel.get(timeout=max(0.0, deadline - time.monotonic()))
+    except queue_module.Empty:
+        raise ProvenanceUnavailable(
+            f"{label} exceeded the audit deadline", remediation
+        ) from None
+    if time.monotonic() > deadline:
+        raise ProvenanceUnavailable(
+            f"{label} completed after the audit deadline", remediation
+        )
+    if kind == "err":
+        raise value
     return value
 
 
@@ -821,7 +898,14 @@ def run_audit(
                 )
             anchored_block = int(candidate_snapshot["block"])
             try:
-                independent_hash = block_hash_lookup(anchored_block)
+                independent_hash = _chain_lookup_bounded(
+                    block_hash_lookup,
+                    anchored_block,
+                    audit_deadline,
+                    "finalized block hash lookup",
+                )
+            except ProvenanceUnavailable:
+                raise
             except Exception as exc:
                 raise ProvenanceUnavailable(
                     f"finalized block hash lookup failed for block {anchored_block}",
@@ -840,7 +924,14 @@ def run_audit(
                     "anchored block hash does not match the independently queried chain"
                 )
             try:
-                historical = historical_hotkeys_lookup(anchored_block)
+                historical = _chain_lookup_bounded(
+                    historical_hotkeys_lookup,
+                    anchored_block,
+                    audit_deadline,
+                    "historical metagraph lookup",
+                )
+            except ProvenanceUnavailable:
+                raise
             except Exception as exc:
                 raise ProvenanceUnavailable(
                     f"historical metagraph lookup failed for block {anchored_block}",
