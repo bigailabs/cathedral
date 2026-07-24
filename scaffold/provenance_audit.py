@@ -362,7 +362,7 @@ def run_audit(
     vector_payload: Mapping[str, Any] | None,
     state: Mapping[str, Any],
     current_block: int | None = None,
-    chain_hotkeys: set[str] | None = None,
+    historical_hotkeys_lookup=None,
     block_hash_lookup=None,
 ) -> ProvenanceAudit:
     """Run one full-provenance audit. Never raises; the status carries the verdict."""
@@ -548,33 +548,80 @@ def run_audit(
                 row["outcome"] == "rejected" for row in active
             )
             candidate_snapshot = manifest["candidate_set"]
-            # Independent chain cross-checks: every committed candidate must
-            # be registered on the SN39 metagraph, and the anchored block
-            # hash must match the independently queried historical chain
-            # when a lookup is available.
-            if chain_hotkeys is not None:
-                foreign = {
-                    row["hotkey"]
-                    for row in candidate_snapshot["candidates"]
-                } - set(chain_hotkeys)
-                if foreign:
-                    raise ProvenanceAuditError(
-                        f"manifest candidates are not registered on the "
-                        f"independently fetched metagraph: {sorted(foreign)}"
-                    )
-            if block_hash_lookup is not None:
-                independent_hash = block_hash_lookup(
-                    int(candidate_snapshot["block"])
+            # Independent HISTORICAL chain cross-checks (defect 1): full
+            # assurance requires the manifest's candidate set to EXACTLY
+            # equal the SN39 metagraph AT candidate_set.block, and the
+            # anchored hash to equal get_block_hash(block). The current
+            # metagraph proves nothing about the anchored epoch; a subset
+            # check would still admit omission. Unavailable or malformed
+            # history is NOT_PROVEN — never a silent pass.
+            if historical_hotkeys_lookup is None or block_hash_lookup is None:
+                raise ProvenanceUnavailable(
+                    "historical chain lookups are unavailable for full "
+                    "assurance",
+                    "provide chain access so the anchored block hash and the "
+                    "historical metagraph at candidate_set.block can be "
+                    "independently verified",
                 )
-                if independent_hash is not None and str(
-                    independent_hash
-                ).lower().removeprefix("0x") != str(
-                    candidate_snapshot["block_hash"]
-                ).lower().removeprefix("0x"):
-                    raise ProvenanceAuditError(
-                        "anchored block hash does not match the independently "
-                        "queried chain"
-                    )
+            anchored_block = int(candidate_snapshot["block"])
+            try:
+                independent_hash = block_hash_lookup(anchored_block)
+            except Exception as exc:
+                raise ProvenanceUnavailable(
+                    f"finalized block hash lookup failed for block "
+                    f"{anchored_block}",
+                    "restore archive-node access and re-run the audit",
+                ) from exc
+            if independent_hash is None:
+                raise ProvenanceUnavailable(
+                    f"the finalized hash of anchored block {anchored_block} "
+                    "is unavailable",
+                    "restore archive-node access and re-run the audit",
+                )
+            if str(independent_hash).lower().removeprefix("0x") != str(
+                candidate_snapshot["block_hash"]
+            ).lower().removeprefix("0x"):
+                raise ProvenanceAuditError(
+                    "anchored block hash does not match the independently "
+                    "queried chain"
+                )
+            try:
+                historical = historical_hotkeys_lookup(anchored_block)
+            except Exception as exc:
+                raise ProvenanceUnavailable(
+                    f"historical metagraph lookup failed for block "
+                    f"{anchored_block}",
+                    "restore archive-node access and re-run the audit",
+                ) from exc
+            if historical is None:
+                raise ProvenanceUnavailable(
+                    f"the historical metagraph at block {anchored_block} is "
+                    "unavailable",
+                    "restore archive-node access and re-run the audit",
+                )
+            historical_set = {str(h) for h in historical}
+            if not historical_set or any(not h for h in historical_set):
+                raise ProvenanceUnavailable(
+                    "the historical metagraph lookup returned malformed "
+                    "hotkeys",
+                    "restore archive-node access and re-run the audit",
+                )
+            manifest_set = {
+                str(row["hotkey"]) for row in candidate_snapshot["candidates"]
+            }
+            extra = manifest_set - historical_set
+            if extra:
+                raise ProvenanceAuditError(
+                    "manifest carries candidates not registered on the "
+                    f"historical metagraph at block {anchored_block}: "
+                    f"{sorted(extra)}"
+                )
+            omitted = historical_set - manifest_set
+            if omitted:
+                raise ProvenanceAuditError(
+                    "manifest omits candidates registered on the historical "
+                    f"metagraph at block {anchored_block}: {sorted(omitted)}"
+                )
             result = provenance.replay_positive_miners(
                 result,
                 candidates_all_rejected=all_rejected,

@@ -484,6 +484,10 @@ def real_evidence(tmp_path_factory):
             source_epoch,
             policy_registry_release=snapshot.release,
             policy_registry_digest=snapshot.digest,
+            network="finney",
+            netuid=39,
+            challenge_anchor_block=ANCHOR_BLOCK,
+            challenge_anchor_hash=ANCHOR_HASH,
         )
         attestation_rows = []
         receipts = []
@@ -658,6 +662,14 @@ def real_evidence(tmp_path_factory):
             valid_from_block=1,
             valid_until_block=10_000_000_000,
             verifier_digest=verifier_digest,
+            candidate_snapshot={
+                "schema": "cathedral_candidate_snapshot_v1",
+                "network": "finney",
+                "netuid": 39,
+                "block": ANCHOR_BLOCK,
+                "block_hash": ANCHOR_HASH,
+                "hotkeys": ["tdx-miner"],
+            },
         )
         report = json.loads(report_bytes)
         ledger.mark_published(epoch_id)
@@ -764,7 +776,26 @@ def real_evidence(tmp_path_factory):
 
 
 
-def _run_audit_replay(settings, *, state=None, vector=None, network="finney", netuid=39):
+def _historical_lookup(block: int):
+    """Fixture chain history: the anchored block resolves to exactly the
+    fixture miner; any other block is unknown history."""
+    return {"tdx-miner"} if block == 100 else None
+
+
+def _block_hash(block: int):
+    return ("0x" + "ab" * 32) if block == 100 else None
+
+
+def _run_audit_replay(
+    settings,
+    *,
+    state=None,
+    vector=None,
+    network="finney",
+    netuid=39,
+    historical_hotkeys_lookup=_historical_lookup,
+    block_hash_lookup=_block_hash,
+):
     """Real full-path audit. ONLY the static-ELF verifier-bytes
     authentication is stubbed (it has its own adversarial matrix and cannot
     pass for a script on this host); envelope digests, canonical strict
@@ -777,6 +808,8 @@ def _run_audit_replay(settings, *, state=None, vector=None, network="finney", ne
             netuid=netuid,
             vector_payload=vector,
             state=state or {},
+            historical_hotkeys_lookup=historical_hotkeys_lookup,
+            block_hash_lookup=block_hash_lookup,
         )
 
 
@@ -1211,3 +1244,224 @@ def test_fenced_state_two_thread_stale_and_equivocation(tmp_path) -> None:
             "provenance_index_manifest": "sha256:" + "a" * 64,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-four defect 1: EXACT historical-metagraph equality
+# ---------------------------------------------------------------------------
+
+def test_full_audit_fails_on_omitted_historical_candidate(real_evidence) -> None:
+    """A hotkey registered at the anchored block but missing from the
+    manifest candidate set is an omission — FAIL, not a subset pass."""
+    _store_root, settings, _stages = real_evidence
+    audit = _run_audit_replay(
+        settings,
+        historical_hotkeys_lookup=lambda block: {"tdx-miner", "omitted-miner"},
+    )
+    assert audit.status == "FAIL"
+    assert "manifest omits candidates" in audit.error
+    assert "omitted-miner" in audit.error
+
+
+def test_full_audit_fails_on_extra_manifest_candidate(real_evidence) -> None:
+    """A manifest candidate that was NOT registered at the anchored block is
+    fabricated membership — FAIL."""
+    _store_root, settings, _stages = real_evidence
+    audit = _run_audit_replay(
+        settings,
+        historical_hotkeys_lookup=lambda block: {"someone-else"},
+    )
+    assert audit.status == "FAIL"
+    assert "not registered on the historical metagraph" in audit.error
+    assert "tdx-miner" in audit.error
+
+
+def test_full_audit_ignores_current_membership_drift(real_evidence) -> None:
+    """The CURRENT metagraph is deliberately not an input to the audit: a
+    miner deregistered today still audits cleanly against the HISTORICAL
+    set at the anchored block. Only history proves the epoch."""
+    _store_root, settings, _stages = real_evidence
+    vector = None
+    audit = _run_audit_replay(
+        settings,
+        vector=vector,
+        # Simulated drift: today's chain no longer contains tdx-miner, but
+        # the anchored-block history does — and history is what counts.
+        historical_hotkeys_lookup=lambda block: {"tdx-miner"},
+    )
+    assert audit.status == "PASS"
+    assert audit.assurance == "full"
+
+
+def test_full_audit_is_not_proven_without_historical_lookups(real_evidence) -> None:
+    _store_root, settings, _stages = real_evidence
+    audit = _run_audit_replay(
+        settings, historical_hotkeys_lookup=None, block_hash_lookup=None
+    )
+    assert audit.status == "NOT_PROVEN"
+    assert "historical chain lookups are unavailable" in audit.error
+
+
+def test_full_audit_is_not_proven_when_history_is_unavailable(real_evidence) -> None:
+    _store_root, settings, _stages = real_evidence
+    unavailable = _run_audit_replay(
+        settings, historical_hotkeys_lookup=lambda block: None
+    )
+    assert unavailable.status == "NOT_PROVEN"
+    assert "historical metagraph" in unavailable.error
+
+    def broken(block):
+        raise RuntimeError("archive node down")
+
+    raising = _run_audit_replay(settings, historical_hotkeys_lookup=broken)
+    assert raising.status == "NOT_PROVEN"
+    assert "historical metagraph lookup failed" in raising.error
+
+    malformed = _run_audit_replay(
+        settings, historical_hotkeys_lookup=lambda block: set()
+    )
+    assert malformed.status == "NOT_PROVEN"
+    assert "malformed" in malformed.error
+
+
+def test_full_audit_is_not_proven_without_the_block_hash(real_evidence) -> None:
+    _store_root, settings, _stages = real_evidence
+    audit = _run_audit_replay(settings, block_hash_lookup=lambda block: None)
+    assert audit.status == "NOT_PROVEN"
+    assert "unavailable" in audit.error
+
+    mismatched = _run_audit_replay(
+        settings, block_hash_lookup=lambda block: "0x" + "cd" * 32
+    )
+    assert mismatched.status == "FAIL"
+    assert "does not match the independently queried chain" in mismatched.error
+
+
+# ---------------------------------------------------------------------------
+# Round-four defect 2: authority reserves under the fence BEFORE any PASS
+# ---------------------------------------------------------------------------
+
+def test_authority_reserves_before_pass_and_stale_auditor_cannot_pass(
+    tmp_path, monkeypatch
+) -> None:
+    """Two threads audit from the SAME stale state; the newer reservation
+    lands first. The stale/equivocating thread must raise WITHOUT emitting
+    PASS and WITHOUT overwriting the newer reservation — and the fresh
+    thread's fenced reservation is ordered strictly BEFORE its PASS event."""
+    import threading
+
+    timeline: list[tuple[str, str]] = []
+    timeline_lock = threading.Lock()
+
+    class _Recorder:
+        def event(self, name, **_kw):
+            with timeline_lock:
+                timeline.append((threading.current_thread().name, name))
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda args: _Recorder())
+
+    audits = {
+        "fresh": ProvenanceAudit(
+            status="PASS",
+            assurance="full",
+            index_source_epoch=12,
+            index_manifest="sha256:" + "a" * 64,
+            policy_digest="sha256:" + "c" * 64,
+            source_epoch=12,
+            report_id="sha256:" + "b" * 64,
+            policy_release=3,
+            recomputed={"tdx-miner": 1.0},
+        ),
+        "stale": ProvenanceAudit(
+            status="PASS",
+            assurance="full",
+            index_source_epoch=11,
+            index_manifest="sha256:" + "d" * 64,
+            policy_digest="sha256:" + "c" * 64,
+            source_epoch=11,
+            report_id="sha256:" + "e" * 64,
+            policy_release=3,
+            recomputed={"tdx-miner": 1.0},
+        ),
+    }
+
+    def fake_run_audit(settings, **_kw):
+        return audits[threading.current_thread().name]
+
+    monkeypatch.setattr(validator_thin, "run_audit", fake_run_audit)
+    real_fenced = validator_thin._write_state_fenced
+
+    def traced_fenced(state_file, updates):
+        with timeline_lock:
+            timeline.append((threading.current_thread().name, "__FENCED_RESERVE__"))
+        return real_fenced(state_file, updates)
+
+    monkeypatch.setattr(validator_thin, "_write_state_fenced", traced_fenced)
+
+    args = _args(tmp_path, "authority")
+    state_file = tmp_path / "state.json"
+    fresh_finished = threading.Event()
+    outcomes: dict[str, object] = {}
+
+    def runner(name, wait_for=None, then_set=None):
+        try:
+            if wait_for is not None:
+                assert wait_for.wait(10)
+            outcomes[name] = validator_thin._run_provenance_stage(
+                args, {}, state_file
+            )
+        except BaseException as exc:  # noqa: BLE001 - the outcome IS the assertion
+            outcomes[name] = exc
+        finally:
+            if then_set is not None:
+                then_set.set()
+
+    fresh = threading.Thread(
+        target=runner, args=("fresh",), kwargs={"then_set": fresh_finished},
+        name="fresh",
+    )
+    stale = threading.Thread(
+        target=runner, args=("stale",), kwargs={"wait_for": fresh_finished},
+        name="stale",
+    )
+    fresh.start()
+    stale.start()
+    for thread in (fresh, stale):
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    # Fresh: reserved first, PASS second — never the other way around.
+    assert outcomes["fresh"] == ("PASS", {"tdx-miner": 1.0})
+    fresh_events = [name for who, name in timeline if who == "fresh"]
+    assert fresh_events.index("__FENCED_RESERVE__") < fresh_events.index(
+        "PROVENANCE_AUDIT_PASS"
+    )
+
+    # Stale: raises, emits NO PASS, and reports the refused reservation.
+    assert isinstance(outcomes["stale"], validator_thin.wire.VectorError)
+    assert "reservation refused" in str(outcomes["stale"])
+    stale_events = [name for who, name in timeline if who == "stale"]
+    assert "PROVENANCE_AUDIT_PASS" not in stale_events
+    assert "PROVENANCE_RESERVATION_REFUSED" in stale_events
+
+    # The newer reservation survives on disk.
+    state = json.loads(state_file.read_text())
+    assert state["provenance_index_epoch"] == 12
+    assert state["provenance_index_manifest"] == "sha256:" + "a" * 64
+    assert state["provenance_last_source_epoch"] == 12
+    assert state["provenance_last_report_id"] == "sha256:" + "b" * 64
+
+
+def test_fenced_state_pins_the_chain_identity(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    validator_thin._write_state_fenced(
+        state_file, {"provenance_network": "finney", "provenance_netuid": 39}
+    )
+    with pytest.raises(ValueError, match="chain-identity mismatch"):
+        validator_thin._write_state_fenced(
+            state_file, {"provenance_network": "test", "provenance_netuid": 39}
+        )
+    with pytest.raises(ValueError, match="chain-identity mismatch"):
+        validator_thin._write_state_fenced(
+            state_file, {"provenance_network": "finney", "provenance_netuid": 40}
+        )

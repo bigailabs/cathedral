@@ -188,6 +188,31 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
                 raise ValueError(
                     "reservation equivocation: same release, different digest"
                 )
+        new_source = updates.get("provenance_last_source_epoch")
+        stored_source = current.get("provenance_last_source_epoch")
+        if isinstance(new_source, int) and isinstance(stored_source, int):
+            if new_source < stored_source:
+                raise ValueError(
+                    f"stale reservation: source epoch {new_source} < reserved "
+                    f"{stored_source}"
+                )
+            if new_source == stored_source and current.get(
+                "provenance_last_report_id"
+            ) != updates.get("provenance_last_report_id"):
+                raise ValueError(
+                    "reservation equivocation: same source epoch, different "
+                    "report"
+                )
+        for key in ("provenance_network", "provenance_netuid"):
+            if (
+                key in updates
+                and key in current
+                and updates[key] != current[key]
+            ):
+                raise ValueError(
+                    f"reservation chain-identity mismatch: {key} "
+                    f"{updates[key]!r} != reserved {current[key]!r}"
+                )
         document = dict(current)
         document.update(updates)
         tmp = state_file.with_suffix(".tmp")
@@ -407,7 +432,8 @@ class _ShadowAuditor:
 
     def submit(
         self, settings, *, network, netuid, payload, state, state_file,
-        current_block=None, chain_hotkeys=None,
+        current_block=None, historical_hotkeys_lookup=None,
+        block_hash_lookup=None,
     ) -> bool:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -421,7 +447,8 @@ class _ShadowAuditor:
                     vector_payload=payload,
                     state=state,
                     current_block=current_block,
-                    chain_hotkeys=chain_hotkeys,
+                    historical_hotkeys_lookup=historical_hotkeys_lookup,
+                    block_hash_lookup=block_hash_lookup,
                 )
                 with self._lock:
                     self._result = (audit, state_file)
@@ -451,8 +478,12 @@ def _get_shadow_auditor(args) -> _ShadowAuditor:
     return auditor
 
 
-def _log_audit_events(args, audit, state_file: Path) -> None:
-    """Log one completed audit and persist chain state (main thread only)."""
+def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) -> None:
+    """Log one completed audit and (for shadow) persist chain state
+    observationally — the fence still refuses stale/equivocating writes, but
+    a refusal is logged and skipped, never fatal. Authority passes
+    persist=False because it has ALREADY reserved under the fence BEFORE any
+    PASS event is emitted (main thread only)."""
     events = _get_events(args)
     status_map = {"PASS": PASS, "FAIL": FAIL, "NOT_PROVEN": NOT_PROVEN}
     if audit.status == "PASS":
@@ -481,14 +512,23 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
                 f"discrepancies={len(audit.discrepancies)}",
             )
         try:
-            _write_state(state_file, {
-                "provenance_last_source_epoch": audit.source_epoch,
-                "provenance_last_report_id": audit.report_id,
-                "provenance_index_epoch": audit.index_source_epoch,
-                "provenance_index_manifest": audit.index_manifest,
-                "provenance_policy_release": audit.policy_release,
-                "provenance_policy_digest": audit.policy_digest,
-            })
+            if persist:
+                _write_state_fenced(state_file, {
+                    "provenance_last_source_epoch": audit.source_epoch,
+                    "provenance_last_report_id": audit.report_id,
+                    "provenance_index_epoch": audit.index_source_epoch,
+                    "provenance_index_manifest": audit.index_manifest,
+                    "provenance_policy_release": audit.policy_release,
+                    "provenance_policy_digest": audit.policy_digest,
+                })
+        except ValueError as exc:
+            events.event(
+                "PROVENANCE_STATE_STALE_SKIPPED",
+                stage="provenance",
+                status=NOT_PROVEN,
+                detail=str(exc)[:200],
+                remediation="a newer reservation exists; shadow stays observational",
+            )
         except Exception as exc:  # noqa: BLE001 - shadow is observational only
             events.event(
                 "PROVENANCE_STATE_WRITE_FAILED",
@@ -516,7 +556,7 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
 def _run_provenance_stage(
     args, payload: dict[str, Any], state_file: Path,
     current_block: int | None = None,
-    chain_hotkeys: set[str] | None = None,
+    historical_hotkeys_lookup=None,
     block_hash_lookup=None,
 ) -> tuple[str, dict[str, float] | None]:
     """Provenance stage for this tick.
@@ -529,6 +569,8 @@ def _run_provenance_stage(
     """
     settings = _provenance_settings(args)
     if settings.mode == "authority":
+        from .events import _neutralize
+
         state = _read_state(state_file)
         audit = run_audit(
             settings,
@@ -537,32 +579,62 @@ def _run_provenance_stage(
             vector_payload=payload,
             state=state,
             current_block=current_block,
-            chain_hotkeys=chain_hotkeys,
+            historical_hotkeys_lookup=historical_hotkeys_lookup,
             block_hash_lookup=block_hash_lookup,
         )
-        _log_audit_events(args, audit, state_file)
         if audit.status != "PASS":
+            _log_audit_events(args, audit, state_file, persist=False)
             raise wire.VectorError(
                 f"full-provenance authority audit did not PASS ({audit.status}): "
                 f"{audit.error or 'see events'}"
             )
-        # Durable fences are MANDATORY for authority: if the reservation
-        # cannot be persisted, nothing is submitted (fail closed) - unlike
-        # shadow, where persistence failures are observational. The check
-        # and the reservation are ONE atomic locked transaction.
-        _write_state_fenced(state_file, {
-            "provenance_last_source_epoch": audit.source_epoch,
-            "provenance_last_report_id": audit.report_id,
-            "provenance_index_epoch": audit.index_source_epoch,
-            "provenance_index_manifest": audit.index_manifest,
-            "provenance_policy_release": audit.policy_release,
-            "provenance_policy_digest": audit.policy_digest,
-        })
         if getattr(audit, "assurance", "receipts_only") != "full":
+            # A receipts-only PASS must not emit a PASS event or reserve.
+            _get_events(args).event(
+                "PROVENANCE_AUDIT_NOT_PROVEN",
+                stage="provenance",
+                status=NOT_PROVEN,
+                artifact=audit.manifest_digest,
+                detail="receipts-only recomputation cannot back authority",
+                remediation="provide the controlled package and verifier pins",
+            )
             raise wire.VectorError(
                 "authority requires FULL assurance (raw-evidence replay); "
                 "receipts-only recomputation is NOT PROVEN and never submits"
             )
+        # RESERVE FIRST, under ONE flock hold covering the index line, the
+        # policy line, the report line, and the chain identity. Only a
+        # successful reservation may emit PASS: a concurrently advanced
+        # state makes THIS audit fail before any success is visible
+        # anywhere, so an older/equivocating writer can neither log PASS
+        # nor overwrite the newer reservation.
+        try:
+            _write_state_fenced(state_file, {
+                "provenance_network": args.network,
+                "provenance_netuid": args.netuid,
+                "provenance_last_source_epoch": audit.source_epoch,
+                "provenance_last_report_id": audit.report_id,
+                "provenance_index_epoch": audit.index_source_epoch,
+                "provenance_index_manifest": audit.index_manifest,
+                "provenance_policy_release": audit.policy_release,
+                "provenance_policy_digest": audit.policy_digest,
+            })
+        except (ValueError, OSError) as exc:
+            _get_events(args).event(
+                "PROVENANCE_RESERVATION_REFUSED",
+                stage="provenance",
+                status=FAIL,
+                artifact=audit.manifest_digest,
+                detail=_neutralize(str(exc))[:512],
+                remediation=(
+                    "a newer reservation exists or the state file is "
+                    "unwritable; nothing was submitted"
+                ),
+            )
+            raise wire.VectorError(
+                f"authority reservation refused: {_neutralize(str(exc))}"
+            ) from exc
+        _log_audit_events(args, audit, state_file, persist=False)
         return audit.status, dict(audit.recomputed)
 
     auditor = _get_shadow_auditor(args)
@@ -577,7 +649,8 @@ def _run_provenance_stage(
         state=_read_state(state_file),
         state_file=state_file,
         current_block=current_block,
-        chain_hotkeys=chain_hotkeys,
+        historical_hotkeys_lookup=historical_hotkeys_lookup,
+        block_hash_lookup=block_hash_lookup,
     )
     if not submitted:
         _get_events(args).event(
@@ -1209,6 +1282,28 @@ def _block_hash_lookup(network: str):
     return lookup
 
 
+def _historical_metagraph_lookup(network: str, netuid: int):
+    """A callable resolving the SN39 metagraph AT a historical block to its
+    exact hotkey set via the validator's own subtensor connection
+    (Subtensor.metagraph(netuid, block=block)). Returns None when the
+    history is unavailable — the audit treats that as NOT_PROVEN, never a
+    pass."""
+
+    def lookup(block: int):
+        try:
+            with _isolated_argv():
+                import bittensor as bt
+
+                mg = _bt_subtensor(bt)(
+                    network=connection_target(network)
+                ).metagraph(netuid, block=int(block))
+            return {str(hk) for hk in mg.hotkeys}
+        except Exception:  # noqa: BLE001 - unavailable history is None, not a pass
+            return None
+
+    return lookup
+
+
 def _metagraph_snapshot(
     *, network: str, netuid: int
 ) -> tuple[dict[str, int], int | None]:
@@ -1332,14 +1427,23 @@ def tick(args) -> bool:
     provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
     submission_authority = "thin"
     if provenance_mode == "shadow":
-        # ONE metagraph snapshot supplies the UID map, the finalized block,
-        # and the independent candidate-membership set for the audit.
+        # ONE metagraph snapshot supplies the UID map and the current
+        # block; candidate membership is proven against the HISTORICAL
+        # metagraph at the manifest's anchored block, via the validator's
+        # own chain connection.
         _run_provenance_stage(
             args,
             payload,
             Path(args.state_file),
             current_block=None if args.offline else tick_block,
-            chain_hotkeys=None if args.offline else set(hk2uid),
+            historical_hotkeys_lookup=(
+                None
+                if args.offline
+                else _historical_metagraph_lookup(args.network, args.netuid)
+            ),
+            block_hash_lookup=(
+                None if args.offline else _block_hash_lookup(args.network)
+            ),
         )
 
     ordered = sorted(uid_weights.items())
@@ -1422,7 +1526,11 @@ def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
         comparison if comparison is not None else {},
         Path(args.state_file),
         current_block=current_block,
-        chain_hotkeys=None if args.offline else set(hk2uid),
+        historical_hotkeys_lookup=(
+            None
+            if args.offline
+            else _historical_metagraph_lookup(args.network, args.netuid)
+        ),
         block_hash_lookup=(
             None if args.offline else _block_hash_lookup(args.network)
         ),
