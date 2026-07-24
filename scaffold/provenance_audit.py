@@ -799,10 +799,9 @@ def run_audit(
                     "manifest lacks verifier binary/command bindings for full mode"
                 )
             candidates = manifest["candidate_set"]["candidates"]
-            active = [row for row in candidates if row["outcome"] != "retired"]
-            all_rejected = bool(active) and all(
-                row["outcome"] == "rejected" for row in active
-            )
+            candidate_outcomes = {
+                str(row["hotkey"]): str(row["outcome"]) for row in candidates
+            }
             candidate_snapshot = manifest["candidate_set"]
             # Independent HISTORICAL chain cross-checks (defect 1): full
             # assurance requires the manifest's candidate set to EXACTLY
@@ -875,7 +874,12 @@ def run_audit(
                 )
             result = provenance.replay_positive_miners(
                 result,
-                candidates_all_rejected=all_rejected,
+                candidate_outcomes=candidate_outcomes,
+                # The shared oracle contract: the INDEPENDENTLY captured
+                # historical candidate set and block hash gate FULL inside
+                # the confidential verifier itself.
+                independent_candidates=historical_set,
+                independent_block_hash=str(independent_hash),
                 epoch_generated_at=manifest["generated_at"],
                 deadline_monotonic=audit_deadline,
                 challenge_anchor={
@@ -920,7 +924,9 @@ def run_audit(
 
         if vector_payload is not None:
             agree, discrepancies = provenance.compare_with_vector(
-                result, vector_payload
+                result,
+                vector_payload,
+                wire_report_sha256=manifest.get("wire_report_sha256"),
             )
             # A disagreement is NOT a chain-verification failure: the evidence
             # verified and the recomputation stands. status stays PASS; the

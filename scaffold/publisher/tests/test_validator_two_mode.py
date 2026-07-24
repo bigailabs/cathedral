@@ -498,7 +498,7 @@ def real_evidence(tmp_path_factory):
     ANCHOR_BLOCK = 100
     ANCHOR_HASH = "0x" + "ab" * 32
 
-    def build_stage(source_epoch: int, positive: bool, challenge_hex: str) -> None:
+    def build_stage(source_epoch: int, positive: bool) -> None:
         epoch_id = ledger.begin_epoch(
             source_epoch,
             policy_registry_release=snapshot.release,
@@ -512,6 +512,7 @@ def real_evidence(tmp_path_factory):
         receipts = []
         work_blobs: list[tuple[str, str]] = []
         if positive:
+            from cathedral.lanes.sat import _compute_challenge_id
             from cathedral.lanes.sat_types import (
                 SatCertificate,
                 SatInstance,
@@ -520,8 +521,10 @@ def real_evidence(tmp_path_factory):
             from cathedral.runtime import _sat_manifest_bytes, _sat_result_bytes
 
             sat_instance = SatInstance(n_vars=3, clauses=[[1, 2, -3]] * 20)
+            sat_seed = source_epoch
+            challenge_hex = _compute_challenge_id(sat_instance, sat_seed)
             sat_item = SatWorkItem(
-                instance=sat_instance, seed=7, challenge_id=challenge_hex
+                instance=sat_instance, seed=sat_seed, challenge_id=challenge_hex
             )
             sat_certificate = SatCertificate(
                 satisfiable=True,
@@ -670,6 +673,7 @@ def real_evidence(tmp_path_factory):
             score_network="finney",
             score_netuid=39,
         )
+        wire_report_sha256 = hashlib.sha256(ledger.report_bytes(epoch_id)).hexdigest()
         report_bytes = export_score_class_report(
             ledger,
             epoch_id,
@@ -743,7 +747,7 @@ def real_evidence(tmp_path_factory):
                     }
                 ],
             },
-            wire_report_sha256=None,
+            wire_report_sha256=wire_report_sha256,
         )
         manifest_digest = store.put_blob(manifest_bytes)
         index_bytes = build_signed_index(
@@ -760,9 +764,9 @@ def real_evidence(tmp_path_factory):
         )
         stage_indexes[source_epoch] = index_bytes
 
-    build_stage(11, positive=True, challenge_hex="a" * 64)
-    build_stage(12, positive=False, challenge_hex="b" * 64)
-    build_stage(13, positive=True, challenge_hex="c" * 64)
+    build_stage(11, positive=True)
+    build_stage(12, positive=False)
+    build_stage(13, positive=True)
     ledger.close()
     store.write_index(stage_indexes[11])
 
@@ -796,6 +800,31 @@ def real_evidence(tmp_path_factory):
         source_revision="abc1234",
     )
     return store_root, settings, stage_indexes
+
+
+def _bound_vector(store_root: Path, *, positive: bool = True) -> dict:
+    """Build the real signed-vector contract bound to the store's latest epoch."""
+    index = json.loads((store_root / "index.json").read_bytes())
+    manifest_digest = index["latest"]["manifest"]
+    manifest = json.loads(
+        (
+            store_root / "blobs" / "sha256" / manifest_digest.split(":", 1)[1]
+        ).read_bytes()
+    )
+    vector = validated_supply_payload(positive=positive)
+    vector["policy_metadata"]["external_scores"] = {
+        "enabled": True,
+        "source": "cathedral_confidential_tdx",
+        "mode": "confidential_primary",
+        "latest_complete": True,
+        "latest_epoch": int(manifest["source_epoch"]),
+        "latest_report_sha256": manifest["score_report"]["blob"],
+        "latest_body_sha256": manifest["wire_report_sha256"],
+    }
+    vector["policy_metadata"]["score_source"] = (
+        "confidential_primary:cathedral_confidential_tdx"
+    )
+    return vector
 
 
 def _historical_lookup(block: int):
@@ -838,17 +867,8 @@ def _run_audit_replay(
 
 
 def test_real_audit_passes_and_agrees_with_a_matching_vector(real_evidence) -> None:
-    _store_root, settings, _stages = real_evidence
-    vector = {
-        "weights": [
-            {
-                "miner_hotkey": "tdx-miner",
-                "weight": 1.0,
-                "base_component": 0.0,
-                "external_component": 1.0,
-            }
-        ]
-    }
+    store_root, settings, _stages = real_evidence
+    vector = _bound_vector(store_root)
     audit = _run_audit_replay(settings, vector=vector)
     assert audit.status == "PASS", audit.error
     assert audit.assurance == "full"
@@ -858,23 +878,22 @@ def test_real_audit_passes_and_agrees_with_a_matching_vector(real_evidence) -> N
 
 
 def test_real_audit_flags_a_diverging_vector(real_evidence) -> None:
-    _store_root, settings, _stages = real_evidence
-    vector = {
-        "weights": [
-            {
-                "miner_hotkey": "tdx-miner",
-                "weight": 0.5,
-                "base_component": 0.0,
-                "external_component": 0.5,
-            },
-            {
-                "miner_hotkey": "sybil-miner",
-                "weight": 0.5,
-                "base_component": 0.0,
-                "external_component": 0.5,
-            },
-        ]
-    }
+    store_root, settings, _stages = real_evidence
+    vector = _bound_vector(store_root)
+    vector["weights"] = [
+        {
+            "miner_hotkey": "tdx-miner",
+            "weight": 0.5,
+            "base_component": 0.0,
+            "external_component": 0.5,
+        },
+        {
+            "miner_hotkey": "sybil-miner",
+            "weight": 0.5,
+            "base_component": 0.0,
+            "external_component": 0.5,
+        },
+    ]
     audit = _run_audit_replay(settings, vector=vector)
     assert audit.status == "PASS"  # the chain itself verified
     assert audit.agrees_with_vector is False
@@ -1005,10 +1024,10 @@ def test_full_path_positive_revoked_restored(real_evidence) -> None:
     revoked = _run_audit_replay(settings, state=state)
     assert revoked.status == "PASS", revoked.error
     assert revoked.recomputed == {}  # everything to burn
-    # The manifest's exhaustive candidate accounting proves every active
-    # candidate was explicitly rejected: the all-burn state is FULL and
-    # authority can submit 100% burn (old positive weights cannot survive).
-    assert revoked.assurance == "full"
+    # A signed rejected label is not independently replayable negative
+    # evidence. The chain remains valid, but full assurance deliberately
+    # downgrades and cannot become an authority vector.
+    assert revoked.assurance == "receipts_only"
     state = _state_after(revoked)
 
     store.write_index(stages[13])
@@ -1031,13 +1050,16 @@ def test_full_path_positive_revoked_restored(real_evidence) -> None:
     assert thin == {0: pytest.approx(0.10), 163: pytest.approx(0.90)}
 
 
-def test_authority_submits_full_burn_on_proven_revocation(
+def test_authority_refuses_all_burn_without_replayable_negative_evidence(
     real_evidence, tmp_path, monkeypatch
 ) -> None:
-    """Counterexample N: on a PROVEN all-rejected epoch (FULL via exhaustive
-    candidate accounting) authority derives and would submit 100% configured
-    burn, so prior positive weights cannot survive revocation. A merely
-    unproven zero-positive audit (receipts_only) still refuses."""
+    """A signed all-rejected epoch is valid but not independently FULL.
+
+    The launch bundle publishes no raw candidate-specific negative evidence,
+    so authority mode refuses rather than treating an operator assertion as a
+    verified 100% burn decision. Thin mode still follows the authenticated
+    signed vector and its hard burn policy.
+    """
     import dataclasses
     import shutil
 
@@ -1053,25 +1075,10 @@ def test_authority_submits_full_burn_on_proven_revocation(
     EvidenceStore(private_root).write_index(stages[12])
     settings = dataclasses.replace(settings, evidence_dir=str(private_root))
     revoked = _run_audit_replay(settings)
-    assert revoked.assurance == "full" and revoked.recomputed == {}
+    assert revoked.status == "PASS"
+    assert revoked.assurance == "receipts_only"
+    assert revoked.recomputed == {}
     monkeypatch.setattr(validator_thin, "run_audit", lambda *a, **k: revoked)
-    _, recomputed = validator_thin._run_provenance_stage(
-        _args(tmp_path, "authority"),
-        validated_supply_payload(positive=False),
-        tmp_path / "state.json",
-    )
-    weights = validator_thin._provenance_uid_weights(
-        recomputed,
-        mechanism="validated_supply_v1",
-        burn_hotkey="burn-hotkey",
-        hotkey_to_uid={"burn-hotkey": 204},
-    )
-    assert weights == {204: 1.0}  # 100% configured burn submitted
-
-    unproven = _run_audit_replay(settings)
-    unproven.assurance = "receipts_only"
-    unproven.recomputed = {}
-    monkeypatch.setattr(validator_thin, "run_audit", lambda *a, **k: unproven)
     with pytest.raises(validator_thin.wire.VectorError, match="FULL assurance"):
         validator_thin._run_provenance_stage(
             _args(tmp_path, "authority"),
@@ -1131,6 +1138,12 @@ def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
         source_epoch=13,
         generated_at="2026-07-24T00:00:00.000000Z",
         valid_until="2026-07-24T01:00:00.000000Z",
+        candidate_snapshot={
+            "digest": "sha256:" + "6" * 64,
+            "block": 100,
+            "block_hash": "ab" * 32,
+            "hotkeys": ["tdx-miner"],
+        },
         miners=[_Miner()],
         recomputed_hotkey_weights={"tdx-miner": 1.0},
     )
@@ -1150,6 +1163,7 @@ def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
             verifier_blob_digest="sha256:" + "5" * 64,
             verifier_command=("/x",),
             verifier_artifacts=("/x",),
+            candidate_outcomes={"tdx-miner": "verified"},
             epoch_generated_at="2026-07-24T00:00:00.000000Z",
             challenge_anchor={
                 "block": 100,
@@ -1157,6 +1171,8 @@ def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
                 "network": "finney",
                 "netuid": 39,
             },
+            independent_candidates={"tdx-miner"},
+            independent_block_hash="0x" + "ab" * 32,
         )
 
 
@@ -2110,9 +2126,7 @@ def test_report_block_window_enforced_with_a_real_block(
     store = EvidenceStore(private_root)
     latest11, _recent11 = _index_rows(stages[11])
     manifest11 = _store_blob(private_root, latest11["manifest"])
-    report11 = _store_blob(
-        private_root, json.loads(manifest11)["score_report"]["blob"]
-    )
+    report11 = _store_blob(private_root, json.loads(manifest11)["score_report"]["blob"])
     narrow = _resign_report(report11, valid_until_block=101)
     narrow_manifest = _rebuild_manifest_with_report(store, manifest11, narrow)
     store.write_index(_sign_index(11, narrow_manifest, []))
@@ -2175,9 +2189,7 @@ def test_recent_chain_missing_intermediate_fails_closed(
     assert "bridge the gap" in wedged.error
 
 
-def test_recent_chain_forked_intermediate_fails_closed(
-    real_evidence, tmp_path
-) -> None:
+def test_recent_chain_forked_intermediate_fails_closed(real_evidence, tmp_path) -> None:
     """Round-seven F2: an intermediate whose report does NOT cite the
     recorded predecessor (a fork, even correctly signed) breaks the walk —
     equivocation fences survive the recovery path."""
@@ -2190,12 +2202,8 @@ def test_recent_chain_forked_intermediate_fails_closed(
 
     latest12, _ = _index_rows(stages[12])
     manifest12 = _store_blob(private_root, latest12["manifest"])
-    report12 = _store_blob(
-        private_root, json.loads(manifest12)["score_report"]["blob"]
-    )
-    forked_report = _resign_report(
-        report12, previous_report_id="sha256:" + "9" * 64
-    )
+    report12 = _store_blob(private_root, json.loads(manifest12)["score_report"]["blob"])
+    forked_report = _resign_report(report12, previous_report_id="sha256:" + "9" * 64)
     forked_manifest = _rebuild_manifest_with_report(store, manifest12, forked_report)
     latest13, recent13 = _index_rows(stages[13])
     forged_recent = [
@@ -2275,9 +2283,7 @@ def _once_args(tmp_path: Path) -> SimpleNamespace:
     return args
 
 
-def test_once_mode_drains_and_reports_the_shadow_audit(
-    tmp_path, monkeypatch
-) -> None:
+def test_once_mode_drains_and_reports_the_shadow_audit(tmp_path, monkeypatch) -> None:
     """Round-seven F4: --once must not exit while the shadow audit daemon is
     still running — the outcome is awaited within the documented bound and
     reported, and the exit code stays truthful."""
@@ -2335,9 +2341,7 @@ def test_once_mode_truthful_exit_when_audit_cannot_be_captured(
     monkeypatch.setattr(
         validator_thin,
         "_provenance_settings",
-        lambda args: dataclasses.replace(
-            real_settings(args), audit_deadline_secs=0.2
-        ),
+        lambda args: dataclasses.replace(real_settings(args), audit_deadline_secs=0.2),
     )
 
     def fake_tick(a):
@@ -2517,9 +2521,7 @@ def test_thin_feed_body_cap_is_shared_across_address_attempts(monkeypatch) -> No
     monkeypatch.setattr(
         http.client.HTTPSConnection, "request", lambda self, *a, **k: None
     )
-    monkeypatch.setattr(
-        http.client.HTTPSConnection, "getresponse", fake_getresponse
-    )
+    monkeypatch.setattr(http.client.HTTPSConnection, "getresponse", fake_getresponse)
     with pytest.raises(validator_thin.wire.VectorError, match="bounded size limit"):
         validator_thin.fetch_vector("https://publisher.example")
     assert attempts == ["34.71.88.140", "34.71.88.141"]
