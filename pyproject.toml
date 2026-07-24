@@ -30,7 +30,10 @@ publisher = [
 ]
 test = [
     "pytest>=8",
-    "ruff>=0.15",
+    # Ruff 0.16 expands the default rule set against the pre-existing thin
+    # subnet tree. Keep required CI reproducible at the reviewed baseline until
+    # that separate migration is performed deliberately.
+    "ruff==0.15.13",
 ]
 # Full-provenance validator mode: independently verifies Cathedral's published
 # evidence chain (policy registry, signed score reports, assurance receipts)
