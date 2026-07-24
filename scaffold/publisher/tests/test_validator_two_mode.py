@@ -4,15 +4,17 @@ Unit tests stub the audit; the integration tests at the bottom build a real
 content-addressed evidence store with the ``cathedral`` package (installed via
 the ``provenance`` extra) and run the actual audit against it.
 """
+
 from __future__ import annotations
 
 import json
 import time
-import unittest.mock as mock
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
+from test_validator_thin_validated_supply import payload as validated_supply_payload
 
 from scaffold import provenance_audit, validator_thin
 from scaffold.provenance_audit import (
@@ -23,12 +25,10 @@ from scaffold.provenance_audit import (
     run_audit,
 )
 
-from test_validator_thin_validated_supply import payload as validated_supply_payload
-
-
 # ---------------------------------------------------------------------------
 # Authority-mode UID vector construction
 # ---------------------------------------------------------------------------
+
 
 def test_authority_weights_use_configured_burn_and_fixed_fraction() -> None:
     weights = validator_thin._provenance_uid_weights(
@@ -49,7 +49,7 @@ def test_authority_weights_use_configured_burn_and_fixed_fraction() -> None:
 
 
 def test_authority_weights_fail_closed_on_bad_inputs() -> None:
-    base = dict(mechanism="validated_supply_v1", burn_hotkey="burn-hotkey")
+    base = {"mechanism": "validated_supply_v1", "burn_hotkey": "burn-hotkey"}
     mapping = {"burn-hotkey": 0, "tdx-miner": 163}
     with pytest.raises(validator_thin.wire.VectorError, match="no current metagraph"):
         validator_thin._provenance_uid_weights(
@@ -73,21 +73,28 @@ def test_authority_weights_fail_closed_on_bad_inputs() -> None:
             hotkey_to_uid={"burn-hotkey": 163, "tdx-miner": 163},
             **base,
         )
-    with pytest.raises(validator_thin.wire.VectorError, match="requires --provenance-burn-hotkey"):
+    with pytest.raises(
+        validator_thin.wire.VectorError, match="requires --provenance-burn-hotkey"
+    ):
         validator_thin._provenance_uid_weights(
-            {"tdx-miner": 1.0}, mechanism="validated_supply_v1",
-            burn_hotkey=None, hotkey_to_uid=mapping,
+            {"tdx-miner": 1.0},
+            mechanism="validated_supply_v1",
+            burn_hotkey=None,
+            hotkey_to_uid=mapping,
         )
     with pytest.raises(validator_thin.wire.VectorError, match="no pinned burn"):
         validator_thin._provenance_uid_weights(
-            {"tdx-miner": 1.0}, mechanism="validated_supply_v99",
-            burn_hotkey="burn-hotkey", hotkey_to_uid=mapping,
+            {"tdx-miner": 1.0},
+            mechanism="validated_supply_v99",
+            burn_hotkey="burn-hotkey",
+            hotkey_to_uid=mapping,
         )
 
 
 # ---------------------------------------------------------------------------
 # Shadow vs authority behavior around the audit (stubbed audit)
 # ---------------------------------------------------------------------------
+
 
 def _args(tmp_path: Path, mode: str) -> SimpleNamespace:
     return SimpleNamespace(
@@ -155,7 +162,9 @@ def test_slow_shadow_audit_is_single_flight_and_cannot_delay_thin(
 
     def slow_audit(settings, *, network, netuid, vector_payload, state, **_kw):
         release.wait(10.0)
-        return ProvenanceAudit(status="PASS", source_epoch=1, report_id="sha256:" + "a" * 64)
+        return ProvenanceAudit(
+            status="PASS", source_epoch=1, report_id="sha256:" + "a" * 64
+        )
 
     monkeypatch.setattr(validator_thin, "run_audit", slow_audit)
     args = _args(tmp_path, "shadow")
@@ -196,7 +205,9 @@ def test_shadow_mode_records_chain_state_on_pass(tmp_path, monkeypatch) -> None:
 
 
 def test_authority_mode_refuses_to_submit_without_a_pass(tmp_path, monkeypatch) -> None:
-    _stub_audit(monkeypatch, ProvenanceAudit(status="NOT_PROVEN", error="not installed"))
+    _stub_audit(
+        monkeypatch, ProvenanceAudit(status="NOT_PROVEN", error="not installed")
+    )
     with pytest.raises(validator_thin.wire.VectorError, match="did not PASS"):
         validator_thin._run_provenance_stage(
             _args(tmp_path, "authority"),
@@ -260,8 +271,11 @@ def test_state_fence_and_provenance_state_share_the_file(tmp_path) -> None:
 # Anti-equivocation chain state
 # ---------------------------------------------------------------------------
 
+
 def test_chain_state_rejects_source_epoch_rollback() -> None:
-    audit = ProvenanceAudit(status="PASS", source_epoch=10, report_id="sha256:" + "a" * 64)
+    audit = ProvenanceAudit(
+        status="PASS", source_epoch=10, report_id="sha256:" + "a" * 64
+    )
     with pytest.raises(ProvenanceAuditError, match="rollback"):
         check_chain_state(
             audit,
@@ -270,7 +284,9 @@ def test_chain_state_rejects_source_epoch_rollback() -> None:
 
 
 def test_chain_state_rejects_same_epoch_equivocation() -> None:
-    audit = ProvenanceAudit(status="PASS", source_epoch=11, report_id="sha256:" + "a" * 64)
+    audit = ProvenanceAudit(
+        status="PASS", source_epoch=11, report_id="sha256:" + "a" * 64
+    )
     with pytest.raises(ProvenanceAuditError, match="equivocation"):
         check_chain_state(
             audit,
@@ -310,6 +326,7 @@ def test_unconfigured_shadow_audit_reports_not_proven(tmp_path) -> None:
 # tests above must always collect and run. Only fixture construction skips.
 try:
     import cathedral.provenance  # noqa: F401
+
     _CATHEDRAL_AVAILABLE = True
 except ImportError:  # pragma: no cover - CI installs the extra
     _CATHEDRAL_AVAILABLE = False
@@ -359,9 +376,6 @@ def real_evidence(tmp_path_factory):
     import hashlib
     from datetime import UTC, datetime, timedelta
 
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
     from cathedral.assurance import (
         AssuranceDimension,
         ClaimStatus,
@@ -391,6 +405,8 @@ def real_evidence(tmp_path_factory):
         _retained_evidence_envelope,
     )
     from cathedral.score_class import export_score_class_report
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     tmp_path = tmp_path_factory.mktemp("evidence")
     registry_seed = bytes(range(32))
@@ -400,7 +416,7 @@ def real_evidence(tmp_path_factory):
     now = datetime.now(UTC).replace(microsecond=0)
     t0 = now - timedelta(hours=1)
     t1 = now + timedelta(hours=47)
-    text = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    text = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def pub_raw(seed: bytes) -> bytes:
         return (
@@ -421,7 +437,9 @@ def real_evidence(tmp_path_factory):
                 {
                     "id": "receipt-test-1",
                     "algorithm": "ed25519",
-                    "public_key_base64": base64.b64encode(pub_raw(receipt_seed)).decode(),
+                    "public_key_base64": base64.b64encode(
+                        pub_raw(receipt_seed)
+                    ).decode(),
                     "purpose": "assurance_receipt",
                     "status": "active",
                     "status_changed_at": text(t0),
@@ -548,7 +566,9 @@ def real_evidence(tmp_path_factory):
             )
             # The receipt's hardware claim hashes the EXACT raw quote bytes.
             claims = attestation_claims(quote, policy, verified_at=verified_text)
-            claims = with_verified_channel(claims, b"binding", verified_at=verified_text)
+            claims = with_verified_channel(
+                claims, b"binding", verified_at=verified_text
+            )
             claims = claims.with_claim(
                 AssuranceDimension.WORK,
                 evaluated_claim(
@@ -596,8 +616,7 @@ def real_evidence(tmp_path_factory):
                 assurance=claims,
                 worker_lifecycle=lifecycle,
                 challenge_id=challenge_hex,
-                manifest_digest="sha256:"
-                + hashlib.sha256(work_item_bytes).hexdigest(),
+                manifest_digest="sha256:" + hashlib.sha256(work_item_bytes).hexdigest(),
                 work_units=20.0,
                 issued_at=now,
             )
@@ -626,7 +645,9 @@ def real_evidence(tmp_path_factory):
                 policy_mode="strict",
                 envelope_digest=envelope_digest,
             )
-            ledger.add_lifecycle_snapshot(epoch_id, lifecycle, snapshot_at=verified_text)
+            ledger.add_lifecycle_snapshot(
+                epoch_id, lifecycle, snapshot_at=verified_text
+            )
             receipts.append((receipt, envelope_digest))
             attestation_rows.append(
                 {
@@ -636,8 +657,7 @@ def real_evidence(tmp_path_factory):
                     if not evidence_digest.startswith("sha256:")
                     else evidence_digest,
                     "envelope_digest": envelope_digest,
-                    "challenge_digest": "sha256:"
-                    + hashlib.sha256(nonce).hexdigest(),
+                    "challenge_digest": "sha256:" + hashlib.sha256(nonce).hexdigest(),
                     "disclosure": "controlled",
                 }
             )
@@ -733,7 +753,9 @@ def real_evidence(tmp_path_factory):
             signing_key_id="evidence-index-test-1",
             private_key_seed=index_seed,
         )
-        recent_rows.insert(0, {"source_epoch": source_epoch, "manifest": manifest_digest})
+        recent_rows.insert(
+            0, {"source_epoch": source_epoch, "manifest": manifest_digest}
+        )
         stage_indexes[source_epoch] = index_bytes
 
     build_stage(11, positive=True, challenge_hex="a" * 64)
@@ -772,8 +794,6 @@ def real_evidence(tmp_path_factory):
         source_revision="abc1234",
     )
     return store_root, settings, stage_indexes
-
-
 
 
 def _historical_lookup(block: int):
@@ -857,13 +877,17 @@ def test_real_audit_flags_a_diverging_vector(real_evidence) -> None:
     assert any("sybil-miner" in item for item in audit.discrepancies)
 
 
-def test_real_audit_fails_closed_on_tampered_report_blob(real_evidence, tmp_path) -> None:
+def test_real_audit_fails_closed_on_tampered_report_blob(
+    real_evidence, tmp_path
+) -> None:
     store_root, settings, _stages = real_evidence
     manifest_digest = json.loads((store_root / "index.json").read_text())["latest"][
         "manifest"
     ]
     manifest = json.loads(
-        (store_root / "blobs" / "sha256" / manifest_digest.split(":", 1)[1]).read_bytes()
+        (
+            store_root / "blobs" / "sha256" / manifest_digest.split(":", 1)[1]
+        ).read_bytes()
     )
     report_blob = manifest["score_report"]["blob"]
     blob_path = store_root / "blobs" / "sha256" / report_blob.split(":", 1)[1]
@@ -901,7 +925,9 @@ def test_fetcher_rejects_credentials_and_private_hosts() -> None:
 
     with pytest.raises(ProvenanceAuditError, match="credential-free"):
         _fetcher(
-            ProvenanceSettings(mode="shadow", evidence_url="https://user:pw@host.example")
+            ProvenanceSettings(
+                mode="shadow", evidence_url="https://user:pw@host.example"
+            )
         )
     with pytest.raises(ProvenanceAuditError, match="non-public address"):
         _fetcher(ProvenanceSettings(mode="shadow", evidence_url="https://127.0.0.1"))
@@ -925,7 +951,10 @@ def test_index_rollback_and_equivocation_fences(real_evidence) -> None:
 
     rollback = _run_audit_replay(
         settings,
-        state={"provenance_index_epoch": 99, "provenance_index_manifest": "sha256:" + "f" * 64},
+        state={
+            "provenance_index_epoch": 99,
+            "provenance_index_manifest": "sha256:" + "f" * 64,
+        },
     )
     assert rollback.status == "FAIL"
     assert "rollback" in rollback.error
@@ -1250,6 +1279,7 @@ def test_fenced_state_two_thread_stale_and_equivocation(tmp_path) -> None:
 # Round-four defect 1: EXACT historical-metagraph equality
 # ---------------------------------------------------------------------------
 
+
 def test_full_audit_fails_on_omitted_historical_candidate(real_evidence) -> None:
     """A hotkey registered at the anchored block but missing from the
     manifest candidate set is an omission — FAIL, not a subset pass."""
@@ -1341,6 +1371,7 @@ def test_full_audit_is_not_proven_without_the_block_hash(real_evidence) -> None:
 # Round-four defect 2: authority reserves under the fence BEFORE any PASS
 # ---------------------------------------------------------------------------
 
+
 def test_authority_reserves_before_pass_and_stale_auditor_cannot_pass(
     tmp_path, monkeypatch
 ) -> None:
@@ -1407,9 +1438,7 @@ def test_authority_reserves_before_pass_and_stale_auditor_cannot_pass(
         try:
             if wait_for is not None:
                 assert wait_for.wait(10)
-            outcomes[name] = validator_thin._run_provenance_stage(
-                args, {}, state_file
-            )
+            outcomes[name] = validator_thin._run_provenance_stage(args, {}, state_file)
         except BaseException as exc:  # noqa: BLE001 - the outcome IS the assertion
             outcomes[name] = exc
         finally:
@@ -1417,11 +1446,15 @@ def test_authority_reserves_before_pass_and_stale_auditor_cannot_pass(
                 then_set.set()
 
     fresh = threading.Thread(
-        target=runner, args=("fresh",), kwargs={"then_set": fresh_finished},
+        target=runner,
+        args=("fresh",),
+        kwargs={"then_set": fresh_finished},
         name="fresh",
     )
     stale = threading.Thread(
-        target=runner, args=("stale",), kwargs={"wait_for": fresh_finished},
+        target=runner,
+        args=("stale",),
+        kwargs={"wait_for": fresh_finished},
         name="stale",
     )
     fresh.start()
@@ -1471,6 +1504,7 @@ def test_fenced_state_pins_the_chain_identity(tmp_path) -> None:
 # Round-four defect 5: bounded resolver slot pool (subnet side)
 # ---------------------------------------------------------------------------
 
+
 def test_audit_resolver_slot_pool_bounds_abandoned_lookups(monkeypatch) -> None:
     import socket
     import threading
@@ -1515,6 +1549,7 @@ def test_audit_resolver_slot_pool_bounds_abandoned_lookups(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # Round-five: linearized authority tick (cross-process audit→reserve→submit)
 # ---------------------------------------------------------------------------
+
 
 def _authority_args(tmp_path: Path) -> SimpleNamespace:
     args = _args(tmp_path, "authority")

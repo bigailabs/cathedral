@@ -17,6 +17,7 @@ epoch backwards, fails the audit outright.
 If the ``cathedral`` package is not installed the audit reports NOT_PROVEN
 (shadow mode warns loudly; authority mode refuses to submit).
 """
+
 from __future__ import annotations
 
 import base64
@@ -87,7 +88,12 @@ class ProvenanceSettings:
             return
         missing = [
             f"--provenance-{name.replace('_', '-')}"
-            for name in ("registry_keys", "report_keys", "index_keys", "verifier_digest")
+            for name in (
+                "registry_keys",
+                "report_keys",
+                "index_keys",
+                "verifier_digest",
+            )
             if not getattr(self, name)
         ]
         if not (self.evidence_url or self.evidence_dir):
@@ -233,9 +239,7 @@ def _getaddrinfo_bounded(host: str, port: int, timeout: float) -> list:
             f"DNS resolution for {host} exceeded the audit deadline"
         ) from None
     if kind == "err":
-        raise ProvenanceAuditError(
-            f"evidence host does not resolve: {host}"
-        ) from value
+        raise ProvenanceAuditError(f"evidence host does not resolve: {host}") from value
     return value
 
 
@@ -353,9 +357,7 @@ def _fetcher(settings: ProvenanceSettings):
                     )
                 remaining["bytes"] -= len(chunk)
                 if remaining["bytes"] < 0:
-                    raise ProvenanceAuditError(
-                        "audit exceeded its aggregate byte cap"
-                    )
+                    raise ProvenanceAuditError("audit exceeded its aggregate byte cap")
                 chunks.append(chunk)
             return b"".join(chunks)
         finally:
@@ -375,9 +377,7 @@ def _fetcher(settings: ProvenanceSettings):
     return load_index, load_blob
 
 
-def check_chain_state(
-    audit: ProvenanceAudit, state: Mapping[str, Any]
-) -> None:
+def check_chain_state(audit: ProvenanceAudit, state: Mapping[str, Any]) -> None:
     """Fail on source-epoch rollback or same-epoch report equivocation."""
     last_epoch = state.get("provenance_last_source_epoch")
     last_report = state.get("provenance_last_report_id")
@@ -598,8 +598,7 @@ def run_audit(
             # history is NOT_PROVEN — never a silent pass.
             if historical_hotkeys_lookup is None or block_hash_lookup is None:
                 raise ProvenanceUnavailable(
-                    "historical chain lookups are unavailable for full "
-                    "assurance",
+                    "historical chain lookups are unavailable for full assurance",
                     "provide chain access so the anchored block hash and the "
                     "historical metagraph at candidate_set.block can be "
                     "independently verified",
@@ -609,8 +608,7 @@ def run_audit(
                 independent_hash = block_hash_lookup(anchored_block)
             except Exception as exc:
                 raise ProvenanceUnavailable(
-                    f"finalized block hash lookup failed for block "
-                    f"{anchored_block}",
+                    f"finalized block hash lookup failed for block {anchored_block}",
                     "restore archive-node access and re-run the audit",
                 ) from exc
             if independent_hash is None:
@@ -623,15 +621,13 @@ def run_audit(
                 candidate_snapshot["block_hash"]
             ).lower().removeprefix("0x"):
                 raise ProvenanceAuditError(
-                    "anchored block hash does not match the independently "
-                    "queried chain"
+                    "anchored block hash does not match the independently queried chain"
                 )
             try:
                 historical = historical_hotkeys_lookup(anchored_block)
             except Exception as exc:
                 raise ProvenanceUnavailable(
-                    f"historical metagraph lookup failed for block "
-                    f"{anchored_block}",
+                    f"historical metagraph lookup failed for block {anchored_block}",
                     "restore archive-node access and re-run the audit",
                 ) from exc
             if historical is None:
@@ -643,8 +639,7 @@ def run_audit(
             historical_set = {str(h) for h in historical}
             if not historical_set or any(not h for h in historical_set):
                 raise ProvenanceUnavailable(
-                    "the historical metagraph lookup returned malformed "
-                    "hotkeys",
+                    "the historical metagraph lookup returned malformed hotkeys",
                     "restore archive-node access and re-run the audit",
                 )
             manifest_set = {

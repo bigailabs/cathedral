@@ -14,6 +14,7 @@ Watch commands (documented in VALIDATOR.md):
     journalctl -fu cathedral-validator -o cat        # TTY view
     tail -f ~/.cathedral/validator-events.jsonl | jq  # JSONL view
 """
+
 from __future__ import annotations
 
 import json
@@ -80,9 +81,7 @@ def _scrub(value):
         # Sensitive FIELD NAMES redact the entire value regardless of shape.
         return {
             _neutralize(str(key)): (
-                "[REDACTED]"
-                if _SENSITIVE_FIELD_RE.match(str(key))
-                else _scrub(item)
+                "[REDACTED]" if _SENSITIVE_FIELD_RE.match(str(key)) else _scrub(item)
             )
             for key, item in value.items()
         }
@@ -126,9 +125,7 @@ class EventLogger:
             opened = os.fstat(descriptor)
             if not _stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o077:
                 os.close(descriptor)
-                raise ValueError(
-                    "event log must be a private (0600) regular file"
-                )
+                raise ValueError("event log must be a private (0600) regular file")
             self._jsonl_file = os.fdopen(descriptor, "a", encoding="utf-8")
         self._tty = tty if tty is not None else sys.stdout
         if color is None:
@@ -201,7 +198,9 @@ class EventLogger:
         parts = [f"{clock} {badge} {record['event']:<28} [{record['mode']}]"]
         if "hotkey" in record:
             hotkey = record["hotkey"]
-            parts.append(hotkey if len(hotkey) <= 12 else f"{hotkey[:6]}..{hotkey[-4:]}")
+            parts.append(
+                hotkey if len(hotkey) <= 12 else f"{hotkey[:6]}..{hotkey[-4:]}"
+            )
         if "duration_ms" in record:
             parts.append(f"{record['duration_ms']:.0f}ms")
         if "detail" in record:
