@@ -64,6 +64,9 @@ class ProvenanceSettings:
     verifier_digest: str | None = None
     mechanism: str = MECHANISM_DEFAULT
     index_max_age_secs: float = 3600.0
+    # Fail closed on a registry published more than 24 hours ago. Freshness
+    # is restored by same-policy reissues at higher releases, never by
+    # widening this ceiling.
     registry_max_age_secs: int = 86400
 
     def validate_for_audit(self) -> None:
