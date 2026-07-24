@@ -39,7 +39,9 @@ class _FakeSubtensor:
         self.metagraph_calls.append((netuid, block))
         if self._expected_block_arg is not None:
             assert block == self._expected_block_arg
-        return SimpleNamespace(hotkeys=list(self._hotkeys), block=self._block)
+        # An honest chain returns the metagraph AT the requested block.
+        returned_block = block if block is not None else self._block
+        return SimpleNamespace(hotkeys=list(self._hotkeys), block=returned_block)
 
     def get_block_hash(self, block):
         self.hash_calls.append(block)
@@ -170,3 +172,36 @@ def test_main_reports_chain_failures_without_traceback(
     )
     assert code == 2
     assert "candidate snapshot failed" in capsys.readouterr().err
+
+
+def test_capture_refuses_a_metagraph_not_at_the_requested_block():
+    """Round-six S1: the returned metagraph must BE at the explicitly
+    requested block; a chain answering with different (or absent) state is
+    an unproven binding and refuses."""
+
+    class _DishonestSubtensor(_FakeSubtensor):
+        def metagraph(self, netuid, block=None):
+            self.metagraph_calls.append((netuid, block))
+            return SimpleNamespace(hotkeys=list(self._hotkeys), block=999)
+
+    dishonest = _DishonestSubtensor(hotkeys=["m1"])
+    with pytest.raises(SnapshotError, match="refusing the unproven binding"):
+        capture_candidate_snapshot(
+            network="finney",
+            netuid=39,
+            block=555,
+            subtensor_factory=lambda n: dishonest,
+        )
+
+    class _BlocklessSubtensor(_FakeSubtensor):
+        def metagraph(self, netuid, block=None):
+            return SimpleNamespace(hotkeys=list(self._hotkeys), block=None)
+
+    blockless = _BlocklessSubtensor(hotkeys=["m1"])
+    with pytest.raises(SnapshotError, match="binding cannot be proven"):
+        capture_candidate_snapshot(
+            network="finney",
+            netuid=39,
+            block=555,
+            subtensor_factory=lambda n: blockless,
+        )

@@ -74,13 +74,20 @@ def capture_candidate_snapshot(
         else subtensor.metagraph(netuid, block=int(block))
     )
 
-    captured_block = block if block is not None else getattr(metagraph, "block", None)
+    metagraph_block = getattr(metagraph, "block", None)
     try:
-        captured_block = int(captured_block)
+        metagraph_block = int(metagraph_block)
     except (TypeError, ValueError) as exc:
         raise SnapshotError(
-            "the metagraph did not expose a usable block number; pass --block"
+            "the metagraph did not expose a usable block number; the "
+            "requested-block binding cannot be proven"
         ) from exc
+    if block is not None and metagraph_block != int(block):
+        raise SnapshotError(
+            f"the chain returned metagraph block {metagraph_block} for the "
+            f"explicitly requested block {block}; refusing the unproven binding"
+        )
+    captured_block = metagraph_block
     if captured_block < 0:
         raise SnapshotError("the captured block number is invalid")
 
