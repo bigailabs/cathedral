@@ -26,9 +26,12 @@ jobs:
           ruff check scaffold/validator_thin.py scaffold/provenance_audit.py scaffold/events.py
           ruff format --check scaffold/provenance_audit.py scaffold/events.py
       - name: Two-mode suites (collection is REQUIRED, not skippable)
+        # NOTE: exactly ONE -q with --collect-only. A second -q (-qq) makes
+        # supported pytest print only a per-file count — no node ids — so
+        # the grep gate would exit 1 before the suite ever ran.
         run: |
-          python -m pytest scaffold/publisher/tests/test_validator_two_mode.py -q \
-            --co -q | grep -q test_full_path_positive_revoked_restored
+          python -m pytest scaffold/publisher/tests/test_validator_two_mode.py \
+            --collect-only -q | grep -q test_full_path_positive_revoked_restored
           python -m pytest scaffold/publisher/tests/test_validator_two_mode.py -q
       - name: Unmocked static-ELF authenticator matrix (Linux x86_64)
         run: |

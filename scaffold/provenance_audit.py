@@ -33,6 +33,10 @@ from typing import Any
 
 MECHANISM_DEFAULT = "validated_supply_v1"
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Hard bound on the recent-chain walk (mirrors the signed index's own
+# MAX_INDEX_RECENT cap in cathedral.evidence); defense in depth against a
+# verifier regression ever admitting a longer list.
+MAX_RECENT_WALK = 96
 
 
 class ProvenanceUnavailable(Exception):
@@ -243,7 +247,14 @@ def _getaddrinfo_bounded(host: str, port: int, timeout: float) -> list:
     return value
 
 
-def _fetcher(settings: ProvenanceSettings):
+def _fetcher(settings: ProvenanceSettings, *, deadline: float | None = None):
+    """Build ``(load_index, load_blob)`` for the configured evidence source.
+
+    ``deadline`` is the caller's command-wide monotonic deadline. It is
+    started BEFORE name resolution, so DNS spends the same budget as every
+    connect, TLS, header, and body-read phase — each of which recomputes
+    the remaining allowance instead of inheriting a stale socket timeout.
+    """
     if settings.evidence_dir:
         root = Path(settings.evidence_dir)
 
@@ -275,17 +286,35 @@ def _fetcher(settings: ProvenanceSettings):
     import ssl
     import urllib.parse
 
+    # ONE command-wide monotonic deadline covering everything remote. It is
+    # anchored by the caller BEFORE DNS (or here, still before any lookup):
+    # name resolution, connect, TLS, headers, and body reads all spend the
+    # same budget, recomputed at every phase.
+    audit_deadline = (
+        deadline
+        if deadline is not None
+        else time.monotonic() + settings.audit_deadline_secs
+    )
+    remaining = {"bytes": 64 * 1024 * 1024, "artifacts": 256}
+
+    def _check_budget() -> float:
+        seconds_left = audit_deadline - time.monotonic()
+        if seconds_left <= 0:
+            raise ProvenanceAuditError("audit exceeded its total deadline")
+        return seconds_left
+
     parsed = urllib.parse.urlsplit(base)
     if parsed.username or parsed.password:
         raise ProvenanceAuditError("evidence URL must be credential-free")
     host = parsed.hostname or ""
     if not host:
         raise ProvenanceAuditError("evidence URL has no host")
-    infos = _getaddrinfo_bounded(
-        host, parsed.port or 443, min(30.0, settings.audit_deadline_secs)
-    )
+    infos = _getaddrinfo_bounded(host, parsed.port or 443, min(30.0, _check_budget()))
     if not infos:
         raise ProvenanceAuditError(f"evidence host does not resolve: {host}")
+    # EVERY resolved address is validated up front; only this validated,
+    # order-preserving public list may ever be dialed (no private retry).
+    peer_ips: list[str] = []
     for info in infos:
         address = ipaddress.ip_address(info[4][0])
         if not settings.allow_private_hosts and (
@@ -299,36 +328,36 @@ def _fetcher(settings: ProvenanceSettings):
             raise ProvenanceAuditError(
                 f"evidence host resolves to a non-public address: {host}"
             )
-    peer_ip = infos[0][4][0]
+        if info[4][0] not in peer_ips:
+            peer_ips.append(info[4][0])
     peer_port = parsed.port or 443
     base_path = parsed.path.rstrip("/")
 
     MAX_FETCH_BYTES = 4 * 1024 * 1024
-    # Whole-audit caps: one monotonic deadline plus aggregate byte and
-    # artifact limits shared by EVERY remote operation in this audit.
-    audit_deadline = time.monotonic() + settings.audit_deadline_secs
-    remaining = {"bytes": 64 * 1024 * 1024, "artifacts": 256}
-
-    def _check_budget() -> float:
-        seconds_left = audit_deadline - time.monotonic()
-        if seconds_left <= 0:
-            raise ProvenanceAuditError("audit exceeded its total deadline")
-        return seconds_left
 
     class _PinnedConnection(http.client.HTTPSConnection):
+        peer_ip = ""
+
         def connect(self) -> None:
-            raw = socket.create_connection((peer_ip, peer_port), self.timeout)
+            raw = socket.create_connection(
+                (self.peer_ip, peer_port), min(30.0, _check_budget())
+            )
+            # TLS must not inherit the connect phase's stale allowance;
+            # SNI/verification always use the ORIGINAL hostname.
+            raw.settimeout(min(30.0, _check_budget()))
             self.sock = self._context.wrap_socket(raw, server_hostname=host)
 
-    def fetch(path: str, timeout: float = 30.0) -> bytes:
-        remaining["artifacts"] -= 1
-        if remaining["artifacts"] < 0:
-            raise ProvenanceAuditError("audit exceeded its artifact cap")
-        timeout = min(timeout, _check_budget())
+    def _fetch_via(peer_ip: str, path: str) -> bytes:
         connection = _PinnedConnection(
-            host, peer_port, timeout=timeout, context=ssl.create_default_context()
+            host,
+            peer_port,
+            timeout=min(30.0, _check_budget()),
+            context=ssl.create_default_context(),
         )
+        connection.peer_ip = peer_ip
         try:
+            connection.connect()
+            connection.sock.settimeout(min(30.0, _check_budget()))
             connection.request(
                 "GET",
                 base_path + path,
@@ -337,6 +366,7 @@ def _fetcher(settings: ProvenanceSettings):
                     "User-Agent": "cathedral-two-mode-validator/1.0",
                 },
             )
+            connection.sock.settimeout(min(30.0, _check_budget()))
             response = connection.getresponse()
             if response.status != 200:
                 raise ProvenanceAuditError(
@@ -346,7 +376,7 @@ def _fetcher(settings: ProvenanceSettings):
             chunks: list[bytes] = []
             received = 0
             while True:
-                _check_budget()
+                connection.sock.settimeout(min(30.0, _check_budget()))
                 chunk = response.read(min(65536, MAX_FETCH_BYTES + 1 - received))
                 if not chunk:
                     break
@@ -355,6 +385,8 @@ def _fetcher(settings: ProvenanceSettings):
                     raise ProvenanceAuditError(
                         "evidence response exceeds the bounded limit"
                     )
+                # The aggregate cap spans EVERY attempt on every address: a
+                # peer that streams then dies cannot reset the budget.
                 remaining["bytes"] -= len(chunk)
                 if remaining["bytes"] < 0:
                     raise ProvenanceAuditError("audit exceeded its aggregate byte cap")
@@ -362,6 +394,24 @@ def _fetcher(settings: ProvenanceSettings):
             return b"".join(chunks)
         finally:
             connection.close()
+
+    def fetch(path: str) -> bytes:
+        remaining["artifacts"] -= 1
+        if remaining["artifacts"] < 0:
+            raise ProvenanceAuditError("audit exceeded its artifact cap")
+        failures: list[str] = []
+        # Try every already validated public address under the one shared
+        # deadline. Only transport failures move on; a served response
+        # (any status) is final, and redirects are never followed.
+        for peer_ip in peer_ips:
+            _check_budget()
+            try:
+                return _fetch_via(peer_ip, path)
+            except OSError as exc:
+                failures.append(f"{peer_ip}: {type(exc).__name__}")
+        raise ProvenanceAuditError(
+            "evidence fetch failed on every resolved address: " + "; ".join(failures)
+        )
 
     def load_index() -> bytes:
         return fetch("/index.json")
@@ -395,6 +445,145 @@ def check_chain_state(audit: ProvenanceAudit, state: Mapping[str, Any]) -> None:
         )
 
 
+def _report_issue_moment(report_bytes: bytes):
+    """A recent-chain report's own ``generated_at`` as an aware datetime.
+
+    A superseded intermediate is verified AT ITS OWN issue time: signature,
+    identity, and chain bindings must all hold, while the expected
+    wall-clock staleness of an already superseded epoch is not a chain
+    break. An unparseable timestamp is an unverifiable link — fail closed.
+    """
+    from datetime import datetime
+
+    try:
+        document = json.loads(report_bytes)
+        moment = datetime.fromisoformat(str(document["generated_at"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProvenanceAuditError(
+            "recent-chain report carries no parseable generated_at"
+        ) from exc
+    if moment.tzinfo is None:
+        raise ProvenanceAuditError("recent-chain report generated_at is not UTC")
+    return moment
+
+
+def _verify_recent_chain_bridge(
+    recent_rows,
+    *,
+    settings: ProvenanceSettings,
+    network: str,
+    netuid: int,
+    registry_keys: Mapping[str, bytes],
+    report_keys: Mapping[str, bytes],
+    state: Mapping[str, Any],
+    last_epoch: int,
+    last_report_id: str,
+    latest_epoch: int,
+    latest_previous_report_id: str | None,
+    load_blob,
+) -> None:
+    """Bridge the recorded chain tip to the latest report through the SIGNED
+    bounded ``recent`` list.
+
+    A consumer that only compared ``previous_report_id`` to its recorded
+    tip wedged permanently after missing one published epoch. Instead,
+    every skipped epoch present in the signed index's ``recent`` list is
+    walked IN ORDER and fully verified — manifest identity and epoch
+    binding, report signature via the trusted report keys, report-id
+    binding to its manifest, per-epoch registry verification, policy
+    rollback/equivocation fences — and each link must cite its predecessor
+    exactly. A missing, forked, or out-of-bound link raises; nothing here
+    weakens the durable anti-rollback or equivocation fences.
+    """
+    from cathedral import provenance
+    from cathedral.evidence import parse_manifest
+
+    rows = sorted(
+        (
+            row
+            for row in recent_rows
+            if last_epoch < int(row["source_epoch"]) < latest_epoch
+        ),
+        key=lambda row: int(row["source_epoch"]),
+    )
+    if not rows:
+        raise ProvenanceAuditError(
+            "score report does not chain from the last audited report and "
+            "the signed recent list carries no intermediate epochs to "
+            "bridge the gap"
+        )
+    if len(rows) > MAX_RECENT_WALK:
+        raise ProvenanceAuditError(
+            f"recent-chain walk exceeds the bounded window ({len(rows)} > "
+            f"{MAX_RECENT_WALK} intermediate epochs)"
+        )
+    running_report_id = last_report_id
+    fence_release = state.get("provenance_policy_release")
+    fence_digest = state.get("provenance_policy_digest")
+    for row in rows:
+        row_epoch = int(row["source_epoch"])
+        manifest = parse_manifest(load_blob(row["manifest"]))
+        if manifest["network"] != network or manifest["netuid"] != netuid:
+            raise ProvenanceAuditError("recent-chain manifest network/netuid mismatch")
+        if int(manifest["source_epoch"]) != row_epoch:
+            raise ProvenanceAuditError(
+                "recent-chain manifest epoch does not match its signed index row"
+            )
+        release = int(manifest["policy_registry"]["release"])
+        digest = str(manifest["policy_registry"]["digest"])
+        if isinstance(fence_release, int) and not isinstance(fence_release, bool):
+            if release < fence_release:
+                raise ProvenanceAuditError(
+                    "recent-chain policy rollback inside the walked window"
+                )
+            if (
+                release == fence_release
+                and fence_digest is not None
+                and digest != fence_digest
+            ):
+                raise ProvenanceAuditError(
+                    "recent-chain policy equivocation inside the walked window"
+                )
+        fence_release, fence_digest = release, digest
+        report_bytes = load_blob(manifest["score_report"]["blob"])
+        moment = _report_issue_moment(report_bytes)
+        try:
+            registry = provenance.load_registry(
+                load_blob(manifest["policy_registry"]["blob"]),
+                registry_keys,
+                now=moment,
+                max_age_seconds=settings.registry_max_age_secs,
+            )
+            document = provenance.verify_report_structure(
+                report_bytes,
+                registry=registry,
+                expected_network=network,
+                expected_netuid=netuid,
+                expected_verifier_digest=settings.verifier_digest,
+                report_signing_keys=report_keys,
+                expected_previous_report_id=running_report_id,
+                enforce_chain=True,
+                now=moment,
+            )
+        except provenance.ProvenanceError as exc:
+            raise ProvenanceAuditError(
+                f"recent-chain link for epoch {row_epoch} failed verification: {exc}"
+            ) from exc
+        if int(document["source_epoch"]) != row_epoch:
+            raise ProvenanceAuditError(
+                "recent-chain report epoch does not match its signed index row"
+            )
+        if document["report_id"] != manifest["score_report"]["report_id"]:
+            raise ProvenanceAuditError(
+                "recent-chain report id does not match its manifest binding"
+            )
+        running_report_id = str(document["report_id"])
+    if latest_previous_report_id != running_report_id:
+        raise ProvenanceAuditError(
+            "score report does not chain from the last audited report"
+        )
+
+
 def run_audit(
     settings: ProvenanceSettings,
     *,
@@ -411,6 +600,17 @@ def run_audit(
     audit_deadline = started + settings.audit_deadline_secs
     try:
         settings.validate_for_audit()
+        if settings.mode == "authority" and (
+            isinstance(current_block, bool)
+            or not isinstance(current_block, int)
+            or current_block <= 0
+        ):
+            # A missing/malformed chain block silently SKIPPED the report
+            # block-validity check; authority must refuse instead.
+            raise ProvenanceAuditError(
+                "authority audit requires a finalized integer chain block to "
+                "anchor the report validity window; refusing to audit without one"
+            )
         try:
             from cathedral import provenance
             from cathedral.evidence import parse_manifest, verify_index
@@ -422,7 +622,7 @@ def run_audit(
                 "cathedralconfidential.git')",
             ) from exc
 
-        load_index, load_blob = _fetcher(settings)
+        load_index, load_blob = _fetcher(settings, deadline=audit_deadline)
         index_keys = _load_pubkeys(
             settings.index_keys, settings.index_keys_digest, "index keys"
         )
@@ -523,17 +723,32 @@ def run_audit(
             current_block=current_block,
         )
         # Report predecessor continuity is ALWAYS enforced across audits:
-        # a new export must chain from the last audited report.
+        # a new export must chain from the last audited report. When newer
+        # epochs were published while this consumer was away, the SIGNED
+        # bounded recent chain is walked in order to bridge the gap — a
+        # missing or forked link still fails closed.
         last_report = state.get("provenance_last_report_id")
         last_epoch = state.get("provenance_last_source_epoch")
         if (
             isinstance(last_epoch, int)
+            and not isinstance(last_epoch, bool)
             and result.source_epoch > last_epoch
             and last_report is not None
             and result.previous_report_id != last_report
         ):
-            raise ProvenanceAuditError(
-                "score report does not chain from the last audited report"
+            _verify_recent_chain_bridge(
+                index_document["recent"],
+                settings=settings,
+                network=network,
+                netuid=netuid,
+                registry_keys=registry_keys,
+                report_keys=report_keys,
+                state=state,
+                last_epoch=int(last_epoch),
+                last_report_id=str(last_report),
+                latest_epoch=int(result.source_epoch),
+                latest_previous_report_id=result.previous_report_id,
+                load_blob=load_blob,
             )
         if result.policy_release != manifest["policy_registry"]["release"]:
             raise ProvenanceAuditError(

@@ -148,6 +148,9 @@ def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
         raise wire.VectorError(f"publisher DNS failed: {exc}") from exc
     if not infos:
         raise wire.VectorError("publisher host does not resolve")
+    # EVERY resolved address is validated up front; only this validated,
+    # order-preserving public list may ever be dialed (no private retry).
+    peer_ips: list[str] = []
     for info in infos:
         address = ipaddress.ip_address(info[4][0])
         if (
@@ -162,45 +165,76 @@ def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
                 "publisher resolves to a non-public address; the production "
                 "endpoint is public HTTPS"
             )
-    peer_ip = infos[0][4][0]
+        if info[4][0] not in peer_ips:
+            peer_ips.append(info[4][0])
+
+    # ONE aggregate body budget spans every address attempt: a peer that
+    # streams most of the cap and then dies cannot reset it by failing over.
+    body_budget = {"bytes": MAX_VECTOR_FETCH_BYTES}
 
     class _PinnedConnection(http.client.HTTPSConnection):
+        peer_ip = ""
+
         def connect(self) -> None:
-            raw = socket.create_connection((peer_ip, port), self.timeout)
+            raw = socket.create_connection((self.peer_ip, port), _phase_timeout())
+            # TLS must not inherit the connect phase's stale allowance; SNI
+            # and certificate verification use the ORIGINAL hostname.
+            raw.settimeout(_phase_timeout())
             self.sock = self._context.wrap_socket(raw, server_hostname=host)
 
-    connection = _PinnedConnection(
-        host, port, timeout=_phase_timeout(), context=ssl.create_default_context()
-    )
-    try:
-        connection.connect()  # TCP + TLS under a freshly computed bound
-        connection.sock.settimeout(_phase_timeout())
-        connection.request(
-            "GET",
-            target_path,
-            headers={"Host": host, "User-Agent": "cathedral-thin-validator/1.0"},
+    def _fetch_via(peer_ip: str) -> bytes:
+        connection = _PinnedConnection(
+            host, port, timeout=_phase_timeout(), context=ssl.create_default_context()
         )
-        connection.sock.settimeout(_phase_timeout())
-        response = connection.getresponse()
-        if response.status != 200:
-            raise wire.VectorError(
-                f"vector fetch failed with status {response.status} "
-                "(redirects are never followed)"
-            )
-        chunks: list[bytes] = []
-        received = 0
-        while True:
+        connection.peer_ip = peer_ip
+        try:
+            connection.connect()  # TCP + TLS under freshly computed bounds
             connection.sock.settimeout(_phase_timeout())
-            chunk = response.read(min(65536, MAX_VECTOR_FETCH_BYTES + 1 - received))
-            if not chunk:
-                break
-            received += len(chunk)
-            if received > MAX_VECTOR_FETCH_BYTES:
-                raise wire.VectorError("vector response exceeds the bounded size limit")
-            chunks.append(chunk)
-        data = b"".join(chunks)
-    finally:
-        connection.close()
+            connection.request(
+                "GET",
+                target_path,
+                headers={"Host": host, "User-Agent": "cathedral-thin-validator/1.0"},
+            )
+            connection.sock.settimeout(_phase_timeout())
+            response = connection.getresponse()
+            if response.status != 200:
+                raise wire.VectorError(
+                    f"vector fetch failed with status {response.status} "
+                    "(redirects are never followed)"
+                )
+            chunks: list[bytes] = []
+            while True:
+                connection.sock.settimeout(_phase_timeout())
+                chunk = response.read(min(65536, body_budget["bytes"] + 1))
+                if not chunk:
+                    break
+                body_budget["bytes"] -= len(chunk)
+                if body_budget["bytes"] < 0:
+                    raise wire.VectorError(
+                        "vector response exceeds the bounded size limit"
+                    )
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            connection.close()
+
+    data: bytes | None = None
+    transport_failures: list[str] = []
+    # Try every already validated public address under the one total
+    # deadline. Only transport failures move on; a served response (any
+    # status) is final, and redirects are never followed.
+    for candidate_ip in peer_ips:
+        _phase_timeout()
+        try:
+            data = _fetch_via(candidate_ip)
+            break
+        except OSError as exc:
+            transport_failures.append(f"{candidate_ip}: {type(exc).__name__}")
+    if data is None:
+        raise wire.VectorError(
+            "publisher unreachable on every validated address: "
+            + "; ".join(transport_failures)
+        )
 
     def _no_duplicates(pairs):
         result = {}
@@ -514,16 +548,32 @@ class _ShadowAuditor:
     submissions are skipped (single-flight). Results are drained and logged
     by the MAIN thread on a later tick, so a slow or broken audit can never
     delay, reorder, or fail the thin submission path.
+
+    Completed results are LOSSLESS and exactly-once: they accumulate in a
+    queue under the same lock drain() holds, so an audit that finishes
+    between drain() and the next submit() can never be overwritten by a
+    later completion — every completed audit is handed to exactly one
+    drain() caller, in completion order.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
-        self._result = None  # (audit, state_file)
+        self._results: list = []  # completed, unreported (audit, state_file)
 
     def busy(self) -> bool:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
+
+    def wait(self, timeout: float) -> bool:
+        """Bounded join of the in-flight audit thread (once-mode drain).
+        True when no audit remains in flight afterwards."""
+        with self._lock:
+            thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout=max(0.0, timeout))
+        return not thread.is_alive()
 
     def submit(
         self,
@@ -553,8 +603,11 @@ class _ShadowAuditor:
                     historical_hotkeys_lookup=historical_hotkeys_lookup,
                     block_hash_lookup=block_hash_lookup,
                 )
+                # Append (never assign) under the drain lock: a completed
+                # result is either queued or already handed out — a later
+                # completion cannot overwrite an unreported one.
                 with self._lock:
-                    self._result = (audit, state_file)
+                    self._results.append((audit, state_file))
 
             self._thread = threading.Thread(
                 target=_run, name="cathedral-shadow-audit", daemon=True
@@ -562,11 +615,12 @@ class _ShadowAuditor:
             self._thread.start()
             return True
 
-    def drain(self):
+    def drain(self) -> list:
+        """Every completed, not-yet-reported result — exactly once, in
+        completion order."""
         with self._lock:
-            result = self._result
-            self._result = None
-            return result
+            results, self._results = self._results, []
+            return results
 
 
 def _get_shadow_auditor(args) -> _ShadowAuditor:
@@ -770,9 +824,8 @@ def _run_provenance_stage(
         return audit.status, dict(audit.recomputed)
 
     auditor = _get_shadow_auditor(args)
-    finished = auditor.drain()
-    if finished is not None:
-        _log_audit_events(args, finished[0], finished[1])
+    for finished_audit, finished_state_file in auditor.drain():
+        _log_audit_events(args, finished_audit, finished_state_file)
     submitted = auditor.submit(
         settings,
         network=args.network,
@@ -1363,11 +1416,7 @@ def chain_preflight(
     index = hotkeys.index(validator_hotkey)
     if not permits[index]:
         raise wire.VectorError("validator hotkey lacks validator permit")
-    block_raw = getattr(metagraph, "block", None)
-    try:
-        block = int(block_raw) if block_raw is not None else None
-    except (TypeError, ValueError):
-        block = None
+    block = _finalized_block(getattr(metagraph, "block", None))
     result = ChainPreflight(
         wallet=wallet,
         subtensor=subtensor,
@@ -1441,6 +1490,25 @@ def set_weights_on_chain(
         " ".join([f"uids={len(ordered)}", f"success={ok}", *response_details]),
     )
     return ok
+
+
+def _finalized_block(raw) -> int | None:
+    """Strictly coerce a metagraph-reported block number.
+
+    Only a positive integral number is a usable finalized block: booleans,
+    fractional floats, junk strings, and non-positive values are all None.
+    Thin mode tolerates None (it never anchors a validity window); authority
+    REFUSES on None instead of silently skipping report block-validity
+    checks."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, float) and not raw.is_integer():
+        return None
+    try:
+        block = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return block if block > 0 else None
 
 
 def _bt_subtensor(bt):
@@ -1529,12 +1597,7 @@ def _metagraph_snapshot(
 
         mg = _bt_subtensor(bt)(network=connection_target(network)).metagraph(netuid)
     mapping = {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
-    block_raw = getattr(mg, "block", None)
-    try:
-        block = int(block_raw) if block_raw is not None else None
-    except (TypeError, ValueError):
-        block = None
-    return mapping, block
+    return mapping, _finalized_block(getattr(mg, "block", None))
 
 
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
@@ -1834,6 +1897,16 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
                 network=args.network, netuid=args.netuid
             )
 
+    # A missing or malformed metagraph block must never degrade to
+    # current_block=None (which silently skips the report block-validity
+    # check inside the audit): refuse BEFORE audit and BEFORE submission.
+    if not args.offline and current_block is None:
+        raise wire.VectorError(
+            "authority requires a finalized integer metagraph block to anchor "
+            "the report validity window; the chain snapshot did not provide "
+            "one (refusing before audit or submission)"
+        )
+
     _, recomputed = _run_provenance_stage(
         args,
         comparison if comparison is not None else {},
@@ -1886,6 +1959,39 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
     return ok
 
 
+def _drain_shadow_audit_once(args) -> bool:
+    """--once only: the recurring loop reports a finished shadow audit on
+    the NEXT tick, which a single run never has. Wait out the in-flight
+    audit within its own documented total bound (the audit deadline),
+    report every completed result exactly once, and return False — a
+    truthful nonzero exit — when the outcome could not be captured.
+    Recurring thin ticks never call this; their non-blocking single-flight
+    drain is unchanged."""
+    auditor = getattr(args, "_shadow_auditor", None)
+    if auditor is None:
+        return True
+    bound = _provenance_settings(args).audit_deadline_secs
+    resolved = auditor.wait(bound)
+    for finished_audit, finished_state_file in auditor.drain():
+        _log_audit_events(args, finished_audit, finished_state_file)
+    if not resolved:
+        _get_events(args).event(
+            "PROVENANCE_AUDIT_UNRESOLVED",
+            stage="provenance",
+            status=NOT_PROVEN,
+            detail=(
+                f"single-run shadow audit still in flight after its "
+                f"{bound:.0f}s bound; its outcome was not captured"
+            ),
+            remediation=(
+                "re-run, extend the audit deadline, or check the evidence "
+                "endpoint; the thin submission itself was unaffected"
+            ),
+        )
+        return False
+    return True
+
+
 def run(args) -> int:
     """The validator loop, shared by `python -m scaffold.validator_thin` and the
     `cathedral-validator serve` console command. `args` is any object carrying
@@ -1936,11 +2042,13 @@ def run(args) -> int:
                     "recovers automatically."
                 ),
             )
-            if args.once:
-                return 1
         if args.once:
-            # A tick that ran but did not succeed is a FAILED single run.
-            return 0 if tick_ok else 1
+            # A single run exits only after the background shadow audit's
+            # outcome is captured and reported (bounded); a tick that ran
+            # but did not succeed — or an audit outcome that could not be
+            # captured — is a FAILED single run.
+            shadow_ok = _drain_shadow_audit_once(args)
+            return 0 if (tick_ok and shadow_ok) else 1
         time.sleep(args.interval_secs)
 
 

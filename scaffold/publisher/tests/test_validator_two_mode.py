@@ -815,6 +815,7 @@ def _run_audit_replay(
     vector=None,
     network="finney",
     netuid=39,
+    current_block=None,
     historical_hotkeys_lookup=_historical_lookup,
     block_hash_lookup=_block_hash,
 ):
@@ -830,6 +831,7 @@ def _run_audit_replay(
             netuid=netuid,
             vector_payload=vector,
             state=state or {},
+            current_block=current_block,
             historical_hotkeys_lookup=historical_hotkeys_lookup,
             block_hash_lookup=block_hash_lookup,
         )
@@ -1944,3 +1946,703 @@ def test_authority_lock_refuses_symlinks_and_unsafe_modes(
     # A safe lock file proceeds normally (nonblocking semantics intact).
     assert validator_thin._authority_tick(args, None) is True
     assert called == {"audit": 1, "submit": 1}
+
+
+# ---------------------------------------------------------------------------
+# Round-seven adversarial regressions
+# ---------------------------------------------------------------------------
+
+# The fixture's deterministic key seeds (module-scope literals above).
+_R7_REPORT_SEED = bytes(range(64, 96))
+_R7_INDEX_SEED = bytes(range(96, 128))
+
+
+def _index_rows(index_bytes: bytes) -> tuple[dict, list[dict]]:
+    document = json.loads(index_bytes)
+    return document["latest"], document["recent"]
+
+
+def _store_blob(store_root: Path, digest: str) -> bytes:
+    return (store_root / "blobs" / "sha256" / digest.split(":", 1)[1]).read_bytes()
+
+
+def _private_store(real_evidence, tmp_path: Path):
+    """A writable clone of the fixture store with the index guard reset, so
+    round-seven tests can publish adversarial indexes without perturbing the
+    shared module-scoped store."""
+    import dataclasses
+    import shutil
+
+    store_root, settings, stages = real_evidence
+    private_root = tmp_path / "store-copy"
+    shutil.copytree(store_root, private_root)
+    (private_root / "index.json").unlink(missing_ok=True)
+    (private_root / ".index-highwater.json").unlink(missing_ok=True)
+    return (
+        private_root,
+        dataclasses.replace(settings, evidence_dir=str(private_root)),
+        stages,
+    )
+
+
+def _resign_report(report_bytes: bytes, **overrides) -> bytes:
+    """Re-sign the fixture report with modified fields (the tests hold the
+    fixture's signing seed, exactly like a compromised-producer adversary)."""
+    from cathedral.score_class import _sign_report
+
+    document = json.loads(report_bytes)
+    document.pop("signature", None)
+    document.pop("report_id", None)
+    document.update(overrides)
+    return _sign_report(document, _R7_REPORT_SEED)
+
+
+def _rebuild_manifest_with_report(store, manifest_bytes: bytes, report_bytes: bytes):
+    """A canonical manifest identical to ``manifest_bytes`` but binding the
+    supplied report blob; returns the new manifest digest."""
+    from cathedral.policy_registry import canonical_json
+
+    manifest = json.loads(manifest_bytes)
+    report = json.loads(report_bytes)
+    manifest["score_report"] = dict(manifest["score_report"])
+    manifest["score_report"]["blob"] = store.put_blob(report_bytes)
+    manifest["score_report"]["report_id"] = report["report_id"]
+    return store.put_blob(canonical_json(manifest))
+
+
+def _sign_index(latest_epoch: int, latest_manifest: str, recent: list[dict]) -> bytes:
+    from cathedral.evidence import build_signed_index
+
+    return build_signed_index(
+        network="finney",
+        netuid=39,
+        latest_source_epoch=latest_epoch,
+        latest_manifest_digest=latest_manifest,
+        recent=recent,
+        signing_key_id="evidence-index-test-1",
+        private_key_seed=_R7_INDEX_SEED,
+    )
+
+
+def test_finalized_block_rejects_missing_and_malformed() -> None:
+    """Round-seven F1: only a positive integral block survives coercion —
+    missing, boolean, fractional, junk, and non-positive values are None
+    (and authority refuses on None instead of skipping validity checks)."""
+    coerce = validator_thin._finalized_block
+    assert coerce(200) == 200
+    assert coerce("200") == 200
+    assert coerce(200.0) == 200
+    assert coerce(None) is None
+    assert coerce(True) is None
+    assert coerce(False) is None
+    assert coerce("abc") is None
+    assert coerce(200.5) is None
+    assert coerce(float("nan")) is None
+    assert coerce(-5) is None
+    assert coerce(0) is None
+
+
+def test_authority_refuses_to_audit_without_a_finalized_block(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-seven F1: a metagraph snapshot without a usable finalized block
+    refuses the authority tick BEFORE the audit — current_block=None must
+    never silently skip the report block-validity check — while a genuine
+    block flows into the audit unchanged."""
+    called = {"audit": 0}
+
+    def fake_run_audit(settings, **_kw):
+        called["audit"] += 1
+        return _epoch_audit(12, "a", "b")
+
+    monkeypatch.setattr(validator_thin, "run_audit", fake_run_audit)
+    monkeypatch.setattr(validator_thin, "set_weights_on_chain", lambda *a, **k: True)
+    monkeypatch.setattr(
+        validator_thin,
+        "_metagraph_snapshot",
+        lambda *, network, netuid: ({"burn-hotkey": 0, "tdx-miner": 163}, None),
+    )
+    args = _authority_args(tmp_path)
+    args.offline = False
+    with pytest.raises(validator_thin.wire.VectorError, match="finalized integer"):
+        validator_thin._authority_tick(args, None)
+    assert called["audit"] == 0  # refused BEFORE any audit ran
+
+    seen_blocks: list = []
+
+    def recording_run_audit(settings, *, current_block=None, **_kw):
+        seen_blocks.append(current_block)
+        return _epoch_audit(12, "a", "b")
+
+    monkeypatch.setattr(validator_thin, "run_audit", recording_run_audit)
+    monkeypatch.setattr(
+        validator_thin,
+        "_metagraph_snapshot",
+        lambda *, network, netuid: ({"burn-hotkey": 0, "tdx-miner": 163}, 200),
+    )
+    assert validator_thin._authority_tick(args, None) is True
+    assert seen_blocks == [200]  # the real block reached the audit
+
+
+def test_run_audit_authority_gate_requires_current_block(real_evidence) -> None:
+    """Round-seven F1 (audit layer): a fully pinned authority audit without
+    a finalized integer block FAILs outright instead of skipping the
+    validity-window check; with a genuine in-window block it passes."""
+    import dataclasses
+
+    _store_root, settings, _stages = real_evidence
+    authority = dataclasses.replace(settings, mode="authority")
+    for bad_block in (None, True, 0, -3):
+        audit = _run_audit_replay(authority, current_block=bad_block)
+        assert audit.status == "FAIL"
+        assert "finalized integer chain block" in audit.error
+
+
+def test_report_block_window_enforced_with_a_real_block(
+    real_evidence, tmp_path
+) -> None:
+    """Round-seven F1 counterexample: a report valid for blocks [100, 101)
+    audited at finalized block 200 FAILS — exactly the check the silent
+    current_block=None used to skip — while block 100 (in window) passes."""
+    from cathedral.evidence import EvidenceStore
+
+    private_root, settings, stages = _private_store(real_evidence, tmp_path)
+    store = EvidenceStore(private_root)
+    latest11, _recent11 = _index_rows(stages[11])
+    manifest11 = _store_blob(private_root, latest11["manifest"])
+    report11 = _store_blob(
+        private_root, json.loads(manifest11)["score_report"]["blob"]
+    )
+    narrow = _resign_report(report11, valid_until_block=101)
+    narrow_manifest = _rebuild_manifest_with_report(store, manifest11, narrow)
+    store.write_index(_sign_index(11, narrow_manifest, []))
+
+    inside = _run_audit_replay(settings, current_block=100)
+    assert inside.status == "PASS", inside.error
+
+    outside = _run_audit_replay(settings, current_block=200)
+    assert outside.status == "FAIL"
+    assert "validity window" in outside.error
+
+
+def test_recent_chain_walk_recovers_after_missed_epochs(
+    real_evidence, tmp_path
+) -> None:
+    """Round-seven F2 counterexample: after auditing epoch 11, a consumer
+    whose next observation is epoch 13 walks the SIGNED recent chain through
+    the missed epoch 12 and recovers — instead of wedging forever on the
+    predecessor check."""
+    from cathedral.evidence import EvidenceStore
+
+    private_root, settings, stages = _private_store(real_evidence, tmp_path)
+    store = EvidenceStore(private_root)
+    store.write_index(stages[11])
+    first = _run_audit_replay(settings)
+    assert first.status == "PASS", first.error
+    assert first.source_epoch == 11
+    state = _state_after(first)
+
+    store.write_index(stages[13])  # 12 was published while we were away
+    recovered = _run_audit_replay(settings, state=state)
+    assert recovered.status == "PASS", recovered.error
+    assert recovered.source_epoch == 13
+    assert recovered.assurance == "full"
+    assert recovered.recomputed == {"tdx-miner": 1.0}
+
+    # And the durable state now advances to 13: the wedge is gone for good.
+    after = _run_audit_replay(settings, state=_state_after(recovered))
+    assert after.status == "PASS"  # idempotent at the new tip
+
+
+def test_recent_chain_missing_intermediate_fails_closed(
+    real_evidence, tmp_path
+) -> None:
+    """Round-seven F2: a signed index whose recent list omits the bridging
+    epoch cannot bridge the gap — the audit FAILs instead of accepting an
+    unverifiable chain."""
+    from cathedral.evidence import EvidenceStore
+
+    private_root, settings, stages = _private_store(real_evidence, tmp_path)
+    store = EvidenceStore(private_root)
+    store.write_index(stages[11])
+    state = _state_after(_run_audit_replay(settings))
+
+    latest13, recent13 = _index_rows(stages[13])
+    hole = [row for row in recent13 if row["source_epoch"] != 12]
+    store.write_index(_sign_index(13, latest13["manifest"], hole))
+    wedged = _run_audit_replay(settings, state=state)
+    assert wedged.status == "FAIL"
+    assert "bridge the gap" in wedged.error
+
+
+def test_recent_chain_forked_intermediate_fails_closed(
+    real_evidence, tmp_path
+) -> None:
+    """Round-seven F2: an intermediate whose report does NOT cite the
+    recorded predecessor (a fork, even correctly signed) breaks the walk —
+    equivocation fences survive the recovery path."""
+    from cathedral.evidence import EvidenceStore
+
+    private_root, settings, stages = _private_store(real_evidence, tmp_path)
+    store = EvidenceStore(private_root)
+    store.write_index(stages[11])
+    state = _state_after(_run_audit_replay(settings))
+
+    latest12, _ = _index_rows(stages[12])
+    manifest12 = _store_blob(private_root, latest12["manifest"])
+    report12 = _store_blob(
+        private_root, json.loads(manifest12)["score_report"]["blob"]
+    )
+    forked_report = _resign_report(
+        report12, previous_report_id="sha256:" + "9" * 64
+    )
+    forked_manifest = _rebuild_manifest_with_report(store, manifest12, forked_report)
+    latest13, recent13 = _index_rows(stages[13])
+    forged_recent = [
+        {"source_epoch": 12, "manifest": forked_manifest}
+        if row["source_epoch"] == 12
+        else row
+        for row in recent13
+    ]
+    store.write_index(_sign_index(13, latest13["manifest"], forged_recent))
+    forked = _run_audit_replay(settings, state=state)
+    assert forked.status == "FAIL"
+    assert "recent-chain link for epoch 12" in forked.error
+
+
+def test_recent_chain_walk_is_bounded(real_evidence) -> None:
+    """Round-seven F2: the walk hard-bounds its window BEFORE any blob is
+    fetched, even if an index verifier regression admitted a longer list."""
+    _store_root, settings, _stages = real_evidence
+    bound = provenance_audit.MAX_RECENT_WALK
+    rows = [
+        {"source_epoch": epoch, "manifest": "sha256:" + f"{epoch:064x}"}
+        for epoch in range(12, 12 + bound + 1)
+    ]
+    with pytest.raises(ProvenanceAuditError, match="bounded window"):
+        provenance_audit._verify_recent_chain_bridge(
+            rows,
+            settings=settings,
+            network="finney",
+            netuid=39,
+            registry_keys={},
+            report_keys={},
+            state={},
+            last_epoch=11,
+            last_report_id="sha256:" + "a" * 64,
+            latest_epoch=12 + bound + 5,
+            latest_previous_report_id="sha256:" + "b" * 64,
+            load_blob=lambda digest: (_ for _ in ()).throw(
+                AssertionError("no blob fetch may precede the bound check")
+            ),
+        )
+
+
+def test_required_ci_collection_gate_returns_zero() -> None:
+    """Round-seven F3: the required workflow's collection gate must find the
+    anchor test and exit 0. Supported pytest under -qq prints only a count
+    (no node ids), so the old `-q --co -q` form exited 1 before the suite."""
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[3]
+    workflow = repo_root / ".github" / "workflows" / "two-mode-provenance.yml"
+    text = workflow.read_text()
+    assert "-q --co -q" not in text  # the broken double-quiet form is gone
+    assert "--collect-only -q" in text
+    command = (
+        f"{sys.executable} -m pytest "
+        "scaffold/publisher/tests/test_validator_two_mode.py "
+        "--collect-only -q | grep -q test_full_path_positive_revoked_restored"
+    )
+    completed = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=repo_root,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def _once_args(tmp_path: Path) -> SimpleNamespace:
+    args = _args(tmp_path, "shadow")
+    args.once = True
+    args.interval_secs = 0.01
+    args.offline = True
+    args.broadcast = False
+    args.require_policy = None
+    return args
+
+
+def test_once_mode_drains_and_reports_the_shadow_audit(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-seven F4: --once must not exit while the shadow audit daemon is
+    still running — the outcome is awaited within the documented bound and
+    reported, and the exit code stays truthful."""
+    events_seen: list[str] = []
+
+    class _Recorder:
+        def event(self, name, **_kw):
+            events_seen.append(name)
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda args: _Recorder())
+    monkeypatch.setattr(
+        validator_thin,
+        "run_audit",
+        lambda settings, **_kw: ProvenanceAudit(
+            status="FAIL", error="endpoint died", duration_ms=1.0
+        ),
+    )
+
+    def fake_tick(a):
+        validator_thin._run_provenance_stage(
+            a, validated_supply_payload(), Path(a.state_file)
+        )
+        return True
+
+    monkeypatch.setattr(validator_thin, "tick", fake_tick)
+    args = _once_args(tmp_path)
+    assert validator_thin.run(args) == 0
+    assert "PROVENANCE_AUDIT_FAIL" in events_seen  # outcome captured, not lost
+
+
+def test_once_mode_truthful_exit_when_audit_cannot_be_captured(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-seven F4: when the audit cannot complete within the documented
+    bound, --once says so — a stable UNRESOLVED event and a nonzero exit —
+    instead of silently reporting success."""
+    import dataclasses
+    import threading as threading_module
+
+    release = threading_module.Event()
+    events_seen: list[str] = []
+
+    class _Recorder:
+        def event(self, name, **_kw):
+            events_seen.append(name)
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda args: _Recorder())
+
+    def hung_audit(settings, **_kw):
+        release.wait(10.0)
+        return ProvenanceAudit(status="PASS")
+
+    monkeypatch.setattr(validator_thin, "run_audit", hung_audit)
+    real_settings = validator_thin._provenance_settings
+    monkeypatch.setattr(
+        validator_thin,
+        "_provenance_settings",
+        lambda args: dataclasses.replace(
+            real_settings(args), audit_deadline_secs=0.2
+        ),
+    )
+
+    def fake_tick(a):
+        validator_thin._run_provenance_stage(
+            a, validated_supply_payload(), Path(a.state_file)
+        )
+        return True
+
+    monkeypatch.setattr(validator_thin, "tick", fake_tick)
+    args = _once_args(tmp_path)
+    try:
+        assert validator_thin.run(args) == 1  # truthful: outcome NOT captured
+        assert "PROVENANCE_AUDIT_UNRESOLVED" in events_seen
+    finally:
+        release.set()
+
+
+def test_shadow_completion_race_is_lossless_and_exactly_once(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-seven F5 counterexample: audit A completes BETWEEN drain() and
+    the next submit(); completed audit B must not overwrite unreported A.
+    Every completed audit is drained exactly once, in completion order."""
+    import threading as threading_module
+
+    gate_a = threading_module.Event()
+    audit_a = ProvenanceAudit(
+        status="PASS", source_epoch=1, report_id="sha256:" + "a" * 64
+    )
+    audit_b = ProvenanceAudit(
+        status="PASS", source_epoch=2, report_id="sha256:" + "b" * 64
+    )
+    outputs = iter([audit_a, audit_b])
+    gates = iter([gate_a, None])
+
+    def scripted_audit(settings, **_kw):
+        gate = next(gates)
+        if gate is not None:
+            assert gate.wait(5.0)
+        return next(outputs)
+
+    monkeypatch.setattr(validator_thin, "run_audit", scripted_audit)
+    auditor = validator_thin._ShadowAuditor()
+    submit_kwargs = {
+        "network": "finney",
+        "netuid": 39,
+        "payload": {},
+        "state": {},
+        "state_file": tmp_path / "state.json",
+    }
+    assert auditor.submit(None, **submit_kwargs)
+    assert auditor.drain() == []  # the tick drained BEFORE A finished
+    gate_a.set()
+    auditor._thread.join(5.0)  # A completes between drain() and submit()
+    assert auditor.submit(None, **submit_kwargs)  # B admitted: A's thread done
+    auditor._thread.join(5.0)  # B completes as well
+    drained = auditor.drain()
+    assert [item[0] for item in drained] == [audit_a, audit_b]  # lossless
+    assert auditor.drain() == []  # exactly once
+
+
+def test_thin_feed_fetch_tries_every_validated_address(monkeypatch) -> None:
+    """Round-seven F6: a dead first resolved address must not fail the thin
+    feed fetch — the healthy second (already validated public) address
+    serves it, with TLS/SNI still for the ORIGINAL hostname."""
+    import http.client
+    import socket
+    import ssl
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(
+        provenance_audit,
+        "_getaddrinfo_bounded",
+        lambda host, port, timeout: [
+            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
+            (socket.AF_INET, 0, 6, "", ("34.71.88.141", 443)),
+        ],
+    )
+    attempts: list[str] = []
+
+    class _FakeSock:
+        def settimeout(self, _t):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_create_connection(address, _timeout=None):
+        attempts.append(address[0])
+        if address[0] == "34.71.88.140":
+            raise ConnectionRefusedError("dead peer")
+        return _FakeSock()
+
+    class _FakeContext:
+        def wrap_socket(self, _raw, server_hostname=None):
+            assert server_hostname == "publisher.example"  # SNI: hostname
+            return _FakeSock()
+
+    sent = {"done": False}
+
+    def read_body(n):
+        if sent["done"]:
+            return b""
+        sent["done"] = True
+        return b'{"ok": true}'
+
+    monkeypatch.setattr(socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(ssl, "create_default_context", lambda: _FakeContext())
+    monkeypatch.setattr(
+        http.client.HTTPSConnection, "request", lambda self, *a, **k: None
+    )
+    monkeypatch.setattr(
+        http.client.HTTPSConnection,
+        "getresponse",
+        lambda self: NS(status=200, read=read_body),
+    )
+    assert validator_thin.fetch_vector("https://publisher.example") == {"ok": True}
+    assert attempts == ["34.71.88.140", "34.71.88.141"]
+
+
+def test_thin_feed_body_cap_is_shared_across_address_attempts(monkeypatch) -> None:
+    """Round-seven F6: a peer that streams the whole cap and then dies
+    cannot reset the body budget by failing over — the aggregate cap spans
+    every address attempt."""
+    import http.client
+    import socket
+    import ssl
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(
+        provenance_audit,
+        "_getaddrinfo_bounded",
+        lambda host, port, timeout: [
+            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
+            (socket.AF_INET, 0, 6, "", ("34.71.88.141", 443)),
+        ],
+    )
+    attempts: list[str] = []
+
+    class _FakeSock:
+        def settimeout(self, _t):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        lambda address, _timeout=None: attempts.append(address[0]) or _FakeSock(),
+    )
+
+    class _FakeContext:
+        def wrap_socket(self, _raw, server_hostname=None):
+            return _FakeSock()
+
+    responses = {"attempt": 0}
+    cap = validator_thin.MAX_VECTOR_FETCH_BYTES
+
+    def fake_getresponse(self):
+        responses["attempt"] += 1
+        if responses["attempt"] == 1:
+            state = {"remaining": cap}
+
+            def stream_then_die(n):
+                if state["remaining"] <= 0:
+                    raise ConnectionResetError("mid-body death")
+                chunk = b"x" * min(n, state["remaining"])
+                state["remaining"] -= len(chunk)
+                return chunk
+
+            return NS(status=200, read=stream_then_die)
+        # Attempt 2: ANY further byte must exceed the shared budget.
+        return NS(status=200, read=lambda n: b"y")
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda: _FakeContext())
+    monkeypatch.setattr(
+        http.client.HTTPSConnection, "request", lambda self, *a, **k: None
+    )
+    monkeypatch.setattr(
+        http.client.HTTPSConnection, "getresponse", fake_getresponse
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="bounded size limit"):
+        validator_thin.fetch_vector("https://publisher.example")
+    assert attempts == ["34.71.88.140", "34.71.88.141"]
+
+
+def _patched_evidence_transport(
+    monkeypatch,
+    *,
+    dns_delay: float = 0.0,
+    read_delay: float = 0.0,
+    connect_delay: float = 0.0,
+    dead: frozenset = frozenset(),
+    body: bytes = b'{"i": 1}',
+) -> list[str]:
+    """Fake DNS/socket/TLS/HTTP plumbing for evidence _fetcher tests; the
+    returned list records connection attempts in order."""
+    import http.client
+    import socket
+    import ssl
+    from types import SimpleNamespace as NS
+
+    def fake_resolver(host, port, timeout):
+        if dns_delay:
+            time.sleep(dns_delay)
+        return [
+            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
+            (socket.AF_INET, 0, 6, "", ("34.71.88.141", 443)),
+        ]
+
+    monkeypatch.setattr(provenance_audit, "_getaddrinfo_bounded", fake_resolver)
+    attempts: list[str] = []
+
+    class _FakeSock:
+        def settimeout(self, _t):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_create_connection(address, _timeout=None):
+        attempts.append(address[0])
+        if connect_delay:
+            time.sleep(connect_delay)
+        if address[0] in dead:
+            raise ConnectionRefusedError("dead peer")
+        return _FakeSock()
+
+    class _FakeContext:
+        def wrap_socket(self, _raw, server_hostname=None):
+            assert server_hostname == "evidence.example"  # SNI: hostname
+            return _FakeSock()
+
+    sent = {"done": False}
+
+    def fake_read(n):
+        if read_delay:
+            time.sleep(read_delay)
+        if sent["done"]:
+            return b""
+        sent["done"] = True
+        return body
+
+    monkeypatch.setattr(socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(ssl, "create_default_context", lambda: _FakeContext())
+    monkeypatch.setattr(
+        http.client.HTTPSConnection, "request", lambda self, *a, **k: None
+    )
+    monkeypatch.setattr(
+        http.client.HTTPSConnection,
+        "getresponse",
+        lambda self: NS(status=200, read=fake_read),
+    )
+    return attempts
+
+
+def test_evidence_fetcher_tries_every_validated_address(monkeypatch) -> None:
+    """Round-seven F6: the evidence fetcher fails over from a dead first
+    address to the healthy second one instead of failing the whole audit."""
+    attempts = _patched_evidence_transport(
+        monkeypatch, dead=frozenset({"34.71.88.140"}), body=b'{"i": 1}'
+    )
+    settings = ProvenanceSettings(
+        mode="shadow", evidence_url="https://evidence.example"
+    )
+    load_index, _load_blob = provenance_audit._fetcher(settings)
+    assert load_index() == b'{"i": 1}'
+    assert attempts == ["34.71.88.140", "34.71.88.141"]
+
+
+def test_evidence_fetcher_stops_failover_when_budget_is_exhausted(
+    monkeypatch,
+) -> None:
+    """Round-seven F6: address failover never outlives the total deadline —
+    once the budget is spent, the next address is NOT tried."""
+    attempts = _patched_evidence_transport(
+        monkeypatch,
+        connect_delay=0.06,
+        dead=frozenset({"34.71.88.140", "34.71.88.141"}),
+    )
+    settings = ProvenanceSettings(
+        mode="shadow",
+        evidence_url="https://evidence.example",
+        audit_deadline_secs=0.05,
+    )
+    load_index, _load_blob = provenance_audit._fetcher(settings)
+    with pytest.raises(ProvenanceAuditError, match="total deadline"):
+        load_index()
+    assert attempts == ["34.71.88.140"]  # the second address was never dialed
+
+
+def test_audit_deadline_starts_before_dns_and_rebounds_every_phase(
+    monkeypatch,
+) -> None:
+    """Round-seven F7 counterexample: 0.04s of DNS plus a 0.04s body read
+    must FAIL a 0.05s whole-audit budget. Previously the deadline started
+    after DNS and a stale socket allowance survived into body reads, so
+    this exact sequence succeeded."""
+    _patched_evidence_transport(monkeypatch, dns_delay=0.04, read_delay=0.04)
+    settings = ProvenanceSettings(
+        mode="shadow",
+        evidence_url="https://evidence.example",
+        audit_deadline_secs=0.05,
+    )
+    load_index, _load_blob = provenance_audit._fetcher(settings)
+    with pytest.raises(ProvenanceAuditError, match="total deadline"):
+        load_index()
