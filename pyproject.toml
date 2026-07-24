@@ -38,7 +38,7 @@ test = [
 # Pinned to the immutable launch-candidate commit; update ONLY together
 # with the reviewed release process (never a mutable branch ref).
 provenance = [
-    "cathedral @ git+https://github.com/cathedralai/cathedralconfidential.git@bb10975a2a58785ae5f2e1d7fc170ce2ee36865c",
+    "cathedral @ git+https://github.com/cathedralai/cathedralconfidential.git@562dd19640c6d60b5615f95b7dad793cf8d7de86",
 ]
 
 [project.scripts]
