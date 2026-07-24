@@ -484,7 +484,28 @@ def real_evidence(tmp_path_factory):
         )
         attestation_rows = []
         receipts = []
+        work_blobs: list[tuple[str, str]] = []
         if positive:
+            from cathedral.lanes.sat_types import (
+                SatCertificate,
+                SatInstance,
+                SatWorkItem,
+            )
+            from cathedral.runtime import _sat_manifest_bytes, _sat_result_bytes
+
+            sat_instance = SatInstance(n_vars=3, clauses=[[1, 2, -3]] * 20)
+            sat_item = SatWorkItem(
+                instance=sat_instance, seed=7, challenge_id=challenge_hex
+            )
+            sat_certificate = SatCertificate(
+                satisfiable=True,
+                assignment=[1, 2, -3],
+                work_units=20.0,
+                challenge_id=challenge_hex,
+                assigned_hotkey="tdx-miner",
+            )
+            work_item_bytes = _sat_manifest_bytes(sat_item)
+            result_bytes = _sat_result_bytes(sat_item, sat_certificate)
             nonce = bytes([source_epoch]) * 32
             seed_evidence = Evidence(
                 kind=EvidenceKind.TDX,
@@ -517,7 +538,7 @@ def real_evidence(tmp_path_factory):
                 AssuranceDimension.WORK,
                 evaluated_claim(
                     ClaimStatus.PASSED,
-                    b"work-result",
+                    result_bytes,
                     SAT_WORK_POLICY_DIGEST,
                     verified_at=verified_text,
                 ),
@@ -560,9 +581,14 @@ def real_evidence(tmp_path_factory):
                 assurance=claims,
                 worker_lifecycle=lifecycle,
                 challenge_id=challenge_hex,
-                manifest_digest="sha256:" + "b" * 64,
+                manifest_digest="sha256:"
+                + hashlib.sha256(work_item_bytes).hexdigest(),
                 work_units=20.0,
                 issued_at=now,
+            )
+            ledger.record_work_artifacts(challenge_hex, work_item_bytes, result_bytes)
+            work_blobs.append(
+                (store.put_blob(work_item_bytes), store.put_blob(result_bytes))
             )
             ledger.issue_challenge(challenge_hex, "tdx-miner", epoch_id)
             ledger.resolve_challenge_with_receipt(
@@ -630,8 +656,10 @@ def real_evidence(tmp_path_factory):
                 "receipt_id": receipt.receipt_id,
                 "hotkey": "tdx-miner",
                 "blob": store.put_blob(receipt.receipt_bytes),
+                "work_item_blob": work_blobs[index][0],
+                "result_blob": work_blobs[index][1],
             }
-            for receipt, _ in receipts
+            for index, (receipt, _) in enumerate(receipts)
         ]
         manifest_bytes = build_manifest(
             network="finney",

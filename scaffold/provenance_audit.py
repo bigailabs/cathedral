@@ -424,6 +424,13 @@ def run_audit(
         receipts_by_id = {
             row["receipt_id"]: load_blob(row["blob"]) for row in manifest["receipts"]
         }
+        work_artifacts_by_receipt = {
+            row["receipt_id"]: (
+                load_blob(row["work_item_blob"]),
+                load_blob(row["result_blob"]),
+            )
+            for row in manifest["receipts"]
+        }
 
         result = provenance.verify_and_recompute(
             report_bytes=report_bytes,
@@ -437,6 +444,7 @@ def run_audit(
             mechanism_id=settings.mechanism,
             registry_max_age_seconds=settings.registry_max_age_secs,
             candidate_set=manifest["candidate_set"],
+            work_artifacts_by_receipt=work_artifacts_by_receipt,
             current_block=current_block,
         )
         # Report predecessor continuity is ALWAYS enforced across audits:
