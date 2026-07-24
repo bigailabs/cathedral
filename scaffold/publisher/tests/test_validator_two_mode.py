@@ -306,8 +306,16 @@ def test_unconfigured_shadow_audit_reports_not_proven(tmp_path) -> None:
 # Integration: a real evidence store audited by the real cathedral package
 # ---------------------------------------------------------------------------
 
-cathedral_provenance = pytest.importorskip(
-    "cathedral.provenance", reason="provenance extra not installed"
+# The integration fixtures below REQUIRE the cathedral package; the unit
+# tests above must always collect and run. Only fixture construction skips.
+try:
+    import cathedral.provenance  # noqa: F401
+    _CATHEDRAL_AVAILABLE = True
+except ImportError:  # pragma: no cover - CI installs the extra
+    _CATHEDRAL_AVAILABLE = False
+
+requires_cathedral = pytest.mark.skipif(
+    not _CATHEDRAL_AVAILABLE, reason="provenance extra not installed"
 )
 
 
@@ -340,6 +348,8 @@ FULL_CLAIMS = {
 
 @pytest.fixture(scope="module")
 def real_evidence(tmp_path_factory):
+    if not _CATHEDRAL_AVAILABLE:
+        pytest.skip("provenance extra not installed")
     """A genuine registry→receipt→report→manifest→index chain across THREE
     epochs (positive 11, revoked 12, restored 13), with real raw Evidence
     envelopes whose quote bytes are what each receipt's hardware claim
