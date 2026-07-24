@@ -30,11 +30,23 @@ publisher = [
 ]
 test = [
     "pytest>=8",
-    "ruff>=0.15",
+    # Ruff 0.16 expands the default rule set against the pre-existing thin
+    # subnet tree. Keep required CI reproducible at the reviewed baseline until
+    # that separate migration is performed deliberately.
+    "ruff==0.15.13",
+]
+# Full-provenance validator mode: independently verifies Cathedral's published
+# evidence chain (policy registry, signed score reports, assurance receipts)
+# and recomputes the weight vector. Pin a release tag before shipping.
+# Pinned to the immutable launch-candidate commit; update ONLY together
+# with the reviewed release process (never a mutable branch ref).
+provenance = [
+    "cathedral @ git+https://github.com/cathedralai/cathedralconfidential.git@b77c7cfacab34de75b1102360f6e3fc1edf5b796",
 ]
 
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
+cathedral-candidate-snapshot = "scaffold.snapshot_candidates:main"
 cathedral-game = "game.__main__:main"
 cathedral-arena = "game.arena.__main__:main"
 cathedral-arena-audit = "game.arena.audit:main"

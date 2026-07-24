@@ -22,7 +22,45 @@ url = "https://api.cathedral.computer"
 # against https://api.cathedral.computer/.well-known/cathedral-jwks.json
 public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
 key_id = "cathedral-weight-policy"
+# Launch contract pin: 90% Intel TDX / >=10% burn. Supported SN39 mode.
+require_policy = "validated_supply_v1"
 # state_file = "~/.cathedral/thin_validator.json"   # rollback-fence persistence
 
 [weights]
 interval_secs = 1500
+
+[provenance]
+# Two-mode operation. "shadow" (default): thin mode submits the signed vector
+# while the full-provenance verifier independently re-verifies the published
+# evidence chain every tick and reports any divergence. "authority": the
+# validator submits its OWN recomputed vector (the signed vector is only used
+# for comparison and the burn destination). "off": no audit.
+mode = "shadow"
+# evidence_url = "https://api.cathedral.computer/v1/evidence"   # default: publisher + /v1/evidence
+# Trusted public-key pins (JSON files mapping key_id -> base64 32-byte key).
+# Create these from the published key bundle following docs/PROVENANCE.md
+# (they are NOT shipped in-repo until the launch bundle is published) and
+# pin their digests here.
+# registry_keys = "config/provenance/registry-keys.json"
+# registry_keys_digest = "sha256:..."
+# report_keys = "config/provenance/report-keys.json"
+# report_keys_digest = "sha256:..."
+# index_keys = "config/provenance/index-keys.json"
+# index_keys_digest = "sha256:..."
+# The pinned Intel TDX verifier implementation digest (from the release notes):
+# verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+# The versioned reward mechanism this validator recomputes:
+mechanism = "validated_supply_v1"
+# FULL assurance (authority mode requires all of these): the controlled
+# envelope package, the pinned verifier binary, the expected source
+# revision, and the configured burn destination (never taken from the
+# signed vector):
+# controlled_dir = "/var/lib/cathedral-controlled/epoch-latest"
+# verifier_binary = "/opt/cathedral/bin/cathedral-tdx-verifier"
+# source_revision = "<pinned commit>"
+# burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+
+[logs]
+# Stable machine-readable event stream (one JSON object per line).
+# Watch it:  tail -f ~/.cathedral/validator-events.jsonl | jq .
+# jsonl = "~/.cathedral/validator-events.jsonl"

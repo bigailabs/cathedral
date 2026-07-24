@@ -35,6 +35,7 @@ MAX_REPORT_FUTURE_SECS_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_FUTURE_SECS"
 
 _DEFAULT_SOURCE = "violet_audio"
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Known/allowed `source` labels for POST /v1/external-scores/violet. The route
 # name predates any source beyond Violet's own audio scorer; widen this
@@ -500,6 +501,25 @@ def normalize_stale_idempotent_retry(
     return report
 
 
+def bind_authenticated_body(
+    report: dict[str, Any],
+    body: bytes,
+) -> dict[str, Any]:
+    """Bind a normalized report to the exact authenticated HTTP body.
+
+    ``report_sha256`` is the semantic, canonical report identity used by the
+    epoch fence. ``body_sha256`` is deliberately separate: it commits to the
+    exact bytes that passed source-scoped bearer and HMAC authentication.  The
+    latter is persisted and echoed into the signed vector so an independent
+    full validator can compare it with the evidence bundle's wire digest.
+    """
+    if not isinstance(body, bytes):
+        raise ExternalScoreError("invalid_authenticated_report_body")
+    bound = dict(report)
+    bound["body_sha256"] = hashlib.sha256(body).hexdigest()
+    return bound
+
+
 def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
     """Persist a normalized report, enforcing epoch monotonicity.
 
@@ -514,6 +534,12 @@ def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
     epoch = int(report.get("epoch") or 0)
     source = report["source"]
     digest = report["report_sha256"]
+    body_digest = report.get("body_sha256")
+    if source in COMPLETE_REQUIRED_SOURCES and (
+        not isinstance(body_digest, str)
+        or _SHA256_HEX_RE.fullmatch(body_digest) is None
+    ):
+        raise ExternalScoreError("authenticated_body_digest_required")
     network = report.get("network")
     netuid = report.get("netuid")
     expected_audience = configured_score_audience(source)
@@ -749,6 +775,7 @@ def status(store: Store, *, source: str, since_iso: str) -> dict[str, Any]:
     is_complete = False
     is_fresh = False
     active_score_count = 0
+    latest_body_sha256 = None
     if latest is not None:
         try:
             report_obj = json.loads(latest["report_json"])
@@ -756,6 +783,12 @@ def status(store: Store, *, source: str, since_iso: str) -> dict[str, Any]:
                 audience is None
                 or (report_obj.get("network"), report_obj.get("netuid")) == audience
             )
+            body_digest = report_obj.get("body_sha256")
+            if (
+                isinstance(body_digest, str)
+                and _SHA256_HEX_RE.fullmatch(body_digest) is not None
+            ):
+                latest_body_sha256 = body_digest
         except Exception:
             is_complete = False
         is_fresh = str(latest["generated_at_iso"]) > str(since_iso)
@@ -773,6 +806,7 @@ def status(store: Store, *, source: str, since_iso: str) -> dict[str, Any]:
         "latest_received_at": str(latest["received_at_iso"]) if latest else None,
         "latest_score_count": int(latest["score_count"]) if latest else 0,
         "latest_report_sha256": str(latest["report_sha256"]) if latest else None,
+        "latest_body_sha256": latest_body_sha256,
         "latest_complete": is_complete,
         "latest_fresh": is_fresh,
         "active_score_count": active_score_count,

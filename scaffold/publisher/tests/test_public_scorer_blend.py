@@ -425,6 +425,7 @@ def test_postgres_epoch_fence_locks_exact_audience_before_latest_read(monkeypatc
         },
         now=now,
     )
+    report = external_scores.bind_authenticated_body(report, b"postgres-fence-fixture")
 
     class Cursor:
         @staticmethod

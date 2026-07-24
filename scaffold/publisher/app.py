@@ -3361,6 +3361,7 @@ def build_app(
                 if retry_exc.reason == "score_audience_not_configured":
                     raise HTTPException(503, retry_exc.reason)
                 raise HTTPException(400, retry_exc.reason)
+        report = external_scores.bind_authenticated_body(report, body)
         try:
             accepted = external_scores.store_report(store, report)
         except external_scores.ExternalScoreError as exc:

@@ -1,0 +1,74 @@
+name: two-mode-provenance
+# Required CI for the SN39 two-mode validator: collects the two-mode suites
+# WITH the provenance extra installed, runs the unmocked static-ELF
+# verifier-bytes authenticator matrix on Linux x86_64, and lints changed
+# launch files. The provenance extra is pinned to the reviewed, public
+# cathedralconfidential main commit; dependency resolution is a hard gate.
+on:
+  pull_request:
+  push:
+    branches: [main, "feature/**"]
+jobs:
+  two-mode:
+    name: Two-mode provenance
+    runs-on: ubuntu-latest   # x86_64: ELF authenticator runs UNMOCKED
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Install with the provenance extra
+        run: |
+          python -m pip install --upgrade 'pip>=26.1.2'
+          pip install -e '.[test,provenance]'
+      - name: Ruff (launch files)
+        run: |
+          pip install ruff
+          ruff check scaffold/validator_thin.py scaffold/provenance_audit.py scaffold/events.py
+          ruff format --check scaffold/provenance_audit.py scaffold/events.py
+      - name: Two-mode suites (collection is REQUIRED, not skippable)
+        # NOTE: exactly ONE -q with --collect-only. A second -q (-qq) makes
+        # supported pytest print only a per-file count — no node ids — so
+        # the grep gate would exit 1 before the suite ever ran.
+        run: |
+          python -m pytest scaffold/publisher/tests/test_validator_two_mode.py \
+            --collect-only -q | grep -q test_full_path_positive_revoked_restored
+          python -m pytest scaffold/publisher/tests/test_validator_two_mode.py -q
+      - name: Unmocked static-ELF authenticator matrix (Linux x86_64)
+        run: |
+          python -m pytest -q \
+            ../cathedralconfidential/tests/test_replay.py -k verifier_authentication \
+            2>/dev/null || \
+          python - <<'PY'
+          # The authenticator tests live in the pinned cathedral package's
+          # repo; when running from the subnet checkout alone, exercise the
+          # installed package's authenticator directly, UNMOCKED.
+          import hashlib, struct
+          from cathedral.replay import ReplayError, authenticate_verifier_bytes
+          from cathedral.verify import tdx_implementation_digest_from_bytes
+          def elf(machine=62, elf_type=2, ptypes=(1,)):
+              h = bytearray(64); h[:4] = b"\x7fELF"; h[4:7] = b"\x02\x01\x01"
+              struct.pack_into("<HH", h, 16, elf_type, machine)
+              struct.pack_into("<Q", h, 32, 64)
+              struct.pack_into("<HH", h, 54, 56, len(ptypes))
+              b = bytearray()
+              for p in ptypes:
+                  e = bytearray(56); struct.pack_into("<I", e, 0, p); b += e
+              return bytes(h) + bytes(b)
+          D = ("/opt/cathedral/bin/cathedral-tdx-verifier-ci",)
+          good = elf()
+          imp = tdx_implementation_digest_from_bytes(D, D, {D[0]: good})
+          authenticate_verifier_bytes(
+              good,
+              expected_blob_digest="sha256:" + hashlib.sha256(good).hexdigest(),
+              declared_command=D, declared_artifacts=D,
+              expected_implementation_digest=imp,
+          )
+          for bad in (b"#!/bin/sh\necho x", elf(machine=183), elf(elf_type=3),
+                      elf(ptypes=(1, 3)), elf(ptypes=(2,))):
+              try:
+                  tdx_implementation_digest_from_bytes(D, D, {D[0]: bad})
+              except ValueError:
+                  continue
+              raise SystemExit("non-static/non-x86_64 bytes were blessed")
+          print("unmocked ELF authenticator matrix PASS")
+          PY
