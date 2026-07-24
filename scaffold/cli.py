@@ -41,6 +41,22 @@ _DEFAULTS = {
     "offline": False,         # set by --offline (verify+print, no chain access)
     "broadcast": True,        # `serve` is a live validator by default (legacy parity)
     "require_policy": None,   # optional signed-policy pin
+    # Two-mode operation: thin submits by default while the full-provenance
+    # audit runs concurrently in shadow. "authority" submits the independent
+    # recomputation instead; "off" disables the audit.
+    "provenance": "shadow",
+    "evidence_url": None,     # default: <publisher_url>/v1/evidence
+    "evidence_dir": None,
+    "provenance_registry_keys": None,
+    "provenance_registry_keys_digest": None,
+    "provenance_report_keys": None,
+    "provenance_report_keys_digest": None,
+    "provenance_index_keys": None,
+    "provenance_index_keys_digest": None,
+    "provenance_verifier_digest": None,
+    "provenance_mechanism": "validated_supply_v1",
+    "provenance_index_max_age_secs": 3600.0,
+    "jsonl": None,            # JSONL event stream file
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
@@ -55,6 +71,17 @@ _CONFIG_MAP = {
     ("weight_policy", "state_file"): "state_file",
     ("weight_policy", "require_policy"): "require_policy",
     ("weights", "interval_secs"): "interval_secs",
+    ("provenance", "mode"): "provenance",
+    ("provenance", "evidence_url"): "evidence_url",
+    ("provenance", "registry_keys"): "provenance_registry_keys",
+    ("provenance", "registry_keys_digest"): "provenance_registry_keys_digest",
+    ("provenance", "report_keys"): "provenance_report_keys",
+    ("provenance", "report_keys_digest"): "provenance_report_keys_digest",
+    ("provenance", "index_keys"): "provenance_index_keys",
+    ("provenance", "index_keys_digest"): "provenance_index_keys_digest",
+    ("provenance", "verifier_digest"): "provenance_verifier_digest",
+    ("provenance", "mechanism"): "provenance_mechanism",
+    ("logs", "jsonl"): "jsonl",
 }
 
 # env var -> our flat config key
@@ -69,6 +96,17 @@ _ENV_MAP = {
     "BT_WALLET_HOTKEY": "wallet_hotkey",
     "CATHEDRAL_VALIDATOR_STATE": "state_file",
     "CATHEDRAL_VALIDATOR_REQUIRE_POLICY": "require_policy",
+    "CATHEDRAL_VALIDATOR_PROVENANCE": "provenance",
+    "CATHEDRAL_EVIDENCE_URL": "evidence_url",
+    "CATHEDRAL_PROVENANCE_REGISTRY_KEYS": "provenance_registry_keys",
+    "CATHEDRAL_PROVENANCE_REGISTRY_KEYS_DIGEST": "provenance_registry_keys_digest",
+    "CATHEDRAL_PROVENANCE_REPORT_KEYS": "provenance_report_keys",
+    "CATHEDRAL_PROVENANCE_REPORT_KEYS_DIGEST": "provenance_report_keys_digest",
+    "CATHEDRAL_PROVENANCE_INDEX_KEYS": "provenance_index_keys",
+    "CATHEDRAL_PROVENANCE_INDEX_KEYS_DIGEST": "provenance_index_keys_digest",
+    "CATHEDRAL_PROVENANCE_VERIFIER_DIGEST": "provenance_verifier_digest",
+    "CATHEDRAL_PROVENANCE_MECHANISM": "provenance_mechanism",
+    "CATHEDRAL_VALIDATOR_JSONL": "jsonl",
 }
 
 
@@ -95,7 +133,11 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
     # explicit flags win
     for flat in ("publisher_url", "public_key_hex", "key_id", "network", "netuid",
                  "wallet_name", "wallet_hotkey", "state_file", "interval_secs",
-                 "require_policy"):
+                 "require_policy", "provenance", "evidence_url",
+                 "provenance_registry_keys", "provenance_registry_keys_digest",
+                 "provenance_report_keys", "provenance_report_keys_digest",
+                 "provenance_index_keys", "provenance_index_keys_digest",
+                 "provenance_verifier_digest", "provenance_mechanism", "jsonl"):
         v = getattr(ns, flat, None)
         if v is not None:
             cfg[flat] = v
@@ -129,11 +171,26 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
               f"{', '.join(validator_thin.REQUIRE_POLICY_CHOICES)}; got {cfg.require_policy!r}",
               file=sys.stderr)
         return 2
+    provenance_mode = getattr(cfg, "provenance", "shadow") or "shadow"
+    if provenance_mode not in ("off", "shadow", "authority"):
+        print(f"error: provenance must be off, shadow, or authority; got "
+              f"{provenance_mode!r}", file=sys.stderr)
+        return 2
     mode = "BROADCAST (setting weights)" if cfg.broadcast else "DRY-RUN (no chain writes)"
     print(f"cathedral-validator serve — netuid {cfg.netuid} on {cfg.network} — {mode}")
     print(f"  publisher={cfg.publisher_url}  key_id={cfg.key_id}  pinned={cfg.public_key_hex[:16]}…")
     if cfg.require_policy:
         print(f"  policy pin: {cfg.require_policy} (legacy/v3 vectors rejected)")
+    authority_banner = {
+        "off": "submission authority: THIN — provenance audit OFF",
+        "shadow": "submission authority: THIN — full-provenance audits every tick "
+                  "(shadow)",
+        "authority": "submission authority: FULL-PROVENANCE — the independent "
+                     "recomputation is what gets submitted",
+    }[provenance_mode]
+    print(f"  {authority_banner}")
+    if getattr(cfg, "jsonl", None):
+        print(f"  jsonl events → {cfg.jsonl}")
     return validator_thin.run(cfg)
 
 
@@ -175,6 +232,29 @@ def main(argv: list[str] | None = None) -> int:
                     help="pin the validator to a signed policy contract "
                          "(confidential_primary_v1 or validated_supply_v1); "
                          "legacy/v3 vectors are rejected")
+    sp.add_argument("--provenance", dest="provenance", default=None,
+                    choices=("off", "shadow", "authority"),
+                    help="full-provenance mode: shadow (default) audits published "
+                         "evidence concurrently; authority submits the independent "
+                         "recomputation; off disables the audit")
+    sp.add_argument("--evidence-url", dest="evidence_url", default=None)
+    sp.add_argument("--provenance-registry-keys", dest="provenance_registry_keys",
+                    default=None)
+    sp.add_argument("--provenance-registry-keys-digest",
+                    dest="provenance_registry_keys_digest", default=None)
+    sp.add_argument("--provenance-report-keys", dest="provenance_report_keys",
+                    default=None)
+    sp.add_argument("--provenance-report-keys-digest",
+                    dest="provenance_report_keys_digest", default=None)
+    sp.add_argument("--provenance-index-keys", dest="provenance_index_keys",
+                    default=None)
+    sp.add_argument("--provenance-index-keys-digest",
+                    dest="provenance_index_keys_digest", default=None)
+    sp.add_argument("--provenance-verifier-digest", dest="provenance_verifier_digest",
+                    default=None)
+    sp.add_argument("--provenance-mechanism", dest="provenance_mechanism", default=None)
+    sp.add_argument("--jsonl", dest="jsonl", default=None,
+                    help="append the stable JSONL event stream to this file")
     sp.add_argument("--dry-run", action="store_true",
                     help="verify and print the weights without setting them on chain")
     sp.add_argument("--offline", action="store_true",

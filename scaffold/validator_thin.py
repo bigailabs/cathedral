@@ -37,6 +37,12 @@ from urllib.parse import urlsplit
 
 from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
+from .events import FAIL, INFO, NOT_PROVEN, PASS, EventLogger
+from .provenance_audit import (
+    MECHANISM_DEFAULT,
+    ProvenanceSettings,
+    run_audit,
+)
 
 
 # Cathedral's published weight-policy signing key (kid: cathedral-weight-policy).
@@ -89,26 +95,199 @@ def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
 
 # -- rollback fence ------------------------------------------------------------
 
+def _read_state(state_file: Path) -> dict[str, Any]:
+    """Read the whole durable state document (fence + provenance chain)."""
+    if not state_file.exists():
+        return {}
+    document = json.loads(state_file.read_text())
+    if not isinstance(document, dict):
+        raise ValueError("validator state file is corrupt")
+    return document
+
+
+def _write_state(state_file: Path, updates: dict[str, Any]) -> None:
+    """Atomic read-merge-write so fence and provenance state never clobber
+    each other and a crash mid-write can't corrupt the fail-closed load."""
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    document = _read_state(state_file)
+    document.update(updates)
+    tmp = state_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(document, indent=2))
+    os.replace(tmp, state_file)
+
+
 def load_fence(state_file: Path) -> int:
     """FAIL CLOSED: only a genuinely absent state file means 'no fence yet'.
     A corrupt/unreadable file raises (the tick fails) instead of silently
     resetting the fence to -1 and reopening the rollback window."""
-    if not state_file.exists():
+    document = _read_state(state_file)
+    if "last_accepted_policy_version" not in document:
         return -1
-    return int(json.loads(state_file.read_text())["last_accepted_policy_version"])
+    return int(document["last_accepted_policy_version"])
 
 
 def save_fence(state_file: Path, version: int, vector_id: str) -> None:
-    """Atomic write (tmp + rename) so a crash mid-write can't corrupt the
-    fence — which would brick the fail-closed load above."""
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = state_file.with_suffix(".tmp")
-    tmp.write_text(json.dumps({
+    _write_state(state_file, {
         "last_accepted_policy_version": version,
         "last_vector_id": vector_id,
         "accepted_at": _ms_iso_now(),
-    }, indent=2))
-    os.replace(tmp, state_file)
+    })
+
+
+# -- two-mode provenance --------------------------------------------------------
+
+def _provenance_settings(args) -> ProvenanceSettings:
+    mode = getattr(args, "provenance", "shadow") or "shadow"
+    evidence_url = getattr(args, "evidence_url", None)
+    evidence_dir = getattr(args, "evidence_dir", None)
+    if mode != "off" and not evidence_url and not evidence_dir:
+        evidence_url = args.publisher_url.rstrip("/") + "/v1/evidence"
+    return ProvenanceSettings(
+        mode=mode,
+        evidence_url=evidence_url,
+        evidence_dir=evidence_dir,
+        registry_keys=getattr(args, "provenance_registry_keys", None),
+        registry_keys_digest=getattr(args, "provenance_registry_keys_digest", None),
+        report_keys=getattr(args, "provenance_report_keys", None),
+        report_keys_digest=getattr(args, "provenance_report_keys_digest", None),
+        index_keys=getattr(args, "provenance_index_keys", None),
+        index_keys_digest=getattr(args, "provenance_index_keys_digest", None),
+        verifier_digest=getattr(args, "provenance_verifier_digest", None),
+        mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
+        or MECHANISM_DEFAULT,
+        index_max_age_secs=float(getattr(args, "provenance_index_max_age_secs", 3600.0)),
+    )
+
+
+def _get_events(args) -> EventLogger:
+    """One logger per process; authority is stamped on every record."""
+    existing = getattr(args, "_events", None)
+    if existing is not None:
+        return existing
+    mode = getattr(args, "provenance", "shadow") or "shadow"
+    authority = "full_provenance" if mode == "authority" else "thin"
+    logger = EventLogger(
+        mode=authority,
+        jsonl_path=getattr(args, "jsonl", None) or None,
+        tty=sys.stdout,
+    )
+    try:
+        args._events = logger
+    except AttributeError:  # frozen namespaces in tests
+        pass
+    return logger
+
+
+def _provenance_uid_weights(
+    recomputed: dict[str, float],
+    payload: dict[str, Any],
+    hotkey_to_uid: dict[str, int],
+) -> dict[int, float]:
+    """Authority mode: build the UID vector from OUR recomputation.
+
+    Mapping is all-or-nothing exactly like the confidential-primary path; the
+    signed burn snapshot still supplies the burn destination and the 10%
+    forced-burn floor, which the validated_supply_v1 contract has already
+    validated against the pinned policy.
+    """
+    snap = payload.get("burn_snapshot") or {}
+    scores: dict[int, float] = {}
+    seen: set[int] = set()
+    for hotkey, weight in sorted(recomputed.items()):
+        if weight <= 0.0:
+            continue
+        if hotkey not in hotkey_to_uid:
+            raise wire.VectorError(
+                f"provenance hotkey {hotkey!r} has no current metagraph UID"
+            )
+        uid = hotkey_to_uid[hotkey]
+        if uid == snap.get("burn_uid"):
+            raise wire.VectorError(
+                f"provenance hotkey {hotkey!r} resolves to the burn UID"
+            )
+        if uid in seen:
+            raise wire.VectorError(f"provenance duplicate UID {uid}")
+        seen.add(uid)
+        scores[uid] = weight
+    return apply_burn(
+        scores,
+        burn_uid=snap.get("burn_uid"),
+        forced_burn_percentage=float(snap["forced_burn_percentage"]),
+    )
+
+
+def _run_provenance_stage(
+    args, payload: dict[str, Any], state_file: Path
+) -> "tuple[str, dict[str, float] | None]":
+    """Run the concurrent full-provenance audit for this tick.
+
+    Returns ``(status, recomputed_weights_or_None)``. Shadow mode never blocks
+    submission; authority mode raises on anything but a clean PASS.
+    """
+    settings = _provenance_settings(args)
+    events = _get_events(args)
+    state = _read_state(state_file)
+    audit = run_audit(
+        settings,
+        network=args.network,
+        netuid=args.netuid,
+        vector_payload=payload,
+        state=state,
+    )
+    status_map = {"PASS": PASS, "FAIL": FAIL, "NOT_PROVEN": NOT_PROVEN}
+    if audit.status == "PASS":
+        events.event(
+            "PROVENANCE_AUDIT_PASS",
+            stage="provenance",
+            status=PASS,
+            duration_ms=audit.duration_ms,
+            artifact=audit.manifest_digest,
+            detail=(
+                f"source_epoch={audit.source_epoch} release={audit.policy_release} "
+                f"mechanism={audit.mechanism} verified_miners={len(audit.recomputed)} "
+                f"vector_agrees={audit.agrees_with_vector}"
+            ),
+        )
+        if audit.agrees_with_vector is False:
+            # The chain verified but Cathedral's signed vector does not match
+            # the independent recomputation. Loud in both streams.
+            events.event(
+                "PROVENANCE_VECTOR_MISMATCH",
+                stage="provenance",
+                status=FAIL,
+                detail="; ".join(audit.discrepancies)[:512],
+                remediation=audit.remediation,
+            )
+            _lifecycle(
+                "PROVENANCE mismatch",
+                f"discrepancies={len(audit.discrepancies)}",
+            )
+        _write_state(state_file, {
+            "provenance_last_source_epoch": audit.source_epoch,
+            "provenance_last_report_id": audit.report_id,
+        })
+    else:
+        events.event(
+            "PROVENANCE_AUDIT_" + audit.status,
+            stage="provenance",
+            status=status_map.get(audit.status, FAIL),
+            duration_ms=audit.duration_ms,
+            artifact=audit.manifest_digest,
+            detail=(audit.error or "; ".join(audit.discrepancies))[:512] or None,
+            remediation=audit.remediation,
+        )
+        _lifecycle(
+            "PROVENANCE " + audit.status.lower(),
+            f"error={audit.error!r}" if audit.error else "",
+        )
+    if settings.mode == "authority":
+        if audit.status != "PASS":
+            raise wire.VectorError(
+                f"full-provenance authority audit did not PASS ({audit.status}): "
+                f"{audit.error or 'see events'}"
+            )
+        return audit.status, dict(audit.recomputed)
+    return audit.status, None
 
 
 # -- burn + uid mapping ---------------------------------------------------------
@@ -753,6 +932,18 @@ def tick(args) -> bool:
                f"policy_version={payload['policy_version']} "
                f"miners={len(payload['weights'])} "
                f"burn={payload['burn_snapshot']['forced_burn_percentage']}%")
+    _get_events(args).event(
+        "VECTOR_ACCEPTED",
+        stage="verify",
+        status=PASS,
+        artifact=str(payload.get("vector_id", ""))[:36] or None,
+        detail=(
+            f"policy_version={payload['policy_version']} "
+            f"miners={len(payload['weights'])} "
+            f"burn={payload['burn_snapshot']['forced_burn_percentage']}% "
+            f"signature+freshness+rollback ok"
+        ),
+    )
     # offline is authoritative: no chain read AND no broadcast, even if
     # --broadcast was also passed (the two are contradictory; offline wins).
     preflight = None
@@ -780,7 +971,29 @@ def tick(args) -> bool:
             payload, hk2uid, require_policy=getattr(args, "require_policy", None))
     except Exception as e:
         _lifecycle("VECTOR rejected", f"stage=map reason={type(e).__name__}")
+        _get_events(args).event(
+            "VECTOR_REJECTED", stage="map", status=FAIL,
+            detail=f"reason={type(e).__name__}",
+            remediation="The signed vector failed UID mapping; nothing was submitted.",
+        )
         raise
+
+    # Concurrent full-provenance stage (shadow audits; authority replaces the
+    # submitted vector with the independent recomputation).
+    provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
+    submission_authority = "thin"
+    if provenance_mode != "off":
+        _, recomputed = _run_provenance_stage(args, payload, Path(args.state_file))
+        if provenance_mode == "authority":
+            submission_authority = "full_provenance"
+            resolved = _resolve_burn_hotkey(payload, hk2uid) if not args.offline else payload
+            uid_weights = _provenance_uid_weights(recomputed, resolved, hk2uid)
+            _lifecycle(
+                "AUTHORITY provenance",
+                f"submitting the independently recomputed vector "
+                f"({len(recomputed)} verified miners)",
+            )
+
     ordered = sorted(uid_weights.items())
     preview = ",".join(f"{uid}:{weight:.6f}" for uid, weight in ordered[:12])
     if len(ordered) > 12:
@@ -798,6 +1011,16 @@ def tick(args) -> bool:
     ok = set_weights_on_chain(uid_weights, network=args.network, netuid=args.netuid,
                               wallet_name=args.wallet_name, wallet_hotkey=args.wallet_hotkey,
                               broadcast=broadcast, preflight=preflight)
+    _get_events(args).event(
+        "WEIGHTS_SUBMITTED" if (ok and broadcast) else "WEIGHTS_DRY_RUN",
+        stage="submit",
+        status=PASS if ok else FAIL,
+        detail=(
+            f"authority={submission_authority} uids={len(ordered)} "
+            f"burn_uid={burn_uid} burn_share={burn_share:.6f} vector={preview}"
+        ),
+        artifact=str(payload.get("vector_id", ""))[:36] or None,
+    )
     # Advance the fence ONLY on a real broadcast — a dry-run/offline pass must
     # not consume a version (with the pv<=fence rule that would otherwise block
     # the subsequent live broadcast of the same vector).
@@ -814,11 +1037,47 @@ def run(args) -> int:
     require_policy = getattr(args, "require_policy", None)
     if require_policy:
         _lifecycle("PIN active", f"policy={require_policy}")
+    provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
+    submission_authority = (
+        "full_provenance" if provenance_mode == "authority" else "thin"
+    )
+    _lifecycle(
+        "MODE active",
+        f"submission_authority={submission_authority} provenance={provenance_mode} "
+        + (
+            "(thin submits; full-provenance audits concurrently)"
+            if provenance_mode == "shadow"
+            else "(independent recomputation submits)"
+            if provenance_mode == "authority"
+            else "(thin only; no provenance audit)"
+        ),
+    )
+    _get_events(args).event(
+        "STARTUP",
+        stage="startup",
+        status=INFO,
+        detail=(
+            f"submission_authority={submission_authority} "
+            f"provenance={provenance_mode} policy_pin={require_policy or 'none'} "
+            f"network={args.network} netuid={args.netuid}"
+        ),
+    )
     while True:
         try:
             tick(args)
         except Exception as e:
             print(f"tick failed: {e}")
+            _get_events(args).event(
+                "TICK_FAILED",
+                stage="result",
+                status=FAIL,
+                detail=str(e)[:512],
+                remediation=(
+                    "Nothing was submitted this tick; the chain retains the "
+                    "last vector. Fix the reported gate and the next tick "
+                    "recovers automatically."
+                ),
+            )
             if args.once:
                 return 1
         if args.once:
@@ -856,6 +1115,42 @@ def build_parser() -> argparse.ArgumentParser:
                    help="pin the validator to a signed policy contract. "
                         "validated_supply_v1 locks the launch 90%% Intel TDX / "
                         "10%% unadmitted GPU-to-burn allocation. Default: unpinned.")
+    p.add_argument("--provenance", choices=("off", "shadow", "authority"),
+                   default=os.environ.get("CATHEDRAL_VALIDATOR_PROVENANCE", "shadow"),
+                   help="full-provenance mode: 'shadow' (default) audits the "
+                        "published evidence concurrently while thin mode submits; "
+                        "'authority' submits the independent recomputation; "
+                        "'off' disables the audit.")
+    p.add_argument("--evidence-url", default=os.environ.get(
+        "CATHEDRAL_EVIDENCE_URL", "") or None,
+        help="public evidence base URL (default: <publisher-url>/v1/evidence)")
+    p.add_argument("--evidence-dir", default=None,
+                   help="local evidence store directory (testing/reproduction)")
+    p.add_argument("--provenance-registry-keys", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_REGISTRY_KEYS") or None,
+        help="trusted policy-registry key file (JSON key_id -> base64)")
+    p.add_argument("--provenance-registry-keys-digest", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_REGISTRY_KEYS_DIGEST") or None)
+    p.add_argument("--provenance-report-keys", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_REPORT_KEYS") or None,
+        help="trusted score-report key file (JSON key_id -> base64)")
+    p.add_argument("--provenance-report-keys-digest", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_REPORT_KEYS_DIGEST") or None)
+    p.add_argument("--provenance-index-keys", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_INDEX_KEYS") or None,
+        help="trusted evidence-index key file (JSON key_id -> base64)")
+    p.add_argument("--provenance-index-keys-digest", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_INDEX_KEYS_DIGEST") or None)
+    p.add_argument("--provenance-verifier-digest", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_VERIFIER_DIGEST") or None,
+        help="pinned Intel TDX verifier implementation digest (sha256:<hex>)")
+    p.add_argument("--provenance-mechanism", default=os.environ.get(
+        "CATHEDRAL_PROVENANCE_MECHANISM", MECHANISM_DEFAULT),
+        help="pinned versioned reward mechanism (default validated_supply_v1)")
+    p.add_argument("--provenance-index-max-age-secs", type=float, default=3600.0)
+    p.add_argument("--jsonl", default=os.environ.get(
+        "CATHEDRAL_VALIDATOR_JSONL") or None,
+        help="append the stable JSONL event stream to this file")
     return p
 
 

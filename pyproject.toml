@@ -32,6 +32,12 @@ test = [
     "pytest>=8",
     "ruff>=0.15",
 ]
+# Full-provenance validator mode: independently verifies Cathedral's published
+# evidence chain (policy registry, signed score reports, assurance receipts)
+# and recomputes the weight vector. Pin a release tag before shipping.
+provenance = [
+    "cathedral @ git+https://github.com/cathedralai/cathedralconfidential.git@main",
+]
 
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
