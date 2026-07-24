@@ -969,6 +969,7 @@ def test_authority_submits_full_burn_on_proven_revocation(
     private_root = tmp_path / "store-copy"
     shutil.copytree(store_root, private_root)
     (private_root / "index.json").unlink()
+    (private_root / ".index-highwater.json").unlink(missing_ok=True)
     EvidenceStore(private_root).write_index(stages[12])
     settings = dataclasses.replace(settings, evidence_dir=str(private_root))
     revoked = _run_audit_replay(settings)
@@ -997,3 +998,42 @@ def test_authority_submits_full_burn_on_proven_revocation(
             validated_supply_payload(positive=False),
             tmp_path / "state.json",
         )
+
+
+def test_cross_epoch_challenge_reuse_never_upgrades_full(real_evidence) -> None:
+    """Defect-2 proof: the same envelope/challenge commitment seen in an
+    earlier epoch must never make a later epoch FULL."""
+    from cathedral.evidence import EvidenceStore
+
+    store_root, settings, stages = real_evidence
+    EvidenceStore(store_root).write_index(stages[13])
+    clean = _run_audit_replay(settings)
+    assert clean.status == "PASS" and clean.assurance == "full"
+    challenge = next(iter((clean.seen_challenges or {}).keys()))
+    reused = _run_audit_replay(
+        settings,
+        state={"provenance_seen_challenges": {challenge: 11}},
+    )
+    assert reused.status == "FAIL"
+    assert "reuse across epochs" in reused.error
+
+
+def test_authority_mode_refuses_private_host_bypass(tmp_path) -> None:
+    """Defect-8 proof (subnet): authority + allow_private_hosts fails."""
+    settings = ProvenanceSettings(
+        mode="authority",
+        evidence_url="https://api.example",
+        registry_keys="r.json",
+        registry_keys_digest="sha256:" + "0" * 64,
+        report_keys="p.json",
+        report_keys_digest="sha256:" + "0" * 64,
+        index_keys="i.json",
+        index_keys_digest="sha256:" + "0" * 64,
+        verifier_digest="sha256:" + "d" * 64,
+        source_revision="abc1234",
+        verifier_binary="/x/verifier",
+        controlled_dir="/x/controlled",
+        allow_private_hosts=True,
+    )
+    with pytest.raises(ProvenanceAuditError, match="testing-only"):
+        settings.validate_for_audit()

@@ -99,6 +99,11 @@ class ProvenanceSettings:
                 "VALIDATOR.md (or set --provenance off to silence this).",
             )
         if self.mode == "authority":
+            if self.allow_private_hosts:
+                raise ProvenanceAuditError(
+                    "allow_private_hosts is testing-only and is refused in "
+                    "authority mode (SSRF policy)"
+                )
             # Authority has NO optional security pins: every immutable pin
             # and the raw-evidence source are mandatory.
             required = [
@@ -124,6 +129,7 @@ class ProvenanceAudit:
     index_source_epoch: int | None = None
     index_manifest: str | None = None
     policy_digest: str | None = None
+    seen_challenges: dict | None = None
     source_epoch: int | None = None
     report_id: str | None = None
     previous_report_id: str | None = None
@@ -334,6 +340,7 @@ def run_audit(
 ) -> ProvenanceAudit:
     """Run one full-provenance audit. Never raises; the status carries the verdict."""
     started = time.monotonic()
+    audit_deadline = started + settings.audit_deadline_secs
     try:
         settings.validate_for_audit()
         try:
@@ -477,6 +484,29 @@ def run_audit(
             from pathlib import Path as _Path
 
             bindings = {row["hotkey"]: row for row in manifest["attestations"]}
+            # Cross-epoch evidence-reuse fence: a challenge commitment seen in
+            # an EARLIER epoch must never upgrade a later epoch to FULL. The
+            # durable state maps recently seen challenge digests to their
+            # source epoch (bounded, monotonic).
+            seen_challenges = dict(state.get("provenance_seen_challenges") or {})
+            manifest_epoch = int(manifest["source_epoch"])
+            manifest_challenges: set[str] = set()
+            for row in manifest["attestations"]:
+                challenge = row.get("challenge_digest")
+                if not challenge:
+                    continue
+                if challenge in manifest_challenges:
+                    raise ProvenanceAuditError(
+                        "manifest reuses one challenge commitment for two "
+                        "attestations"
+                    )
+                manifest_challenges.add(challenge)
+                recorded_epoch = seen_challenges.get(challenge)
+                if recorded_epoch is not None and int(recorded_epoch) != manifest_epoch:
+                    raise ProvenanceAuditError(
+                        f"challenge commitment reuse across epochs: seen in "
+                        f"epoch {recorded_epoch}, replayed in {manifest_epoch}"
+                    )
             envelopes: dict[str, bytes] = {}
             for miner in result.miners:
                 if not miner.receipt_verified:
@@ -517,6 +547,7 @@ def run_audit(
                 result,
                 candidates_all_rejected=all_rejected,
                 epoch_generated_at=manifest["generated_at"],
+                deadline_monotonic=audit_deadline,
                 registry=provenance.load_registry(
                     registry_bytes,
                     registry_keys,
@@ -532,11 +563,22 @@ def run_audit(
                 ),
             )
 
+        seen_update = None
+        if settings.controlled_dir:
+            merged = dict(seen_challenges)
+            for challenge in manifest_challenges:
+                merged[challenge] = manifest_epoch
+            if len(merged) > 512:
+                # Bounded: drop the oldest epochs first.
+                ordered = sorted(merged.items(), key=lambda kv: int(kv[1]))
+                merged = dict(ordered[-512:])
+            seen_update = merged
         audit = ProvenanceAudit(
             status="PASS",
             assurance=result.assurance_level,
             index_source_epoch=index_epoch,
             index_manifest=manifest_digest,
+            seen_challenges=seen_update,
             policy_digest=result.policy_digest,
             source_epoch=result.source_epoch,
             report_id=result.report_id,

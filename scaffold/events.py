@@ -32,9 +32,14 @@ _STATUSES = (PASS, FAIL, NOT_PROVEN, INFO)
 _EVENT_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 # Full credential grammar: key=value / key: value forms AND scheme-prefixed
 # header values ("Authorization: Bearer <secret>", "Basic <secret>").
+# Full credential grammar: bare and QUOTED values (single/double quotes,
+# JSON-serialized and Python-repr forms, values containing spaces),
+# scheme-prefixed opaque header values, and URL-safe tokens.
 _SECRET_RE = re.compile(
-    r"(?i)(bearer|basic|token|secret|hmac|api_key|authorization|password|"
-    r"private_key)((\s*[=:]\s*)|\s+)(?:(?:bearer|basic)\s+)?\S+"
+    r"(?i)([\"']?)(bearer|basic|token|secret|hmac|api_key|authorization|"
+    r"password|private_key)\1((\s*[=:]\s*)|\s+)"
+    r"(?:(?:bearer|basic)\s+)?"
+    r"(\"[^\"]*\"|'[^']*'|\S+)"
 )
 _SENSITIVE_FIELD_RE = re.compile(
     r"(?i)^(authorization|.*(token|secret|password|credential|api_key|"
@@ -62,7 +67,7 @@ def _neutralize(value: str) -> str:
     """Strip ANSI/control characters, redact secrets, bound the length."""
     cleaned = _CONTROL_RE.sub(" ", value)
     cleaned = _SECRET_RE.sub(
-        lambda match: (match.group(1) or "credential") + "=[REDACTED]", cleaned
+        lambda match: (match.group(2) or "credential") + "=[REDACTED]", cleaned
     )
     return cleaned[:2048]
 

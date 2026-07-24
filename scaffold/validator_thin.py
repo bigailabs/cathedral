@@ -419,6 +419,11 @@ def _log_audit_events(args, audit, state_file: Path) -> None:
                 "provenance_index_manifest": audit.index_manifest,
                 "provenance_policy_release": audit.policy_release,
                 "provenance_policy_digest": audit.policy_digest,
+                **(
+                    {"provenance_seen_challenges": audit.seen_challenges}
+                    if audit.seen_challenges is not None
+                    else {}
+                ),
             })
         except Exception as exc:  # noqa: BLE001 - shadow is observational only
             events.event(
@@ -473,6 +478,22 @@ def _run_provenance_stage(
                 f"full-provenance authority audit did not PASS ({audit.status}): "
                 f"{audit.error or 'see events'}"
             )
+        # Durable fences are MANDATORY for authority: if the reservation
+        # cannot be persisted, nothing is submitted (fail closed) - unlike
+        # shadow, where persistence failures are observational.
+        _write_state(state_file, {
+            "provenance_last_source_epoch": audit.source_epoch,
+            "provenance_last_report_id": audit.report_id,
+            "provenance_index_epoch": audit.index_source_epoch,
+            "provenance_index_manifest": audit.index_manifest,
+            "provenance_policy_release": audit.policy_release,
+            "provenance_policy_digest": audit.policy_digest,
+            **(
+                {"provenance_seen_challenges": audit.seen_challenges}
+                if audit.seen_challenges is not None
+                else {}
+            ),
+        })
         if getattr(audit, "assurance", "receipts_only") != "full":
             raise wire.VectorError(
                 "authority requires FULL assurance (raw-evidence replay); "
