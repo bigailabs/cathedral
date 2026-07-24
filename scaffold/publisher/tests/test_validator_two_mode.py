@@ -1824,11 +1824,11 @@ def test_receipts_only_shadow_pass_is_not_proven_and_never_persists(
 ) -> None:
     """Round-six S3: a receipts-only shadow PASS emits NOT_PROVEN — never
     PROVENANCE_AUDIT_PASS — and persists nothing."""
-    events_seen: list[str] = []
+    events_seen: list[tuple[str, dict]] = []
 
     class _Recorder:
-        def event(self, name, **_kw):
-            events_seen.append(name)
+        def event(self, name, **kw):
+            events_seen.append((name, kw))
 
     monkeypatch.setattr(validator_thin, "_get_events", lambda args: _Recorder())
     _stub_audit(
@@ -1843,6 +1843,10 @@ def test_receipts_only_shadow_pass_is_not_proven_and_never_persists(
             policy_release=3,
             policy_digest="sha256:" + "c" * 64,
             recomputed={"tdx-miner": 1.0},
+            raw_replayed_hotkeys=["tdx-miner"],
+            not_proven_reasons=[
+                "non-verified anchored candidates lack replayable negative evidence"
+            ],
         ),
     )
     state_file = tmp_path / "state.json"
@@ -1851,11 +1855,44 @@ def test_receipts_only_shadow_pass_is_not_proven_and_never_persists(
     _drain_shadow(args)
     validator_thin._run_provenance_stage(args, {}, state_file)
     _drain_shadow(args)
-    assert "PROVENANCE_AUDIT_NOT_PROVEN" in events_seen
-    assert "PROVENANCE_AUDIT_PASS" not in events_seen
+    names = [name for name, _fields in events_seen]
+    assert "PROVENANCE_AUDIT_NOT_PROVEN" in names
+    assert "PROVENANCE_AUDIT_PASS" not in names
+    not_proven = next(
+        fields for name, fields in events_seen if name == "PROVENANCE_AUDIT_NOT_PROVEN"
+    )
+    assert "positive raw evidence replayed for 1 miner(s)" in not_proven["detail"]
+    assert "replayable negative evidence" in not_proven["detail"]
+    assert "raw evidence was not replayed" not in not_proven["detail"]
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     assert "provenance_last_source_epoch" not in state
     assert "provenance_index_epoch" not in state
+
+
+def test_receipts_only_without_positive_replay_does_not_claim_one(
+    tmp_path, monkeypatch
+) -> None:
+    events_seen: list[tuple[str, dict]] = []
+
+    class _Recorder:
+        def event(self, name, **kw):
+            events_seen.append((name, kw))
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda args: _Recorder())
+    validator_thin._log_audit_events(
+        _args(tmp_path, "shadow"),
+        ProvenanceAudit(
+            status="PASS",
+            assurance="receipts_only",
+            not_proven_reasons=["no positive raw replays"],
+        ),
+        tmp_path / "state.json",
+    )
+    fields = next(
+        fields for name, fields in events_seen if name == "PROVENANCE_AUDIT_NOT_PROVEN"
+    )
+    assert "no positive raw evidence replayed" in fields["detail"]
+    assert "positive raw evidence replayed for" not in fields["detail"]
 
 
 def test_output_surfaces_redact_paths_and_use_stable_error_codes(capsys) -> None:

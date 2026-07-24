@@ -647,21 +647,36 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
         audit.status == "PASS"
         and getattr(audit, "assurance", "receipts_only") != "full"
     ):
-        # Receipts-only recomputation is PARTIAL provenance: internally
-        # consistent signatures, NO raw-evidence replay. It must never be
-        # announced as a provenance PASS and must never persist the durable
+        # Receipts-only recomputation is PARTIAL provenance. Positive raw
+        # evidence may already have replayed successfully while independently
+        # anchored non-verified candidates remain unsupported by replayable
+        # negative evidence. Never erase that distinction in the operator log.
+        # It must not be announced as a provenance PASS or persist the durable
         # reservation state as if it were FULL.
+        reasons = list(getattr(audit, "not_proven_reasons", ()) or ())
+        raw_replayed = list(getattr(audit, "raw_replayed_hotkeys", ()) or ())
+        replay_summary = (
+            f"positive raw evidence replayed for {len(raw_replayed)} miner(s)"
+            if raw_replayed
+            else "no positive raw evidence replayed"
+        )
+        detail = (
+            f"{replay_summary}; whole-epoch FULL assurance is not established"
+            + (": " + "; ".join(reasons) if reasons else "")
+        )
         events.event(
             "PROVENANCE_AUDIT_NOT_PROVEN",
             stage="provenance",
             status=NOT_PROVEN,
             duration_ms=audit.duration_ms,
             artifact=audit.manifest_digest,
-            detail=(
-                "receipts-only recomputation; the signed chain is internally "
-                "consistent but raw evidence was not replayed"
+            detail=detail[:512],
+            remediation=(
+                "keep thin authority; FULL requires independently replayable "
+                "evidence for every anchored candidate outcome"
+                if reasons
+                else "provide the controlled package and verifier pins for FULL"
             ),
-            remediation="provide the controlled package and verifier pins for FULL",
         )
         return
     if audit.status == "PASS":
