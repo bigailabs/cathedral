@@ -17,7 +17,9 @@ Watch commands (documented in VALIDATOR.md):
 
 from __future__ import annotations
 
+import grp
 import json
+import math
 import os
 import re
 import sys
@@ -66,18 +68,46 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 _PATH_RE = re.compile(
     r"(?:file |path )?"
-    r"(?:/(?:Users|home|root|private|var|tmp|etc|opt|srv|mnt)|~[A-Za-z0-9_-]*)"
+    r"(?:(?<![A-Za-z0-9:/])/(?!/)|~[A-Za-z0-9_-]*(?:/|\\)|"
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/])"
     r"[^\s'\"]*"
 )
+# Greedy through the FINAL `@` in the authority. A malformed raw password may
+# itself contain `@`; stopping at the first one would leak the credential
+# suffix as a fake hostname in the public event stream.
+_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s]+@")
+_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s]+")
+# If a malformed URL contains authority credentials, query, or fragment and
+# then whitespace, token boundaries are no longer trustworthy. Redact the
+# remainder of that line rather than leaking a whitespace-separated suffix.
+_SENSITIVE_URL_LINE_RE = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\r\n'\"]*[@?#][^\r\n'\"]*"
+)
+
+
+def _scrub_url(match: re.Match[str]) -> str:
+    """Keep a URL useful for diagnosis without retaining credentials.
+
+    Query strings and fragments are removed wholesale rather than trying to
+    enumerate every signed-URL vocabulary (``apikey``, ``sig``, ``X-Amz-*``,
+    and vendor-specific variants). Userinfo is greedy through the final ``@``
+    so malformed passwords cannot leak a suffix as a fake hostname.
+    """
+    raw = match.group(0)
+    base = raw.split("#", 1)[0].split("?", 1)[0]
+    return _URL_USERINFO_RE.sub(r"\1[REDACTED]@", base)
 
 
 def _neutralize(value: str) -> str:
     """Strip ANSI/control characters, redact secrets and absolute
     filesystem paths/usernames, bound the length."""
     cleaned = _CONTROL_RE.sub(" ", value)
+    cleaned = _SENSITIVE_URL_LINE_RE.sub("<redacted-url>", cleaned)
+    cleaned = _URL_RE.sub(_scrub_url, cleaned)
     cleaned = _SECRET_RE.sub(
         lambda match: (match.group(2) or "credential") + "=[REDACTED]", cleaned
     )
+    cleaned = _URL_USERINFO_RE.sub(r"\1[REDACTED]@", cleaned)
     cleaned = _PATH_RE.sub("<path>", cleaned)
     return cleaned[:2048]
 
@@ -108,6 +138,8 @@ def _scrub(value):
         }
     if isinstance(value, (list, tuple)):
         return [_scrub(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return "[NON_FINITE]"
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return _neutralize(str(value))
@@ -124,6 +156,7 @@ class EventLogger:
         mode: str,
         jsonl: IO[str] | None = None,
         jsonl_path: str | None = None,
+        jsonl_group: str | None = None,
         tty: IO[str] | None = None,
         color: bool | None = None,
     ) -> None:
@@ -131,8 +164,13 @@ class EventLogger:
         self._jsonl = jsonl
         self._jsonl_file: IO[str] | None = None
         if jsonl_path:
+            group_gid = (
+                grp.getgrnam(jsonl_group).gr_gid if jsonl_group is not None else None
+            )
             # Secure append: refuse symlinks/non-regular files, create 0600,
-            # refuse group/world-accessible existing logs.
+            # and permit 0640 only when an explicit reader group is pinned by
+            # the service. This lets a separate sanitizer read the private
+            # source without giving the validator access to the public tree.
             flags = (
                 os.O_WRONLY
                 | os.O_APPEND
@@ -143,10 +181,35 @@ class EventLogger:
             descriptor = os.open(jsonl_path, flags, 0o600)
             import stat as _stat
 
-            opened = os.fstat(descriptor)
-            if not _stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o077:
+            try:
+                opened = os.fstat(descriptor)
+                opened_mode = _stat.S_IMODE(opened.st_mode)
+                if (
+                    not _stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != os.geteuid()
+                    or opened_mode & 0o007
+                    or opened_mode not in (0o600, 0o640)
+                ):
+                    raise ValueError(
+                        "event log must be an owner-controlled regular file"
+                    )
+                if group_gid is None:
+                    if opened_mode & 0o070:
+                        raise ValueError(
+                            "event log must be private (0600) without a reader group"
+                        )
+                else:
+                    os.fchown(descriptor, -1, group_gid)
+                    os.fchmod(descriptor, 0o640)
+                    secured = os.fstat(descriptor)
+                    if (
+                        secured.st_gid != group_gid
+                        or _stat.S_IMODE(secured.st_mode) != 0o640
+                    ):
+                        raise ValueError("event log reader-group setup failed")
+            except BaseException:
                 os.close(descriptor)
-                raise ValueError("event log must be a private (0600) regular file")
+                raise
             self._jsonl_file = os.fdopen(descriptor, "a", encoding="utf-8")
         self._tty = tty if tty is not None else sys.stdout
         if color is None:
@@ -190,7 +253,9 @@ class EventLogger:
         if hotkey is not None:
             record["hotkey"] = _neutralize(hotkey)
         if duration_ms is not None:
-            record["duration_ms"] = round(float(duration_ms), 3)
+            parsed_duration = float(duration_ms)
+            if math.isfinite(parsed_duration):
+                record["duration_ms"] = round(parsed_duration, 3)
         if artifact is not None:
             record["artifact"] = _redact(str(artifact))
         if detail is not None:
@@ -200,7 +265,7 @@ class EventLogger:
         for key, value in fields.items():
             if key not in record:
                 record[key] = _scrub(value)
-        line = json.dumps(record, separators=(",", ":"))
+        line = json.dumps(record, separators=(",", ":"), allow_nan=False)
         for target in (self._jsonl, self._jsonl_file):
             if target is not None:
                 target.write(line + "\n")

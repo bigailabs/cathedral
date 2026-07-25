@@ -24,6 +24,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import re
 import threading
 import time
@@ -147,6 +148,13 @@ class ProvenanceAudit:
     manifest_digest: str | None = None
     policy_release: int | None = None
     mechanism: str | None = None
+    report_generated_at: str | None = None
+    report_valid_until: str | None = None
+    report_valid_from_block: int | None = None
+    report_valid_until_block: int | None = None
+    report_signing_key_id: str | None = None
+    verifier_binary_digest: str | None = None
+    signed_index: dict[str, Any] | None = None
     recomputed: dict[str, float] = field(default_factory=dict)
     agrees_with_vector: bool | None = None
     discrepancies: list[str] = field(default_factory=list)
@@ -169,7 +177,24 @@ def _load_pubkeys(path: str, pinned_digest: str | None, label: str) -> dict[str,
         if actual != pinned_digest:
             raise ProvenanceAuditError(f"{label} file does not match its digest pin")
     try:
-        document = json.loads(raw)
+
+        def reject_duplicates(pairs):
+            document = {}
+            for key, value in pairs:
+                if key in document:
+                    raise ValueError("duplicate key id")
+                document[key] = value
+            return document
+
+        document = json.loads(
+            raw,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                ValueError("non-finite public key JSON")
+            ),
+        )
+        if not isinstance(document, dict):
+            raise TypeError
         keys = {}
         for key_id, encoded in document.items():
             decoded = base64.b64decode(encoded, validate=True)
@@ -326,7 +351,12 @@ def _chain_lookup_bounded(callback, block: int, deadline: float, label: str):
     return value
 
 
-def _fetcher(settings: ProvenanceSettings, *, deadline: float | None = None):
+def _fetcher(
+    settings: ProvenanceSettings,
+    *,
+    deadline: float | None = None,
+    include_raw_fetch: bool = False,
+):
     """Build ``(load_index, load_blob)`` for the configured evidence source.
 
     ``deadline`` is the caller's command-wide monotonic deadline. It is
@@ -354,6 +384,22 @@ def _fetcher(settings: ProvenanceSettings, *, deadline: float | None = None):
                 raise ProvenanceAuditError(f"blob {digest} content is corrupt")
             return data
 
+        if include_raw_fetch:
+
+            def fetch_named(path: str) -> bytes:
+                if (
+                    not path.startswith("/")
+                    or ".." in path
+                    or "\\" in path
+                    or "\x00" in path
+                ):
+                    raise ProvenanceAuditError("named evidence path is malformed")
+                target = root / path.removeprefix("/")
+                if target.is_symlink() or not target.is_file():
+                    raise ProvenanceAuditError("named evidence artifact is missing")
+                return target.read_bytes()
+
+            return load_index, load_blob, fetch_named
         return load_index, load_blob
 
     base = (settings.evidence_url or "").rstrip("/")
@@ -396,14 +442,7 @@ def _fetcher(settings: ProvenanceSettings, *, deadline: float | None = None):
     peer_ips: list[str] = []
     for info in infos:
         address = ipaddress.ip_address(info[4][0])
-        if not settings.allow_private_hosts and (
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-        ):
+        if not settings.allow_private_hosts and not address.is_global:
             raise ProvenanceAuditError(
                 f"evidence host resolves to a non-public address: {host}"
             )
@@ -503,6 +542,19 @@ def _fetcher(settings: ProvenanceSettings, *, deadline: float | None = None):
             raise ProvenanceAuditError(f"fetched blob does not match digest {digest}")
         return data
 
+    if include_raw_fetch:
+
+        def fetch_named(path: str) -> bytes:
+            if (
+                not path.startswith("/")
+                or ".." in path
+                or "\\" in path
+                or "\x00" in path
+            ):
+                raise ProvenanceAuditError("named evidence path is malformed")
+            return fetch(path)
+
+        return load_index, load_blob, fetch_named
     return load_index, load_blob
 
 
@@ -535,7 +587,29 @@ def _report_issue_moment(report_bytes: bytes):
     from datetime import datetime
 
     try:
-        document = json.loads(report_bytes)
+
+        def reject_duplicates(pairs):
+            document = {}
+            for key, value in pairs:
+                if key in document:
+                    raise ValueError("duplicate score-report JSON key")
+                document[key] = value
+            return document
+
+        def finite_float(raw: str) -> float:
+            value = float(raw)
+            if not math.isfinite(value):
+                raise ValueError("non-finite score-report JSON")
+            return value
+
+        document = json.loads(
+            report_bytes,
+            object_pairs_hook=reject_duplicates,
+            parse_float=finite_float,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                ValueError("non-finite score-report JSON")
+            ),
+        )
         moment = datetime.fromisoformat(str(document["generated_at"]))
     except (KeyError, TypeError, ValueError) as exc:
         raise ProvenanceAuditError(
@@ -693,6 +767,7 @@ def run_audit(
         try:
             from cathedral import provenance
             from cathedral.evidence import parse_manifest, verify_index
+            from cathedral.score_class import parse_score_report_json
         except ImportError as exc:
             raise ProvenanceUnavailable(
                 "the cathedral provenance package is not installed",
@@ -801,6 +876,7 @@ def run_audit(
             work_artifacts_by_receipt=work_artifacts_by_receipt,
             current_block=current_block,
         )
+        report_document = parse_score_report_json(report_bytes)
         # Report predecessor continuity is ALWAYS enforced across audits:
         # a new export must chain from the last audited report. When newer
         # epochs were published while this consumer was away, the SIGNED
@@ -1008,6 +1084,13 @@ def run_audit(
             manifest_digest=manifest_digest,
             policy_release=result.policy_release,
             mechanism=result.mechanism_id,
+            report_generated_at=str(report_document["generated_at"]),
+            report_valid_until=str(report_document["valid_until"]),
+            report_valid_from_block=int(report_document["valid_from_block"]),
+            report_valid_until_block=int(report_document["valid_until_block"]),
+            report_signing_key_id=str(manifest["score_report"]["signing_key_id"]),
+            verifier_binary_digest=str(manifest["verifier"]["binary_blob"]),
+            signed_index=dict(index_document),
             recomputed=dict(result.recomputed_hotkey_weights),
             receipt_hotkeys=[
                 miner.hotkey for miner in result.miners if miner.receipt_verified

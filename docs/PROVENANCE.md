@@ -63,8 +63,10 @@ cathedral-candidate-snapshot --network finney --netuid 39 \
 
 ## Operator pins (never self-authorized by the manifest)
 
-Configure ALL of these independently — from the release notes / key bundle,
-not from anything the evidence surface serves:
+Configure ALL of these independently — from the release notes and the
+byte-pinned key bundle in `config/provenance/`, not from anything the evidence
+surface serves. The current exact pins are recorded in
+[`SN39_MAINNET_RELEASE_20260724.md`](SN39_MAINNET_RELEASE_20260724.md):
 
 ```toml
 [provenance]

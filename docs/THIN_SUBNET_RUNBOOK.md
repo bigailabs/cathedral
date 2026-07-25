@@ -285,12 +285,25 @@ Inspect current hyperparameters before launch:
 btcli subnet hyperparameters --network test --netuid <NETUID>
 ```
 
-The subnet owner should enable `commit_reveal_weights_enabled` and use the
-current chain-supported commit-reveal version and period. The Bittensor SDK
-automatically chooses its commit-reveal path when the subnet flag is enabled;
-the validator continues calling `set_weights`. Keep neuron immunity longer than
-the full reveal interval so a new miner is not pruned before its weights can be
-revealed.
+The tagged SN39 Intel TDX CPU release requires
+`commit_reveal_weights_enabled = false`. Its public proof names one finalized
+`set_mechanism_weights` extrinsic and proves the applied vector at that block;
+a finalized commitment is not equivalent evidence. The validator reads this
+hyperparameter at the canonical finalized head and fails closed when it is
+enabled. Submission calls the explicit `set_mechanism_weights` extrinsic path,
+not the SDK entry point that can auto-route to commit-reveal after preflight.
+
+Thin and FULL-authority services must also share one absolute owner-only
+`runtime_root` (mode `0700`, `/var/lib/cathedral-validator` in the launch
+config). That directory contains the cross-mode single-flight lock and common
+pending-attempt journal. It is deliberately independent of `HOME` and the
+lane-specific state files: an ambiguous call in either mode blocks both modes
+until an operator reconciles the named extrinsic.
+
+Commit-reveal may be enabled only after a later release persists and publicly
+verifies the complete commitment, reveal round, applied-vector block, and
+their bindings. At that point, keep neuron immunity longer than the full reveal
+interval so a new miner is not pruned before its weights can be revealed.
 
 Set owner hyperparameters only with the current official `btcli sudo set`
 workflow. These are chain writes; review them interactively rather than using

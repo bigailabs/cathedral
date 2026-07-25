@@ -1,18 +1,16 @@
-"""Testnet weight-set + receipt stage for the mechanism router.
+"""Artifact-only weight-set + receipt stage for the mechanism router.
 
 This is the CHAIN-ADJACENT piece: it takes the composed ``{uid: weight}`` table
 from ``mechanism_router.compose(...)`` and turns it into a *signed weight
-artifact* (schema ``cathedral.mechanism_weights.v1``) that we can inspect,
-audit, and — on testnet only — eventually broadcast.
+artifact* (schema ``cathedral.mechanism_weights.v1``) that we can inspect
+and audit.  This legacy helper has no chain-writing capability.
 
 Safety posture (mirrors ``deploy/MECHANISM_ROUTER_CONTRACT.md`` §Isolation):
 
-  * DRY-RUN by default. ``set_weights`` computes + signs + logs + records the
-    artifact, but does NOT touch any chain unless ALL of the following hold:
-      1. env ``CATHEDRAL_MECH_WEIGHTSET_LIVE == "true"``, AND
-      2. ``network`` is a recognised testnet (never finney/mainnet), AND
-      3. the caller passes ``confirm=True``, AND
-      4. the caller injects a ``broadcast_fn`` (we never import a chain path).
+  * ALWAYS DRY-RUN. ``set_weights`` computes + signs + logs + records the
+    artifact but never invokes the caller-provided callback.  An arbitrary
+    callback cannot prove which chain it writes, so accepting one would let a
+    nominal testnet request launder an SN39/Finney submission.
   * HARD REFUSE on ``network == "finney"`` / mainnet / a known mainnet netuid —
     ``set_weights`` raises before doing anything.
   * No secrets in code or logs; deterministic output (sorted, rounded).
@@ -21,12 +19,14 @@ Reuses the signing + audit-bundle style from ``v2_pipeline.py`` (Ed25519 over
 ``canonical_bytes`` + a merkle root over per-leaf hashes) and the canonical-bytes
 helper from ``wire_vector`` so the emission is byte-stable.
 """
+
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -39,11 +39,9 @@ from ..wire_vector import canonical_bytes
 log = logging.getLogger(__name__)
 
 SCHEMA = "cathedral.mechanism_weights.v1"
+# Retained as a compatibility symbol for callers/tests. It no longer enables
+# any broadcast path.
 LIVE_ENV = "CATHEDRAL_MECH_WEIGHTSET_LIVE"
-# Deliberate opt-in to target mainnet/SN39. Unset -> mainnet is refused (safe
-# default). Set to "true" -> mainnet may be TARGETED (still dry-run unless the
-# full live gate below also holds). This is the "run on 39" switch.
-ALLOW_MAINNET_ENV = "CATHEDRAL_MECH_WEIGHTSET_ALLOW_MAINNET"
 
 # --- network / netuid classification (the hard safety boundary) -------------
 # Anything not explicitly testnet is treated as unsafe and refused.
@@ -72,20 +70,13 @@ def is_testnet(network: str, netuid: int) -> bool:
 
 
 def _assert_target_allowed(network: str, netuid: int) -> None:
-    """Fail-closed gate: proceed on a recognised testnet, OR on mainnet ONLY when
-    the deliberate ``CATHEDRAL_MECH_WEIGHTSET_ALLOW_MAINNET=true`` opt-in is set."""
+    """Fail closed unless this is a recognized non-SN39 testnet target."""
     if is_mainnet(network, netuid):
-        if not _allow_mainnet():
-            raise UnsafeNetworkError(
-                f"refusing mechanism weight-set on mainnet: network={network!r} netuid={netuid} "
-                f"(set {ALLOW_MAINNET_ENV}=true to deliberately target mainnet/SN39)"
-            )
-        log.warning(
-            "mechanism weight-set TARGETING MAINNET network=%s netuid=%s (%s set) "
-            "— real emissions if the live broadcast gate also holds",
-            network, netuid, ALLOW_MAINNET_ENV,
+        raise UnsafeNetworkError(
+            "refusing legacy mechanism weight-set on mainnet/SN39: "
+            f"network={network!r} netuid={netuid}; use the immutable "
+            "cathedral-validator release"
         )
-        return
     if not is_testnet(network, netuid):
         raise UnsafeNetworkError(
             f"refusing mechanism weight-set on unrecognised network={network!r} netuid={netuid} "
@@ -128,7 +119,7 @@ def build_weight_artifact(
     clean: dict[int, float] = {}
     for uid, w in composed.items():
         fw = float(w)
-        if fw != fw or fw in (float("inf"), float("-inf")):  # NaN/inf guard
+        if not math.isfinite(fw):
             continue
         if fw <= 0:
             continue
@@ -156,9 +147,8 @@ def build_weight_artifact(
         "merkle_root": "sha256:" + root,
         "leaves": leaves,
         "receipt_id": "sha256:" + hashlib.sha256(root.encode()).hexdigest(),
-        "key_id": key_id or os.environ.get(
-            "CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy"
-        ),
+        "key_id": key_id
+        or os.environ.get("CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy"),
     }
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
@@ -167,10 +157,6 @@ def build_weight_artifact(
 
 def _live_env() -> bool:
     return str(os.environ.get(LIVE_ENV, "")).strip().lower() == "true"
-
-
-def _allow_mainnet() -> bool:
-    return str(os.environ.get(ALLOW_MAINNET_ENV, "")).strip().lower() == "true"
 
 
 def set_weights(
@@ -184,19 +170,14 @@ def set_weights(
     broadcast_fn: Callable[[dict[str, Any]], Any] | None = None,
     key_id: str | None = None,
 ) -> dict[str, Any]:
-    """Compute + sign + (dry-run) record a mechanism weight-set.
-
-    Triple-gated live broadcast — ALL must hold or we stay DRY-RUN:
-      * ``CATHEDRAL_MECH_WEIGHTSET_LIVE == "true"`` (env), AND
-      * ``network`` is a recognised testnet (never finney/mainnet), AND
-      * ``confirm is True`` (explicit caller opt-in), AND
-      * ``broadcast_fn`` is provided (we never import a chain path ourselves).
+    """Compute, sign, and record an artifact without any chain write.
 
     HARD REFUSE: raises ``UnsafeNetworkError`` on mainnet/finney/mainnet netuid
     before building anything.
 
-    Returns ``{"mode", "broadcast", "would_set", "artifact", "reason"}``. In
-    dry-run, ``broadcast`` is False and ``broadcast_fn`` is never called.
+    ``confirm`` and ``broadcast_fn`` remain accepted only for source
+    compatibility. They are deliberately ignored and the callback is never
+    invoked.
     """
     # (0) hard boundary — do this first, before we build or sign anything.
     _assert_target_allowed(network, netuid)
@@ -211,52 +192,36 @@ def set_weights(
     )
     would_set = {w["uid"]: w["weight"] for w in artifact["weights"]}
 
-    live_env = _live_env()
     gates = {
-        "live_env": live_env,
-        "target_allowed": is_testnet(network, netuid)
-        or (is_mainnet(network, netuid) and _allow_mainnet()),
+        "live_env": _live_env(),
+        "target_allowed": is_testnet(network, netuid),
         "confirm": bool(confirm),
         "broadcast_fn": broadcast_fn is not None,
     }
-    go_live = all(gates.values())
 
-    # record the artifact for the read endpoint regardless of mode
+    # Record the artifact for the read endpoint. This module is permanently
+    # artifact-only; the immutable cathedral-validator release is the sole
+    # repository path allowed to submit weights.
     publish_next(artifact)
-
-    if not go_live:
-        reason = "dry_run: " + ", ".join(
-            f"{k}={'ok' if v else 'MISSING'}" for k, v in gates.items()
-        )
-        log.info(
-            "mechanism weight-set DRY-RUN (network=%s netuid=%s n_uids=%s) %s",
-            network,
-            netuid,
-            artifact["n_uids"],
-            reason,
-        )
-        return {
-            "mode": "dry_run",
-            "broadcast": False,
-            "would_set": would_set,
-            "artifact": artifact,
-            "reason": reason,
-        }
-
-    # LIVE — testnet only, triple-gated, caller-injected broadcast.
-    log.warning(
-        "mechanism weight-set LIVE broadcast on testnet network=%s netuid=%s n_uids=%s",
+    requested = any((gates["live_env"], gates["confirm"], gates["broadcast_fn"]))
+    reason = (
+        "dry_run: legacy mechanism broadcaster permanently disabled; "
+        "artifact published only"
+    )
+    log.info(
+        "mechanism weight-set ARTIFACT-ONLY "
+        "(network=%s netuid=%s n_uids=%s live_requested=%s)",
         network,
         netuid,
         artifact["n_uids"],
+        requested,
     )
-    broadcast_fn(artifact)  # type: ignore[misc]
     return {
-        "mode": "live",
-        "broadcast": True,
+        "mode": "dry_run",
+        "broadcast": False,
         "would_set": would_set,
         "artifact": artifact,
-        "reason": "live: all gates satisfied (testnet)",
+        "reason": reason,
     }
 
 
@@ -292,7 +257,9 @@ def build_router():
     def get_next_weightset() -> dict[str, Any]:
         art = latest_next()
         if art is None:
-            raise HTTPException(status_code=404, detail="no mechanism weight-set built yet")
+            raise HTTPException(
+                status_code=404, detail="no mechanism weight-set built yet"
+            )
         # defensive re-stamp: never let this look like the real /v1 vector
         return {**art, "testnet": True}
 

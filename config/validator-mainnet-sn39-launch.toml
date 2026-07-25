@@ -1,0 +1,52 @@
+# One-shot SN39 Intel TDX CPU mainnet launch canary.
+#
+# This profile is intentionally not a daemon. It permits at most ONE durable
+# submission attempt and refuses the write unless raw TDX replay reaches FULL
+# assurance and independently derives the exact signed thin vector.
+
+[network]
+name = "finney"
+netuid = 39
+wallet_name = "validator"
+validator_hotkey = "default"
+
+[publisher]
+url = "https://api.cathedral.computer"
+
+[weight_policy]
+public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26" # pragma: allowlist secret
+key_id = "cathedral-weight-policy"
+require_policy = "validated_supply_v1"
+state_file = "/var/lib/cathedral-validator/thin-state.json"
+
+[weights]
+interval_secs = 1500
+max_submissions = 1
+
+[runtime]
+# The one-shot launch and continuous service deliberately share the same
+# cross-mode lock, rollback state, and append-only attempt journal.
+root = "/var/lib/cathedral-validator"
+
+[provenance]
+mode = "shadow"
+evidence_url = "https://api.cathedral.computer/v1/evidence"
+registry_keys = "config/provenance/registry-keys.json"
+registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
+report_keys = "config/provenance/report-keys.json"
+report_keys_digest = "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70"
+index_keys = "config/provenance/index-keys.json"
+index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
+verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+source_revision = "fa39af97e738fdbed5c454f976b61246590b5794" # pragma: allowlist secret
+mechanism = "validated_supply_v1"
+burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
+controlled_dir = "/etc/cathedral/controlled/sn39-launch"
+verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
+
+[launch]
+require_full_provenance_for_broadcast = true
+require_completed_launch_for_broadcast = false
+
+[logs]
+jsonl = "/var/log/cathedral-validator-launch/validator-events.jsonl"

@@ -127,7 +127,7 @@ cathedral-validator serve --config my-validator.toml --dry-run --once
 Only after both pass may an authorized operator start the continuous service:
 
 ```bash
-cathedral-validator serve --config my-validator.toml
+cathedral-validator serve --config my-validator.toml --broadcast
 ```
 
 The rollback fence advances only after a successful broadcast and survives a
@@ -167,10 +167,10 @@ cathedral-validator serve --config my-validator.toml --dry-run --once
 ```
 
 Confirm the accepted vector, burn share, and weights look right. **Then go
-live** (drop `--dry-run`/`--once` — `serve` sets weights and loops):
+live** (drop `--dry-run`/`--once` and explicitly permit chain writes):
 
 ```bash
-cathedral-validator serve --config my-validator.toml
+cathedral-validator serve --config my-validator.toml --broadcast
 ```
 
 That's it — same `serve` command and systemd unit you already run. The rollback
@@ -180,12 +180,15 @@ the last one you accepted.
 | Flag | Default | Purpose |
 |---|---|---|
 | `--config` | — | TOML config (network, wallet, pinned key) |
-| `--dry-run` | off (lives) | verify + print the weights without setting them |
+| `--broadcast` | off | explicitly permit chain weight submissions |
+| `--dry-run` | off | force verify + print without setting weights |
 | `--once` | off | single tick then exit |
 | `--offline` | off | verify + print only, no chain access (CI / smoke) |
 
-Every config value can be overridden by a flag or env var (`--wallet-name`,
-`--netuid`, `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY`, …). The raw module form
+Ordinary operator values can be overridden by a flag or supported env var
+(`--wallet-name`, `--netuid`, `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY`, …).
+Security-critical SN39 transition, attempt-budget, and runtime-root values are
+not ambient-environment overrides. The raw module form
 (`python -m scaffold.validator_thin --help`) is also available if you prefer
 flags over a config file.
 | `--state-file` | `~/.cathedral/thin_validator.json` | rollback-fence persistence |
@@ -197,8 +200,8 @@ This validator binary is **new**: its verify / burn / fence logic is covered by
 the release gates (`publisher_verify.py`), and it has been exercised end-to-end
 against the live mainnet vector. Run it in dry-run (or alongside your existing
 validator) until you've confirmed the uid vector it produces matches your
-expectation, then go live: with `cathedral-validator serve`, drop `--dry-run`
-(it writes weights by default — there is no `--broadcast` flag); with the raw
-`python -m scaffold.validator_thin` form, add `--broadcast`. Adoption is per-operator and
-incremental — the network already converges as long as stake-weighted-majority
-validators relay the same signed vector.
+expectation. Chain writes require an explicit `--broadcast`. Finney/SN39
+`validated_supply_v1` additionally requires the immutable launch release and
+signed public transition seal described in
+`docs/SN39_MAINNET_RELEASE_20260724.md`; a generic direct invocation cannot
+bypass that state machine.

@@ -1,0 +1,25 @@
+[Unit]
+Description=Cathedral SN39 finalized launch reconciliation
+After=network-online.target cathedral-validator-sn39-launch.service
+Wants=network-online.target
+Conflicts=cathedral-thin-validator.service cathedral-validator-sn39.service
+
+[Service]
+Type=oneshot
+User=cathedral-validator
+Group=cathedral-validator
+Environment=HOME=/var/lib/cathedral-validator
+ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release reconcile
+TimeoutStartSec=5min
+StateDirectory=cathedral-validator
+StateDirectoryMode=0700
+LogsDirectory=cathedral-validator
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/cathedral-validator /var/log/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true

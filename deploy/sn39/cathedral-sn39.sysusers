@@ -1,0 +1,3 @@
+g cathedral-status -
+u cathedral-status - "Cathedral public status publisher" /var/lib/cathedral-public-evidence
+m cathedral-status cathedral-validator

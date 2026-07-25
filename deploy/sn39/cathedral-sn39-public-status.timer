@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh sanitized Cathedral SN39 validator status
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+RandomizedDelaySec=3s
+Persistent=true
+Unit=cathedral-sn39-public-status.service
+
+[Install]
+WantedBy=timers.target

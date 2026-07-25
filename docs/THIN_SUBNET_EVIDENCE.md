@@ -1,5 +1,12 @@
 # Cathedral Thin Subnet Evidence
 
+> **Historical checkpoint — superseded for SN39 launch decisions.** This
+> document records the repository and chain state inspected on 2026-07-19.
+> Its statements about missing broadcasts and TDX evidence were true at that
+> checkpoint, not claims about the current launch candidate. Use
+> [`SN39_MAINNET_RELEASE_20260724.md`](SN39_MAINNET_RELEASE_20260724.md) and its
+> root-signed public release record for the current gate.
+
 Date: 2026-07-19  
 Candidate branch: `codex/production-ready-subnet`  
 Base: `origin/main` at `f9843df`

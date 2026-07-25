@@ -37,10 +37,16 @@ _DEFAULTS = {
     "wallet_name": "validator",
     "wallet_hotkey": "default",
     "state_file": str(Path.home() / ".cathedral" / "thin_validator.json"),
+    # Shared by thin and FULL-authority processes, independent of HOME and
+    # lane-specific state files. The service installer creates it mode 0700.
+    "runtime_root": "/var/lib/cathedral-validator",
     "interval_secs": 1500.0,
+    "max_submissions": 0,
+    "require_full_provenance_for_broadcast": False,
+    "require_completed_launch_for_broadcast": True,
     "once": False,
     "offline": False,  # set by --offline (verify+print, no chain access)
-    "broadcast": True,  # `serve` is a live validator by default (legacy parity)
+    "broadcast": False,  # every chain write requires an explicit --broadcast
     # Supported SN39 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
@@ -76,8 +82,18 @@ _CONFIG_MAP = {
     ("weight_policy", "public_key_hex"): "public_key_hex",
     ("weight_policy", "key_id"): "key_id",
     ("weight_policy", "state_file"): "state_file",
+    ("runtime", "root"): "runtime_root",
     ("weight_policy", "require_policy"): "require_policy",
     ("weights", "interval_secs"): "interval_secs",
+    ("weights", "max_submissions"): "max_submissions",
+    (
+        "launch",
+        "require_full_provenance_for_broadcast",
+    ): "require_full_provenance_for_broadcast",
+    (
+        "launch",
+        "require_completed_launch_for_broadcast",
+    ): "require_completed_launch_for_broadcast",
     ("provenance", "mode"): "provenance",
     ("provenance", "evidence_url"): "evidence_url",
     ("provenance", "registry_keys"): "provenance_registry_keys",
@@ -137,6 +153,17 @@ def _load_config_file(path: str) -> dict:
     return out
 
 
+def _parse_bool(value: object, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{field} must be true or false")
+
+
 def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
     cfg = dict(_DEFAULTS)
     if ns.config:
@@ -155,7 +182,11 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         "wallet_name",
         "wallet_hotkey",
         "state_file",
+        "runtime_root",
         "interval_secs",
+        "max_submissions",
+        "require_full_provenance_for_broadcast",
+        "require_completed_launch_for_broadcast",
         "require_policy",
         "provenance",
         "evidence_url",
@@ -178,6 +209,8 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
             cfg[flat] = v
     if ns.dry_run:
         cfg["broadcast"] = False
+    elif getattr(ns, "broadcast", False):
+        cfg["broadcast"] = True
     if ns.once:
         cfg["once"] = True
     if getattr(ns, "offline", False):
@@ -185,6 +218,15 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         cfg["broadcast"] = False
     cfg["netuid"] = int(cfg["netuid"])
     cfg["interval_secs"] = float(cfg["interval_secs"])
+    cfg["max_submissions"] = int(cfg["max_submissions"])
+    cfg["require_full_provenance_for_broadcast"] = _parse_bool(
+        cfg["require_full_provenance_for_broadcast"],
+        field="require_full_provenance_for_broadcast",
+    )
+    cfg["require_completed_launch_for_broadcast"] = _parse_bool(
+        cfg["require_completed_launch_for_broadcast"],
+        field="require_completed_launch_for_broadcast",
+    )
     return SimpleNamespace(**cfg)
 
 
@@ -222,25 +264,34 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    try:
+        validator_thin._validate_runtime_contract(cfg)
+    except validator_thin.wire.VectorError as exc:
+        print(
+            f"error: {validator_thin.stable_error(exc)}",
+            file=sys.stderr,
+        )
+        return 2
     mode = (
         "BROADCAST (setting weights)" if cfg.broadcast else "DRY-RUN (no chain writes)"
     )
     print(f"cathedral-validator serve — netuid {cfg.netuid} on {cfg.network} — {mode}")
     print(
-        f"  publisher={cfg.publisher_url}  key_id={cfg.key_id}  pinned={cfg.public_key_hex[:16]}…"
+        f"  publisher={validator_thin._safe_endpoint_label(cfg.publisher_url)}  "
+        f"key_id={cfg.key_id}  pinned={cfg.public_key_hex[:16]}…"
     )
     if cfg.require_policy:
         print(f"  policy pin: {cfg.require_policy} (legacy/v3 vectors rejected)")
     authority_banner = {
         "off": "submission authority: THIN — provenance audit OFF",
-        "shadow": "submission authority: THIN — full-provenance audits every tick "
-        "(shadow)",
+        "shadow": "submission authority: THIN — provenance audits every tick "
+        "(FULL only with controlled raw evidence; shadow)",
         "authority": "submission authority: FULL-PROVENANCE — the independent "
         "recomputation is what gets submitted",
     }[provenance_mode]
     print(f"  {authority_banner}")
     if getattr(cfg, "jsonl", None):
-        print(f"  jsonl events → {cfg.jsonl}")
+        print("  jsonl events → enabled (path withheld)")
     return validator_thin.run(cfg)
 
 
@@ -248,6 +299,27 @@ def _cmd_migrate(ns: argparse.Namespace) -> int:
     print(
         "nothing to migrate — v4 keeps no local validator database "
         "(scoring is composed and signed by the orchestrator)."
+    )
+    return 0
+
+
+def _cmd_reconcile_launch(ns: argparse.Namespace) -> int:
+    """Prove the recorded one-shot launch before unlocking the daemon."""
+    cfg = _resolve_serve_config(ns)
+    if getattr(ns, "chain_endpoint", None):
+        os.environ[validator_thin.CHAIN_ENDPOINT_ENV] = ns.chain_endpoint
+    try:
+        result = validator_thin.reconcile_launch_transition(cfg)
+    except Exception as exc:  # noqa: BLE001 - sanitized operator boundary
+        print(
+            f"launch reconciliation failed closed: {validator_thin.stable_error(exc)}",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        "launch reconciliation PASS "
+        f"block={result['block_number']} "
+        f"extrinsic={result['extrinsic_hash']}"
     )
     return 0
 
@@ -268,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser(
-        "serve", help="run the validator (live by default; --dry-run to test)"
+        "serve", help="run the validator (dry-run unless --broadcast is explicit)"
     )
     sp.add_argument(
         "--config",
@@ -290,7 +362,37 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--wallet-name", dest="wallet_name", default=None)
     sp.add_argument("--wallet-hotkey", dest="wallet_hotkey", default=None)
     sp.add_argument("--state-file", dest="state_file", default=None)
+    sp.add_argument(
+        "--runtime-root",
+        dest="runtime_root",
+        default=None,
+        help="absolute owner-only directory shared by thin and FULL processes "
+        "for the cross-mode lock and ambiguity journal",
+    )
     sp.add_argument("--interval-secs", dest="interval_secs", type=float, default=None)
+    sp.add_argument(
+        "--max-submissions",
+        dest="max_submissions",
+        type=int,
+        default=None,
+        help="durable attempt ceiling; 0 means unlimited, launch canary requires 1",
+    )
+    sp.add_argument(
+        "--require-full-provenance-for-broadcast",
+        dest="require_full_provenance_for_broadcast",
+        action="store_true",
+        default=None,
+        help="launch-only: synchronously replay raw evidence and require exact "
+        "agreement before the one permitted chain write",
+    )
+    sp.add_argument(
+        "--require-completed-launch-for-broadcast",
+        dest="require_completed_launch_for_broadcast",
+        action="store_true",
+        default=None,
+        help="refuse continuous writes until reconcile-launch proves the finalized "
+        "FULL-gated launch",
+    )
     sp.add_argument(
         "--require-policy",
         dest="require_policy",
@@ -361,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
         help="verify and print the weights without setting them on chain",
     )
     sp.add_argument(
+        "--broadcast",
+        action="store_true",
+        help="explicitly permit a chain weight submission",
+    )
+    sp.add_argument(
         "--offline",
         action="store_true",
         help="verify + print only, no chain access (CI / smoke)",
@@ -370,6 +477,20 @@ def main(argv: list[str] | None = None) -> int:
 
     mp = sub.add_parser("migrate", help="(no-op in v4 — kept for update-script parity)")
     mp.set_defaults(func=_cmd_migrate)
+
+    rp = sub.add_parser(
+        "reconcile-launch",
+        help="verify the finalized FULL-gated launch and unlock continuous broadcast",
+    )
+    rp.add_argument("--config", required=True)
+    rp.add_argument("--chain-endpoint", dest="chain_endpoint", default=None)
+    rp.set_defaults(
+        func=_cmd_reconcile_launch,
+        dry_run=False,
+        broadcast=False,
+        once=False,
+        offline=False,
+    )
 
     vp = sub.add_parser("version", help="print version")
     vp.set_defaults(func=_cmd_version)
