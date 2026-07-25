@@ -148,6 +148,9 @@ class ProvenanceAudit:
     manifest_digest: str | None = None
     policy_release: int | None = None
     mechanism: str | None = None
+    manifest_generated_at: str | None = None
+    candidate_block: int | None = None
+    candidate_block_hash: str | None = None
     report_generated_at: str | None = None
     report_valid_until: str | None = None
     report_valid_from_block: int | None = None
@@ -1084,6 +1087,9 @@ def run_audit(
             manifest_digest=manifest_digest,
             policy_release=result.policy_release,
             mechanism=result.mechanism_id,
+            manifest_generated_at=str(manifest["generated_at"]),
+            candidate_block=int(manifest["candidate_set"]["block"]),
+            candidate_block_hash=str(manifest["candidate_set"]["block_hash"]),
             report_generated_at=str(report_document["generated_at"]),
             report_valid_until=str(report_document["valid_until"]),
             report_valid_from_block=int(report_document["valid_from_block"]),

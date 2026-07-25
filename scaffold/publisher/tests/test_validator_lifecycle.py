@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -235,6 +236,13 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
         "chain_preflight",
         lambda **_kwargs: SimpleNamespace(
             hotkey_to_uid={"burn-hotkey": 204},
+            subnet_owner_hotkey="burn-hotkey",
+            blocks_until_next_epoch=100,
+            next_epoch_start_block=223,
+            weights_rate_limit=0,
+            validator_blocks_since_last_update=1,
+            uid_mapping_stable_until_block=127,
+            replacement_safe_hotkeys=frozenset({"burn-hotkey"}),
             block=123,
             validator_uid=30,
             validator_hotkey="validator-hotkey",
@@ -249,9 +257,34 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
         "_require_continuous_launch_transition",
         lambda _args: None,
     )
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: {"schema": "fixture_uid_safety_v1"},
+    )
 
-    def submit(*_args, **_kwargs):
+    def submit(uid_weights, **kwargs):
         submissions["count"] += 1
+        runtime = kwargs["runtime_contract"]
+        ordered = sorted(uid_weights.items())
+        wire_uids, wire_weights = validator_thin._wire_weights(
+            [uid for uid, _weight in ordered],
+            [weight for _uid, weight in ordered],
+        )
+        attempt_id = validator_thin._read_state(
+            validator_thin._submission_state_path(runtime)
+        )["submission_pending_id"]
+        validator_thin._record_pending_broadcast_intent(
+            runtime,
+            attempt_id=attempt_id,
+            extrinsic_hash="0x" + "a" * 64,
+            nonce=17,
+            era_reference_block=runtime._tick_preflight.block,
+            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            version_key=validator_thin._weight_version_key(),
+            wire_uids=wire_uids,
+            wire_weights=wire_weights,
+        )
         return validator_thin.ChainSubmission(
             success=True,
             extrinsic_hash="0x" + "a" * 64,
@@ -285,6 +318,7 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
         wallet_hotkey="default",
         require_policy="validated_supply_v1",
         provenance="off",
+        provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
     )
 
@@ -313,6 +347,13 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         "chain_preflight",
         lambda **_kwargs: SimpleNamespace(
             hotkey_to_uid={"burn-hotkey": 204},
+            subnet_owner_hotkey="burn-hotkey",
+            blocks_until_next_epoch=100,
+            next_epoch_start_block=mapping_block["value"] + 100,
+            weights_rate_limit=0,
+            validator_blocks_since_last_update=1,
+            uid_mapping_stable_until_block=mapping_block["value"] + 4,
+            replacement_safe_hotkeys=frozenset({"burn-hotkey"}),
             block=mapping_block["value"],
             validator_uid=30,
             validator_hotkey="validator-hotkey",
@@ -327,9 +368,34 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         "_require_continuous_launch_transition",
         lambda _args: None,
     )
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: {"schema": "fixture_uid_safety_v1"},
+    )
 
-    def submit(*_args, **_kwargs):
+    def submit(uid_weights, **kwargs):
         submissions["count"] += 1
+        runtime = kwargs["runtime_contract"]
+        ordered = sorted(uid_weights.items())
+        wire_uids, wire_weights = validator_thin._wire_weights(
+            [uid for uid, _weight in ordered],
+            [weight for _uid, weight in ordered],
+        )
+        attempt_id = validator_thin._read_state(
+            validator_thin._submission_state_path(runtime)
+        )["submission_pending_id"]
+        validator_thin._record_pending_broadcast_intent(
+            runtime,
+            attempt_id=attempt_id,
+            extrinsic_hash="0x" + "a" * 64,
+            nonce=17,
+            era_reference_block=runtime._tick_preflight.block,
+            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            version_key=validator_thin._weight_version_key(),
+            wire_uids=wire_uids,
+            wire_weights=wire_weights,
+        )
         return validator_thin.ChainSubmission(
             success=True,
             extrinsic_hash="0x" + "a" * 64,
@@ -339,15 +405,18 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         )
 
     monkeypatch.setattr(validator_thin, "set_weights_on_chain", submit)
-    real_write_state = validator_thin._write_state
+    real_write_state_fenced = validator_thin._write_state_fenced
 
     def fail_finalization(path, updates):
-        if updates.get("thin_submission_attempt_status") == "finalized":
+        if (
+            Path(path) == state_file
+            and updates.get("thin_submission_attempt_status") == "finalized"
+        ):
             raise OSError("simulated final state fsync failure")
-        return real_write_state(path, updates)
+        return real_write_state_fenced(path, updates)
 
-    monkeypatch.setattr(validator_thin, "_write_state", fail_finalization)
     state_file = tmp_path / "fence.json"
+    monkeypatch.setattr(validator_thin, "_write_state_fenced", fail_finalization)
     args = SimpleNamespace(
         publisher_url="https://api.cathedral.computer",
         state_file=str(state_file),
@@ -361,22 +430,136 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         wallet_hotkey="default",
         require_policy="validated_supply_v1",
         provenance="off",
+        provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
     )
 
     with pytest.raises(OSError, match="state fsync"):
         validator_thin.tick(args)
     assert submissions["count"] == 1
-    pending = validator_thin._read_state(state_file)
-    assert pending["thin_submission_attempt_status"] == "pending"
-    assert pending["thin_submission_attempt_ids"] == [
-        pending["thin_submission_attempt_id"]
-    ]
+    assert validator_thin.load_fence(state_file) == -1
+    common = validator_thin._read_state(validator_thin._submission_state_path(args))
+    assert common["submission_pending_id"] is None
+    assert common["submission_finalized_id"] in common["submission_attempt_ids"]
+    assert common["submission_pending_identity"]["policy_version"] == 42
 
     mapping_block["value"] = 124
     with pytest.raises(
         wire_vector.VectorError,
-        match="rollback/replay",
+        match="common thin policy rollback",
     ):
         validator_thin.tick(args)
     assert submissions["count"] == 1
+
+
+def _run_loop_args(*, once: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        publisher_url="https://api.cathedral.computer",
+        evidence_url="https://api.cathedral.computer/v2/receipts/latest",
+        state_file="/tmp/test-validator-state.json",
+        public_key_hex="00" * 32,
+        key_id="test-key",
+        network="finney",
+        netuid=39,
+        offline=False,
+        broadcast=True,
+        wallet_name="validator",
+        wallet_hotkey="default",
+        require_policy=None,
+        provenance="shadow",
+        once=once,
+        interval_secs=60,
+        max_submissions=2,
+        require_full_provenance_for_broadcast=False,
+    )
+
+
+class _RunEventRecorder:
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, dict[str, object]]] = []
+
+    def event(self, name: str, **fields: object) -> None:
+        self.rows.append((name, fields))
+
+
+def test_recurring_loop_exits_on_post_signed_contradiction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _run_loop_args(once=False)
+    events = _RunEventRecorder()
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_recover_pending_launch_receipt",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+    monkeypatch.setattr(
+        validator_thin,
+        "tick",
+        lambda _args: (_ for _ in ()).throw(
+            validator_thin._PostSignedSubmissionMismatch(
+                "historical execution contradicted the signed intent"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("a post-signed contradiction must terminate")
+        ),
+    )
+
+    assert validator_thin.run(args) == 1
+    names = [name for name, _fields in events.rows]
+    assert names.count("PENDING_RECEIPT_CONTRADICTION") == 1
+    assert "TICK_FAILED" not in names
+
+
+def test_safe_pre_sign_head_drift_retries_whole_tick_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _run_loop_args(once=True)
+    events = _RunEventRecorder()
+    tick_calls: list[int] = []
+
+    def tick(_args: SimpleNamespace) -> bool:
+        tick_calls.append(len(tick_calls) + 1)
+        if len(tick_calls) == 1:
+            raise validator_thin._RetryablePreSignHeadDrift(
+                "finalized head advanced before signing"
+            )
+        return True
+
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_recover_pending_launch_receipt",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+    monkeypatch.setattr(validator_thin, "tick", tick)
+
+    assert validator_thin.run(args) == 0
+    assert tick_calls == [1, 2]
+    retry_events = [
+        fields for name, fields in events.rows if name == "PRE_SIGN_HEAD_DRIFT_RETRY"
+    ]
+    assert retry_events == [
+        {
+            "stage": "submit",
+            "status": validator_thin.NOT_PROVEN,
+            "detail": "finalized head advanced before signing",
+            "retry": 1,
+            "retry_limit": validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES,
+            "remediation": (
+                "The unsigned reservation was safely released. Rebuilding the "
+                "complete tick from a fresh finalized head now."
+            ),
+        }
+    ]

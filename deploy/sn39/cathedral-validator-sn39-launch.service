@@ -10,7 +10,7 @@ User=cathedral-validator
 Group=cathedral-validator
 Environment=HOME=/var/lib/cathedral-validator
 ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release launch
-TimeoutStartSec=15min
+TimeoutStartSec=20min
 StateDirectory=cathedral-validator
 StateDirectoryMode=0700
 LogsDirectory=cathedral-validator-launch

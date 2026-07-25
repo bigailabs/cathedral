@@ -18,6 +18,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from scripts.assert_sn39_public_reproduction import (  # noqa: E402
     ReproductionError,
+    ReproductionNotProven,
     assert_public_reproduction,
 )
 
@@ -36,6 +37,9 @@ def main() -> int:
         return 2
     try:
         result = run()
+    except ReproductionNotProven as exc:
+        print(f"SN39 public reproduction: NOT_PROVEN: {exc}", file=sys.stderr)
+        return 3
     except ReproductionError as exc:
         print(f"SN39 public reproduction: FAIL: {exc}", file=sys.stderr)
         return 1

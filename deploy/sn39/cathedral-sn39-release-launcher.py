@@ -23,12 +23,17 @@ from typing import Any
 MANIFEST = Path("/etc/cathedral/sn39-release-manifest.json")
 RELEASES = Path("/opt/cathedral-sn39/releases")
 VENVS = Path("/opt/cathedral-sn39/venvs")
+RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
+JOURNAL_RE = re.compile(r"journal-[0-9a-f]{64}\.json")
+FINALIZER_CONTEXT_ENV = "CATHEDRAL_SN39_FINALIZER_CONTEXT"
+RECURRING_AUTHORIZER_CONTEXT_ENV = "CATHEDRAL_SN39_RECURRING_AUTHORIZER_CONTEXT"
 CONFIGS = {
+    "preflight": Path("/etc/cathedral/validator-mainnet-sn39-launch.toml"),
     "launch": Path("/etc/cathedral/validator-mainnet-sn39-launch.toml"),
     "continuous": Path("/etc/cathedral/validator-mainnet-sn39.toml"),
     "reconcile": Path("/etc/cathedral/validator-mainnet-sn39.toml"),
 }
-MODES = frozenset({*CONFIGS, "status"})
+MODES = frozenset({*CONFIGS, "status", "finalize", "authorize-recurring"})
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -68,6 +73,7 @@ def _root_controlled(path: Path, *, directory: bool = False) -> None:
         path.is_symlink()
         or not expected(info.st_mode)
         or info.st_uid != ROOT_UID
+        or (not directory and info.st_nlink != 1)
         or stat.S_IMODE(info.st_mode) & 0o022
     ):
         raise InstallError(
@@ -106,7 +112,7 @@ def _immutable_tree_digest(root: Path) -> str:
                 )
             mode = f"{stat.S_IMODE(info.st_mode):04o}"
             if stat.S_ISREG(info.st_mode):
-                if stat.S_IMODE(info.st_mode) & 0o022:
+                if info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022:
                     raise InstallError(
                         f"immutable tree has a mutable or unsupported entry: {path}"
                     )
@@ -127,6 +133,7 @@ def _immutable_tree_digest(root: Path) -> str:
                     ) from exc
                 if (
                     target_info.st_uid != ROOT_UID
+                    or target_info.st_nlink != 1
                     or stat.S_IMODE(target_info.st_mode) & 0o022
                     or not stat.S_ISREG(target_info.st_mode)
                 ):
@@ -206,9 +213,14 @@ def _verify_bootstrap(document: dict[str, Any]) -> None:
         raise InstallError("release bootstrap interpreter differs from its manifest")
 
 
-def _child_environment(mode: str = "continuous") -> dict[str, str]:
+def _child_environment(
+    mode: str = "continuous",
+    *,
+    release_sha: str | None = None,
+    launch_config_sha256: str | None = None,
+) -> dict[str, str]:
     """Return the complete allowlisted environment for the validator child."""
-    return {
+    environment = {
         "HOME": (
             "/var/lib/cathedral-public-evidence"
             if mode == "status"
@@ -220,6 +232,13 @@ def _child_environment(mode: str = "continuous") -> dict[str, str]:
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
     }
+    if mode in {"preflight", "launch", "continuous", "reconcile"}:
+        environment["CATHEDRAL_VALIDATOR_JSONL_GROUP"] = "cathedral-validator-log"
+    if release_sha is not None:
+        environment["CATHEDRAL_SN39_RELEASE_SHA"] = release_sha
+    if launch_config_sha256 is not None:
+        environment["CATHEDRAL_SN39_LAUNCH_CONFIG_SHA256"] = launch_config_sha256
+    return environment
 
 
 def _check_digest_map(
@@ -257,8 +276,55 @@ def _git_output(release: Path, *args: str) -> str:
         raise InstallError("cannot verify immutable release checkout") from exc
 
 
-def _verify(mode: str) -> tuple[Path, Path]:
+def _finalizer_context_digest(
+    *,
+    release_sha: str,
+    journal: Path,
+    manifest_digest: str,
+) -> str:
+    payload = (
+        "cathedral-sn39-finalizer-context-v1\n"
+        f"{release_sha}\n"
+        f"{manifest_digest}\n"
+        f"{journal}\n"
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _recurring_authorizer_context_digest(
+    *,
+    release_sha: str,
+    manifest_digest: str,
+    arguments: list[str],
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "cathedral_sn39_recurring_authorizer_context_v1",
+            "release_sha": release_sha,
+            "manifest_digest": manifest_digest,
+            "arguments": arguments,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _finalizer_journal(value: str) -> Path:
+    journal = Path(value)
+    if (
+        not journal.is_absolute()
+        or journal.parent != RUNTIME_ROOT
+        or JOURNAL_RE.fullmatch(journal.name) is None
+    ):
+        raise InstallError("finalizer journal is outside the canonical runtime root")
+    return journal
+
+
+def _verify(mode: str) -> tuple[Path, Path, str]:
     _root_controlled(MANIFEST)
+    manifest_digest = _digest(MANIFEST)
     document = _strict_json(MANIFEST)
     if (
         set(document)
@@ -311,30 +377,90 @@ def _verify(mode: str) -> tuple[Path, Path]:
     python = venv / "bin/python"
     if not python.exists() or os.access(python, os.W_OK):
         raise InstallError("versioned release interpreter is missing or writable")
-    return release, python
+    if _digest(MANIFEST) != manifest_digest:
+        raise InstallError("release manifest changed during immutable-install check")
+    return release, python, manifest_digest
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 1 or argv[0] not in MODES:
+    mode = argv[0] if argv else ""
+    finalize = mode == "finalize"
+    authorize_recurring = mode == "authorize-recurring"
+    if (
+        mode not in MODES
+        or (finalize and len(argv) != 2)
+        or (authorize_recurring and len(argv) < 2)
+        or (not finalize and not authorize_recurring and len(argv) != 1)
+    ):
         print(
-            "usage: cathedral-sn39-release {launch|reconcile|continuous|status}",
+            "usage: cathedral-sn39-release "
+            "{preflight|launch|reconcile|continuous|status|finalize JOURNAL|"
+            "authorize-recurring OPTIONS...}",
             file=sys.stderr,
         )
         return 2
-    mode = argv[0]
+    if (
+        finalize or authorize_recurring or mode == "preflight"
+    ) and os.geteuid() != ROOT_UID:
+        print(
+            f"SN39 {mode} launcher must run as root",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        release, python = _verify(mode)
+        journal = _finalizer_journal(argv[1]) if finalize else None
+        release, python, manifest_digest = _verify(mode)
     except InstallError as exc:
         print(f"SN39 immutable-install check failed: {exc}", file=sys.stderr)
         return 1
-    if mode == "status":
+    if finalize:
+        assert journal is not None
+        command = [
+            str(python),
+            "-I",
+            "-B",
+            str(release / "scripts/finalize_sn39_public_release.py"),
+            "--release",
+            str(release),
+            "--release-sha",
+            release.name,
+            "--journal",
+            str(journal),
+        ]
+    elif authorize_recurring:
+        # Isolated mode deliberately omits cwd and environment paths. This
+        # fixed bootstrap inserts only the already verified immutable release,
+        # then executes the reviewed module with the operator's data arguments.
+        command = [
+            str(python),
+            "-I",
+            "-E",
+            "-s",
+            "-B",
+            "-c",
+            (
+                "import runpy,sys;"
+                "sys.path.insert(0,sys.argv.pop(1));"
+                "runpy.run_module(sys.argv.pop(1),run_name='__main__',alter_sys=True)"
+            ),
+            str(release),
+            "scaffold.sn39_continuous_authorization",
+            *argv[1:],
+        ]
+    elif mode == "status":
         command = [str(python), "scripts/publish_sn39_validator_status.py"]
     else:
         command = [
             str(python),
             "-m",
             "scaffold.cli",
-            "reconcile-launch" if mode == "reconcile" else "serve",
+            (
+                "reconcile-launch"
+                if mode == "reconcile"
+                else "preflight-launch"
+                if mode == "preflight"
+                else "serve"
+            ),
             "--config",
             str(CONFIGS[mode]),
         ]
@@ -342,7 +468,27 @@ def main(argv: list[str]) -> int:
             command.append("--broadcast")
         if mode == "launch":
             command.append("--once")
-    environment = _child_environment(mode)
+    config = CONFIGS.get(mode)
+    environment = _child_environment(
+        mode,
+        release_sha=release.name,
+        launch_config_sha256=_digest(config) if config is not None else None,
+    )
+    if finalize:
+        assert journal is not None
+        environment[FINALIZER_CONTEXT_ENV] = _finalizer_context_digest(
+            release_sha=release.name,
+            journal=journal,
+            manifest_digest=manifest_digest,
+        )
+    if authorize_recurring:
+        environment[RECURRING_AUTHORIZER_CONTEXT_ENV] = (
+            _recurring_authorizer_context_digest(
+                release_sha=release.name,
+                manifest_digest=manifest_digest,
+                arguments=argv[1:],
+            )
+        )
     os.chdir(release)
     os.execve(python, command, environment)
     return 127

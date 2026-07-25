@@ -34,13 +34,17 @@ RELEASE_FILES = (
     "config/provenance/release-attestation-keys.json",
     "requirements/sn39-reproduction.lock",
     "deploy/sn39/cathedral-sn39-release-launcher.py",
+    "deploy/sn39/cathedral-sn39-rotation-launcher.py",
     "deploy/sn39/cathedral-validator-sn39.service",
     "deploy/sn39/cathedral-validator-sn39-launch.service",
     "deploy/sn39/cathedral-validator-sn39-reconcile.service",
     "requirements/sn39-build.in",
     "requirements/sn39-build.lock",
+    "scaffold/sn39_continuous_authorization.py",
     "scripts/finalize_sn39_public_release.py",
+    "scripts/build_sn39_rotation_manifest.py",
     "scripts/publish_sn39_validator_status.py",
+    "scripts/sn39_hotkey_rotation_operator.py",
     "deploy/sn39/cathedral-sn39-public-status.service",
     "deploy/sn39/cathedral-sn39-public-status.timer",
     "deploy/sn39/cathedral-sn39.sysusers",
@@ -75,15 +79,17 @@ def immutable_tree_digest(root: Path) -> str:
             info = path.lstat()
             mode = f"{stat.S_IMODE(info.st_mode):04o}"
             if stat.S_ISREG(info.st_mode):
+                if info.st_nlink != 1:
+                    raise SystemExit(f"versioned venv has a hard-linked file: {path}")
                 record_digest(tree, "file", relative, mode, digest(path))
             elif stat.S_ISDIR(info.st_mode):
                 record_digest(tree, "directory", relative, mode)
             elif stat.S_ISLNK(info.st_mode):
                 target = path.resolve(strict=True)
                 target_info = target.stat()
-                if not stat.S_ISREG(target_info.st_mode):
+                if not stat.S_ISREG(target_info.st_mode) or target_info.st_nlink != 1:
                     raise SystemExit(
-                        f"versioned venv directory symlink is forbidden: {path}"
+                        f"versioned venv symlink target is unsupported: {path}"
                     )
                 record_digest(
                     tree,
@@ -247,12 +253,16 @@ def verify_locked_environment(
 
 
 def git(root: Path, *args: str) -> str:
-    return subprocess.check_output(
-        ["git", *args],
-        cwd=root,
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).strip()
+    try:
+        return subprocess.check_output(
+            ["/usr/bin/git", "-c", f"safe.directory={root}", *args],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit("cannot verify reviewed release source") from exc
 
 
 def main() -> int:

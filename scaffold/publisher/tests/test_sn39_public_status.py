@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -29,6 +31,22 @@ def _event(
         "mode": "thin",
         "status": event_status,
         "detail": detail,
+    }
+
+
+def _startup(authority: str, provenance: str) -> dict[str, object]:
+    return {
+        "ts": _timestamp(),
+        "event": "STARTUP",
+        "stage": "startup",
+        "mode": authority,
+        "status": "INFO",
+        "detail": (
+            f"submission_authority={authority} provenance={provenance} "
+            "policy_pin=validated_supply_v1 network=finney netuid=39"
+        ),
+        "authority": authority,
+        "provenance_mode": provenance,
     }
 
 
@@ -62,8 +80,174 @@ def test_exact_launch_boundary_is_pass_but_all_burn_is_not_proven() -> None:
     assert all_burn_status["authority"]["burn_share"] is None
 
 
+def test_launch_boundary_tracks_dynamic_uids_and_failed_tick_stays_ambiguous() -> None:
+    moved = status.clean_event(
+        _event(
+            "WEIGHTS_SUBMITTED",
+            "PASS",
+            detail=(
+                "authority=thin uids=2 burn_uid=7 burn_share=0.100000 "
+                "vector=7:0.100000,241:0.900000"
+            ),
+        )
+    )
+    assert status.is_launch_weight_boundary(moved)
+
+    failed = status.clean_event(_event("TICK_FAILED", "FAIL", detail="rpc timeout"))
+    assert failed is not None
+    assert "may have finalized" in failed["detail"]
+    assert "automatic retry remains blocked" in failed["remediation"]
+    document = status.build_status([moved, failed])
+    assert document["authority"]["status"] == "FAIL"
+
+
+def test_pending_receipt_unavailability_is_not_mislabeled_as_failure() -> None:
+    pending = status.clean_event(
+        _event(
+            "PENDING_RECEIPT_NOT_PROVEN",
+            "NOT_PROVEN",
+            detail="archive temporarily unavailable",
+        )
+    )
+    assert pending is not None
+    assert pending["status"] == "NOT_PROVEN"
+    assert "no replacement was submitted" in pending["detail"]
+    assert "never submit a replacement" in pending["remediation"]
+    document = status.build_status([pending])
+    assert document["authority"]["status"] == "NOT_PROVEN"
+    assert document["authority"]["latest_event"] == "PENDING_RECEIPT_NOT_PROVEN"
+
+
+def test_exact_recovered_boundary_is_pass_without_claiming_second_write() -> None:
+    recovered = status.clean_event(
+        _event(
+            "PENDING_RECEIPT_RECOVERED",
+            "PASS",
+            detail=(
+                "authority=thin uids=2 burn_uid=204 burn_share=0.100000 "
+                "vector=163:0.900000,204:0.100000"
+            ),
+        )
+    )
+    assert recovered is not None
+    assert status.is_launch_weight_boundary(recovered)
+    assert recovered["detail"] == (
+        "exact journaled transaction re-proven; no second chain write"
+    )
+    assert "never retry" in recovered["remediation"]
+
+    document = status.build_status([recovered])
+    assert document["authority"]["status"] == "PASS"
+    assert document["authority"]["latest_event"] == "PENDING_RECEIPT_RECOVERED"
+    assert document["authority"]["burn_share"] == "0.10"
+
+
+def test_incomplete_recovered_boundary_is_not_proven() -> None:
+    recovered = status.clean_event(
+        _event(
+            "PENDING_RECEIPT_RECOVERED",
+            "PASS",
+            detail=(
+                "the exact journaled thin receipt was re-proven and finalized; "
+                "no second chain write was attempted"
+            ),
+        )
+    )
+    assert recovered is not None
+    assert not status.is_launch_weight_boundary(recovered)
+    assert recovered["detail"] == (
+        "exact journaled transaction re-proven; no second chain write"
+    )
+
+    document = status.build_status([recovered])
+    assert document["authority"]["status"] == "NOT_PROVEN"
+    assert document["authority"]["burn_share"] is None
+
+
+def test_recovered_full_authority_is_not_the_thin_launch_boundary() -> None:
+    recovered = status.clean_event(
+        _event(
+            "PENDING_RECEIPT_RECOVERED",
+            "PASS",
+            detail=(
+                "authority=full_provenance uids=2 burn_uid=204 "
+                "burn_share=0.100000 vector=163:0.900000,204:0.100000"
+            ),
+        )
+    )
+    assert recovered is not None
+    assert recovered["authority"] == "full_provenance"
+    assert not status.is_launch_weight_boundary(recovered)
+
+    document = status.build_status([recovered])
+    assert document["authority"]["status"] == "NOT_PROVEN"
+    assert document["authority"]["burn_share"] is None
+
+
+def test_full_authority_startup_is_truthful_and_cannot_claim_thin_launch() -> None:
+    startup = status.clean_event(_startup("full_provenance", "authority"))
+    raw_recovered = _event(
+        "PENDING_RECEIPT_RECOVERED",
+        "PASS",
+        detail=(
+            "authority=full_provenance uids=2 burn_uid=204 "
+            "burn_share=0.100000 vector=163:0.900000,204:0.100000"
+        ),
+    )
+    raw_recovered["mode"] = "full_provenance"
+    recovered = status.clean_event(raw_recovered)
+
+    assert startup is not None
+    assert startup["detail"] == "FULL provenance authority started"
+    document = status.build_status([startup, recovered])
+    assert document["authority"]["mode"] == "full_provenance"
+    assert document["provenance"]["mode"] == "authority"
+    assert document["authority"]["status"] == "NOT_PROVEN"
+    assert document["authority"]["burn_share"] is None
+
+
+def test_invalid_or_self_contradictory_startup_is_dropped() -> None:
+    mismatched = _startup("full_provenance", "authority")
+    mismatched["mode"] = "thin"
+    invalid_pair = _startup("thin", "authority")
+
+    assert status.clean_event(mismatched) is None
+    assert status.clean_event(invalid_pair) is None
+
+
+def test_pending_receipt_contradiction_overrides_prior_thin_pass() -> None:
+    startup = status.clean_event(_startup("thin", "shadow"))
+    launch = status.clean_event(
+        _event(
+            "WEIGHTS_SUBMITTED",
+            "PASS",
+            detail=(
+                "authority=thin uids=2 burn_uid=204 burn_share=0.100000 "
+                "vector=163:0.900000,204:0.100000"
+            ),
+        )
+    )
+    contradiction = status.clean_event(
+        _event(
+            "PENDING_RECEIPT_CONTRADICTION",
+            "FAIL",
+            detail="private contradictory receipt details",
+            offset_seconds=1,
+        )
+    )
+
+    assert contradiction is not None
+    assert "positive durable or historical contradiction" in contradiction["detail"]
+    document = status.build_status([startup, launch, contradiction])
+    assert document["authority"]["mode"] == "thin"
+    assert document["authority"]["status"] == "FAIL"
+    assert document["authority"]["latest_event"] == ("PENDING_RECEIPT_CONTRADICTION")
+
+
 def test_event_status_mismatch_is_dropped() -> None:
     assert status.clean_event(_event("WEIGHTS_SUBMITTED", "FAIL")) is None
+    assert status.clean_event(_event("PENDING_RECEIPT_RECOVERED", "FAIL")) is None
+    assert status.clean_event(_event("PENDING_RECEIPT_NOT_PROVEN", "FAIL")) is None
     assert status.clean_event(_event("PROVENANCE_AUDIT_FAIL", "PASS")) is None
     assert status.clean_event(_event("WEIGHTS_DRY_RUN", "FAIL"))["status"] == "FAIL"
 
@@ -101,6 +285,104 @@ def test_rewarded_set_pass_does_not_claim_whole_epoch_full() -> None:
     assert document["provenance"]["rewarded_set_full"] == "PASS"
     assert document["provenance"]["positive_tdx_raw_replay"] == "PASS"
     assert document["provenance"]["whole_epoch_full"] == "NOT_PROVEN"
+
+
+def test_current_full_audit_does_not_upgrade_receipts_only_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = {
+        "launch_submission": {
+            "evidence_checkpoint": {"public_assurance": "receipts_only"}
+        }
+    }
+    monkeypatch.setattr(status, "read_signed_release", lambda: release)
+    startup = status.clean_event(_startup("thin", "shadow"))
+    audit = status.clean_event(_event("PROVENANCE_AUDIT_PASS", "PASS"))
+
+    document = status.build_status([startup, audit])
+
+    assert document["provenance"]["launch_public_assurance"] == "receipts_only"
+    assert document["provenance"]["whole_epoch_full"] == "NOT_PROVEN"
+    assert document["provenance"]["current_whole_epoch_full"] == "PASS"
+
+
+def test_unsigned_release_cannot_upgrade_launch_assurance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_path = tmp_path / "release.json"
+    signature_path = tmp_path / "release.json.sig"
+    keys_path = tmp_path / "release-attestation-keys.json"
+    release_path.write_text(
+        json.dumps(
+            {
+                "release_attestation": {"key_id": status.RELEASE_KEY_ID},
+                "launch_submission": {
+                    "evidence_checkpoint": {"public_assurance": "full"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    keys_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(status, "RELEASE", release_path)
+    monkeypatch.setattr(status, "RELEASE_SIGNATURE", signature_path)
+    monkeypatch.setattr(status, "RELEASE_KEYS", keys_path)
+
+    assert status.read_signed_release() == {}
+    document = status.build_status([])
+    assert document["provenance"]["whole_epoch_full"] == "NOT_PROVEN"
+    assert document["provenance"]["launch_public_assurance"] == "NOT_PROVEN"
+
+
+def test_valid_detached_release_signature_can_publish_launch_assurance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    release_path = tmp_path / "release.json"
+    signature_path = tmp_path / "release.json.sig"
+    keys_path = tmp_path / "release-attestation-keys.json"
+    release = {
+        "release_attestation": {"key_id": status.RELEASE_KEY_ID},
+        "launch_submission": {"evidence_checkpoint": {"public_assurance": "full"}},
+    }
+    release_bytes = json.dumps(
+        release,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    signature = {
+        "algorithm": "Ed25519",
+        "key_id": status.RELEASE_KEY_ID,
+        "payload": "release.json exact bytes",
+        "payload_sha256": "sha256:" + hashlib.sha256(release_bytes).hexdigest(),
+        "signature": base64.b64encode(private.sign(release_bytes)).decode(),
+    }
+    release_path.write_bytes(release_bytes)
+    signature_path.write_text(json.dumps(signature), encoding="utf-8")
+    keys_path.write_text(
+        json.dumps({status.RELEASE_KEY_ID: base64.b64encode(public).decode()}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(status, "RELEASE", release_path)
+    monkeypatch.setattr(status, "RELEASE_SIGNATURE", signature_path)
+    monkeypatch.setattr(status, "RELEASE_KEYS", keys_path)
+
+    assert status.read_signed_release() == release
+    document = status.build_status([])
+    assert document["provenance"]["whole_epoch_full"] == "PASS"
+    assert document["provenance"]["launch_public_assurance"] == "full"
+
+    release_path.write_bytes(release_bytes + b" ")
+    assert status.read_signed_release() == {}
 
 
 def test_source_reader_rejects_symlink_and_world_writable_file(

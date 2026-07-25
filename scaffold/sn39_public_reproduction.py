@@ -32,6 +32,9 @@ EXPECTED_PRODUCER_REVISION = (
     "fa39af97e738fdbed5c454f976b61246590b5794"  # pragma: allowlist secret
 )
 EXPECTED_REPORT_KEY_ID = "cathedral-score-sn39-20260724"
+FINNEY_GENESIS_HASH = (
+    "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+)
 EXPECTED_RELEASE_PINS = {
     "registry_keys": (
         "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
@@ -64,23 +67,30 @@ WIRE_TOTAL = WIRE_VALIDATED_SUPPLY_U16 + WIRE_BURN_U16
 WIRE_VALIDATED_SUPPLY_SHARE = WIRE_VALIDATED_SUPPLY_U16 / WIRE_TOTAL
 WIRE_BURN_SHARE = WIRE_BURN_U16 / WIRE_TOTAL
 EXPECTED_VERSION_KEY = 10005000
+RELEASE_SCHEMA = "cathedral_sn39_provenance_release_v2"
+UID_SAFETY_SCHEMA = "cathedral_sn39_uid_safety_v1"
+MORTAL_PERIOD_BLOCKS = 4
 
 
 class ReproductionError(ValueError):
     """The public reproduction did not prove the documented result."""
 
 
+class ReproductionNotProven(ReproductionError):
+    """Required public or archive material was unavailable for reproduction."""
+
+
 def _repo_revision(root: Path) -> str:
     try:
         revision = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
+            ["/usr/bin/git", "rev-parse", "HEAD"],
             cwd=root,
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
         checkout_changes = subprocess.check_output(
             [
-                "git",
+                "/usr/bin/git",
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",
@@ -91,7 +101,9 @@ def _repo_revision(root: Path) -> str:
             stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise ReproductionError("cannot resolve the reproducer Git revision") from exc
+        raise ReproductionNotProven(
+            "cannot resolve the reproducer Git revision"
+        ) from exc
     if checkout_changes:
         raise ReproductionError(
             "reproducer checkout is not pristine (modified, untracked, or ignored "
@@ -106,6 +118,14 @@ def _is_hash(value: Any, *, prefix: str) -> bool:
         and value.startswith(prefix)
         and len(value) == len(prefix) + 64
         and all(character in "0123456789abcdef" for character in value[len(prefix) :])
+    )
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
     )
 
 
@@ -165,6 +185,115 @@ def _strict_json_bytes(
     return document
 
 
+def _parse_utc(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ReproductionError(f"{label} is not canonical UTC")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ReproductionError(f"{label} is malformed") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise ReproductionError(f"{label} is not UTC")
+    return parsed
+
+
+def _validate_post_rotation_boundary(
+    launch: dict[str, Any],
+    *,
+    uid_safety: dict[str, Any],
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    targets = uid_safety["rotation"]["targets"]
+    receipts: list[dict[str, Any]] = []
+    for target in targets:
+        receipt = target.get("rotation_receipt") if isinstance(target, dict) else None
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt)
+            != {
+                "call",
+                "extrinsic_hash",
+                "block_hash",
+                "block_number",
+                "block_timestamp",
+                "extrinsic_index",
+                "coldkey",
+                "old_hotkey",
+                "new_hotkey",
+                "netuid",
+                "keep_stake",
+                "event",
+            }
+            or receipt.get("call") != "swap_hotkey_v2"
+            or not _is_hash(receipt.get("extrinsic_hash"), prefix="0x")
+            or not _is_hash(receipt.get("block_hash"), prefix="0x")
+            or receipt.get("block_number") != target.get("last_hotkey_swap_block")
+            or receipt.get("coldkey") != target.get("coldkey")
+            or receipt.get("new_hotkey") != target.get("hotkey")
+            or receipt.get("netuid") != 39
+            or not isinstance(receipt.get("keep_stake"), bool)
+            or receipt.get("event") != "HotkeySwappedOnSubnet"
+            or isinstance(receipt.get("extrinsic_index"), bool)
+            or not isinstance(receipt.get("extrinsic_index"), int)
+            or receipt.get("extrinsic_index") < 0
+        ):
+            raise ReproductionError("signed target rotation receipt is malformed")
+        receipts.append(receipt)
+    freshness = checkpoint.get("freshness_boundary")
+    if not isinstance(freshness, dict):
+        raise ReproductionError("signed evidence has no post-rotation boundary")
+    rotation_floor_block = max(int(row["block_number"]) for row in receipts)
+    rotation_floor_time = max(
+        _parse_utc(row["block_timestamp"], label="rotation block timestamp")
+        for row in receipts
+    )
+    vector = launch["signed_vector"]
+    index = checkpoint["signed_index"]
+    expected_keys = {
+        "schema",
+        "rotation_floor_block",
+        "rotation_floor_timestamp",
+        "candidate_block",
+        "candidate_block_hash",
+        "manifest_generated_at",
+        "report_generated_at",
+        "report_valid_from_block",
+        "vector_generated_at",
+        "index_generated_at",
+    }
+    if (
+        set(freshness) != expected_keys
+        or freshness.get("schema") != "cathedral_sn39_post_rotation_evidence_v1"
+        or freshness.get("rotation_floor_block") != rotation_floor_block
+        or _parse_utc(
+            freshness.get("rotation_floor_timestamp"),
+            label="rotation floor timestamp",
+        )
+        != rotation_floor_time
+        or isinstance(freshness.get("candidate_block"), bool)
+        or not isinstance(freshness.get("candidate_block"), int)
+        or freshness["candidate_block"] <= rotation_floor_block
+        or not _is_hash(freshness.get("candidate_block_hash"), prefix="0x")
+        or isinstance(freshness.get("report_valid_from_block"), bool)
+        or not isinstance(freshness.get("report_valid_from_block"), int)
+        or freshness["report_valid_from_block"] <= rotation_floor_block
+        or freshness.get("vector_generated_at") != vector.get("generated_at")
+        or freshness.get("index_generated_at") != index.get("generated_at")
+    ):
+        raise ReproductionError("signed post-rotation evidence boundary is malformed")
+    for name in (
+        "manifest_generated_at",
+        "report_generated_at",
+        "vector_generated_at",
+        "index_generated_at",
+    ):
+        if _parse_utc(freshness.get(name), label=name) <= rotation_floor_time:
+            raise ReproductionError(
+                "signed evidence generation does not follow both rotations"
+            )
+    return freshness
+
+
 def _validate_launch_submission(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ReproductionError("signed release has no exact launch submission")
@@ -183,36 +312,145 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
     snapshot = (mapping or {}).get("metagraph_snapshot")
     if (
         not isinstance(mapping, dict)
+        or isinstance(mapping.get("block"), bool)
+        or not isinstance(mapping.get("block"), int)
+        or mapping.get("block") < 1
         or not isinstance(snapshot, dict)
         or snapshot.get("network") != "finney"
         or snapshot.get("netuid") != 39
         or snapshot.get("block") != mapping.get("block")
         or not _is_hash(snapshot.get("block_hash"), prefix="0x")
+        or not isinstance(snapshot.get("uids"), list)
         or not isinstance(snapshot.get("hotkeys"), list)
+        or not isinstance(snapshot.get("validator_permit"), list)
+        or len(snapshot["uids"]) != len(snapshot["hotkeys"])
+        or len(snapshot["validator_permit"]) != len(snapshot["hotkeys"])
+        or not snapshot["uids"]
         or not snapshot["hotkeys"]
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in snapshot["uids"]
+        )
+        or len(set(snapshot["uids"])) != len(snapshot["uids"])
+        or len(set(snapshot["hotkeys"])) != len(snapshot["hotkeys"])
         or any(not isinstance(value, str) or not value for value in snapshot["hotkeys"])
+        or any(not isinstance(value, bool) for value in snapshot["validator_permit"])
         or mapping.get("commit_reveal_enabled") is not False
     ):
         raise ReproductionError("signed historical metagraph snapshot is malformed")
+    validator_uid = mapping.get("validator_uid")
+    rewarded_uid = mapping.get("rewarded_uid")
+    burn_uid = mapping.get("burn_uid")
+    uid_weights = mapping.get("uid_weights")
     if (
-        mapping.get("validator_uid") != 30
-        or mapping.get("burn_uid") != 204
-        or mapping.get("uid_weights") != {"163": 0.9, "204": 0.1}
+        any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (validator_uid, rewarded_uid, burn_uid)
+        )
+        or len({validator_uid, rewarded_uid, burn_uid}) != 3
+        or not isinstance(mapping.get("validator_hotkey"), str)
+        or not mapping["validator_hotkey"]
+        or not isinstance(mapping.get("rewarded_hotkey"), str)
+        or not mapping["rewarded_hotkey"]
+        or not isinstance(mapping.get("burn_hotkey"), str)
+        or not mapping["burn_hotkey"]
+        or len(
+            {
+                mapping["validator_hotkey"],
+                mapping["rewarded_hotkey"],
+                mapping["burn_hotkey"],
+            }
+        )
+        != 3
+        or not isinstance(uid_weights, dict)
+        or set(uid_weights) != {str(rewarded_uid), str(burn_uid)}
+        or not _is_finite_number(uid_weights.get(str(rewarded_uid)))
+        or not _is_finite_number(uid_weights.get(str(burn_uid)))
+        or not math.isclose(
+            float(uid_weights[str(rewarded_uid)]),
+            0.9,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        or not math.isclose(
+            float(uid_weights[str(burn_uid)]),
+            0.1,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        or isinstance(mapping.get("next_epoch_start_block"), bool)
+        or not isinstance(mapping.get("next_epoch_start_block"), int)
     ):
         raise ReproductionError("signed launch UID mapping differs from 90/10")
 
     extrinsic = raw.get("extrinsic")
+    intent = raw.get("broadcast_intent")
+    ordered_uids = sorted((rewarded_uid, burn_uid))
+    expected_wire_weights = [
+        WIRE_VALIDATED_SUPPLY_U16 if uid == rewarded_uid else WIRE_BURN_U16
+        for uid in ordered_uids
+    ]
     if (
         not isinstance(extrinsic, dict)
         or not _is_hash(extrinsic.get("hash"), prefix="0x")
         or not _is_hash(extrinsic.get("block_hash"), prefix="0x")
         or not isinstance(extrinsic.get("block"), int)
-        or extrinsic.get("validator_uid") != 30
-        or extrinsic.get("uids") != [163, 204]
-        or extrinsic.get("weights_u16") != [WIRE_VALIDATED_SUPPLY_U16, WIRE_BURN_U16]
+        or extrinsic.get("block") <= mapping.get("block")
+        or extrinsic.get("block") >= mapping.get("next_epoch_start_block")
+        or extrinsic.get("validator_uid") != validator_uid
+        or extrinsic.get("uids") != ordered_uids
+        or extrinsic.get("weights_u16") != expected_wire_weights
         or extrinsic.get("version_key") != EXPECTED_VERSION_KEY
     ):
         raise ReproductionError("signed launch extrinsic is malformed")
+    if (
+        not isinstance(intent, dict)
+        or set(intent)
+        != {
+            "extrinsic_hash",
+            "nonce",
+            "era_reference_block",
+            "mortal_period_blocks",
+            "version_key",
+            "wire_uids",
+            "wire_weights",
+        }
+        or intent.get("extrinsic_hash") != extrinsic["hash"]
+        or isinstance(intent.get("nonce"), bool)
+        or not isinstance(intent.get("nonce"), int)
+        or intent.get("nonce") < 0
+        or intent.get("era_reference_block") != mapping["block"]
+        or intent.get("mortal_period_blocks") != MORTAL_PERIOD_BLOCKS
+        or intent.get("version_key") != extrinsic["version_key"]
+        or intent.get("wire_uids") != extrinsic["uids"]
+        or intent.get("wire_weights") != extrinsic["weights_u16"]
+        or not (
+            intent["era_reference_block"]
+            <= extrinsic["block"]
+            < intent["era_reference_block"] + intent["mortal_period_blocks"]
+        )
+    ):
+        raise ReproductionError("signed launch broadcast intent is malformed")
+    uid_safety = mapping.get("uid_safety")
+    if (
+        not isinstance(uid_safety, dict)
+        or uid_safety.get("schema") != UID_SAFETY_SCHEMA
+        or not isinstance(uid_safety.get("registration"), dict)
+        or not isinstance(uid_safety.get("rotation"), dict)
+        or uid_safety["rotation"].get("status") != "PASS"
+        or uid_safety["rotation"].get("mapping_block") != mapping["block"]
+        or uid_safety["rotation"].get("mortal_period_blocks") != MORTAL_PERIOD_BLOCKS
+        or uid_safety["rotation"].get("era_last_block")
+        != mapping["block"] + MORTAL_PERIOD_BLOCKS - 1
+        or not isinstance(uid_safety["rotation"].get("targets"), list)
+        or {
+            row.get("uid")
+            for row in uid_safety["rotation"]["targets"]
+            if isinstance(row, dict)
+        }
+        != {rewarded_uid, burn_uid}
+    ):
+        raise ReproductionError("signed launch UID/hotkey safety proof is malformed")
 
     checkpoint = raw.get("evidence_checkpoint")
     frozen_index = (checkpoint or {}).get("signed_index")
@@ -240,6 +478,11 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
         != checkpoint.get("source_epoch")
     ):
         raise ReproductionError("signed evidence checkpoint is malformed")
+    _validate_post_rotation_boundary(
+        raw,
+        uid_safety=uid_safety,
+        checkpoint=checkpoint,
+    )
     return raw
 
 
@@ -295,7 +538,7 @@ def verify_release_bytes(
             "checked-out code is not the signed reproducer revision"
         )
     if (
-        release.get("schema") != "cathedral_sn39_provenance_release_v1"
+        release.get("schema") != RELEASE_SCHEMA
         or release.get("network") != "finney"
         or release.get("netuid") != 39
         or release.get("validated_capability") != "intel_tdx_cpu"
@@ -346,6 +589,8 @@ def _block_timestamp_ms(substrate: Any, block_hash: str) -> int:
         block_hash=block_hash,
     )
     raw = getattr(value, "value", value)
+    if raw is None:
+        raise ReproductionNotProven("launch inclusion block timestamp is unavailable")
     if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
         raise ReproductionError("launch inclusion block timestamp is malformed")
     return raw
@@ -357,7 +602,29 @@ def _finney_subtensor() -> Any:
 
         return bt.Subtensor(network="archive")
     except Exception as exc:
-        raise ReproductionError("cannot connect to the Finney archive") from exc
+        raise ReproductionNotProven("cannot connect to the Finney archive") from exc
+
+
+def _require_finney_archive(
+    subtensor: Any,
+    *,
+    deadline: float | None = None,
+) -> str:
+    """Fail closed unless the supplied archive is the pinned Finney chain."""
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is None:
+        raise ReproductionNotProven("Finney archive substrate is unavailable")
+    genesis_hash = _bounded_archive_call(
+        deadline,
+        "Finney genesis lookup",
+        lambda: substrate.get_block_hash(0),
+    )
+    if genesis_hash is None:
+        raise ReproductionNotProven("Finney genesis lookup returned no block hash")
+    observed = str(genesis_hash).lower()
+    if observed != FINNEY_GENESIS_HASH:
+        raise ReproductionError("archive differs from the pinned Finney genesis")
+    return observed
 
 
 def _bounded_archive_call(
@@ -367,10 +634,17 @@ def _bounded_archive_call(
 ) -> Any:
     """Run one read-only archive operation inside the command-wide deadline."""
     if deadline is None:
-        return operation()
+        try:
+            return operation()
+        except ReproductionError:
+            raise
+        except Exception as exc:
+            raise ReproductionNotProven(f"{label} is unavailable") from exc
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise ReproductionError(f"public reproduction deadline expired before {label}")
+        raise ReproductionNotProven(
+            f"public reproduction deadline expired before {label}"
+        )
     outcome: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
     def invoke() -> None:
@@ -387,14 +661,20 @@ def _bounded_archive_call(
     worker.start()
     worker.join(remaining)
     if worker.is_alive():
-        raise ReproductionError(f"public reproduction deadline exceeded during {label}")
+        raise ReproductionNotProven(
+            f"public reproduction deadline exceeded during {label}"
+        )
     succeeded, value = outcome.get_nowait()
     if not succeeded:
-        raise ReproductionError(f"{label} failed") from value
+        if isinstance(value, ReproductionError):
+            raise value
+        raise ReproductionNotProven(f"{label} is unavailable") from value
     return value
 
 
 def _materialize_execution_receipt(receipt: Any) -> dict[str, Any]:
+    if receipt is None:
+        raise ReproductionNotProven("launch extrinsic execution receipt is unavailable")
     return {
         "extrinsic_idx": int(getattr(receipt, "extrinsic_idx", -1)),
         "is_success": getattr(receipt, "is_success", None),
@@ -406,6 +686,481 @@ def _materialize_finalized_head(substrate: Any) -> tuple[str, int, str]:
     block_hash = str(substrate.get_chain_finalised_head())
     block_number = int(substrate.get_block_number(block_hash))
     return block_hash, block_number, str(substrate.get_block_hash(block_number))
+
+
+def _archive_storage_value(
+    subtensor: Any,
+    *,
+    name: str,
+    params: list[Any],
+    block: int,
+) -> Any:
+    try:
+        observed = subtensor.query_subtensor(
+            name=name,
+            params=params,
+            block=block,
+        )
+    except Exception as exc:
+        raise ReproductionNotProven(
+            f"historical {name} storage is unavailable"
+        ) from exc
+    return getattr(observed, "value", observed)
+
+
+def _archive_constant_value(
+    substrate: Any,
+    *,
+    name: str,
+    block_hash: str,
+) -> Any:
+    try:
+        observed = substrate.get_constant(
+            module_name="SubtensorModule",
+            constant_name=name,
+            block_hash=block_hash,
+        )
+    except Exception as exc:
+        raise ReproductionNotProven(
+            f"historical {name} constant is unavailable"
+        ) from exc
+    return getattr(observed, "value", observed)
+
+
+def _archive_rotation_receipt(
+    substrate: Any,
+    *,
+    block_number: int,
+    coldkey: str,
+    target_hotkey: str,
+) -> dict[str, Any]:
+    try:
+        block_hash = str(substrate.get_block_hash(block_number)).lower()
+        canonical_number = int(substrate.get_block_number(block_hash))
+        block = substrate.get_block(block_hash=block_hash)
+    except Exception as exc:
+        raise ReproductionNotProven(
+            "historical target rotation block is unavailable"
+        ) from exc
+    if (
+        not _is_hash(block_hash, prefix="0x")
+        or canonical_number != block_number
+        or not isinstance(block, dict)
+        or not isinstance(block.get("extrinsics"), (list, tuple))
+    ):
+        raise ReproductionError("historical target rotation block is non-canonical")
+    matching: list[tuple[int, dict[str, Any]]] = []
+    for index, item in enumerate(block["extrinsics"]):
+        observed = getattr(item, "value", None)
+        if not isinstance(observed, dict):
+            continue
+        call = observed.get("call")
+        if (
+            isinstance(call, dict)
+            and observed.get("address") == coldkey
+            and call.get("call_module") == "SubtensorModule"
+            and call.get("call_function") == "swap_hotkey_v2"
+            and _call_arg(call, "new_hotkey") == target_hotkey
+            and _call_arg(call, "netuid") == 39
+        ):
+            matching.append((index, observed))
+    if len(matching) != 1:
+        raise ReproductionError(
+            "historical target has no unique exact swap_hotkey_v2 call"
+        )
+    extrinsic_index, observed = matching[0]
+    call = observed["call"]
+    extrinsic_hash = str(observed.get("extrinsic_hash", "")).lower()
+    old_hotkey = _call_arg(call, "hotkey")
+    keep_stake = _call_arg(call, "keep_stake")
+    if (
+        not _is_hash(extrinsic_hash, prefix="0x")
+        or not isinstance(old_hotkey, str)
+        or not old_hotkey
+        or old_hotkey == target_hotkey
+        or not isinstance(keep_stake, bool)
+    ):
+        raise ReproductionError("historical target rotation call is malformed")
+    try:
+        receipt = substrate.retrieve_extrinsic_by_hash(block_hash, extrinsic_hash)
+        receipt_index = int(getattr(receipt, "extrinsic_idx", -1))
+        receipt_success = getattr(receipt, "is_success", None)
+        receipt_error = getattr(receipt, "error_message", None)
+        events = getattr(receipt, "triggered_events", None)
+        timestamp_value = substrate.query(
+            module="Timestamp",
+            storage_function="Now",
+            block_hash=block_hash,
+        )
+        timestamp_ms = getattr(timestamp_value, "value", timestamp_value)
+    except Exception as exc:
+        raise ReproductionNotProven(
+            "historical target rotation execution is unavailable"
+        ) from exc
+    if (
+        receipt_index != extrinsic_index
+        or receipt_success is not True
+        or receipt_error is not None
+        or not isinstance(events, (list, tuple))
+        or isinstance(timestamp_ms, bool)
+        or not isinstance(timestamp_ms, int)
+        or timestamp_ms <= 0
+    ):
+        raise ReproductionError(
+            "historical target rotation receipt is incomplete or failed"
+        )
+    matching_events = []
+    for event in events:
+        event_data = event.get("event") if isinstance(event, dict) else None
+        if (
+            isinstance(event_data, dict)
+            and event_data.get("module_id") == "SubtensorModule"
+            and event_data.get("event_id") == "HotkeySwappedOnSubnet"
+            and isinstance(event_data.get("attributes"), dict)
+            and event_data["attributes"].get("coldkey") == coldkey
+            and event_data["attributes"].get("old_hotkey") == old_hotkey
+            and event_data["attributes"].get("new_hotkey") == target_hotkey
+            and event_data["attributes"].get("netuid") == 39
+        ):
+            matching_events.append(event_data)
+    if len(matching_events) != 1:
+        raise ReproductionError(
+            "historical target rotation event is absent or ambiguous"
+        )
+    return {
+        "call": "swap_hotkey_v2",
+        "extrinsic_hash": extrinsic_hash,
+        "block_hash": block_hash,
+        "block_number": block_number,
+        "block_timestamp": datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "extrinsic_index": extrinsic_index,
+        "coldkey": coldkey,
+        "old_hotkey": old_hotkey,
+        "new_hotkey": target_hotkey,
+        "netuid": 39,
+        "keep_stake": keep_stake,
+        "event": "HotkeySwappedOnSubnet",
+    }
+
+
+def _recompute_uid_safety(
+    subtensor: Any,
+    *,
+    metagraph: Any,
+    mapping: dict[str, Any],
+    block_hash: str,
+) -> dict[str, Any]:
+    """Rebuild the signed UID/hotkey-safety document from archive state."""
+    block = int(mapping["block"])
+    try:
+        canonical_block_hash = subtensor.substrate.get_block_hash(block)
+    except Exception as exc:
+        raise ReproductionNotProven(
+            "historical mapping block hash is unavailable from the archive"
+        ) from exc
+    if canonical_block_hash is None:
+        raise ReproductionNotProven(
+            "historical mapping block hash is unavailable from the archive"
+        )
+    if str(canonical_block_hash).lower() != block_hash.lower():
+        raise ReproductionError(
+            "historical mapping block hash contradicts the signed release"
+        )
+    raw_uids = getattr(metagraph, "uids", ())
+    if hasattr(raw_uids, "tolist"):
+        raw_uids = raw_uids.tolist()
+    uids = [int(value) for value in raw_uids]
+    hotkeys = [str(value) for value in getattr(metagraph, "hotkeys", ())]
+    try:
+        max_uids = int(getattr(metagraph, "max_uids"))
+        hparams = getattr(metagraph, "hparams")
+        max_regs_per_block = int(getattr(hparams, "max_regs_per_block"))
+        immunity_period = int(getattr(hparams, "immunity_period"))
+        registration_blocks = [
+            int(value) for value in getattr(metagraph, "block_at_registration")
+        ]
+        min_nonimmune_uids = int(
+            _archive_storage_value(
+                subtensor,
+                name="MinNonImmuneUids",
+                params=[39],
+                block=block,
+            )
+        )
+        subnet_owner_coldkey = str(
+            _archive_storage_value(
+                subtensor,
+                name="SubnetOwner",
+                params=[39],
+                block=block,
+            )
+            or ""
+        )
+        owned_hotkeys = [
+            str(value)
+            for value in (
+                _archive_storage_value(
+                    subtensor,
+                    name="OwnedHotkeys",
+                    params=[subnet_owner_coldkey],
+                    block=block,
+                )
+                or ()
+            )
+        ]
+        immune_owner_uids_limit = int(
+            _archive_storage_value(
+                subtensor,
+                name="ImmuneOwnerUidsLimit",
+                params=[39],
+                block=block,
+            )
+        )
+    except ReproductionError:
+        raise
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ReproductionError(
+            "historical UID replacement-safety inputs are malformed"
+        ) from exc
+    if (
+        len(uids) != len(hotkeys)
+        or len(registration_blocks) != len(hotkeys)
+        or max_uids < len(uids)
+        or max_regs_per_block < 0
+        or immunity_period < 0
+        or min_nonimmune_uids < 0
+        or not subnet_owner_coldkey
+        or immune_owner_uids_limit < 0
+        or len(set(owned_hotkeys)) != len(owned_hotkeys)
+    ):
+        raise ReproductionError(
+            "historical UID replacement-safety inputs are malformed"
+        )
+    registration_by_hotkey = {
+        hotkey: (uid, registered_at)
+        for uid, hotkey, registered_at in zip(
+            uids,
+            hotkeys,
+            registration_blocks,
+        )
+    }
+    owner_rows = sorted(
+        (registered_at, uid, hotkey)
+        for hotkey in owned_hotkeys
+        if (row := registration_by_hotkey.get(hotkey)) is not None
+        for uid, registered_at in [row]
+    )
+    owner_immortal_rows = owner_rows[:immune_owner_uids_limit]
+    owner_hotkey = str(mapping["burn_hotkey"])
+    owner_current = registration_by_hotkey.get(owner_hotkey)
+    if owner_current is not None and all(
+        row[2] != owner_hotkey for row in owner_immortal_rows
+    ):
+        owner_uid, owner_registered_at = owner_current
+        owner_immortal_rows.insert(
+            0,
+            (owner_registered_at, owner_uid, owner_hotkey),
+        )
+        owner_immortal_rows = owner_immortal_rows[:immune_owner_uids_limit]
+    owner_immortal_hotkeys = {row[2] for row in owner_immortal_rows}
+    free_uid_slots = max_uids - len(uids)
+    maximum_era_registrations = max_regs_per_block * MORTAL_PERIOD_BLOCKS
+    capacity_protects_all = free_uid_slots >= maximum_era_registrations
+    temporally_immune_hotkeys = {
+        hotkey
+        for hotkey, registered_at in zip(hotkeys, registration_blocks)
+        if registered_at + immunity_period >= block + MORTAL_PERIOD_BLOCKS
+    }
+    prunable_nonimmune_count = sum(
+        registered_at + immunity_period <= block
+        and hotkey not in owner_immortal_hotkeys
+        for hotkey, registered_at in zip(hotkeys, registration_blocks)
+    )
+    nonimmune_buffer_protects_immunity = (
+        prunable_nonimmune_count
+        > min_nonimmune_uids + max(0, maximum_era_registrations - free_uid_slots)
+    )
+    replacement_safe_hotkeys = (
+        set(hotkeys)
+        if capacity_protects_all
+        else owner_immortal_hotkeys
+        | (temporally_immune_hotkeys if nonimmune_buffer_protects_immunity else set())
+    )
+    target_rows = [
+        (int(mapping["rewarded_uid"]), str(mapping["rewarded_hotkey"])),
+        (int(mapping["burn_uid"]), str(mapping["burn_hotkey"])),
+    ]
+    if any(hotkey not in replacement_safe_hotkeys for _uid, hotkey in target_rows):
+        raise ReproductionError(
+            "historical target UID was not registration-replacement-safe"
+        )
+    try:
+        hotkey_swap_interval = int(
+            _archive_constant_value(
+                subtensor.substrate,
+                name="HotkeySwapOnSubnetInterval",
+                block_hash=block_hash,
+            )
+        )
+        coldkey_swap_delay = int(
+            _archive_storage_value(
+                subtensor,
+                name="ColdkeySwapAnnouncementDelay",
+                params=[],
+                block=block,
+            )
+        )
+    except ReproductionError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ReproductionError("historical swap constants are malformed") from exc
+    if (
+        hotkey_swap_interval < MORTAL_PERIOD_BLOCKS
+        or coldkey_swap_delay < MORTAL_PERIOD_BLOCKS
+    ):
+        raise ReproductionError("historical swap constants do not cover the mortal era")
+    era_last_block = block + MORTAL_PERIOD_BLOCKS - 1
+    targets: list[dict[str, Any]] = []
+    for uid, hotkey in sorted(target_rows):
+        coldkey = str(
+            _archive_storage_value(
+                subtensor,
+                name="Owner",
+                params=[hotkey],
+                block=block,
+            )
+            or ""
+        )
+        if not coldkey:
+            raise ReproductionError("historical target hotkey owner is malformed")
+        try:
+            last_swap_block = int(
+                _archive_storage_value(
+                    subtensor,
+                    name="LastHotkeySwapOnNetuid",
+                    params=[39, coldkey],
+                    block=block,
+                )
+            )
+        except ReproductionError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise ReproductionError(
+                "historical target hotkey swap block is malformed"
+            ) from exc
+        pending = _archive_storage_value(
+            subtensor,
+            name="ColdkeySwapAnnouncements",
+            params=[coldkey],
+            block=block,
+        )
+        if pending is not None:
+            raise ReproductionError(
+                "historical target coldkey had a pending swap announcement"
+            )
+        safe_until_block = last_swap_block + hotkey_swap_interval
+        if last_swap_block <= 0 or era_last_block > safe_until_block:
+            raise ReproductionError(
+                "historical target hotkey rotation did not cover the mortal era"
+            )
+        rotation_receipt = _archive_rotation_receipt(
+            subtensor.substrate,
+            block_number=last_swap_block,
+            coldkey=coldkey,
+            target_hotkey=hotkey,
+        )
+        successor = _archive_storage_value(
+            subtensor,
+            name="HotkeySuccessor",
+            params=[39, hotkey],
+            block=block,
+        )
+        root = _archive_storage_value(
+            subtensor,
+            name="HotkeyRoot",
+            params=[39, hotkey],
+            block=block,
+        )
+        old_successor = _archive_storage_value(
+            subtensor,
+            name="HotkeySuccessor",
+            params=[39, rotation_receipt["old_hotkey"]],
+            block=block,
+        )
+        old_root = _archive_storage_value(
+            subtensor,
+            name="HotkeyRoot",
+            params=[39, rotation_receipt["old_hotkey"]],
+            block=block,
+        )
+        expected_root = (
+            str(old_root)
+            if old_root not in (None, "")
+            else str(rotation_receipt["old_hotkey"])
+        )
+        if (
+            successor not in (None, "")
+            or root in (None, "")
+            or str(old_successor) != hotkey
+            or str(root) != expected_root
+        ):
+            raise ReproductionError(
+                "historical target hotkey lineage differs from its rotation"
+            )
+        targets.append(
+            {
+                "uid": uid,
+                "hotkey": hotkey,
+                "coldkey": coldkey,
+                "last_hotkey_swap_block": last_swap_block,
+                "hotkey_swap_safe_until_block": safe_until_block,
+                "pending_coldkey_swap": None,
+                "hotkey_successor": None,
+                "hotkey_root": str(root),
+                "rotation_receipt": rotation_receipt,
+                "registration_replacement_safe": True,
+            }
+        )
+    return {
+        "schema": UID_SAFETY_SCHEMA,
+        "registration": {
+            "max_uids": max_uids,
+            "max_regs_per_block": max_regs_per_block,
+            "immunity_period": immunity_period,
+            "min_nonimmune_uids": min_nonimmune_uids,
+            "block_at_registration": [
+                {
+                    "uid": uid,
+                    "hotkey": hotkey,
+                    "block_at_registration": registered_at,
+                }
+                for uid, hotkey, registered_at in zip(
+                    uids,
+                    hotkeys,
+                    registration_blocks,
+                )
+            ],
+            "subnet_owner_coldkey": subnet_owner_coldkey,
+            "owned_hotkeys": owned_hotkeys,
+            "immune_owner_uids_limit": immune_owner_uids_limit,
+            "free_uid_slots": free_uid_slots,
+            "maximum_era_registrations": maximum_era_registrations,
+            "owner_immortal_hotkeys": sorted(owner_immortal_hotkeys),
+            "replacement_safe_hotkeys": sorted(replacement_safe_hotkeys),
+        },
+        "rotation": {
+            "status": "PASS",
+            "mapping_block": block,
+            "mapping_block_hash": block_hash,
+            "mortal_period_blocks": MORTAL_PERIOD_BLOCKS,
+            "era_last_block": era_last_block,
+            "hotkey_swap_on_subnet_interval": hotkey_swap_interval,
+            "coldkey_swap_announcement_delay": coldkey_swap_delay,
+            "targets": targets,
+        },
+    }
 
 
 def verify_historical_launch(
@@ -444,6 +1199,7 @@ def verify_historical_launch(
             "Finney archive connection",
             _finney_subtensor,
         )
+    _require_finney_archive(subtensor, deadline=deadline)
 
     mapping = launch["mapping"]
     snapshot = mapping["metagraph_snapshot"]
@@ -451,31 +1207,79 @@ def verify_historical_launch(
     extrinsic = launch["extrinsic"]
     if mapping_block >= int(extrinsic["block"]):
         raise ReproductionError("historical mapping must precede launch extrinsic")
-    actual_mapping_hash, metagraph, historical_commit_reveal = _bounded_archive_call(
+    (
+        actual_mapping_hash,
+        metagraph,
+        historical_commit_reveal,
+        historical_owner_hotkey,
+        historical_next_epoch,
+    ) = _bounded_archive_call(
         deadline,
         "historical launch metagraph lookup",
         lambda: (
             subtensor.get_block_hash(mapping_block),
             subtensor.metagraph(39, block=mapping_block),
             subtensor.commit_reveal_enabled(netuid=39, block=mapping_block),
+            subtensor.get_subnet_owner_hotkey(39, block=mapping_block),
+            subtensor.get_next_epoch_start_block(39, block=mapping_block),
         ),
     )
+    if (
+        actual_mapping_hash is None
+        or metagraph is None
+        or historical_commit_reveal is None
+        or historical_owner_hotkey is None
+        or historical_next_epoch is None
+        or any(
+            not hasattr(metagraph, field)
+            for field in ("block", "uids", "hotkeys", "validator_permit")
+        )
+        or any(
+            getattr(metagraph, field) is None
+            for field in ("block", "uids", "hotkeys", "validator_permit")
+        )
+    ):
+        raise ReproductionNotProven(
+            "historical launch metagraph lookup returned incomplete material"
+        )
+    raw_actual_uids = getattr(metagraph, "uids", ())
+    if hasattr(raw_actual_uids, "tolist"):
+        raw_actual_uids = raw_actual_uids.tolist()
+    actual_uids = [int(value) for value in raw_actual_uids]
     actual_hotkeys = [str(value) for value in getattr(metagraph, "hotkeys", ())]
+    actual_validator_permit = [
+        bool(value) for value in getattr(metagraph, "validator_permit", ())
+    ]
     if (
         int(getattr(metagraph, "block", -1)) != mapping_block
         or str(actual_mapping_hash).lower() != snapshot["block_hash"].lower()
+        or actual_uids != snapshot["uids"]
         or actual_hotkeys != snapshot["hotkeys"]
+        or actual_validator_permit != snapshot["validator_permit"]
         or historical_commit_reveal is not False
+        or str(historical_owner_hotkey) != mapping["burn_hotkey"]
+        or historical_next_epoch != mapping["next_epoch_start_block"]
     ):
         raise ReproductionError(
             "historical metagraph differs from the signed snapshot, or its "
-            "commit-reveal state changed"
+            "owner, epoch schedule, or commit-reveal state changed"
         )
-    hotkey_to_uid = {hotkey: uid for uid, hotkey in enumerate(actual_hotkeys)}
+    hotkey_to_uid = dict(zip(actual_hotkeys, actual_uids))
+    validator_index = (
+        actual_hotkeys.index(mapping["validator_hotkey"])
+        if mapping.get("validator_hotkey") in actual_hotkeys
+        else None
+    )
     if (
         hotkey_to_uid.get(mapping.get("validator_hotkey")) != mapping["validator_uid"]
-        or hotkey_to_uid.get(vector["weights"][0]["miner_hotkey"]) != 163
-        or hotkey_to_uid.get(vector["burn_snapshot"]["burn_hotkey"]) != 204
+        or validator_index is None
+        or actual_validator_permit[validator_index] is not True
+        or hotkey_to_uid.get(vector["weights"][0]["miner_hotkey"])
+        != mapping["rewarded_uid"]
+        or hotkey_to_uid.get(vector["burn_snapshot"]["burn_hotkey"])
+        != mapping["burn_uid"]
+        or mapping.get("rewarded_hotkey") != vector["weights"][0]["miner_hotkey"]
+        or mapping.get("burn_hotkey") != vector["burn_snapshot"]["burn_hotkey"]
     ):
         raise ReproductionError("launch hotkeys do not map to the signed UIDs")
     mapped = vector_to_uid_weights(
@@ -483,8 +1287,26 @@ def verify_historical_launch(
         hotkey_to_uid,
         require_policy="validated_supply_v1",
     )
-    if mapped != {163: 0.9, 204: 0.1}:
+    expected_mapping = {
+        int(mapping["rewarded_uid"]): 0.9,
+        int(mapping["burn_uid"]): 0.1,
+    }
+    if mapped != expected_mapping:
         raise ReproductionError("launch vector does not independently map to 90/10")
+    actual_uid_safety = _bounded_archive_call(
+        deadline,
+        "historical UID and hotkey safety lookup",
+        lambda: _recompute_uid_safety(
+            subtensor,
+            metagraph=metagraph,
+            mapping=mapping,
+            block_hash=str(actual_mapping_hash).lower(),
+        ),
+    )
+    if actual_uid_safety != mapping.get("uid_safety"):
+        raise ReproductionError(
+            "historical UID/hotkey safety differs from the signed release"
+        )
 
     (
         actual_block_hash,
@@ -492,6 +1314,8 @@ def verify_historical_launch(
         inclusion_metagraph,
         chain_rows,
         inclusion_commit_reveal,
+        inclusion_owner_hotkey,
+        inclusion_next_epoch,
         inclusion_timestamp_ms,
     ) = _bounded_archive_call(
         deadline,
@@ -505,9 +1329,43 @@ def verify_historical_launch(
                 netuid=39,
                 block=int(extrinsic["block"]),
             ),
+            subtensor.get_subnet_owner_hotkey(
+                39,
+                block=int(extrinsic["block"]),
+            ),
+            subtensor.get_next_epoch_start_block(
+                39,
+                block=int(extrinsic["block"]),
+            ),
             _block_timestamp_ms(subtensor.substrate, extrinsic["block_hash"]),
         ),
     )
+    if (
+        actual_block_hash is None
+        or not isinstance(block, dict)
+        or inclusion_metagraph is None
+        or chain_rows is None
+        or inclusion_commit_reveal is None
+        or inclusion_owner_hotkey is None
+        or inclusion_next_epoch is None
+        or not isinstance(block.get("header"), dict)
+        or "number" not in block["header"]
+        or "hash" not in block["header"]
+        or block["header"]["number"] is None
+        or block["header"]["hash"] is None
+        or not isinstance(block.get("extrinsics"), (list, tuple))
+        or any(
+            not hasattr(inclusion_metagraph, field)
+            for field in ("block", "uids", "hotkeys", "validator_permit")
+        )
+        or any(
+            getattr(inclusion_metagraph, field) is None
+            for field in ("block", "uids", "hotkeys", "validator_permit")
+        )
+    ):
+        raise ReproductionNotProven(
+            "launch extrinsic archive lookup returned incomplete material"
+        )
     if (
         str(actual_block_hash).lower() != extrinsic["block_hash"].lower()
         or int(block.get("header", {}).get("number", -1)) != extrinsic["block"]
@@ -518,12 +1376,33 @@ def verify_historical_launch(
     inclusion_hotkeys = [
         str(value) for value in getattr(inclusion_metagraph, "hotkeys", ())
     ]
+    raw_inclusion_uids = getattr(inclusion_metagraph, "uids", ())
+    if hasattr(raw_inclusion_uids, "tolist"):
+        raw_inclusion_uids = raw_inclusion_uids.tolist()
+    inclusion_uids = [int(value) for value in raw_inclusion_uids]
+    inclusion_map = dict(zip(inclusion_uids, inclusion_hotkeys))
+    inclusion_permits = [
+        bool(value) for value in getattr(inclusion_metagraph, "validator_permit", ())
+    ]
+    inclusion_validator_index = (
+        inclusion_hotkeys.index(mapping["validator_hotkey"])
+        if mapping["validator_hotkey"] in inclusion_hotkeys
+        else None
+    )
     if (
         int(getattr(inclusion_metagraph, "block", -1)) != extrinsic["block"]
-        or len(inclusion_hotkeys) <= 204
-        or inclusion_hotkeys[mapping["validator_uid"]] != mapping["validator_hotkey"]
-        or inclusion_hotkeys[163] != vector["weights"][0]["miner_hotkey"]
-        or inclusion_hotkeys[204] != vector["burn_snapshot"]["burn_hotkey"]
+        or len(inclusion_uids) != len(inclusion_hotkeys)
+        or len(inclusion_permits) != len(inclusion_hotkeys)
+        or len(inclusion_map) != len(inclusion_uids)
+        or inclusion_validator_index is None
+        or inclusion_permits[inclusion_validator_index] is not True
+        or inclusion_map.get(mapping["validator_uid"]) != mapping["validator_hotkey"]
+        or inclusion_map.get(mapping["rewarded_uid"])
+        != vector["weights"][0]["miner_hotkey"]
+        or inclusion_map.get(mapping["burn_uid"])
+        != vector["burn_snapshot"]["burn_hotkey"]
+        or str(inclusion_owner_hotkey) != mapping["burn_hotkey"]
+        or inclusion_next_epoch != mapping["next_epoch_start_block"]
     ):
         raise ReproductionError("launch inclusion UID mapping differs")
     try:
@@ -564,6 +1443,42 @@ def verify_historical_launch(
         or _call_arg(call, "weights") != extrinsic["weights_u16"]
     ):
         raise ReproductionError("launch extrinsic call differs from the signed record")
+    intent = launch["broadcast_intent"]
+    if "nonce" not in observed or "era" not in observed:
+        raise ReproductionNotProven(
+            "decoded launch extrinsic nonce or mortal era is unavailable"
+        )
+    observed_nonce = observed.get("nonce")
+    raw_era = getattr(observed.get("era"), "value", observed.get("era"))
+    if not isinstance(raw_era, dict) or not {"period", "phase"} <= set(raw_era):
+        raise ReproductionNotProven(
+            "decoded launch extrinsic mortal-era fields are unavailable"
+        )
+    try:
+        observed_period = int(raw_era["period"])
+        observed_phase = int(raw_era["phase"])
+    except (TypeError, ValueError) as exc:
+        raise ReproductionError(
+            "decoded launch extrinsic mortal era is malformed"
+        ) from exc
+    if observed_period <= 0:
+        raise ReproductionError("decoded launch extrinsic mortal era is malformed")
+    era_reference = int(intent["era_reference_block"])
+    expected_phase = era_reference % MORTAL_PERIOD_BLOCKS
+    derived_birth = int(extrinsic["block"]) - (
+        (int(extrinsic["block"]) - observed_phase) % observed_period
+    )
+    if (
+        isinstance(observed_nonce, bool)
+        or not isinstance(observed_nonce, int)
+        or observed_nonce != intent["nonce"]
+        or observed_period != MORTAL_PERIOD_BLOCKS
+        or observed_phase != expected_phase
+        or derived_birth != era_reference
+    ):
+        raise ReproductionError(
+            "decoded launch extrinsic nonce or mortal era contradicts the signed intent"
+        )
     execution = _bounded_archive_call(
         deadline,
         "launch extrinsic execution lookup",
@@ -587,8 +1502,8 @@ def verify_historical_launch(
         else []
     )
     if actual_weights != [
-        [163, WIRE_VALIDATED_SUPPLY_U16],
-        [204, WIRE_BURN_U16],
+        [uid, weight]
+        for uid, weight in zip(extrinsic["uids"], extrinsic["weights_u16"])
     ]:
         raise ReproductionError("historical on-chain weights differ from the launch")
     finalized_hash, finalized_number, canonical_finalized_hash = _bounded_archive_call(
@@ -617,7 +1532,9 @@ def _load_pinned_key_document(path: Path, pin_name: str) -> dict[str, Any]:
     try:
         payload = path.read_bytes()
     except OSError as exc:
-        raise ReproductionError(f"cannot read public key bundle {path.name}") from exc
+        raise ReproductionNotProven(
+            f"cannot read public key bundle {path.name}"
+        ) from exc
     expected = EXPECTED_RELEASE_PINS.get(pin_name)
     actual = "sha256:" + hashlib.sha256(payload).hexdigest()
     if expected is None or actual != expected:
@@ -654,6 +1571,7 @@ def verify_historical_candidates(
     deadline: float | None = None,
 ) -> None:
     """Require the evidence candidate set to equal its historical metagraph."""
+    _require_finney_archive(subtensor, deadline=deadline)
     snapshot = manifest.get("candidate_set")
     candidates = (snapshot or {}).get("candidates")
     if (
@@ -684,6 +1602,17 @@ def verify_historical_candidates(
             subtensor.metagraph(39, block=block),
         ),
     )
+    if (
+        actual_hash is None
+        or metagraph is None
+        or not hasattr(metagraph, "block")
+        or not hasattr(metagraph, "hotkeys")
+        or getattr(metagraph, "block") is None
+        or getattr(metagraph, "hotkeys") is None
+    ):
+        raise ReproductionNotProven(
+            "evidence historical metagraph lookup returned incomplete material"
+        )
     actual = [str(value) for value in getattr(metagraph, "hotkeys", ())]
     if (
         int(getattr(metagraph, "block", -1)) != block
@@ -701,6 +1630,7 @@ def _validate_frozen_manifest(
     manifest: dict[str, Any],
     checkpoint: dict[str, Any],
 ) -> None:
+    freshness = checkpoint["freshness_boundary"]
     if (
         manifest.get("network") != "finney"
         or manifest.get("netuid") != 39
@@ -719,9 +1649,30 @@ def _validate_frozen_manifest(
         or manifest.get("verifier", {}).get("digest") != checkpoint["verifier_digest"]
         or manifest.get("verifier", {}).get("binary_blob")
         != checkpoint["verifier_binary_digest"]
+        or manifest.get("generated_at") != freshness["manifest_generated_at"]
+        or manifest.get("candidate_set", {}).get("block")
+        != freshness["candidate_block"]
+        or str(manifest.get("candidate_set", {}).get("block_hash", "")).lower()
+        != freshness["candidate_block_hash"]
     ):
         raise ReproductionError(
             "frozen evidence manifest differs from the signed checkpoint"
+        )
+
+
+def _validate_frozen_report_freshness(
+    report: dict[str, Any],
+    checkpoint: dict[str, Any],
+) -> None:
+    freshness = checkpoint["freshness_boundary"]
+    if (
+        report.get("generated_at") != freshness["report_generated_at"]
+        or report.get("valid_from_block") != freshness["report_valid_from_block"]
+        or report.get("source_epoch") != checkpoint["source_epoch"]
+        or report.get("report_id") != checkpoint["report_id"]
+    ):
+        raise ReproductionError(
+            "frozen score report differs from the post-rotation boundary"
         )
 
 
@@ -746,16 +1697,89 @@ def _validate_controlled_replay_result(
     document: dict[str, Any],
     checkpoint: dict[str, Any],
     launch: dict[str, Any],
+    manifest: dict[str, Any],
 ) -> None:
+    expected = _controlled_replay_result_document(checkpoint, launch, manifest)
+    if document != expected:
+        raise ReproductionError(
+            "content-addressed controlled TDX replay result differs from "
+            "the signed checkpoint and exact replay input digests"
+        )
+
+
+def _controlled_replay_result_document(
+    checkpoint: dict[str, Any],
+    launch: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe only the exact public and controlled bytes replayed by root.
+
+    The controlled envelope itself remains private. Its content digest and
+    every public receipt/work/result input are bound into the signed release,
+    so a mutable journal assertion cannot be promoted into a replay PASS.
+    """
     positive_hotkeys = sorted(
         str(row["miner_hotkey"])
         for row in launch["signed_vector"]["weights"]
         if float(row["weight"]) > 0.0
     )
-    expected = {
-        "schema": "cathedral_sn39_tdx_replay_result_v1",
+    if not positive_hotkeys or len(set(positive_hotkeys)) != len(positive_hotkeys):
+        raise ReproductionError("controlled TDX replay has no unique positive set")
+    bindings: dict[str, dict[str, Any]] = {}
+    for row in manifest.get("attestations") or ():
+        if not isinstance(row, dict):
+            raise ReproductionError("controlled TDX replay binding is malformed")
+        hotkey = row.get("hotkey")
+        if not isinstance(hotkey, str) or not hotkey or hotkey in bindings:
+            raise ReproductionError("controlled TDX replay binding is ambiguous")
+        bindings[hotkey] = row
+    receipts: dict[str, dict[str, Any]] = {}
+    for row in manifest.get("receipts") or ():
+        if not isinstance(row, dict):
+            raise ReproductionError("controlled TDX replay receipt is malformed")
+        hotkey = row.get("hotkey")
+        if not isinstance(hotkey, str) or not hotkey or hotkey in receipts:
+            raise ReproductionError("controlled TDX replay receipt is ambiguous")
+        receipts[hotkey] = row
+    replay_inputs: list[dict[str, Any]] = []
+    for hotkey in positive_hotkeys:
+        binding = bindings.get(hotkey)
+        receipt = receipts.get(hotkey)
+        if binding is None or receipt is None:
+            raise ReproductionError(
+                "controlled TDX replay lacks an exact positive input binding"
+            )
+        replay_input = {
+            "hotkey": hotkey,
+            "receipt_id": receipt.get("receipt_id"),
+            "receipt_blob": receipt.get("blob"),
+            "work_item_blob": receipt.get("work_item_blob"),
+            "result_blob": receipt.get("result_blob"),
+            "envelope_digest": binding.get("envelope_digest"),
+            "evidence_digest": binding.get("evidence_digest"),
+            "challenge_digest": binding.get("challenge_digest"),
+        }
+        if (
+            not isinstance(replay_input["receipt_id"], str)
+            or not replay_input["receipt_id"]
+            or any(
+                not _is_hash(replay_input[field], prefix="sha256:")
+                for field in (
+                    "receipt_blob",
+                    "work_item_blob",
+                    "result_blob",
+                    "envelope_digest",
+                    "evidence_digest",
+                    "challenge_digest",
+                )
+            )
+        ):
+            raise ReproductionError("controlled TDX replay input digest is malformed")
+        replay_inputs.append(replay_input)
+    return {
+        "schema": "cathedral_sn39_tdx_replay_result_v2",
         "status": "PASS",
-        "assurance": "operator_attested_positive_raw_replay",
+        "assurance": "root_finalizer_positive_raw_replay",
         "source_epoch": checkpoint["source_epoch"],
         "manifest": checkpoint["manifest"],
         "report_id": checkpoint["report_id"],
@@ -765,12 +1789,8 @@ def _validate_controlled_replay_result(
         "verifier_digest": checkpoint["verifier_digest"],
         "verifier_binary_digest": checkpoint["verifier_binary_digest"],
         "replayed_hotkeys": positive_hotkeys,
+        "replay_inputs": replay_inputs,
     }
-    if document != expected:
-        raise ReproductionError(
-            "content-addressed controlled TDX replay result differs from "
-            "the signed checkpoint"
-        )
 
 
 def verify_frozen_evidence(
@@ -783,6 +1803,7 @@ def verify_frozen_evidence(
     """Recompute the exact signed public checkpoint, never mutable `latest`."""
     from cathedral import provenance
     from cathedral.evidence import parse_manifest, verify_index
+    from cathedral.score_class import parse_score_report_json
 
     root = Path(__file__).resolve().parents[1]
     launch = _validate_launch_submission(release.get("launch_submission"))
@@ -813,8 +1834,21 @@ def verify_frozen_evidence(
             if not _is_hash(digest, prefix="sha256:"):
                 raise ReproductionError("evidence blob digest is malformed")
             if load_public_blob is None:
-                raise ReproductionError("hardened public evidence transport is missing")
-            data = load_public_blob(digest)
+                raise ReproductionNotProven(
+                    "hardened public evidence transport is missing"
+                )
+            try:
+                data = load_public_blob(digest)
+            except ReproductionError:
+                raise
+            except Exception as exc:
+                raise ReproductionNotProven(
+                    f"public evidence blob {digest} is unavailable"
+                ) from exc
+            if not isinstance(data, bytes):
+                raise ReproductionNotProven(
+                    f"public evidence blob {digest} returned incomplete material"
+                )
             if len(data) > MAX_BLOB_BYTES:
                 raise ReproductionError("public evidence blob exceeds its size cap")
             if "sha256:" + hashlib.sha256(data).hexdigest() != digest:
@@ -825,11 +1859,18 @@ def verify_frozen_evidence(
     try:
         manifest = parse_manifest(load_blob(checkpoint["manifest"]))
         _validate_frozen_manifest(manifest, checkpoint)
+        report = parse_score_report_json(load_blob(manifest["score_report"]["blob"]))
+        _validate_frozen_report_freshness(report, checkpoint)
         controlled_replay = _strict_json_bytes(
             load_blob(checkpoint["replay_result"]),
             label="controlled TDX replay result",
         )
-        _validate_controlled_replay_result(controlled_replay, checkpoint, launch)
+        _validate_controlled_replay_result(
+            controlled_replay,
+            checkpoint,
+            launch,
+            manifest,
+        )
         if subtensor is None:
             subtensor = _bounded_archive_call(
                 deadline,
@@ -905,7 +1946,7 @@ def verify_frozen_evidence(
         "evidence_source_epoch": checkpoint["source_epoch"],
         "evidence_candidate_set": "PASS",
         "public_assurance": "receipts_only",
-        "operator_attested_tdx_replay": "PASS",
+        "root_finalizer_tdx_replay": "PASS",
         "independent_raw_tdx_replay": "NOT_PROVEN",
     }
 
@@ -937,6 +1978,12 @@ def verify_public_release() -> dict[str, Any]:
         )
         release_bytes = fetch_named("/release.json")
         signature_bytes = fetch_named("/release.json.sig")
+        if not isinstance(release_bytes, bytes) or not isinstance(
+            signature_bytes, bytes
+        ):
+            raise ReproductionNotProven(
+                "public release fetch returned incomplete material"
+            )
         if (
             len(release_bytes) > MAX_RELEASE_BYTES
             or len(signature_bytes) > MAX_RELEASE_BYTES
@@ -949,7 +1996,9 @@ def verify_public_release() -> dict[str, Any]:
             repo_revision=_repo_revision(root),
         )
     except ProvenanceAuditError as exc:
-        raise ReproductionError("hardened public evidence fetch failed closed") from exc
+        raise ReproductionNotProven(
+            "hardened public evidence fetch is unavailable"
+        ) from exc
     release = result["release"]
     subtensor = _bounded_archive_call(
         deadline,
@@ -1085,41 +2134,71 @@ def assert_current_dry_run(
     burn_share = submission.get("burn_share")
     uid_weights = submission.get("uid_weights")
     mapping_block = submission.get("mapping_block")
+    burn_uid = submission.get("burn_uid")
     exact_uid_weights = (
         isinstance(uid_weights, dict)
-        and set(uid_weights) == {"163", "204"}
+        and isinstance(burn_uid, int)
+        and not isinstance(burn_uid, bool)
+        and str(burn_uid) in uid_weights
+        and len(uid_weights) == 2
         and all(
             not isinstance(uid_weights[uid], bool)
             and isinstance(uid_weights[uid], (int, float))
-            for uid in ("163", "204")
+            for uid in uid_weights
         )
-        and math.isclose(float(uid_weights["163"]), 0.9, rel_tol=0.0, abs_tol=1e-12)
-        and math.isclose(float(uid_weights["204"]), 0.1, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            float(uid_weights[str(burn_uid)]),
+            0.1,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and len(
+            [
+                value
+                for uid, value in uid_weights.items()
+                if uid != str(burn_uid)
+                and math.isclose(
+                    float(value),
+                    0.9,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ]
+        )
+        == 1
+    )
+    expected_wire_uids = (
+        sorted(int(uid) for uid in uid_weights) if exact_uid_weights else []
+    )
+    expected_wire_weights = (
+        [
+            WIRE_BURN_U16 if uid == burn_uid else WIRE_VALIDATED_SUPPLY_U16
+            for uid in expected_wire_uids
+        ]
+        if exact_uid_weights
+        else []
     )
     if (
         submission.get("authority") != "thin"
         or submission.get("uid_count") != 2
-        or submission.get("burn_uid") != 204
         or isinstance(burn_share, bool)
         or not isinstance(burn_share, (int, float))
         or not math.isclose(float(burn_share), 0.1, rel_tol=0.0, abs_tol=1e-12)
         or not exact_uid_weights
-        or submission.get("wire_uids") != [163, 204]
-        or submission.get("wire_weights")
-        != [
-            WIRE_VALIDATED_SUPPLY_U16,
-            WIRE_BURN_U16,
-        ]
+        or submission.get("wire_uids") != expected_wire_uids
+        or submission.get("wire_weights") != expected_wire_weights
         or submission.get("version_key") != EXPECTED_VERSION_KEY
         or isinstance(mapping_block, bool)
         or not isinstance(mapping_block, int)
         or mapping_block <= 0
-        or submission.get("validator_uid") != 30
+        or isinstance(submission.get("validator_uid"), bool)
+        or not isinstance(submission.get("validator_uid"), int)
+        or submission.get("validator_uid") in expected_wire_uids
         or not isinstance(submission.get("validator_hotkey"), str)
         or not submission.get("validator_hotkey")
     ):
         raise ReproductionError(
-            "thin result is not the documented two-UID 163/204 90/10 boundary"
+            "thin result is not the dynamically resolved rewarded/burn 90/10 boundary"
         )
 
     provenance = _latest(events[startup_index:], "PROVENANCE_AUDIT_PASS")
@@ -1164,7 +2243,7 @@ def assert_public_reproduction(
     return {
         "chain_write": False,
         "public_recomputation": "PASS",
-        "operator_attested_tdx_replay": "PASS",
+        "root_finalizer_tdx_replay": "PASS",
         "independent_raw_tdx_replay": "NOT_PROVEN",
         "whole_epoch_full": "NOT_PROVEN",
         **{field: "PASS" for field in required},
@@ -1182,6 +2261,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         summary = assert_public_reproduction()
+    except ReproductionNotProven as exc:
+        print(f"SN39 public reproduction: NOT_PROVEN: {exc}", file=sys.stderr)
+        return 3
     except ReproductionError as exc:
         print(f"SN39 public reproduction: FAIL: {exc}", file=sys.stderr)
         return 1

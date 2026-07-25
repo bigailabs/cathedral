@@ -24,6 +24,10 @@ state_file = "/var/lib/cathedral-validator/thin-state.json"
 
 [weights]
 interval_secs = 1500
+# SN39 recurring operation never treats zero as unlimited authority. A
+# separate root-signed authorization supplies the mandatory per-authorization
+# attempt ceiling (at most 96), rollback-resistant account-nonce range, and
+# expiry window.
 max_submissions = 0
 
 [runtime]
@@ -44,11 +48,16 @@ verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16
 source_revision = "fa39af97e738fdbed5c454f976b61246590b5794" # pragma: allowlist secret
 mechanism = "validated_supply_v1"
 burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
+controlled_dir = "/etc/cathedral/controlled/sn39-launch"
+verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
 
 [launch]
 # Continuous operation keeps the full audit concurrent and non-blocking.
 # The one-shot launch service uses validator-mainnet-sn39-launch.toml instead.
 require_full_provenance_for_broadcast = false
+# This proves the one-shot launch but does not grant recurring write authority.
+# The separately signed /etc/cathedral/sn39-recurring-write-authorization.json
+# is also required before every reservation.
 require_completed_launch_for_broadcast = true
 
 [logs]

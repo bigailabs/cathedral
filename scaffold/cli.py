@@ -44,6 +44,12 @@ _DEFAULTS = {
     "max_submissions": 0,
     "require_full_provenance_for_broadcast": False,
     "require_completed_launch_for_broadcast": True,
+    "launch_approval_file": str(validator_thin.SN39_LAUNCH_APPROVAL_FILE),
+    "launch_release_sha": os.environ.get(validator_thin.SN39_RELEASE_SHA_ENV, ""),
+    "launch_config_sha256": os.environ.get(
+        validator_thin.SN39_LAUNCH_CONFIG_DIGEST_ENV, ""
+    ),
+    "launch_preflight": False,
     "once": False,
     "offline": False,  # set by --offline (verify+print, no chain access)
     "broadcast": False,  # every chain write requires an explicit --broadcast
@@ -94,6 +100,7 @@ _CONFIG_MAP = {
         "launch",
         "require_completed_launch_for_broadcast",
     ): "require_completed_launch_for_broadcast",
+    ("launch", "approval_file"): "launch_approval_file",
     ("provenance", "mode"): "provenance",
     ("provenance", "evidence_url"): "evidence_url",
     ("provenance", "registry_keys"): "provenance_registry_keys",
@@ -187,6 +194,7 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         "max_submissions",
         "require_full_provenance_for_broadcast",
         "require_completed_launch_for_broadcast",
+        "launch_approval_file",
         "require_policy",
         "provenance",
         "evidence_url",
@@ -324,6 +332,35 @@ def _cmd_reconcile_launch(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_preflight_launch(ns: argparse.Namespace) -> int:
+    """Run the exact launch gate without a reservation, unlock, or write."""
+    cfg = _resolve_serve_config(ns)
+    cfg.launch_preflight = True
+    cfg.broadcast = False
+    cfg.offline = False
+    cfg.once = True
+    if getattr(ns, "chain_endpoint", None):
+        os.environ[validator_thin.CHAIN_ENDPOINT_ENV] = ns.chain_endpoint
+    approval_out = Path(getattr(ns, "approval_out", None) or cfg.launch_approval_file)
+    try:
+        result = validator_thin.run_launch_preflight(
+            cfg,
+            approval_out=approval_out,
+        )
+    except Exception as exc:  # noqa: BLE001 - sanitized operator boundary
+        print(
+            f"launch preflight failed closed: {validator_thin.stable_error(exc)}",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        "launch preflight PASS "
+        f"approval={result['approval_digest']} "
+        f"valid_until_block={result['approval_valid_until_block']}"
+    )
+    return 0
+
+
 def _cmd_version(ns: argparse.Namespace) -> int:
     from . import __version__
 
@@ -375,7 +412,9 @@ def main(argv: list[str] | None = None) -> int:
         dest="max_submissions",
         type=int,
         default=None,
-        help="durable attempt ceiling; 0 means unlimited, launch canary requires 1",
+        help="optional local durable-attempt ceiling; 0 disables this extra "
+        "ceiling, but SN39 recurring writes still require a separately signed "
+        "bounded authorization; launch canary requires 1",
     )
     sp.add_argument(
         "--require-full-provenance-for-broadcast",
@@ -489,6 +528,21 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=False,
         broadcast=False,
         once=False,
+        offline=False,
+    )
+
+    pp = sub.add_parser(
+        "preflight-launch",
+        help="run the exact SN39 FULL launch gate read-only and emit approval",
+    )
+    pp.add_argument("--config", required=True)
+    pp.add_argument("--chain-endpoint", dest="chain_endpoint", default=None)
+    pp.add_argument("--approval-out", dest="approval_out", default=None)
+    pp.set_defaults(
+        func=_cmd_preflight_launch,
+        dry_run=True,
+        broadcast=False,
+        once=True,
         offline=False,
     )
 

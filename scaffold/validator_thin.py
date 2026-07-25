@@ -83,9 +83,29 @@ SN39_BURN_HOTKEY = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 SN39_STATE_FILE = Path("/var/lib/cathedral-validator/thin-state.json")
 SN39_LAUNCH_CONTROLLED_DIR = Path("/etc/cathedral/controlled/sn39-launch")
 SN39_LAUNCH_VERIFIER_BINARY = Path("/opt/cathedral-sn39/bin/cathedral-tdx-verifier")
-SN39_LAUNCH_VALIDATOR_UID = 30
-SN39_LAUNCH_REWARDED_UID = 163
-SN39_LAUNCH_BURN_UID = 204
+SN39_LAUNCH_APPROVAL_FILE = Path("/etc/cathedral/controlled/sn39-launch-approval.json")
+SN39_LAUNCH_APPROVAL_SCHEMA = "cathedral_sn39_launch_approval_v1"
+SN39_LAUNCH_APPROVAL_LIFETIME_BLOCKS = 64
+SN39_LAUNCH_APPROVAL_MAX_BYTES = 256 * 1024
+SN39_LAUNCH_APPROVAL_OWNER_UID = 0
+SN39_RELEASE_SHA_ENV = "CATHEDRAL_SN39_RELEASE_SHA"
+SN39_LAUNCH_CONFIG_DIGEST_ENV = "CATHEDRAL_SN39_LAUNCH_CONFIG_SHA256"
+
+
+class _RetryablePreSignHeadDrift(wire.VectorError):
+    """The proven head changed before any signed intent or broadcast existed."""
+
+
+class _PendingReceiptNotProven(wire.VectorError):
+    """A signed attempt may have finalized, but archive proof is unavailable."""
+
+
+class _PostSignedSubmissionMismatch(wire.VectorError):
+    """A signed attempt has a positive receipt or execution contradiction."""
+
+
+EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
+SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 1
 
 
 def _ms_iso_now() -> str:
@@ -349,6 +369,176 @@ def _strict_state_document(payload: str) -> dict[str, Any]:
     return document
 
 
+def _canonical_json_bytes(document: dict[str, Any]) -> bytes:
+    return json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _sha256_document(document: dict[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(_canonical_json_bytes(document)).hexdigest()
+
+
+def _strict_launch_approval_bytes(payload: bytes) -> dict[str, Any]:
+    """Parse one byte-canonical launch approval with no ambiguous JSON."""
+
+    def no_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise wire.VectorError("launch approval has duplicate keys")
+            result[key] = value
+        return result
+
+    try:
+        text = payload.decode("utf-8")
+        document = json.loads(
+            text,
+            object_pairs_hook=no_duplicates,
+            parse_float=lambda raw: (
+                float(raw)
+                if math.isfinite(float(raw))
+                else (_ for _ in ()).throw(
+                    wire.VectorError("launch approval has non-finite numbers")
+                )
+            ),
+            parse_constant=lambda _raw: (_ for _ in ()).throw(
+                wire.VectorError("launch approval has non-finite numbers")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise wire.VectorError("launch approval is not strict UTF-8 JSON") from exc
+    if not isinstance(document, dict):
+        raise wire.VectorError("launch approval must be a JSON object")
+    if payload != _canonical_json_bytes(document) + b"\n":
+        raise wire.VectorError("launch approval is not byte-canonical JSON")
+    return document
+
+
+def _read_root_launch_approval(path: Path) -> dict[str, Any]:
+    """Read one immutable operator approval without following links."""
+    import stat as stat_module
+
+    if not path.is_absolute():
+        raise wire.VectorError("launch approval path must be absolute")
+    try:
+        parent = os.open(
+            path.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise wire.VectorError("launch approval directory is unavailable") from exc
+    try:
+        parent_info = os.fstat(parent)
+        if (
+            not stat_module.S_ISDIR(parent_info.st_mode)
+            or parent_info.st_uid != SN39_LAUNCH_APPROVAL_OWNER_UID
+            or stat_module.S_IMODE(parent_info.st_mode) & 0o022
+        ):
+            raise wire.VectorError("launch approval directory is not root-controlled")
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except OSError as exc:
+            raise wire.VectorError("required launch approval is unavailable") from exc
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat_module.S_ISREG(info.st_mode)
+                or info.st_uid != SN39_LAUNCH_APPROVAL_OWNER_UID
+                or stat_module.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise wire.VectorError(
+                    "launch approval is not an immutable root-controlled file"
+                )
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                payload = handle.read(SN39_LAUNCH_APPROVAL_MAX_BYTES + 1)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    finally:
+        os.close(parent)
+    if len(payload) > SN39_LAUNCH_APPROVAL_MAX_BYTES:
+        raise wire.VectorError("launch approval exceeds its bounded size")
+    return _strict_launch_approval_bytes(payload)
+
+
+def _write_root_launch_approval(path: Path, document: dict[str, Any]) -> None:
+    """Atomically emit the sole intended preflight mutation: the approval."""
+    import stat as stat_module
+
+    if not path.is_absolute():
+        raise wire.VectorError("launch approval output path must be absolute")
+    payload = _canonical_json_bytes(document) + b"\n"
+    if len(payload) > SN39_LAUNCH_APPROVAL_MAX_BYTES:
+        raise wire.VectorError("launch approval exceeds its bounded size")
+    try:
+        parent = os.open(
+            path.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise wire.VectorError(
+            "launch approval output directory is unavailable"
+        ) from exc
+    tmp_name = path.name + ".tmp"
+    try:
+        info = os.fstat(parent)
+        if (
+            not stat_module.S_ISDIR(info.st_mode)
+            or info.st_uid != SN39_LAUNCH_APPROVAL_OWNER_UID
+            or stat_module.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise wire.VectorError(
+                "launch approval output directory is not root-controlled"
+            )
+        try:
+            os.unlink(tmp_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(tmp_name, flags, 0o644, dir_fd=parent)
+        try:
+            os.fchmod(descriptor, 0o644)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        os.replace(tmp_name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        try:
+            os.unlink(tmp_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
+
+
 def _open_private_lock(path: Path) -> int:
     import stat as stat_module
 
@@ -457,6 +647,60 @@ def _read_state(state_file: Path) -> dict[str, Any]:
         os.close(parent)
 
 
+def _read_state_without_mutation(state_file: Path) -> dict[str, Any]:
+    """Read validator state for root preflight without chmod/mkdir side effects."""
+    import stat as stat_module
+
+    if not state_file.is_absolute():
+        raise wire.VectorError("validator state path must be absolute")
+    try:
+        parent = os.open(
+            state_file.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise wire.VectorError("validator state directory is unavailable") from exc
+    try:
+        parent_info = os.fstat(parent)
+        if (
+            not stat_module.S_ISDIR(parent_info.st_mode)
+            or stat_module.S_IMODE(parent_info.st_mode) & 0o022
+        ):
+            raise wire.VectorError("validator state directory is not owner-controlled")
+        try:
+            descriptor = os.open(
+                state_file.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            raise wire.VectorError("validator state is unavailable") from exc
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat_module.S_ISREG(info.st_mode)
+                or stat_module.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise wire.VectorError(
+                    "validator state is not an owner-controlled regular file mode 0600"
+                )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                return _strict_state_document(handle.read())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    finally:
+        os.close(parent)
+
+
 def _replace_private_state(state_file: Path, document: dict[str, Any]) -> None:
     """Atomically replace state relative to one verified directory descriptor."""
     parent = _open_private_state_dir(state_file.parent)
@@ -541,6 +785,61 @@ def _state_policy_fence(document: dict[str, Any]) -> int:
     return max(candidates)
 
 
+def _authority_lane_transition_authorized(
+    state: dict[str, Any],
+    identity: dict[str, Any],
+) -> bool:
+    """Allow only the reviewed one-way thin-to-FULL authority handoff.
+
+    The authority process has already reproduced the root-signed launch seal
+    and completed a current FULL audit before it can construct this identity.
+    This check binds that authorization back to the durable launch journal.
+    There is deliberately no automatic authority-to-thin transition.
+    """
+    authorization = identity.get("continuous_authorization")
+    if not isinstance(authorization, dict):
+        return False
+    launch_attempt_id = state.get("submission_launch_attempt_id")
+    launch_attempt_ids = state.get("submission_launch_attempt_ids")
+    return bool(
+        identity.get("network") == "finney"
+        and identity.get("netuid") == 39
+        and identity.get("validator_hotkey") == state.get("submission_validator_hotkey")
+        and state.get("submission_genesis_hash") == FINNEY_GENESIS_HASH
+        and state.get("provenance_netuid") == 39
+        and state.get("submission_launch_status") == "finalized"
+        and state.get("submission_continuous_enabled") is True
+        and isinstance(launch_attempt_id, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", launch_attempt_id) is not None
+        and isinstance(launch_attempt_ids, list)
+        and launch_attempt_id in launch_attempt_ids
+        and state.get("submission_continuous_launch_attempt_id") == launch_attempt_id
+        and authorization.get("launch_attempt_id") == launch_attempt_id
+        and authorization.get("release_sha256")
+        == state.get("submission_continuous_release_sha256")
+        and authorization.get("reproducer_revision")
+        == state.get("submission_continuous_reproducer_revision")
+        and authorization.get("validator_hotkey")
+        == state.get("submission_validator_hotkey")
+        and authorization.get("genesis_hash") == state.get("submission_genesis_hash")
+        and isinstance(authorization.get("authorization_sha256"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", authorization["authorization_sha256"])
+        is not None
+        and isinstance(authorization.get("lanes"), list)
+        and "authority" in authorization["lanes"]
+        and isinstance(authorization.get("max_attempts"), int)
+        and not isinstance(authorization["max_attempts"], bool)
+        and 0 < authorization["max_attempts"] <= 96
+        and isinstance(authorization.get("valid_from_nonce"), int)
+        and not isinstance(authorization["valid_from_nonce"], bool)
+        and authorization["valid_from_nonce"] >= 0
+        and isinstance(authorization.get("valid_until_nonce_exclusive"), int)
+        and not isinstance(authorization["valid_until_nonce_exclusive"], bool)
+        and authorization["valid_until_nonce_exclusive"]
+        == authorization["valid_from_nonce"] + authorization["max_attempts"]
+    )
+
+
 def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
     """Atomic CHECK-AND-RESERVE under the state lock (authority path).
 
@@ -559,6 +858,16 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         current = _read_state(state_file)
         updates = dict(updates)
+        receipt_submission_id = updates.pop("_record_receipt_for_submission_id", None)
+        if receipt_submission_id is not None:
+            if (
+                not isinstance(receipt_submission_id, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", receipt_submission_id) is None
+                or current.get("submission_pending_id") != receipt_submission_id
+            ):
+                raise ValueError(
+                    "receipt candidate does not match the common pending fence"
+                )
         finalize_submission_id = updates.pop("_finalize_submission_id", None)
         if finalize_submission_id is not None:
             if (
@@ -572,6 +881,17 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
             updates["submission_pending_id"] = None
         new_common_attempt = updates.get("submission_pending_id")
         if new_common_attempt is not None:
+            provisional = updates.pop("_provisional_submission", False)
+            allow_authority_transition = updates.pop(
+                "_allow_authority_lane_transition",
+                False,
+            )
+            if provisional is not True:
+                raise ValueError(
+                    "new common submissions must begin as unsigned reservations"
+                )
+            if not isinstance(allow_authority_transition, bool):
+                raise ValueError("submission lane transition marker is malformed")
             if (
                 not isinstance(new_common_attempt, str)
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", new_common_attempt) is None
@@ -596,11 +916,27 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
             lane = updates.get("submission_pending_lane")
             if lane not in ("thin", "authority"):
                 raise ValueError("common submission lane is malformed")
+            identity = updates.get("submission_pending_identity")
+            if not isinstance(identity, dict):
+                raise ValueError("common submission identity is malformed")
             active_lane = current.get("submission_active_lane")
+            lane_transition_from: str | None = None
             if active_lane is not None and active_lane != lane:
+                if (
+                    allow_authority_transition
+                    and active_lane == "thin"
+                    and lane == "authority"
+                    and _authority_lane_transition_authorized(current, identity)
+                ):
+                    lane_transition_from = "thin"
+                else:
+                    raise ValueError(
+                        "submission authority lane changed without explicit operator "
+                        f"reconciliation ({active_lane!r} -> {lane!r})"
+                    )
+            elif allow_authority_transition and lane != "authority":
                 raise ValueError(
-                    "submission authority lane changed without explicit operator "
-                    f"reconciliation ({active_lane!r} -> {lane!r})"
+                    "only FULL authority may request a submission lane transition"
                 )
             launch_attempt = updates.pop("_launch_attempt", False)
             if not isinstance(launch_attempt, bool):
@@ -636,15 +972,8 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
                     raise ValueError(
                         f"submission attempt budget {budget_limit} is exhausted"
                     )
-                updates["submission_attempt_budgets"] = {
-                    **budgets,
-                    budget_scope: {
-                        "limit": budget_limit,
-                        "ids": [*budget["ids"], new_common_attempt],
-                    },
-                }
+            configured_limit = updates.pop("_launch_budget_limit", None)
             if launch_attempt:
-                configured_limit = updates.pop("_launch_budget_limit", None)
                 if (
                     isinstance(configured_limit, bool)
                     or not isinstance(configured_limit, int)
@@ -660,14 +989,10 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
                     raise ValueError("launch submission attempt journal is corrupt")
                 if launch_history:
                     raise ValueError("launch submission attempt budget 1 is exhausted")
-                updates["submission_launch_attempt_ids"] = [
-                    *launch_history,
-                    new_common_attempt,
-                ]
-                updates["submission_launch_budget_limit"] = configured_limit
-                updates["submission_launch_status"] = "pending"
-            policy_version = updates.get("submission_highest_policy_version")
-            source_epoch = updates.get("submission_highest_source_epoch")
+            elif configured_limit is not None:
+                raise ValueError("non-launch reservation carries a launch budget")
+            policy_version = updates.pop("submission_highest_policy_version", None)
+            source_epoch = updates.pop("submission_highest_source_epoch", None)
             if lane == "thin":
                 if (
                     isinstance(policy_version, bool)
@@ -694,12 +1019,32 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
                         f"common authority epoch rollback {source_epoch} <= "
                         f"{prior_source}"
                     )
-            updates["submission_attempt_ids"] = [
-                *raw_common_history,
-                new_common_attempt,
-            ]
-            updates["submission_active_lane"] = lane
-            updates["submission_attempt_count"] = len(raw_common_history) + 1
+            # A pre-sign reservation linearizes the in-process decision under the
+            # shared submission lock, but it is not yet an irreversible attempt.
+            # Histories, rollback fences, and budgets are committed atomically
+            # with the exact signed hash immediately before broadcast.
+            for stale_key in (
+                "submission_pending_broadcast_intent",
+                "submission_pending_broadcast_started_at",
+                "submission_pending_receipt_candidate",
+                "submission_pending_receipt_recorded_at",
+                "submission_pending_proof_status",
+                "submission_pending_proof_checked_at",
+                "submission_pending_lane_transition_from",
+            ):
+                current.pop(stale_key, None)
+            updates.update(
+                {
+                    "submission_pending_phase": "unsigned_reserved",
+                    "submission_pending_launch_attempt": launch_attempt,
+                    "submission_pending_launch_budget_limit": configured_limit,
+                    "submission_pending_budget_scope": budget_scope,
+                    "submission_pending_budget_limit": budget_limit,
+                    "submission_pending_policy_version": policy_version,
+                    "submission_pending_source_epoch": source_epoch,
+                    "submission_pending_lane_transition_from": lane_transition_from,
+                }
+            )
         if finalize_submission_id is not None:
             finalized_count = current.get("submission_finalized_count", 0)
             if (
@@ -893,13 +1238,23 @@ def _provenance_settings(args) -> ProvenanceSettings:
     )
 
 
+def _runtime_modes(args: Any) -> tuple[str, str]:
+    """Return the truthful submission authority and provenance runtime mode."""
+    provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
+    if provenance_mode not in {"off", "shadow", "authority"}:
+        raise wire.VectorError(f"unsupported provenance mode {provenance_mode!r}")
+    submission_authority = (
+        "full_provenance" if provenance_mode == "authority" else "thin"
+    )
+    return submission_authority, provenance_mode
+
+
 def _get_events(args) -> EventLogger:
     """One logger per process; authority is stamped on every record."""
     existing = getattr(args, "_events", None)
     if existing is not None:
         return existing
-    mode = getattr(args, "provenance", "shadow") or "shadow"
-    authority = "full_provenance" if mode == "authority" else "thin"
+    authority, _provenance_mode = _runtime_modes(args)
     logger = EventLogger(
         mode=authority,
         jsonl_path=getattr(args, "jsonl", None) or None,
@@ -1326,6 +1681,8 @@ def _run_launch_rewarded_set_gate(
     hotkey_to_uid: dict[str, int],
     current_block: int,
     state_file: Path,
+    state: dict[str, Any] | None = None,
+    persist: bool = True,
 ) -> Any:
     """Synchronously replay every rewarded miner and prove vector agreement.
 
@@ -1340,7 +1697,7 @@ def _run_launch_rewarded_set_gate(
         network=args.network,
         netuid=args.netuid,
         vector_payload=payload,
-        state=_read_state(state_file),
+        state=dict(state) if state is not None else _read_state(state_file),
         current_block=current_block,
         historical_hotkeys_lookup=_historical_metagraph_lookup(
             args.network, args.netuid
@@ -1381,25 +1738,26 @@ def _run_launch_rewarded_set_gate(
         raise wire.VectorError(
             "launch rewarded-set recomputation does not match the thin UID vector"
         )
-    try:
-        _write_state_fenced(
-            state_file,
-            {
-                "provenance_network": args.network,
-                "provenance_netuid": args.netuid,
-                "provenance_last_source_epoch": audit.source_epoch,
-                "provenance_last_report_id": audit.report_id,
-                "provenance_index_epoch": audit.index_source_epoch,
-                "provenance_index_manifest": audit.index_manifest,
-                "provenance_policy_release": audit.policy_release,
-                "provenance_policy_digest": audit.policy_digest,
-            },
-        )
-    except (ValueError, OSError) as exc:
-        raise wire.VectorError(
-            "launch rewarded-set provenance reservation failed before submission: "
-            f"{stable_error(exc)}"
-        ) from exc
+    if persist:
+        try:
+            _write_state_fenced(
+                state_file,
+                {
+                    "provenance_network": args.network,
+                    "provenance_netuid": args.netuid,
+                    "provenance_last_source_epoch": audit.source_epoch,
+                    "provenance_last_report_id": audit.report_id,
+                    "provenance_index_epoch": audit.index_source_epoch,
+                    "provenance_index_manifest": audit.index_manifest,
+                    "provenance_policy_release": audit.policy_release,
+                    "provenance_policy_digest": audit.policy_digest,
+                },
+            )
+        except (ValueError, OSError) as exc:
+            raise wire.VectorError(
+                "launch rewarded-set provenance reservation failed before submission: "
+                f"{stable_error(exc)}"
+            ) from exc
     _log_audit_events(args, audit, state_file, persist=False)
     _get_events(args).event(
         "LAUNCH_REWARDED_SET_GATE_PASS",
@@ -1446,7 +1804,7 @@ def _revalidate_launch_after_rewarded_set_replay(
         wallet_name=args.wallet_name,
         wallet_hotkey=args.wallet_hotkey,
     )
-    _validate_resolved_chain_contract(args, fresh)
+    _validate_resolved_chain_contract(args, fresh, require_sn39_identity=True)
     _bind_submission_identity(args, fresh)
     if fresh.block is None:
         raise wire.VectorError("fresh launch preflight has no finalized block")
@@ -1514,8 +1872,7 @@ def _revalidate_launch_after_rewarded_set_replay(
     signed_rows = payload.get("weights")
     burn_snapshot = payload.get("burn_snapshot")
     if (
-        fresh.validator_uid != SN39_LAUNCH_VALIDATOR_UID
-        or fresh.hotkey_to_uid.get(fresh.validator_hotkey) != SN39_LAUNCH_VALIDATOR_UID
+        fresh.hotkey_to_uid.get(fresh.validator_hotkey) != fresh.validator_uid
         or not isinstance(signed_rows, list)
         or len(signed_rows) != 1
         or not isinstance(signed_rows[0], dict)
@@ -1526,38 +1883,449 @@ def _revalidate_launch_after_rewarded_set_replay(
         )
     rewarded_hotkey = signed_rows[0].get("miner_hotkey")
     burn_hotkey = burn_snapshot.get("burn_hotkey")
+    rewarded_uid = fresh.hotkey_to_uid.get(rewarded_hotkey)
+    burn_uid = fresh.hotkey_to_uid.get(burn_hotkey)
     if (
-        rewarded_hotkey not in fresh.hotkey_to_uid
+        not isinstance(rewarded_hotkey, str)
+        or not rewarded_hotkey
+        or not isinstance(rewarded_uid, int)
         or burn_hotkey != getattr(args, "provenance_burn_hotkey", None)
-        or burn_hotkey not in fresh.hotkey_to_uid
-        or fresh.hotkey_to_uid[rewarded_hotkey] != SN39_LAUNCH_REWARDED_UID
-        or fresh.hotkey_to_uid[burn_hotkey] != SN39_LAUNCH_BURN_UID
-        or set(uid_weights) != {SN39_LAUNCH_REWARDED_UID, SN39_LAUNCH_BURN_UID}
+        or burn_hotkey != fresh.subnet_owner_hotkey
+        or not isinstance(burn_uid, int)
+        or rewarded_uid == burn_uid
+        or fresh.validator_uid in {rewarded_uid, burn_uid}
+        or fresh.validator_hotkey in {rewarded_hotkey, burn_hotkey}
+        or set(uid_weights) != {rewarded_uid, burn_uid}
         or not math.isclose(
-            uid_weights[SN39_LAUNCH_REWARDED_UID],
+            uid_weights[rewarded_uid],
             0.90,
             rel_tol=0.0,
             abs_tol=1e-12,
         )
         or not math.isclose(
-            uid_weights[SN39_LAUNCH_BURN_UID],
+            uid_weights[burn_uid],
             0.10,
             rel_tol=0.0,
             abs_tol=1e-12,
         )
     ):
         raise wire.VectorError(
-            "fresh launch allocation is not the immutable UID 163/204 90/10 "
-            "release boundary"
+            "fresh launch allocation is not the dynamically resolved rewarded-hotkey "
+            "and subnet-owner burn-hotkey 90/10 release boundary"
         )
     args._launch_inclusion_policy = InclusionPolicy(
         valid_from_block=valid_from,
         valid_until_block=valid_until,
         valid_from_time=inclusion_start,
         valid_until_time=inclusion_expiry,
+        expected_next_epoch_start_block=fresh.next_epoch_start_block,
     )
     _require_inclusion_policy_ready(args._launch_inclusion_policy, fresh)
+    uid_safety = _require_uid_mapping_stability(
+        fresh,
+        {
+            rewarded_uid: rewarded_hotkey,
+            burn_uid: burn_hotkey,
+        },
+        mortal_period_blocks=args._launch_inclusion_policy.mortal_period_blocks,
+    )
+    _require_launch_evidence_after_rotations(
+        payload=payload,
+        audit=audit,
+        uid_safety=uid_safety,
+    )
     return fresh, fresh.hotkey_to_uid, uid_weights
+
+
+def _launch_release_config_identity(args: Any) -> dict[str, Any]:
+    """Exact immutable release and resolved launch profile under review."""
+    release_sha = str(getattr(args, "launch_release_sha", "") or "")
+    config_digest = str(getattr(args, "launch_config_sha256", "") or "")
+    approval_file = Path(str(getattr(args, "launch_approval_file", "") or ""))
+    if re.fullmatch(r"[0-9a-f]{40}", release_sha) is None:
+        raise wire.VectorError(
+            "launch preflight requires the immutable installed release SHA"
+        )
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", config_digest) is None:
+        raise wire.VectorError(
+            "launch preflight requires the immutable launch-config digest"
+        )
+    if approval_file != SN39_LAUNCH_APPROVAL_FILE:
+        raise wire.VectorError(
+            "launch approval path differs from the immutable SN39 profile"
+        )
+    try:
+        source_digest = (
+            "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        )
+    except OSError as exc:
+        raise wire.VectorError("validator release source is unreadable") from exc
+    return {
+        "schema": "cathedral_sn39_launch_release_config_v1",
+        "release_sha": release_sha,
+        "launch_config_sha256": config_digest,
+        "validator_source_sha256": source_digest,
+        "network": str(args.network).strip().lower(),
+        "netuid": int(args.netuid),
+        "publisher_url": args.publisher_url,
+        "weight_policy_public_key": args.public_key_hex,
+        "weight_policy_key_id": args.key_id,
+        "required_policy": args.require_policy,
+        "state_file": str(Path(args.state_file)),
+        "runtime_root": str(_submission_runtime_root(args)),
+        "wallet_name": args.wallet_name,
+        "wallet_hotkey_alias": args.wallet_hotkey,
+        "evidence_url": args.evidence_url,
+        "registry_keys": args.provenance_registry_keys,
+        "registry_keys_digest": args.provenance_registry_keys_digest,
+        "report_keys": args.provenance_report_keys,
+        "report_keys_digest": args.provenance_report_keys_digest,
+        "index_keys": args.provenance_index_keys,
+        "index_keys_digest": args.provenance_index_keys_digest,
+        "verifier_digest": args.provenance_verifier_digest,
+        "producer_revision": args.provenance_source_revision,
+        "mechanism": args.provenance_mechanism,
+        "burn_hotkey": args.provenance_burn_hotkey,
+        "controlled_dir": str(Path(args.provenance_controlled_dir)),
+        "verifier_binary": str(Path(args.provenance_verifier_binary)),
+        "approval_file": str(approval_file),
+        "max_submissions": int(args.max_submissions),
+        "weight_version_key": _weight_version_key(),
+    }
+
+
+def _launch_approval_bindings(
+    args: Any,
+    *,
+    payload: dict[str, Any],
+    audit: Any,
+    preflight: ChainPreflight,
+    uid_weights: dict[int, float],
+    hotkey_to_uid: dict[str, int],
+) -> dict[str, Any]:
+    """Build every non-head fact an operator approves for one launch."""
+    signed_vector_sha256 = (
+        "sha256:" + hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+    )
+    signed_rows = payload.get("weights")
+    burn_snapshot = payload.get("burn_snapshot")
+    rewarded = sorted(set(getattr(audit, "recomputed", {}) or {}))
+    replayed = sorted(set(getattr(audit, "raw_replayed_hotkeys", ()) or ()))
+    receipt_hotkeys = sorted(set(getattr(audit, "receipt_hotkeys", ()) or ()))
+    if (
+        not isinstance(signed_rows, list)
+        or not isinstance(burn_snapshot, dict)
+        or not rewarded
+        or rewarded != replayed
+        or rewarded != receipt_hotkeys
+    ):
+        raise wire.VectorError(
+            "launch approval requires one exact FULL rewarded-set replay"
+        )
+    burn_hotkey = burn_snapshot.get("burn_hotkey")
+    burn_uid = hotkey_to_uid.get(burn_hotkey)
+    rewarded_uid_hotkeys = sorted(
+        (hotkey_to_uid[hotkey], hotkey)
+        for hotkey in rewarded
+        if hotkey in hotkey_to_uid
+    )
+    ordered = sorted((int(uid), float(weight)) for uid, weight in uid_weights.items())
+    uid_hotkeys = sorted(
+        (int(uid), str(hotkey))
+        for hotkey, uid in hotkey_to_uid.items()
+        if uid in uid_weights
+    )
+    if (
+        not isinstance(burn_hotkey, str)
+        or not burn_hotkey
+        or not isinstance(burn_uid, int)
+        or len(rewarded_uid_hotkeys) != len(rewarded)
+        or preflight.hotkey_to_uid != hotkey_to_uid
+    ):
+        raise wire.VectorError(
+            "launch approval cannot bind the rewarded and burn hotkeys"
+        )
+    wire_uids, wire_weights = _wire_weights(
+        [uid for uid, _weight in ordered],
+        [weight for _uid, weight in ordered],
+    )
+    release_config = _launch_release_config_identity(args)
+    return {
+        "release_config": release_config,
+        "release_config_digest": _sha256_document(release_config),
+        "chain_genesis_hash": str(preflight.genesis_hash).lower(),
+        "signer_validator_hotkey": preflight.validator_hotkey,
+        "signer_validator_uid": preflight.validator_uid,
+        "vector_id": payload.get("vector_id"),
+        "policy_version": payload.get("policy_version"),
+        "policy_contract": args.require_policy,
+        "signed_vector_sha256": signed_vector_sha256,
+        "rewarded_hotkeys": rewarded,
+        "rewarded_uid_hotkeys": [[uid, hotkey] for uid, hotkey in rewarded_uid_hotkeys],
+        "burn_hotkey": burn_hotkey,
+        "burn_uid": burn_uid,
+        "uid_weights": [[uid, weight] for uid, weight in ordered],
+        "uid_hotkeys": [[uid, hotkey] for uid, hotkey in uid_hotkeys],
+        "wire_uids": wire_uids,
+        "wire_weights": wire_weights,
+        "provenance": {
+            "source_epoch": getattr(audit, "source_epoch", None),
+            "report_id": getattr(audit, "report_id", None),
+            "manifest": getattr(audit, "manifest_digest", None),
+            "policy_release": getattr(audit, "policy_release", None),
+            "policy_digest": getattr(audit, "policy_digest", None),
+            "mechanism": getattr(audit, "mechanism", None),
+            "whole_epoch_assurance": getattr(audit, "assurance", None),
+            "verifier_binary_digest": getattr(audit, "verifier_binary_digest", None),
+            "report_signing_key_id": getattr(audit, "report_signing_key_id", None),
+            "signed_index": getattr(audit, "signed_index", None),
+            "raw_replayed_hotkeys": replayed,
+        },
+    }
+
+
+def _build_launch_approval(
+    args: Any,
+    *,
+    payload: dict[str, Any],
+    audit: Any,
+    preflight: ChainPreflight,
+    uid_weights: dict[int, float],
+    hotkey_to_uid: dict[str, int],
+) -> dict[str, Any]:
+    if (
+        preflight.block is None
+        or preflight.block <= 0
+        or _CHAIN_HASH_RE.fullmatch(str(preflight.finalized_hash).lower()) is None
+    ):
+        raise wire.VectorError(
+            "launch approval requires a canonical finalized block and hash"
+        )
+    body = {
+        "schema": SN39_LAUNCH_APPROVAL_SCHEMA,
+        "bindings": _launch_approval_bindings(
+            args,
+            payload=payload,
+            audit=audit,
+            preflight=preflight,
+            uid_weights=uid_weights,
+            hotkey_to_uid=hotkey_to_uid,
+        ),
+        "reviewed_finalized_block": preflight.block,
+        "reviewed_finalized_hash": str(preflight.finalized_hash).lower(),
+        "approval_valid_until_block": (
+            preflight.block + SN39_LAUNCH_APPROVAL_LIFETIME_BLOCKS
+        ),
+    }
+    return {**body, "approval_digest": _sha256_document(body)}
+
+
+def _validate_launch_approval_envelope(
+    args: Any,
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    if set(document) != {
+        "schema",
+        "bindings",
+        "reviewed_finalized_block",
+        "reviewed_finalized_hash",
+        "approval_valid_until_block",
+        "approval_digest",
+    }:
+        raise wire.VectorError("launch approval fields differ from its schema")
+    body = {key: value for key, value in document.items() if key != "approval_digest"}
+    reviewed_block = body["reviewed_finalized_block"]
+    valid_until = body["approval_valid_until_block"]
+    reviewed_hash = body["reviewed_finalized_hash"]
+    if (
+        body["schema"] != SN39_LAUNCH_APPROVAL_SCHEMA
+        or not isinstance(body["bindings"], dict)
+        or isinstance(reviewed_block, bool)
+        or not isinstance(reviewed_block, int)
+        or reviewed_block <= 0
+        or isinstance(valid_until, bool)
+        or not isinstance(valid_until, int)
+        or valid_until != reviewed_block + SN39_LAUNCH_APPROVAL_LIFETIME_BLOCKS
+        or not isinstance(reviewed_hash, str)
+        or _CHAIN_HASH_RE.fullmatch(reviewed_hash) is None
+        or document["approval_digest"] != _sha256_document(body)
+    ):
+        raise wire.VectorError("launch approval digest or validity is malformed")
+    bindings = body["bindings"]
+    release_config = bindings.get("release_config")
+    if (
+        not isinstance(release_config, dict)
+        or bindings.get("release_config_digest") != _sha256_document(release_config)
+        or release_config != _launch_release_config_identity(args)
+    ):
+        raise wire.VectorError(
+            "launch approval differs from the running release or config"
+        )
+    return document
+
+
+def _load_launch_approval(args: Any) -> dict[str, Any]:
+    path = Path(str(getattr(args, "launch_approval_file", "") or ""))
+    return _validate_launch_approval_envelope(
+        args,
+        _read_root_launch_approval(path),
+    )
+
+
+def _require_launch_approval(
+    args: Any,
+    *,
+    payload: dict[str, Any],
+    audit: Any,
+    preflight: ChainPreflight,
+    uid_weights: dict[int, float],
+    hotkey_to_uid: dict[str, int],
+) -> dict[str, Any]:
+    """Consume the exact operator-reviewed artifact before any reservation."""
+    document = _load_launch_approval(args)
+    reviewed_block = document["reviewed_finalized_block"]
+    reviewed_hash = document["reviewed_finalized_hash"]
+    valid_until = document["approval_valid_until_block"]
+    if (
+        preflight.block is None
+        or preflight.block < reviewed_block
+        or preflight.block + SN39_MORTAL_PERIOD_BLOCKS > valid_until
+        or _CHAIN_HASH_RE.fullmatch(str(preflight.finalized_hash).lower()) is None
+    ):
+        raise wire.VectorError(
+            "launch approval is stale or outside its finalized-head bound"
+        )
+    substrate = getattr(preflight.subtensor, "substrate", None)
+    try:
+        canonical_reviewed_hash = str(substrate.get_block_hash(reviewed_block)).lower()
+        canonical_current_hash = str(substrate.get_block_hash(preflight.block)).lower()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "launch approval finalized-head binding is unavailable"
+        ) from exc
+    if (
+        canonical_reviewed_hash != reviewed_hash
+        or canonical_current_hash != str(preflight.finalized_hash).lower()
+    ):
+        raise wire.VectorError(
+            "launch approval finalized block/hash is no longer canonical"
+        )
+    expected_bindings = _launch_approval_bindings(
+        args,
+        payload=payload,
+        audit=audit,
+        preflight=preflight,
+        uid_weights=uid_weights,
+        hotkey_to_uid=hotkey_to_uid,
+    )
+    if document["bindings"] != expected_bindings:
+        raise wire.VectorError(
+            "launch approval differs from the fresh vector, signer, mapping, or "
+            "FULL provenance"
+        )
+    args._launch_approval = document
+    return document
+
+
+def _require_launch_journal_available(state: dict[str, Any]) -> None:
+    launch_history = state.get("submission_launch_attempt_ids", [])
+    if (
+        state.get("submission_pending_id") is not None
+        or state.get("submission_pending_phase") is not None
+        or state.get("submission_launch_status") in {"pending", "finalized"}
+        or not isinstance(launch_history, list)
+        or bool(launch_history)
+    ):
+        raise wire.VectorError(
+            "launch preflight requires a clear one-shot submission journal"
+        )
+
+
+def run_launch_preflight(args: Any, *, approval_out: Path) -> dict[str, Any]:
+    """Run the exact launch gate read-only and emit a bounded operator approval."""
+    if approval_out != SN39_LAUNCH_APPROVAL_FILE:
+        raise wire.VectorError(
+            "launch preflight output differs from the immutable approval path"
+        )
+    args.launch_preflight = True
+    args.broadcast = False
+    args.offline = False
+    args.once = True
+    _validate_runtime_contract(args)
+    state = _read_state_without_mutation(Path(args.state_file))
+    _require_launch_journal_available(state)
+    fence = _state_policy_fence(state)
+    payload = fetch_vector(args.publisher_url)
+    accept_vector(
+        payload,
+        public_key_hex=args.public_key_hex,
+        key_id=args.key_id,
+        network=args.network,
+        netuid=args.netuid,
+        fence_version=fence,
+    )
+    preflight = chain_preflight(
+        network=args.network,
+        netuid=args.netuid,
+        wallet_name=args.wallet_name,
+        wallet_hotkey=args.wallet_hotkey,
+    )
+    _validate_resolved_chain_contract(args, preflight, require_sn39_identity=True)
+    _bind_submission_identity(args, preflight)
+    uid_weights = vector_to_uid_weights(
+        payload,
+        preflight.hotkey_to_uid,
+        require_policy=args.require_policy,
+    )
+    _validate_chain_constraints(uid_weights, preflight)
+    burn_hotkey = (payload.get("burn_snapshot") or {}).get("burn_hotkey")
+    burn_uid = preflight.hotkey_to_uid.get(burn_hotkey)
+    _require_no_validator_compute_reward(
+        uid_weights,
+        preflight=preflight,
+        burn_uid=burn_uid,
+    )
+    audit = _run_launch_rewarded_set_gate(
+        args,
+        payload=payload,
+        uid_weights=uid_weights,
+        hotkey_to_uid=preflight.hotkey_to_uid,
+        current_block=int(preflight.block),
+        state_file=Path(args.state_file),
+        state=state,
+        persist=False,
+    )
+    fresh, hotkey_to_uid, uid_weights = _revalidate_launch_after_rewarded_set_replay(
+        args,
+        payload=payload,
+        audit=audit,
+        fence_version=fence,
+    )
+    approval = _build_launch_approval(
+        args,
+        payload=payload,
+        audit=audit,
+        preflight=fresh,
+        uid_weights=uid_weights,
+        hotkey_to_uid=hotkey_to_uid,
+    )
+    _write_root_launch_approval(approval_out, approval)
+    _get_events(args).event(
+        "LAUNCH_PREFLIGHT_APPROVED",
+        stage="launch",
+        status=PASS,
+        artifact=approval["approval_digest"],
+        detail=(
+            f"read_only=true reviewed_finalized_block="
+            f"{approval['reviewed_finalized_block']} "
+            f"valid_until_block={approval['approval_valid_until_block']}"
+        ),
+        approval_digest=approval["approval_digest"],
+        reviewed_finalized_block=approval["reviewed_finalized_block"],
+        reviewed_finalized_hash=approval["reviewed_finalized_hash"],
+        approval_valid_until_block=approval["approval_valid_until_block"],
+    )
+    return approval
 
 
 # -- burn + uid mapping ---------------------------------------------------------
@@ -2044,6 +2812,25 @@ class ChainPreflight:
     max_weight_limit: float
     commit_reveal_enabled: bool = False
     genesis_hash: str = ""
+    subnet_owner_hotkey: str = ""
+    blocks_until_next_epoch: int | None = None
+    next_epoch_start_block: int | None = None
+    weights_rate_limit: int | None = None
+    validator_blocks_since_last_update: int | None = None
+    uid_mapping_stable_until_block: int | None = None
+    replacement_safe_hotkeys: frozenset[str] = frozenset()
+    subnet_free_uid_slots: int | None = None
+    subnet_max_regs_per_block: int | None = None
+    subnet_min_nonimmune_uids: int | None = None
+    subnet_immunity_period: int | None = None
+    subnet_temporally_immune_uids: int | None = None
+    subnet_owner_coldkey: str = ""
+    subnet_immune_owner_uids_limit: int | None = None
+    subnet_owner_immortal_hotkeys: frozenset[str] = frozenset()
+    subnet_max_uids: int | None = None
+    subnet_registration_blocks: tuple[tuple[int, str, int], ...] = ()
+    subnet_owned_hotkeys: tuple[str, ...] = ()
+    finalized_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -2058,12 +2845,65 @@ class ChainSubmission:
         return self.success
 
 
+@dataclass(frozen=True)
+class RecoveredSubmission:
+    """Exact finalized thin transaction recovered without another write."""
+
+    attempt_id: str
+    policy_version: int
+    vector_id: str
+    signed_vector_sha256: str
+    uid_weights: tuple[tuple[int, float], ...]
+    burn_uid: int
+    burn_share: float
+    extrinsic_hash: str
+    block_hash: str
+    block_number: int
+
+    @property
+    def boundary_detail(self) -> str:
+        vector = ",".join(f"{uid}:{weight:.6f}" for uid, weight in self.uid_weights)
+        return (
+            f"authority=thin uids={len(self.uid_weights)} "
+            f"burn_uid={self.burn_uid} burn_share={self.burn_share:.6f} "
+            f"vector={vector}"
+        )
+
+
+@dataclass(frozen=True)
+class RecoveredAuthoritySubmission:
+    """Exact finalized FULL-authority transaction recovered without a write."""
+
+    attempt_id: str
+    source_epoch: int
+    report_id: str
+    uid_weights: tuple[tuple[int, float], ...]
+    burn_uid: int
+    burn_share: float
+    extrinsic_hash: str
+    block_hash: str
+    block_number: int
+
+    @property
+    def boundary_detail(self) -> str:
+        vector = ",".join(f"{uid}:{weight:.6f}" for uid, weight in self.uid_weights)
+        return (
+            f"authority=full_provenance uids={len(self.uid_weights)} "
+            f"burn_uid={self.burn_uid} "
+            f"burn_share={self.burn_share:.6f} vector={vector}"
+        )
+
+
 CHAIN_OPERATION_DEADLINE_SECS = 180.0
 # A write is refused unless its evidence remains valid beyond the entire
 # synchronous SDK deadline plus an explicit clock/RPC margin. The mortal era
 # is intentionally short and is also bounded by the evidence block window.
 SN39_MIN_VALIDITY_MARGIN_SECS = 60.0
-SN39_MORTAL_PERIOD_BLOCKS = 16
+SN39_MORTAL_PERIOD_BLOCKS = 4
+# A launch write must finalize comfortably before the next epoch. UID targets
+# are separately proven replacement-safe for the complete mortal era; there is
+# deliberately no automatic second/corrective weight write.
+SN39_EPOCH_FINALITY_MARGIN_BLOCKS = 32
 
 
 @dataclass(frozen=True)
@@ -2076,17 +2916,29 @@ class InclusionPolicy:
     valid_until_time: datetime
     require_commit_reveal_disabled: bool = True
     mortal_period_blocks: int = SN39_MORTAL_PERIOD_BLOCKS
+    expected_next_epoch_start_block: int | None = None
 
 
 @dataclass(frozen=True)
 class ContinuousAuthorization:
-    """Root-signed launch authorization proven before a durable reservation."""
+    """Separate root-signed recurring-write authorization."""
 
+    authorization_sha256: str
+    submission_journal: str
     launch_attempt_id: str
     release_sha256: str
     reproducer_revision: str
     validator_hotkey: str
     genesis_hash: str
+    lanes: tuple[str, ...]
+    issued_at: str
+    valid_from_time: str
+    valid_until_time: str
+    valid_from_block: int
+    valid_until_block: int
+    valid_from_nonce: int
+    valid_until_nonce_exclusive: int
+    max_attempts: int
 
 
 def _canonical_policy_time(value: datetime) -> str:
@@ -2106,18 +2958,30 @@ def _inclusion_policy_identity(policy: InclusionPolicy) -> dict[str, Any]:
         "valid_until_time": _canonical_policy_time(policy.valid_until_time),
         "require_commit_reveal_disabled": policy.require_commit_reveal_disabled,
         "mortal_period_blocks": policy.mortal_period_blocks,
+        "expected_next_epoch_start_block": policy.expected_next_epoch_start_block,
     }
 
 
 def _continuous_authorization_identity(
     authorization: ContinuousAuthorization,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     return {
+        "authorization_sha256": authorization.authorization_sha256,
+        "submission_journal": authorization.submission_journal,
         "launch_attempt_id": authorization.launch_attempt_id,
         "release_sha256": authorization.release_sha256,
         "reproducer_revision": authorization.reproducer_revision,
         "validator_hotkey": authorization.validator_hotkey,
         "genesis_hash": authorization.genesis_hash,
+        "lanes": list(authorization.lanes),
+        "issued_at": authorization.issued_at,
+        "valid_from_time": authorization.valid_from_time,
+        "valid_until_time": authorization.valid_until_time,
+        "valid_from_block": authorization.valid_from_block,
+        "valid_until_block": authorization.valid_until_block,
+        "valid_from_nonce": authorization.valid_from_nonce,
+        "valid_until_nonce_exclusive": authorization.valid_until_nonce_exclusive,
+        "max_attempts": authorization.max_attempts,
     }
 
 
@@ -2165,6 +3029,498 @@ def _require_inclusion_policy_ready(
         raise wire.VectorError(
             "inclusion policy requires commit-reveal disabled before submission"
         )
+    rate_limit = preflight.weights_rate_limit
+    blocks_since_update = preflight.validator_blocks_since_last_update
+    if (
+        isinstance(rate_limit, bool)
+        or not isinstance(rate_limit, int)
+        or rate_limit < 0
+        or isinstance(blocks_since_update, bool)
+        or not isinstance(blocks_since_update, int)
+        or blocks_since_update < 0
+    ):
+        raise wire.VectorError(
+            "submission cannot prove the live validator weight-update cooldown"
+        )
+    # The runtime currently permits equality while the locked SDK helper uses
+    # strict greater-than. This direct extrinsic path conservatively observes
+    # the stricter boundary so an SDK/runtime change cannot make launch timing
+    # optimistic.
+    if blocks_since_update <= rate_limit:
+        raise wire.VectorError(
+            "submission is inside the live validator weight-update cooldown"
+        )
+    remaining = preflight.blocks_until_next_epoch
+    next_epoch = preflight.next_epoch_start_block
+    required_epoch_room = (
+        policy.mortal_period_blocks + SN39_EPOCH_FINALITY_MARGIN_BLOCKS
+    )
+    if (
+        isinstance(remaining, bool)
+        or not isinstance(remaining, int)
+        or isinstance(next_epoch, bool)
+        or not isinstance(next_epoch, int)
+        or next_epoch != preflight.block + remaining
+        or policy.expected_next_epoch_start_block != next_epoch
+        or remaining < required_epoch_room
+    ):
+        raise wire.VectorError(
+            "submission cannot prove the exact next epoch with enough room for "
+            "mortal inclusion and finalized verification"
+        )
+
+
+def _prove_target_hotkey_rotation(
+    substrate: Any,
+    *,
+    block_number: int,
+    coldkey: str,
+    target_hotkey: str,
+) -> dict[str, Any]:
+    """Prove the exact successful ``swap_hotkey_v2`` that created a target.
+
+    ``LastHotkeySwapOnNetuid`` is keyed by coldkey and therefore cannot, by
+    itself, prove which hotkey was rotated. This archive proof binds the
+    cooldown block to the decoded call, signer, successful execution, and the
+    pallet event for the exact current target hotkey.
+    """
+    if (
+        isinstance(block_number, bool)
+        or not isinstance(block_number, int)
+        or block_number <= 0
+        or not coldkey
+        or not target_hotkey
+    ):
+        raise wire.VectorError("target hotkey rotation identity is malformed")
+    try:
+        block_hash = str(substrate.get_block_hash(block_number)).lower()
+        canonical_number = int(substrate.get_block_number(block_hash))
+        block = substrate.get_block(block_hash=block_hash)
+    except Exception as exc:  # noqa: BLE001 - archive proof must fail closed
+        raise wire.VectorError(
+            "submission cannot retrieve the target hotkey rotation block"
+        ) from exc
+    if (
+        _CHAIN_HASH_RE.fullmatch(block_hash) is None
+        or canonical_number != block_number
+        or not isinstance(block, dict)
+        or not isinstance(block.get("extrinsics"), (list, tuple))
+    ):
+        raise wire.VectorError("target hotkey rotation block is non-canonical")
+
+    matching: list[tuple[int, dict[str, Any]]] = []
+    for index, item in enumerate(block["extrinsics"]):
+        observed = getattr(item, "value", None)
+        if not isinstance(observed, dict):
+            continue
+        call = observed.get("call")
+        if not isinstance(call, dict):
+            continue
+        if (
+            observed.get("address") == coldkey
+            and call.get("call_module") == "SubtensorModule"
+            and call.get("call_function") == "swap_hotkey_v2"
+            and _chain_call_arg(call, "new_hotkey") == target_hotkey
+            and _chain_call_arg(call, "netuid") == 39
+        ):
+            matching.append((index, observed))
+    if len(matching) != 1:
+        raise wire.VectorError(
+            "target hotkey rotation block has no unique exact swap_hotkey_v2 call"
+        )
+    extrinsic_index, observed = matching[0]
+    call = observed["call"]
+    extrinsic_hash = str(observed.get("extrinsic_hash", "")).lower()
+    old_hotkey = _chain_call_arg(call, "hotkey")
+    keep_stake = _chain_call_arg(call, "keep_stake")
+    if (
+        _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None
+        or not isinstance(old_hotkey, str)
+        or not old_hotkey
+        or old_hotkey == target_hotkey
+        or not isinstance(keep_stake, bool)
+    ):
+        raise wire.VectorError("target hotkey rotation call is malformed")
+    try:
+        receipt = substrate.retrieve_extrinsic_by_hash(block_hash, extrinsic_hash)
+        receipt_index = getattr(receipt, "extrinsic_idx", None)
+        receipt_success = getattr(receipt, "is_success", None)
+        receipt_error = getattr(receipt, "error_message", None)
+        triggered_events = getattr(receipt, "triggered_events", None)
+        timestamp_value = substrate.query(
+            module="Timestamp",
+            storage_function="Now",
+            block_hash=block_hash,
+        )
+        timestamp_ms = getattr(timestamp_value, "value", timestamp_value)
+    except Exception as exc:  # noqa: BLE001 - archive proof must fail closed
+        raise wire.VectorError(
+            "submission cannot prove target hotkey rotation execution"
+        ) from exc
+    try:
+        receipt_index_value = int(receipt_index)
+    except (TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "target hotkey rotation has no exact successful execution receipt"
+        ) from exc
+    if (
+        isinstance(receipt_index, bool)
+        or receipt_index_value != extrinsic_index
+        or receipt_success is not True
+        or receipt_error is not None
+        or not isinstance(triggered_events, (list, tuple))
+        or isinstance(timestamp_ms, bool)
+        or not isinstance(timestamp_ms, int)
+        or timestamp_ms <= 0
+    ):
+        raise wire.VectorError(
+            "target hotkey rotation has no exact successful execution receipt"
+        )
+    matching_events = []
+    for event in triggered_events:
+        event_data = event.get("event") if isinstance(event, dict) else None
+        if (
+            isinstance(event_data, dict)
+            and event_data.get("module_id") == "SubtensorModule"
+            and event_data.get("event_id") == "HotkeySwappedOnSubnet"
+            and isinstance(event_data.get("attributes"), dict)
+            and event_data["attributes"].get("coldkey") == coldkey
+            and event_data["attributes"].get("old_hotkey") == old_hotkey
+            and event_data["attributes"].get("new_hotkey") == target_hotkey
+            and event_data["attributes"].get("netuid") == 39
+        ):
+            matching_events.append(event_data)
+    if len(matching_events) != 1:
+        raise wire.VectorError(
+            "target hotkey rotation has no unique matching pallet event"
+        )
+    block_time = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+    return {
+        "call": "swap_hotkey_v2",
+        "extrinsic_hash": extrinsic_hash,
+        "block_hash": block_hash,
+        "block_number": block_number,
+        "block_timestamp": block_time.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        ),
+        "extrinsic_index": extrinsic_index,
+        "coldkey": coldkey,
+        "old_hotkey": old_hotkey,
+        "new_hotkey": target_hotkey,
+        "netuid": 39,
+        "keep_stake": keep_stake,
+        "event": "HotkeySwappedOnSubnet",
+    }
+
+
+def _require_uid_mapping_stability(
+    preflight: ChainPreflight,
+    uid_hotkeys: dict[int, str],
+    *,
+    mortal_period_blocks: int,
+) -> dict[str, Any]:
+    if (
+        isinstance(mortal_period_blocks, bool)
+        or not isinstance(mortal_period_blocks, int)
+        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or not uid_hotkeys
+    ):
+        raise wire.VectorError("UID stability check has an invalid mortal vector")
+    safe_hotkeys = preflight.replacement_safe_hotkeys
+    if not isinstance(safe_hotkeys, frozenset) or not safe_hotkeys:
+        raise wire.VectorError(
+            "submission cannot prove any UID mapping replacement-safe"
+        )
+    unsafe = sorted(set(uid_hotkeys.values()) - safe_hotkeys)
+    if unsafe:
+        raise wire.VectorError(
+            "submission cannot prove UID mappings stable for the complete mortal "
+            f"era ({len(unsafe)} target hotkey(s) are not chain-immune)"
+        )
+    # `set_mechanism_weights` binds only UIDs. A registered hotkey can be
+    # replaced at the same UID by `swap_hotkey_v2` during the four-block mortal
+    # era, so registration immunity alone is insufficient. On Finney, prove
+    # that every target hotkey was freshly rotated and remains cooldown-locked
+    # through the complete era, and that no pending coldkey ownership transfer
+    # can bypass that lock.
+    finney = str(preflight.genesis_hash).lower() == FINNEY_GENESIS_HASH
+    if not finney:
+        registration_safety: dict[str, Any] = {
+            "status": "not_applicable_non_finney",
+            "replacement_safe_hotkeys": sorted(preflight.replacement_safe_hotkeys),
+        }
+        rotation_safety = {
+            "status": "not_applicable_non_finney",
+            "mapping_block": preflight.block,
+            "mortal_period_blocks": mortal_period_blocks,
+            "targets": [],
+        }
+    else:
+        if (
+            preflight.block is None
+            or preflight.subnet_max_uids is None
+            or preflight.subnet_max_regs_per_block is None
+            or preflight.subnet_immunity_period is None
+            or preflight.subnet_min_nonimmune_uids is None
+            or preflight.subnet_free_uid_slots is None
+            or preflight.subnet_immune_owner_uids_limit is None
+            or not preflight.subnet_owner_coldkey
+            or not preflight.subnet_registration_blocks
+        ):
+            raise wire.VectorError(
+                "submission cannot publish the raw UID replacement-safety inputs"
+            )
+        registration_rows = [
+            {
+                "uid": uid,
+                "hotkey": hotkey,
+                "block_at_registration": registered_at,
+            }
+            for uid, hotkey, registered_at in preflight.subnet_registration_blocks
+        ]
+        registration_safety = {
+            "max_uids": preflight.subnet_max_uids,
+            "max_regs_per_block": preflight.subnet_max_regs_per_block,
+            "immunity_period": preflight.subnet_immunity_period,
+            "min_nonimmune_uids": preflight.subnet_min_nonimmune_uids,
+            "block_at_registration": registration_rows,
+            "subnet_owner_coldkey": preflight.subnet_owner_coldkey,
+            "owned_hotkeys": list(preflight.subnet_owned_hotkeys),
+            "immune_owner_uids_limit": preflight.subnet_immune_owner_uids_limit,
+            "free_uid_slots": preflight.subnet_free_uid_slots,
+            "maximum_era_registrations": (
+                preflight.subnet_max_regs_per_block * mortal_period_blocks
+            ),
+            "owner_immortal_hotkeys": sorted(preflight.subnet_owner_immortal_hotkeys),
+            "replacement_safe_hotkeys": sorted(preflight.replacement_safe_hotkeys),
+        }
+        subtensor = preflight.subtensor
+        substrate = getattr(subtensor, "substrate", None)
+        if substrate is None:
+            raise wire.VectorError(
+                "submission cannot prove hotkey-rotation safety without substrate"
+            )
+
+        def storage_value(name: str, params: list[Any]) -> Any:
+            try:
+                observed = subtensor.query_subtensor(
+                    name=name,
+                    params=params,
+                    block=preflight.block,
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed at write boundary
+                raise wire.VectorError(
+                    f"submission cannot query {name} at the proven mapping block"
+                ) from exc
+            return getattr(observed, "value", observed)
+
+        try:
+            block_hash = str(substrate.get_block_hash(preflight.block)).lower()
+            if _CHAIN_HASH_RE.fullmatch(block_hash) is None:
+                raise ValueError("mapping block hash is malformed")
+
+            def constant_value(name: str) -> Any:
+                observed = substrate.get_constant(
+                    module_name="SubtensorModule",
+                    constant_name=name,
+                    block_hash=block_hash,
+                )
+                return getattr(observed, "value", observed)
+
+            hotkey_swap_interval = int(constant_value("HotkeySwapOnSubnetInterval"))
+            coldkey_swap_delay = int(storage_value("ColdkeySwapAnnouncementDelay", []))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise wire.VectorError(
+                "submission cannot prove the live hotkey/coldkey swap constants"
+            ) from exc
+        if hotkey_swap_interval < mortal_period_blocks:
+            raise wire.VectorError(
+                "live hotkey swap cooldown is shorter than the complete mortal era"
+            )
+        if coldkey_swap_delay < mortal_period_blocks:
+            raise wire.VectorError(
+                "live coldkey swap announcement delay is shorter than the mortal era"
+            )
+
+        era_last_block = preflight.block + mortal_period_blocks - 1
+        targets: list[dict[str, Any]] = []
+        for uid, hotkey in sorted(uid_hotkeys.items()):
+            coldkey = str(storage_value("Owner", [hotkey]) or "")
+            if not coldkey:
+                raise wire.VectorError(
+                    f"submission cannot prove the owner for target UID {uid}"
+                )
+            raw_last_swap = storage_value(
+                "LastHotkeySwapOnNetuid",
+                [39, coldkey],
+            )
+            try:
+                last_swap_block = int(raw_last_swap)
+            except (TypeError, ValueError) as exc:
+                raise wire.VectorError(
+                    f"submission cannot prove the last hotkey swap for target UID {uid}"
+                ) from exc
+            if last_swap_block <= 0:
+                raise wire.VectorError(
+                    f"target UID {uid} has not been locked by a fresh hotkey rotation"
+                )
+            pending_coldkey_swap = storage_value(
+                "ColdkeySwapAnnouncements",
+                [coldkey],
+            )
+            if pending_coldkey_swap is not None:
+                raise wire.VectorError(
+                    f"target UID {uid} has a pending coldkey swap announcement"
+                )
+            safe_until_block = last_swap_block + hotkey_swap_interval
+            if era_last_block > safe_until_block:
+                raise wire.VectorError(
+                    f"target UID {uid} hotkey can rotate before the mortal era ends"
+                )
+            receipt = _prove_target_hotkey_rotation(
+                substrate,
+                block_number=last_swap_block,
+                coldkey=coldkey,
+                target_hotkey=hotkey,
+            )
+            successor = storage_value("HotkeySuccessor", [39, hotkey])
+            root = storage_value("HotkeyRoot", [39, hotkey])
+            old_successor = storage_value(
+                "HotkeySuccessor",
+                [39, receipt["old_hotkey"]],
+            )
+            old_root = storage_value(
+                "HotkeyRoot",
+                [39, receipt["old_hotkey"]],
+            )
+            expected_root = (
+                str(old_root)
+                if old_root not in (None, "")
+                else str(receipt["old_hotkey"])
+            )
+            if (
+                successor not in (None, "")
+                or root in (None, "")
+                or str(old_successor) != hotkey
+                or str(root) != expected_root
+            ):
+                raise wire.VectorError(
+                    f"target UID {uid} hotkey lineage does not match its rotation"
+                )
+            targets.append(
+                {
+                    "uid": uid,
+                    "hotkey": hotkey,
+                    "coldkey": coldkey,
+                    "last_hotkey_swap_block": last_swap_block,
+                    "hotkey_swap_safe_until_block": safe_until_block,
+                    "pending_coldkey_swap": None,
+                    "hotkey_successor": None,
+                    "hotkey_root": str(root),
+                    "rotation_receipt": receipt,
+                    "registration_replacement_safe": hotkey in safe_hotkeys,
+                }
+            )
+        rotation_safety = {
+            "status": PASS,
+            "mapping_block": preflight.block,
+            "mapping_block_hash": block_hash,
+            "mortal_period_blocks": mortal_period_blocks,
+            "era_last_block": era_last_block,
+            "hotkey_swap_on_subnet_interval": hotkey_swap_interval,
+            "coldkey_swap_announcement_delay": coldkey_swap_delay,
+            "targets": targets,
+        }
+    return {
+        "schema": "cathedral_sn39_uid_safety_v1",
+        "registration": registration_safety,
+        "rotation": rotation_safety,
+    }
+
+
+def _require_launch_evidence_after_rotations(
+    *,
+    payload: dict[str, Any],
+    audit: Any,
+    uid_safety: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind every launch-generation boundary strictly after both rotations."""
+    try:
+        targets = uid_safety["rotation"]["targets"]
+        receipts = [row["rotation_receipt"] for row in targets]
+        rotation_blocks = [int(row["block_number"]) for row in receipts]
+        rotation_times = [
+            wire._parse_canonical_utc(
+                row["block_timestamp"],
+                field="rotation block timestamp",
+            )
+            for row in receipts
+        ]
+        candidate_block = int(getattr(audit, "candidate_block"))
+        candidate_block_hash = str(getattr(audit, "candidate_block_hash"))
+        report_valid_from_block = int(getattr(audit, "report_valid_from_block"))
+        manifest_generated = wire._parse_canonical_utc(
+            getattr(audit, "manifest_generated_at", None),
+            field="evidence manifest generated_at",
+        )
+        report_generated = wire._parse_canonical_utc(
+            getattr(audit, "report_generated_at", None),
+            field="provenance report generated_at",
+        )
+        vector_generated = wire._parse_canonical_utc(
+            payload.get("generated_at"),
+            field="generated_at",
+        )
+        signed_index = getattr(audit, "signed_index", None)
+        index_generated = wire._parse_canonical_utc(
+            signed_index["generated_at"],
+            field="evidence index generated_at",
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "launch evidence has no exact post-rotation generation boundary"
+        ) from exc
+    if (
+        len(targets) != 2
+        or len(receipts) != 2
+        or _CHAIN_HASH_RE.fullmatch(candidate_block_hash) is None
+    ):
+        raise wire.VectorError(
+            "launch evidence does not name two distinct canonical rotations"
+        )
+    rotation_floor_block = max(rotation_blocks)
+    rotation_floor_time = max(rotation_times)
+    if (
+        candidate_block <= rotation_floor_block
+        or report_valid_from_block <= rotation_floor_block
+        or any(
+            generated <= rotation_floor_time
+            for generated in (
+                manifest_generated,
+                report_generated,
+                vector_generated,
+                index_generated,
+            )
+        )
+    ):
+        raise wire.VectorError(
+            "launch candidate, evidence, report, vector, and index must all be "
+            "generated strictly after both target rotations"
+        )
+    return {
+        "schema": "cathedral_sn39_post_rotation_evidence_v1",
+        "rotation_floor_block": rotation_floor_block,
+        "rotation_floor_timestamp": rotation_floor_time.isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z"),
+        "candidate_block": candidate_block,
+        "candidate_block_hash": candidate_block_hash.lower(),
+        "manifest_generated_at": getattr(audit, "manifest_generated_at"),
+        "report_generated_at": getattr(audit, "report_generated_at"),
+        "report_valid_from_block": report_valid_from_block,
+        "vector_generated_at": payload["generated_at"],
+        "index_generated_at": signed_index["generated_at"],
+    }
 
 
 def _vector_inclusion_policy(
@@ -2184,6 +3540,7 @@ def _vector_inclusion_policy(
             payload.get("expires_at"),
             field="expires_at",
         ),
+        expected_next_epoch_start_block=preflight.next_epoch_start_block,
     )
     _require_inclusion_policy_ready(policy, preflight)
     return policy
@@ -2215,6 +3572,7 @@ def _authority_inclusion_policy(
             getattr(audit, "report_valid_until", None),
             field="provenance report valid_until",
         ),
+        expected_next_epoch_start_block=preflight.next_epoch_start_block,
     )
     _require_inclusion_policy_ready(policy, preflight)
     return policy
@@ -2323,6 +3681,20 @@ def _validate_chain_constraints(
         raise wire.VectorError("chain preflight vector cannot conserve mass")
 
 
+def _require_no_validator_compute_reward(
+    uid_weights: dict[int, float],
+    *,
+    preflight: ChainPreflight,
+    burn_uid: int | None,
+) -> None:
+    """Prevent a validator from assigning validated-compute mass to itself."""
+    validator_weight = float(uid_weights.get(preflight.validator_uid, 0.0))
+    if validator_weight > 0.0 and preflight.validator_uid != burn_uid:
+        raise wire.VectorError(
+            "SN39 validator hotkey cannot receive validated-compute weight"
+        )
+
+
 def chain_preflight(
     *,
     network: str,
@@ -2365,18 +3737,186 @@ def _chain_preflight_unbounded(
     validator_hotkey = str(wallet.hotkey.ss58_address)
     if validator_hotkey not in hotkey_to_uid:
         raise wire.VectorError("validator hotkey is not registered on this subnet")
+    validator_uid = hotkey_to_uid[validator_hotkey]
     index = hotkeys.index(validator_hotkey)
     if not permits[index]:
         raise wire.VectorError("validator hotkey lacks validator permit")
     block = _finalized_block(getattr(metagraph, "block", None))
     if block != finalized_block:
         raise wire.VectorError("metagraph did not resolve at the finalized chain head")
+    subnet_owner_hotkey = str(
+        subtensor.get_subnet_owner_hotkey(netuid, block=finalized_block) or ""
+    )
+    raw_blocks_until_epoch = subtensor.blocks_until_next_epoch(
+        netuid,
+        block=finalized_block,
+    )
+    raw_next_epoch_start = subtensor.get_next_epoch_start_block(
+        netuid,
+        block=finalized_block,
+    )
+    raw_weights_rate_limit = subtensor.weights_rate_limit(
+        netuid,
+        block=finalized_block,
+    )
+    raw_blocks_since_update = subtensor.blocks_since_last_update(
+        netuid,
+        validator_uid,
+        block=finalized_block,
+    )
+    try:
+        max_uids = int(getattr(metagraph, "max_uids"))
+        hparams = getattr(metagraph, "hparams")
+        max_regs_per_block = int(getattr(hparams, "max_regs_per_block"))
+        immunity_period = int(getattr(hparams, "immunity_period"))
+        raw_registration_blocks = getattr(metagraph, "block_at_registration")
+        registration_blocks = [int(value) for value in raw_registration_blocks]
+        min_nonimmune_value = subtensor.query_subtensor(
+            name="MinNonImmuneUids",
+            params=[netuid],
+            block=finalized_block,
+        )
+        min_nonimmune_uids = int(
+            getattr(min_nonimmune_value, "value", min_nonimmune_value)
+        )
+        owner_coldkey_value = subtensor.query_subtensor(
+            name="SubnetOwner",
+            params=[netuid],
+            block=finalized_block,
+        )
+        subnet_owner_coldkey = str(
+            getattr(owner_coldkey_value, "value", owner_coldkey_value) or ""
+        )
+        owned_hotkeys_value = subtensor.query_subtensor(
+            name="OwnedHotkeys",
+            params=[subnet_owner_coldkey],
+            block=finalized_block,
+        )
+        owned_hotkeys = [
+            str(value)
+            for value in getattr(
+                owned_hotkeys_value,
+                "value",
+                owned_hotkeys_value,
+            )
+        ]
+        owner_limit_value = subtensor.query_subtensor(
+            name="ImmuneOwnerUidsLimit",
+            params=[netuid],
+            block=finalized_block,
+        )
+        immune_owner_uids_limit = int(
+            getattr(owner_limit_value, "value", owner_limit_value)
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "subnet registration and immunity policy is unavailable at finalized head"
+        ) from exc
+    if (
+        max_uids < len(uids)
+        or max_regs_per_block < 0
+        or immunity_period < 0
+        or min_nonimmune_uids < 0
+        or len(registration_blocks) != len(uids)
+        or not subnet_owner_coldkey
+        or immune_owner_uids_limit < 0
+        or any(not hotkey for hotkey in owned_hotkeys)
+        or len(set(owned_hotkeys)) != len(owned_hotkeys)
+    ):
+        raise wire.VectorError(
+            "subnet registration and owner-immunity policy is malformed at "
+            "finalized head"
+        )
+    uid_registration_by_hotkey = {
+        hotkey: (uid, registered_at)
+        for hotkey, uid, registered_at in zip(
+            hotkeys,
+            uids,
+            registration_blocks,
+        )
+    }
+    owner_rows: list[tuple[int, int, str]] = []
+    for hotkey in owned_hotkeys:
+        owner_row = uid_registration_by_hotkey.get(hotkey)
+        if owner_row is None:
+            continue
+        uid, registered_at = owner_row
+        owner_rows.append((registered_at, uid, hotkey))
+    owner_rows.sort()
+    owner_immortal_rows = owner_rows[:immune_owner_uids_limit]
+    owner_current_row = uid_registration_by_hotkey.get(subnet_owner_hotkey)
+    if owner_current_row is not None and all(
+        row[2] != subnet_owner_hotkey for row in owner_immortal_rows
+    ):
+        owner_uid, owner_registered_at = owner_current_row
+        owner_immortal_rows.insert(
+            0,
+            (owner_registered_at, owner_uid, subnet_owner_hotkey),
+        )
+        owner_immortal_rows = owner_immortal_rows[:immune_owner_uids_limit]
+    owner_immortal_hotkeys = {row[2] for row in owner_immortal_rows}
+    free_uid_slots = max_uids - len(uids)
+    maximum_era_registrations = max_regs_per_block * SN39_MORTAL_PERIOD_BLOCKS
+    if max_regs_per_block == 0:
+        uid_mapping_stable_until_block = raw_next_epoch_start
+    else:
+        uid_mapping_stable_until_block = finalized_block + (
+            free_uid_slots // max_regs_per_block
+        )
+    capacity_protects_all = free_uid_slots >= maximum_era_registrations
+    temporally_immune_hotkeys = {
+        hotkey
+        for hotkey, registered_at in zip(hotkeys, registration_blocks)
+        if registered_at + immunity_period
+        >= finalized_block + SN39_MORTAL_PERIOD_BLOCKS
+    }
+    prunable_nonimmune_count = sum(
+        registered_at + immunity_period <= finalized_block
+        and hotkey not in owner_immortal_hotkeys
+        for hotkey, registered_at in zip(hotkeys, registration_blocks)
+    )
+    nonimmune_buffer_protects_immunity = (
+        prunable_nonimmune_count
+        > min_nonimmune_uids + max(0, maximum_era_registrations - free_uid_slots)
+    )
+    replacement_safe_hotkeys = (
+        set(hotkeys)
+        if capacity_protects_all
+        else owner_immortal_hotkeys
+        | (temporally_immune_hotkeys if nonimmune_buffer_protects_immunity else set())
+    )
+    if (
+        not subnet_owner_hotkey
+        or isinstance(raw_blocks_until_epoch, bool)
+        or not isinstance(raw_blocks_until_epoch, int)
+        or raw_blocks_until_epoch < 0
+        or isinstance(raw_next_epoch_start, bool)
+        or not isinstance(raw_next_epoch_start, int)
+        or raw_next_epoch_start != finalized_block + raw_blocks_until_epoch
+        or isinstance(raw_weights_rate_limit, bool)
+        or not isinstance(raw_weights_rate_limit, int)
+        or raw_weights_rate_limit < 0
+        or isinstance(raw_blocks_since_update, bool)
+        or not isinstance(raw_blocks_since_update, int)
+        or raw_blocks_since_update < 0
+        or max_uids < len(uids)
+        or max_regs_per_block < 0
+        or immunity_period < 0
+        or min_nonimmune_uids < 0
+        or len(registration_blocks) != len(uids)
+        or not subnet_owner_coldkey
+        or immune_owner_uids_limit < 0
+    ):
+        raise wire.VectorError(
+            "subnet owner, exact epoch schedule, registration capacity, or "
+            "validator weight cooldown is unavailable at finalized head"
+        )
     result = ChainPreflight(
         wallet=wallet,
         subtensor=subtensor,
         hotkey_to_uid=hotkey_to_uid,
         validator_hotkey=validator_hotkey,
-        validator_uid=hotkey_to_uid[validator_hotkey],
+        validator_uid=validator_uid,
         block=block,
         min_allowed_weights=int(
             subtensor.min_allowed_weights(netuid=netuid, block=finalized_block)
@@ -2388,13 +3928,51 @@ def _chain_preflight_unbounded(
             subtensor.commit_reveal_enabled(netuid=netuid, block=finalized_block)
         ),
         genesis_hash=_canonical_genesis_hash(subtensor),
+        subnet_owner_hotkey=subnet_owner_hotkey,
+        blocks_until_next_epoch=raw_blocks_until_epoch,
+        next_epoch_start_block=raw_next_epoch_start,
+        weights_rate_limit=raw_weights_rate_limit,
+        validator_blocks_since_last_update=raw_blocks_since_update,
+        uid_mapping_stable_until_block=uid_mapping_stable_until_block,
+        replacement_safe_hotkeys=frozenset(replacement_safe_hotkeys),
+        subnet_free_uid_slots=free_uid_slots,
+        subnet_max_regs_per_block=max_regs_per_block,
+        subnet_min_nonimmune_uids=min_nonimmune_uids,
+        subnet_immunity_period=immunity_period,
+        subnet_temporally_immune_uids=len(temporally_immune_hotkeys),
+        subnet_owner_coldkey=subnet_owner_coldkey,
+        subnet_immune_owner_uids_limit=immune_owner_uids_limit,
+        subnet_owner_immortal_hotkeys=frozenset(owner_immortal_hotkeys),
+        subnet_max_uids=max_uids,
+        subnet_registration_blocks=tuple(
+            (uid, hotkey, registered_at)
+            for uid, hotkey, registered_at in zip(
+                uids,
+                hotkeys,
+                registration_blocks,
+            )
+        ),
+        subnet_owned_hotkeys=tuple(owned_hotkeys),
+        finalized_hash=_finalized_hash,
     )
     _lifecycle(
         "PREFLIGHT complete",
         f"validator_hotkey={validator_hotkey} validator_uid={result.validator_uid} "
         f"block={block if block is not None else 'unknown'} "
         f"min_allowed={result.min_allowed_weights} max_limit={result.max_weight_limit} "
-        f"commit_reveal={str(result.commit_reveal_enabled).lower()}",
+        f"commit_reveal={str(result.commit_reveal_enabled).lower()} "
+        f"blocks_until_epoch={result.blocks_until_next_epoch} "
+        f"next_epoch={result.next_epoch_start_block} "
+        f"weights_rate_limit={result.weights_rate_limit} "
+        f"blocks_since_update={result.validator_blocks_since_last_update} "
+        f"free_uid_slots={result.subnet_free_uid_slots} "
+        f"max_regs_per_block={result.subnet_max_regs_per_block} "
+        f"min_nonimmune_uids={result.subnet_min_nonimmune_uids} "
+        f"temporally_immune_uids={result.subnet_temporally_immune_uids} "
+        f"owner_immortal_uids={len(result.subnet_owner_immortal_hotkeys)} "
+        f"owner_immune_limit={result.subnet_immune_owner_uids_limit} "
+        f"replacement_safe_uids={len(result.replacement_safe_hotkeys)} "
+        f"capacity_stable_until={result.uid_mapping_stable_until_block}",
     )
     return result
 
@@ -2443,6 +4021,36 @@ def _finalized_chain_head(subtensor: Any) -> tuple[int, str]:
     return block_number, block_hash.lower()
 
 
+def _canonical_receipt_block_number(subtensor: Any, block_hash: str) -> int:
+    """Resolve and reverse-check the canonical height for a finalized receipt."""
+    if not isinstance(block_hash, str) or _CHAIN_HASH_RE.fullmatch(block_hash) is None:
+        raise wire.VectorError("submission receipt block hash is malformed")
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is None:
+        raise wire.VectorError("submission receipt has no canonical chain interface")
+    try:
+        raw_number = substrate.get_block_number(block_hash)
+        canonical_number = _finalized_block(raw_number)
+        canonical_hash = (
+            str(substrate.get_block_hash(canonical_number))
+            if canonical_number is not None
+            else ""
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "submission receipt block number is unavailable"
+        ) from exc
+    if (
+        canonical_number is None
+        or canonical_number <= 0
+        or canonical_hash.lower() != block_hash.lower()
+    ):
+        raise wire.VectorError(
+            "submission receipt block hash and canonical height disagree"
+        )
+    return canonical_number
+
+
 def _weight_version_key() -> int:
     """The exact SDK version key committed into the weight extrinsic."""
     from bittensor.core.settings import version_as_int
@@ -2464,7 +4072,7 @@ def _chain_call_arg(call: dict[str, Any], name: str) -> Any:
     return None
 
 
-def _prove_finalized_receipt(
+def _classify_finalized_receipt(
     subtensor: Any,
     *,
     receipt: Any,
@@ -2477,20 +4085,38 @@ def _prove_finalized_receipt(
     wire_uids: list[int],
     wire_weights: list[int],
     uid_hotkeys: dict[int, str] | None = None,
+    expected_subnet_owner_hotkey: str | None = None,
     inclusion_policy: InclusionPolicy | None = None,
     require_receipt: bool = True,
-) -> bool:
-    """Prove finality and the exact included ``set_mechanism_weights`` call."""
+) -> str:
+    """Classify exact finalized-call proof as PASS, FAIL, or NOT_PROVEN.
+
+    An RPC/archive exception is not evidence of a mismatch. Keeping that case
+    distinct prevents a transient read failure from authorizing any second
+    chain write after a valid irreversible call.
+    """
     substrate = getattr(subtensor, "substrate", None)
     if substrate is None:
-        return False
-    if require_receipt and (
-        receipt is None or getattr(receipt, "is_success", None) is not True
-    ):
-        return False
+        return NOT_PROVEN
+    if require_receipt:
+        receipt_success = (
+            getattr(receipt, "is_success", None) if receipt is not None else None
+        )
+        if not isinstance(receipt_success, bool):
+            return NOT_PROVEN
+        if (
+            receipt_success is not True
+            or getattr(receipt, "error_message", None) is not None
+        ):
+            return FAIL
     try:
         finalized_hash = str(substrate.get_chain_finalised_head())
-        finalized_number = int(substrate.get_block_number(finalized_hash))
+        finalized_number = _finalized_block(substrate.get_block_number(finalized_hash))
+        canonical_finalized_hash = (
+            str(substrate.get_block_hash(finalized_number))
+            if finalized_number is not None
+            else ""
+        )
         canonical_hash = str(substrate.get_block_hash(block_number))
         block = substrate.get_block(block_hash=block_hash)
         inclusion_metagraph = (
@@ -2514,23 +4140,92 @@ def _prove_finalized_receipt(
                 or not isinstance(timestamp_ms, int)
                 or timestamp_ms <= 0
             ):
-                return False
+                return NOT_PROVEN
             inclusion_time = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+            inclusion_next_epoch = (
+                subtensor.get_next_epoch_start_block(
+                    netuid,
+                    block=block_number,
+                )
+                if inclusion_policy.expected_next_epoch_start_block is not None
+                else None
+            )
         else:
             commit_reveal_at_inclusion = None
             inclusion_time = None
-    except Exception:  # noqa: BLE001 - any archive/RPC fault is a failed proof
-        return False
+            inclusion_next_epoch = None
+        inclusion_owner_hotkey = (
+            str(subtensor.get_subnet_owner_hotkey(netuid, block=block_number) or "")
+            if expected_subnet_owner_hotkey is not None
+            else None
+        )
+        historical_execution = substrate.retrieve_extrinsic_by_hash(
+            block_hash,
+            extrinsic_hash,
+        )
+    except Exception:  # noqa: BLE001 - archive/RPC unavailability is inconclusive
+        return NOT_PROVEN
+    if not isinstance(block, dict):
+        return NOT_PROVEN
+    extrinsics = block.get("extrinsics")
+    if not isinstance(extrinsics, (list, tuple)):
+        return NOT_PROVEN
     matching = [
-        item.value
-        for item in block.get("extrinsics", ())
+        (index, item.value)
+        for index, item in enumerate(extrinsics)
         if isinstance(getattr(item, "value", None), dict)
         and str(item.value.get("extrinsic_hash", "")).lower() == extrinsic_hash.lower()
     ]
-    if len(matching) != 1:
-        return False
-    observed = matching[0]
+    if not matching:
+        return NOT_PROVEN
+    if len(matching) > 1:
+        return FAIL
+    extrinsic_index, observed = matching[0]
+    if historical_execution is None:
+        return NOT_PROVEN
+    historical_success = getattr(historical_execution, "is_success", None)
+    historical_index = getattr(historical_execution, "extrinsic_idx", None)
+    if not isinstance(historical_success, bool) or isinstance(historical_index, bool):
+        return NOT_PROVEN
+    try:
+        historical_execution_index = int(historical_index)
+    except (TypeError, ValueError):
+        return NOT_PROVEN
+    if (
+        historical_success is not True
+        or getattr(historical_execution, "error_message", None) is not None
+        or historical_execution_index != extrinsic_index
+    ):
+        return FAIL
+    historical_execution_ok = True
     call = observed.get("call") or {}
+    if (
+        _CHAIN_HASH_RE.fullmatch(finalized_hash) is None
+        or finalized_number is None
+        or _CHAIN_HASH_RE.fullmatch(canonical_finalized_hash) is None
+        or _CHAIN_HASH_RE.fullmatch(canonical_hash) is None
+        or not isinstance(call, dict)
+        or not isinstance(observed.get("address"), str)
+        or not isinstance(call.get("call_module"), str)
+        or not isinstance(call.get("call_function"), str)
+    ):
+        return NOT_PROVEN
+    if canonical_finalized_hash.lower() != finalized_hash.lower():
+        return NOT_PROVEN
+    if canonical_hash.lower() != block_hash.lower():
+        return FAIL
+    if finalized_number < block_number:
+        return NOT_PROVEN
+    if inclusion_policy is not None:
+        if not isinstance(commit_reveal_at_inclusion, bool):
+            return NOT_PROVEN
+        if inclusion_policy.expected_next_epoch_start_block is not None and (
+            isinstance(inclusion_next_epoch, bool)
+            or not isinstance(inclusion_next_epoch, int)
+        ):
+            return NOT_PROVEN
+    if expected_subnet_owner_hotkey is not None and not inclusion_owner_hotkey:
+        return NOT_PROVEN
     inclusion_bindings_ok = True
     if uid_hotkeys is not None:
         try:
@@ -2544,18 +4239,37 @@ def _prove_finalized_receipt(
             ]
             inclusion_hotkeys = [str(value) for value in inclusion_metagraph.hotkeys]
             inclusion_map = dict(zip(inclusion_uids, inclusion_hotkeys))
-            inclusion_bindings_ok = (
+            inclusion_permits = (
+                [bool(value) for value in inclusion_metagraph.validator_permit]
+                if netuid == 39
+                else []
+            )
+            complete_bindings = (
                 len(inclusion_uids) == len(inclusion_hotkeys)
                 and len(inclusion_map) == len(inclusion_uids)
                 and _finalized_block(getattr(inclusion_metagraph, "block", None))
                 == block_number
-                and all(
-                    inclusion_map.get(uid) == hotkey
-                    for uid, hotkey in uid_hotkeys.items()
-                )
+                and (netuid != 39 or len(inclusion_permits) == len(inclusion_hotkeys))
             )
         except (AttributeError, TypeError, ValueError):
-            inclusion_bindings_ok = False
+            return NOT_PROVEN
+        if not complete_bindings:
+            return NOT_PROVEN
+        inclusion_bindings_ok = all(
+            inclusion_map.get(uid) == hotkey for uid, hotkey in uid_hotkeys.items()
+        )
+        if netuid == 39:
+            validator_indexes = [
+                index
+                for index, hotkey in enumerate(inclusion_hotkeys)
+                if hotkey == validator_hotkey
+            ]
+            if len(validator_indexes) != 1:
+                return FAIL
+            inclusion_bindings_ok = (
+                inclusion_bindings_ok
+                and inclusion_permits[validator_indexes[0]] is True
+            )
     inclusion_policy_ok = inclusion_policy is None or (
         inclusion_policy.valid_from_block
         <= block_number
@@ -2567,11 +4281,17 @@ def _prove_finalized_receipt(
             not inclusion_policy.require_commit_reveal_disabled
             or commit_reveal_at_inclusion is False
         )
+        and (
+            inclusion_policy.expected_next_epoch_start_block is None
+            or inclusion_next_epoch == inclusion_policy.expected_next_epoch_start_block
+        )
     )
-    return (
-        finalized_number >= block_number
-        and canonical_hash.lower() == block_hash.lower()
-        and _CHAIN_HASH_RE.fullmatch(finalized_hash) is not None
+    inclusion_owner_ok = (
+        expected_subnet_owner_hotkey is None
+        or inclusion_owner_hotkey == expected_subnet_owner_hotkey
+    )
+    proven = (
+        historical_execution_ok
         and observed.get("address") == validator_hotkey
         and call.get("call_module") == "SubtensorModule"
         and call.get("call_function") == "set_mechanism_weights"
@@ -2582,7 +4302,17 @@ def _prove_finalized_receipt(
         and _chain_call_arg(call, "weights") == wire_weights
         and inclusion_bindings_ok
         and inclusion_policy_ok
+        and inclusion_owner_ok
     )
+    return PASS if proven else FAIL
+
+
+def _prove_finalized_receipt(
+    subtensor: Any,
+    **kwargs: Any,
+) -> bool:
+    """Compatibility wrapper for callers that only accept a proven boolean."""
+    return _classify_finalized_receipt(subtensor, **kwargs) == PASS
 
 
 def _authorize_sn39_chain_submission(
@@ -2604,7 +4334,7 @@ def _authorize_sn39_chain_submission(
     exact immutable runtime profile, resolved Finney identity, and a durable
     reservation made by the thin/FULL state machine.  The first launch also
     carries its synchronous FULL replay; later writes re-prove the independent
-    root-signed launch seal.
+    root-signed launch seal plus a separate bounded recurring-write approval.
     """
     if args is None:
         raise wire.VectorError(
@@ -2638,12 +4368,23 @@ def _authorize_sn39_chain_submission(
     attempt_id = state.get("submission_pending_id")
     identity = state.get("submission_pending_identity")
     lane = state.get("submission_pending_lane")
+    active_lane = state.get("submission_active_lane")
+    transition_from = state.get("submission_pending_lane_transition_from")
+    ordinary_lane = active_lane in {None, lane} and transition_from is None
+    authorized_transition = bool(
+        active_lane == "thin"
+        and lane == "authority"
+        and transition_from == "thin"
+        and isinstance(identity, dict)
+        and _authority_lane_transition_authorized(state, identity)
+    )
     if (
         not isinstance(attempt_id, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
         or lane not in {"thin", "authority"}
-        or state.get("submission_active_lane") != lane
+        or state.get("submission_pending_phase") != "unsigned_reserved"
         or not isinstance(identity, dict)
+        or not (ordinary_lane or authorized_transition)
     ):
         raise wire.VectorError(
             "SN39 chain submission has no exact durable state-machine reservation"
@@ -2684,9 +4425,25 @@ def _authorize_sn39_chain_submission(
             "SN39 chain submission requires an inclusion-time evidence policy"
         )
     _require_inclusion_policy_ready(inclusion_policy, preflight)
+    observed_uid_safety = _require_uid_mapping_stability(
+        preflight,
+        {int(uid): str(hotkey) for uid, hotkey in uid_hotkeys.items()},
+        mortal_period_blocks=inclusion_policy.mortal_period_blocks,
+    )
+    if identity.get("uid_safety") != observed_uid_safety:
+        raise wire.VectorError(
+            "SN39 UID/hotkey safety differs from its exact durable reservation"
+        )
     if identity.get("inclusion_policy") != _inclusion_policy_identity(inclusion_policy):
         raise wire.VectorError(
             "SN39 inclusion policy differs from its durable reservation"
+        )
+    if (
+        preflight.block is None
+        or identity.get("next_epoch_start_block") != preflight.next_epoch_start_block
+    ):
+        raise wire.VectorError(
+            "SN39 exact next epoch differs from its durable reservation"
         )
 
     launch = bool(getattr(args, "require_full_provenance_for_broadcast", False))
@@ -2704,11 +4461,64 @@ def _authorize_sn39_chain_submission(
             != authorization.reproducer_revision
             or preflight.validator_hotkey != authorization.validator_hotkey
             or preflight.genesis_hash != authorization.genesis_hash
+            or lane not in authorization.lanes
+            or state.get("submission_pending_budget_scope")
+            != authorization.authorization_sha256.removeprefix("sha256:")
+            or state.get("submission_pending_budget_limit")
+            != authorization.max_attempts
         ):
             raise wire.VectorError(
                 "SN39 continuous chain call lacks its pre-reservation "
-                "root-signed launch authorization"
+                "root-signed recurring-write authorization and durable budget"
             )
+        try:
+            from scaffold import sn39_continuous_authorization as recurring
+
+            reverified = recurring.verify_authorization(
+                expected={
+                    "submission_journal": str(_submission_state_path(args)),
+                    "genesis_hash": preflight.genesis_hash,
+                    "validator_hotkey": preflight.validator_hotkey,
+                    "launch_attempt_id": authorization.launch_attempt_id,
+                    "release_sha256": authorization.release_sha256,
+                    "reproducer_revision": authorization.reproducer_revision,
+                    "not_before_time": state.get("submission_continuous_enabled_at"),
+                },
+                lane=lane,
+                finalized_block=preflight.block,
+            )
+            reverified_authorization = ContinuousAuthorization(
+                authorization_sha256=reverified.authorization_sha256,
+                submission_journal=reverified.submission_journal,
+                launch_attempt_id=reverified.launch_attempt_id,
+                release_sha256=reverified.release_sha256,
+                reproducer_revision=reverified.reproducer_revision,
+                validator_hotkey=reverified.validator_hotkey,
+                genesis_hash=reverified.genesis_hash,
+                lanes=reverified.lanes,
+                issued_at=reverified.issued_at,
+                valid_from_time=reverified.valid_from_time,
+                valid_until_time=reverified.valid_until_time,
+                valid_from_block=reverified.valid_from_block,
+                valid_until_block=reverified.valid_until_block,
+                valid_from_nonce=reverified.valid_from_nonce,
+                valid_until_nonce_exclusive=reverified.valid_until_nonce_exclusive,
+                max_attempts=reverified.max_attempts,
+            )
+            if reverified_authorization != authorization:
+                raise recurring.AuthorizationError(
+                    "recurring-write artifact changed after reservation"
+                )
+            recurring.assert_still_ready(
+                reverified,
+                lane=lane,
+                finalized_block=preflight.block,
+            )
+        except Exception as exc:
+            raise wire.VectorError(
+                "SN39 recurring-write authorization signature, bytes, expiry, "
+                "or scope changed before the chain boundary"
+            ) from exc
         return
     audit = getattr(args, "_launch_rewarded_set_audit", None)
     full = identity.get("full_provenance")
@@ -2717,9 +4527,9 @@ def _authorize_sn39_chain_submission(
     replayed = set(getattr(audit, "raw_replayed_hotkeys", ()) or ())
     if (
         lane != "thin"
-        or state.get("submission_launch_status") != "pending"
-        or state.get("submission_launch_budget_limit") != 1
-        or state.get("submission_launch_attempt_ids") != [attempt_id]
+        or state.get("submission_pending_launch_attempt") is not True
+        or state.get("submission_pending_launch_budget_limit") != 1
+        or state.get("submission_launch_attempt_ids", []) != []
         or not isinstance(inclusion_policy, InclusionPolicy)
         or not isinstance(full, dict)
         or getattr(audit, "status", None) != PASS
@@ -2731,6 +4541,29 @@ def _authorize_sn39_chain_submission(
         raise wire.VectorError(
             "SN39 launch chain call lacks its one-shot rewarded-set raw-replay gate"
         )
+    approval = _require_launch_approval(
+        args,
+        payload=identity.get("signed_vector") or {},
+        audit=audit,
+        preflight=preflight,
+        uid_weights=uid_weights,
+        hotkey_to_uid=preflight.hotkey_to_uid,
+    )
+    expected_approval_identity = {
+        "approval_digest": approval["approval_digest"],
+        "reviewed_finalized_block": approval["reviewed_finalized_block"],
+        "reviewed_finalized_hash": approval["reviewed_finalized_hash"],
+        "approval_valid_until_block": approval["approval_valid_until_block"],
+    }
+    if identity.get("launch_approval") != expected_approval_identity:
+        raise wire.VectorError(
+            "SN39 launch reservation differs from its root-controlled approval"
+        )
+    expected_freshness_boundary = _require_launch_evidence_after_rotations(
+        payload=identity.get("signed_vector") or {},
+        audit=audit,
+        uid_safety=observed_uid_safety,
+    )
     full_matches_audit = (
         full.get("source_epoch") == getattr(audit, "source_epoch", None),
         full.get("report_id") == getattr(audit, "report_id", None),
@@ -2753,12 +4586,155 @@ def _authorize_sn39_chain_submission(
         full.get("signed_index") == getattr(audit, "signed_index", None),
         isinstance(full.get("signed_index"), dict),
         full.get("source_revision") == SN39_PRODUCER_REVISION,
+        full.get("freshness_boundary") == expected_freshness_boundary,
     )
     if not all(full_matches_audit):
         raise wire.VectorError(
             "SN39 launch reservation does not match the synchronous rewarded-set "
             "raw replay"
         )
+
+
+def _submit_exact_sn39_extrinsic(
+    preflight: ChainPreflight,
+    *,
+    runtime_contract: Any,
+    attempt_id: str,
+    netuid: int,
+    version_key: int,
+    wire_uids: list[int],
+    wire_weights: list[int],
+    mortal_period_blocks: int,
+) -> Any:
+    """Sign one pinned-era SN39 call and journal its hash before broadcast.
+
+    The generic SDK weight helper chooses its mortal-era reference block inside
+    the signing call. That head can be later than the finalized block whose UID
+    mappings and evidence window were authorized. SN39 therefore composes the
+    same pallet call directly, pins the era to the proven finalized block, and
+    fsyncs the exact signed hash and nonce before submitting it. A restart can
+    identify this transaction cryptographically and never has to infer it from
+    an otherwise identical call.
+    """
+    from bittensor.core.extrinsics.pallets import SubtensorModule
+    from bittensor.core.types import ExtrinsicResponse
+
+    if (
+        preflight.block is None
+        or preflight.block <= 0
+        or netuid != 39
+        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or len(wire_uids) != len(wire_weights)
+        or not wire_uids
+    ):
+        raise wire.VectorError("SN39 exact signing contract is malformed")
+    substrate = getattr(preflight.subtensor, "substrate", None)
+    if substrate is None:
+        raise wire.VectorError("SN39 exact signing has no substrate interface")
+    latest_finalized_block, latest_finalized_hash = _finalized_chain_head(
+        preflight.subtensor
+    )
+    if (
+        latest_finalized_block != preflight.block
+        or latest_finalized_hash != str(preflight.finalized_hash).lower()
+    ):
+        raise _RetryablePreSignHeadDrift(
+            "SN39 finalized head advanced after preflight; refusing before signing"
+        )
+    nonce = substrate.get_account_next_index(preflight.wallet.hotkey.ss58_address)
+    if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
+        raise wire.VectorError("SN39 validator nonce is malformed")
+    if not bool(
+        getattr(runtime_contract, "require_full_provenance_for_broadcast", False)
+    ):
+        authorization = getattr(
+            runtime_contract,
+            "_continuous_submission_authorization",
+            None,
+        )
+        if not isinstance(authorization, ContinuousAuthorization):
+            raise wire.VectorError(
+                "SN39 recurring submission has no signed nonce allowance"
+            )
+        try:
+            from scaffold import sn39_continuous_authorization as recurring
+
+            recurring.assert_nonce_ready(
+                authorization,
+                account_nonce=nonce,
+            )
+        except Exception as exc:
+            raise wire.VectorError(
+                "SN39 validator account nonce is outside the signed recurring-write "
+                "allowance"
+            ) from exc
+    unlocked = ExtrinsicResponse.unlock_wallet(
+        preflight.wallet,
+        True,
+        "hotkey",
+    )
+    if getattr(unlocked, "success", None) is not True:
+        raise wire.VectorError("SN39 validator hotkey could not be unlocked")
+    call = SubtensorModule(preflight.subtensor).set_mechanism_weights(
+        netuid=netuid,
+        mecid=0,
+        dests=wire_uids,
+        weights=wire_weights,
+        version_key=version_key,
+    )
+    era = {
+        "period": mortal_period_blocks,
+        "current": preflight.block,
+    }
+    signed = substrate.create_signed_extrinsic(
+        call=call,
+        keypair=preflight.wallet.hotkey,
+        nonce=nonce,
+        era=era,
+    )
+    try:
+        extrinsic_hash = f"0x{signed.extrinsic_hash.hex()}".lower()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise wire.VectorError("SN39 signed extrinsic has no canonical hash") from exc
+    if _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None:
+        raise wire.VectorError("SN39 signed extrinsic hash is malformed")
+    _record_pending_broadcast_intent(
+        runtime_contract,
+        attempt_id=attempt_id,
+        extrinsic_hash=extrinsic_hash,
+        nonce=nonce,
+        era_reference_block=preflight.block,
+        mortal_period_blocks=mortal_period_blocks,
+        version_key=version_key,
+        wire_uids=wire_uids,
+        wire_weights=wire_weights,
+    )
+    receipt = substrate.submit_extrinsic(
+        signed,
+        wait_for_inclusion=True,
+        wait_for_finalization=True,
+    )
+    returned_hash = str(getattr(receipt, "extrinsic_hash", "")).lower()
+    if returned_hash != extrinsic_hash:
+        if _CHAIN_HASH_RE.fullmatch(returned_hash) is not None:
+            raise _PostSignedSubmissionMismatch(
+                "SN39 submission receipt differs from its pre-journaled signed hash"
+            )
+        raise _PendingReceiptNotProven(
+            "SN39 submit returned no canonical receipt hash; the exact signed "
+            "attempt remains fenced for restart-only proof"
+        )
+    receipt_success = getattr(receipt, "is_success", None)
+    if receipt_success is False:
+        raise _PostSignedSubmissionMismatch(
+            "SN39 signed transaction finalized without successful execution"
+        )
+    if receipt_success is not True:
+        raise _PendingReceiptNotProven(
+            "SN39 submit returned no provable execution result; the exact signed "
+            "attempt remains fenced for restart-only proof"
+        )
+    return receipt
 
 
 def set_weights_on_chain(
@@ -2782,6 +4758,8 @@ def set_weights_on_chain(
     )
     uids = [u for u, _ in ordered]
     vals = [w for _, w in ordered]
+    primary_call_started = False
+    attempt_id: str | None = None
     try:
         if preflight is None:
             preflight = chain_preflight(
@@ -2818,36 +4796,68 @@ def set_weights_on_chain(
             )
             return ChainSubmission(success=True)
         with _chain_operation_deadline("weight submission", deadline_secs):
-            # Keep the irreversible SDK primitive inside this authorized
-            # function. There is no separately importable repository helper
-            # that can bypass the SN39 runtime/state-machine checks above.
-            from bittensor.core.extrinsics.weights import set_weights_extrinsic
-            from bittensor.core.settings import version_as_int
+            if netuid == 39:
+                state = (
+                    _read_state(_submission_state_path(runtime_contract))
+                    if runtime_contract is not None
+                    else {}
+                )
+                attempt_id = state.get("submission_pending_id")
+                if (
+                    runtime_contract is None
+                    or not isinstance(attempt_id, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
+                ):
+                    raise wire.VectorError(
+                        "SN39 authorized call has no durable pending attempt"
+                    )
+                primary_call_started = True
+                receipt = _submit_exact_sn39_extrinsic(
+                    preflight,
+                    runtime_contract=runtime_contract,
+                    attempt_id=attempt_id,
+                    netuid=netuid,
+                    version_key=_weight_version_key(),
+                    wire_uids=wire_uids,
+                    wire_weights=wire_values,
+                    mortal_period_blocks=mortal_period,
+                )
+                resp = receipt
+                ok = True
+            else:
+                # Non-SN39 callers retain the standard SDK helper. The exact
+                # signer/journal path above is the sole SN39 write primitive.
+                from bittensor.core.extrinsics.weights import set_weights_extrinsic
+                from bittensor.core.settings import version_as_int
 
-            resp = set_weights_extrinsic(
-                subtensor=preflight.subtensor,
-                wallet=preflight.wallet,
-                netuid=netuid,
-                mechid=0,
-                uids=uids,
-                weights=vals,
-                version_key=version_as_int,
-                mev_protection=False,
-                period=mortal_period,
-                raise_error=True,
-                wait_for_inclusion=True,
-                wait_for_finalization=True,
-                wait_for_revealed_execution=False,
-            )
+                primary_call_started = True
+                resp = set_weights_extrinsic(
+                    subtensor=preflight.subtensor,
+                    wallet=preflight.wallet,
+                    netuid=netuid,
+                    mechid=0,
+                    uids=uids,
+                    weights=vals,
+                    version_key=version_as_int,
+                    mev_protection=False,
+                    period=mortal_period,
+                    raise_error=True,
+                    wait_for_inclusion=True,
+                    wait_for_finalization=True,
+                    wait_for_revealed_execution=False,
+                )
+                receipt = getattr(resp, "extrinsic_receipt", None)
+                ok = bool(getattr(resp, "success", resp))
             # Some SDK receipt properties are lazy. Materialize every field
             # while the same wall-clock bound is still active.
-            ok = bool(getattr(resp, "success", resp))
             response_values: dict[str, Any] = {}
-            receipt = getattr(resp, "extrinsic_receipt", None)
             for name in ("extrinsic_hash", "block_hash", "block_number"):
                 value = getattr(receipt, name, None) or getattr(resp, name, None)
                 if value is not None:
                     response_values[name] = value
+            receipt_block_hash_value = response_values.get("block_hash")
+            if receipt_block_hash_value is not None:
+                response_values["block_hash"] = str(receipt_block_hash_value).lower()
             block_number = response_values.get("block_number")
             try:
                 receipt_block_number = (
@@ -2856,14 +4866,54 @@ def set_weights_on_chain(
             except (TypeError, ValueError):
                 receipt_block_number = None
             receipt_block_hash = response_values.get("block_hash")
-            receipt_extrinsic_hash = response_values.get("extrinsic_hash")
-            finalized = bool(
+            if (
                 ok
-                and receipt_block_number is not None
-                and receipt_block_number > 0
+                and receipt_block_number is None
                 and isinstance(receipt_block_hash, str)
-                and isinstance(receipt_extrinsic_hash, str)
-                and _prove_finalized_receipt(
+            ):
+                receipt_block_number = _canonical_receipt_block_number(
+                    preflight.subtensor,
+                    receipt_block_hash,
+                )
+                response_values["block_number"] = receipt_block_number
+            receipt_extrinsic_hash = response_values.get("extrinsic_hash")
+            finalized = False
+            if ok:
+                if (
+                    receipt_block_number is None
+                    or receipt_block_number <= 0
+                    or not isinstance(receipt_block_hash, str)
+                    or not isinstance(receipt_extrinsic_hash, str)
+                ):
+                    raise wire.VectorError(
+                        "submission returned success without a canonical receipt "
+                        "identity; the durable attempt remains fenced"
+                    )
+                candidate = ChainSubmission(
+                    success=True,
+                    extrinsic_hash=receipt_extrinsic_hash,
+                    block_hash=receipt_block_hash,
+                    block_number=receipt_block_number,
+                    finalized=False,
+                )
+                if netuid == 39:
+                    if (
+                        runtime_contract is None
+                        or not isinstance(attempt_id, str)
+                        or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
+                    ):
+                        raise wire.VectorError(
+                            "SN39 successful call has no durable pending attempt"
+                        )
+                    _record_pending_submission_receipt(
+                        runtime_contract,
+                        attempt_id=attempt_id,
+                        submission=candidate,
+                        version_key=_weight_version_key(),
+                        wire_uids=wire_uids,
+                        wire_weights=wire_values,
+                    )
+                proof_status = _classify_finalized_receipt(
                     preflight.subtensor,
                     receipt=receipt,
                     extrinsic_hash=receipt_extrinsic_hash,
@@ -2875,11 +4925,66 @@ def set_weights_on_chain(
                     wire_uids=wire_uids,
                     wire_weights=wire_values,
                     uid_hotkeys=uid_hotkeys,
+                    expected_subnet_owner_hotkey=(
+                        SN39_BURN_HOTKEY if netuid == 39 else None
+                    ),
                     inclusion_policy=inclusion_policy,
                 )
-            )
+                if netuid == 39 and isinstance(attempt_id, str):
+                    _record_pending_proof_status(
+                        runtime_contract,
+                        attempt_id=attempt_id,
+                        status=proof_status,
+                    )
+                finalized = proof_status == PASS
+                if proof_status == NOT_PROVEN:
+                    raise _PendingReceiptNotProven(
+                        "submission receipt was recorded, but archive/RPC proof is "
+                        "temporarily unavailable; restart may only re-prove this "
+                        "exact receipt and must not submit again"
+                    )
+                if proof_status == FAIL:
+                    raise _PostSignedSubmissionMismatch(
+                        "submission receipt positively mismatches the reserved "
+                        "inclusion contract; the attempt remains fenced for "
+                        "operator investigation"
+                    )
     except Exception as exc:
-        _lifecycle("CHAIN failed", f"uids={len(ordered)} reason={type(exc).__name__}")
+        unsigned_aborted = False
+        if (
+            netuid == 39
+            and runtime_contract is not None
+            and isinstance(attempt_id, str)
+        ):
+            try:
+                unsigned_aborted = _abort_unsigned_common_submission(
+                    runtime_contract,
+                    attempt_id=attempt_id,
+                )
+            except (OSError, ValueError):
+                # Never claim a safe retry unless the fsynced common journal
+                # itself confirmed that no signed intent or receipt existed.
+                unsigned_aborted = False
+        event = (
+            "CHAIN failed"
+            if unsigned_aborted or not primary_call_started
+            else "CHAIN ambiguous"
+        )
+        _lifecycle(event, f"uids={len(ordered)} reason={type(exc).__name__}")
+        if (
+            event == "CHAIN ambiguous"
+            and netuid == 39
+            and runtime_contract is not None
+            and not isinstance(
+                exc,
+                (_PendingReceiptNotProven, _PostSignedSubmissionMismatch),
+            )
+        ):
+            raise _PendingReceiptNotProven(
+                "the exact signed transaction may have finalized, but its submit "
+                "response or durable receipt could not be proven; restart may only "
+                "reconcile this signed hash and must not submit again"
+            ) from exc
         raise
     # newer bittensor returns an ExtrinsicResponse object (truthy even on
     # failure) — judge success by the field, not truthiness.
@@ -2906,11 +5011,16 @@ def set_weights_on_chain(
     if ok:
         try:
             submission = _require_release_grade_submission(submission)
-        except wire.VectorError:
+        except wire.VectorError as exc:
             _lifecycle(
                 "CHAIN ambiguous",
                 f"uids={len(ordered)} success=True receipt_identity=incomplete",
             )
+            if netuid == 39:
+                raise _PendingReceiptNotProven(
+                    "the successful SN39 response has no complete canonical receipt "
+                    "identity; the exact signed attempt remains fenced"
+                ) from exc
             raise
     response_details = (
         [
@@ -3139,6 +5249,45 @@ def _thin_tick_locked(args) -> bool:
         f"id={str(payload.get('vector_id', ''))[:8]} "
         f"policy_version={payload.get('policy_version')}",
     )
+    state_path = Path(args.state_file)
+    prior_state = _read_state(state_path)
+    recovered_version = prior_state.get("thin_recovered_policy_version")
+    if (
+        isinstance(recovered_version, int)
+        and not isinstance(recovered_version, bool)
+        and payload.get("policy_version") == recovered_version
+    ):
+        observed_bytes = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        observed_digest = "sha256:" + hashlib.sha256(observed_bytes).hexdigest()
+        if payload.get("vector_id") == prior_state.get(
+            "thin_recovered_vector_id"
+        ) and observed_digest == prior_state.get("thin_recovered_signed_vector_sha256"):
+            wire.verify_signature(
+                payload,
+                public_key_hex=args.public_key_hex,
+                expected_key_id=args.key_id,
+            )
+            _lifecycle(
+                "VECTOR idle",
+                f"id={str(payload.get('vector_id', ''))[:8]} "
+                f"policy_version={recovered_version} already_finalized=true",
+            )
+            _get_events(args).event(
+                "RECOVERED_VECTOR_IDLE",
+                stage="result",
+                status=INFO,
+                artifact=str(payload.get("vector_id", ""))[:36] or None,
+                detail=(
+                    "exact recovered policy/vector is already finalized; "
+                    "no second chain write was attempted"
+                ),
+            )
+            return True
     fence = load_fence(Path(args.state_file))
     try:
         accept_vector(
@@ -3241,12 +5390,21 @@ def _thin_tick_locked(args) -> bool:
             hotkey_to_uid=hk2uid,
             current_block=tick_block,
             state_file=Path(args.state_file),
+            persist=False,
         )
         preflight, hk2uid, uid_weights = _revalidate_launch_after_rewarded_set_replay(
             args,
             payload=payload,
             audit=launch_audit,
             fence_version=fence,
+        )
+        _require_launch_approval(
+            args,
+            payload=payload,
+            audit=launch_audit,
+            preflight=preflight,
+            uid_weights=uid_weights,
+            hotkey_to_uid=hk2uid,
         )
         args._tick_preflight = preflight
         tick_block = preflight.block
@@ -3280,6 +5438,12 @@ def _thin_tick_locked(args) -> bool:
         if burn_hotkey is not None
         else (payload.get("burn_snapshot") or {}).get("burn_uid")
     )
+    if preflight is not None:
+        _require_no_validator_compute_reward(
+            uid_weights,
+            preflight=preflight,
+            burn_uid=int(burn_uid) if burn_uid is not None else None,
+        )
     burn_share = uid_weights.get(int(burn_uid), 0.0) if burn_uid is not None else 0.0
     _lifecycle(
         "MAP complete",
@@ -3307,6 +5471,11 @@ def _thin_tick_locked(args) -> bool:
         inclusion_policy = getattr(args, "_launch_inclusion_policy", None)
         if inclusion_policy is None:
             inclusion_policy = _vector_inclusion_policy(payload, preflight)
+        uid_safety = _require_uid_mapping_stability(
+            preflight,
+            {uid: hotkey for hotkey, uid in hk2uid.items() if uid in uid_weights},
+            mortal_period_blocks=inclusion_policy.mortal_period_blocks,
+        )
         # Persist an ambiguity fence BEFORE the irreversible call. Mapping block
         # is retained in the exact submission record but excluded from the
         # dedup identity: advancing a block with the same signed vector and
@@ -3327,7 +5496,9 @@ def _thin_tick_locked(args) -> bool:
                 for hotkey, uid in sorted(hk2uid.items(), key=lambda item: item[1])
                 if uid in uid_weights
             ],
+            "next_epoch_start_block": (preflight.next_epoch_start_block),
             "inclusion_policy": _inclusion_policy_identity(inclusion_policy),
+            "uid_safety": uid_safety,
         }
         continuous_authorization = getattr(
             args, "_continuous_submission_authorization", None
@@ -3342,6 +5513,11 @@ def _thin_tick_locked(args) -> bool:
             )
         launch_audit = getattr(args, "_launch_rewarded_set_audit", None)
         if launch_audit is not None:
+            freshness_boundary = _require_launch_evidence_after_rotations(
+                payload=payload,
+                audit=launch_audit,
+                uid_safety=uid_safety,
+            )
             identity["signed_vector"] = payload
             identity["full_provenance"] = {
                 "source_epoch": launch_audit.source_epoch,
@@ -3360,9 +5536,29 @@ def _thin_tick_locked(args) -> bool:
                 "report_signing_key_id": launch_audit.report_signing_key_id,
                 "signed_index": launch_audit.signed_index,
                 "source_revision": getattr(args, "provenance_source_revision", None),
+                "freshness_boundary": freshness_boundary,
+            }
+            launch_approval = getattr(args, "_launch_approval", None)
+            if not isinstance(launch_approval, dict):
+                raise wire.VectorError(
+                    "launch reservation has no consumed operator approval"
+                )
+            identity["launch_approval"] = {
+                "approval_digest": launch_approval.get("approval_digest"),
+                "reviewed_finalized_block": launch_approval.get(
+                    "reviewed_finalized_block"
+                ),
+                "reviewed_finalized_hash": launch_approval.get(
+                    "reviewed_finalized_hash"
+                ),
+                "approval_valid_until_block": launch_approval.get(
+                    "approval_valid_until_block"
+                ),
             }
         dedup_identity = {
-            key: value for key, value in identity.items() if key != "mapping_block"
+            key: value
+            for key, value in identity.items()
+            if key not in {"mapping_block", "uid_safety"}
         }
         thin_attempt_id = (
             "sha256:"
@@ -3381,17 +5577,6 @@ def _thin_tick_locked(args) -> bool:
                 lane="thin",
                 attempt_id=thin_attempt_id,
                 identity=identity,
-            )
-            _write_state_fenced(
-                state_file,
-                {
-                    "highest_attempted_policy_version": int(payload["policy_version"]),
-                    "thin_submission_attempt_id": thin_attempt_id,
-                    "thin_submission_attempt_status": "pending",
-                    "thin_submission_attempted_at": _ms_iso_now(),
-                    "thin_submission_identity": identity,
-                    "thin_submission_dedup_identity": dedup_identity,
-                },
             )
         except (ValueError, OSError) as exc:
             raise wire.VectorError(
@@ -3418,12 +5603,21 @@ def _thin_tick_locked(args) -> bool:
         submission = _require_release_grade_submission(submission)
     ok = bool(submission)
     # Finalize the attempt and rollback fence in ONE atomic fsync before any
-    # fallible telemetry. If this write fails, the already-fsynced pending
-    # attempt still blocks an unsafe automatic retry.
+    # fallible telemetry. The common journal is the release source of truth, so
+    # finalize it first. A crash before the lane-local telemetry write leaves a
+    # recoverable finalized launch instead of an unrecoverable common pending
+    # fence.
     if ok and broadcast:
-        _write_state(
+        _finalize_common_submission(
+            args,
+            attempt_id=thin_attempt_id,
+            submission=submission,
+        )
+        _write_state_fenced(
             state_file,
             {
+                "highest_attempted_policy_version": int(payload["policy_version"]),
+                "thin_submission_attempt_id": thin_attempt_id,
                 "thin_submission_attempt_status": "finalized",
                 "thin_submission_finalized_id": thin_attempt_id,
                 "thin_submission_finalized_at": _ms_iso_now(),
@@ -3434,15 +5628,15 @@ def _thin_tick_locked(args) -> bool:
                 "thin_submission_block_number": getattr(
                     submission, "block_number", None
                 ),
+                "thin_submission_identity": identity,
+                "thin_submission_dedup_identity": dedup_identity,
                 "last_accepted_policy_version": int(payload["policy_version"]),
                 "last_vector_id": payload["vector_id"],
                 "accepted_at": _ms_iso_now(),
+                "thin_recovered_policy_version": None,
+                "thin_recovered_vector_id": None,
+                "thin_recovered_signed_vector_sha256": None,
             },
-        )
-        _finalize_common_submission(
-            args,
-            attempt_id=thin_attempt_id,
-            submission=submission,
         )
     _get_events(args).event(
         "WEIGHTS_SUBMITTED" if (ok and broadcast) else "WEIGHTS_DRY_RUN",
@@ -3538,6 +5732,17 @@ def _validate_resolved_chain_contract(
         )
     if preflight.commit_reveal_enabled:
         raise wire.VectorError("Finney SN39 broadcast requires commit-reveal disabled")
+    expected_burn_hotkey = getattr(args, "provenance_burn_hotkey", None)
+    if (
+        not isinstance(expected_burn_hotkey, str)
+        or not expected_burn_hotkey
+        or preflight.subnet_owner_hotkey != expected_burn_hotkey
+        or preflight.hotkey_to_uid.get(expected_burn_hotkey) is None
+    ):
+        raise wire.VectorError(
+            "Finney SN39 broadcast requires the pinned burn hotkey to remain "
+            "the live subnet owner"
+        )
     if _submission_runtime_root(args) != _VALIDATOR_RUNTIME_ROOT:
         raise wire.VectorError(
             "Finney SN39 broadcast requires the canonical owner-only "
@@ -3647,16 +5852,58 @@ def _reserve_common_submission(
     if max_submissions < 0:
         raise ValueError("max submissions must be nonnegative")
     launch_attempt = bool(getattr(args, "require_full_provenance_for_broadcast", False))
-    budget_updates = (
-        {
-            "_submission_budget_scope": (
-                "launch_full_gate" if launch_attempt else f"{lane}_bounded"
-            ),
-            "_submission_budget_limit": max_submissions,
-        }
-        if max_submissions
-        else {}
+    authorization = getattr(args, "_continuous_submission_authorization", None)
+    recurring_required = bool(
+        bool(getattr(args, "broadcast", False))
+        and not bool(getattr(args, "offline", False))
+        and int(getattr(args, "netuid", -1)) == 39
+        and not launch_attempt
+        and _continuous_transition_required(args)
+        and bool(getattr(args, "require_completed_launch_for_broadcast", False))
     )
+    if recurring_required and not isinstance(authorization, ContinuousAuthorization):
+        raise ValueError(
+            "SN39 recurring reservation lacks a separate signed authorization"
+        )
+    if isinstance(authorization, ContinuousAuthorization):
+        authorization_identity = _continuous_authorization_identity(authorization)
+        if (
+            launch_attempt
+            or identity.get("continuous_authorization") != authorization_identity
+            or lane not in authorization.lanes
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", authorization.authorization_sha256)
+            is None
+            or authorization.max_attempts <= 0
+            or authorization.max_attempts > 96
+            or authorization.valid_from_nonce < 0
+            or authorization.valid_until_nonce_exclusive
+            != authorization.valid_from_nonce + authorization.max_attempts
+            or (max_submissions > 0 and authorization.max_attempts > max_submissions)
+        ):
+            raise ValueError(
+                "recurring authorization differs from the exact reservation "
+                "or configured attempt ceiling"
+            )
+        # The signed artifact's digest gives each explicit renewal an
+        # independent durable budget. The budget is consumed only when the
+        # exact signed transaction is fsynced, never by a dry or failed tick.
+        budget_updates = {
+            "_submission_budget_scope": authorization.authorization_sha256.removeprefix(
+                "sha256:"
+            ),
+            "_submission_budget_limit": authorization.max_attempts,
+        }
+    else:
+        budget_updates = (
+            {
+                "_submission_budget_scope": (
+                    "launch_full_gate" if launch_attempt else f"{lane}_bounded"
+                ),
+                "_submission_budget_limit": max_submissions,
+            }
+            if max_submissions
+            else {}
+        )
     _write_state_fenced(
         _submission_state_path(args),
         {
@@ -3666,6 +5913,12 @@ def _reserve_common_submission(
             "provenance_netuid": int(args.netuid),
             "submission_validator_hotkey": getattr(
                 args, "_submission_validator_hotkey", "offline"
+            ),
+            "_provisional_submission": True,
+            "_allow_authority_lane_transition": bool(
+                lane == "authority"
+                and isinstance(authorization, ContinuousAuthorization)
+                and "authority" in authorization.lanes
             ),
             "_launch_attempt": launch_attempt,
             **({"_launch_budget_limit": max_submissions} if launch_attempt else {}),
@@ -3679,18 +5932,413 @@ def _reserve_common_submission(
     )
 
 
+def _record_pending_submission_receipt(
+    args: Any,
+    *,
+    attempt_id: str,
+    submission: ChainSubmission,
+    version_key: int,
+    wire_uids: list[int],
+    wire_weights: list[int],
+) -> None:
+    """Fsync the canonical receipt identity before any archive proof.
+
+    The receipt is sufficient for a restart to re-prove the exact historical
+    call. It never authorizes another submission.
+    """
+    if (
+        not submission.success
+        or not submission.extrinsic_hash
+        or _CHAIN_HASH_RE.fullmatch(submission.extrinsic_hash) is None
+        or not submission.block_hash
+        or _CHAIN_HASH_RE.fullmatch(submission.block_hash) is None
+        or not isinstance(submission.block_number, int)
+        or submission.block_number <= 0
+        or isinstance(version_key, bool)
+        or not isinstance(version_key, int)
+        or version_key < 0
+        or len(wire_uids) != len(wire_weights)
+    ):
+        raise wire.VectorError(
+            "successful chain call has no canonical restart-safe receipt identity"
+        )
+    _write_state_fenced(
+        _submission_state_path(args),
+        {
+            "_record_receipt_for_submission_id": attempt_id,
+            "submission_pending_receipt_candidate": {
+                "extrinsic_hash": submission.extrinsic_hash,
+                "block_hash": submission.block_hash,
+                "block_number": submission.block_number,
+                "version_key": version_key,
+                "wire_uids": wire_uids,
+                "wire_weights": wire_weights,
+            },
+            "submission_pending_proof_status": "pending",
+            "submission_pending_receipt_recorded_at": _ms_iso_now(),
+        },
+    )
+
+
+def _commit_pending_signed_attempt(
+    args: Any,
+    *,
+    attempt_id: str,
+    intent: dict[str, Any],
+) -> None:
+    """Atomically turn an unsigned reservation into the one irreversible attempt."""
+    import fcntl
+
+    state_file = _submission_state_path(args)
+    state_directory = _open_private_state_dir(state_file.parent)
+    os.close(state_directory)
+    lock_descriptor = _open_private_lock(state_file.with_suffix(".lock"))
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        current = _read_state(state_file)
+        lane = current.get("submission_pending_lane")
+        identity = current.get("submission_pending_identity")
+        if (
+            current.get("submission_pending_id") != attempt_id
+            or current.get("submission_pending_phase") != "unsigned_reserved"
+            or lane not in {"thin", "authority"}
+            or not isinstance(identity, dict)
+            or current.get("submission_pending_broadcast_intent") is not None
+            or current.get("submission_pending_receipt_candidate") is not None
+        ):
+            raise ValueError(
+                "signed intent does not match one pristine unsigned reservation"
+            )
+
+        history = current.get("submission_attempt_ids", [])
+        if not isinstance(history, list) or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None
+            for item in history
+        ):
+            raise ValueError("common submission attempt journal is corrupt")
+        if attempt_id in history:
+            raise ValueError("signed attempt already exists in the common journal")
+        active_lane = current.get("submission_active_lane")
+        transition_from = current.get("submission_pending_lane_transition_from")
+        if active_lane is not None and active_lane != lane:
+            identity_transition = bool(
+                active_lane == "thin"
+                and lane == "authority"
+                and transition_from == "thin"
+                and _authority_lane_transition_authorized(current, identity)
+            )
+            if not identity_transition:
+                raise ValueError(
+                    "submission authority lane changed before signed-intent commit"
+                )
+        elif transition_from is not None:
+            raise ValueError("pending submission lane transition is inconsistent")
+
+        budget_scope = current.get("submission_pending_budget_scope")
+        budget_limit = current.get("submission_pending_budget_limit")
+        budgets = current.get("submission_attempt_budgets", {})
+        if not isinstance(budgets, dict):
+            raise ValueError("submission attempt budgets are corrupt")
+        updated_budgets = dict(budgets)
+        if budget_scope is not None:
+            if (
+                not isinstance(budget_scope, str)
+                or re.fullmatch(r"[a-z0-9_]{1,64}", budget_scope) is None
+                or isinstance(budget_limit, bool)
+                or not isinstance(budget_limit, int)
+                or budget_limit <= 0
+            ):
+                raise ValueError("pending submission budget is malformed")
+            budget = budgets.get(budget_scope, {"limit": budget_limit, "ids": []})
+            if (
+                not isinstance(budget, dict)
+                or set(budget) != {"limit", "ids"}
+                or budget.get("limit") != budget_limit
+                or not isinstance(budget.get("ids"), list)
+                or any(
+                    not isinstance(item, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None
+                    for item in budget.get("ids", [])
+                )
+            ):
+                raise ValueError("submission attempt budget changed or is corrupt")
+            if len(budget["ids"]) >= budget_limit:
+                raise ValueError(
+                    f"submission attempt budget {budget_limit} is exhausted"
+                )
+            updated_budgets[budget_scope] = {
+                "limit": budget_limit,
+                "ids": [*budget["ids"], attempt_id],
+            }
+        elif budget_limit is not None:
+            raise ValueError("pending submission budget limit has no scope")
+
+        launch_attempt = current.get("submission_pending_launch_attempt")
+        launch_limit = current.get("submission_pending_launch_budget_limit")
+        launch_updates: dict[str, Any] = {}
+        if not isinstance(launch_attempt, bool):
+            raise ValueError("pending launch marker is malformed")
+        if launch_attempt:
+            launch_history = current.get("submission_launch_attempt_ids", [])
+            if (
+                launch_limit != 1
+                or not isinstance(launch_history, list)
+                or any(
+                    not isinstance(item, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None
+                    for item in launch_history
+                )
+                or launch_history
+            ):
+                raise ValueError("launch submission budget 1 is exhausted or corrupt")
+            launch_updates = {
+                "submission_launch_attempt_ids": [attempt_id],
+                "submission_launch_budget_limit": 1,
+                "submission_launch_status": "pending",
+            }
+        elif launch_limit is not None:
+            raise ValueError("non-launch signed attempt carries a launch budget")
+
+        lane_updates: dict[str, int]
+        if lane == "thin":
+            policy_version = current.get("submission_pending_policy_version")
+            prior_policy = current.get("submission_highest_policy_version")
+            if (
+                isinstance(policy_version, bool)
+                or not isinstance(policy_version, int)
+                or policy_version < 0
+                or (isinstance(prior_policy, int) and policy_version <= prior_policy)
+            ):
+                raise ValueError("common thin policy fence changed before signing")
+            lane_updates = {"submission_highest_policy_version": policy_version}
+        else:
+            source_epoch = current.get("submission_pending_source_epoch")
+            prior_source = current.get("submission_highest_source_epoch")
+            if (
+                isinstance(source_epoch, bool)
+                or not isinstance(source_epoch, int)
+                or source_epoch < 0
+                or (isinstance(prior_source, int) and source_epoch <= prior_source)
+            ):
+                raise ValueError("common authority epoch fence changed before signing")
+            lane_updates = {"submission_highest_source_epoch": source_epoch}
+
+        document = dict(current)
+        document.update(
+            {
+                "submission_pending_phase": "signed_intent",
+                "submission_pending_broadcast_intent": intent,
+                "submission_pending_broadcast_started_at": _ms_iso_now(),
+                "submission_attempt_ids": [*history, attempt_id],
+                "submission_attempt_budgets": updated_budgets,
+                "submission_active_lane": lane,
+                "submission_attempt_count": len(history) + 1,
+                **lane_updates,
+                **launch_updates,
+            }
+        )
+        _replace_private_state(state_file, document)
+    finally:
+        os.close(lock_descriptor)
+
+
+def _abort_unsigned_common_submission(args: Any, *, attempt_id: str) -> bool:
+    """Release only a reservation that provably never reached signed intent."""
+    import fcntl
+
+    state_file = _submission_state_path(args)
+    state_directory = _open_private_state_dir(state_file.parent)
+    os.close(state_directory)
+    lock_descriptor = _open_private_lock(state_file.with_suffix(".lock"))
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        current = _read_state(state_file)
+        if (
+            current.get("submission_pending_id") != attempt_id
+            or current.get("submission_pending_phase") != "unsigned_reserved"
+            or current.get("submission_pending_broadcast_intent") is not None
+            or current.get("submission_pending_receipt_candidate") is not None
+        ):
+            return False
+        document = dict(current)
+        for key in tuple(document):
+            if key.startswith("submission_pending_"):
+                document.pop(key, None)
+        document["submission_pending_id"] = None
+        _replace_private_state(state_file, document)
+        return True
+    finally:
+        os.close(lock_descriptor)
+
+
+def _record_pending_broadcast_intent(
+    args: Any,
+    *,
+    attempt_id: str,
+    extrinsic_hash: str,
+    nonce: int,
+    era_reference_block: int,
+    mortal_period_blocks: int,
+    version_key: int,
+    wire_uids: list[int],
+    wire_weights: list[int],
+) -> None:
+    """Fsync the exact signed transaction before its irreversible submission.
+
+    The intent does not prove that a broadcast occurred and never authorizes a
+    retry. Its signed hash gives restart recovery one cryptographic transaction
+    identity to search for when the process dies after broadcast but before a
+    canonical receipt is returned.
+    """
+    if (
+        re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
+        or _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None
+        or isinstance(nonce, bool)
+        or not isinstance(nonce, int)
+        or nonce < 0
+        or isinstance(era_reference_block, bool)
+        or not isinstance(era_reference_block, int)
+        or era_reference_block <= 0
+        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or isinstance(version_key, bool)
+        or not isinstance(version_key, int)
+        or version_key < 0
+        or not wire_uids
+        or len(wire_uids) != len(wire_weights)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in [*wire_uids, *wire_weights]
+        )
+    ):
+        raise wire.VectorError("pending broadcast intent is malformed")
+    _commit_pending_signed_attempt(
+        args,
+        attempt_id=attempt_id,
+        intent={
+            "extrinsic_hash": extrinsic_hash.lower(),
+            "nonce": nonce,
+            "era_reference_block": era_reference_block,
+            "mortal_period_blocks": mortal_period_blocks,
+            "version_key": version_key,
+            "wire_uids": wire_uids,
+            "wire_weights": wire_weights,
+        },
+    )
+
+
+def _record_pending_proof_status(
+    args: Any,
+    *,
+    attempt_id: str,
+    status: str,
+) -> None:
+    if status not in {PASS, FAIL, NOT_PROVEN}:
+        raise ValueError("pending proof status is invalid")
+    _write_state_fenced(
+        _submission_state_path(args),
+        {
+            "_record_receipt_for_submission_id": attempt_id,
+            "submission_pending_proof_status": status,
+            "submission_pending_proof_checked_at": _ms_iso_now(),
+        },
+    )
+
+
 def _finalize_common_submission(
     args: Any,
     *,
     attempt_id: str,
     submission: ChainSubmission,
+    version_key: int | None = None,
 ) -> None:
+    finalized_version_key = (
+        _weight_version_key() if version_key is None else version_key
+    )
+    pending = _read_state(_submission_state_path(args))
+    if (
+        pending.get("submission_pending_id") != attempt_id
+        or pending.get("submission_pending_phase") != "signed_intent"
+        or not isinstance(pending.get("submission_pending_broadcast_intent"), dict)
+    ):
+        raise ValueError("submission finalization has no matching exact signed intent")
+    pending_lane = pending.get("submission_pending_lane")
+    pending_identity = pending.get("submission_pending_identity")
+    pending_intent = pending.get("submission_pending_broadcast_intent")
+    try:
+        intent_hash = str(pending_intent["extrinsic_hash"]).lower()
+        intent_version_key = pending_intent["version_key"]
+        intent_wire_uids = list(pending_intent["wire_uids"])
+        intent_wire_weights = list(pending_intent["wire_weights"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "submission finalization has a malformed signed intent"
+        ) from exc
+    try:
+        pending_uid_weights = {
+            int(uid): float(weight) for uid, weight in pending_identity["uid_weights"]
+        }
+        pending_ordered = sorted(pending_uid_weights.items())
+        expected_wire_uids, expected_wire_weights = _wire_weights(
+            [uid for uid, _weight in pending_ordered],
+            [weight for _uid, weight in pending_ordered],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "submission finalization has a malformed reserved vector"
+        ) from exc
+    if (
+        pending_lane not in {"thin", "authority"}
+        or not isinstance(pending_identity, dict)
+        or not submission.success
+        or submission.finalized is not True
+        or not isinstance(submission.extrinsic_hash, str)
+        or _CHAIN_HASH_RE.fullmatch(submission.extrinsic_hash.lower()) is None
+        or submission.extrinsic_hash.lower() != intent_hash
+        or not isinstance(submission.block_hash, str)
+        or _CHAIN_HASH_RE.fullmatch(submission.block_hash.lower()) is None
+        or isinstance(submission.block_number, bool)
+        or not isinstance(submission.block_number, int)
+        or submission.block_number <= 0
+        or isinstance(intent_version_key, bool)
+        or not isinstance(intent_version_key, int)
+        or intent_version_key < 0
+        or intent_version_key != finalized_version_key
+        or not intent_wire_uids
+        or len(intent_wire_uids) != len(intent_wire_weights)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in [*intent_wire_uids, *intent_wire_weights]
+        )
+        or intent_wire_uids != expected_wire_uids
+        or intent_wire_weights != expected_wire_weights
+    ):
+        raise ValueError("submission finalization differs from its exact signed intent")
+    finalized_receipt = {
+        "extrinsic_hash": submission.extrinsic_hash.lower(),
+        "block_hash": submission.block_hash.lower(),
+        "block_number": submission.block_number,
+        "version_key": finalized_version_key,
+        "wire_uids": intent_wire_uids,
+        "wire_weights": intent_wire_weights,
+    }
     launch_updates: dict[str, Any] = {}
-    if bool(getattr(args, "require_full_provenance_for_broadcast", False)):
-        pending = _read_state(_submission_state_path(args))
+    launch_attempt = pending.get("submission_pending_launch_attempt")
+    if not isinstance(launch_attempt, bool):
+        raise ValueError("submission finalization has no durable launch marker")
+    if launch_attempt:
         launch_identity = pending.get("submission_pending_identity")
+        launch_intent = pending.get("submission_pending_broadcast_intent")
         if not isinstance(launch_identity, dict):
             raise ValueError("launch finalization has no exact pending identity")
+        if (
+            pending.get("submission_pending_phase") != "signed_intent"
+            or not isinstance(launch_intent, dict)
+            or not isinstance(launch_identity.get("uid_safety"), dict)
+        ):
+            raise ValueError(
+                "launch finalization has no signed intent or UID safety proof"
+            )
         launch_updates = {
             "submission_launch_status": "finalized",
             "submission_launch_attempt_id": attempt_id,
@@ -3698,7 +6346,9 @@ def _finalize_common_submission(
             "submission_launch_extrinsic_hash": submission.extrinsic_hash,
             "submission_launch_block_hash": submission.block_hash,
             "submission_launch_block_number": submission.block_number,
-            "submission_launch_version_key": _weight_version_key(),
+            "submission_launch_version_key": finalized_version_key,
+            "submission_launch_broadcast_intent": launch_intent,
+            "submission_launch_uid_safety": launch_identity["uid_safety"],
             "submission_continuous_enabled": False,
         }
     _write_state_fenced(
@@ -3710,10 +6360,944 @@ def _finalize_common_submission(
             "submission_extrinsic_hash": submission.extrinsic_hash,
             "submission_block_hash": submission.block_hash,
             "submission_block_number": submission.block_number,
-            "submission_version_key": _weight_version_key(),
+            "submission_version_key": finalized_version_key,
+            "submission_finalized_lane": pending_lane,
+            "submission_finalized_identity": pending_identity,
+            "submission_finalized_broadcast_intent": pending_intent,
+            "submission_finalized_receipt": finalized_receipt,
+            "submission_pending_proof_status": PASS,
             **launch_updates,
         },
     )
+
+
+def _recover_common_finalized_submission(
+    args: Any,
+    state: dict[str, Any],
+) -> RecoveredSubmission | RecoveredAuthoritySubmission | None:
+    """Mirror a proven common finalization after a lane-telemetry crash."""
+    attempt_id = state.get("submission_finalized_id")
+    lane = state.get("submission_finalized_lane")
+    identity = state.get("submission_finalized_identity")
+    intent = state.get("submission_finalized_broadcast_intent")
+    receipt = state.get("submission_finalized_receipt")
+    if attempt_id is None:
+        return None
+    if lane is None and identity is None and intent is None and receipt is None:
+        # Compatibility with finalized journals created before the explicit
+        # cross-file recovery record existed.
+        return None
+    history = state.get("submission_attempt_ids")
+    if (
+        not isinstance(attempt_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
+        or lane not in {"thin", "authority"}
+        or not isinstance(identity, dict)
+        or not isinstance(intent, dict)
+        or not isinstance(receipt, dict)
+        or not isinstance(history, list)
+        or attempt_id not in history
+        or state.get("submission_pending_id") is not None
+        or state.get("submission_active_lane") != lane
+        or state.get("submission_pending_lane") != lane
+        or state.get("submission_pending_phase") != "signed_intent"
+        or state.get("submission_pending_identity") != identity
+        or state.get("submission_pending_broadcast_intent") != intent
+        or state.get("submission_pending_proof_status") != PASS
+        or set(intent)
+        != {
+            "extrinsic_hash",
+            "nonce",
+            "era_reference_block",
+            "mortal_period_blocks",
+            "version_key",
+            "wire_uids",
+            "wire_weights",
+        }
+        or set(receipt)
+        != {
+            "extrinsic_hash",
+            "block_hash",
+            "block_number",
+            "version_key",
+            "wire_uids",
+            "wire_weights",
+        }
+    ):
+        raise _PostSignedSubmissionMismatch(
+            "finalized common submission recovery record is contradictory"
+        )
+    try:
+        extrinsic_hash = str(receipt["extrinsic_hash"]).lower()
+        block_hash = str(receipt["block_hash"]).lower()
+        block_number = receipt["block_number"]
+        version_key = receipt["version_key"]
+        wire_uids = list(receipt["wire_uids"])
+        wire_weights = list(receipt["wire_weights"])
+        intent_extrinsic_hash = str(intent["extrinsic_hash"]).lower()
+        intent_version_key = intent["version_key"]
+        intent_wire_uids = list(intent["wire_uids"])
+        intent_wire_weights = list(intent["wire_weights"])
+        intent_nonce = intent["nonce"]
+        intent_era_reference_block = intent["era_reference_block"]
+        intent_mortal_period_blocks = intent["mortal_period_blocks"]
+        uid_weights = {
+            int(uid): float(weight) for uid, weight in identity["uid_weights"]
+        }
+        uid_hotkeys = {int(uid): str(hotkey) for uid, hotkey in identity["uid_hotkeys"]}
+        ordered_weights = sorted(uid_weights.items())
+        expected_wire_uids, expected_wire_weights = _wire_weights(
+            [uid for uid, _weight in ordered_weights],
+            [weight for _uid, weight in ordered_weights],
+        )
+        burn_hotkey = str(identity["burn_hotkey"])
+        burn_uid = next(
+            uid for uid, hotkey in uid_hotkeys.items() if hotkey == burn_hotkey
+        )
+        burn_share = uid_weights[burn_uid]
+    except (KeyError, StopIteration, TypeError, ValueError) as exc:
+        raise _PostSignedSubmissionMismatch(
+            "finalized common submission identity or receipt is malformed"
+        ) from exc
+    if (
+        identity.get("network") != "finney"
+        or identity.get("netuid") != 39
+        or state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
+        or identity.get("validator_hotkey") != state.get("submission_validator_hotkey")
+        or intent_era_reference_block != identity.get("mapping_block")
+        or set(uid_hotkeys) != set(uid_weights)
+        or list(uid_hotkeys.values()).count(burn_hotkey) != 1
+        or not math.isfinite(burn_share)
+        or burn_share < 0.0
+        or _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None
+        or _CHAIN_HASH_RE.fullmatch(block_hash) is None
+        or isinstance(block_number, bool)
+        or not isinstance(block_number, int)
+        or block_number <= 0
+        or isinstance(version_key, bool)
+        or not isinstance(version_key, int)
+        or version_key < 0
+        or isinstance(intent_nonce, bool)
+        or not isinstance(intent_nonce, int)
+        or intent_nonce < 0
+        or isinstance(intent_era_reference_block, bool)
+        or not isinstance(intent_era_reference_block, int)
+        or intent_era_reference_block <= 0
+        or intent_mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or isinstance(intent_version_key, bool)
+        or not isinstance(intent_version_key, int)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in [
+                *wire_uids,
+                *wire_weights,
+                *intent_wire_uids,
+                *intent_wire_weights,
+            ]
+        )
+        or extrinsic_hash != intent_extrinsic_hash
+        or version_key != intent_version_key
+        or wire_uids != intent_wire_uids
+        or wire_weights != intent_wire_weights
+        or wire_uids != expected_wire_uids
+        or wire_weights != expected_wire_weights
+        or state.get("submission_extrinsic_hash") != extrinsic_hash
+        or state.get("submission_block_hash") != block_hash
+        or state.get("submission_block_number") != block_number
+        or state.get("submission_version_key") != version_key
+    ):
+        raise _PostSignedSubmissionMismatch(
+            "finalized common submission does not match its durable identity"
+        )
+
+    lane_state_path = Path(args.state_file)
+    try:
+        lane_state = _read_state(lane_state_path)
+    except ValueError as exc:
+        raise _PostSignedSubmissionMismatch(
+            "finalized common submission contradicts its lane state"
+        ) from exc
+    except OSError as exc:
+        raise _PendingReceiptNotProven(
+            "finalized common submission is proven, but its lane state is "
+            "temporarily unavailable"
+        ) from exc
+    finalized_at = _ms_iso_now()
+    dedup_identity = {
+        key: value
+        for key, value in identity.items()
+        if key not in {"mapping_block", "uid_safety"}
+    }
+    if lane == "thin":
+        try:
+            policy_version = int(identity["policy_version"])
+            vector_id = str(identity["vector_id"])
+            signed_vector_sha256 = str(identity["signed_vector_sha256"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _PostSignedSubmissionMismatch(
+                "finalized common thin identity is malformed"
+            ) from exc
+        if (
+            policy_version < 0
+            or not vector_id
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", signed_vector_sha256) is None
+        ):
+            raise _PostSignedSubmissionMismatch(
+                "finalized common thin identity is malformed"
+            )
+        mirrored = bool(
+            lane_state.get("thin_submission_attempt_status") == "finalized"
+            and lane_state.get("thin_submission_finalized_id") == attempt_id
+            and lane_state.get("thin_submission_identity") == identity
+            and lane_state.get("thin_submission_extrinsic_hash") == extrinsic_hash
+            and lane_state.get("thin_submission_block_hash") == block_hash
+            and lane_state.get("thin_submission_block_number") == block_number
+            and lane_state.get("last_accepted_policy_version") == policy_version
+            and lane_state.get("last_vector_id") == vector_id
+        )
+        if mirrored:
+            return None
+        if (
+            lane_state.get("thin_submission_attempt_id") == attempt_id
+            or lane_state.get("thin_submission_finalized_id") == attempt_id
+        ):
+            raise _PostSignedSubmissionMismatch(
+                "finalized common thin submission contradicts its lane mirror"
+            )
+        try:
+            _write_state_fenced(
+                lane_state_path,
+                {
+                    "highest_attempted_policy_version": policy_version,
+                    "thin_submission_attempt_id": attempt_id,
+                    "thin_submission_attempt_status": "finalized",
+                    "thin_submission_finalized_id": attempt_id,
+                    "thin_submission_finalized_at": finalized_at,
+                    "thin_submission_extrinsic_hash": extrinsic_hash,
+                    "thin_submission_block_hash": block_hash,
+                    "thin_submission_block_number": block_number,
+                    "thin_submission_identity": identity,
+                    "thin_submission_dedup_identity": dedup_identity,
+                    "last_accepted_policy_version": policy_version,
+                    "last_vector_id": vector_id,
+                    "accepted_at": finalized_at,
+                    "thin_recovered_policy_version": policy_version,
+                    "thin_recovered_vector_id": vector_id,
+                    "thin_recovered_signed_vector_sha256": signed_vector_sha256,
+                },
+            )
+        except ValueError as exc:
+            raise _PostSignedSubmissionMismatch(
+                "finalized common thin submission contradicts its lane state"
+            ) from exc
+        except OSError as exc:
+            raise _PendingReceiptNotProven(
+                "finalized common thin submission is proven, but its lane mirror "
+                "could not be persisted"
+            ) from exc
+        return RecoveredSubmission(
+            attempt_id=attempt_id,
+            policy_version=policy_version,
+            vector_id=vector_id,
+            signed_vector_sha256=signed_vector_sha256,
+            uid_weights=tuple(sorted(uid_weights.items())),
+            burn_uid=burn_uid,
+            burn_share=burn_share,
+            extrinsic_hash=extrinsic_hash,
+            block_hash=block_hash,
+            block_number=block_number,
+        )
+
+    try:
+        source_epoch = int(identity["source_epoch"])
+        report_id = str(identity["report_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _PostSignedSubmissionMismatch(
+            "finalized common FULL identity is malformed"
+        ) from exc
+    if source_epoch < 0 or re.fullmatch(r"sha256:[0-9a-f]{64}", report_id) is None:
+        raise _PostSignedSubmissionMismatch(
+            "finalized common FULL identity is malformed"
+        )
+    mirrored = bool(
+        lane_state.get("authority_submission_attempt_status") == "finalized"
+        and lane_state.get("authority_submission_finalized_id") == attempt_id
+        and lane_state.get("authority_submission_identity") == identity
+        and lane_state.get("authority_submission_extrinsic_hash") == extrinsic_hash
+        and lane_state.get("authority_submission_block_hash") == block_hash
+        and lane_state.get("authority_submission_block_number") == block_number
+    )
+    if mirrored:
+        return None
+    if (
+        lane_state.get("authority_submission_attempt_id") == attempt_id
+        or lane_state.get("authority_submission_finalized_id") == attempt_id
+    ):
+        raise _PostSignedSubmissionMismatch(
+            "finalized common FULL submission contradicts its lane mirror"
+        )
+    try:
+        _write_state_fenced(
+            lane_state_path,
+            {
+                "authority_submission_attempt_id": attempt_id,
+                "authority_submission_attempt_status": "finalized",
+                "authority_submission_attempted_at": finalized_at,
+                "authority_submission_identity": identity,
+                "authority_submission_dedup_identity": dedup_identity,
+                "authority_submission_finalized_id": attempt_id,
+                "authority_submission_finalized_at": finalized_at,
+                "authority_submission_extrinsic_hash": extrinsic_hash,
+                "authority_submission_block_hash": block_hash,
+                "authority_submission_block_number": block_number,
+            },
+        )
+    except ValueError as exc:
+        raise _PostSignedSubmissionMismatch(
+            "finalized common FULL submission contradicts its lane state"
+        ) from exc
+    except OSError as exc:
+        raise _PendingReceiptNotProven(
+            "finalized common FULL submission is proven, but its lane mirror "
+            "could not be persisted"
+        ) from exc
+    return RecoveredAuthoritySubmission(
+        attempt_id=attempt_id,
+        source_epoch=source_epoch,
+        report_id=report_id,
+        uid_weights=tuple(sorted(uid_weights.items())),
+        burn_uid=burn_uid,
+        burn_share=burn_share,
+        extrinsic_hash=extrinsic_hash,
+        block_hash=block_hash,
+        block_number=block_number,
+    )
+
+
+def _policy_from_submission_identity(identity: dict[str, Any]) -> InclusionPolicy:
+    raw = identity.get("inclusion_policy")
+    if not isinstance(raw, dict):
+        raise wire.VectorError("pending submission has no inclusion policy")
+    try:
+        policy = InclusionPolicy(
+            valid_from_block=int(raw["valid_from_block"]),
+            valid_until_block=int(raw["valid_until_block"]),
+            valid_from_time=wire._parse_canonical_utc(
+                raw["valid_from_time"],
+                field="pending inclusion valid_from_time",
+            ),
+            valid_until_time=wire._parse_canonical_utc(
+                raw["valid_until_time"],
+                field="pending inclusion valid_until_time",
+            ),
+            require_commit_reveal_disabled=raw["require_commit_reveal_disabled"],
+            mortal_period_blocks=int(raw["mortal_period_blocks"]),
+            expected_next_epoch_start_block=int(raw["expected_next_epoch_start_block"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise wire.VectorError("pending inclusion policy is malformed") from exc
+    if (
+        not isinstance(policy.require_commit_reveal_disabled, bool)
+        or identity.get("next_epoch_start_block")
+        != policy.expected_next_epoch_start_block
+    ):
+        raise wire.VectorError("pending inclusion policy identity is inconsistent")
+    return policy
+
+
+def _locate_pending_broadcast_receipt(
+    subtensor: Any,
+    *,
+    extrinsic_hash: str,
+    era_reference_block: int,
+    mortal_period_blocks: int,
+    validator_hotkey: str,
+    netuid: int,
+    version_key: int,
+    wire_uids: list[int],
+    wire_weights: list[int],
+    inclusion_policy: InclusionPolicy,
+) -> tuple[str, ChainSubmission | None]:
+    """Find the pre-journaled signed transaction after a crash hid its receipt.
+
+    The search is limited to the four blocks authorized by the durable mortal
+    inclusion policy and matches the signed hash, signer, and decoded call. It
+    does not sign or submit anything.
+    """
+    substrate = getattr(subtensor, "substrate", None)
+    if (
+        substrate is None
+        or _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None
+        or isinstance(era_reference_block, bool)
+        or not isinstance(era_reference_block, int)
+        or era_reference_block <= 0
+        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+    ):
+        return NOT_PROVEN, None
+    matches: list[ChainSubmission] = []
+    try:
+        finalized_hash = str(substrate.get_chain_finalised_head())
+        finalized_number = int(substrate.get_block_number(finalized_hash))
+        canonical_finalized_hash = str(substrate.get_block_hash(finalized_number))
+        if (
+            _CHAIN_HASH_RE.fullmatch(finalized_hash) is None
+            or canonical_finalized_hash.lower() != finalized_hash.lower()
+        ):
+            return NOT_PROVEN, None
+        search_from = max(
+            inclusion_policy.valid_from_block,
+            era_reference_block,
+        )
+        search_until = min(
+            inclusion_policy.valid_until_block,
+            era_reference_block + mortal_period_blocks,
+        )
+        if search_from >= search_until:
+            return FAIL, None
+        for block_number in range(search_from, search_until):
+            if block_number > finalized_number:
+                continue
+            block_hash = str(substrate.get_block_hash(block_number))
+            if _CHAIN_HASH_RE.fullmatch(block_hash) is None:
+                return NOT_PROVEN, None
+            block = substrate.get_block(block_hash=block_hash)
+            if not isinstance(block, dict) or not isinstance(
+                block.get("extrinsics"), (list, tuple)
+            ):
+                return NOT_PROVEN, None
+            for item in block["extrinsics"]:
+                observed = getattr(item, "value", None)
+                if not isinstance(observed, dict):
+                    continue
+                observed_hash = str(observed.get("extrinsic_hash", "")).lower()
+                if observed_hash != extrinsic_hash.lower():
+                    continue
+                call = observed.get("call") or {}
+                exact_call = (
+                    observed.get("address") == validator_hotkey
+                    and call.get("call_module") == "SubtensorModule"
+                    and call.get("call_function") == "set_mechanism_weights"
+                    and _chain_call_arg(call, "netuid") == netuid
+                    and _chain_call_arg(call, "mecid") == 0
+                    and _chain_call_arg(call, "version_key") == version_key
+                    and _chain_call_arg(call, "dests") == wire_uids
+                    and _chain_call_arg(call, "weights") == wire_weights
+                )
+                if not exact_call:
+                    return FAIL, None
+                matches.append(
+                    ChainSubmission(
+                        success=True,
+                        extrinsic_hash=extrinsic_hash.lower(),
+                        block_hash=block_hash,
+                        block_number=block_number,
+                        finalized=True,
+                    )
+                )
+    except Exception:  # noqa: BLE001 - archive/RPC unavailability is inconclusive
+        return NOT_PROVEN, None
+    if len(matches) > 1:
+        return FAIL, None
+    if not matches:
+        if finalized_number >= search_until - 1:
+            # Every block in the complete authorized mortal era was fetched
+            # successfully from one reverse-checked finalized chain. Absence is
+            # now terminal rather than an RPC gap: the signed transaction can no
+            # longer be included, so restart recovery may retire only this exact
+            # attempt without authorizing it again.
+            return EXPIRED_WITHOUT_INCLUSION, None
+        return NOT_PROVEN, None
+    return PASS, matches[0]
+
+
+def _expire_pending_common_submission(args: Any, *, attempt_id: str) -> None:
+    """Retire one exhaustively absent signed attempt without erasing its budget.
+
+    This transition is valid only after the complete mortal era has been
+    finalized and read without an exact inclusion. It clears the ambiguity
+    fence, but deliberately retains the signed-attempt, authorization-budget,
+    policy/source high-water, and launch histories. The same attempt therefore
+    remains permanently ineligible while a distinct later attempt still needs
+    its own fresh vector/evidence and signed authorization.
+    """
+    import fcntl
+
+    state_file = _submission_state_path(args)
+    state_directory = _open_private_state_dir(state_file.parent)
+    os.close(state_directory)
+    lock_descriptor = _open_private_lock(state_file.with_suffix(".lock"))
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        current = _read_state(state_file)
+        if (
+            current.get("submission_pending_id") != attempt_id
+            or current.get("submission_pending_phase") != "signed_intent"
+            or not isinstance(current.get("submission_pending_broadcast_intent"), dict)
+            or current.get("submission_pending_receipt_candidate") is not None
+        ):
+            raise ValueError(
+                "expired submission does not match one receipt-free signed intent"
+            )
+        history = current.get("submission_attempt_ids")
+        budgets = current.get("submission_attempt_budgets")
+        if (
+            not isinstance(history, list)
+            or attempt_id not in history
+            or not isinstance(budgets, dict)
+        ):
+            raise ValueError(
+                "expired submission has no retained attempt or budget history"
+            )
+        terminal_attempts = current.get("submission_expired_attempts", [])
+        if not isinstance(terminal_attempts, list) or any(
+            not isinstance(item, dict) for item in terminal_attempts
+        ):
+            raise ValueError("expired submission history is malformed")
+        if any(item.get("attempt_id") == attempt_id for item in terminal_attempts):
+            raise ValueError("expired submission was already retired")
+
+        lane = current.get("submission_pending_lane")
+        identity = current.get("submission_pending_identity")
+        intent = current.get("submission_pending_broadcast_intent")
+        launch_attempt = current.get("submission_pending_launch_attempt")
+        if (
+            lane not in {"thin", "authority"}
+            or not isinstance(identity, dict)
+            or not isinstance(launch_attempt, bool)
+        ):
+            raise ValueError("expired submission identity is malformed")
+        expired_at = _ms_iso_now()
+        terminal = {
+            "attempt_id": attempt_id,
+            "status": EXPIRED_WITHOUT_INCLUSION,
+            "expired_at": expired_at,
+            "lane": lane,
+            "identity": identity,
+            "broadcast_intent": intent,
+        }
+        document = dict(current)
+        for key in tuple(document):
+            if key.startswith("submission_pending_"):
+                document.pop(key, None)
+        document.update(
+            {
+                "submission_pending_id": None,
+                "submission_expired_status": EXPIRED_WITHOUT_INCLUSION,
+                "submission_expired_id": attempt_id,
+                "submission_expired_at": expired_at,
+                "submission_expired_lane": lane,
+                "submission_expired_identity": identity,
+                "submission_expired_broadcast_intent": intent,
+                "submission_expired_attempts": [*terminal_attempts, terminal],
+            }
+        )
+        if launch_attempt:
+            document.update(
+                {
+                    "submission_launch_status": EXPIRED_WITHOUT_INCLUSION,
+                    "submission_launch_attempt_id": attempt_id,
+                    "submission_launch_identity": identity,
+                    "submission_launch_broadcast_intent": intent,
+                    "submission_continuous_enabled": False,
+                }
+            )
+        _replace_private_state(state_file, document)
+    finally:
+        os.close(lock_descriptor)
+
+
+def _recover_pending_launch_receipt(
+    args: Any,
+) -> RecoveredSubmission | RecoveredAuthoritySubmission | None:
+    """Re-prove and finalize one journaled thin or FULL receipt without writing.
+
+    This runs before every profile tick. ``None`` means there is no pending
+    submission. A positive historical mismatch or unavailable archive remains
+    fenced and exits nonzero; recovery never signs or submits.
+    """
+    if not bool(getattr(args, "broadcast", False)) or bool(
+        getattr(args, "offline", False)
+    ):
+        return None
+    try:
+        _prepare_tick_preflight(args)
+    except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
+        raise
+    except Exception as exc:
+        raise _PendingReceiptNotProven(
+            "pending receipt recovery chain preflight is temporarily unavailable"
+        ) from exc
+    recovery_lock = _pending_recovery_tick_lock(args)
+    recovery_lock.__enter__()
+    try:
+        state_path = _submission_state_path(args)
+        state = _read_state(state_path)
+        attempt_id = state.get("submission_pending_id")
+        if attempt_id is None:
+            return _recover_common_finalized_submission(args, state)
+        pending_lane = state.get("submission_pending_lane")
+        if (
+            not isinstance(attempt_id, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
+            or pending_lane not in {"thin", "authority"}
+        ):
+            raise wire.VectorError("pending submission journal is malformed")
+        pending_phase = state.get("submission_pending_phase")
+        if pending_phase == "unsigned_reserved":
+            if not _abort_unsigned_common_submission(args, attempt_id=attempt_id):
+                raise wire.VectorError(
+                    "unsigned reservation changed while restart recovery held the "
+                    "submission lock"
+                )
+            _lifecycle(
+                "CHAIN reservation released",
+                f"attempt_id={attempt_id} signed=false broadcast=false",
+            )
+            return None
+        if pending_phase != "signed_intent":
+            raise wire.VectorError(
+                "pending submission journal has no recognized unsigned or signed phase"
+            )
+        if state.get("submission_pending_proof_status") == FAIL:
+            raise _PostSignedSubmissionMismatch(
+                "pending submission has a positive historical proof mismatch; "
+                "automatic recovery is forbidden"
+            )
+        identity = state.get("submission_pending_identity")
+        candidate = state.get("submission_pending_receipt_candidate")
+        if not isinstance(identity, dict):
+            raise wire.VectorError(
+                "pending submission has no complete submission identity"
+            )
+        preflight = getattr(args, "_tick_preflight", None)
+        if not isinstance(preflight, ChainPreflight):
+            raise _PendingReceiptNotProven(
+                "pending submission recovery has no available chain preflight"
+            )
+        try:
+            uid_weights = {
+                int(uid): float(weight) for uid, weight in identity["uid_weights"]
+            }
+            uid_hotkeys = {
+                int(uid): str(hotkey) for uid, hotkey in identity["uid_hotkeys"]
+            }
+            ordered = sorted(uid_weights.items())
+            expected_wire_uids, expected_wire_weights = _wire_weights(
+                [uid for uid, _weight in ordered],
+                [weight for _uid, weight in ordered],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise wire.VectorError("pending submission identity is malformed") from exc
+        inclusion_policy = _policy_from_submission_identity(identity)
+        intent = state.get("submission_pending_broadcast_intent")
+        if not isinstance(intent, dict):
+            raise wire.VectorError(
+                "pending submission predates its exact signed broadcast intent; "
+                "refusing any retry"
+            )
+        try:
+            intent_extrinsic_hash = str(intent["extrinsic_hash"]).lower()
+            intent_nonce = intent["nonce"]
+            intent_era_reference_block = intent["era_reference_block"]
+            intent_mortal_period = intent["mortal_period_blocks"]
+            version_key = intent["version_key"]
+            wire_uids = list(intent["wire_uids"])
+            wire_weights = list(intent["wire_weights"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise wire.VectorError(
+                "pending signed broadcast intent is malformed"
+            ) from exc
+        if (
+            _CHAIN_HASH_RE.fullmatch(intent_extrinsic_hash) is None
+            or isinstance(intent_nonce, bool)
+            or not isinstance(intent_nonce, int)
+            or intent_nonce < 0
+            or isinstance(intent_era_reference_block, bool)
+            or not isinstance(intent_era_reference_block, int)
+            or intent_era_reference_block != identity.get("mapping_block")
+            or isinstance(intent_mortal_period, bool)
+            or not isinstance(intent_mortal_period, int)
+            or intent_mortal_period != inclusion_policy.mortal_period_blocks
+            or intent_mortal_period != SN39_MORTAL_PERIOD_BLOCKS
+            or isinstance(version_key, bool)
+            or not isinstance(version_key, int)
+            or version_key < 0
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in [*wire_uids, *wire_weights]
+            )
+            or wire_uids != expected_wire_uids
+            or wire_weights != expected_wire_weights
+        ):
+            raise wire.VectorError(
+                "pending signed broadcast intent differs from its reserved vector "
+                "or inclusion policy"
+            )
+        if not isinstance(candidate, dict):
+            locate_status, located = _locate_pending_broadcast_receipt(
+                preflight.subtensor,
+                extrinsic_hash=intent_extrinsic_hash,
+                era_reference_block=intent_era_reference_block,
+                mortal_period_blocks=intent_mortal_period,
+                validator_hotkey=preflight.validator_hotkey,
+                netuid=39,
+                version_key=version_key,
+                wire_uids=wire_uids,
+                wire_weights=wire_weights,
+                inclusion_policy=inclusion_policy,
+            )
+            if locate_status == EXPIRED_WITHOUT_INCLUSION and located is None:
+                _expire_pending_common_submission(args, attempt_id=attempt_id)
+                _lifecycle(
+                    "CHAIN expired",
+                    f"attempt_id={attempt_id} included=false resubmitted=false",
+                )
+                return None
+            _record_pending_proof_status(
+                args,
+                attempt_id=attempt_id,
+                status=locate_status,
+            )
+            if locate_status == FAIL:
+                raise _PostSignedSubmissionMismatch(
+                    "pending broadcast recovery found conflicting historical "
+                    "calls; operator investigation is required"
+                )
+            if locate_status == NOT_PROVEN or located is None:
+                raise _PendingReceiptNotProven(
+                    "pending broadcast has no unique finalized exact transaction "
+                    "in its authorized block window; no second chain write was "
+                    "attempted"
+                )
+            _record_pending_submission_receipt(
+                args,
+                attempt_id=attempt_id,
+                submission=located,
+                version_key=version_key,
+                wire_uids=wire_uids,
+                wire_weights=wire_weights,
+            )
+            candidate = {
+                "extrinsic_hash": located.extrinsic_hash,
+                "block_hash": located.block_hash,
+                "block_number": located.block_number,
+                "version_key": version_key,
+                "wire_uids": wire_uids,
+                "wire_weights": wire_weights,
+            }
+        try:
+            extrinsic_hash = str(candidate["extrinsic_hash"])
+            block_hash = str(candidate["block_hash"])
+            block_number = int(candidate["block_number"])
+            version_key = int(candidate["version_key"])
+            wire_uids = [int(value) for value in candidate["wire_uids"]]
+            wire_weights = [int(value) for value in candidate["wire_weights"]]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise wire.VectorError("pending receipt candidate is malformed") from exc
+        if (
+            identity.get("network") != "finney"
+            or identity.get("netuid") != 39
+            or identity.get("validator_hotkey") != preflight.validator_hotkey
+            or state.get("submission_genesis_hash") != preflight.genesis_hash
+            or _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None
+            or extrinsic_hash.lower() != intent_extrinsic_hash
+            or _CHAIN_HASH_RE.fullmatch(block_hash) is None
+            or block_number <= 0
+            or wire_uids != expected_wire_uids
+            or wire_weights != expected_wire_weights
+            or set(uid_hotkeys) != set(uid_weights)
+        ):
+            raise wire.VectorError(
+                "pending receipt differs from its reserved vector or chain identity"
+            )
+        try:
+            with _chain_operation_deadline(
+                "pending launch receipt recovery",
+                CHAIN_OPERATION_DEADLINE_SECS,
+            ):
+                proof_status = _classify_finalized_receipt(
+                    preflight.subtensor,
+                    receipt=None,
+                    extrinsic_hash=extrinsic_hash,
+                    block_hash=block_hash,
+                    block_number=block_number,
+                    validator_hotkey=preflight.validator_hotkey,
+                    netuid=39,
+                    version_key=version_key,
+                    wire_uids=wire_uids,
+                    wire_weights=wire_weights,
+                    uid_hotkeys=uid_hotkeys,
+                    expected_subnet_owner_hotkey=str(identity.get("burn_hotkey") or ""),
+                    inclusion_policy=inclusion_policy,
+                    require_receipt=False,
+                )
+        except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
+            raise
+        except Exception as exc:
+            raise _PendingReceiptNotProven(
+                "pending receipt archive proof is temporarily unavailable"
+            ) from exc
+        _record_pending_proof_status(
+            args,
+            attempt_id=attempt_id,
+            status=proof_status,
+        )
+        if proof_status == NOT_PROVEN:
+            raise _PendingReceiptNotProven(
+                "pending receipt is still not provable from the archive; "
+                "no second chain write was attempted"
+            )
+        if proof_status == FAIL:
+            raise _PostSignedSubmissionMismatch(
+                "pending receipt positively mismatches its historical "
+                "inclusion contract; operator investigation is required"
+            )
+        submission = ChainSubmission(
+            success=True,
+            extrinsic_hash=extrinsic_hash,
+            block_hash=block_hash,
+            block_number=block_number,
+            finalized=True,
+        )
+        _finalize_common_submission(
+            args,
+            attempt_id=attempt_id,
+            submission=submission,
+            version_key=version_key,
+        )
+        try:
+            burn_hotkey = str(identity["burn_hotkey"])
+            burn_uid = next(
+                uid for uid, hotkey in uid_hotkeys.items() if hotkey == burn_hotkey
+            )
+            burn_share = float(uid_weights[burn_uid])
+        except (KeyError, StopIteration, TypeError, ValueError) as exc:
+            raise wire.VectorError(
+                "recovered submission has no exact burn identity"
+            ) from exc
+        if not math.isfinite(burn_share) or burn_share < 0.0:
+            raise wire.VectorError("recovered submission identity is malformed")
+        lane_state_path = Path(args.state_file)
+        lane_state = _read_state(lane_state_path)
+        if pending_lane == "thin":
+            try:
+                policy_version = int(identity["policy_version"])
+                vector_id = str(identity["vector_id"])
+                signed_vector_sha256 = str(identity["signed_vector_sha256"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise wire.VectorError(
+                    "recovered thin submission has no exact policy/vector identity"
+                ) from exc
+            if (
+                policy_version < 0
+                or not vector_id
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", signed_vector_sha256) is None
+            ):
+                raise wire.VectorError("recovered thin identity is malformed")
+            lane_updates = {
+                "thin_submission_attempt_status": "finalized",
+                "thin_submission_finalized_id": attempt_id,
+                "thin_submission_finalized_at": _ms_iso_now(),
+                "thin_submission_extrinsic_hash": extrinsic_hash,
+                "thin_submission_block_hash": block_hash,
+                "thin_submission_block_number": block_number,
+                "last_accepted_policy_version": policy_version,
+                "last_vector_id": vector_id,
+                "accepted_at": _ms_iso_now(),
+                "thin_recovered_policy_version": policy_version,
+                "thin_recovered_vector_id": vector_id,
+                "thin_recovered_signed_vector_sha256": signed_vector_sha256,
+            }
+            if lane_state.get("thin_submission_attempt_id") == attempt_id:
+                _write_state(lane_state_path, lane_updates)
+            else:
+                _write_state_fenced(
+                    lane_state_path,
+                    {
+                        "highest_attempted_policy_version": policy_version,
+                        "thin_submission_attempt_id": attempt_id,
+                        "thin_submission_attempted_at": _ms_iso_now(),
+                        "thin_submission_identity": identity,
+                        **lane_updates,
+                    },
+                )
+            recovered: RecoveredSubmission | RecoveredAuthoritySubmission = (
+                RecoveredSubmission(
+                    attempt_id=attempt_id,
+                    policy_version=policy_version,
+                    vector_id=vector_id,
+                    signed_vector_sha256=signed_vector_sha256,
+                    uid_weights=tuple(sorted(uid_weights.items())),
+                    burn_uid=burn_uid,
+                    burn_share=burn_share,
+                    extrinsic_hash=extrinsic_hash,
+                    block_hash=block_hash,
+                    block_number=block_number,
+                )
+            )
+        else:
+            try:
+                source_epoch = int(identity["source_epoch"])
+                report_id = str(identity["report_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise wire.VectorError(
+                    "recovered FULL submission has no exact evidence identity"
+                ) from exc
+            if (
+                source_epoch < 0
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", report_id) is None
+            ):
+                raise wire.VectorError("recovered FULL identity is malformed")
+            dedup_identity = {
+                key: value
+                for key, value in identity.items()
+                if key not in {"mapping_block", "uid_safety"}
+            }
+            authority_updates = {
+                "authority_submission_attempt_id": attempt_id,
+                "authority_submission_attempt_status": "finalized",
+                "authority_submission_attempted_at": _ms_iso_now(),
+                "authority_submission_identity": identity,
+                "authority_submission_dedup_identity": dedup_identity,
+                "authority_submission_finalized_id": attempt_id,
+                "authority_submission_finalized_at": _ms_iso_now(),
+                "authority_submission_extrinsic_hash": extrinsic_hash,
+                "authority_submission_block_hash": block_hash,
+                "authority_submission_block_number": block_number,
+            }
+            if lane_state.get("authority_submission_attempt_id") == attempt_id:
+                _write_state(lane_state_path, authority_updates)
+            else:
+                _write_state_fenced(lane_state_path, authority_updates)
+            recovered = RecoveredAuthoritySubmission(
+                attempt_id=attempt_id,
+                source_epoch=source_epoch,
+                report_id=report_id,
+                uid_weights=tuple(sorted(uid_weights.items())),
+                burn_uid=burn_uid,
+                burn_share=burn_share,
+                extrinsic_hash=extrinsic_hash,
+                block_hash=block_hash,
+                block_number=block_number,
+            )
+        _lifecycle(
+            "CHAIN recovered",
+            f"extrinsic_hash={extrinsic_hash} block_number={block_number} "
+            "resubmitted=false",
+        )
+        return recovered
+    except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
+        raise
+    except OSError as exc:
+        raise _PendingReceiptNotProven(
+            "pending receipt recovery state is temporarily unavailable"
+        ) from exc
+    except Exception as exc:
+        raise _PostSignedSubmissionMismatch(
+            "pending receipt recovery found contradictory durable state"
+        ) from exc
+    finally:
+        recovery_lock.__exit__(*sys.exc_info())
 
 
 def _match_signed_public_release_to_launch(
@@ -3735,6 +7319,7 @@ def _match_signed_public_release_to_launch(
         release = public_result["release"]
         launch = release["launch_submission"]
         mapping = launch["mapping"]
+        broadcast_intent = launch["broadcast_intent"]
         snapshot = mapping["metagraph_snapshot"]
         extrinsic = launch["extrinsic"]
         checkpoint = launch["evidence_checkpoint"]
@@ -3748,16 +7333,24 @@ def _match_signed_public_release_to_launch(
         identity_uid_hotkeys = {
             int(uid): str(hotkey) for uid, hotkey in identity["uid_hotkeys"]
         }
+        snapshot_uids = [int(value) for value in snapshot["uids"]]
         snapshot_hotkeys = [str(value) for value in snapshot["hotkeys"]]
+        snapshot_uid_hotkeys = dict(zip(snapshot_uids, snapshot_hotkeys))
+        if len(snapshot_uids) != len(snapshot_hotkeys) or len(
+            snapshot_uid_hotkeys
+        ) != len(snapshot_uids):
+            raise ValueError("public launch metagraph snapshot is inconsistent")
         burn_uid = int(mapping["burn_uid"])
-        burn_hotkey = snapshot_hotkeys[burn_uid]
+        burn_hotkey = snapshot_uid_hotkeys[burn_uid]
         release_uid_hotkeys = {
-            uid: snapshot_hotkeys[uid] for uid in sorted(release_uid_weights)
+            uid: snapshot_uid_hotkeys[uid] for uid in sorted(release_uid_weights)
         }
         expected_uids, expected_weights = _wire_weights(
             sorted(identity_uid_weights),
             [identity_uid_weights[uid] for uid in sorted(identity_uid_weights)],
         )
+        if not isinstance(broadcast_intent, dict):
+            raise ValueError("public launch broadcast intent is malformed")
     except (IndexError, KeyError, TypeError, ValueError) as exc:
         raise wire.VectorError(
             "root-signed public launch evidence is malformed"
@@ -3777,6 +7370,10 @@ def _match_signed_public_release_to_launch(
         mapping.get("validator_hotkey") == identity.get("validator_hotkey"),
         mapping.get("validator_uid") == identity.get("validator_uid"),
         snapshot.get("block") == identity.get("mapping_block"),
+        mapping.get("next_epoch_start_block") == identity.get("next_epoch_start_block"),
+        mapping.get("uid_safety") == identity.get("uid_safety"),
+        mapping.get("uid_safety") == state.get("submission_launch_uid_safety"),
+        extrinsic.get("block", 0) < mapping.get("next_epoch_start_block", 0),
         burn_uid in release_uid_weights,
         burn_hotkey == identity.get("burn_hotkey"),
         release_uid_weights == identity_uid_weights,
@@ -3788,6 +7385,17 @@ def _match_signed_public_release_to_launch(
         extrinsic.get("uids") == expected_uids,
         extrinsic.get("weights_u16") == expected_weights,
         extrinsic.get("version_key") == state.get("submission_launch_version_key"),
+        broadcast_intent == state.get("submission_launch_broadcast_intent"),
+        broadcast_intent.get("extrinsic_hash") == extrinsic.get("hash"),
+        broadcast_intent.get("era_reference_block") == mapping.get("block"),
+        broadcast_intent.get("mortal_period_blocks") == SN39_MORTAL_PERIOD_BLOCKS,
+        broadcast_intent.get("version_key") == extrinsic.get("version_key"),
+        broadcast_intent.get("wire_uids") == extrinsic.get("uids"),
+        broadcast_intent.get("wire_weights") == extrinsic.get("weights_u16"),
+        broadcast_intent.get("era_reference_block", 0)
+        <= extrinsic.get("block", -1)
+        < broadcast_intent.get("era_reference_block", 0)
+        + broadcast_intent.get("mortal_period_blocks", 0),
         full.get("scope") == "rewarded_set_full",
         full.get("whole_epoch_assurance") in {"receipts_only", "full"},
         full.get("vector_agrees") is True,
@@ -3948,16 +7556,18 @@ def reconcile_launch_transition(args: Any) -> dict[str, Any]:
 
 
 def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
-    """Re-prove the external launch authorization before reservation.
+    """Re-prove launch history and a separate recurring authorization.
 
     The service account owns its crash-safety journal and therefore cannot
     authorize itself merely by editing journal fields.  The root-signed public
     release is re-verified under the shared submission lock before every
-    continuous reservation and must bind the exact local attempt, chain
-    receipt, and rewarded-set evidence checkpoint. The returned immutable
-    authorization is stored in the reservation; the lowest write boundary
-    validates it locally and performs no fallible network work after pending
-    state has been fsynced.
+    continuous reservation and must bind the exact historical launch attempt,
+    chain receipt, and rewarded-set evidence checkpoint. A second, short-lived,
+    root-controlled signed artifact must explicitly authorize recurring writes
+    for this release, signer, chain, lane, and bounded attempt count. The
+    returned immutable authorization is stored in the reservation; the lowest
+    write boundary rechecks its time/block scope without network work after
+    pending state has been fsynced.
     """
     state = _read_state(_submission_state_path(args))
     if state.get("submission_pending_id") is not None:
@@ -4025,12 +7635,60 @@ def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
         or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
     ):
         raise wire.VectorError("continuous launch attempt identity is malformed")
+    preflight = getattr(args, "_tick_preflight", None)
+    if (
+        not isinstance(preflight, ChainPreflight)
+        or preflight.block is None
+        or preflight.validator_hotkey != validator_hotkey
+        or preflight.genesis_hash != genesis_hash
+    ):
+        raise wire.VectorError(
+            "recurring authorization requires the current finalized signer snapshot"
+        )
+    lane = (
+        "authority"
+        if (getattr(args, "provenance", "shadow") or "shadow") == "authority"
+        else "thin"
+    )
+    try:
+        from scaffold import sn39_continuous_authorization as recurring
+
+        verified = recurring.verify_authorization(
+            expected={
+                "submission_journal": str(_submission_state_path(args)),
+                "genesis_hash": genesis_hash,
+                "validator_hotkey": validator_hotkey,
+                "launch_attempt_id": attempt_id,
+                "release_sha256": public_seal["release_sha256"],
+                "reproducer_revision": str(public_seal["reproducer_revision"]),
+                "not_before_time": state.get("submission_continuous_enabled_at"),
+            },
+            lane=lane,
+            finalized_block=preflight.block,
+        )
+    except Exception as exc:
+        raise wire.VectorError(
+            "separate root-signed recurring-write authorization is absent, "
+            "invalid, expired, exhausted in scope, or does not match this "
+            "release/runtime"
+        ) from exc
     return ContinuousAuthorization(
+        authorization_sha256=verified.authorization_sha256,
+        submission_journal=verified.submission_journal,
         launch_attempt_id=attempt_id,
         release_sha256=public_seal["release_sha256"],
         reproducer_revision=str(public_seal["reproducer_revision"]),
         validator_hotkey=validator_hotkey,
         genesis_hash=genesis_hash,
+        lanes=verified.lanes,
+        issued_at=verified.issued_at,
+        valid_from_time=verified.valid_from_time,
+        valid_until_time=verified.valid_until_time,
+        valid_from_block=verified.valid_from_block,
+        valid_until_block=verified.valid_until_block,
+        valid_from_nonce=verified.valid_from_nonce,
+        valid_until_nonce_exclusive=verified.valid_until_nonce_exclusive,
+        max_attempts=verified.max_attempts,
     )
 
 
@@ -4053,10 +7711,9 @@ def _continuous_transition_required(args: Any) -> bool:
 def _submission_tick_lock(args: Any, *, lane: str):
     """One non-blocking cross-process submission section for every mode.
 
-    Thin and FULL-authority processes must contend on the same file. Separate
-    per-lane locks permit both to reach the irreversible chain call and race
-    which vector lands last. Shadow audit work remains concurrent because it
-    never enters a submission tick on its own.
+    Thin and FULL-authority processes contend on the same file, so only one can
+    reach an irreversible chain call. Shadow audit work remains concurrent
+    because it never enters a submission tick on its own.
     """
     import fcntl
 
@@ -4089,6 +7746,30 @@ def _submission_tick_lock(args: Any, *, lane: str):
 def _thin_tick_lock(args: Any):
     with _submission_tick_lock(args, lane="thin"):
         yield
+
+
+@contextlib.contextmanager
+def _pending_recovery_tick_lock(args: Any):
+    """Classify lock acquisition/cleanup failure as unavailable proof.
+
+    Exceptions raised by the recovery body pass through unchanged so durable
+    contradictions can still be classified as positive failures below.
+    """
+    entered = False
+    body_completed = False
+    try:
+        with _thin_tick_lock(args):
+            entered = True
+            yield
+            body_completed = True
+    except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
+        raise
+    except Exception as exc:
+        if entered and not body_completed:
+            raise
+        raise _PendingReceiptNotProven(
+            "pending receipt recovery lock is temporarily unavailable"
+        ) from exc
 
 
 @contextlib.contextmanager
@@ -4145,8 +7826,23 @@ def _revalidate_authority_after_audit(
         burn_hotkey=getattr(args, "provenance_burn_hotkey", None),
         hotkey_to_uid=fresh.hotkey_to_uid,
     )
+    burn_uid = fresh.hotkey_to_uid.get(getattr(args, "provenance_burn_hotkey", None))
+    _require_no_validator_compute_reward(
+        uid_weights,
+        preflight=fresh,
+        burn_uid=burn_uid,
+    )
     _validate_chain_constraints(uid_weights, fresh)
     inclusion_policy = _authority_inclusion_policy(audit, fresh)
+    _require_uid_mapping_stability(
+        fresh,
+        {
+            uid: hotkey
+            for hotkey, uid in fresh.hotkey_to_uid.items()
+            if uid in uid_weights
+        },
+        mortal_period_blocks=inclusion_policy.mortal_period_blocks,
+    )
     args._tick_preflight = fresh
     return fresh, fresh.hotkey_to_uid, uid_weights, inclusion_policy
 
@@ -4296,7 +7992,17 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
                 for hotkey, uid in sorted(hk2uid.items(), key=lambda item: item[1])
                 if uid in uid_weights
             ],
+            "next_epoch_start_block": (preflight.next_epoch_start_block),
             "inclusion_policy": _inclusion_policy_identity(inclusion_policy),
+            "uid_safety": _require_uid_mapping_stability(
+                preflight,
+                {
+                    uid: hotkey
+                    for hotkey, uid in preflight.hotkey_to_uid.items()
+                    if uid in uid_weights
+                },
+                mortal_period_blocks=inclusion_policy.mortal_period_blocks,
+            ),
         }
         continuous_authorization = getattr(
             args, "_continuous_submission_authorization", None
@@ -4324,7 +8030,9 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
                 "refusing before submission"
             )
         dedup_identity = {
-            key: value for key, value in identity.items() if key != "mapping_block"
+            key: value
+            for key, value in identity.items()
+            if key not in {"mapping_block", "uid_safety"}
         }
         attempt_bytes = json.dumps(
             dedup_identity,
@@ -4339,16 +8047,6 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
                 lane="authority",
                 attempt_id=attempt_id,
                 identity=identity,
-            )
-            _write_state_fenced(
-                state_file,
-                {
-                    "authority_submission_attempt_id": attempt_id,
-                    "authority_submission_attempt_status": "pending",
-                    "authority_submission_attempted_at": _ms_iso_now(),
-                    "authority_submission_identity": identity,
-                    "authority_submission_dedup_identity": dedup_identity,
-                },
             )
         except (ValueError, OSError) as exc:
             raise wire.VectorError(
@@ -4375,13 +8073,22 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
         submission = _require_release_grade_submission(submission)
     ok = bool(submission)
     if ok and broadcast:
-        # The RPC waited for finalization. Persist the final identity before any
-        # event write/flush. If this write fails, the already-fsynced pending
-        # attempt above still blocks an unsafe automatic retry.
-        _write_state(
+        # The common journal is canonical for crash recovery. Finalize it before
+        # the lane-local telemetry file so a crash cannot strand a proven
+        # finalized extrinsic behind an unrecoverable common pending fence.
+        _finalize_common_submission(
+            args,
+            attempt_id=attempt_id,
+            submission=submission,
+        )
+        _write_state_fenced(
             state_file,
             {
+                "authority_submission_attempt_id": attempt_id,
                 "authority_submission_attempt_status": "finalized",
+                "authority_submission_attempted_at": _ms_iso_now(),
+                "authority_submission_identity": identity,
+                "authority_submission_dedup_identity": dedup_identity,
                 "authority_submission_finalized_id": attempt_id,
                 "authority_submission_finalized_at": _ms_iso_now(),
                 "authority_submission_extrinsic_hash": getattr(
@@ -4394,11 +8101,6 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
                     submission, "block_number", None
                 ),
             },
-        )
-        _finalize_common_submission(
-            args,
-            attempt_id=attempt_id,
-            submission=submission,
         )
     _get_events(args).event(
         "WEIGHTS_SUBMITTED" if (ok and broadcast) else "WEIGHTS_DRY_RUN",
@@ -4492,12 +8194,18 @@ def _validate_runtime_contract(args: Any) -> None:
     if max_submissions < 0:
         raise wire.VectorError("max_submissions must be nonnegative")
     launch_gate = bool(getattr(args, "require_full_provenance_for_broadcast", False))
+    launch_preflight = bool(getattr(args, "launch_preflight", False))
     sn39_broadcast = (
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
         and int(getattr(args, "netuid", -1)) == 39
     )
-    if sn39_broadcast:
+    sn39_launch_profile = (
+        int(getattr(args, "netuid", -1)) == 39
+        and not bool(getattr(args, "offline", False))
+        and (sn39_broadcast or launch_preflight)
+    )
+    if sn39_launch_profile:
         pinned = {
             "network": "finney",
             "publisher_url": SN39_PUBLISHER_URL,
@@ -4562,21 +8270,34 @@ def _validate_runtime_contract(args: Any) -> None:
         and Path(str(getattr(args, "provenance_verifier_binary", "")))
         == SN39_LAUNCH_VERIFIER_BINARY
     )
+    approval_path_match = (
+        Path(str(getattr(args, "launch_approval_file", "")))
+        == SN39_LAUNCH_APPROVAL_FILE
+    )
+    launch_action_matches = (
+        launch_preflight
+        and not bool(getattr(args, "broadcast", False))
+        or not launch_preflight
+        and bool(getattr(args, "broadcast", False))
+    )
     if (
-        not bool(getattr(args, "broadcast", False))
-        or bool(getattr(args, "offline", False))
+        bool(getattr(args, "offline", False))
         or not bool(getattr(args, "once", False))
         or max_submissions != 1
         or (getattr(args, "provenance", "shadow") or "shadow") != "shadow"
         or not launch_paths_match
+        or not approval_path_match
+        or not launch_action_matches
         or missing
     ):
         suffix = f"; missing {', '.join(missing)}" if missing else ""
         raise wire.VectorError(
-            "launch full-provenance broadcast requires online broadcast, --once, "
+            "launch full-provenance mode requires exactly one online action "
+            "(read-only preflight or approved broadcast), --once, "
             "provenance=shadow, max_submissions=1, controlled evidence, verifier "
-            f"binary, immutable launch paths, and burn hotkey{suffix}"
+            f"binary, immutable launch/approval paths, and burn hotkey{suffix}"
         )
+    _launch_release_config_identity(args)
 
 
 def run(args) -> int:
@@ -4585,13 +8306,16 @@ def run(args) -> int:
     the tick attributes (an argparse Namespace or a SimpleNamespace from the
     CLI's config loader)."""
     _validate_runtime_contract(args)
+    if bool(getattr(args, "require_full_provenance_for_broadcast", False)):
+        if bool(getattr(args, "launch_preflight", False)):
+            raise wire.VectorError(
+                "read-only launch preflight must use run_launch_preflight"
+            )
+        args._launch_approval = _load_launch_approval(args)
     require_policy = getattr(args, "require_policy", None)
     if require_policy:
         _lifecycle("PIN active", f"policy={require_policy}")
-    provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
-    submission_authority = (
-        "full_provenance" if provenance_mode == "authority" else "thin"
-    )
+    submission_authority, provenance_mode = _runtime_modes(args)
     _lifecycle(
         "MODE active",
         f"submission_authority={submission_authority} provenance={provenance_mode} "
@@ -4641,24 +8365,159 @@ def run(args) -> int:
             getattr(args, "require_full_provenance_for_broadcast", False)
         ),
     )
+    try:
+        recovered = _recover_pending_launch_receipt(args)
+    except _PostSignedSubmissionMismatch as exc:
+        print(f"pending receipt contradiction: {stable_error(exc)}")
+        _get_events(args).event(
+            "PENDING_RECEIPT_CONTRADICTION",
+            stage="result",
+            status=FAIL,
+            detail=str(exc)[:512],
+            remediation=(
+                "The exact signed attempt has a positive durable or historical "
+                "contradiction. Keep every writer stopped and inspect the journal "
+                "and named transaction; never submit a replacement."
+            ),
+        )
+        return 1
+    except _PendingReceiptNotProven as exc:
+        print(f"pending receipt not proven: {stable_error(exc)}")
+        _get_events(args).event(
+            "PENDING_RECEIPT_NOT_PROVEN",
+            stage="result",
+            status=NOT_PROVEN,
+            detail=str(exc)[:512],
+            remediation=(
+                "The exact signed attempt remains fenced. Wait for archive/RPC "
+                "proof and restart to re-prove it; never submit a replacement."
+            ),
+        )
+        return 1
+    if recovered:
+        event_fields: dict[str, Any] = {
+            "stage": "result",
+            "status": PASS,
+            "detail": recovered.boundary_detail,
+            "authority": (
+                "full_provenance"
+                if isinstance(recovered, RecoveredAuthoritySubmission)
+                else "thin"
+            ),
+            "uid_count": len(recovered.uid_weights),
+            "burn_uid": recovered.burn_uid,
+            "burn_share": recovered.burn_share,
+            "uid_weights": {str(uid): weight for uid, weight in recovered.uid_weights},
+            "extrinsic_hash": recovered.extrinsic_hash,
+            "block_hash": recovered.block_hash,
+            "block_number": recovered.block_number,
+        }
+        if isinstance(recovered, RecoveredAuthoritySubmission):
+            event_fields.update(
+                {
+                    "source_epoch": recovered.source_epoch,
+                    "report_id": recovered.report_id,
+                }
+            )
+        else:
+            event_fields.update(
+                {
+                    "vector_id": recovered.vector_id,
+                    "policy_version": recovered.policy_version,
+                    "signed_vector_sha256": recovered.signed_vector_sha256,
+                }
+            )
+        _get_events(args).event("PENDING_RECEIPT_RECOVERED", **event_fields)
+        if bool(getattr(args, "once", False)):
+            return 0
     while True:
         tick_ok = False
-        try:
-            tick_ok = tick(args)
-        except Exception as e:  # noqa: BLE001 - loop resilience; sanitized below
-            print(f"tick failed: {stable_error(e)}")
-            _get_events(args).event(
-                "TICK_FAILED",
-                stage="result",
-                status=FAIL,
-                detail=str(e)[:512],
-                remediation=(
-                    "The tick failed closed. If failure occurred after the "
-                    "chain call, a write may have finalized; inspect the "
-                    "durable attempt state and named extrinsic before operator "
-                    "recovery. Automatic same-attempt retry remains blocked."
-                ),
-            )
+        pre_sign_head_drift_retries = 0
+        while True:
+            try:
+                tick_ok = tick(args)
+                break
+            except _RetryablePreSignHeadDrift as e:
+                if pre_sign_head_drift_retries >= SN39_PRE_SIGN_HEAD_DRIFT_RETRIES:
+                    print(f"pre-sign head drift retry exhausted: {stable_error(e)}")
+                    _get_events(args).event(
+                        "PRE_SIGN_HEAD_DRIFT_RETRY_EXHAUSTED",
+                        stage="submit",
+                        status=FAIL,
+                        detail=str(e)[:512],
+                        remediation=(
+                            "No transaction was signed. Wait for the next normal "
+                            "tick, which will rebuild every chain, authorization, "
+                            "mapping, and evidence proof from a new finalized head."
+                        ),
+                    )
+                    break
+                pre_sign_head_drift_retries += 1
+                print(f"pre-sign head drift retry: {stable_error(e)}")
+                _get_events(args).event(
+                    "PRE_SIGN_HEAD_DRIFT_RETRY",
+                    stage="submit",
+                    status=NOT_PROVEN,
+                    detail=str(e)[:512],
+                    retry=pre_sign_head_drift_retries,
+                    retry_limit=SN39_PRE_SIGN_HEAD_DRIFT_RETRIES,
+                    remediation=(
+                        "The unsigned reservation was safely released. Rebuilding "
+                        "the complete tick from a fresh finalized head now."
+                    ),
+                )
+                # This exception can escape set_weights_on_chain only after its
+                # fsynced common journal proved that no signed intent, receipt,
+                # or broadcast exists. Calling tick again deliberately repeats
+                # preflight, recurring authorization, UID mapping, provenance,
+                # and inclusion-policy construction instead of reusing any
+                # mutable proof from the aborted attempt.
+                continue
+            except _PostSignedSubmissionMismatch as e:
+                print(f"pending receipt contradiction: {stable_error(e)}")
+                _get_events(args).event(
+                    "PENDING_RECEIPT_CONTRADICTION",
+                    stage="result",
+                    status=FAIL,
+                    detail=str(e)[:512],
+                    remediation=(
+                        "The exact signed attempt has a positive durable or "
+                        "historical contradiction. Keep every writer stopped and "
+                        "inspect the journal and named transaction; never submit "
+                        "a replacement."
+                    ),
+                )
+                return 1
+            except _PendingReceiptNotProven as e:
+                print(f"pending receipt not proven: {stable_error(e)}")
+                _get_events(args).event(
+                    "PENDING_RECEIPT_NOT_PROVEN",
+                    stage="result",
+                    status=NOT_PROVEN,
+                    detail=str(e)[:512],
+                    remediation=(
+                        "The exact signed attempt remains fenced. Wait for archive/RPC "
+                        "proof and restart to re-prove it; never submit a replacement."
+                    ),
+                )
+                # Restart enters the dedicated receipt-recovery path before any new
+                # tick can reserve or sign another submission.
+                return 1
+            except Exception as e:  # noqa: BLE001 - loop resilience; sanitized below
+                print(f"tick failed: {stable_error(e)}")
+                _get_events(args).event(
+                    "TICK_FAILED",
+                    stage="result",
+                    status=FAIL,
+                    detail=str(e)[:512],
+                    remediation=(
+                        "The tick failed closed. If failure occurred after the "
+                        "chain call, a write may have finalized; inspect the "
+                        "durable attempt state and named extrinsic before operator "
+                        "recovery. Automatic same-attempt retry remains blocked."
+                    ),
+                )
+                break
         if args.once:
             # A single run exits only after the background shadow audit's
             # outcome is captured and reported (bounded); a tick that ran
@@ -4725,7 +8584,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-submissions",
         type=int,
         default=int(os.environ.get("CATHEDRAL_VALIDATOR_MAX_SUBMISSIONS", "0")),
-        help="durable attempt ceiling; 0 means unlimited, launch canary requires 1",
+        help="optional local durable-attempt ceiling; 0 disables this extra "
+        "ceiling, but SN39 recurring writes still require a separately signed "
+        "bounded authorization; launch canary requires 1",
     )
     p.add_argument("--once", action="store_true", help="single tick, then exit")
     p.add_argument(

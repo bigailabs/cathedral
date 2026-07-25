@@ -47,6 +47,7 @@ verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
 [launch]
 require_full_provenance_for_broadcast = true
 require_completed_launch_for_broadcast = false
+approval_file = "/etc/cathedral/controlled/sn39-launch-approval.json"
 
 [logs]
 jsonl = "/var/log/cathedral-validator-launch/validator-events.jsonl"

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
 import os
@@ -19,6 +21,14 @@ PUBLIC_ROOT = Path("/var/lib/cathedral-public-evidence")
 LOG_ROOT = PUBLIC_ROOT / "logs"
 INDEX = PUBLIC_ROOT / "index.json"
 RELEASE = PUBLIC_ROOT / "release.json"
+RELEASE_SIGNATURE = PUBLIC_ROOT / "release.json.sig"
+RELEASE_KEYS = (
+    Path(__file__).resolve().parents[1]
+    / "config"
+    / "provenance"
+    / "release-attestation-keys.json"
+)
+RELEASE_KEY_ID = "cathedral-release-attestation-sn39-20260724"
 MAX_EVENTS = 200
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_EVENT_AGE_SECONDS = 2100
@@ -45,6 +55,9 @@ ALLOWED_EVENTS = frozenset(
         "PROVENANCE_STATE_WRITE_FAILED",
         "PROVENANCE_VECTOR_MISMATCH",
         "LAUNCH_REWARDED_SET_GATE_PASS",
+        "PENDING_RECEIPT_CONTRADICTION",
+        "PENDING_RECEIPT_NOT_PROVEN",
+        "PENDING_RECEIPT_RECOVERED",
         "TICK_FAILED",
         "VECTOR_ACCEPTED",
         "VECTOR_REJECTED",
@@ -65,6 +78,9 @@ EVENT_STATUS = {
     "PROVENANCE_STATE_WRITE_FAILED": "NOT_PROVEN",
     "PROVENANCE_VECTOR_MISMATCH": "FAIL",
     "LAUNCH_REWARDED_SET_GATE_PASS": "PASS",
+    "PENDING_RECEIPT_CONTRADICTION": "FAIL",
+    "PENDING_RECEIPT_NOT_PROVEN": "NOT_PROVEN",
+    "PENDING_RECEIPT_RECOVERED": "PASS",
     "TICK_FAILED": "FAIL",
     "VECTOR_ACCEPTED": "PASS",
     "VECTOR_REJECTED": "FAIL",
@@ -79,7 +95,21 @@ EVENT_REMEDIATION = {
     "PROVENANCE_STATE_WRITE_FAILED": "repair the validator-local state path; thin authority is unaffected",
     "PROVENANCE_VECTOR_MISMATCH": "keep thin authority and inspect the validator-local discrepancy log",
     "PROVENANCE_HEALTH_GATE_FAILED": "keep thin authority and inspect the validator-local provenance verdict",
-    "TICK_FAILED": "inspect the validator-local log; the chain retains the last vector",
+    "PENDING_RECEIPT_RECOVERED": (
+        "verify the published exact transaction proof; never retry the recovered attempt"
+    ),
+    "PENDING_RECEIPT_CONTRADICTION": (
+        "stop every writer and inspect the durable journal and named transaction; "
+        "never submit a replacement"
+    ),
+    "PENDING_RECEIPT_NOT_PROVEN": (
+        "wait for archive proof and restart to re-prove the exact fenced "
+        "transaction; never submit a replacement"
+    ),
+    "TICK_FAILED": (
+        "inspect the validator-local log and durable attempt journal; a named "
+        "extrinsic may have finalized and automatic retry remains blocked"
+    ),
     "VECTOR_REJECTED": "inspect the validator-local verification log; nothing was submitted",
 }
 ALLOWED_FIELDS = (
@@ -138,6 +168,18 @@ WEIGHT_DETAIL = re.compile(
     r"(?:burn_uid=(\d{1,5}) burn_share=(0(?:\.\d{1,12})?|1(?:\.0{1,12})?) )?"
     r"vector=([0-9:,.\-]{1,256})"
 )
+STARTUP_DETAIL = re.compile(
+    r"submission_authority=(thin|full_provenance) "
+    r"provenance=(off|shadow|authority) "
+    r"policy_pin=[^\s\x00-\x1f\x7f]{1,128} network=finney netuid=39"
+)
+STARTUP_MODE_PAIRS = frozenset(
+    {
+        ("thin", "off"),
+        ("thin", "shadow"),
+        ("full_provenance", "authority"),
+    }
+)
 SAFE_STAGE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 SAFE_MODES = frozenset({"thin", "full_provenance"})
 ALLOWED_RAW_STATUSES = {
@@ -172,7 +214,21 @@ def public_detail(event: str, raw: Any) -> str | None:
     """Convert private diagnostics into fixed public templates."""
     detail = raw if isinstance(raw, str) else ""
     if event == "STARTUP":
-        return "thin authority and concurrent provenance shadow started"
+        match = STARTUP_DETAIL.fullmatch(detail)
+        if match is None:
+            return None
+        modes = match.groups()
+        return {
+            ("thin", "off"): "thin authority started; provenance audit is off",
+            (
+                "thin",
+                "shadow",
+            ): "thin authority and concurrent provenance shadow started",
+            (
+                "full_provenance",
+                "authority",
+            ): "FULL provenance authority started",
+        }.get(modes)
     if event == "VECTOR_ACCEPTED":
         return "signed vector passed signature, audience, policy, freshness, and rollback gates"
     if event == "VECTOR_REJECTED":
@@ -224,8 +280,23 @@ def public_detail(event: str, raw: Any) -> str | None:
         return "the current provenance health gate failed"
     if event == "LAUNCH_REWARDED_SET_GATE_PASS":
         return "every rewarded miner independently replayed with exact vector and UID agreement"
+    if event == "PENDING_RECEIPT_RECOVERED":
+        return "exact journaled transaction re-proven; no second chain write"
+    if event == "PENDING_RECEIPT_CONTRADICTION":
+        return (
+            "the exact signed attempt has a positive durable or historical "
+            "contradiction; no replacement was submitted"
+        )
+    if event == "PENDING_RECEIPT_NOT_PROVEN":
+        return (
+            "the exact signed attempt remains fenced while finalized archive "
+            "proof is unavailable; no replacement was submitted"
+        )
     if event == "TICK_FAILED":
-        return "the validator tick failed; no new vector was submitted"
+        return (
+            "the validator tick failed; a write may have finalized, so inspect "
+            "the named extrinsic and durable attempt journal before recovery"
+        )
     return None
 
 
@@ -269,21 +340,30 @@ def is_launch_weight_boundary(event: dict[str, Any] | None) -> bool:
     if event is None:
         return False
     weights = event.get("uid_weights")
-    if not isinstance(weights, dict) or set(weights) != {"163", "204"}:
+    burn_uid = event.get("burn_uid")
+    if (
+        not isinstance(weights, dict)
+        or isinstance(burn_uid, bool)
+        or not isinstance(burn_uid, int)
+        or len(weights) != 2
+        or str(burn_uid) not in weights
+    ):
         return False
-    worker_weight = weights.get("163")
-    burn_weight = weights.get("204")
+    rewarded = [value for uid, value in weights.items() if uid != str(burn_uid)]
+    if len(rewarded) != 1:
+        return False
+    worker_weight = rewarded[0]
+    burn_weight = weights[str(burn_uid)]
     if any(
         isinstance(value, bool) or not isinstance(value, (int, float))
         for value in (worker_weight, burn_weight)
     ):
         return False
     return (
-        event.get("event") == "WEIGHTS_SUBMITTED"
+        event.get("event") in ("WEIGHTS_SUBMITTED", "PENDING_RECEIPT_RECOVERED")
         and event.get("status") == "PASS"
         and event.get("authority") == "thin"
         and event.get("uid_count") == 2
-        and event.get("burn_uid") == 204
         and isinstance(event.get("burn_share"), (int, float))
         and not isinstance(event.get("burn_share"), bool)
         and math.isclose(float(event["burn_share"]), 0.1, rel_tol=0.0, abs_tol=1e-12)
@@ -314,6 +394,20 @@ def clean_event(document: Any) -> dict[str, Any] | None:
         return None
     if event not in ALLOWED_EVENTS:
         return None
+    startup_modes: tuple[str, str] | None = None
+    if event == "STARTUP":
+        detail = document.get("detail")
+        match = STARTUP_DETAIL.fullmatch(detail) if isinstance(detail, str) else None
+        if match is None:
+            return None
+        startup_modes = match.groups()
+        if (
+            startup_modes not in STARTUP_MODE_PAIRS
+            or document.get("mode") != startup_modes[0]
+            or document.get("authority") != startup_modes[0]
+            or document.get("provenance_mode") != startup_modes[1]
+        ):
+            return None
     raw_status = document.get("status")
     if raw_status not in ALLOWED_RAW_STATUSES[event]:
         return None
@@ -358,10 +452,17 @@ def clean_event(document: Any) -> dict[str, Any] | None:
             continue
         clean[key] = scrub(value, TEXT_LIMITS[key])
     clean["status"] = raw_status
+    if startup_modes is not None:
+        clean["authority"] = startup_modes[0]
+        clean["provenance_mode"] = startup_modes[1]
     detail = public_detail(event, document.get("detail"))
     if detail:
         clean["detail"] = detail[: TEXT_LIMITS["detail"]]
-    if event in ("WEIGHTS_DRY_RUN", "WEIGHTS_SUBMITTED"):
+    if event in (
+        "WEIGHTS_DRY_RUN",
+        "WEIGHTS_SUBMITTED",
+        "PENDING_RECEIPT_RECOVERED",
+    ):
         boundary = parse_weight_boundary(document.get("detail"))
         if boundary is not None:
             clean.update(boundary)
@@ -409,7 +510,7 @@ def tail_events() -> list[dict[str, Any]]:
     return list(events)
 
 
-def read_public_json(path: Path) -> dict[str, Any]:
+def read_public_bytes(path: Path) -> bytes | None:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(path, flags)
@@ -420,15 +521,75 @@ def read_public_json(path: Path) -> dict[str, Any]:
             or stat.S_IMODE(info.st_mode) & 0o002
         ):
             os.close(descriptor)
-            return {}
+            return None
         try:
             payload = os.read(descriptor, info.st_size + 1)
         finally:
             os.close(descriptor)
+    except OSError:
+        return None
+    return payload
+
+
+def read_public_json(path: Path) -> dict[str, Any]:
+    payload = read_public_bytes(path)
+    if payload is None:
+        return {}
+    try:
         document = json.loads(payload)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return document if isinstance(document, dict) else {}
+
+
+def read_signed_release() -> dict[str, Any]:
+    """Return release.json only when its detached root signature verifies."""
+    release_bytes = read_public_bytes(RELEASE)
+    signature_bytes = read_public_bytes(RELEASE_SIGNATURE)
+    keys = read_public_json(RELEASE_KEYS)
+    if release_bytes is None or signature_bytes is None:
+        return {}
+    try:
+        release = json.loads(release_bytes)
+        signature = json.loads(signature_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    release_attestation = (
+        release.get("release_attestation") if isinstance(release, dict) else None
+    )
+    if (
+        not isinstance(release, dict)
+        or not isinstance(signature, dict)
+        or not isinstance(release_attestation, dict)
+        or set(signature)
+        != {
+            "algorithm",
+            "key_id",
+            "payload",
+            "payload_sha256",
+            "signature",
+        }
+        or signature.get("algorithm") != "Ed25519"
+        or signature.get("key_id") != RELEASE_KEY_ID
+        or signature.get("payload") != "release.json exact bytes"
+        or signature.get("payload_sha256")
+        != "sha256:" + hashlib.sha256(release_bytes).hexdigest()
+        or release_attestation.get("key_id") != RELEASE_KEY_ID
+    ):
+        return {}
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        return {}
+
+    try:
+        public = base64.b64decode(keys[RELEASE_KEY_ID], validate=True)
+        detached = base64.b64decode(signature["signature"], validate=True)
+        Ed25519PublicKey.from_public_bytes(public).verify(detached, release_bytes)
+    except (InvalidSignature, KeyError, TypeError, ValueError):
+        return {}
+    return release
 
 
 def latest_matching(
@@ -461,15 +622,23 @@ def event_age_seconds(event: dict[str, Any] | None, now: datetime) -> float | No
 
 def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
     index = read_public_json(INDEX)
-    release = read_public_json(RELEASE)
+    release = read_signed_release()
     provenance = latest_matching(events, ("PROVENANCE_",))
     rewarded_set = latest_matching(events, ("LAUNCH_REWARDED_SET_GATE_",))
+    startup = latest_matching(events, ("STARTUP",))
     # Authority status is about an observed live submission, not merely a
     # signed vector passing preflight or a no-write canary. Keep the last
     # successful live submission until a later tick records a real failure.
     authority = latest_matching(
         events,
-        ("WEIGHTS_SUBMITTED", "TICK_FAILED", "VECTOR_REJECTED"),
+        (
+            "WEIGHTS_SUBMITTED",
+            "PENDING_RECEIPT_CONTRADICTION",
+            "PENDING_RECEIPT_NOT_PROVEN",
+            "PENDING_RECEIPT_RECOVERED",
+            "TICK_FAILED",
+            "VECTOR_REJECTED",
+        ),
     )
     now = datetime.now(UTC)
     authority_age = event_age_seconds(authority, now)
@@ -486,9 +655,30 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
     )
     authority_event = str((authority or {}).get("event", ""))
     provenance_event = str((provenance or {}).get("event", ""))
-    if authority_event in ("TICK_FAILED", "VECTOR_REJECTED"):
+    mode_event = latest_matching(
+        events,
+        ("WEIGHTS_SUBMITTED", "WEIGHTS_DRY_RUN", "PENDING_RECEIPT_RECOVERED"),
+    )
+    if startup is not None:
+        current_authority_mode = str(startup.get("authority", "NOT_PROVEN"))
+        current_provenance_mode = str(startup.get("provenance_mode", "NOT_PROVEN"))
+    elif (mode_event or {}).get("authority") in SAFE_MODES:
+        current_authority_mode = str(mode_event["authority"])
+        current_provenance_mode = (
+            "authority" if current_authority_mode == "full_provenance" else "NOT_PROVEN"
+        )
+    else:
+        current_authority_mode = "NOT_PROVEN"
+        current_provenance_mode = "NOT_PROVEN"
+    if authority_event in (
+        "PENDING_RECEIPT_CONTRADICTION",
+        "TICK_FAILED",
+        "VECTOR_REJECTED",
+    ):
         authority_status = "FAIL"
-    elif is_launch_weight_boundary(authority):
+    elif authority_event == "PENDING_RECEIPT_NOT_PROVEN":
+        authority_status = "NOT_PROVEN"
+    elif current_authority_mode == "thin" and is_launch_weight_boundary(authority):
         authority_status = "PASS"
     else:
         authority_status = "NOT_PROVEN"
@@ -508,6 +698,19 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
         )
         else "NOT_PROVEN"
     )
+    launch_checkpoint = (
+        ((release.get("launch_submission") or {}).get("evidence_checkpoint") or {})
+        if isinstance(release.get("launch_submission"), dict)
+        else {}
+    )
+    launch_public_assurance = (
+        launch_checkpoint.get("public_assurance")
+        if isinstance(launch_checkpoint, dict)
+        else None
+    )
+    launch_whole_epoch_full = (
+        "PASS" if launch_public_assurance == "full" else "NOT_PROVEN"
+    )
     return {
         "schema": "cathedral.sn39.validator-status.v1",
         "generated_at": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -521,10 +724,12 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
         "network": "finney",
         "netuid": 39,
         "authority": {
-            "mode": "thin",
+            "mode": current_authority_mode,
             "status": authority_status if authority_fresh else "NOT_PROVEN",
             "burn_share": "0.10"
-            if authority_fresh and is_launch_weight_boundary(authority)
+            if authority_fresh
+            and current_authority_mode == "thin"
+            and is_launch_weight_boundary(authority)
             else None,
             "fresh": authority_fresh,
             "age_seconds": round(authority_age, 3)
@@ -540,7 +745,7 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
             ),
         },
         "provenance": {
-            "mode": "shadow",
+            "mode": current_provenance_mode,
             "rewarded_set_full": (
                 "PASS"
                 if rewarded_set_fresh
@@ -549,7 +754,13 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
                 else "NOT_PROVEN"
             ),
             "positive_tdx_raw_replay": positive_replay,
-            "whole_epoch_full": (
+            "whole_epoch_full": launch_whole_epoch_full,
+            "launch_public_assurance": (
+                launch_public_assurance
+                if isinstance(launch_public_assurance, str)
+                else "NOT_PROVEN"
+            ),
+            "current_whole_epoch_full": (
                 provenance_status if provenance_fresh else "NOT_PROVEN"
             ),
             "fresh": provenance_fresh,

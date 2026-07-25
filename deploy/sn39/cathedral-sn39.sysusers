@@ -1,3 +1,7 @@
+g cathedral-validator -
+u cathedral-validator - "Cathedral SN39 validator" /var/lib/cathedral-validator /usr/sbin/nologin
+g cathedral-validator-log -
+m cathedral-validator cathedral-validator-log
 g cathedral-status -
 u cathedral-status - "Cathedral public status publisher" /var/lib/cathedral-public-evidence
-m cathedral-status cathedral-validator
+m cathedral-status cathedral-validator-log

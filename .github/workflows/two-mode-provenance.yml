@@ -47,17 +47,26 @@ jobs:
       - name: Ruff (launch files)
         run: |
           "$SN39_VENV/bin/ruff" check \
+            scaffold/cli.py \
+            scaffold/sn39_continuous_authorization.py \
             scaffold/validator_thin.py \
             scaffold/provenance_audit.py \
             scaffold/events.py \
             scaffold/sn39_public_reproduction.py \
             scripts/assert_sn39_public_reproduction.py \
+            scripts/build_sn39_rotation_manifest.py \
             scripts/build_sn39_release_manifest.py \
             scripts/finalize_sn39_public_release.py \
             scripts/publish_sn39_validator_status.py \
             scripts/run_sn39_public_reproduction.py \
+            scripts/sn39_hotkey_rotation_operator.py \
+            scaffold/publisher/tests/test_sn39_continuous_authorization.py \
+            scaffold/publisher/tests/test_sn39_launch_approval.py \
             scaffold/publisher/tests/test_sn39_public_status.py \
-            deploy/sn39/cathedral-sn39-release-launcher.py
+            scaffold/publisher/tests/test_sn39_hotkey_rotation_operator.py \
+            scaffold/publisher/tests/test_sn39_rotation_bundle.py \
+            deploy/sn39/cathedral-sn39-release-launcher.py \
+            deploy/sn39/cathedral-sn39-rotation-launcher.py
           "$SN39_VENV/bin/ruff" check \
             scaffold/publisher/app.py \
             scaffold/publisher/weights.py \
@@ -73,17 +82,26 @@ jobs:
             scaffold/publisher/tests/test_mechanism_weightset.py \
             tests/thin/test_validator.py
           "$SN39_VENV/bin/ruff" format --check \
+            scaffold/cli.py \
+            scaffold/sn39_continuous_authorization.py \
             scaffold/validator_thin.py \
             scaffold/provenance_audit.py \
             scaffold/events.py \
             scaffold/sn39_public_reproduction.py \
             scripts/assert_sn39_public_reproduction.py \
+            scripts/build_sn39_rotation_manifest.py \
             scripts/build_sn39_release_manifest.py \
             scripts/finalize_sn39_public_release.py \
             scripts/publish_sn39_validator_status.py \
             scripts/run_sn39_public_reproduction.py \
+            scripts/sn39_hotkey_rotation_operator.py \
+            scaffold/publisher/tests/test_sn39_continuous_authorization.py \
+            scaffold/publisher/tests/test_sn39_launch_approval.py \
             scaffold/publisher/tests/test_sn39_public_status.py \
+            scaffold/publisher/tests/test_sn39_hotkey_rotation_operator.py \
+            scaffold/publisher/tests/test_sn39_rotation_bundle.py \
             deploy/sn39/cathedral-sn39-release-launcher.py \
+            deploy/sn39/cathedral-sn39-rotation-launcher.py \
             cathedral_thin/validator.py \
             scaffold/chain.py \
             scaffold/publisher/mechanism_weightset.py \
@@ -92,19 +110,25 @@ jobs:
             tests/thin/test_validator.py
       - name: Validator launch suites (collection is REQUIRED, not skippable)
         # NOTE: exactly ONE -q with --collect-only. A second -q (-qq) makes
-        # supported pytest print only a per-file count — no node ids — so
-        # the grep gate would exit 1 before the suite ever ran.
+        # supported pytest print only a per-file count — no node ids. Grep
+        # must consume the complete stream (not -q): under pipefail, an early
+        # close can make pytest report BrokenPipe and fail a valid gate.
         run: |
           "$SN39_VENV/bin/python" -m pytest \
             scaffold/publisher/tests/test_validator_two_mode.py \
             scaffold/publisher/tests/test_validator_thin_validated_supply.py \
             scaffold/publisher/tests/test_validator_lifecycle.py \
-            --collect-only -q | grep -q test_full_path_positive_revoked_restored
+            --collect-only -q | grep test_full_path_positive_revoked_restored \
+            >/dev/null
           "$SN39_VENV/bin/python" -m pytest -q \
+            scaffold/publisher/tests/test_sn39_continuous_authorization.py \
+            scaffold/publisher/tests/test_sn39_launch_approval.py \
             scaffold/publisher/tests/test_validator_two_mode.py \
             scaffold/publisher/tests/test_validator_thin_validated_supply.py \
             scaffold/publisher/tests/test_validator_lifecycle.py \
             scaffold/publisher/tests/test_sn39_public_status.py \
+            scaffold/publisher/tests/test_sn39_hotkey_rotation_operator.py \
+            scaffold/publisher/tests/test_sn39_rotation_bundle.py \
             scaffold/publisher/tests/test_legacy_chain_guard.py \
             scaffold/publisher/tests/test_mechanism_weightset.py \
             scaffold/publisher/tests/test_weight_vector_scope.py \

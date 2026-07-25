@@ -4,11 +4,13 @@ After=network-online.target
 Wants=network-online.target
 Conflicts=cathedral-thin-validator.service cathedral-validator-sn39-launch.service
 ConditionPathIsReadWrite=/var/lib/cathedral-validator
+ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json
+ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json.sig
 
 [Service]
 Type=simple
 User=cathedral-validator
-Group=cathedral-validator
+Group=cathedral-validator-log
 Environment=HOME=/var/lib/cathedral-validator
 ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release continuous
 Restart=on-failure
@@ -23,6 +25,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadOnlyPaths=/etc/cathedral/controlled/sn39-launch /opt/cathedral-sn39/bin/cathedral-tdx-verifier
 ReadWritePaths=/var/lib/cathedral-validator /var/log/cathedral-validator
 RestrictSUIDSGID=true
 LockPersonality=true

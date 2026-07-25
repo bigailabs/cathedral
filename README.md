@@ -79,7 +79,7 @@ tier mix, and scoring weights in
 | **Hash-only feed** | Miners receive token-gated CNF URLs. Public score rows expose hashes, not raw formulas or answers. |
 | **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
 | **Receipt ordered** | Winning SAT receipt is selected by publisher-observed submit time. |
-| **Burn configured** | The proposed SN39 Intel TDX launch mechanism, `validated_supply_v1`, targets 10% at burn UID 204 and 90% only to validated supply. Its published u16 wire values make the small protocol quantization explicit. If no positive validated supply exists, the entire vector fails safe to burn. The exact launch boundary is tracked in [`docs/SN39_MAINNET_RELEASE_20260724.md`](docs/SN39_MAINNET_RELEASE_20260724.md). |
+| **Burn configured** | The proposed SN39 Intel TDX launch mechanism, `validated_supply_v1`, dynamically resolves the current subnet-owner burn hotkey to its live UID, targets 10% there, and assigns 90% only to validated supply resolved by hotkey at the finalized chain head. Its published u16 wire values make the small protocol quantization explicit. If no positive validated supply exists, the entire vector fails safe to the owner-bound burn destination. The exact launch boundary is tracked in [`docs/SN39_MAINNET_RELEASE_20260724.md`](docs/SN39_MAINNET_RELEASE_20260724.md). |
 
 The Cathedral publisher is verifier of record for private SAT in v1. Validators verify the signed weight vector; they do not receive raw SAT formulas.
 
