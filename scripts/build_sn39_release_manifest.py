@@ -20,10 +20,10 @@ EXPECTED_VERIFIER_BINARY = (
 )
 EXPECTED_CATHEDRAL_URL = (
     "https://github.com/cathedralai/cathedralconfidential/archive/"
-    "9540de4409bfda74dd9827cb7c969ad4e2243543.tar.gz"
+    "655c264421a1f5f2e625a372a40f595aa1e114ab.tar.gz"
 )
 EXPECTED_CATHEDRAL_ARCHIVE_SHA256 = (
-    "97a047f8a81481c5cba854d861cd6ab9e07fee16f9ec5b55687954dcb6d778cf"
+    "befc572f459c2d80af7ce18013cb4d3649716f143da0a6a86a4a8b96f84b88fb"
 )
 RELEASE_FILES = (
     "config/validator-mainnet-sn39.toml",

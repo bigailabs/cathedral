@@ -15,7 +15,7 @@ did not agree:
 |---|---|---|
 | Host exporter `/usr/local/sbin/cathedral-sn39-export-evidence` | `b77c7cfacab34de75b1102360f6e3fc1edf5b796` | Hardcoded constant stamped into every signed manifest |
 | This repository (validator pin and configs) | `fa39af97e738fdbed5c454f976b61246590b5794` | Hardcoded constant the validator compares against |
-| The producer's installed controlled venv `/opt/cathedral-sn39/venvs/9540de44...` | `9540de4409bfda74dd9827cb7c969ad4e2243543` | The code that actually ran |
+| The producer's installed controlled venv `/opt/cathedral-sn39/venvs/9540de44...` | `655c264421a1f5f2e625a372a40f595aa1e114ab` | The code that actually ran |
 
 The consequence was not cosmetic. `scaffold/provenance_audit.py:935-936` fails
 the audit when the manifest's `source_revision` differs from the operator pin,
@@ -33,16 +33,16 @@ both editable claims about a fact recorded somewhere else, and each can drift
 independently. The venv basename is the identity of the interpreter and package
 tree that actually executed the export, so it cannot drift from the code that
 produced the evidence without the export itself moving. Every pin in this
-repository is now `9540de4409bfda74dd9827cb7c969ad4e2243543`.
+repository is now `655c264421a1f5f2e625a372a40f595aa1e114ab`.
 
 The upstream archive for that revision was verified independently rather than
 trusted:
 
 ```
 curl -sSL -o /tmp/c.tar.gz \
-  https://github.com/cathedralai/cathedralconfidential/archive/9540de4409bfda74dd9827cb7c969ad4e2243543.tar.gz
+  https://github.com/cathedralai/cathedralconfidential/archive/655c264421a1f5f2e625a372a40f595aa1e114ab.tar.gz
 sha256sum /tmp/c.tar.gz
-# 97a047f8a81481c5cba854d861cd6ab9e07fee16f9ec5b55687954dcb6d778cf
+# befc572f459c2d80af7ce18013cb4d3649716f143da0a6a86a4a8b96f84b88fb
 ```
 
 The same procedure applied to the superseded `fa39af97` archive reproduces its
@@ -74,7 +74,7 @@ inconsistent and fails the two-mode tests:
 
 The reproduction lock digest moved from
 `sha256:8a4d730778c37ef7cc47e2ffcba74e42dcdd19240283f688567dd06204181e5b` to
-`sha256:52d8f80f9943657d89ea7f5811d05eaf6816f360b118132390f3ef09ef5eb49e`.
+`sha256:4c8155b0f3af5d2df254e1680b574ed51d6d9b9a36078469cc9bc5a1f13c84d8`.
 The build lock digest is unchanged, which confirms only the cathedral archive
 line moved.
 
@@ -123,7 +123,7 @@ was not read while preparing this change, so confirm the variable name and the
 location of the existing `SOURCE_REVISION=` assignment before applying.
 
 After the exporter is redeployed, the next signed manifest must stamp
-`9540de4409bfda74dd9827cb7c969ad4e2243543`. Until that happens the Producer
+`655c264421a1f5f2e625a372a40f595aa1e114ab`. Until that happens the Producer
 revision boundary in `SN39_MAINNET_RELEASE_20260724.md` stays **FAIL**, because
 published evidence still carries `b77c7cf...` and will not match the pin.
 

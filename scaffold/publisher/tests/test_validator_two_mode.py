@@ -3507,7 +3507,7 @@ def test_mainnet_launch_bundle_is_byte_pinned_and_shadow_by_default() -> None:
         "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
     )
     assert config["provenance"]["source_revision"] == (
-        "9540de4409bfda74dd9827cb7c969ad4e2243543"
+        "655c264421a1f5f2e625a372a40f595aa1e114ab"
     )
 
     for config_key, (name, digest) in expected.items():
@@ -5641,7 +5641,7 @@ def _frozen_cross_binding_fixture() -> tuple[dict[str, object], dict[str, object
             "block": 100,
             "block_hash": "0x" + "a" * 64,
         },
-        "source_revision": "9540de4409bfda74dd9827cb7c969ad4e2243543",
+        "source_revision": "655c264421a1f5f2e625a372a40f595aa1e114ab",
         "reward_mechanism": checkpoint["reward_mechanism"],
         "policy_registry": {
             "release": checkpoint["policy_release"],
