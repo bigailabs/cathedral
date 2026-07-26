@@ -34,6 +34,22 @@ from pathlib import Path
 from typing import Any
 
 MECHANISM_DEFAULT = "validated_supply_v1"
+
+# Which manifest mechanism ids a validator pinned to a given mechanism accepts.
+#
+# A mechanism upgrade has to roll out without a lockstep deploy: validators ship
+# an acceptance set first, the producer flips afterwards, and the old id is
+# retired only once every validator carries the new build. A validator pinned to
+# the older id therefore accepts the newer one; a validator already pinned to the
+# newer id refuses a downgrade.
+#
+# This only widens which evidence is admitted. The burn contract is looked up in
+# validator_thin.MECHANISM_BURN_FRACTION by the operator's own pinned mechanism,
+# never by the id the manifest claims, so acceptance cannot move the burn.
+MECHANISM_ACCEPTED = {
+    "validated_supply_v1": ("validated_supply_v1", "validated_supply_v2"),
+    "validated_supply_v2": ("validated_supply_v2",),
+}
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Hard bound on the recent-chain walk (mirrors the signed index's own
 # MAX_INDEX_RECENT cap in cathedral.evidence); defense in depth against a
@@ -816,10 +832,12 @@ def run_audit(
             raise ProvenanceAuditError(
                 "index latest.source_epoch does not match the manifest it points to"
             )
-        if manifest["reward_mechanism"]["id"] != settings.mechanism:
+        accepted = MECHANISM_ACCEPTED.get(settings.mechanism, (settings.mechanism,))
+        if manifest["reward_mechanism"]["id"] not in accepted:
             raise ProvenanceAuditError(
-                f"manifest mechanism {manifest['reward_mechanism']['id']!r} does not "
-                f"match the pinned mechanism {settings.mechanism!r}"
+                f"manifest mechanism {manifest['reward_mechanism']['id']!r} is not "
+                f"accepted by the pinned mechanism {settings.mechanism!r} "
+                f"(accepted: {', '.join(accepted)})"
             )
         if manifest["verifier"]["digest"] != settings.verifier_digest:
             raise ProvenanceAuditError(
