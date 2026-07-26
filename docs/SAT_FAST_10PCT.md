@@ -1,5 +1,13 @@
 # SAT fast-path 10% reward wire (Release 1)
 
+> [!WARNING]
+> **Unreleased historical design.** The V2 endpoint is currently unavailable
+> and this mechanism is not part of the active weight vector. Nothing in this
+> file promises a reward allocation or authorizes deployment.
+
+<details>
+<summary>Archived design text (not current)</summary>
+
 Cathedral's own verified fast-path SAT scoreboard (`GET /v2/validator/weights/next`
 on v2-beta) is a real, verified scoreboard, but it isn't part of the real weight
 vector yet. Release 1 wires it in by treating it as **just another external
@@ -80,3 +88,5 @@ Rollout order matters: turn on `INGEST_ENABLED` + `TOKEN` first and run the
 poster (or `--dry-run` against a real publisher) to confirm reports are
 accepted, *before* flipping `EXTERNAL_SCORES_ENABLED=1` to start blending into
 the real vector.
+
+</details>

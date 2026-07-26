@@ -1,284 +1,194 @@
-<h2 align="center">Decentralized&nbsp;formal&nbsp;verification.&nbsp;Built&nbsp;on&nbsp;SAT.</h2>
+# Cathedral SN39 validator
 
-<p align="center">
-  Documentation:
-  <a href="VALIDATOR.md">Validator</a> |
-  <a href="docs/THIN_SUBNET_RUNBOOK.md">No-infrastructure subnet</a> |
-  <a href="docs/VERIFIED_AGENT_WORK.md">Verified Agent Work</a> |
-  <a href="CATHEDRAL_V0_LANES.md">v0 Lanes</a> |
-  <a href="LAUNCH_V0_RUNBOOK.md">v0 Launch Runbook</a> |
-  <a href="game/arena/ARENA.md">Arena</a> |
-  <a href="docs/FAST_PATH_MINER_GUIDE.md">Fast Path</a> |
-  <a href="https://api.cathedral.computer/v1/synthetic-boolean/active-challenges">Active Challenges</a> |
-  <a href="https://github.com/cathedralai/cathedral/releases">Releases</a>
-</p>
+**Turn verified compute evidence into a transparent, fail-closed Bittensor
+weight decision.**
 
-<p align="center">
-  <a href="https://github.com/cathedralai/cathedral/commits/main"><img src="https://img.shields.io/github/last-commit/cathedralai/cathedral" alt="Last Commit"></a>
-  <a href="https://deepwiki.com/cathedralai/cathedral"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-  <a href="https://cathedral.computer"><img src="https://img.shields.io/badge/Site-cathedral.computer-1a1814" alt="Site"></a>
-  <a href="https://api.cathedral.computer"><img src="https://img.shields.io/badge/API-api.cathedral.computer-5a6f9a" alt="Publisher API"></a>
-</p>
+This repository contains Cathedral's SN39 validator and the mechanisms it can
+audit. It is the validator side of the Cathedral system:
 
-## [Why Cathedral](#why-cathedral)
+- [Cathedral Computer](https://cathedral.computer/) is the customer-facing
+  account, billing, API, job, and receipt product.
+- [`cathedralconfidential`](https://github.com/cathedralai/cathedralconfidential)
+  produces Intel TDX evidence, verified-work receipts, and signed score reports.
+- This repository lets an independent validator verify those inputs, map public
+  hotkeys to the current metagraph, and decide whether to set weights.
 
-Cathedral is decentralized formal verification: compute whose answers can
-be checked deterministically and rewarded through an open miner market.
-The substrate is Boolean satisfiability, the canonical NP-complete
-problem. Any question that can be reduced to SAT can be raced by miners
-and verified by Cathedral before validators use the signed result for
-weights.
+Cathedral is in **live testing**. The public signed feed and evidence surfaces
+are available, and the validator software implements both thin and independent
+provenance modes. The public release/tag and final launch acceptance are
+separate gates. **Do not run a chain-writing command from an arbitrary `main`
+checkout.**
 
-SAT asks whether a boolean formula can be satisfied. It is a core search
-problem behind verification, planning, scheduling, compiler optimization,
-hardware reasoning, and automated theorem proving. Better SAT solvers
-lower the cost of proving, finding, and optimizing real systems. Cathedral
-turns hard verification work into open, scored challenges that miners can
-attack with solvers, solver agents, and new search systems.
+## Choose your path
 
-- **Built for Bittensor.** SAT scoring is deterministic and instance-private. Signed score rows are cryptographically verifiable. Validators check signatures, not opinions. The mechanism is designed to be hard to game and easy to audit, which is what Bittensor incentive design rewards.
-
-- **Designed for solver evolution.** A SAT-solving market is useful on day one: miners are scored for verified solves, with rewards determined by the live signed validator weight policy. As agent capability improves, miners move from calling solvers like Kissat or Z3 to composing, configuring, and eventually evolving them. Recent work such as [SATLUTION](https://arxiv.org/abs/2509.07367) points toward LLM-driven solver evolution under correctness checks; Cathedral makes that kind of work economic.
-
-- **Real demand.** Hard SAT and SMT instances drive workloads at industrial scale: Amazon has described AWS automated-reasoning systems generating [a billion SMT queries a day](https://www.amazon.science/blog/a-billion-smt-queries-a-day). Chip companies depend on formal verification platforms from Cadence, Synopsys, and Siemens. Today these teams either pay enterprise EDA licenses or run reasoning workloads inside closed cloud services. Cathedral is a third path: verifiable hard-instance solving through an open mining market.
-
-## [How It Works](#how-it-works)
-
-### Incentive Mechanism
-
-1. Each miner is scored under their registered Bittensor hotkey.
-2. Miner fetches the active challenge through the signed API.
-3. Miner returns one DIMACS satisfying assignment.
-4. Cathedral checks the assignment against the private formula and records publisher-observed submit time.
-5. Cathedral signs a hash-only score row.
-6. Validator verifies the Cathedral signature and maps the hotkey to the current metagraph UID.
-7. Validator applies the signed weight policy and calls `set_weights`.
-
-Validators apply one Cathedral-signed weight vector: a final score per miner plus the signed burn snapshot, verified against a pinned key. Scoring (recency window, multi-challenge composition, burn rate) is composed on the publisher and signed, so validators relay the signed number rather than recomputing it locally. The per-solve feed (`/v1/leaderboard/recent`) stays public as an independently re-checkable audit trail.
-
-External mechanisms can feed Cathedral without changing validators. For example, Violet posts normalized audio miner scores to `POST /v1/external-scores/violet`; Cathedral stores/blends those publisher-side and still emits the single signed `/v1/validator/weights/next` vector. See [`docs/VIOLET_EXTERNAL_SCORES.md`](docs/VIOLET_EXTERNAL_SCORES.md).
-
-SAT scoring:
-
-- A valid satisfying assignment records a verified solve for that hotkey and challenge.
-- Invalid, malformed, incomplete, non-winning, locked, or verifier-error answers score `0.0`.
-- When proportional mode is enabled and deployed, signed miner weights are composed from distinct verified solves in the recency window, weighted by challenge tier.
-
-Winning is selected by publisher receipt time, not first verified time. After
-this publisher release is deployed, it exposes the current generator policy,
-tier mix, and scoring weights in
-`/v1/synthetic-boolean/active-challenges`.
-
-### Proofs and Protections
-
-| Claim | Mechanism |
+| Role | Start here |
 |---|---|
-| **Hotkey scoped** | Signed rows are mapped to current metagraph UIDs. Unmapped hotkeys are dropped. |
-| **Publisher signed** | Eval rows are Ed25519-signed by Cathedral and verified by validators. |
-| **Signed weight policy** | Validators pin the publisher key and verify the weight vector's signature, key id, network, netuid, expiry, and burn snapshot before applying it. |
-| **Hash-only feed** | Miners receive token-gated CNF URLs. Public score rows expose hashes, not raw formulas or answers. |
-| **Publisher checked** | Cathedral parses DIMACS and checks clauses before signing a score row. |
-| **Receipt ordered** | Winning SAT receipt is selected by publisher-observed submit time. |
-| **Burn configured** | The proposed SN39 Intel TDX launch mechanism, `validated_supply_v1`, dynamically resolves the current subnet-owner burn hotkey to its live UID, targets 10% there, and assigns 90% only to validated supply resolved by hotkey at the finalized chain head. Its published u16 wire values make the small protocol quantization explicit. If no positive validated supply exists, the entire vector fails safe to the owner-bound burn destination. The exact launch boundary is tracked in [`docs/SN39_MAINNET_RELEASE_20260724.md`](docs/SN39_MAINNET_RELEASE_20260724.md). |
+| Cathedral Computer customer | [Product and API documentation](https://cathedral.computer/docs/) |
+| Validator operator | [Validator guide](VALIDATOR.md) |
+| Independent auditor | [Full-provenance verification](docs/PROVENANCE.md) |
+| Intel TDX compute provider | [Cathedral Confidential mining guide](https://github.com/cathedralai/cathedralconfidential/blob/main/MINING.md) |
+| Mechanism or subnet developer | [Score-class contract](docs/THIN_SCORE_CLASSES.md) |
+| Contributor | [Open issues](https://github.com/cathedralai/cathedral/issues) |
 
-The Cathedral publisher is verifier of record for private SAT in v1. Validators verify the signed weight vector; they do not receive raw SAT formulas.
+## What the validator does
 
----
+Every tick, the validator:
 
-## [Getting Started](#getting-started)
+1. fetches Cathedral's signed weight vector;
+2. verifies the Ed25519 signature, key id, network, netuid, policy, expiry, and
+   rollback fence;
+3. checks the signed burn contract and resolves every hotkey against a fresh
+   metagraph;
+4. runs the configured provenance audit concurrently;
+5. fails closed when a gate belonging to the active submission authority
+   fails; and
+6. only then constructs the UID-aligned weight decision.
 
-Use the quick starts below to work inside the subnet.
+The validator wallet remains the sole authority for any `set_weights`
+transaction. A score source can publish evidence and measurements; it cannot
+sign with the validator's wallet or bypass validator-local policy.
 
-### Installation
+## Two modes run together
+
+| Mode | Default | What it trusts | What it submits |
+|---|---:|---|---|
+| **Thin + shadow audit** | Yes | A pinned Cathedral signature for the fast path, while a background audit checks public provenance | The gated signed vector |
+| **Full-provenance authority** | No | The validator's own replay through pinned keys, source, verifier, historical candidate set, and controlled raw evidence | The validator's independently recomputed vector |
+
+Shadow mode is intentionally non-blocking: a slow independent audit does not
+delay the thin tick, and a shadow `FAIL` or `NOT_PROVEN` is observational—it
+does not veto a thin submission whose own signature, scope, policy, freshness,
+rollback, burn, and mapping gates pass. Authority mode is stricter and refuses
+to submit unless the epoch reaches the documented `FULL` assurance level.
+Signed receipts alone are useful provenance but are not `FULL`.
+
+See [the provenance contract](docs/PROVENANCE.md) for the exact trust boundary,
+candidate-set rules, controlled-disclosure package, and independent replay
+command.
+
+## Current capability boundary
+
+| Capability | Status |
+|---|---|
+| Signed SN39 weight-vector verification | Deployed feed; validator implementation available |
+| Default thin mode with concurrent provenance audit | Implemented in the launch candidate |
+| Independent full-provenance recomputation | Implemented; requires all operator pins and controlled evidence |
+| Current deployed vector vs independent verifier | `FAIL`: deployed v1/GPU-allocation shape has not converged with the v2/fixed-burn/body-binding verifier |
+| Intel TDX verified-supply input | Current confidential-compute path |
+| Confidential GPU subnet admission | Not currently admitted for positive weight |
+| Registration or uptime rewards | Never sufficient; verified work is required |
+| Self-service mainnet validator launch | Pending a tagged release and launch notice |
+
+The current vector is deliberately allowed to contain no positive miners. In
+that case the mechanism routes eligible mass to the configured burn
+destination rather than preserving stale credit.
+
+## Read-only quick start
+
+Use a clean checkout and Python 3.11 or newer:
 
 ```bash
-git clone https://github.com/cathedralai/cathedral
+git clone https://github.com/cathedralai/cathedral.git
 cd cathedral
+
 python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[provenance]'
+
+cp config/validator.toml my-validator.toml
 ```
 
-### Miner Quick Start
+Before trusting the example configuration:
 
-> **Heads up:** the `cathedral-runtime` Docker image (`ghcr.io/cathedralai/cathedral-runtime:v1.0.7`) is **deprecated**. Current miners do not need it. Run Hermes directly on a Linux SSH host.
+1. select the exact tagged release announced for validators;
+2. compare its release digest with your checkout or installed artifact;
+3. verify the `cathedral-weight-policy` key through the live
+   [JWKS](https://api.cathedral.computer/.well-known/cathedral-jwks.json);
+4. pin the provenance keys, key-file digests, verifier digest, source revision,
+   and burn hotkey from that same release; and
+5. add your own wallet names without copying any secret into the repository.
 
-You need:
-
-- registered Bittensor hotkey
-- private SAT solver, solver agent, or wrapper
-- SSH host with Hermes for post-win audit
-- access to the signed challenge API
-
-Live miner flow:
-
-1. Read the public challenge metadata.
-2. Fetch the tokenized CNF through signed `active-cnf`.
-3. Verify the CNF SHA-256.
-4. Solve locally.
-5. Submit `challenge_id` and `dimacs_solution` to `/v1/agents/submit`.
-
-The canonical live board is served at
-[`https://api.cathedral.computer/v1/synthetic-boolean/active-challenges`](https://api.cathedral.computer/v1/synthetic-boolean/active-challenges).
-
-Submit a DIMACS assignment:
-
-````text
-```FINAL_ANSWER
-{
-  "dimacs_solution": "s SATISFIABLE\nv 1 -2 3 0\n"
-}
-```
-````
-
-Per-miner private challenges use the same submit endpoint, but miners fetch
-their own assigned set first:
-
-- `GET /v1/synthetic-boolean/per-miner/challenges`
-- `GET /v1/synthetic-boolean/per-miner/cnf?challenge_id=pm-...`
-- `GET /v1/synthetic-boolean/per-miner/status`
-- `POST /v1/agents/submit`
-
-Use the same Cathedral hotkey signing headers as `active-cnf`. The status
-endpoint shows accepted PM solves, rejected PM attempts, rejection reasons,
-eligible/unique/verified solves, tier mix, current epoch totals, and 24h totals.
-
-Submit full DIMACS solver output for both public and per-miner challenges:
-
-```text
-s SATISFIABLE
-v 1 -2 3 0
-```
-
-Do not submit raw literals only (`1 -2 3 0`). That fails with
-`solution_missing_status`.
-
-Retry behavior:
-
-- `429 submit_busy_retry`: Cathedral submit slots are full. Retry the same
-  signed payload after `Retry-After` with jittered backoff. This is not a bad
-  solve.
-- `429 rate_limited`: the same hotkey/challenge submitted too quickly. Wait
-  longer before retrying.
-- `400 solution_missing_status`: the payload is malformed; include
-  `s SATISFIABLE` and one or more `v ... 0` lines.
-
-Operator visibility:
-
-- `GET /v1/admin/synthetic-boolean/submit-metrics` shows submit pressure,
-  429s, and rejection reason counters.
-- Set `CATHEDRAL_PUBLISHER_ADMIN_TOKEN` and pass
-  `Authorization: Bearer <token>` to read it.
-- `CATHEDRAL_SUBMIT_LOG_EVENTS=1` enables per-submit rejection logs. Leave it
-  off for normal high-throughput operation; counters still record by default.
-
-### Fast Path — real problems, real rewards
-
-Cathedral is opening a **faster miner lane** alongside the v1 flow above:
-
-- **Tiny signed submits.** Instead of a full DIMACS body, the fast path takes a compact signed *bitset* of your assignment — cheap to send, cheap to verify — over the per-miner V2 endpoints on `v2-beta.cathedral.computer`.
-- **Real, checkable problems.** A configurable share (currently ~10%) of per-miner challenges are genuine combinatorial instances — **graph k-coloring** and **Latin-square completion** encoded as SAT — mixed in with the usual planted 3-SAT. Cathedral verifies the witness exactly; a wrong-but-fast answer scores `0.0`.
-- **10% of incentive routes to the fast path.** Verified fast-path solves feed a `cathedral_sat_fast` score that Cathedral blends into the single signed weight vector at 10% (registered hotkeys only, capped, fail-safe) — so your fast-path work shows up in your on-chain weight without changing anything for validators.
-
-Full walkthrough — endpoints, the reference miner, and how the reward composes — in [`docs/FAST_PATH_MINER_GUIDE.md`](docs/FAST_PATH_MINER_GUIDE.md). Watch it live: fast-path solve/verify rate at [`/v2/verify/metrics`](https://v2-beta.cathedral.computer/v2/verify/metrics), the fast-path scoreboard at [`/v2/validator/weights/next`](https://v2-beta.cathedral.computer/v2/validator/weights/next).
-
-### Local Verification Arena
-
-The repo also includes **Subnet Breaker**, a local playable arena for the
-agent/audit path. It does not touch chain state, Railway, paid compute, or the
-live validator. It exists to show the Cathedral loop end to end:
-
-```text
-probe -> encode -> solve -> replay -> attest -> seal
-```
-
-Run it locally:
+Run one no-chain verification tick. It still fetches the signed vector and
+shadow evidence over HTTPS, but opens no chain connection and cannot broadcast:
 
 ```bash
-python -m game.arena.serve 8790
-# open http://127.0.0.1:8790/game
+cathedral-validator serve \
+  --config my-validator.toml \
+  --offline \
+  --once
 ```
 
-Useful checks:
+Then run a metagraph-backed preview that still cannot write weights:
 
 ```bash
-python -m game.arena.playthrough
-python -m game.arena.audit_scanner_smoke
-python -m game.arena --shot
-python -m game.arena.verify game/arena/out
-python -m game.arena.bundle game/arena/out/proof_bundle.json
+cathedral-validator serve \
+  --config my-validator.toml \
+  --dry-run \
+  --once
 ```
 
-Full guide: [`game/arena/ARENA.md`](game/arena/ARENA.md).
+Stop there until the tagged release, public launch notice, and your own
+preflight are all green. The launch candidate is non-writing by default:
+only an explicit `--broadcast` permits a chain-write attempt, and SN39's
+signed release and transition gates must still authorize it.
 
-### Owner-infrastructure-free subnet
+## Observe and audit
 
-The `cathedral_thin` runtime is the complete validator-owned weight path. Its
-default mode uses no publisher, database, object storage, queue, scorer, or
-owner-hosted challenge service: each validator sends private SAT challenges,
-verifies witnesses, collapses hotkeys by coldkey, and sets its own Subtensor
-weights. Its optional federated score-class mode lets Cathedral Confidential or
-another subnet component contribute small signed, evidence-backed facts while
-the validator retains class allocation, assignment, provenance, and sole chain
-signing authority. A source-subnet owner can also register a delegate hotkey on
-the target subnet and sign a bounded class/report-key delegation; every
-validator independently verifies current ownership and registration before
-using it, and the contributor never receives direct `set_weights` authority.
-
-Prove the full local loop first:
+TTY logs are concise and human-readable. A validator can also publish a stable
+JSONL stream for dashboards and independent monitoring. Create the parent
+directory first and keep it private:
 
 ```bash
-cathedral-thin-e2e --pretty
-python -m pytest -q tests/thin
+install -d -m 700 "$HOME/.cathedral"
+export CATHEDRAL_VALIDATOR_JSONL="$HOME/.cathedral/validator-events.jsonl"
+tail -f "$CATHEDRAL_VALIDATOR_JSONL" | jq .
 ```
 
-Then follow the [thin subnet runbook](docs/THIN_SUBNET_RUNBOOK.md) for wallets,
-registration, miner service, validator dry-run, commit-reveal, and broadcast.
-The [design and threat model](docs/THIN_SUBNET_DESIGN.md) states the explicit
-non-claims and residual risks. The
-[evidence record](docs/THIN_SUBNET_EVIDENCE.md) separates completed checks from
-the remaining testnet-write launch gates, and the
-[Fable review record](docs/THIN_SUBNET_FABLE_REVIEW.md) records the independent
-findings, remediation, and accepted follow-up. The
-[score-class contract](docs/THIN_SCORE_CLASSES.md) specifies decentralized
-composition, Cathedral Confidential integration, replay/equivocation handling,
-source-subnet owner onboarding, and the no-central-infrastructure scaling
-model.
+Events name the mode and stage and report `PASS`, `FAIL`, `NOT_PROVEN`, or
+`INFO`. They redact credential-shaped values and are not a substitute for
+retaining the signed artifacts they reference.
 
-The same thin path now includes a first concrete Verified Agent Work commodity:
-miners distill structured agent decisions into compact rule policies;
-validators replay them on committed hidden cases and assign separate budgets
-for fidelity, rare-case retention, evidence faithfulness, compactness, and
-attested execution. It uses the score-class and owner-registration contracts
-above, so a testnet subnet owner can contribute measurements without receiving
-the validator's weight key or control over its final allocation.
+## Documentation map
 
-```bash
-python -m cathedral_thin.policy_cli demo
-```
+### Launch path
 
-The demo constructs a complete UID-aligned weight vector without services or a
-chain write. See the [architecture, threat model, operator commands, and
-production gates](docs/VERIFIED_AGENT_WORK.md).
+- [SN39 Intel TDX CPU mainnet release boundary](docs/SN39_MAINNET_RELEASE_20260724.md)
+- [Validator operator guide](VALIDATOR.md)
+- [Full-provenance verification](docs/PROVENANCE.md)
+- [Score-class and contributor contract](docs/THIN_SCORE_CLASSES.md)
+- [Thin-subnet design and threat model](docs/THIN_SUBNET_DESIGN.md)
+- [Thin-subnet evidence record](docs/THIN_SUBNET_EVIDENCE.md)
+- [Thin-subnet runbook](docs/THIN_SUBNET_RUNBOOK.md)
+- [Confidential CPU publisher canary](docs/CONFIDENTIAL_CPU_PUBLISHER_CANARY.md)
 
-The production-style audit scanner bridge lives at `/v1/audit-scanner/*`.
-It is default-off, signed, replay-scored, and not connected to payment weights
-until explicitly promoted. `python -m game.arena.audit_scanner_smoke` proves
-the full bridge contract locally.
+### Experimental and reference mechanisms
 
-### [Validator Quick Start](VALIDATOR.md)
+The repository also preserves SAT, agent-policy, VerifyML, Violet, arena, and
+V2 fast-path work. These are research or integration surfaces unless a current
+tagged release explicitly promotes them. They are not evidence that an endpoint
+is deployed or that a reward class is active.
 
-The v4 validator is one loop: fetch one signed score per miner from the publisher, verify the signature, set weights. Scoring lives on the publisher, so there is no re-release for scoring changes.
+- [Verified Agent Work](docs/VERIFIED_AGENT_WORK.md)
+- [VerifyML](docs/VERIFYML.md)
+- [Violet external scores](docs/VIOLET_EXTERNAL_SCORES.md)
+- [Fast-path miner guide](docs/FAST_PATH_MINER_GUIDE.md)
+- [Local arena](game/arena/ARENA.md)
 
-```bash
-pip install -e .                              # installs the `cathedral-validator` command
-cp config/validator.toml my-validator.toml    # add your wallet + pin the publisher key
+## Security
 
-# Preview the weights it would set, without touching the chain:
-cathedral-validator serve --config my-validator.toml --dry-run --once
+- Never put a wallet seed, private key, bearer token, cloud credential, or
+  controlled raw quote in an issue, log, config committed to Git, or public
+  evidence bundle.
+- Do not infer current eligibility from a past receipt, historical chain row,
+  or local test.
+- Verify live keys and release digests through two independent channels before
+  enabling a wallet.
+- Treat `PASS`, `FAIL`, and `NOT_PROVEN` as distinct outcomes. Missing evidence
+  is not success.
 
-# Go live (the chain-write permission is explicit):
-cathedral-validator serve --config my-validator.toml --broadcast
-```
+## Licensing
 
-Pin the publisher's signing key in your config and verify it against the live [JWKS](https://api.cathedral.computer/.well-known/cathedral-jwks.json) before going live. Full guide: [VALIDATOR.md](VALIDATOR.md).
+This repository does not currently publish a license file. Do not assume
+redistribution rights; contact the maintainers before using it outside the
+permissions granted by applicable law.
