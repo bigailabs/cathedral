@@ -109,12 +109,16 @@ Before trusting the example configuration:
    and burn hotkey from that same release; and
 5. add your own wallet names without copying any secret into the repository.
 
-Run one no-chain verification tick. It still fetches the signed vector and
-shadow evidence over HTTPS, but opens no chain connection and cannot broadcast:
+Run one non-writing verification tick with a synthetic UID map. It fetches the
+signed vector and shadow evidence over HTTPS and cannot broadcast. In the
+current launch candidate, the final preview path may still initialize and read
+the configured Finney client, so do not treat `--offline` as an air-gap
+guarantee:
 
 ```bash
 cathedral-validator serve \
   --config my-validator.toml \
+  --runtime-root "$HOME/.cathedral" \
   --offline \
   --once
 ```
@@ -124,6 +128,7 @@ Then run a metagraph-backed preview that still cannot write weights:
 ```bash
 cathedral-validator serve \
   --config my-validator.toml \
+  --runtime-root "$HOME/.cathedral" \
   --dry-run \
   --once
 ```

@@ -27,7 +27,8 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 
 The current public contract mismatch is a launch blocker. Shadow mode reports
 it but does not veto an otherwise valid thin vector, which is why operators
-must remain in no-chain/dry-run modes until the supported release converges.
+must remain in non-writing preview modes until the supported release
+converges.
 
 ## What happens on each tick
 
@@ -98,7 +99,7 @@ Do not install a moving branch for chain use. When a supported release is
 published, verify the tag, commit, package digest, and release notes before
 installation.
 
-For source review and no-chain testing only:
+For source review and non-writing testing only:
 
 ```bash
 git clone https://github.com/cathedralai/cathedral.git
@@ -169,18 +170,22 @@ The endpoint must serve the same Finney chain and historical state required by
 the evidence anchor. Changing the RPC connection does not change the signed
 `network` label.
 
-## No-chain acceptance
+## Non-writing acceptance
 
 Run these in order.
 
-### 1. No-chain tick
+### 1. Synthetic-map tick
 
-This still fetches the signed vector and shadow evidence over HTTPS, but uses
-no wallet or chain connection:
+This fetches the signed vector and shadow evidence over HTTPS, uses a synthetic
+UID map, and cannot broadcast. In the current launch candidate, the final
+preview path may still initialize and read the configured Finney client. Do
+not treat `--offline` as an air-gap guarantee; use network controls if strict
+isolation is required:
 
 ```bash
 cathedral-validator serve \
   --config my-validator.toml \
+  --runtime-root "$HOME/.cathedral" \
   --offline \
   --once
 ```
@@ -191,7 +196,7 @@ Confirm:
 - the vector is fresh and scoped to Finney SN39;
 - burn and weights are finite and normalized;
 - the provenance result is clearly `PASS`, `FAIL`, or `NOT_PROVEN`; and
-- no chain client or wallet write is attempted.
+- no wallet write or broadcast is attempted.
 
 ### 2. Metagraph-backed dry run
 
@@ -200,6 +205,7 @@ This resolves hotkeys and computes the exact UID vector without writing:
 ```bash
 cathedral-validator serve \
   --config my-validator.toml \
+  --runtime-root "$HOME/.cathedral" \
   --dry-run \
   --once
 ```
@@ -238,7 +244,7 @@ Do not add `--broadcast` until all of the following are true:
 
 - [ ] Cathedral has published a supported immutable tag and launch notice.
 - [ ] You verified the source/package digest and all signing-key pins.
-- [ ] No-chain and metagraph-backed dry runs passed on your machine.
+- [ ] Synthetic-map and metagraph-backed dry runs passed on your machine.
 - [ ] The current vector, evidence index, and provenance outcome match your
       intended assurance level; the known public contract mismatch is resolved.
 - [ ] Your validator hotkey, permit, wallet isolation, RPC, and rollback-state
@@ -269,7 +275,7 @@ Treat a release or signing-key change as a new trust decision:
 3. verify the change through an independent channel;
 4. install into a new environment;
 5. preserve and migrate the rollback state deliberately;
-6. repeat offline and metagraph-backed dry runs; and
+6. repeat synthetic-map and metagraph-backed dry runs; and
 7. resume only after explicit operator authorization.
 
 Never accept a replacement key from a weight payload signed only by the old or
