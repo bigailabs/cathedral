@@ -4345,6 +4345,86 @@ def _prove_finalized_receipt(
     return _classify_finalized_receipt(subtensor, **kwargs) == PASS
 
 
+def _reverify_reserved_signed_vector(
+    args: Any,
+    *,
+    identity: dict[str, Any],
+    preflight: ChainPreflight,
+    uid_weights: dict[int, float],
+) -> None:
+    """Re-prove the reserved signed vector at the irreversible write boundary.
+
+    Every other check here compares the submission against the durable
+    reservation, which makes the reservation the sole authority for what gets
+    written. Writing that file needs owner access to the canonical runtime
+    root, so this is defense in depth rather than a live exploit, but the
+    chain write is irreversible and the evidence to do better is already on
+    hand: the reservation carries the signed payload, so the boundary can
+    re-derive the policy from Cathedral's signature instead of trusting the
+    reservation's own summary of it.
+    """
+    payload = identity.get("signed_vector")
+    if not isinstance(payload, dict):
+        raise wire.VectorError(
+            "SN39 thin reservation carries no signed vector to re-verify"
+        )
+    if _sha256_document(payload) != identity.get("signed_vector_sha256"):
+        raise wire.VectorError(
+            "SN39 reserved signed vector does not hash to its reserved digest"
+        )
+    # Re-load the fence rather than trusting the reservation's policy_version.
+    # The fence only advances after a successful write (_write_state_fenced
+    # runs after set_weights_on_chain returns), so at this point it still holds
+    # the value the tick accepted against and pv > fence must still hold. The
+    # launch path already re-runs accept_vector against that same pre-write
+    # fence in _revalidate_launch_after_rewarded_set_replay, so this is the
+    # established comparison, not a weakened one.
+    fence = load_fence(Path(args.state_file))
+    try:
+        accept_vector(
+            payload,
+            public_key_hex=args.public_key_hex,
+            key_id=args.key_id,
+            network=args.network,
+            netuid=args.netuid,
+            fence_version=fence,
+        )
+    except Exception as exc:
+        raise wire.VectorError(
+            "SN39 reserved signed vector fails signature, wire invariant, or "
+            f"rollback re-verification: {stable_error(exc)}"
+        ) from exc
+    if _validated_supply_meta(payload) is None:
+        raise wire.VectorError(
+            "SN39 reserved signed vector carries no fixed 90/10 supply contract"
+        )
+    burn_hotkey = (payload.get("burn_snapshot") or {}).get("burn_hotkey")
+    if burn_hotkey != SN39_BURN_HOTKEY or identity.get("burn_hotkey") != burn_hotkey:
+        raise wire.VectorError(
+            "SN39 reserved signed vector does not burn to the pinned hotkey"
+        )
+    # Same call the tick used to produce what is about to be written, so a
+    # reservation cannot redirect the allocation while keeping a valid payload.
+    reverified_uid_weights = vector_to_uid_weights(
+        payload,
+        preflight.hotkey_to_uid,
+        require_policy=getattr(args, "require_policy", None),
+    )
+    if set(reverified_uid_weights) != set(uid_weights) or any(
+        not math.isclose(
+            reverified_uid_weights[uid],
+            float(uid_weights[uid]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        for uid in reverified_uid_weights
+    ):
+        raise wire.VectorError(
+            "SN39 chain call differs from the allocation its reserved signed "
+            "vector derives"
+        )
+
+
 def _authorize_sn39_chain_submission(
     args: Any | None,
     *,
@@ -4475,8 +4555,41 @@ def _authorize_sn39_chain_submission(
         raise wire.VectorError(
             "SN39 exact next epoch differs from its durable reservation"
         )
+    if lane == "thin":
+        # Applies to relay, thin-continuous, and launch alike: all three relay a
+        # signed vector, so the payload is the authority for what may be
+        # written and re-proving it is strictly more evidence. The authority
+        # lane originates weights from its own FULL recomputation and has no
+        # signed vector to bind, so it keeps proving its allocation through the
+        # evidence identity and the recurring-write authorization below.
+        _reverify_reserved_signed_vector(
+            args,
+            identity=identity,
+            preflight=preflight,
+            uid_weights=uid_weights,
+        )
 
     launch = bool(getattr(args, "require_full_provenance_for_broadcast", False))
+    if not launch and not _continuous_transition_required(args):
+        # Relay: this runtime owes SN39 no launch of its own, so there is no
+        # recurring-write authorization to re-prove. Everything that makes the
+        # write safe still ran above (pinned trust profile, verified signature,
+        # exact durable reservation, UID/epoch/inclusion safety). Refuse a call
+        # that nonetheless claims launch or recurring authority it cannot
+        # present, so the relay path can never be used to smuggle one.
+        if (
+            lane != "thin"
+            or identity.get("continuous_authorization") is not None
+            or getattr(args, "_continuous_submission_authorization", None) is not None
+            or state.get("submission_pending_launch_attempt") is True
+            or state.get("submission_pending_budget_scope")
+            not in (None, "thin_bounded")
+        ):
+            raise wire.VectorError(
+                "SN39 relay chain call claims launch or recurring-write "
+                "authority it cannot present"
+            )
+        return
     if not launch:
         authorization = getattr(args, "_continuous_submission_authorization", None)
         if (
@@ -4674,9 +4787,12 @@ def _submit_exact_sn39_extrinsic(
     nonce = substrate.get_account_next_index(preflight.wallet.hotkey.ss58_address)
     if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
         raise wire.VectorError("SN39 validator nonce is malformed")
+    # A relay has no recurring-write authorization and therefore no signed
+    # nonce window to check. The launch runtime and any runtime that owes SN39
+    # a launch still must present one before the account nonce is used.
     if not bool(
         getattr(runtime_contract, "require_full_provenance_for_broadcast", False)
-    ):
+    ) and _continuous_transition_required(runtime_contract):
         authorization = getattr(
             runtime_contract,
             "_continuous_submission_authorization",
@@ -5294,13 +5410,7 @@ def _thin_tick_locked(args) -> bool:
         and not isinstance(recovered_version, bool)
         and payload.get("policy_version") == recovered_version
     ):
-        observed_bytes = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        observed_digest = "sha256:" + hashlib.sha256(observed_bytes).hexdigest()
+        observed_digest = _sha256_document(payload)
         if payload.get("vector_id") == prior_state.get(
             "thin_recovered_vector_id"
         ) and observed_digest == prior_state.get("thin_recovered_signed_vector_sha256"):
@@ -5487,13 +5597,7 @@ def _thin_tick_locked(args) -> bool:
         f"uids={len(uid_weights)} burn_uid={burn_uid} burn_share={burn_share:.6f} "
         f"vector={preview}",
     )
-    signed_vector_bytes = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    signed_vector_sha256 = "sha256:" + hashlib.sha256(signed_vector_bytes).hexdigest()
+    signed_vector_sha256 = _sha256_document(payload)
     if args.offline:
         wire_uids = wire_values = None
     else:
@@ -5526,6 +5630,10 @@ def _thin_tick_locked(args) -> bool:
             "vector_id": payload["vector_id"],
             "policy_version": int(payload["policy_version"]),
             "signed_vector_sha256": signed_vector_sha256,
+            # The payload itself, not just its digest. The chain-write boundary
+            # re-derives the whole policy from these bytes, so a reservation can
+            # never be the sole authority for what gets written.
+            "signed_vector": payload,
             "burn_hotkey": burn_hotkey,
             "uid_weights": [[uid, weight] for uid, weight in ordered],
             "uid_hotkeys": [
@@ -5555,7 +5663,6 @@ def _thin_tick_locked(args) -> bool:
                 audit=launch_audit,
                 uid_safety=uid_safety,
             )
-            identity["signed_vector"] = payload
             identity["full_provenance"] = {
                 "source_epoch": launch_audit.source_epoch,
                 "report_id": launch_audit.report_id,
@@ -5890,13 +5997,16 @@ def _reserve_common_submission(
         raise ValueError("max submissions must be nonnegative")
     launch_attempt = bool(getattr(args, "require_full_provenance_for_broadcast", False))
     authorization = getattr(args, "_continuous_submission_authorization", None)
+    # `_continuous_transition_required` is the single source of truth. Keeping
+    # a separate config conjunct here let an authority-lane operator who set
+    # the flag false reserve without the signed authorization the tick had
+    # already demanded, so the reservation and the tick disagreed.
     recurring_required = bool(
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
         and int(getattr(args, "netuid", -1)) == 39
         and not launch_attempt
         and _continuous_transition_required(args)
-        and bool(getattr(args, "require_completed_launch_for_broadcast", False))
     )
     if recurring_required and not isinstance(authorization, ContinuousAuthorization):
         raise ValueError(
@@ -7729,14 +7839,109 @@ def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
     )
 
 
+def _sn39_launch_lineage(args: Any) -> bool | None:
+    """Report whether this runtime's own journal records an SN39 launch.
+
+    Returns None when the canonical signer/genesis identity is not resolved
+    yet. The journal is addressed BY that identity, so before it is bound the
+    question is unanswerable rather than answered "no". Every boundary that can
+    actually reach an irreversible chain call resolves the identity first
+    (`_prepare_tick_preflight`/`_bind_submission_identity`), so a runtime that
+    has launched can never slip past the gate on an unresolved probe.
+    """
+    if not bool(getattr(args, "offline", False)) and (
+        getattr(args, "_submission_validator_hotkey", None) is None
+        or getattr(args, "_submission_genesis_hash", None) is None
+    ):
+        return None
+    try:
+        journal = _submission_state_path(args)
+    except Exception:  # noqa: BLE001 - identity or root not usable here
+        return None
+    try:
+        os.stat(journal.parent)
+    except (FileNotFoundError, NotADirectoryError):
+        # No runtime root yet means no journal and therefore no launch history.
+        # The root itself is pinned to its canonical location separately, so
+        # this cannot be used to point the probe somewhere convenient.
+        return False
+    except OSError:
+        return True
+    try:
+        state = _read_state_without_mutation(journal)
+    except Exception:  # noqa: BLE001
+        # An unreadable, foreign-owned, or malformed journal must never read as
+        # "never launched"; that is exactly how a launcher would hide its own
+        # obligation. Fail closed.
+        return True
+    # Every marker below is written only under a launch reservation. The
+    # per-reservation `submission_pending_launch_attempt` is a bool on ordinary
+    # thin writes too, so it is compared against True rather than None: a relay
+    # that has already reserved once must not read as launch lineage and brick
+    # itself on its second tick.
+    return bool(
+        state.get("submission_launch_status") is not None
+        or state.get("submission_launch_attempt_id") is not None
+        or state.get("submission_launch_attempt_ids")
+        or state.get("submission_continuous_enabled") is True
+        or state.get("submission_continuous_launch_attempt_id") is not None
+        or state.get("submission_pending_launch_attempt") is True
+    )
+
+
+def _sn39_launch_obligation(args: Any) -> bool:
+    """Does THIS runtime owe SN39 its own completed one-shot launch?
+
+    The mainnet launch is a subnet-level event, not a per-validator one. A
+    third-party validator that only relays Cathedral's signed vector can never
+    satisfy a per-validator launch gate, so an unconditional gate locks every
+    operator except Cathedral out of SN39 entirely. The obligation therefore
+    tracks the things an operator cannot simply restate in a config file:
+
+      1. the authority code path, which submits its own recomputation instead
+         of relaying the signed vector, and so originates trust rather than
+         carrying it;
+      2. the launch runtime itself, which performs the one-shot transaction;
+      3. possession of, or journalled lineage from, the controlled launch
+         material at the release-pinned absolute paths.
+
+    Every branch reads code constants or this runtime's own durable journal, so
+    no config value, CLI flag, endpoint label, or environment variable can
+    clear an obligation the runtime actually has. Declaring `provenance =
+    "shadow"` to dodge branch 1 also gives up the ability to originate weights,
+    which is the capability the gate exists to protect.
+    """
+    if (getattr(args, "provenance", "shadow") or "shadow") == "authority":
+        return True
+    if bool(getattr(args, "require_full_provenance_for_broadcast", False)):
+        return True
+    for path in (
+        SN39_LAUNCH_CONTROLLED_DIR,
+        SN39_LAUNCH_VERIFIER_BINARY,
+        SN39_LAUNCH_APPROVAL_FILE,
+    ):
+        try:
+            os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            # A host that cannot answer the question is treated as holding the
+            # launch material; refusing the broadcast is the safe direction.
+            return True
+        return True
+    return _sn39_launch_lineage(args) is True
+
+
 def _continuous_transition_required(args: Any) -> bool:
     if (
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
         and int(getattr(args, "netuid", -1)) == 39
+        and _sn39_launch_obligation(args)
     ):
         # No operator-controlled label, endpoint, config, or direct CLI
-        # invocation may weaken the SN39 transition requirement.
+        # invocation may weaken the SN39 transition requirement for a runtime
+        # that originates weights or holds/has held launch material.
         return True
     explicit = getattr(args, "require_completed_launch_for_broadcast", None)
     if explicit is not None:
@@ -8284,11 +8489,18 @@ def _validate_runtime_contract(args: Any) -> None:
                 "SN39 mainnet broadcast requires the canonical owner-only "
                 f"runtime root {_VALIDATOR_RUNTIME_ROOT}"
             )
-        if not launch_gate and not bool(
-            getattr(args, "require_completed_launch_for_broadcast", False)
+        # A pure relay carries Cathedral's signature to the pinned netuid and
+        # burn; it has no launch of its own to complete, so demanding the gate
+        # from it would only lock third parties off the subnet. A runtime that
+        # originates weights or holds launch material still must set it.
+        if (
+            not launch_gate
+            and _sn39_launch_obligation(args)
+            and not bool(getattr(args, "require_completed_launch_for_broadcast", False))
         ):
             raise wire.VectorError(
-                "continuous SN39 broadcast requires the completed-launch gate"
+                "SN39 broadcast from a weight-originating or launch-capable "
+                "runtime requires the completed-launch gate"
             )
     if not launch_gate:
         return

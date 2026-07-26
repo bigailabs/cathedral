@@ -6553,7 +6553,14 @@ def test_shipped_launch_and_continuous_profiles_share_one_journal_and_gate(
     continuous.require_completed_launch_for_broadcast = False
     continuous.require_policy = "validated_supply_v1"
     continuous.broadcast = True
+    # Clearing the flag no longer clears an obligation the runtime actually
+    # has: the authority lane originates weights, so it stays gated regardless.
+    continuous.provenance = "authority"
     assert validator_thin._continuous_transition_required(continuous) is True
+    # A pure relay owes SN39 no launch of its own, so the same flag is an
+    # honest opt-out for it. Anything stronger locks third parties off SN39.
+    continuous.provenance = "shadow"
+    assert validator_thin._continuous_transition_required(continuous) is False
 
 
 def test_forged_validator_owned_transition_journal_cannot_authorize(

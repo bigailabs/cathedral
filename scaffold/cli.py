@@ -430,7 +430,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         default=None,
         help="refuse continuous writes until reconcile-launch proves the finalized "
-        "FULL-gated launch",
+        "FULL-gated launch; on by default and mandatory for provenance=authority "
+        "or any host holding the controlled launch material. A third-party "
+        "validator that only relays Cathedral's signed vector opts out in its "
+        "config file (see config/validator-thin-sn39-relay.toml)",
     )
     sp.add_argument(
         "--require-policy",
