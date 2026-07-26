@@ -19,7 +19,7 @@ whole-epoch FULL-provenance claim.
 | Whole-epoch FULL provenance | **NOT_PROVEN** | Non-verified candidates have explicit zero rows but do not publish candidate-specific replayable negative evidence. |
 | Independent external reproduction | **NOT_PROVEN** until an outside operator runs the release | The exact public inputs and command are below. A controlled package is additionally required to replay raw TDX evidence. |
 | Burn-only revocation fail-safe | **PASS at the observed chain boundary; rechecked before every write** | Finalized Finney block `8697317` reported `min_allowed_weights=1`, `max_weight_limit=1.0`, and commit-reveal disabled. The release refuses every SN39 write if any of those facts change, so a revoked final miner can be replaced by one 100% burn destination instead of leaving stale earning weights. |
-| UID identity race guard | **NOT_PROVEN until both target hotkeys are rotated and the live gate below passes** | UIDs are never treated as permanent identities. The rewarded target and the owner/burn target must each be rotated to a fresh, dedicated launch hotkey in two separately approved preparatory chain writes. For each target, the validator, finalizer, and public reproducer require one unique successful `SubtensorModule.swap_hotkey_v2` call at the recorded finalized block, signed by the expected owner coldkey with the exact old hotkey, new hotkey, netuid `39`, and reviewed `keep_stake` value; the matching `HotkeySwappedOnSubnet` event and post-call root/successor lineage must also verify. The coldkey-wide `LastHotkeySwapOnNetuid` value alone is not target proof. At finalized preflight block `B`, each target's owner coldkey must then have a positive `LastHotkeySwapOnNetuid` value `S` satisfying `B + 4 - 1 <= S + HotkeySwapOnSubnetInterval`, no pending `ColdkeySwapAnnouncements`, and a live storage value `ColdkeySwapAnnouncementDelay >= 4`. These hotkey-swap and coldkey-swap checks are additional to the existing registration-replacement safety proof: the validator still resolves the signed worker hotkey, validator signer, subnet-owner burn hotkey, exact next epoch, live weight cooldown, registration capacity, `immunity_period`, `MinNonImmuneUids`, owner coldkey, `OwnedHotkeys`, and `ImmuneOwnerUidsLimit`, and reproduces the runtime's bounded owner-immortal set. The inclusion proof must recheck every hotkey binding, owner, swap guard, epoch, policy fact, call argument, successful execution, and finality. A returned canonical receipt is fsynced before archive reads. `NOT_PROVEN` leaves the attempt fenced for restart-only reproof and is published as `NOT_PROVEN`, not `FAIL`; `FAIL` requires operator investigation. Neither condition can trigger a second weight write. |
+| UID identity race guard | **NOT_PROVEN until the live gate below passes** | UIDs are never treated as permanent identities. A target may be rotated to a fresh, dedicated launch hotkey in a separately approved preparatory chain write, but the launch does not require one: only a target's own coldkey can replace its hotkey, and both SN39 target coldkeys are operator-controlled. That assumption is recorded in the proof itself as `"stability_basis": "operator_controlled_coldkeys"`. At finalized preflight block `B`, each target's lock is published as `swap_lock`: `never_rotated` when `LastHotkeySwapOnNetuid` is `0`, `active` when its value `S` satisfies `B + 4 - 1 <= S + HotkeySwapOnSubnetInterval`, and `expired` otherwise. Only an `active` lock carries a rotation proof, and a claimed `active` lock is proven in full: the validator, finalizer, and public reproducer require one unique successful `SubtensorModule.swap_hotkey_v2` call at the recorded finalized block, signed by the expected owner coldkey with the exact old hotkey, new hotkey, netuid `39`, and reviewed `keep_stake` value; the matching `HotkeySwappedOnSubnet` event and post-call root/successor lineage must also verify. The coldkey-wide `LastHotkeySwapOnNetuid` value alone is not target proof. Regardless of lock state, every target must have no pending `ColdkeySwapAnnouncements`, and the live storage value `ColdkeySwapAnnouncementDelay` must be at least `4`. These hotkey-swap and coldkey-swap checks are additional to the existing registration-replacement safety proof: the validator still resolves the signed worker hotkey, validator signer, subnet-owner burn hotkey, exact next epoch, live weight cooldown, registration capacity, `immunity_period`, `MinNonImmuneUids`, owner coldkey, `OwnedHotkeys`, and `ImmuneOwnerUidsLimit`, and reproduces the runtime's bounded owner-immortal set. The inclusion proof must recheck every hotkey binding, owner, swap guard, epoch, policy fact, call argument, successful execution, and finality. A returned canonical receipt is fsynced before archive reads. `NOT_PROVEN` leaves the attempt fenced for restart-only reproof and is published as `NOT_PROVEN`, not `FAIL`; `FAIL` requires operator investigation. Neither condition can trigger a second weight write. |
 
 After the tagged launch gate passes, the public status and sanitized event
 stream are published at:
@@ -41,46 +41,53 @@ claim. The following observations remain blocking:
 | Intel TDX worker | **FAIL** | The required worker is `TERMINATED`. Starting or replacing it is a paid production mutation and requires explicit authority. |
 | Producer revision | **FAIL** | The staged producer bundle still pins the older `b77` revision instead of the required `fa39af97e738fdbed5c454f976b61246590b5794` revision. |
 | Producer, enrollment, and controlled-package install contract | **NOT_PROVEN** | The exact final ownership, group, and mode contract for `/etc/cathedral/controlled/sn39-launch` has not been resolved. Do not infer permissions or install a substitute package. |
-| Public launch evidence | **NOT_PROVEN** | The currently published evidence is stale and the current vector is empty/all-burn. It predates the required target rotations and cannot authorize the launch weight. |
+| Public launch evidence | **NOT_PROVEN** | The currently published evidence is stale and the current vector is empty/all-burn. It cannot authorize the launch weight. |
 | Root-signed release | **NOT_PROVEN** | The final release and its detached signature are absent. A mutable candidate or unsigned `release.json` is not a sealed release. |
 
-The safe order is therefore fixed: review a preparatory rotation bundle; select
-the exact replacement hotkeys; perform the two separately approved rotations;
-update every rewarded and burn identity pin; repair the producer, enrollment,
-and controlled-package installation contracts; pass final review, CI, tag, and
-immutable installation; obtain explicit authority to start the paid TDX
-worker; generate fresh post-rotation evidence; pass the final read-only gate;
-and only then request separate approval for one weight write.
+The safe order is therefore fixed: if a preparatory rotation is being performed,
+review its bundle, select the exact replacement hotkeys, perform each separately
+approved rotation, and update every rewarded and burn identity pin; repair the
+producer, enrollment, and controlled-package installation contracts; pass final
+review, CI, tag, and immutable installation; obtain explicit authority to start
+the paid TDX worker; generate fresh evidence; pass the final read-only gate; and
+only then request separate approval for one weight write.
 
 ## Blocking final eligibility
 
 The release is **not ready for the final on-chain weight test** until all of
 the following are proven from canonical finalized Finney state:
 
-1. An explicitly approved `swap_hotkey_v2` write has rotated the rewarded
-   target to a fresh, dedicated launch hotkey. Its unique decoded call,
-   successful finalized receipt, matching `HotkeySwappedOnSubnet` event, and
-   root/successor lineage all verify independently.
-2. A second explicitly approved `swap_hotkey_v2` write has rotated the
-   owner/burn target to its own fresh, dedicated launch hotkey, with the same
-   independently verified call, receipt, event, and lineage proof.
+1. Every target whose owner coldkey holds a live rotation lock has that
+   rotation proven: its unique decoded `swap_hotkey_v2` call, successful
+   finalized receipt, matching `HotkeySwappedOnSubnet` event, and
+   root/successor lineage all verify independently. A target that has never
+   rotated, or whose cooldown has expired, carries no lock and no receipt.
+   Rotation is not a launch prerequisite; a rotation that is performed must
+   still prove out in full.
+2. The rewarded target and the owner/burn target are evaluated independently.
+   Each resolves its own owner coldkey, lock state, and proof; neither inherits
+   a lock, a receipt, or a lineage from the other.
 3. All Intel TDX evidence, workload/result receipts, the candidate snapshot,
-   signed weight vector, and public provenance artifacts were generated
-   entirely after both rotations. Pre-rotation evidence cannot authorize the
-   launch write because it is bound to the old hotkeys. The evidence candidate
-   block must be strictly greater than both rotation blocks, its finalized
-   block hash must bind the TDX challenge, and every signed artifact timestamp
-   must be later than both finalized rotation timestamps.
-4. At the exact finalized preflight block `B`, each target has a positive
-   `LastHotkeySwapOnNetuid` block `S` and satisfies:
+   signed weight vector, and public provenance artifacts postdate every proven
+   rotation. Evidence bound to an old hotkey cannot authorize the launch write.
+   Where at least one target carries a proven rotation, the evidence candidate
+   block must be strictly greater than the latest rotation block and every
+   signed artifact timestamp must be later than the latest finalized rotation
+   timestamp; where no target does, there is no rotation floor to clear. In
+   both cases the candidate block's finalized hash must bind the TDX challenge.
+4. At the exact finalized preflight block `B`, each target's lock state is
+   recorded from its `LastHotkeySwapOnNetuid` block `S`, where a lock is
+   `active` when:
 
    ```text
    B + 4 - 1 <= S + HotkeySwapOnSubnetInterval
    ```
 
-   The `4` is the signed extrinsic's mortal-era period. This proves that the
-   target hotkey cannot be swapped again before the complete inclusion window
-   ends.
+   The `4` is the signed extrinsic's mortal-era period. An `active` lock proves
+   that the target hotkey cannot be swapped again before the complete inclusion
+   window ends. `S = 0` is recorded as `never_rotated` and a lock that no longer
+   covers the window as `expired`; neither blocks the write, because only the
+   target's own operator-controlled coldkey can replace its hotkey.
 5. Each target owner coldkey has no pending `ColdkeySwapAnnouncements`, and
    the live runtime `ColdkeySwapAnnouncementDelay` is at least `4`. This closes
    the coldkey-transfer path for the same inclusion window.
@@ -89,21 +96,22 @@ the following are proven from canonical finalized Finney state:
    owner immortality, or registration immunity plus the conservative
    non-immune pruning buffer.
 7. The final validator constant, both mainnet validator configurations, and
-   the scorer runtime/environment pin the two post-rotation hotkeys rather than
-   either old identity. The producer registry and enrollment state name those
-   same post-rotation identities.
+   the scorer runtime/environment pin the hotkey each target currently runs
+   under, and no superseded identity. The producer registry and enrollment
+   state name those same identities.
 8. The controlled-package installation has an explicitly reviewed owner,
    group, directory-mode, and file-mode contract, and the exact package for the
-   fresh post-rotation epoch is installed under that contract.
+   fresh evidence epoch is installed under that contract.
 9. Final CI, tag resolution, immutable installation, controlled replay, and
    the complete read-only Finney preflight are all **PASS**. The root-signed
    public reproduction follows the one-shot finalizer; pre-write review proves
    its inputs and readiness rather than fabricating a sealed launch. Passing
    these gates still does not authorize a weight write.
 
-The two rotations are preparatory chain writes, not part of the one-shot weight
-submission budget. This guide does not authorize them: each requires explicit
-operator approval, exact signer/target review, and a finalized receipt. The
+A rotation is a preparatory chain write, not part of the one-shot weight
+submission budget, and the launch gate does not require one. This guide does
+not authorize any rotation: each requires explicit operator approval, exact
+signer/target review, and a finalized receipt. The
 locked Bittensor 10.5.0 environment has no reviewed convenience wrapper for
 this call, so the approved operator procedure must compose
 `SubtensorModule.swap_hotkey_v2` from runtime metadata, sign with the owning
@@ -410,12 +418,13 @@ owner/burn target with distinct files, `--role owner-burn`, its exact owner
 coldkey, and an independently reviewed `keep_stake` choice. Never reuse a
 confirmation digest between roles or targets.
 
-### Materialize fresh post-rotation evidence
+### Materialize fresh launch evidence
 
 This is an external producer prerequisite, not functionality completed by the
 rotation operator. The rotation tool does not generate, sign, or publish
 Cathedral evidence.
-After both receipt artifacts are `PASS`, first update every rewarded and
+After every performed rotation's receipt artifacts are `PASS`, first update
+every rewarded and
 owner/burn identity pin in the validator, both mainnet configurations, scorer,
 producer registry, and enrollment state. Repair the producer deployment to the
 required revision, fix its policy-digest/registry mismatch, and explicitly
@@ -441,13 +450,14 @@ For the final launch service, materialize only the two existing inputs:
    values for it. The pinned verifier remains
    `/opt/cathedral-sn39/bin/cathedral-tdx-verifier`.
 
-Before the final weight test, record the two canonical receipt JSON files and
-confirm with the evidence producer that its new epoch names the two **new**
-hotkeys. The one-shot launch service then enforces the actual gate before it
-signs: the candidate block and report validity start are strictly after both
-rotation blocks; the candidate block hash is canonical and binds the TDX
-challenge; manifest, report, vector, and signed-index timestamps are strictly
-after both rotation block timestamps; every rewarded row replays from the
+Before the final weight test, record the canonical receipt JSON file for every
+rotation that was performed and confirm with the evidence producer that its new
+epoch names the hotkeys each target currently runs under. The one-shot launch
+service then enforces the actual gate before it signs: the candidate block and
+report validity start are strictly after every proven rotation block; the
+candidate block hash is canonical and binds the TDX challenge; manifest,
+report, vector, and signed-index timestamps are strictly after every proven
+rotation block timestamp; every rewarded row replays from the
 controlled package; and the recomputed 90/10 vector exactly matches the signed
 vector. Any missing public blob, controlled byte, freshness binding, target
 identity, or replay result stops before signing.
@@ -456,7 +466,7 @@ There is deliberately no local command that fabricates a PASS for this step.
 Until the producer runs the required revision without the policy-digest
 mismatch, the paid TDX worker is explicitly authorized and running, and the
 producer has published the new epoch and delivered its matching controlled
-package, post-rotation evidence remains **NOT_PROVEN** and
+package, the launch evidence boundary remains **NOT_PROVEN** and
 `cathedral-validator-sn39-launch.service` must not be started.
 
 ## Immutable release
@@ -464,9 +474,9 @@ package, post-rotation evidence remains **NOT_PROVEN** and
 This table describes the required final release, not the current candidate.
 Do not create the tag, install the validator, or sign the release while either
 configuration, validator constant, scorer, producer registry, or enrollment
-state still names a pre-rotation hotkey. The final release can be frozen only
-after both rotation receipts verify and all identity pins and installation
-contracts have been reviewed together.
+state still names a superseded hotkey. The final release can be frozen only
+after every performed rotation receipt verifies and all identity pins and
+installation contracts have been reviewed together.
 
 | Component | Revision or digest |
 |---|---|
@@ -533,7 +543,7 @@ A fresh environment plus `python -m scaffold.cli` is deterministic.
 ## Install the final reviewed release
 
 The production services do not run a mutable checkout or editable package.
-After both rotations, update and review all post-rotation identity pins, repair
+After any rotation, update and review all identity pins, repair
 the producer and enrollment contracts, resolve the controlled-package
 ownership and mode contract, and require final CI to pass. Only then create the
 tag and install its exact commit in a root-owned checkout. Build its versioned
@@ -670,23 +680,23 @@ validator with a permit. The validator **coldkey is never installed**.
 Do not start the continuous writer first. The launch order is deliberately
 one-way:
 
-1. Review and hash-lock the preparatory rotation bundle and its runtime while
-   keeping every validator service stopped. Select the exact fresh rewarded
-   and owner/burn replacement hotkeys, confirm their distinct owner coldkeys,
-   and run the operator in inspect-only mode. This preparatory bundle is not a
-   final validator tag and does not authorize either rotation.
-2. Obtain separate explicit operator approval for each of exactly two
-   preparatory chain writes:
-   rotate the rewarded target and the owner/burn target to separate fresh
-   launch hotkeys. Review each signer, coldkey, old hotkey, new hotkey, netuid,
-   and `keep_stake` choice before broadcast, and retain both finalized
-   receipts. For each receipt, retain the unique decoded
-   `SubtensorModule.swap_hotkey_v2` call and matching
+1. Steps 1 and 2 apply only if a target is being rotated; the launch gate does
+   not require a rotation. Review and hash-lock the preparatory rotation bundle
+   and its runtime while keeping every validator service stopped. Select the
+   exact fresh replacement hotkeys, confirm their distinct owner coldkeys, and
+   run the operator in inspect-only mode. This preparatory bundle is not a
+   final validator tag and does not authorize any rotation.
+2. Obtain separate explicit operator approval for each preparatory chain write
+   that rotates a target to a fresh launch hotkey. Review each signer, coldkey,
+   old hotkey, new hotkey, netuid, and `keep_stake` choice before broadcast,
+   and retain every finalized receipt. For each receipt, retain the unique
+   decoded `SubtensorModule.swap_hotkey_v2` call and matching
    `HotkeySwappedOnSubnet` event. Confirm the post-call
-   `HotkeyRoot`/`HotkeySuccessor` lineage for netuid `39`. These rotations are
+   `HotkeyRoot`/`HotkeySuccessor` lineage for netuid `39`. A rotation is
    not implicitly authorized by approval of the later weight test.
-3. Only after both rotations finalize, update the rewarded and owner/burn
-   identity pins in the validator, both mainnet configurations, scorer,
+3. Only after every performed rotation finalizes, update the rewarded and
+   owner/burn identity pins in the validator, both mainnet configurations,
+   scorer,
    producer registry, and enrollment state. Repair the producer to the required
    revision and resolve its policy-digest/registry mismatch. Resolve and review
    the controlled-package owner, group, directory mode, and file mode instead
@@ -700,26 +710,27 @@ one-way:
    workload/result receipts, candidate snapshot, signed vector, evidence
    checkpoint, and provenance artifacts.
    Reject any artifact whose identity, creation boundary, or digest traces to
-   a pre-rotation hotkey. Require the evidence candidate block to be strictly
-   greater than both receipt blocks and its finalized hash to be the TDX
-   challenge anchor; require the manifest, score report, vector, and signed
-   index times to be later than both rotation timestamps. At the exact
-   finalized preflight block `B`, prove for each target that
-   `B + 4 - 1 <= S + HotkeySwapOnSubnetInterval`, where `S` is its positive
-   `LastHotkeySwapOnNetuid` value; that its owner coldkey has no pending
-   `ColdkeySwapAnnouncements`; and that the live storage value
+   a superseded hotkey. Require the evidence candidate block to be strictly
+   greater than every proven rotation block and its finalized hash to be the
+   TDX challenge anchor; require the manifest, score report, vector, and signed
+   index times to be later than every proven rotation timestamp. At the exact
+   finalized preflight block `B`, record each target's lock state from its
+   `LastHotkeySwapOnNetuid` value `S`, prove every target whose lock is
+   `active` under `B + 4 - 1 <= S + HotkeySwapOnSubnetInterval`, and prove for
+   every target that its owner coldkey has no pending
+   `ColdkeySwapAnnouncements` and that the live storage value
    `ColdkeySwapAnnouncementDelay >= 4`.
 5. With the launch service still stopped, run the complete read-only release,
    evidence, controlled-replay, and finalized-Finney eligibility gate. It must
-   prove the final tag and installation, both exact rotations, every
-   post-rotation identity pin, the fresh evidence boundary, exact 90/10 vector,
+   prove the final tag and installation, every claimed rotation lock, every
+   identity pin, the fresh evidence boundary, exact 90/10 vector,
    live weight policy, cooldown, epoch, and replacement and swap safety. Any
    `FAIL` or `NOT_PROVEN` stops here. A green read-only gate does not authorize
    a chain write.
 6. Only after step 5 is entirely **PASS**, request separate explicit approval
    for one exact `set_mechanism_weights` attempt. The approval must name the
    final release, validator signer, two target hotkeys, vector digest, attempt
-   boundary, and current finalized preflight. Do not reuse either rotation
+   boundary, and current finalized preflight. Do not reuse a rotation
    approval and do not start the service without this new authorization.
 7. Start `cathedral-validator-sn39-launch.service` only under that approval. It
    can reserve at most one
@@ -777,7 +788,7 @@ archive to Finney genesis
 `0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03`,
 then re-reads the historical mapping and inclusion blocks, verifies the exact
 extrinsic and applied wire weights,
-re-verifies both exact target-rotation receipts and lineage, enforces the
+re-verifies every claimed target-rotation receipt and lineage, enforces the
 post-rotation evidence boundary, recomputes the frozen public evidence
 checkpoint, and then independently executes the canonical positive-TDX replay
 from the actual digest-named controlled envelope and immutable verifier bytes.
@@ -892,7 +903,7 @@ Expected public-only result:
 
 - the root-signed launch vector, source revisions, pins, and historical
   candidate set verify;
-- both exact target rotations, their successful events and lineage, and the
+- every claimed target rotation, its successful event and lineage, and the
   post-rotation evidence boundary verify independently;
 - the launch vector maps to one admitted Intel TDX worker plus the logical
   10% burn target, with the effective protocol-quantized shares published;
