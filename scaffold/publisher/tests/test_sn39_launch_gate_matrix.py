@@ -15,19 +15,22 @@ a test for is the one that bites. Every test here fails if its guard is removed.
 
 from __future__ import annotations
 
+import base64
 import copy
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_validator_thin_validated_supply import payload as validated_supply_payload
 
-from scaffold import validator_thin
+from scaffold import validator_thin, wire_vector
 
 VALIDATOR_HOTKEY = "5CanonicalValidator"
 LAUNCH_ATTEMPT_ID = "sha256:" + "1" * 64
+TDX_MINER_HOTKEY = "tdx-miner"
 
 
 @pytest.fixture(autouse=True)
@@ -421,7 +424,90 @@ def test_relay_cannot_redirect_the_runtime_root(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _chain_fixtures(monkeypatch: pytest.MonkeyPatch):
+def _iso(value: datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
+
+
+def _sign(payload: dict, private_key: Ed25519PrivateKey) -> dict:
+    payload["signature"] = base64.b64encode(
+        private_key.sign(wire_vector.canonical_bytes(payload))
+    ).decode()
+    return payload
+
+
+def _signed_relay_vector(
+    private_key: Ed25519PrivateKey,
+    *,
+    policy_version: int = 7,
+    burn_hotkey: str = validator_thin.SN39_BURN_HOTKEY,
+    validated_supply: bool = True,
+) -> dict:
+    """One real signed relay vector: 90% to the TDX miner, 10% burned.
+
+    Against the fixture metagraph this derives exactly {1: 0.9, 2: 0.1}, which
+    is what the reservation and the chain call below both claim.
+    """
+    now = datetime.now(UTC)
+    metadata: dict[str, dict] = {
+        "confidential_primary": {
+            "contract_version": "v1",
+            "mode": "confidential_primary",
+            "source": "cathedral_confidential_tdx",
+            "base_mass": 0.0,
+            "confidential_mass": 1.0,
+            "complete": True,
+            "fresh": True,
+            "confirmed": True,
+        }
+    }
+    if validated_supply:
+        metadata["validated_supply"] = {
+            "contract_version": "v2",
+            "intel_tdx_allocation": 0.90,
+            "fixed_burn_allocation": 0.10,
+            "burn_hotkey": burn_hotkey,
+        }
+    payload = {
+        "vector_id": "vector-1",
+        "policy_version": policy_version,
+        "network": "finney",
+        "netuid": 39,
+        "generated_at": _iso(now),
+        "expires_at": _iso(now + timedelta(minutes=5)),
+        "burn_snapshot": {
+            "burn_uid": None,
+            "burn_hotkey": burn_hotkey,
+            "forced_burn_percentage": 10.0,
+        },
+        "policy_metadata": metadata,
+        "policy_hash": "sha256:relay-fixture",
+        "key_id": validator_thin.SN39_WEIGHT_POLICY_KEY_ID,
+        "weights": [
+            {
+                "miner_hotkey": TDX_MINER_HOTKEY,
+                "weight": 1.0,
+                "base_component": 0.0,
+                "external_component": 1.0,
+            }
+        ],
+    }
+    return _sign(payload, private_key)
+
+
+def _chain_fixtures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # The boundary now verifies Cathedral's signature over the reserved payload,
+    # so the tests need a key they can actually sign with. Pin the release
+    # constants to this test's key and lane state file rather than weakening
+    # what the boundary checks.
+    private_key = Ed25519PrivateKey.generate()
+    monkeypatch.setattr(
+        validator_thin,
+        "DEFAULT_PUBLIC_KEY_HEX",
+        private_key.public_key().public_bytes_raw().hex(),
+    )
+    monkeypatch.setattr(
+        validator_thin, "SN39_STATE_FILE", tmp_path / "lane-state" / "thin-state.json"
+    )
     policy = validator_thin.InclusionPolicy(
         valid_from_block=100,
         valid_until_block=300,
@@ -434,7 +520,7 @@ def _chain_fixtures(monkeypatch: pytest.MonkeyPatch):
         wallet=object(),
         subtensor=object(),
         hotkey_to_uid={
-            "tdx-miner": 1,
+            TDX_MINER_HOTKEY: 1,
             validator_thin.SN39_BURN_HOTKEY: 2,
             VALIDATOR_HOTKEY: 30,
         },
@@ -467,10 +553,24 @@ def _chain_fixtures(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         validator_thin, "_chain_operation_deadline", lambda *_a, **_kw: nullcontext()
     )
-    return policy, uid_safety, preflight
+    return private_key, policy, uid_safety, preflight
 
 
-def _reserve_thin(args: SimpleNamespace, *, policy, uid_safety) -> str:
+def _reserve_thin(
+    args: SimpleNamespace,
+    *,
+    policy,
+    uid_safety,
+    payload: dict | None,
+    uid_weights: list[list] | None = None,
+    signed_vector_sha256: str | None = None,
+) -> str:
+    """Reserve exactly what a thin tick reserves, from a real signed payload.
+
+    The digest defaults to the payload's own, because that is what the tick
+    computes; the overrides exist so a test can reserve a deliberately
+    inconsistent record without hand-rolling the whole identity.
+    """
     identity = {
         "network": "finney",
         "netuid": 39,
@@ -479,14 +579,20 @@ def _reserve_thin(args: SimpleNamespace, *, policy, uid_safety) -> str:
         "validator_uid": 30,
         "vector_id": "vector-1",
         "policy_version": 7,
-        "signed_vector_sha256": "sha256:" + "c" * 64,
+        "signed_vector_sha256": (
+            signed_vector_sha256
+            if signed_vector_sha256 is not None
+            else validator_thin._sha256_document(payload or {})
+        ),
         "burn_hotkey": validator_thin.SN39_BURN_HOTKEY,
-        "uid_weights": [[1, 0.9], [2, 0.1]],
-        "uid_hotkeys": [[1, "tdx-miner"], [2, validator_thin.SN39_BURN_HOTKEY]],
+        "uid_weights": uid_weights if uid_weights is not None else [[1, 0.9], [2, 0.1]],
+        "uid_hotkeys": [[1, TDX_MINER_HOTKEY], [2, validator_thin.SN39_BURN_HOTKEY]],
         "next_epoch_start_block": 240,
         "inclusion_policy": validator_thin._inclusion_policy_identity(policy),
         "uid_safety": uid_safety,
     }
+    if payload is not None:
+        identity["signed_vector"] = payload
     attempt_id = "sha256:" + "9" * 64
     validator_thin._reserve_common_submission(
         args, lane="thin", attempt_id=attempt_id, identity=identity
@@ -494,16 +600,11 @@ def _reserve_thin(args: SimpleNamespace, *, policy, uid_safety) -> str:
     return attempt_id
 
 
-def test_relay_reaches_the_chain_boundary_without_an_authorization(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy, uid_safety, preflight = _chain_fixtures(monkeypatch)
-    args = _relay_args()
-    _reserve_thin(args, policy=policy, uid_safety=uid_safety)
+def _authorize(args: SimpleNamespace, *, policy, preflight, uid_weights=None) -> None:
     validator_thin._authorize_sn39_chain_submission(
         args,
-        uid_weights={1: 0.9, 2: 0.1},
-        uid_hotkeys={1: "tdx-miner", 2: validator_thin.SN39_BURN_HOTKEY},
+        uid_weights=uid_weights if uid_weights is not None else {1: 0.9, 2: 0.1},
+        uid_hotkeys={1: TDX_MINER_HOTKEY, 2: validator_thin.SN39_BURN_HOTKEY},
         network="finney",
         netuid=39,
         wallet_name=args.wallet_name,
@@ -513,12 +614,25 @@ def test_relay_reaches_the_chain_boundary_without_an_authorization(
     )
 
 
-def test_obligated_runtime_is_still_refused_at_the_chain_boundary(
-    monkeypatch: pytest.MonkeyPatch,
+def test_relay_reaches_the_chain_boundary_without_an_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    policy, uid_safety, preflight = _chain_fixtures(monkeypatch)
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
     args = _relay_args()
-    _reserve_thin(args, policy=policy, uid_safety=uid_safety)
+    _reserve_thin(
+        args, policy=policy, uid_safety=uid_safety, payload=_signed_relay_vector(key)
+    )
+    _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_obligated_runtime_is_still_refused_at_the_chain_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args, policy=policy, uid_safety=uid_safety, payload=_signed_relay_vector(key)
+    )
     # Same durable reservation, but this runtime now owes SN39 a launch.
     _install_launch_material()
     args.require_completed_launch_for_broadcast = True
@@ -526,26 +640,18 @@ def test_obligated_runtime_is_still_refused_at_the_chain_boundary(
         validator_thin.wire.VectorError,
         match="root-signed recurring-write authorization",
     ):
-        validator_thin._authorize_sn39_chain_submission(
-            args,
-            uid_weights={1: 0.9, 2: 0.1},
-            uid_hotkeys={1: "tdx-miner", 2: validator_thin.SN39_BURN_HOTKEY},
-            network="finney",
-            netuid=39,
-            wallet_name=args.wallet_name,
-            wallet_hotkey=args.wallet_hotkey,
-            preflight=preflight,
-            inclusion_policy=policy,
-        )
+        _authorize(args, policy=policy, preflight=preflight)
 
 
 def test_relay_boundary_refuses_a_smuggled_authority_claim(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The relay branch must not become a hole for claims it cannot prove."""
-    policy, uid_safety, preflight = _chain_fixtures(monkeypatch)
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
     args = _relay_args()
-    _reserve_thin(args, policy=policy, uid_safety=uid_safety)
+    _reserve_thin(
+        args, policy=policy, uid_safety=uid_safety, payload=_signed_relay_vector(key)
+    )
     journal = validator_thin._submission_state_path(args)
     state = validator_thin._read_state(journal)
     state["submission_pending_identity"]["continuous_authorization"] = {
@@ -556,17 +662,257 @@ def test_relay_boundary_refuses_a_smuggled_authority_claim(
         validator_thin.wire.VectorError,
         match="claims launch or recurring-write authority",
     ):
-        validator_thin._authorize_sn39_chain_submission(
-            args,
-            uid_weights={1: 0.9, 2: 0.1},
-            uid_hotkeys={1: "tdx-miner", 2: validator_thin.SN39_BURN_HOTKEY},
-            network="finney",
-            netuid=39,
-            wallet_name=args.wallet_name,
-            wallet_hotkey=args.wallet_hotkey,
-            preflight=preflight,
-            inclusion_policy=policy,
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+# ---------------------------------------------------------------------------
+# The reservation is evidence, not authority: the boundary re-derives from the
+# payload the reservation carries and refuses anything it cannot re-prove
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_refuses_a_reservation_with_no_bound_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fabricated-reservation case: a bare digest proves nothing."""
+    _key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args,
+        policy=policy,
+        uid_safety=uid_safety,
+        payload=None,
+        signed_vector_sha256="sha256:" + "c" * 64,
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="carries no signed vector to re-verify",
+    ):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_refuses_a_payload_that_contradicts_its_reserved_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args,
+        policy=policy,
+        uid_safety=uid_safety,
+        payload=_signed_relay_vector(key),
+        signed_vector_sha256="sha256:" + "c" * 64,
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="does not hash to its reserved digest",
+    ):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_refuses_a_payload_whose_signature_does_not_verify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signed by a key that is not the pinned one, so only the signature is
+    wrong; the digest still matches because it covers the signature field."""
+    _key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    payload = _signed_relay_vector(Ed25519PrivateKey.generate())
+    _reserve_thin(args, policy=policy, uid_safety=uid_safety, payload=payload)
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="ed25519 signature verify failed",
+    ):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_refuses_a_payload_with_no_signature_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    payload = _signed_relay_vector(key)
+    payload.pop("signature")
+    _reserve_thin(args, policy=policy, uid_safety=uid_safety, payload=payload)
+    with pytest.raises(validator_thin.wire.VectorError, match="missing signature"):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_refuses_a_validly_signed_payload_that_moves_the_burn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-signed after tampering, so the signature is genuine and only the
+    fixed 90/10 contract is wrong.
+
+    Two boundary checks catch this: the explicit _validated_supply_meta
+    re-assertion and the uid-weight re-derivation, which validates the same
+    contract on its way through vector_to_uid_weights. Removing either alone
+    leaves this test passing; removing both lets a 0.11 burn through.
+    """
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    payload = _signed_relay_vector(key)
+    payload["policy_metadata"]["validated_supply"]["fixed_burn_allocation"] = 0.11
+    _sign(payload, key)
+    _reserve_thin(args, policy=policy, uid_safety=uid_safety, payload=payload)
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="fixed burn allocation must equal 0.10",
+    ):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_refuses_a_payload_with_no_fixed_supply_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args,
+        policy=policy,
+        uid_safety=uid_safety,
+        payload=_signed_relay_vector(key, validated_supply=False),
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="carries no fixed 90/10 supply contract",
+    ):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_refuses_a_reservation_that_redirects_the_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reservation and chain call agree with each other and disagree with the
+    payload. Only re-deriving from the payload catches this."""
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args,
+        policy=policy,
+        uid_safety=uid_safety,
+        payload=_signed_relay_vector(key),
+        uid_weights=[[1, 0.5], [2, 0.5]],
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="differs from the allocation its reserved signed vector derives",
+    ):
+        _authorize(
+            args, policy=policy, preflight=preflight, uid_weights={1: 0.5, 2: 0.5}
         )
+
+
+def test_boundary_refuses_a_payload_that_burns_to_the_wrong_hotkey(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args,
+        policy=policy,
+        uid_safety=uid_safety,
+        payload=_signed_relay_vector(key, burn_hotkey="5AttackerBurn"),
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="does not burn to the pinned hotkey",
+    ):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_refuses_a_payload_the_rollback_fence_has_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fence is re-read here, not taken from the reservation, so a replayed
+    policy version is refused even though the reservation looks current."""
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args,
+        policy=policy,
+        uid_safety=uid_safety,
+        payload=_signed_relay_vector(key, policy_version=7),
+    )
+    validator_thin._write_state(
+        Path(args.state_file), {"last_accepted_policy_version": 7}
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="rollback/replay"):
+        _authorize(args, policy=policy, preflight=preflight)
+
+
+def test_boundary_accepts_the_same_vector_while_the_fence_is_behind_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Counterpart to the rollback test: re-reading the fence must not refuse
+    the write it is fencing. The fence only advances after the chain call
+    succeeds, so a live lane state one version behind still authorizes."""
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    args = _relay_args()
+    _reserve_thin(
+        args,
+        policy=policy,
+        uid_safety=uid_safety,
+        payload=_signed_relay_vector(key, policy_version=7),
+    )
+    validator_thin._write_state(
+        Path(args.state_file), {"last_accepted_policy_version": 6}
+    )
+    _authorize(args, policy=policy, preflight=preflight)
+
+
+class _ReachedTheChainCall(Exception):
+    """Raised in place of the extrinsic once the boundary has authorized."""
+
+
+def test_a_real_relay_tick_reserves_what_the_boundary_demands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer and consumer, together.
+
+    Every other boundary test hand-builds the reservation, so all of them would
+    still pass if the tick stopped binding the payload. This one runs the real
+    thin tick, lets it build and fsync its own reservation, and then hands the
+    real chain call to the real boundary.
+    """
+    key, policy, uid_safety, preflight = _chain_fixtures(tmp_path, monkeypatch)
+    payload = _signed_relay_vector(key)
+    args = _relay_args()
+    args._events = SimpleNamespace(event=lambda _code, **_fields: None)
+    monkeypatch.setattr(validator_thin, "fetch_vector", lambda _url: payload)
+    monkeypatch.setattr(validator_thin, "chain_preflight", lambda **_kwargs: preflight)
+    monkeypatch.setattr(
+        validator_thin, "_vector_inclusion_policy", lambda *_a, **_kw: policy
+    )
+    # The shadow auditor is a background stage with its own coverage; it is not
+    # part of what authorizes a write.
+    monkeypatch.setattr(
+        validator_thin, "_run_provenance_stage", lambda *_a, **_kw: ("shadow", None)
+    )
+
+    def _chain_call(uid_weights, **kwargs):
+        validator_thin._authorize_sn39_chain_submission(
+            kwargs["runtime_contract"],
+            uid_weights=uid_weights,
+            uid_hotkeys=kwargs["uid_hotkeys"],
+            network=kwargs["network"],
+            netuid=kwargs["netuid"],
+            wallet_name=kwargs["wallet_name"],
+            wallet_hotkey=kwargs["wallet_hotkey"],
+            preflight=kwargs["preflight"],
+            inclusion_policy=kwargs["inclusion_policy"],
+        )
+        raise _ReachedTheChainCall
+
+    monkeypatch.setattr(validator_thin, "set_weights_on_chain", _chain_call)
+    with pytest.raises(_ReachedTheChainCall):
+        validator_thin._thin_tick_locked(args)
+
+    reserved = validator_thin._read_state(validator_thin._submission_state_path(args))
+    identity = reserved["submission_pending_identity"]
+    assert identity["signed_vector"] == payload
+    assert identity["signed_vector_sha256"] == validator_thin._sha256_document(payload)
+    assert identity["uid_weights"] == [[1, 0.9], [2, 0.1]]
 
 
 def test_signed_nonce_allowance_tracks_the_same_obligation(

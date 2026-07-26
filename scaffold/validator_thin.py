@@ -4345,6 +4345,86 @@ def _prove_finalized_receipt(
     return _classify_finalized_receipt(subtensor, **kwargs) == PASS
 
 
+def _reverify_reserved_signed_vector(
+    args: Any,
+    *,
+    identity: dict[str, Any],
+    preflight: ChainPreflight,
+    uid_weights: dict[int, float],
+) -> None:
+    """Re-prove the reserved signed vector at the irreversible write boundary.
+
+    Every other check here compares the submission against the durable
+    reservation, which makes the reservation the sole authority for what gets
+    written. Writing that file needs owner access to the canonical runtime
+    root, so this is defense in depth rather than a live exploit, but the
+    chain write is irreversible and the evidence to do better is already on
+    hand: the reservation carries the signed payload, so the boundary can
+    re-derive the policy from Cathedral's signature instead of trusting the
+    reservation's own summary of it.
+    """
+    payload = identity.get("signed_vector")
+    if not isinstance(payload, dict):
+        raise wire.VectorError(
+            "SN39 thin reservation carries no signed vector to re-verify"
+        )
+    if _sha256_document(payload) != identity.get("signed_vector_sha256"):
+        raise wire.VectorError(
+            "SN39 reserved signed vector does not hash to its reserved digest"
+        )
+    # Re-load the fence rather than trusting the reservation's policy_version.
+    # The fence only advances after a successful write (_write_state_fenced
+    # runs after set_weights_on_chain returns), so at this point it still holds
+    # the value the tick accepted against and pv > fence must still hold. The
+    # launch path already re-runs accept_vector against that same pre-write
+    # fence in _revalidate_launch_after_rewarded_set_replay, so this is the
+    # established comparison, not a weakened one.
+    fence = load_fence(Path(args.state_file))
+    try:
+        accept_vector(
+            payload,
+            public_key_hex=args.public_key_hex,
+            key_id=args.key_id,
+            network=args.network,
+            netuid=args.netuid,
+            fence_version=fence,
+        )
+    except Exception as exc:
+        raise wire.VectorError(
+            "SN39 reserved signed vector fails signature, wire invariant, or "
+            f"rollback re-verification: {stable_error(exc)}"
+        ) from exc
+    if _validated_supply_meta(payload) is None:
+        raise wire.VectorError(
+            "SN39 reserved signed vector carries no fixed 90/10 supply contract"
+        )
+    burn_hotkey = (payload.get("burn_snapshot") or {}).get("burn_hotkey")
+    if burn_hotkey != SN39_BURN_HOTKEY or identity.get("burn_hotkey") != burn_hotkey:
+        raise wire.VectorError(
+            "SN39 reserved signed vector does not burn to the pinned hotkey"
+        )
+    # Same call the tick used to produce what is about to be written, so a
+    # reservation cannot redirect the allocation while keeping a valid payload.
+    reverified_uid_weights = vector_to_uid_weights(
+        payload,
+        preflight.hotkey_to_uid,
+        require_policy=getattr(args, "require_policy", None),
+    )
+    if set(reverified_uid_weights) != set(uid_weights) or any(
+        not math.isclose(
+            reverified_uid_weights[uid],
+            float(uid_weights[uid]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        for uid in reverified_uid_weights
+    ):
+        raise wire.VectorError(
+            "SN39 chain call differs from the allocation its reserved signed "
+            "vector derives"
+        )
+
+
 def _authorize_sn39_chain_submission(
     args: Any | None,
     *,
@@ -4474,6 +4554,19 @@ def _authorize_sn39_chain_submission(
     ):
         raise wire.VectorError(
             "SN39 exact next epoch differs from its durable reservation"
+        )
+    if lane == "thin":
+        # Applies to relay, thin-continuous, and launch alike: all three relay a
+        # signed vector, so the payload is the authority for what may be
+        # written and re-proving it is strictly more evidence. The authority
+        # lane originates weights from its own FULL recomputation and has no
+        # signed vector to bind, so it keeps proving its allocation through the
+        # evidence identity and the recurring-write authorization below.
+        _reverify_reserved_signed_vector(
+            args,
+            identity=identity,
+            preflight=preflight,
+            uid_weights=uid_weights,
         )
 
     launch = bool(getattr(args, "require_full_provenance_for_broadcast", False))
@@ -5317,13 +5410,7 @@ def _thin_tick_locked(args) -> bool:
         and not isinstance(recovered_version, bool)
         and payload.get("policy_version") == recovered_version
     ):
-        observed_bytes = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        observed_digest = "sha256:" + hashlib.sha256(observed_bytes).hexdigest()
+        observed_digest = _sha256_document(payload)
         if payload.get("vector_id") == prior_state.get(
             "thin_recovered_vector_id"
         ) and observed_digest == prior_state.get("thin_recovered_signed_vector_sha256"):
@@ -5510,13 +5597,7 @@ def _thin_tick_locked(args) -> bool:
         f"uids={len(uid_weights)} burn_uid={burn_uid} burn_share={burn_share:.6f} "
         f"vector={preview}",
     )
-    signed_vector_bytes = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    signed_vector_sha256 = "sha256:" + hashlib.sha256(signed_vector_bytes).hexdigest()
+    signed_vector_sha256 = _sha256_document(payload)
     if args.offline:
         wire_uids = wire_values = None
     else:
@@ -5549,6 +5630,10 @@ def _thin_tick_locked(args) -> bool:
             "vector_id": payload["vector_id"],
             "policy_version": int(payload["policy_version"]),
             "signed_vector_sha256": signed_vector_sha256,
+            # The payload itself, not just its digest. The chain-write boundary
+            # re-derives the whole policy from these bytes, so a reservation can
+            # never be the sole authority for what gets written.
+            "signed_vector": payload,
             "burn_hotkey": burn_hotkey,
             "uid_weights": [[uid, weight] for uid, weight in ordered],
             "uid_hotkeys": [
@@ -5578,7 +5663,6 @@ def _thin_tick_locked(args) -> bool:
                 audit=launch_audit,
                 uid_safety=uid_safety,
             )
-            identity["signed_vector"] = payload
             identity["full_provenance"] = {
                 "source_epoch": launch_audit.source_epoch,
                 "report_id": launch_audit.report_id,

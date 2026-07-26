@@ -1,14 +1,21 @@
 [Unit]
 Description=Cathedral SN39 one-shot FULL-gated mainnet launch canary
-After=network-online.target cathedral-thin-validator.service
+After=network-online.target cathedral-thin-validator.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
 Wants=network-online.target
-Conflicts=cathedral-validator-sn39.service cathedral-thin-validator.service
+Conflicts=cathedral-validator-sn39.service cathedral-thin-validator.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
 
 [Service]
 Type=oneshot
 User=cathedral-validator
 Group=cathedral-validator
 Environment=HOME=/var/lib/cathedral-validator
+# Belt and braces. Conflicts= only acts on units systemd is asked to start;
+# it cannot stop a writer someone launched by hand. This refuses to start
+# at all while any known SN39 writer is active, because the legacy writer
+# uses its own state file and runtime root and therefore shares no
+# cross-process submission lock with this unit. Two writers on one hotkey
+# means nonce races and a second weight extrinsic.
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service'
 ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release launch
 TimeoutStartSec=20min
 StateDirectory=cathedral-validator
