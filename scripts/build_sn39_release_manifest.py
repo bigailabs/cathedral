@@ -20,10 +20,10 @@ EXPECTED_VERIFIER_BINARY = (
 )
 EXPECTED_CATHEDRAL_URL = (
     "https://github.com/cathedralai/cathedralconfidential/archive/"
-    "fa39af97e738fdbed5c454f976b61246590b5794.tar.gz"
+    "9540de4409bfda74dd9827cb7c969ad4e2243543.tar.gz"
 )
 EXPECTED_CATHEDRAL_ARCHIVE_SHA256 = (
-    "356080e182512b90a283db1496fdaaf1fc3d0cfcb540c35dd3ede5ceecca5324"
+    "97a047f8a81481c5cba854d861cd6ab9e07fee16f9ec5b55687954dcb6d778cf"
 )
 RELEASE_FILES = (
     "config/validator-mainnet-sn39.toml",
@@ -47,8 +47,8 @@ RELEASE_FILES = (
     "scripts/sn39_hotkey_rotation_operator.py",
     "deploy/sn39/cathedral-sn39-public-status.service",
     "deploy/sn39/cathedral-sn39-public-status.timer",
-    "deploy/sn39/cathedral-sn39.sysusers",
-    "deploy/sn39/cathedral-sn39.tmpfiles",
+    "deploy/sn39/cathedral-sn39-validator.sysusers",
+    "deploy/sn39/cathedral-sn39-validator.tmpfiles",
 )
 
 
@@ -318,12 +318,12 @@ def main() -> int:
     parser.add_argument(
         "--sysusers",
         type=Path,
-        default=Path("/etc/sysusers.d/cathedral-sn39.conf"),
+        default=Path("/etc/sysusers.d/cathedral-sn39-validator.conf"),
     )
     parser.add_argument(
         "--tmpfiles",
         type=Path,
-        default=Path("/etc/tmpfiles.d/cathedral-sn39.conf"),
+        default=Path("/etc/tmpfiles.d/cathedral-sn39-validator.conf"),
     )
     parser.add_argument(
         "--bootstrap-python",
@@ -376,8 +376,8 @@ def main() -> int:
             args.status_timer,
             root / "deploy/sn39/cathedral-sn39-public-status.timer",
         ),
-        (args.sysusers, root / "deploy/sn39/cathedral-sn39.sysusers"),
-        (args.tmpfiles, root / "deploy/sn39/cathedral-sn39.tmpfiles"),
+        (args.sysusers, root / "deploy/sn39/cathedral-sn39-validator.sysusers"),
+        (args.tmpfiles, root / "deploy/sn39/cathedral-sn39-validator.tmpfiles"),
     )
     for installed, reviewed in config_pairs:
         if installed.read_bytes() != reviewed.read_bytes():

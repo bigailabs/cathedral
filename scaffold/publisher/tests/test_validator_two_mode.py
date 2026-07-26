@@ -3507,7 +3507,7 @@ def test_mainnet_launch_bundle_is_byte_pinned_and_shadow_by_default() -> None:
         "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
     )
     assert config["provenance"]["source_revision"] == (
-        "fa39af97e738fdbed5c454f976b61246590b5794"
+        "9540de4409bfda74dd9827cb7c969ad4e2243543"
     )
 
     for config_key, (name, digest) in expected.items():
@@ -5641,7 +5641,7 @@ def _frozen_cross_binding_fixture() -> tuple[dict[str, object], dict[str, object
             "block": 100,
             "block_hash": "0x" + "a" * 64,
         },
-        "source_revision": "fa39af97e738fdbed5c454f976b61246590b5794",
+        "source_revision": "9540de4409bfda74dd9827cb7c969ad4e2243543",
         "reward_mechanism": checkpoint["reward_mechanism"],
         "policy_registry": {
             "release": checkpoint["policy_release"],
@@ -6983,7 +6983,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     ).read_text()
     assert "User=cathedral-status" in status_unit
     assert "SupplementaryGroups=cathedral-validator-log" in status_unit
-    sysusers = (root / "deploy/sn39/cathedral-sn39.sysusers").read_text()
+    sysusers = (root / "deploy/sn39/cathedral-sn39-validator.sysusers").read_text()
     assert "u cathedral-validator " in sysusers
     assert "g cathedral-validator-log " in sysusers
     assert "m cathedral-status cathedral-validator-log" in sysusers
@@ -7002,23 +7002,45 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         in status_unit
     )
     assert "ReadWritePaths=/var/lib/cathedral-public-evidence/logs" in status_unit
-    tmpfiles = (root / "deploy/sn39/cathedral-sn39.tmpfiles").read_text()
-    assert "d /var/lib/cathedral-public-evidence 0755 root root -" in tmpfiles
+    tmpfiles = (root / "deploy/sn39/cathedral-sn39-validator.tmpfiles").read_text()
+    assert "d /var/lib/cathedral-public-evidence :0755 :root :root -" in tmpfiles
     assert (
-        "d /var/lib/cathedral-public-evidence/blobs/sha256 0755 root root -" in tmpfiles
+        "d /var/lib/cathedral-public-evidence/blobs/sha256 :0755 :root :root -"
+        in tmpfiles
     )
     assert (
         "d /var/lib/cathedral-public-evidence/logs "
-        "0755 cathedral-status cathedral-status -"
+        ":0755 :cathedral-status :cathedral-status -"
     ) in tmpfiles
+    # The evidence tree is the producer's on an established host and is written
+    # every few minutes by a running service. systemd-tmpfiles applies an
+    # unprefixed mode or ownership field to inodes that ALREADY exist, so a
+    # single unprefixed line would chown that live directory on every
+    # `systemd-tmpfiles --create`, including the one systemd runs at boot.
+    # Assert the property, not just the three known lines, so a future line
+    # cannot reintroduce the hazard.
+    tmpfiles_directives = [
+        line.split()
+        for line in tmpfiles.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert tmpfiles_directives
+    for fields in tmpfiles_directives:
+        kind, path, mode, user, group = fields[0], fields[1], *fields[2:5]
+        # z/Z create nothing; they exist only to force mode and ownership onto
+        # an inode that already exists.
+        assert kind == "d", f"{path} uses {kind!r}, which only mutates existing inodes"
+        assert mode.startswith(":"), f"{path} applies mode {mode} to existing inodes"
+        assert user.startswith(":"), f"{path} chowns existing inodes to {user}"
+        assert group.startswith(":"), f"{path} chgrps existing inodes to {group}"
     assert {
         "deploy/sn39/cathedral-validator-sn39.service",
         "deploy/sn39/cathedral-validator-sn39-launch.service",
         "deploy/sn39/cathedral-validator-sn39-reconcile.service",
         "deploy/sn39/cathedral-sn39-public-status.service",
         "deploy/sn39/cathedral-sn39-public-status.timer",
-        "deploy/sn39/cathedral-sn39.sysusers",
-        "deploy/sn39/cathedral-sn39.tmpfiles",
+        "deploy/sn39/cathedral-sn39-validator.sysusers",
+        "deploy/sn39/cathedral-sn39-validator.tmpfiles",
         "scripts/publish_sn39_validator_status.py",
         "scripts/finalize_sn39_public_release.py",
         "scripts/build_sn39_rotation_manifest.py",

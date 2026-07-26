@@ -1,0 +1,20 @@
+# Installed as /etc/sysusers.d/cathedral-sn39-validator.conf.
+#
+# The filename must stay validator-specific. The producer host already carries
+# /etc/sysusers.d/cathedral-sn39.conf, installed by the evidence producer's own
+# deploy tree, and it declares the producer identities (cathedral-evidence,
+# cathedral-validator-evidence, and a polaris membership). Shipping this file
+# under that generic name overwrites that declaration. systemd-sysusers never
+# deletes accounts, so the producer identities would survive on the running
+# host and the breakage would stay invisible until someone rebuilt the host
+# from its configuration, at which point they would simply be absent.
+#
+# These are the validator identities only. Producer identities are declared by
+# the producer's own deploy tree and are deliberately not restated here.
+g cathedral-validator -
+u cathedral-validator - "Cathedral SN39 validator" /var/lib/cathedral-validator /usr/sbin/nologin
+g cathedral-validator-log -
+m cathedral-validator cathedral-validator-log
+g cathedral-status -
+u cathedral-status - "Cathedral public status publisher" /var/lib/cathedral-public-evidence
+m cathedral-status cathedral-validator-log

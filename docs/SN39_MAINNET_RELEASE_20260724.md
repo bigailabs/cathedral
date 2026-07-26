@@ -39,7 +39,7 @@ claim. The following observations remain blocking:
 |---|---|---|
 | Evidence epoch producer | **FAIL** | The live epoch producer is wedged on `signed report policy_digest does not match supplied registry`; it is not producing a qualifying fresh epoch. |
 | Intel TDX worker | **FAIL** | The required worker is `TERMINATED`. Starting or replacing it is a paid production mutation and requires explicit authority. |
-| Producer revision | **FAIL** | The staged producer bundle still pins the older `b77` revision instead of the required `fa39af97e738fdbed5c454f976b61246590b5794` revision. |
+| Producer revision | **FAIL** | Three values disagreed. The host exporter stamped `b77c7cfacab34de75b1102360f6e3fc1edf5b796` into every signed manifest, this repository pinned `fa39af97e738fdbed5c454f976b61246590b5794`, and the producer actually runs `9540de4409bfda74dd9827cb7c969ad4e2243543` from `/opt/cathedral-sn39/venvs/9540de44...`. The installed venv is the only value that is evidence rather than assertion, so every pin in this repository now reads `9540de44...`. The boundary stays FAIL until the host exporter is redeployed to derive its stamp from the installed venv basename instead of hardcoding it, because until then signed evidence still misstates what produced it and FULL provenance cannot match. |
 | Producer, enrollment, and controlled-package install contract | **NOT_PROVEN** | The exact final ownership, group, and mode contract for `/etc/cathedral/controlled/sn39-launch` has not been resolved. Do not infer permissions or install a substitute package. |
 | Public launch evidence | **NOT_PROVEN** | The currently published evidence is stale and the current vector is empty/all-burn. It cannot authorize the launch weight. |
 | Root-signed release | **NOT_PROVEN** | The final release and its detached signature are absent. A mutable candidate or unsigned `release.json` is not a sealed release. |
@@ -481,12 +481,12 @@ installation contracts have been reviewed together.
 | Component | Revision or digest |
 |---|---|
 | SN39 validator | tag `sn39-mainnet-tdx-20260724`; the exact commit is bound by the root-signed public release |
-| Cathedral Confidential producer | `fa39af97e738fdbed5c454f976b61246590b5794` |
+| Cathedral Confidential producer | `9540de4409bfda74dd9827cb7c969ad4e2243543` |
 | Registry key bundle | `sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512` |
 | Score-report key bundle | `sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70` |
 | Evidence-index key bundle | `sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611` |
 | Release-attestation key bundle | `sha256:1a60a22de160853d460b22853a426d0534fab4df0fe9f89e5859d60bb4ed3d12` |
-| Reproduction dependency lock | `sha256:8a4d730778c37ef7cc47e2ffcba74e42dcdd19240283f688567dd06204181e5b` |
+| Reproduction dependency lock | `sha256:52d8f80f9943657d89ea7f5811d05eaf6816f360b118132390f3ef09ef5eb49e` |
 | Build-backend dependency lock | `sha256:b212eed198712c8f54ad6250dc64575485bef5c3c311d71ee3c24a2c80396912` |
 | Verifier binary blob | `sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb` |
 | Verifier implementation | `sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f` |
@@ -584,19 +584,19 @@ install -D -o root -g root -m 0644 \
   "$release/deploy/sn39/cathedral-sn39-public-status.timer" \
   /etc/systemd/system/cathedral-sn39-public-status.timer
 install -D -o root -g root -m 0644 \
-  "$release/deploy/sn39/cathedral-sn39.sysusers" \
-  /etc/sysusers.d/cathedral-sn39.conf
+  "$release/deploy/sn39/cathedral-sn39-validator.sysusers" \
+  /etc/sysusers.d/cathedral-sn39-validator.conf
 install -D -o root -g root -m 0644 \
-  "$release/deploy/sn39/cathedral-sn39.tmpfiles" \
-  /etc/tmpfiles.d/cathedral-sn39.conf
+  "$release/deploy/sn39/cathedral-sn39-validator.tmpfiles" \
+  /etc/tmpfiles.d/cathedral-sn39-validator.conf
 install -D -o root -g root -m 0644 \
   "$release/config/validator-mainnet-sn39.toml" \
   /etc/cathedral/validator-mainnet-sn39.toml
 install -D -o root -g root -m 0644 \
   "$release/config/validator-mainnet-sn39-launch.toml" \
   /etc/cathedral/validator-mainnet-sn39-launch.toml
-systemd-sysusers /etc/sysusers.d/cathedral-sn39.conf
-systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39.conf
+systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator.conf
 
 # Provision only the already-registered validator HOTKEY into the service
 # account. Run this on a secure interactive console. The source key may prompt
