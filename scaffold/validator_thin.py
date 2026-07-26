@@ -3239,10 +3239,13 @@ def _require_uid_mapping_stability(
         )
     # `set_mechanism_weights` binds only UIDs. A registered hotkey can be
     # replaced at the same UID by `swap_hotkey_v2` during the four-block mortal
-    # era, so registration immunity alone is insufficient. On Finney, prove
-    # that every target hotkey was freshly rotated and remains cooldown-locked
-    # through the complete era, and that no pending coldkey ownership transfer
-    # can bypass that lock.
+    # era, so registration immunity alone is insufficient. On Finney, publish
+    # the exact rotation-lock state of every target and refuse any target whose
+    # coldkey has a pending ownership transfer. A live rotation lock is proven
+    # end to end when one exists, but it is not required to submit: only the
+    # target coldkey owner can rotate a target, both SN39 targets are
+    # operator-controlled, and requiring a live lock would force a fresh
+    # rotation to a new hotkey before every single broadcast.
     finney = str(preflight.genesis_hash).lower() == FINNEY_GENESIS_HASH
     if not finney:
         registration_safety: dict[str, Any] = {
@@ -3360,10 +3363,6 @@ def _require_uid_mapping_stability(
                 raise wire.VectorError(
                     f"submission cannot prove the last hotkey swap for target UID {uid}"
                 ) from exc
-            if last_swap_block <= 0:
-                raise wire.VectorError(
-                    f"target UID {uid} has not been locked by a fresh hotkey rotation"
-                )
             pending_coldkey_swap = storage_value(
                 "ColdkeySwapAnnouncements",
                 [coldkey],
@@ -3372,41 +3371,50 @@ def _require_uid_mapping_stability(
                 raise wire.VectorError(
                     f"target UID {uid} has a pending coldkey swap announcement"
                 )
-            safe_until_block = last_swap_block + hotkey_swap_interval
-            if era_last_block > safe_until_block:
-                raise wire.VectorError(
-                    f"target UID {uid} hotkey can rotate before the mortal era ends"
+            if last_swap_block > 0:
+                safe_until_block = last_swap_block + hotkey_swap_interval
+                swap_lock = (
+                    "active" if era_last_block <= safe_until_block else "expired"
                 )
-            receipt = _prove_target_hotkey_rotation(
-                substrate,
-                block_number=last_swap_block,
-                coldkey=coldkey,
-                target_hotkey=hotkey,
-            )
-            successor = storage_value("HotkeySuccessor", [39, hotkey])
-            root = storage_value("HotkeyRoot", [39, hotkey])
-            old_successor = storage_value(
-                "HotkeySuccessor",
-                [39, receipt["old_hotkey"]],
-            )
-            old_root = storage_value(
-                "HotkeyRoot",
-                [39, receipt["old_hotkey"]],
-            )
-            expected_root = (
-                str(old_root)
-                if old_root not in (None, "")
-                else str(receipt["old_hotkey"])
-            )
-            if (
-                successor not in (None, "")
-                or root in (None, "")
-                or str(old_successor) != hotkey
-                or str(root) != expected_root
-            ):
-                raise wire.VectorError(
-                    f"target UID {uid} hotkey lineage does not match its rotation"
+            else:
+                safe_until_block = None
+                swap_lock = "never_rotated"
+            receipt: dict[str, Any] | None = None
+            hotkey_root: str | None = None
+            if swap_lock == "active":
+                # A claimed live lock must still be proven: the exact successful
+                # swap_hotkey_v2 at the cooldown block, and the lineage it left.
+                receipt = _prove_target_hotkey_rotation(
+                    substrate,
+                    block_number=last_swap_block,
+                    coldkey=coldkey,
+                    target_hotkey=hotkey,
                 )
+                successor = storage_value("HotkeySuccessor", [39, hotkey])
+                root = storage_value("HotkeyRoot", [39, hotkey])
+                old_successor = storage_value(
+                    "HotkeySuccessor",
+                    [39, receipt["old_hotkey"]],
+                )
+                old_root = storage_value(
+                    "HotkeyRoot",
+                    [39, receipt["old_hotkey"]],
+                )
+                expected_root = (
+                    str(old_root)
+                    if old_root not in (None, "")
+                    else str(receipt["old_hotkey"])
+                )
+                if (
+                    successor not in (None, "")
+                    or root in (None, "")
+                    or str(old_successor) != hotkey
+                    or str(root) != expected_root
+                ):
+                    raise wire.VectorError(
+                        f"target UID {uid} hotkey lineage does not match its rotation"
+                    )
+                hotkey_root = str(root)
             targets.append(
                 {
                     "uid": uid,
@@ -3414,9 +3422,10 @@ def _require_uid_mapping_stability(
                     "coldkey": coldkey,
                     "last_hotkey_swap_block": last_swap_block,
                     "hotkey_swap_safe_until_block": safe_until_block,
+                    "swap_lock": swap_lock,
                     "pending_coldkey_swap": None,
                     "hotkey_successor": None,
-                    "hotkey_root": str(root),
+                    "hotkey_root": hotkey_root,
                     "rotation_receipt": receipt,
                     "registration_replacement_safe": hotkey in safe_hotkeys,
                 }
@@ -3432,7 +3441,11 @@ def _require_uid_mapping_stability(
             "targets": targets,
         }
     return {
-        "schema": "cathedral_sn39_uid_safety_v1",
+        "schema": "cathedral_sn39_uid_safety_v2",
+        # Records the launch assumption this proof rests on: every target
+        # coldkey is operator-controlled, so a target hotkey cannot be replaced
+        # mid-era by anyone else.
+        "stability_basis": "operator_controlled_coldkeys",
         "registration": registration_safety,
         "rotation": rotation_safety,
     }
@@ -3444,10 +3457,19 @@ def _require_launch_evidence_after_rotations(
     audit: Any,
     uid_safety: dict[str, Any],
 ) -> dict[str, Any]:
-    """Bind every launch-generation boundary strictly after both rotations."""
+    """Bind every launch-generation boundary strictly after proven rotations.
+
+    Targets that carry no live rotation lock contribute no receipt and no
+    floor. When no target does, there is nothing for the evidence to postdate
+    and the boundary records a null floor.
+    """
     try:
         targets = uid_safety["rotation"]["targets"]
-        receipts = [row["rotation_receipt"] for row in targets]
+        receipts = [
+            row["rotation_receipt"]
+            for row in targets
+            if row["rotation_receipt"] is not None
+        ]
         rotation_blocks = [int(row["block_number"]) for row in receipts]
         rotation_times = [
             wire._parse_canonical_utc(
@@ -3480,39 +3502,40 @@ def _require_launch_evidence_after_rotations(
         raise wire.VectorError(
             "launch evidence has no exact post-rotation generation boundary"
         ) from exc
-    if (
-        len(targets) != 2
-        or len(receipts) != 2
-        or _CHAIN_HASH_RE.fullmatch(candidate_block_hash) is None
-    ):
+    if len(targets) != 2 or _CHAIN_HASH_RE.fullmatch(candidate_block_hash) is None:
         raise wire.VectorError(
-            "launch evidence does not name two distinct canonical rotations"
+            "launch evidence does not name the two canonical targets at a "
+            "canonical candidate block"
         )
-    rotation_floor_block = max(rotation_blocks)
-    rotation_floor_time = max(rotation_times)
-    if (
-        candidate_block <= rotation_floor_block
-        or report_valid_from_block <= rotation_floor_block
-        or any(
-            generated <= rotation_floor_time
-            for generated in (
-                manifest_generated,
-                report_generated,
-                vector_generated,
-                index_generated,
-            )
-        )
-    ):
-        raise wire.VectorError(
-            "launch candidate, evidence, report, vector, and index must all be "
-            "generated strictly after both target rotations"
-        )
-    return {
-        "schema": "cathedral_sn39_post_rotation_evidence_v1",
-        "rotation_floor_block": rotation_floor_block,
-        "rotation_floor_timestamp": rotation_floor_time.isoformat(
+    rotation_floor_block: int | None = None
+    rotation_floor_timestamp: str | None = None
+    if receipts:
+        rotation_floor_block = max(rotation_blocks)
+        rotation_floor_time = max(rotation_times)
+        rotation_floor_timestamp = rotation_floor_time.isoformat(
             timespec="milliseconds"
-        ).replace("+00:00", "Z"),
+        ).replace("+00:00", "Z")
+        if (
+            candidate_block <= rotation_floor_block
+            or report_valid_from_block <= rotation_floor_block
+            or any(
+                generated <= rotation_floor_time
+                for generated in (
+                    manifest_generated,
+                    report_generated,
+                    vector_generated,
+                    index_generated,
+                )
+            )
+        ):
+            raise wire.VectorError(
+                "launch candidate, evidence, report, vector, and index must all "
+                "be generated strictly after every proven target rotation"
+            )
+    return {
+        "schema": "cathedral_sn39_post_rotation_evidence_v2",
+        "rotation_floor_block": rotation_floor_block,
+        "rotation_floor_timestamp": rotation_floor_timestamp,
         "candidate_block": candidate_block,
         "candidate_block_hash": candidate_block_hash.lower(),
         "manifest_generated_at": getattr(audit, "manifest_generated_at"),

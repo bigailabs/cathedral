@@ -713,10 +713,6 @@ def _archive_uid_safety(
             raise ReleaseError(
                 f"archive cannot prove the last hotkey swap for target UID {uid}"
             ) from exc
-        if last_swap_block <= 0:
-            raise ReleaseError(
-                f"archive target UID {uid} has no fresh hotkey-rotation lock"
-            )
         pending_coldkey_swap = _storage_value(
             subtensor,
             name="ColdkeySwapAnnouncements",
@@ -727,55 +723,63 @@ def _archive_uid_safety(
             raise ReleaseError(
                 f"archive target UID {uid} has a pending coldkey-swap announcement"
             )
-        safe_until_block = last_swap_block + hotkey_swap_interval
-        if era_last_block > safe_until_block:
-            raise ReleaseError(
-                f"archive target UID {uid} can rotate before the mortal era ends"
+        # Mirrors the validator: the lock state is published, a live lock is
+        # proven, and no lock is required. Any drift here breaks the archive
+        # equality check against the durable reservation.
+        if last_swap_block > 0:
+            safe_until_block = last_swap_block + hotkey_swap_interval
+            swap_lock = "active" if era_last_block <= safe_until_block else "expired"
+        else:
+            safe_until_block = None
+            swap_lock = "never_rotated"
+        rotation_receipt: dict[str, Any] | None = None
+        hotkey_root: str | None = None
+        if swap_lock == "active":
+            rotation_receipt = _archive_rotation_receipt(
+                substrate,
+                block_number=last_swap_block,
+                coldkey=coldkey,
+                target_hotkey=hotkey,
             )
-        rotation_receipt = _archive_rotation_receipt(
-            substrate,
-            block_number=last_swap_block,
-            coldkey=coldkey,
-            target_hotkey=hotkey,
-        )
-        successor = _storage_value(
-            subtensor,
-            name="HotkeySuccessor",
-            params=[39, hotkey],
-            block=block,
-        )
-        root = _storage_value(
-            subtensor,
-            name="HotkeyRoot",
-            params=[39, hotkey],
-            block=block,
-        )
-        old_successor = _storage_value(
-            subtensor,
-            name="HotkeySuccessor",
-            params=[39, rotation_receipt["old_hotkey"]],
-            block=block,
-        )
-        old_root = _storage_value(
-            subtensor,
-            name="HotkeyRoot",
-            params=[39, rotation_receipt["old_hotkey"]],
-            block=block,
-        )
-        expected_root = (
-            str(old_root)
-            if old_root not in (None, "")
-            else str(rotation_receipt["old_hotkey"])
-        )
-        if (
-            successor not in (None, "")
-            or root in (None, "")
-            or str(old_successor) != hotkey
-            or str(root) != expected_root
-        ):
-            raise ReleaseError(
-                f"archive target UID {uid} lineage differs from its rotation"
+            successor = _storage_value(
+                subtensor,
+                name="HotkeySuccessor",
+                params=[39, hotkey],
+                block=block,
             )
+            root = _storage_value(
+                subtensor,
+                name="HotkeyRoot",
+                params=[39, hotkey],
+                block=block,
+            )
+            old_successor = _storage_value(
+                subtensor,
+                name="HotkeySuccessor",
+                params=[39, rotation_receipt["old_hotkey"]],
+                block=block,
+            )
+            old_root = _storage_value(
+                subtensor,
+                name="HotkeyRoot",
+                params=[39, rotation_receipt["old_hotkey"]],
+                block=block,
+            )
+            expected_root = (
+                str(old_root)
+                if old_root not in (None, "")
+                else str(rotation_receipt["old_hotkey"])
+            )
+            if (
+                successor not in (None, "")
+                or root in (None, "")
+                or str(old_successor) != hotkey
+                or str(root) != expected_root
+            ):
+                raise ReleaseError(
+                    f"archive target UID {uid} lineage differs from its rotation"
+                )
+            hotkey_root = str(root)
         target_rows.append(
             {
                 "uid": uid,
@@ -783,15 +787,17 @@ def _archive_uid_safety(
                 "coldkey": coldkey,
                 "last_hotkey_swap_block": last_swap_block,
                 "hotkey_swap_safe_until_block": safe_until_block,
+                "swap_lock": swap_lock,
                 "pending_coldkey_swap": None,
                 "hotkey_successor": None,
-                "hotkey_root": str(root),
+                "hotkey_root": hotkey_root,
                 "rotation_receipt": rotation_receipt,
                 "registration_replacement_safe": (hotkey in replacement_safe_hotkeys),
             }
         )
     return {
-        "schema": "cathedral_sn39_uid_safety_v1",
+        "schema": "cathedral_sn39_uid_safety_v2",
+        "stability_basis": "operator_controlled_coldkeys",
         "registration": registration_safety,
         "rotation": {
             "status": "PASS",

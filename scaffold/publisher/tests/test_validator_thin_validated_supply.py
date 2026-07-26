@@ -2239,7 +2239,7 @@ def test_continuous_profile_persistently_finalizes_journaled_launch_recovery(
         "next_epoch_start_block": 1100,
         "inclusion_policy": validator_thin._inclusion_policy_identity(policy),
         "uid_safety": {
-            "schema": "cathedral_sn39_uid_safety_v1",
+            "schema": "cathedral_sn39_uid_safety_v2",
             "registration": {"fixture": True},
             "rotation": {"status": validator_thin.PASS},
         },
@@ -2607,7 +2607,11 @@ def test_chain_submission_has_a_validator_controlled_wall_clock_deadline(
     assert time.monotonic() - started < 0.15
 
 
-def test_finney_uid_safety_requires_rotation_lock_and_no_coldkey_announcement() -> None:
+def _finney_uid_safety_fixture(
+    *,
+    hotkey_swap_interval: int = 7200,
+) -> SimpleNamespace:
+    """Two Finney targets whose coldkeys both carry a live rotation lock."""
     mapping_hash = "0x" + "a" * 64
     values: dict[tuple[str, tuple[object, ...]], object] = {
         ("ColdkeySwapAnnouncementDelay", ()): 36000,
@@ -2643,9 +2647,12 @@ def test_finney_uid_safety_requires_rotation_lock_and_no_coldkey_announcement() 
         },
     }
 
+    proved_rotation_blocks: list[int] = []
+
     def get_block_hash(block: int) -> str | None:
         if block == 100:
             return mapping_hash
+        proved_rotation_blocks.append(block)
         return str(rotations[block]["block_hash"]) if block in rotations else None
 
     def get_block_number(block_hash: str) -> int:
@@ -2714,7 +2721,7 @@ def test_finney_uid_safety_requires_rotation_lock_and_no_coldkey_announcement() 
             value=int(datetime(2026, 7, 24, 21, 0, tzinfo=UTC).timestamp() * 1000)
         ),
         get_constant=lambda *, constant_name, **_kwargs: (
-            7200
+            hotkey_swap_interval
             if constant_name == "HotkeySwapOnSubnetInterval"
             else (_ for _ in ()).throw(AssertionError("coldkey delay must use storage"))
         ),
@@ -2749,36 +2756,106 @@ def test_finney_uid_safety_requires_rotation_lock_and_no_coldkey_announcement() 
         subnet_registration_blocks=((7, "worker", 90), (241, "burn", 1)),
         subnet_owned_hotkeys=("burn",),
     )
-    proof = validator_thin._require_uid_mapping_stability(
-        preflight,
+    return SimpleNamespace(
+        values=values,
+        rotations=rotations,
+        preflight=preflight,
+        proved_rotation_blocks=proved_rotation_blocks,
+    )
+
+
+def _uid_safety(fixture: SimpleNamespace) -> dict[str, object]:
+    return validator_thin._require_uid_mapping_stability(
+        fixture.preflight,
         {7: "worker", 241: "burn"},
         mortal_period_blocks=4,
     )
+
+
+def test_finney_uid_safety_proves_an_active_rotation_lock() -> None:
+    fixture = _finney_uid_safety_fixture()
+    proof = _uid_safety(fixture)
+    assert proof["schema"] == "cathedral_sn39_uid_safety_v2"
+    assert proof["stability_basis"] == "operator_controlled_coldkeys"
     assert proof["rotation"]["status"] == validator_thin.PASS
     assert proof["rotation"]["era_last_block"] == 103
-    assert [row["uid"] for row in proof["rotation"]["targets"]] == [7, 241]
+    targets = proof["rotation"]["targets"]
+    assert [row["uid"] for row in targets] == [7, 241]
+    assert [row["swap_lock"] for row in targets] == ["active", "active"]
+    assert [row["hotkey_swap_safe_until_block"] for row in targets] == [7298, 7299]
+    assert [row["hotkey_root"] for row in targets] == ["old-worker", "old-burn"]
+    assert all(row["rotation_receipt"]["call"] == "swap_hotkey_v2" for row in targets)
+    assert fixture.proved_rotation_blocks == [98, 99]
 
-    values[("LastHotkeySwapOnNetuid", (39, "worker-coldkey"))] = 0
+
+def test_finney_uid_safety_accepts_a_target_that_never_rotated() -> None:
+    fixture = _finney_uid_safety_fixture()
+    fixture.values[("LastHotkeySwapOnNetuid", (39, "worker-coldkey"))] = 0
+    proof = _uid_safety(fixture)
+    never = proof["rotation"]["targets"][0]
+    assert never["uid"] == 7
+    assert never["swap_lock"] == "never_rotated"
+    assert never["last_hotkey_swap_block"] == 0
+    assert never["hotkey_swap_safe_until_block"] is None
+    assert never["hotkey_root"] is None
+    assert never["rotation_receipt"] is None
+    # No lock is claimed, so no rotation block is fetched to prove one.
+    assert fixture.proved_rotation_blocks == [99]
+
+
+def test_finney_uid_safety_accepts_an_expired_rotation_cooldown() -> None:
+    # A cooldown of exactly the mortal era still passes the constants check, but
+    # it only covers the era for the more recent of the two rotations.
+    fixture = _finney_uid_safety_fixture(hotkey_swap_interval=4)
+    proof = _uid_safety(fixture)
+    targets = proof["rotation"]["targets"]
+    assert [row["swap_lock"] for row in targets] == ["expired", "active"]
+    assert [row["hotkey_swap_safe_until_block"] for row in targets] == [102, 103]
+    assert targets[0]["rotation_receipt"] is None
+    assert targets[0]["hotkey_root"] is None
+    assert targets[1]["rotation_receipt"]["block_number"] == 99
+    # Only the still-locked target is proven.
+    assert fixture.proved_rotation_blocks == [99]
+
+
+def test_finney_uid_safety_accepts_every_cooldown_expired() -> None:
+    fixture = _finney_uid_safety_fixture(hotkey_swap_interval=4)
+    fixture.values[("LastHotkeySwapOnNetuid", (39, "burn-coldkey"))] = 98
+    proof = _uid_safety(fixture)
+    targets = proof["rotation"]["targets"]
+    assert [row["swap_lock"] for row in targets] == ["expired", "expired"]
+    assert [row["rotation_receipt"] for row in targets] == [None, None]
+    assert [row["hotkey_root"] for row in targets] == [None, None]
+    assert fixture.proved_rotation_blocks == []
+
+
+def test_finney_uid_safety_still_proves_a_claimed_active_lock() -> None:
+    fixture = _finney_uid_safety_fixture()
+    fixture.rotations[98]["new_hotkey"] = "someone-else"
     with pytest.raises(
         validator_thin.wire.VectorError,
-        match="fresh hotkey rotation",
+        match="unique exact swap_hotkey_v2",
     ):
-        validator_thin._require_uid_mapping_stability(
-            preflight,
-            {7: "worker", 241: "burn"},
-            mortal_period_blocks=4,
-        )
-    values[("LastHotkeySwapOnNetuid", (39, "worker-coldkey"))] = 98
-    values[("ColdkeySwapAnnouncements", ("worker-coldkey",))] = {"execution_block": 101}
+        _uid_safety(fixture)
+
+
+def test_finney_uid_safety_still_refuses_a_pending_coldkey_swap() -> None:
+    fixture = _finney_uid_safety_fixture()
+    fixture.values[("ColdkeySwapAnnouncements", ("worker-coldkey",))] = {
+        "execution_block": 101
+    }
     with pytest.raises(
         validator_thin.wire.VectorError,
         match="pending coldkey swap",
     ):
-        validator_thin._require_uid_mapping_stability(
-            preflight,
-            {7: "worker", 241: "burn"},
-            mortal_period_blocks=4,
-        )
+        _uid_safety(fixture)
+    # A never-rotated target with a scheduled coldkey transfer still refuses.
+    fixture.values[("LastHotkeySwapOnNetuid", (39, "worker-coldkey"))] = 0
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="pending coldkey swap",
+    ):
+        _uid_safety(fixture)
 
 
 def test_unsigned_reservation_does_not_consume_budget_until_signed_intent(
