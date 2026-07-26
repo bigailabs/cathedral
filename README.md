@@ -109,11 +109,9 @@ Before trusting the example configuration:
    and burn hotkey from that same release; and
 5. add your own wallet names without copying any secret into the repository.
 
-Run one non-writing verification tick with a synthetic UID map. It fetches the
-signed vector and shadow evidence over HTTPS and cannot broadcast. In the
-current launch candidate, the final preview path may still initialize and read
-the configured Finney client, so do not treat `--offline` as an air-gap
-guarantee:
+Run one no-chain verification tick with a synthetic UID map. It fetches the
+signed vector and shadow evidence over HTTPS, opens no chain connection, and
+cannot broadcast:
 
 ```bash
 cathedral-validator serve \

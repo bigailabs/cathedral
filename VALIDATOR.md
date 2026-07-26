@@ -177,10 +177,7 @@ Run these in order.
 ### 1. Synthetic-map tick
 
 This fetches the signed vector and shadow evidence over HTTPS, uses a synthetic
-UID map, and cannot broadcast. In the current launch candidate, the final
-preview path may still initialize and read the configured Finney client. Do
-not treat `--offline` as an air-gap guarantee; use network controls if strict
-isolation is required:
+UID map, opens no chain connection, and cannot broadcast:
 
 ```bash
 cathedral-validator serve \
@@ -196,7 +193,7 @@ Confirm:
 - the vector is fresh and scoped to Finney SN39;
 - burn and weights are finite and normalized;
 - the provenance result is clearly `PASS`, `FAIL`, or `NOT_PROVEN`; and
-- no wallet write or broadcast is attempted.
+- no wallet or chain client is initialized, and no broadcast is attempted.
 
 ### 2. Metagraph-backed dry run
 
