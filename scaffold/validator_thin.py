@@ -1272,7 +1272,14 @@ def _get_events(args) -> EventLogger:
 # the operator's configured pin resolved against the live metagraph. The
 # signed Cathedral vector's burn row is comparison input only — authority
 # mode never derives allocation from it.
-MECHANISM_BURN_FRACTION = {MECHANISM_DEFAULT: 0.10}
+# Every supported mechanism pins its own burn contract. The fraction is always
+# looked up by the operator's own pinned mechanism, never by the id the manifest
+# claims, so MECHANISM_ACCEPTED widening which evidence is admitted can never let
+# a producer move the burn.
+MECHANISM_BURN_FRACTION = {
+    "validated_supply_v1": 0.10,
+    "validated_supply_v2": 0.10,
+}
 
 
 def _provenance_uid_weights(
