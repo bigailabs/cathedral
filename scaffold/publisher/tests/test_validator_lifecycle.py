@@ -195,8 +195,10 @@ def test_tick_emits_sanitized_verdict_and_mapping_lifecycle(
     monkeypatch.setattr(validator_thin, "fetch_vector", lambda _url: payload)
     monkeypatch.setattr(
         validator_thin,
-        "set_weights_on_chain",
-        lambda *_args, **_kwargs: True,
+        "chain_preflight",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("offline tick must not initialize a chain client")
+        ),
     )
     args = SimpleNamespace(
         publisher_url="https://user:secret@api.cathedral.computer?token=secret",  # pragma: allowlist secret
@@ -223,6 +225,7 @@ def test_tick_emits_sanitized_verdict_and_mapping_lifecycle(
     assert (
         "MAP complete uids=1 burn_uid=0 burn_share=1.000000 vector=0:1.000000" in output
     )
+    assert "WEIGHTS dry-run" in output
     assert "secret" not in output
 
 

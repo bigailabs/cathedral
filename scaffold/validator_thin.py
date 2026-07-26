@@ -4761,6 +4761,14 @@ def set_weights_on_chain(
     primary_call_started = False
     attempt_id: str | None = None
     try:
+        wire_uids, wire_values = _wire_weights(uids, vals)
+        if not broadcast and preflight is None:
+            _lifecycle(
+                "WEIGHTS dry-run",
+                f"uids={len(ordered)} wire_uids={wire_uids} "
+                f"wire_weights={wire_values} vector={preview}",
+            )
+            return ChainSubmission(success=True)
         if preflight is None:
             preflight = chain_preflight(
                 network=network,
@@ -4787,7 +4795,6 @@ def set_weights_on_chain(
             if broadcast and netuid == 39 and inclusion_policy is not None
             else 128
         )
-        wire_uids, wire_values = _wire_weights(uids, vals)
         if not broadcast:
             _lifecycle(
                 "WEIGHTS dry-run",

@@ -370,6 +370,35 @@ def test_chain_preflight_rejects_best_head_mapping_newer_than_finalized(
         )
 
 
+def test_offline_chain_submission_skips_preflight(monkeypatch) -> None:
+    events: list[tuple[str, str]] = []
+
+    def forbidden_preflight(**_kwargs):
+        raise AssertionError("offline dry-run must not initialize a chain client")
+
+    monkeypatch.setattr(validator_thin, "chain_preflight", forbidden_preflight)
+    monkeypatch.setattr(
+        validator_thin,
+        "_lifecycle",
+        lambda event, details: events.append((event, details)),
+    )
+
+    result = validator_thin.set_weights_on_chain(
+        {0: 0.1, 163: 0.9},
+        network="finney",
+        netuid=39,
+        wallet_name="unused",
+        wallet_hotkey="unused",
+        broadcast=False,
+        preflight=None,
+    )
+
+    assert result.success is True
+    assert len(events) == 1
+    assert events[0][0] == "WEIGHTS dry-run"
+    assert "wire_uids=[0, 163]" in events[0][1]
+
+
 def test_chain_submission_uses_preflight_snapshot_and_waits_for_finality() -> None:
     calls = []
     extrinsic_hash = "0x" + "a" * 64
