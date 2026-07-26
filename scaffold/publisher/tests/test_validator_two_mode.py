@@ -1949,7 +1949,7 @@ def test_common_finalization_survives_lane_telemetry_failure(
         validator_thin,
         "_require_uid_mapping_stability",
         lambda *_args, **_kwargs: {
-            "schema": "cathedral_sn39_uid_safety_v1",
+            "schema": "cathedral_sn39_uid_safety_v2",
             "registration": {"fixture": True},
             "rotation": {"status": "PASS", "targets": []},
         },
@@ -3862,6 +3862,7 @@ def _fixture_uid_safety(hotkeys: list[str]) -> dict[str, object]:
             "coldkey": coldkey,
             "last_hotkey_swap_block": 99,
             "hotkey_swap_safe_until_block": 7299,
+            "swap_lock": "active",
             "pending_coldkey_swap": None,
             "hotkey_successor": None,
             "hotkey_root": old_hotkey,
@@ -3883,7 +3884,8 @@ def _fixture_uid_safety(hotkeys: list[str]) -> dict[str, object]:
         }
 
     return {
-        "schema": "cathedral_sn39_uid_safety_v1",
+        "schema": "cathedral_sn39_uid_safety_v2",
+        "stability_basis": "operator_controlled_coldkeys",
         "registration": {
             "max_uids": 256,
             "max_regs_per_block": 1,
@@ -3933,7 +3935,7 @@ def _fixture_uid_safety(hotkeys: list[str]) -> dict[str, object]:
 
 def _fixture_freshness_boundary() -> dict[str, object]:
     return {
-        "schema": "cathedral_sn39_post_rotation_evidence_v1",
+        "schema": "cathedral_sn39_post_rotation_evidence_v2",
         "rotation_floor_block": 99,
         "rotation_floor_timestamp": "2026-07-24T21:00:00.000Z",
         "candidate_block": 100,
@@ -3944,6 +3946,75 @@ def _fixture_freshness_boundary() -> dict[str, object]:
         "vector_generated_at": "2026-07-24T22:00:00.000Z",
         "index_generated_at": "2026-07-24T22:00:00.000Z",
     }
+
+
+def _unlocked_uid_safety(*, locked_uids: set[int]) -> dict[str, object]:
+    """Fixture UID safety where only ``locked_uids`` still hold a live lock."""
+    uid_safety = _fixture_uid_safety([f"hotkey-{uid}" for uid in range(205)])
+    for target in uid_safety["rotation"]["targets"]:
+        if target["uid"] in locked_uids:
+            continue
+        target["swap_lock"] = "never_rotated"
+        target["last_hotkey_swap_block"] = 0
+        target["hotkey_swap_safe_until_block"] = None
+        target["hotkey_root"] = None
+        target["rotation_receipt"] = None
+    return uid_safety
+
+
+def _boundary_audit(*, candidate_block: int) -> ProvenanceAudit:
+    return ProvenanceAudit(
+        status="PASS",
+        assurance="full",
+        agrees_with_vector=True,
+        recomputed={"tdx-miner": 1.0},
+        manifest_generated_at="2026-07-24T21:30:00.000Z",
+        candidate_block=candidate_block,
+        candidate_block_hash="0x" + "a" * 64,
+        report_generated_at="2026-07-24T21:45:00.000Z",
+        report_valid_until="2099-01-01T00:00:00.000Z",
+        report_valid_from_block=candidate_block,
+        report_valid_until_block=candidate_block + 100,
+        signed_index={"generated_at": "2026-07-24T22:00:00.000Z"},
+    )
+
+
+def test_launch_evidence_boundary_without_rotations_has_a_null_floor() -> None:
+    boundary = validator_thin._require_launch_evidence_after_rotations(
+        payload={"generated_at": "2026-07-24T22:00:00.000Z"},
+        audit=_boundary_audit(candidate_block=1),
+        uid_safety=_unlocked_uid_safety(locked_uids=set()),
+    )
+    assert boundary["schema"] == "cathedral_sn39_post_rotation_evidence_v2"
+    assert boundary["rotation_floor_block"] is None
+    assert boundary["rotation_floor_timestamp"] is None
+    assert boundary["candidate_block"] == 1
+    assert boundary["candidate_block_hash"] == "0x" + "a" * 64
+    assert boundary["vector_generated_at"] == "2026-07-24T22:00:00.000Z"
+    assert boundary["index_generated_at"] == "2026-07-24T22:00:00.000Z"
+
+
+@pytest.mark.parametrize("locked_uids", [{204}, {163, 204}])
+def test_launch_evidence_boundary_enforces_every_proven_rotation(
+    locked_uids: set[int],
+) -> None:
+    uid_safety = _unlocked_uid_safety(locked_uids=locked_uids)
+    boundary = validator_thin._require_launch_evidence_after_rotations(
+        payload={"generated_at": "2026-07-24T22:00:00.000Z"},
+        audit=_boundary_audit(candidate_block=100),
+        uid_safety=uid_safety,
+    )
+    assert boundary["rotation_floor_block"] == 99
+    assert boundary["rotation_floor_timestamp"] == "2026-07-24T21:00:00.000Z"
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="strictly after every proven target rotation",
+    ):
+        validator_thin._require_launch_evidence_after_rotations(
+            payload={"generated_at": "2026-07-24T22:00:00.000Z"},
+            audit=_boundary_audit(candidate_block=99),
+            uid_safety=uid_safety,
+        )
 
 
 def test_release_attestation_binds_exact_reproducer_revision() -> None:
@@ -4463,6 +4534,76 @@ def test_signed_post_rotation_boundary_rejects_stale_artifacts(
         sn39_public_reproduction._validate_launch_submission(launch)
 
 
+def _unlock_uid_safety_targets(
+    uid_safety: dict[str, object],
+    boundary: dict[str, object],
+) -> None:
+    """Rewrite a signed proof so no target claims a live rotation lock."""
+    for target in uid_safety["rotation"]["targets"]:
+        target["swap_lock"] = "never_rotated"
+        target["last_hotkey_swap_block"] = 0
+        target["hotkey_swap_safe_until_block"] = None
+        target["hotkey_root"] = None
+        target["rotation_receipt"] = None
+    boundary["rotation_floor_block"] = None
+    boundary["rotation_floor_timestamp"] = None
+
+
+def _unlock_signed_launch_targets(launch: dict[str, object]) -> None:
+    _unlock_uid_safety_targets(
+        launch["mapping"]["uid_safety"],
+        launch["evidence_checkpoint"]["freshness_boundary"],
+    )
+
+
+def test_signed_launch_accepts_targets_without_a_rotation_lock() -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    _unlock_signed_launch_targets(launch)
+    # Nothing to postdate, so evidence older than the historical rotations is
+    # no longer a boundary violation.
+    launch["evidence_checkpoint"]["freshness_boundary"]["candidate_block"] = 1
+    assert sn39_public_reproduction._validate_launch_submission(launch) is launch
+
+
+def test_signed_launch_rejects_an_unlocked_target_carrying_a_receipt() -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    targets = launch["mapping"]["uid_safety"]["rotation"]["targets"]
+    _unlock_signed_launch_targets(launch)
+    targets[0]["rotation_receipt"] = {"block_number": 99}
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="rotation receipt is malformed",
+    ):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
+@pytest.mark.parametrize("swap_lock", ["", "ACTIVE", None, True])
+def test_signed_launch_rejects_an_unknown_rotation_lock_state(
+    swap_lock: object,
+) -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    launch["mapping"]["uid_safety"]["rotation"]["targets"][0]["swap_lock"] = swap_lock
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="rotation lock state is malformed",
+    ):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
+def test_signed_launch_requires_the_recorded_stability_basis() -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    launch["mapping"]["uid_safety"]["stability_basis"] = "unreviewed"
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="UID/hotkey safety proof is malformed",
+    ):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
 class _HistoricalSubstrate:
     def __init__(self, owner: _HistoricalSubtensor) -> None:
         self.owner = owner
@@ -4761,7 +4902,7 @@ class _HistoricalSubtensor:
                 else f"coldkey-{self.hotkeys.index(hotkey)}"
             )
         if name == "LastHotkeySwapOnNetuid":
-            return 99
+            return 0 if self.mutation == "never_rotated" else 99
         if name == "ColdkeySwapAnnouncements":
             return (
                 {"execution_block": 101}
@@ -4903,6 +5044,48 @@ def test_release_finalizer_builds_the_exact_archive_verified_seal(
         "sha256:" + hashlib.sha256(replay_bytes).hexdigest()
     )
     assert release["source_revisions"]["validator"] == "a" * 40
+
+
+def test_release_finalizer_seals_targets_that_never_rotated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.finalize_sn39_public_release import build_release
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    identity = state["submission_launch_identity"]
+    _unlock_uid_safety_targets(
+        identity["uid_safety"],
+        identity["full_provenance"]["freshness_boundary"],
+    )
+    release, _replay_bytes = build_release(
+        state,
+        release_sha="a" * 40,
+        subtensor=_HistoricalSubtensor(hotkeys, mutation="never_rotated"),
+    )
+    targets = release["launch_submission"]["mapping"]["uid_safety"]["rotation"][
+        "targets"
+    ]
+    assert [row["swap_lock"] for row in targets] == ["never_rotated"] * 2
+    assert [row["rotation_receipt"] for row in targets] == [None, None]
+    assert [row["hotkey_swap_safe_until_block"] for row in targets] == [None, None]
+
+
+def test_release_finalizer_rejects_a_journal_lock_the_archive_denies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.finalize_sn39_public_release import ReleaseError, build_release
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    with pytest.raises(ReleaseError, match="archive UID-safety proof differs"):
+        build_release(
+            state,
+            release_sha="a" * 40,
+            subtensor=_HistoricalSubtensor(hotkeys, mutation="never_rotated"),
+        )
 
 
 def test_release_finalizer_rejects_inclusion_uid_reassignment(
@@ -5645,6 +5828,41 @@ def test_historical_launch_verifies_exact_archive_record(
         "launch_block": 101,
         "finalized_head_block": 200,
     }
+
+
+def test_historical_launch_verifies_targets_that_never_rotated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.assert_sn39_public_reproduction import verify_historical_launch
+
+    release, hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    assert isinstance(launch, dict)
+    _unlock_signed_launch_targets(launch)
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    result = verify_historical_launch(
+        release,
+        subtensor=_HistoricalSubtensor(hotkeys, mutation="never_rotated"),
+    )
+    assert result["historical_launch"] == "PASS"
+
+
+def test_historical_launch_rejects_a_signed_lock_the_archive_denies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        verify_historical_launch,
+    )
+
+    # The signed release claims a live lock; the archive says it never rotated.
+    release, hotkeys = _historical_launch_fixture()
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    with pytest.raises(ReproductionError, match="historical UID/hotkey safety differs"):
+        verify_historical_launch(
+            release,
+            subtensor=_HistoricalSubtensor(hotkeys, mutation="never_rotated"),
+        )
 
 
 def test_historical_launch_rejects_mapping_at_or_after_extrinsic(
@@ -6961,7 +7179,7 @@ def test_launch_rechecks_fresh_mapping_and_report_window_after_rewarded_set_repl
         validator_thin,
         "_require_uid_mapping_stability",
         lambda _preflight, uid_hotkeys, **_kwargs: {
-            "schema": "cathedral_sn39_uid_safety_v1",
+            "schema": "cathedral_sn39_uid_safety_v2",
             "registration": {"fixture": True},
             "rotation": {
                 "status": "PASS",
@@ -7133,7 +7351,7 @@ def test_authority_refreshes_mapping_and_validity_after_full_audit(
         validator_thin,
         "_require_uid_mapping_stability",
         lambda *_args, **_kwargs: {
-            "schema": "cathedral_sn39_uid_safety_v1",
+            "schema": "cathedral_sn39_uid_safety_v2",
             "registration": {"fixture": True},
             "rotation": {"status": "PASS", "targets": []},
         },
@@ -7242,7 +7460,7 @@ def test_reconcile_launch_proves_record_and_unlocks_shared_continuous_journal(
     launch._submission_validator_hotkey = "validator-hotkey"
     attempt = "sha256:" + "a" * 64
     uid_safety = {
-        "schema": "cathedral_sn39_uid_safety_v1",
+        "schema": "cathedral_sn39_uid_safety_v2",
         "registration": {"fixture": True},
         "rotation": {"status": "PASS", "targets": []},
     }

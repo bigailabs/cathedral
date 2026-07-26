@@ -68,7 +68,10 @@ WIRE_VALIDATED_SUPPLY_SHARE = WIRE_VALIDATED_SUPPLY_U16 / WIRE_TOTAL
 WIRE_BURN_SHARE = WIRE_BURN_U16 / WIRE_TOTAL
 EXPECTED_VERSION_KEY = 10005000
 RELEASE_SCHEMA = "cathedral_sn39_provenance_release_v2"
-UID_SAFETY_SCHEMA = "cathedral_sn39_uid_safety_v1"
+UID_SAFETY_SCHEMA = "cathedral_sn39_uid_safety_v2"
+UID_SAFETY_STABILITY_BASIS = "operator_controlled_coldkeys"
+POST_ROTATION_EVIDENCE_SCHEMA = "cathedral_sn39_post_rotation_evidence_v2"
+SWAP_LOCK_STATES = frozenset({"never_rotated", "expired", "active"})
 MORTAL_PERIOD_BLOCKS = 4
 
 
@@ -206,7 +209,17 @@ def _validate_post_rotation_boundary(
     targets = uid_safety["rotation"]["targets"]
     receipts: list[dict[str, Any]] = []
     for target in targets:
-        receipt = target.get("rotation_receipt") if isinstance(target, dict) else None
+        if not isinstance(target, dict):
+            raise ReproductionError("signed target rotation row is malformed")
+        swap_lock = target.get("swap_lock")
+        receipt = target.get("rotation_receipt")
+        if swap_lock not in SWAP_LOCK_STATES:
+            raise ReproductionError("signed target rotation lock state is malformed")
+        if swap_lock != "active":
+            # Only a claimed live lock carries a proof; anything else must not.
+            if receipt is not None:
+                raise ReproductionError("signed target rotation receipt is malformed")
+            continue
         if (
             not isinstance(receipt, dict)
             or set(receipt)
@@ -242,11 +255,14 @@ def _validate_post_rotation_boundary(
     freshness = checkpoint.get("freshness_boundary")
     if not isinstance(freshness, dict):
         raise ReproductionError("signed evidence has no post-rotation boundary")
-    rotation_floor_block = max(int(row["block_number"]) for row in receipts)
-    rotation_floor_time = max(
-        _parse_utc(row["block_timestamp"], label="rotation block timestamp")
-        for row in receipts
-    )
+    rotation_floor_block: int | None = None
+    rotation_floor_time: datetime | None = None
+    if receipts:
+        rotation_floor_block = max(int(row["block_number"]) for row in receipts)
+        rotation_floor_time = max(
+            _parse_utc(row["block_timestamp"], label="rotation block timestamp")
+            for row in receipts
+        )
     vector = launch["signed_vector"]
     index = checkpoint["signed_index"]
     expected_keys = {
@@ -261,36 +277,53 @@ def _validate_post_rotation_boundary(
         "vector_generated_at",
         "index_generated_at",
     }
+    if rotation_floor_time is None:
+        floor_timestamp_matches = freshness.get("rotation_floor_timestamp") is None
+    else:
+        floor_timestamp_matches = (
+            _parse_utc(
+                freshness.get("rotation_floor_timestamp"),
+                label="rotation floor timestamp",
+            )
+            == rotation_floor_time
+        )
     if (
         set(freshness) != expected_keys
-        or freshness.get("schema") != "cathedral_sn39_post_rotation_evidence_v1"
+        or freshness.get("schema") != POST_ROTATION_EVIDENCE_SCHEMA
         or freshness.get("rotation_floor_block") != rotation_floor_block
-        or _parse_utc(
-            freshness.get("rotation_floor_timestamp"),
-            label="rotation floor timestamp",
-        )
-        != rotation_floor_time
+        or not floor_timestamp_matches
         or isinstance(freshness.get("candidate_block"), bool)
         or not isinstance(freshness.get("candidate_block"), int)
-        or freshness["candidate_block"] <= rotation_floor_block
         or not _is_hash(freshness.get("candidate_block_hash"), prefix="0x")
         or isinstance(freshness.get("report_valid_from_block"), bool)
         or not isinstance(freshness.get("report_valid_from_block"), int)
-        or freshness["report_valid_from_block"] <= rotation_floor_block
         or freshness.get("vector_generated_at") != vector.get("generated_at")
         or freshness.get("index_generated_at") != index.get("generated_at")
     ):
         raise ReproductionError("signed post-rotation evidence boundary is malformed")
-    for name in (
-        "manifest_generated_at",
-        "report_generated_at",
-        "vector_generated_at",
-        "index_generated_at",
+    generated_times = {
+        name: _parse_utc(freshness.get(name), label=name)
+        for name in (
+            "manifest_generated_at",
+            "report_generated_at",
+            "vector_generated_at",
+            "index_generated_at",
+        )
+    }
+    if rotation_floor_block is None or rotation_floor_time is None:
+        # No target carried a live rotation lock, so there is no floor for the
+        # evidence to postdate.
+        return freshness
+    if (
+        freshness["candidate_block"] <= rotation_floor_block
+        or freshness["report_valid_from_block"] <= rotation_floor_block
+        or any(
+            generated <= rotation_floor_time for generated in generated_times.values()
+        )
     ):
-        if _parse_utc(freshness.get(name), label=name) <= rotation_floor_time:
-            raise ReproductionError(
-                "signed evidence generation does not follow both rotations"
-            )
+        raise ReproductionError(
+            "signed evidence generation does not follow the proven rotations"
+        )
     return freshness
 
 
@@ -435,6 +468,7 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
     if (
         not isinstance(uid_safety, dict)
         or uid_safety.get("schema") != UID_SAFETY_SCHEMA
+        or uid_safety.get("stability_basis") != UID_SAFETY_STABILITY_BASIS
         or not isinstance(uid_safety.get("registration"), dict)
         or not isinstance(uid_safety.get("rotation"), dict)
         or uid_safety["rotation"].get("status") != "PASS"
@@ -1060,55 +1094,63 @@ def _recompute_uid_safety(
             raise ReproductionError(
                 "historical target coldkey had a pending swap announcement"
             )
-        safe_until_block = last_swap_block + hotkey_swap_interval
-        if last_swap_block <= 0 or era_last_block > safe_until_block:
-            raise ReproductionError(
-                "historical target hotkey rotation did not cover the mortal era"
+        # Mirrors the validator and the finalizer: publish the lock state, prove
+        # a live lock, and require none. These three recomputations are compared
+        # for equality, so they must stay byte-identical.
+        if last_swap_block > 0:
+            safe_until_block = last_swap_block + hotkey_swap_interval
+            swap_lock = "active" if era_last_block <= safe_until_block else "expired"
+        else:
+            safe_until_block = None
+            swap_lock = "never_rotated"
+        rotation_receipt: dict[str, Any] | None = None
+        hotkey_root: str | None = None
+        if swap_lock == "active":
+            rotation_receipt = _archive_rotation_receipt(
+                subtensor.substrate,
+                block_number=last_swap_block,
+                coldkey=coldkey,
+                target_hotkey=hotkey,
             )
-        rotation_receipt = _archive_rotation_receipt(
-            subtensor.substrate,
-            block_number=last_swap_block,
-            coldkey=coldkey,
-            target_hotkey=hotkey,
-        )
-        successor = _archive_storage_value(
-            subtensor,
-            name="HotkeySuccessor",
-            params=[39, hotkey],
-            block=block,
-        )
-        root = _archive_storage_value(
-            subtensor,
-            name="HotkeyRoot",
-            params=[39, hotkey],
-            block=block,
-        )
-        old_successor = _archive_storage_value(
-            subtensor,
-            name="HotkeySuccessor",
-            params=[39, rotation_receipt["old_hotkey"]],
-            block=block,
-        )
-        old_root = _archive_storage_value(
-            subtensor,
-            name="HotkeyRoot",
-            params=[39, rotation_receipt["old_hotkey"]],
-            block=block,
-        )
-        expected_root = (
-            str(old_root)
-            if old_root not in (None, "")
-            else str(rotation_receipt["old_hotkey"])
-        )
-        if (
-            successor not in (None, "")
-            or root in (None, "")
-            or str(old_successor) != hotkey
-            or str(root) != expected_root
-        ):
-            raise ReproductionError(
-                "historical target hotkey lineage differs from its rotation"
+            successor = _archive_storage_value(
+                subtensor,
+                name="HotkeySuccessor",
+                params=[39, hotkey],
+                block=block,
             )
+            root = _archive_storage_value(
+                subtensor,
+                name="HotkeyRoot",
+                params=[39, hotkey],
+                block=block,
+            )
+            old_successor = _archive_storage_value(
+                subtensor,
+                name="HotkeySuccessor",
+                params=[39, rotation_receipt["old_hotkey"]],
+                block=block,
+            )
+            old_root = _archive_storage_value(
+                subtensor,
+                name="HotkeyRoot",
+                params=[39, rotation_receipt["old_hotkey"]],
+                block=block,
+            )
+            expected_root = (
+                str(old_root)
+                if old_root not in (None, "")
+                else str(rotation_receipt["old_hotkey"])
+            )
+            if (
+                successor not in (None, "")
+                or root in (None, "")
+                or str(old_successor) != hotkey
+                or str(root) != expected_root
+            ):
+                raise ReproductionError(
+                    "historical target hotkey lineage differs from its rotation"
+                )
+            hotkey_root = str(root)
         targets.append(
             {
                 "uid": uid,
@@ -1116,15 +1158,17 @@ def _recompute_uid_safety(
                 "coldkey": coldkey,
                 "last_hotkey_swap_block": last_swap_block,
                 "hotkey_swap_safe_until_block": safe_until_block,
+                "swap_lock": swap_lock,
                 "pending_coldkey_swap": None,
                 "hotkey_successor": None,
-                "hotkey_root": str(root),
+                "hotkey_root": hotkey_root,
                 "rotation_receipt": rotation_receipt,
                 "registration_replacement_safe": True,
             }
         )
     return {
         "schema": UID_SAFETY_SCHEMA,
+        "stability_basis": UID_SAFETY_STABILITY_BASIS,
         "registration": {
             "max_uids": max_uids,
             "max_regs_per_block": max_regs_per_block,
