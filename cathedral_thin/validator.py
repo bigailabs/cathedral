@@ -9,9 +9,10 @@ import json
 import math
 import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import bittensor as bt
 
@@ -49,13 +50,12 @@ from .score_classes import (
     decision_document,
     default_score_policy,
     external_class_decision,
-    load_best_report,
     load_best_owner_registration,
+    load_best_report,
     load_score_policy,
     local_class_decision,
     materialize_registered_policy,
 )
-
 
 WEIGHTS_VERSION_KEY = 1_000_001
 
@@ -296,6 +296,11 @@ class BittensorRuntime:
         return owner
 
     async def submit_weights(self, pending: PendingVector) -> Any:
+        if self.netuid == 39:
+            raise ThinSubnetError(
+                "legacy SAT validator broadcasts are disabled on SN39 "
+                "regardless of network label or RPC endpoint"
+            )
         kwargs = {
             "wallet": self.wallet,
             "netuid": self.netuid,
@@ -903,11 +908,14 @@ async def close_dendrite(dendrite: Any) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the owner-infrastructure-free Cathedral SAT validator"
+        description=(
+            "Run the legacy Cathedral SAT validator on test/local subnets. "
+            "SN39 mainnet uses cathedral-validator."
+        )
     )
-    parser.add_argument("--network", default=os.environ.get("BT_NETWORK", "finney"))
+    parser.add_argument("--network", default=os.environ.get("BT_NETWORK", "local"))
     parser.add_argument(
-        "--netuid", type=int, default=int(os.environ.get("BT_NETUID", "39"))
+        "--netuid", type=int, default=int(os.environ.get("BT_NETUID", "1"))
     )
     parser.add_argument(
         "--wallet-name", default=os.environ.get("BT_WALLET_NAME", "validator")
@@ -975,6 +983,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.broadcast and args.netuid == 39:
+        raise SystemExit(
+            "cathedral-thin-validator cannot broadcast on SN39; "
+            "use the immutable cathedral-validator SN39 release path"
+        )
     if args.netuid < 0 or not 3 <= args.vars <= 4096 or not 1 <= args.clauses <= 20_000:
         raise SystemExit("invalid netuid or challenge dimensions")
     if (
@@ -994,6 +1007,11 @@ def validate_args(args: argparse.Namespace) -> None:
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    if args.broadcast and args.netuid == 39:
+        raise ThinSubnetError(
+            "legacy SAT validator broadcasts are disabled on SN39 regardless "
+            "of network label or RPC endpoint"
+        )
     score_policy = (
         load_score_policy(args.score_policy, network=args.network, netuid=args.netuid)
         if args.score_policy

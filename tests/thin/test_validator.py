@@ -21,8 +21,8 @@ from cathedral_thin.score_classes import (
     ScoreEntry,
     ScorePolicy,
     SourceCheckpoint,
-    VerifiedReport,
     VerifiedOwnerRegistration,
+    VerifiedReport,
 )
 from cathedral_thin.validator import (
     BittensorRuntime,
@@ -34,6 +34,50 @@ from cathedral_thin.validator import (
     run_validator_loop,
     snapshot_peers,
 )
+
+
+@pytest.mark.parametrize(
+    "network",
+    [
+        "finney",
+        "wss://entrypoint-finney.opentensor.ai:443",
+        "wss://self-hosted-finney.example",
+        "test",
+    ],
+)
+def test_legacy_sat_validator_refuses_sn39_broadcast_for_every_label(
+    network: str,
+) -> None:
+    args = validator_module.build_parser().parse_args(
+        ["--network", network, "--netuid", "39", "--broadcast"]
+    )
+    with pytest.raises(SystemExit, match="cannot broadcast on SN39"):
+        validator_module.validate_args(args)
+
+
+def test_legacy_runtime_refuses_direct_sn39_submission() -> None:
+    calls: list[dict] = []
+    runtime = BittensorRuntime(
+        wallet=object(),
+        subtensor=SimpleNamespace(set_weights=lambda **kwargs: calls.append(kwargs)),
+        dendrite=object(),
+        netuid=39,
+        mev_protection=False,
+        commit_reveal_version=4,
+    )
+    pending = SimpleNamespace(uids=[1], weights=[1.0])
+    with pytest.raises(ThinSubnetError, match="disabled on SN39"):
+        asyncio.run(runtime.submit_weights(pending))
+    assert calls == []
+
+
+def test_legacy_sat_validator_defaults_to_non_mainnet_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BT_NETWORK", raising=False)
+    monkeypatch.delenv("BT_NETUID", raising=False)
+    args = validator_module.build_parser().parse_args([])
+    assert (args.network, args.netuid, args.broadcast) == ("local", 1, False)
 
 
 def config() -> ValidatorConfig:

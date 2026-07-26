@@ -1,0 +1,26 @@
+[Unit]
+Description=Cathedral SN39 one-shot FULL-gated mainnet launch canary
+After=network-online.target
+Wants=network-online.target
+Conflicts=cathedral-validator-sn39.service cathedral-thin-validator.service
+
+[Service]
+Type=oneshot
+User=cathedral-validator
+Group=cathedral-validator
+Environment=HOME=/var/lib/cathedral-validator
+ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release launch
+TimeoutStartSec=20min
+StateDirectory=cathedral-validator
+StateDirectoryMode=0700
+LogsDirectory=cathedral-validator-launch
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/cathedral/controlled/sn39-launch /opt/cathedral-sn39/bin/cathedral-tdx-verifier
+ReadWritePaths=/var/lib/cathedral-validator /var/log/cathedral-validator-launch
+RestrictSUIDSGID=true
+LockPersonality=true

@@ -38,7 +38,6 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .. import wire
-from ..contract import GenerateCtx
 from ..lanes.solver_arena import SolverRegistry, SolverSpec
 from . import board_cache as board_cache_mod
 from . import keys, rows, scoring, top_cache as top_cache_mod, weights as weights_mod
@@ -1172,7 +1171,19 @@ def build_app(
     def _sat_snapshot_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
         board_payload, board_etag = board_cache.get()
         weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
-        weights_payload = weights_mod.current_vector(store, signing_key_hex=weight_key)
+        try:
+            weights_payload = weights_mod.current_vector(
+                store, signing_key_hex=weight_key
+            )
+        except weights_mod.VectorNotReady as exc:
+            raise HTTPException(
+                503,
+                {
+                    "detail": "signed_weights_warming",
+                    "retry_after_seconds": 1,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
         board_hash = _snapshot_hash(board_payload)
         weights_hash = _snapshot_hash(weights_payload)
         policy_version = str(weights_payload.get("policy_version") or int(time.time() * 1000))
@@ -7612,8 +7623,12 @@ def build_app(
             lock_deadline_iso=deadline, batch_size=batch_size)
         for attempt in claimed:
             kind = attempt["challenge_kind"]
-            rec = (lambda outcome, reason, challenge_id=None:
-                   _record_submit_event(outcome, reason, challenge_id=challenge_id))
+
+            def rec(outcome, reason, challenge_id=None):
+                return _record_submit_event(
+                    outcome, reason, challenge_id=challenge_id
+                )
+
             if kind == submit_admission.KIND_PER_MINER_SHADOW:
                 submit_admission.finalize_pm_shadow(
                     store, attempt, now_iso=_now_iso_ms(),

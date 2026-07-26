@@ -2013,9 +2013,11 @@ try:
         return True
     _vt.metagraph_hotkey_to_uid = _spy_mg
     _vt.set_weights_on_chain = _spy_set
+    _offline_root = tempfile.mkdtemp()
     _off = _NS(publisher_url="x", public_key_hex=pub_hex, key_id="cathedral-weight-policy",
                network="finney", netuid=39, wallet_name="w", wallet_hotkey="h",
-               state_file=os.path.join(tempfile.mkdtemp(), "fence.json"),  # absent -> fence -1
+               state_file=os.path.join(_offline_root, "fence.json"),  # absent -> fence -1
+               runtime_root=_offline_root,
                offline=True, broadcast=True, once=True, interval_secs=1.0)
     _vt.tick(_off)
     ck("offline authoritative: --offline --broadcast does NOT read the metagraph",

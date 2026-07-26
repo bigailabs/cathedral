@@ -1,0 +1,8 @@
+d /var/lib/cathedral-public-evidence 0755 root root -
+z /var/lib/cathedral-public-evidence 0755 root root -
+d /var/lib/cathedral-public-evidence/blobs 0755 root root -
+z /var/lib/cathedral-public-evidence/blobs 0755 root root -
+d /var/lib/cathedral-public-evidence/blobs/sha256 0755 root root -
+z /var/lib/cathedral-public-evidence/blobs/sha256 0755 root root -
+d /var/lib/cathedral-public-evidence/logs 0755 cathedral-status cathedral-status -
+z /var/lib/cathedral-public-evidence/logs 0755 cathedral-status cathedral-status -

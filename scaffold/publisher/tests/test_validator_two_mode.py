@@ -7,8 +7,18 @@ the ``provenance`` extra) and run the actual audit against it.
 
 from __future__ import annotations
 
+import grp
+import hashlib
+import importlib.util
 import json
+import os
+import stat
+import subprocess
+import sys
 import time
+import tomllib
+from contextlib import nullcontext
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,7 +26,7 @@ from unittest import mock
 import pytest
 from test_validator_thin_validated_supply import payload as validated_supply_payload
 
-from scaffold import provenance_audit, validator_thin
+from scaffold import cli, provenance_audit, sn39_public_reproduction, validator_thin
 from scaffold.provenance_audit import (
     ProvenanceAudit,
     ProvenanceAuditError,
@@ -25,6 +35,14 @@ from scaffold.provenance_audit import (
     check_chain_state,
     run_audit,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_submission_runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        validator_thin, "_VALIDATOR_RUNTIME_ROOT", tmp_path / "submission-runtime"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Authority-mode UID vector construction
@@ -113,6 +131,35 @@ def _args(tmp_path: Path, mode: str) -> SimpleNamespace:
         provenance_mechanism="validated_supply_v1",
         jsonl=None,
     )
+
+
+def _pin_sn39_runtime(args: SimpleNamespace, *, launch: bool = False) -> None:
+    args.publisher_url = validator_thin.SN39_PUBLISHER_URL
+    args.public_key_hex = validator_thin.DEFAULT_PUBLIC_KEY_HEX
+    args.key_id = validator_thin.SN39_WEIGHT_POLICY_KEY_ID
+    args.require_policy = "validated_supply_v1"
+    args.wallet_name = "validator"
+    args.wallet_hotkey = "default"
+    args.state_file = str(validator_thin.SN39_STATE_FILE)
+    args.runtime_root = str(validator_thin._VALIDATOR_RUNTIME_ROOT)
+    args.evidence_url = validator_thin.SN39_EVIDENCE_URL
+    args.provenance_registry_keys_digest = validator_thin.SN39_REGISTRY_KEYS_DIGEST
+    args.provenance_report_keys_digest = validator_thin.SN39_REPORT_KEYS_DIGEST
+    args.provenance_index_keys_digest = validator_thin.SN39_INDEX_KEYS_DIGEST
+    args.provenance_verifier_digest = validator_thin.SN39_VERIFIER_DIGEST
+    args.provenance_source_revision = validator_thin.SN39_PRODUCER_REVISION
+    args.provenance_mechanism = validator_thin.MECHANISM_DEFAULT
+    args.provenance_burn_hotkey = validator_thin.SN39_BURN_HOTKEY
+    args.launch_approval_file = str(validator_thin.SN39_LAUNCH_APPROVAL_FILE)
+    args.launch_release_sha = "a" * 40
+    args.launch_config_sha256 = "sha256:" + "b" * 64
+    args.launch_preflight = False
+    args.require_completed_launch_for_broadcast = not launch
+    if launch:
+        args.provenance_controlled_dir = str(validator_thin.SN39_LAUNCH_CONTROLLED_DIR)
+        args.provenance_verifier_binary = str(
+            validator_thin.SN39_LAUNCH_VERIFIER_BINARY
+        )
 
 
 def _stub_audit(monkeypatch, audit: ProvenanceAudit) -> list[dict]:
@@ -285,6 +332,24 @@ def test_chain_state_rejects_source_epoch_rollback() -> None:
         )
 
 
+@pytest.mark.parametrize("lane", ["authority", "thin"])
+def test_submission_attempt_journal_refuses_a_b_a_replay(
+    tmp_path: Path, lane: str
+) -> None:
+    state_file = tmp_path / "state.json"
+    attempt_a = "sha256:" + "a" * 64
+    attempt_b = "sha256:" + "b" * 64
+    key = f"{lane}_submission_attempt_id"
+    history_key = f"{lane}_submission_attempt_ids"
+
+    validator_thin._write_state_fenced(state_file, {key: attempt_a})
+    validator_thin._write_state_fenced(state_file, {key: attempt_b})
+    state = validator_thin._read_state(state_file)
+    assert state[history_key] == [attempt_a, attempt_b]
+    with pytest.raises(ValueError, match="already attempted"):
+        validator_thin._write_state_fenced(state_file, {key: attempt_a})
+
+
 def test_chain_state_rejects_same_epoch_equivocation() -> None:
     audit = ProvenanceAudit(
         status="PASS", source_epoch=11, report_id="sha256:" + "a" * 64
@@ -418,7 +483,9 @@ def real_evidence(tmp_path_factory):
     now = datetime.now(UTC).replace(microsecond=0)
     t0 = now - timedelta(hours=1)
     t1 = now + timedelta(hours=47)
-    text = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def text(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def pub_raw(seed: bytes) -> bytes:
         return (
@@ -876,6 +943,13 @@ def test_real_audit_passes_and_agrees_with_a_matching_vector(real_evidence) -> N
     assert audit.recomputed == {"tdx-miner": 1.0}
     assert audit.agrees_with_vector is True
     assert audit.receipt_hotkeys == ["tdx-miner"]
+    assert audit.report_signing_key_id
+    assert audit.verifier_binary_digest
+    assert audit.signed_index
+    assert audit.signed_index["latest"] == {
+        "source_epoch": audit.source_epoch,
+        "manifest": audit.manifest_digest,
+    }
 
 
 def test_real_audit_flags_a_diverging_vector(real_evidence) -> None:
@@ -1818,16 +1892,180 @@ def test_authority_tick_lock_errors_refuse_before_submission(
     assert threading.active_count() >= 1  # trivial liveness sanity
 
 
-def test_shadow_ticks_never_touch_the_authority_lock(tmp_path, monkeypatch) -> None:
-    """Round-five: thin/shadow concurrency is NOT weakened — the shadow
-    stage never creates or acquires the authority submission lock."""
+def test_thin_and_authority_share_one_submission_lock(tmp_path: Path) -> None:
+    args = _authority_args(tmp_path)
+    args.runtime_root = str(tmp_path / "runtime")
+    with validator_thin._thin_tick_lock(args):
+        with pytest.raises(
+            validator_thin.wire.VectorError,
+            match="cross-mode linearized single-flight",
+        ):
+            with validator_thin._authority_tick_lock(args):
+                pytest.fail("authority entered while thin held the submission lock")
+    with validator_thin._authority_tick_lock(args):
+        with pytest.raises(
+            validator_thin.wire.VectorError,
+            match="cross-mode linearized single-flight",
+        ):
+            with validator_thin._thin_tick_lock(args):
+                pytest.fail("thin entered while authority held the submission lock")
+
+
+def test_common_finalization_survives_lane_telemetry_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finalized authority write is never repeated when event I/O fails."""
+    args = _authority_args(tmp_path)
+    args.offline = False
+    args.broadcast = True
+    args.network = "finney"
+    args.netuid = 39
+    args.require_policy = "validated_supply_v1"
+    state_file = Path(args.state_file)
+    submissions: list[dict[int, float]] = []
+
+    preflight = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={"tdx-miner": 163, "burn-hotkey": 204},
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=900,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        commit_reveal_enabled=False,
+        subnet_owner_hotkey="burn-hotkey",
+        blocks_until_next_epoch=80,
+        next_epoch_start_block=980,
+        weights_rate_limit=0,
+        validator_blocks_since_last_update=1,
+        uid_mapping_stable_until_block=904,
+        replacement_safe_hotkeys=frozenset({"tdx-miner", "burn-hotkey"}),
+    )
+    monkeypatch.setattr(validator_thin, "chain_preflight", lambda **_kw: preflight)
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: {
+            "schema": "cathedral_sn39_uid_safety_v1",
+            "registration": {"fixture": True},
+            "rotation": {"status": "PASS", "targets": []},
+        },
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_historical_metagraph_lookup",
+        lambda *_a: lambda _block: {"tdx-miner", "burn-hotkey"},
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_block_hash_lookup",
+        lambda *_a: lambda _block: "0x" + "a" * 64,
+    )
+    monkeypatch.setattr(
+        validator_thin, "_continuous_transition_required", lambda _args: False
+    )
+
+    def provenance_stage(*_args, **_kwargs):
+        validator_thin._write_state_fenced(
+            state_file,
+            {
+                "provenance_network": "finney",
+                "provenance_netuid": 39,
+                "provenance_last_source_epoch": 12,
+                "provenance_last_report_id": "sha256:" + "b" * 64,
+                "provenance_index_epoch": 12,
+                "provenance_index_manifest": "sha256:" + "c" * 64,
+                "provenance_policy_release": 3,
+                "provenance_policy_digest": "sha256:" + "d" * 64,
+            },
+        )
+        args._authority_full_audit = ProvenanceAudit(
+            status="PASS",
+            assurance="full",
+            report_generated_at="2026-07-24T00:00:00.000Z",
+            report_valid_until="2099-01-01T00:00:00.000Z",
+            report_valid_from_block=800,
+            report_valid_until_block=1200,
+        )
+        return "PASS", {"tdx-miner": 1.0}
+
+    monkeypatch.setattr(validator_thin, "_run_provenance_stage", provenance_stage)
+
+    def submit(weights, **_kw):
+        submissions.append(dict(weights))
+        journal = validator_thin._read_state(
+            validator_thin._submission_state_path(args)
+        )
+        validator_thin._record_pending_broadcast_intent(
+            args,
+            attempt_id=journal["submission_pending_id"],
+            extrinsic_hash="0x" + "a" * 64,
+            nonce=17,
+            era_reference_block=900,
+            mortal_period_blocks=4,
+            version_key=validator_thin._weight_version_key(),
+            wire_uids=[163, 204],
+            wire_weights=[65535, 7282],
+        )
+        return validator_thin.ChainSubmission(
+            success=True,
+            extrinsic_hash="0x" + "a" * 64,
+            block_hash="0x" + "d" * 64,
+            block_number=901,
+            finalized=True,
+        )
+
+    monkeypatch.setattr(validator_thin, "set_weights_on_chain", submit)
+
+    real_write_state_fenced = validator_thin._write_state_fenced
+
+    def fail_lane_telemetry(path, updates):
+        if "authority_submission_attempt_status" in updates:
+            raise OSError("simulated lane telemetry failure")
+        return real_write_state_fenced(path, updates)
+
+    monkeypatch.setattr(
+        validator_thin,
+        "_write_state_fenced",
+        fail_lane_telemetry,
+    )
+
+    with pytest.raises(OSError, match="lane telemetry"):
+        validator_thin._authority_tick(args, None)
+    lane_state = json.loads(state_file.read_text())
+    assert "authority_submission_attempt_status" not in lane_state
+    common_state = validator_thin._read_state(
+        validator_thin._submission_state_path(args)
+    )
+    assert common_state["submission_pending_id"] is None
+    assert common_state["submission_finalized_id"].startswith("sha256:")
+    assert len(submissions) == 1
+
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="attempt fence refused before chain write",
+    ):
+        validator_thin._authority_tick(args, None)
+    assert len(submissions) == 1
+
+
+def test_shadow_audit_stage_never_touches_the_submission_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """The audit worker alone never creates/acquires the cross-mode lock."""
+    monkeypatch.setattr(validator_thin, "_VALIDATOR_RUNTIME_ROOT", tmp_path / "runtime")
     _stub_audit(monkeypatch, ProvenanceAudit(status="PASS", source_epoch=5))
-    args = _args(tmp_path, "shadow")
+    args = _authority_args(tmp_path)
+    args.provenance = "shadow"
+    args.runtime_root = str(tmp_path / "runtime")
     state_file = tmp_path / "state.json"
     status, _ = validator_thin._run_provenance_stage(args, {}, state_file)
     _drain_shadow(args)
     assert status == "PENDING"
-    assert not state_file.with_suffix(".authority.lock").exists()
+    assert not validator_thin._submission_lock_path(args).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1858,6 +2096,15 @@ def test_thin_feed_fetch_rejects_malformed_and_private_endpoints(monkeypatch) ->
         lambda *a, **k: [
             (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
             (socket.AF_INET, 0, 6, "", ("127.0.0.1", 443)),  # ONE bad peer
+        ],
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="non-public address"):
+        validator_thin.fetch_vector("https://publisher.example")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, 0, 6, "", ("100.64.0.1", 443)),
         ],
     )
     with pytest.raises(validator_thin.wire.VectorError, match="non-public address"):
@@ -1917,6 +2164,11 @@ def test_thin_feed_fetch_refuses_redirects_and_oversized_bodies(monkeypatch) -> 
 
     responses["current"] = NS(status=200, read=endless_read)
     with pytest.raises(validator_thin.wire.VectorError, match="bounded size limit"):
+        validator_thin.fetch_vector("https://publisher.example")
+
+    chunks = iter((b'{"weight":1e400}', b""))
+    responses["current"] = NS(status=200, read=lambda _n: next(chunks))
+    with pytest.raises(validator_thin.wire.VectorError, match="non-finite"):
         validator_thin.fetch_vector("https://publisher.example")
 
 
@@ -1996,6 +2248,32 @@ def test_receipts_only_without_positive_replay_does_not_claim_one(
     assert "positive raw evidence replayed for" not in fields["detail"]
 
 
+@pytest.mark.parametrize("assurance", ["receipts_only", "full"])
+def test_vector_mismatch_is_the_terminal_provenance_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    assurance: str,
+) -> None:
+    events_seen: list[str] = []
+
+    class _Recorder:
+        def event(self, name, **_kw):
+            events_seen.append(name)
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: _Recorder())
+    validator_thin._log_audit_events(
+        _args(tmp_path, "shadow"),
+        ProvenanceAudit(
+            status="PASS",
+            assurance=assurance,
+            agrees_with_vector=False,
+            discrepancies=["recomputed weight differs"],
+        ),
+        tmp_path / "state.json",
+    )
+    assert events_seen == ["PROVENANCE_VECTOR_MISMATCH"]
+
+
 def test_output_surfaces_redact_paths_and_use_stable_error_codes(capsys) -> None:
     """Round-six S4: absolute filesystem paths and usernames never reach
     TTY/JSONL/lifecycle output; OS errors become stable errno codes."""
@@ -2011,6 +2289,33 @@ def test_output_surfaces_redact_paths_and_use_stable_error_codes(capsys) -> None
     )
     assert "<path>" in _neutralize("lock ~bob/launch/state.lock is held")
     assert "bob" not in _neutralize("lock ~bob/launch/state.lock is held")
+    redacted_url = _neutralize(
+        "https://alice:s3cr3t@example.invalid/path?token=still-secret"
+    )
+    assert "alice" not in redacted_url
+    assert "s3cr3t" not in redacted_url
+    assert "still-secret" not in redacted_url
+    assert redacted_url == "<redacted-url>"
+    malformed_userinfo = _neutralize(
+        "https://alice:p@ss@example.invalid/path?token=still-secret"
+    )
+    assert malformed_userinfo == "<redacted-url>"
+    assert "alice" not in malformed_userinfo
+    assert "p@ss" not in malformed_userinfo
+    for raw in (
+        "wss://alice:s3cr3t@example.invalid/ws",
+        "postgresql://alice:s3cr3t@example.invalid/db",
+        "https://opaque-token@example.invalid/path",
+    ):
+        scrubbed = _neutralize(raw)
+        assert "alice" not in scrubbed
+        assert "s3cr3t" not in scrubbed
+        assert "opaque-token" not in scrubbed
+        assert scrubbed == "<redacted-url>"
+    long_secret = "opaque-" + "x" * 800
+    long_scrubbed = _neutralize(f"custom+ssh://{long_secret}@example.invalid/path")
+    assert long_secret not in long_scrubbed
+    assert long_scrubbed == "<redacted-url>"
     assert (
         stable_error(OSError(errno.EACCES, "denied", "/home/carol/x"))
         == "OSError[EACCES]"
@@ -2023,6 +2328,61 @@ def test_output_surfaces_redact_paths_and_use_stable_error_codes(capsys) -> None
     validator_thin._lifecycle("STATE failed", "path=/Users/dave/launch/state.json")
     line = capsys.readouterr().out
     assert "dave" not in line and "<path>" in line
+
+
+def test_state_reader_migrates_safe_legacy_mode_and_rejects_unsafe_or_symlink(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "private-state"
+    state_dir.mkdir(mode=0o755)
+    state = state_dir / "state.json"
+    state.write_text("{}")
+    os.chmod(state, 0o644)
+    assert validator_thin._read_state(state) == {}
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state.stat().st_mode) == 0o600
+    os.chmod(state, 0o666)  # nosec B103 - intentional unsafe migration fixture
+    with pytest.raises(ValueError, match="mode 0600"):
+        validator_thin._read_state(state)
+    os.chmod(state, 0o600)
+    state.unlink()
+    victim = state_dir / "victim.json"
+    victim.write_text("{}")
+    os.chmod(victim, 0o600)
+    state.symlink_to(victim)
+    with pytest.raises(OSError):
+        validator_thin._read_state(state)
+
+
+def test_cli_banner_never_prints_raw_endpoint_credentials_or_jsonl_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    secret_endpoint = (
+        "https://alice:supersecret@example.invalid/path?token=URLSECRET#fragment"
+    )
+    secret_path = tmp_path / "private" / "validator-secret.jsonl"
+    monkeypatch.setattr(validator_thin, "run", lambda _cfg: 0)
+    assert (
+        cli.main(
+            [
+                "serve",
+                "--publisher-url",
+                secret_endpoint,
+                "--public-key-hex",
+                "00" * 32,
+                "--jsonl",
+                str(secret_path),
+                "--dry-run",
+                "--once",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "supersecret" not in output
+    assert "URLSECRET" not in output
+    assert str(secret_path) not in output
+    assert "publisher=<invalid-endpoint>" in output
 
 
 def test_historical_lookup_validates_the_raw_sequence(real_evidence) -> None:
@@ -2075,11 +2435,22 @@ def test_authority_lock_refuses_symlinks_and_unsafe_modes(
     monkeypatch.setattr(
         validator_thin,
         "set_weights_on_chain",
-        lambda *a, **k: called.__setitem__("submit", called["submit"] + 1) or True,
+        lambda *a, **k: (
+            called.__setitem__("submit", called["submit"] + 1)
+            or validator_thin.ChainSubmission(
+                success=True,
+                extrinsic_hash="0x" + "a" * 64,
+                block_hash="0x" + "d" * 64,
+                block_number=123,
+                finalized=True,
+            )
+        ),
     )
     args = _authority_args(tmp_path)
-    state_file = Path(args.state_file)
-    lock_path = state_file.with_suffix(".authority.lock")
+    monkeypatch.setattr(validator_thin, "_VALIDATOR_RUNTIME_ROOT", tmp_path / "runtime")
+    args.runtime_root = str(tmp_path / "runtime")
+    lock_path = validator_thin._submission_lock_path(args)
+    lock_path.parent.mkdir(mode=0o700, parents=True)
 
     # Symlinked lock target: O_NOFOLLOW refuses at open.
     victim = tmp_path / "victim.file"
@@ -2091,8 +2462,9 @@ def test_authority_lock_refuses_symlinks_and_unsafe_modes(
 
     # Unsafe pre-existing mode (group/other access) is refused.
     lock_path.touch(mode=0o600)
-    os.chmod(lock_path, 0o666)
-    with pytest.raises(validator_thin.wire.VectorError, match="unsafe"):
+    # Deliberately create the unsafe mode that the production code must reject.
+    os.chmod(lock_path, 0o666)  # nosec B103
+    with pytest.raises(validator_thin.wire.VectorError, match="refusing"):
         validator_thin._authority_tick(args, None)
     os.chmod(lock_path, 0o600)
     assert called == {"audit": 0, "submit": 0}
@@ -2211,13 +2583,26 @@ def test_authority_refuses_to_audit_without_a_finalized_block(
 
     monkeypatch.setattr(validator_thin, "run_audit", fake_run_audit)
     monkeypatch.setattr(validator_thin, "set_weights_on_chain", lambda *a, **k: True)
-    monkeypatch.setattr(
-        validator_thin,
-        "_metagraph_snapshot",
-        lambda *, network, netuid: ({"burn-hotkey": 0, "tdx-miner": 163}, None),
-    )
     args = _authority_args(tmp_path)
     args.offline = False
+    args.runtime_root = str(tmp_path / "runtime")
+    missing_block = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={"burn-hotkey": 0, "tdx-miner": 163},
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=None,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        commit_reveal_enabled=False,
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "chain_preflight",
+        lambda **_kw: missing_block,
+    )
     with pytest.raises(validator_thin.wire.VectorError, match="finalized integer"):
         validator_thin._authority_tick(args, None)
     assert called["audit"] == 0  # refused BEFORE any audit ran
@@ -2229,11 +2614,24 @@ def test_authority_refuses_to_audit_without_a_finalized_block(
         return _epoch_audit(12, "a", "b")
 
     monkeypatch.setattr(validator_thin, "run_audit", recording_run_audit)
+    finalized = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={"burn-hotkey": 0, "tdx-miner": 163},
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=200,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        commit_reveal_enabled=False,
+    )
     monkeypatch.setattr(
         validator_thin,
-        "_metagraph_snapshot",
-        lambda *, network, netuid: ({"burn-hotkey": 0, "tdx-miner": 163}, 200),
+        "chain_preflight",
+        lambda **_kw: finalized,
     )
+    args._tick_preflight = None
     assert validator_thin._authority_tick(args, None) is True
     assert seen_blocks == [200]  # the real block reached the audit
 
@@ -2421,6 +2819,193 @@ def _once_args(tmp_path: Path) -> SimpleNamespace:
     return args
 
 
+def test_pending_receipt_unavailability_emits_not_proven_and_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events_seen: list[tuple[str, str | None]] = []
+
+    class _Recorder:
+        def event(self, name, **fields):
+            events_seen.append((name, fields.get("status")))
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: _Recorder())
+    monkeypatch.setattr(
+        validator_thin,
+        "_recover_pending_launch_receipt",
+        lambda _args: (_ for _ in ()).throw(
+            validator_thin._PendingReceiptNotProven("archive unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "tick",
+        lambda _args: (_ for _ in ()).throw(
+            AssertionError("a fenced receipt must stop before a new tick")
+        ),
+    )
+    assert validator_thin.run(_once_args(tmp_path)) == 1
+    assert ("PENDING_RECEIPT_NOT_PROVEN", "NOT_PROVEN") in events_seen
+    assert not any(name == "TICK_FAILED" for name, _status in events_seen)
+
+
+def test_pending_receipt_contradiction_emits_fail_and_stops_before_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events_seen: list[tuple[str, str | None]] = []
+
+    class _Recorder:
+        def event(self, name, **fields):
+            events_seen.append((name, fields.get("status")))
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: _Recorder())
+    monkeypatch.setattr(
+        validator_thin,
+        "_recover_pending_launch_receipt",
+        lambda _args: (_ for _ in ()).throw(
+            validator_thin._PostSignedSubmissionMismatch(
+                "positive historical contradiction"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "tick",
+        lambda _args: (_ for _ in ()).throw(
+            AssertionError("a contradictory signed attempt must stop before a tick")
+        ),
+    )
+
+    assert validator_thin.run(_once_args(tmp_path)) == 1
+    assert ("PENDING_RECEIPT_CONTRADICTION", "FAIL") in events_seen
+    assert not any(name == "TICK_FAILED" for name, _status in events_seen)
+
+
+def _online_recovery_args(tmp_path: Path) -> SimpleNamespace:
+    args = _once_args(tmp_path)
+    args.offline = False
+    args.broadcast = True
+    return args
+
+
+def _record_recovery_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, str | None]]:
+    events_seen: list[tuple[str, str | None]] = []
+
+    class _Recorder:
+        def event(self, name, **fields):
+            events_seen.append((name, fields.get("status")))
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: _Recorder())
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "tick",
+        lambda _args: (_ for _ in ()).throw(
+            AssertionError("startup recovery failure must stop before a tick")
+        ),
+    )
+    return events_seen
+
+
+def test_startup_recovery_malformed_journal_emits_fail_before_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events_seen = _record_recovery_events(monkeypatch)
+    monkeypatch.setattr(validator_thin, "_prepare_tick_preflight", lambda _args: None)
+    monkeypatch.setattr(validator_thin, "_thin_tick_lock", lambda _args: nullcontext())
+    monkeypatch.setattr(
+        validator_thin,
+        "_submission_state_path",
+        lambda _args: tmp_path / "submission.json",
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_read_state",
+        lambda _path: {
+            "submission_pending_id": "not-a-digest",
+            "submission_pending_lane": "thin",
+        },
+    )
+
+    assert validator_thin.run(_online_recovery_args(tmp_path)) == 1
+    assert events_seen[0][0] == "STARTUP"
+    assert ("PENDING_RECEIPT_CONTRADICTION", "FAIL") in events_seen
+    assert not any(name == "TICK_FAILED" for name, _status in events_seen)
+
+
+def test_startup_recovery_state_io_failure_emits_not_proven_before_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events_seen = _record_recovery_events(monkeypatch)
+    monkeypatch.setattr(validator_thin, "_prepare_tick_preflight", lambda _args: None)
+    monkeypatch.setattr(validator_thin, "_thin_tick_lock", lambda _args: nullcontext())
+    monkeypatch.setattr(
+        validator_thin,
+        "_submission_state_path",
+        lambda _args: tmp_path / "submission.json",
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_read_state",
+        lambda _path: (_ for _ in ()).throw(OSError("state fsync unavailable")),
+    )
+
+    assert validator_thin.run(_online_recovery_args(tmp_path)) == 1
+    assert events_seen[0][0] == "STARTUP"
+    assert ("PENDING_RECEIPT_NOT_PROVEN", "NOT_PROVEN") in events_seen
+    assert not any(name == "TICK_FAILED" for name, _status in events_seen)
+
+
+def test_startup_recovery_preflight_failure_emits_not_proven_before_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events_seen = _record_recovery_events(monkeypatch)
+    monkeypatch.setattr(
+        validator_thin,
+        "_prepare_tick_preflight",
+        lambda _args: (_ for _ in ()).throw(
+            validator_thin.wire.VectorError("RPC unavailable")
+        ),
+    )
+
+    assert validator_thin.run(_online_recovery_args(tmp_path)) == 1
+    assert events_seen[0][0] == "STARTUP"
+    assert ("PENDING_RECEIPT_NOT_PROVEN", "NOT_PROVEN") in events_seen
+    assert not any(name == "TICK_FAILED" for name, _status in events_seen)
+
+
+def test_startup_recovery_lock_failure_emits_not_proven_before_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events_seen = _record_recovery_events(monkeypatch)
+
+    class _UnavailableLock:
+        def __enter__(self):
+            raise validator_thin.wire.VectorError("submission lock unavailable")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(validator_thin, "_prepare_tick_preflight", lambda _args: None)
+    monkeypatch.setattr(
+        validator_thin, "_thin_tick_lock", lambda _args: _UnavailableLock()
+    )
+
+    assert validator_thin.run(_online_recovery_args(tmp_path)) == 1
+    assert events_seen[0][0] == "STARTUP"
+    assert ("PENDING_RECEIPT_NOT_PROVEN", "NOT_PROVEN") in events_seen
+    assert not any(name == "TICK_FAILED" for name, _status in events_seen)
+
+
 def test_once_mode_drains_and_reports_the_shadow_audit(tmp_path, monkeypatch) -> None:
     """Round-seven F4: --once must not exit while the shadow audit daemon is
     still running — the outcome is awaited within the documented bound and
@@ -2448,8 +3033,83 @@ def test_once_mode_drains_and_reports_the_shadow_audit(tmp_path, monkeypatch) ->
 
     monkeypatch.setattr(validator_thin, "tick", fake_tick)
     args = _once_args(tmp_path)
-    assert validator_thin.run(args) == 0
+    assert validator_thin.run(args) == 1
     assert "PROVENANCE_AUDIT_FAIL" in events_seen  # outcome captured, not lost
+    assert "PROVENANCE_HEALTH_GATE_FAILED" in events_seen
+
+
+def test_once_mode_exits_zero_only_for_full_agreeing_shadow_audit(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        validator_thin,
+        "run_audit",
+        lambda settings, **_kw: ProvenanceAudit(
+            status="PASS",
+            assurance="full",
+            agrees_with_vector=True,
+            source_epoch=1,
+            report_id="sha256:" + "a" * 64,
+            index_source_epoch=1,
+            index_manifest="sha256:" + "b" * 64,
+            policy_release=1,
+            policy_digest="sha256:" + "c" * 64,
+        ),
+    )
+
+    def fake_tick(a):
+        validator_thin._run_provenance_stage(
+            a, validated_supply_payload(), Path(a.state_file)
+        )
+        return True
+
+    monkeypatch.setattr(validator_thin, "tick", fake_tick)
+    assert validator_thin.run(_once_args(tmp_path)) == 0
+
+
+def test_once_mode_fails_when_full_audit_state_cannot_persist(
+    tmp_path, monkeypatch
+) -> None:
+    events_seen: list[tuple[str, str | None]] = []
+
+    class _Recorder:
+        def event(self, name, **fields):
+            events_seen.append((name, fields.get("status")))
+
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: _Recorder())
+    monkeypatch.setattr(
+        validator_thin,
+        "run_audit",
+        lambda settings, **_kw: ProvenanceAudit(
+            status="PASS",
+            assurance="full",
+            agrees_with_vector=True,
+            source_epoch=1,
+            report_id="sha256:" + "a" * 64,
+            index_source_epoch=1,
+            index_manifest="sha256:" + "b" * 64,
+            policy_release=1,
+            policy_digest="sha256:" + "c" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_write_state_fenced",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated persistence failure")
+        ),
+    )
+
+    def fake_tick(a):
+        validator_thin._run_provenance_stage(
+            a, validated_supply_payload(), Path(a.state_file)
+        )
+        return True
+
+    monkeypatch.setattr(validator_thin, "tick", fake_tick)
+    assert validator_thin.run(_once_args(tmp_path)) == 1
+    assert ("PROVENANCE_STATE_WRITE_FAILED", "NOT_PROVEN") in events_seen
+    assert not any(name == "PROVENANCE_AUDIT_PASS" for name, _status in events_seen)
 
 
 def test_once_mode_truthful_exit_when_audit_cannot_be_captured(
@@ -2673,6 +3333,7 @@ def _patched_evidence_transport(
     connect_delay: float = 0.0,
     dead: frozenset = frozenset(),
     body: bytes = b'{"i": 1}',
+    status: int = 200,
 ) -> list[str]:
     """Fake DNS/socket/TLS/HTTP plumbing for evidence _fetcher tests; the
     returned list records connection attempts in order."""
@@ -2730,7 +3391,7 @@ def _patched_evidence_transport(
     monkeypatch.setattr(
         http.client.HTTPSConnection,
         "getresponse",
-        lambda self: NS(status=200, read=fake_read),
+        lambda self: NS(status=status, read=fake_read),
     )
     return attempts
 
@@ -2786,3 +3447,4150 @@ def test_audit_deadline_starts_before_dns_and_rebounds_every_phase(
     load_index, _load_blob = provenance_audit._fetcher(settings)
     with pytest.raises(ProvenanceAuditError, match="total deadline"):
         load_index()
+
+
+def test_named_evidence_fetch_refuses_redirects(monkeypatch) -> None:
+    _patched_evidence_transport(monkeypatch, status=302)
+    settings = ProvenanceSettings(
+        mode="shadow",
+        evidence_url="https://evidence.example",
+    )
+    _load_index, _load_blob, fetch_named = provenance_audit._fetcher(
+        settings,
+        include_raw_fetch=True,
+    )
+    with pytest.raises(ProvenanceAuditError, match="redirects are never"):
+        fetch_named("/release.json")
+    with pytest.raises(ProvenanceAuditError, match="path is malformed"):
+        fetch_named("/../private")
+
+
+def test_mainnet_launch_bundle_is_byte_pinned_and_shadow_by_default() -> None:
+    """The public copy-paste config must resolve to the reviewed launch pins.
+
+    A final newline or a stale digest is security-relevant here: validators
+    pin the exact public-key file bytes before trusting signed evidence.
+    """
+    root = Path(__file__).resolve().parents[3]
+    expected = {
+        "registry_keys": (
+            "registry-keys.json",
+            "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512",
+        ),
+        "report_keys": (
+            "report-keys.json",
+            "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70",
+        ),
+        "index_keys": (
+            "index-keys.json",
+            "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611",
+        ),
+    }
+    config_path = root / "config" / "validator-mainnet-sn39.toml"
+    with config_path.open("rb") as handle:
+        config = tomllib.load(handle)
+
+    assert config["network"] == {
+        "name": "finney",
+        "netuid": 39,
+        "wallet_name": "validator",
+        "validator_hotkey": "default",
+    }
+    assert config["weight_policy"]["require_policy"] == "validated_supply_v1"
+    assert config["weight_policy"]["public_key_hex"] == (
+        "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
+    )
+    assert config["weight_policy"]["key_id"] == "cathedral-weight-policy"
+    assert config["provenance"]["mode"] == "shadow"
+    assert config["provenance"]["mechanism"] == "validated_supply_v1"
+    assert config["provenance"]["verifier_digest"] == (
+        "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+    )
+    assert config["provenance"]["source_revision"] == (
+        "fa39af97e738fdbed5c454f976b61246590b5794"
+    )
+
+    for config_key, (name, digest) in expected.items():
+        path = root / "config" / "provenance" / name
+        actual = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        assert actual == digest
+        assert config["provenance"][config_key] == f"config/provenance/{name}"
+        assert config["provenance"][config_key + "_digest"] == digest
+    release_key_path = root / "config" / "provenance" / "release-attestation-keys.json"
+    assert "sha256:" + hashlib.sha256(release_key_path.read_bytes()).hexdigest() == (
+        "sha256:1a60a22de160853d460b22853a426d0534fab4df0fe9f89e5859d60bb4ed3d12"
+    )
+
+    captured: list[SimpleNamespace] = []
+    with (
+        mock.patch.dict(os.environ, {}, clear=True),
+        mock.patch.object(
+            validator_thin,
+            "run",
+            side_effect=lambda resolved: captured.append(resolved) or 0,
+        ),
+    ):
+        assert (
+            cli.main(
+                [
+                    "serve",
+                    "--config",
+                    str(config_path),
+                    "--dry-run",
+                    "--once",
+                ]
+            )
+            == 0
+        )
+    assert len(captured) == 1
+    resolved = captured[0]
+    assert resolved.broadcast is False
+    assert resolved.once is True
+    assert resolved.public_key_hex == config["weight_policy"]["public_key_hex"]
+    assert resolved.key_id == config["weight_policy"]["key_id"]
+    assert resolved.provenance == "shadow"
+    assert (
+        resolved.provenance_verifier_digest == config["provenance"]["verifier_digest"]
+    )
+
+
+def test_public_key_loader_rejects_duplicate_ids(tmp_path: Path) -> None:
+    duplicate = (
+        b'{"same":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",'
+        b'"same":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
+    )
+    path = tmp_path / "keys.json"
+    path.write_bytes(duplicate)
+    digest = "sha256:" + hashlib.sha256(duplicate).hexdigest()
+    with pytest.raises(ProvenanceAuditError, match="must map key ids"):
+        provenance_audit._load_pubkeys(str(path), digest, "test keys")
+
+
+def test_public_reproduction_assertion_rejects_shadow_failures(tmp_path: Path) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        EXPECTED_STARTUP,
+        ReproductionError,
+        assert_current_dry_run,
+    )
+
+    path = tmp_path / "events.jsonl"
+    base = [
+        {
+            "event": "STARTUP",
+            "status": "INFO",
+            "detail": "submission_authority=thin provenance=shadow",
+            **EXPECTED_STARTUP,
+        },
+        {
+            "event": "WEIGHTS_DRY_RUN",
+            "status": "PASS",
+            "detail": "authority=thin uids=2 burn_share=0.100000",
+            "authority": "thin",
+            "uid_count": 2,
+            "burn_uid": 204,
+            "burn_share": 0.1,
+            "uid_weights": {"163": 0.9, "204": 0.1},
+            "wire_uids": [163, 204],
+            "wire_weights": [65535, 7282],
+            "version_key": 10005000,
+            "mapping_block": 8694000,
+            "validator_uid": 30,
+            "validator_hotkey": "validator-hotkey",
+        },
+        {
+            "event": "PROVENANCE_AUDIT_PASS",
+            "status": "PASS",
+            "detail": "whole-epoch FULL assurance established",
+            "vector_agrees": True,
+        },
+    ]
+    path.write_text("\n".join(json.dumps(event) for event in base) + "\n")
+    assert assert_current_dry_run(path)["current_dry_run"] == "PASS"
+
+    path.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                *base,
+                {
+                    "event": "PROVENANCE_VECTOR_MISMATCH",
+                    "status": "FAIL",
+                    "detail": "counterexample",
+                },
+            ]
+        )
+        + "\n"
+    )
+    with pytest.raises(ReproductionError, match="fail-closed"):
+        assert_current_dry_run(path)
+
+    twenty_uids = [dict(event) for event in base]
+    twenty_uids[1]["detail"] = "authority=thin uids=20 burn_share=0.100000"
+    twenty_uids[1]["uid_count"] = 20
+    path.write_text("\n".join(json.dumps(event) for event in twenty_uids) + "\n")
+    with pytest.raises(ReproductionError, match="rewarded/burn"):
+        assert_current_dry_run(path)
+
+    wrong_uids = [dict(event) for event in base]
+    wrong_uids[1]["burn_uid"] = 999
+    wrong_uids[1]["uid_weights"] = {"7": 0.9, "999": 0.1}
+    path.write_text("\n".join(json.dumps(event) for event in wrong_uids) + "\n")
+    with pytest.raises(ReproductionError, match="rewarded/burn"):
+        assert_current_dry_run(path)
+
+    alternate = [dict(event) for event in base]
+    alternate[0]["publisher_url"] = "https://alternate.example"
+    path.write_text("\n".join(json.dumps(event) for event in alternate) + "\n")
+    with pytest.raises(ReproductionError, match="resolved launch pins"):
+        assert_current_dry_run(path)
+
+    wrong_burn = [dict(event) for event in base]
+    wrong_burn[1]["burn_share"] = 0.2
+    path.write_text("\n".join(json.dumps(event) for event in wrong_burn) + "\n")
+    with pytest.raises(ReproductionError, match="rewarded/burn"):
+        assert_current_dry_run(path)
+
+
+def test_receipts_only_mismatch_reaches_public_assertion(tmp_path: Path) -> None:
+    """Exercise the real logger-to-assertion path for the former fail-open."""
+    from scaffold.events import EventLogger
+    from scripts.assert_sn39_public_reproduction import (
+        EXPECTED_STARTUP,
+        ReproductionError,
+        assert_current_dry_run,
+    )
+
+    path = tmp_path / "events.jsonl"
+    logger = EventLogger(mode="thin", jsonl_path=str(path), tty=None)
+    logger.event(
+        "STARTUP",
+        stage="startup",
+        status="INFO",
+        detail="submission_authority=thin provenance=shadow",
+        **EXPECTED_STARTUP,
+    )
+    logger.event(
+        "WEIGHTS_DRY_RUN",
+        stage="submit",
+        status="PASS",
+        detail="authority=thin uids=2 burn_share=0.100000",
+        authority="thin",
+        uid_count=2,
+        burn_uid=204,
+        burn_share=0.1,
+        uid_weights={"163": 0.9, "204": 0.1},
+        wire_uids=[163, 204],
+        wire_weights=[65535, 7282],
+        version_key=10005000,
+        mapping_block=8694000,
+        validator_uid=30,
+        validator_hotkey="validator-hotkey",
+    )
+    args = SimpleNamespace(_events=logger)
+    validator_thin._log_audit_events(
+        args,
+        ProvenanceAudit(
+            status="PASS",
+            assurance="receipts_only",
+            agrees_with_vector=False,
+            discrepancies=["tdx-miner weight differs"],
+            remediation="inspect evidence",
+            not_proven_reasons=["negative evidence unavailable"],
+        ),
+        tmp_path / "state.json",
+    )
+    logger.close()
+    with pytest.raises(ReproductionError, match="fail-closed"):
+        assert_current_dry_run(path)
+
+
+def test_event_log_explicit_reader_group_is_exactly_0640(tmp_path: Path) -> None:
+    from scaffold.events import EventLogger
+
+    path = tmp_path / "validator-events.jsonl"
+    group = grp.getgrgid(os.getegid()).gr_name
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(path),
+        jsonl_group=group,
+        tty=None,
+    )
+    logger.event("STARTUP", stage="startup", status="INFO")
+    logger.close()
+
+    metadata = path.stat()
+    assert metadata.st_gid == os.getegid()
+    assert metadata.st_mode & 0o777 == 0o640
+
+
+def test_event_log_without_reader_group_remains_private(tmp_path: Path) -> None:
+    from scaffold.events import EventLogger
+
+    path = tmp_path / "validator-events.jsonl"
+    logger = EventLogger(mode="thin", jsonl_path=str(path), tty=None)
+    logger.event("STARTUP", stage="startup", status="INFO")
+    logger.close()
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_cli_to_tick_to_current_assertion_and_immutable_reproducer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Current health is explicit; immutable proof never substitutes its feed."""
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        assert_current_dry_run,
+    )
+    from scripts.run_sn39_public_reproduction import run as run_reproduction
+
+    root = Path(__file__).resolve().parents[3]
+    config = root / "config/validator-mainnet-sn39.toml"
+    state = tmp_path / "state.json"
+    events = tmp_path / "events.jsonl"
+    vector = validated_supply_payload()
+    vector.update(
+        {
+            "vector_id": "launch-vector",
+            "policy_version": 1,
+            "key_id": "cathedral-weight-policy",
+            "network": "finney",
+            "netuid": 39,
+            "generated_at": "2026-07-24T22:00:00.000Z",
+            "expires_at": "2026-07-24T23:00:00.000Z",
+        }
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "fetch_vector",
+        lambda _url: vector,
+    )
+    monkeypatch.setattr(validator_thin, "accept_vector", lambda *_args, **_kw: None)
+    monkeypatch.setattr(
+        validator_thin,
+        "chain_preflight",
+        lambda **_kw: validator_thin.ChainPreflight(
+            wallet=object(),
+            subtensor=object(),
+            hotkey_to_uid={"burn-hotkey": 204, "tdx-miner": 163},
+            validator_hotkey="validator-hotkey",
+            validator_uid=30,
+            block=8694000,
+            min_allowed_weights=1,
+            max_weight_limit=1.0,
+            genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+            commit_reveal_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "run_audit",
+        lambda *_args, **_kw: ProvenanceAudit(
+            status="PASS",
+            assurance="full",
+            agrees_with_vector=True,
+            source_epoch=77,
+            report_id="sha256:" + "a" * 64,
+            index_source_epoch=77,
+            index_manifest="sha256:" + "b" * 64,
+            policy_release=1,
+            policy_digest="sha256:" + "c" * 64,
+            mechanism="validated_supply_v1",
+            recomputed={"tdx-miner": 1.0},
+            receipt_hotkeys=["tdx-miner"],
+            raw_replayed_hotkeys=["tdx-miner"],
+            not_proven_reasons=[],
+        ),
+    )
+    with mock.patch.dict(os.environ, {}, clear=True):
+        assert (
+            cli.main(
+                [
+                    "serve",
+                    "--config",
+                    str(config),
+                    "--state-file",
+                    str(state),
+                    "--runtime-root",
+                    str(tmp_path / "runtime"),
+                    "--jsonl",
+                    str(events),
+                    "--dry-run",
+                    "--once",
+                ]
+            )
+            == 0
+        )
+    result = assert_current_dry_run(events)
+    assert result["current_dry_run"] == "PASS"
+    immutable = run_reproduction(
+        release_result={
+            "release_attestation": "PASS",
+            "historical_launch": "PASS",
+            "evidence_checkpoint": "PASS",
+            "evidence_candidate_set": "PASS",
+            "reproducer_revision": "a" * 40,
+        },
+    )
+    assert immutable["public_recomputation"] == "PASS"
+    with pytest.raises(ReproductionError, match="candidate set"):
+        run_reproduction(
+            release_result={
+                "release_attestation": "PASS",
+                "historical_launch": "PASS",
+                "evidence_checkpoint": "PASS",
+                "evidence_candidate_set": "NOT_PROVEN",
+                "reproducer_revision": "a" * 40,
+            },
+        )
+
+
+def _fixture_uid_safety(hotkeys: list[str]) -> dict[str, object]:
+    rotation_block_hash = "0x" + "9" * 64
+    rotation_timestamp = "2026-07-24T21:00:00.000Z"
+
+    def target(
+        *,
+        uid: int,
+        coldkey: str,
+        extrinsic_hash: str,
+        extrinsic_index: int,
+    ) -> dict[str, object]:
+        old_hotkey = f"old-{hotkeys[uid]}"
+        return {
+            "uid": uid,
+            "hotkey": hotkeys[uid],
+            "coldkey": coldkey,
+            "last_hotkey_swap_block": 99,
+            "hotkey_swap_safe_until_block": 7299,
+            "pending_coldkey_swap": None,
+            "hotkey_successor": None,
+            "hotkey_root": old_hotkey,
+            "rotation_receipt": {
+                "call": "swap_hotkey_v2",
+                "extrinsic_hash": extrinsic_hash,
+                "block_hash": rotation_block_hash,
+                "block_number": 99,
+                "block_timestamp": rotation_timestamp,
+                "extrinsic_index": extrinsic_index,
+                "coldkey": coldkey,
+                "old_hotkey": old_hotkey,
+                "new_hotkey": hotkeys[uid],
+                "netuid": 39,
+                "keep_stake": False,
+                "event": "HotkeySwappedOnSubnet",
+            },
+            "registration_replacement_safe": True,
+        }
+
+    return {
+        "schema": "cathedral_sn39_uid_safety_v1",
+        "registration": {
+            "max_uids": 256,
+            "max_regs_per_block": 1,
+            "immunity_period": 15000,
+            "min_nonimmune_uids": 10,
+            "block_at_registration": [
+                {
+                    "uid": uid,
+                    "hotkey": hotkey,
+                    "block_at_registration": 0,
+                }
+                for uid, hotkey in enumerate(hotkeys)
+            ],
+            "subnet_owner_coldkey": "subnet-owner-coldkey",
+            "owned_hotkeys": [hotkeys[204]],
+            "immune_owner_uids_limit": 1,
+            "free_uid_slots": 51,
+            "maximum_era_registrations": 4,
+            "owner_immortal_hotkeys": [hotkeys[204]],
+            "replacement_safe_hotkeys": sorted(hotkeys),
+        },
+        "rotation": {
+            "status": "PASS",
+            "mapping_block": 100,
+            "mapping_block_hash": "0x" + "a" * 64,
+            "mortal_period_blocks": 4,
+            "era_last_block": 103,
+            "hotkey_swap_on_subnet_interval": 7200,
+            "coldkey_swap_announcement_delay": 36000,
+            "targets": [
+                target(
+                    uid=163,
+                    coldkey="coldkey-163",
+                    extrinsic_hash="0x" + "1" * 64,
+                    extrinsic_index=0,
+                ),
+                target(
+                    uid=204,
+                    coldkey="subnet-owner-coldkey",
+                    extrinsic_hash="0x" + "2" * 64,
+                    extrinsic_index=1,
+                ),
+            ],
+        },
+    }
+
+
+def _fixture_freshness_boundary() -> dict[str, object]:
+    return {
+        "schema": "cathedral_sn39_post_rotation_evidence_v1",
+        "rotation_floor_block": 99,
+        "rotation_floor_timestamp": "2026-07-24T21:00:00.000Z",
+        "candidate_block": 100,
+        "candidate_block_hash": "0x" + "a" * 64,
+        "manifest_generated_at": "2026-07-24T21:30:00.000Z",
+        "report_generated_at": "2026-07-24T21:45:00.000Z",
+        "report_valid_from_block": 100,
+        "vector_generated_at": "2026-07-24T22:00:00.000Z",
+        "index_generated_at": "2026-07-24T22:00:00.000Z",
+    }
+
+
+def test_release_attestation_binds_exact_reproducer_revision() -> None:
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from scripts.assert_sn39_public_reproduction import (
+        EXPECTED_PRODUCER_REVISION,
+        EXPECTED_RELEASE_PINS,
+        RELEASE_KEY_ID,
+        ReproductionError,
+        verify_release_bytes,
+    )
+
+    revision = "a" * 40
+    hotkeys = [f"hotkey-{uid}" for uid in range(205)]
+    vector = {
+        "vector_id": "launch-vector-id",
+        "policy_version": 77,
+        "network": "finney",
+        "netuid": 39,
+        "key_id": "cathedral-weight-policy",
+        "generated_at": "2026-07-24T22:00:00.000Z",
+        "expires_at": "2026-07-24T23:00:00.000Z",
+        "weights": [{"miner_hotkey": hotkeys[163], "weight": 1.0}],
+        "burn_snapshot": {
+            "burn_hotkey": hotkeys[204],
+            "burn_uid": None,
+            "forced_burn_percentage": 10.0,
+        },
+        "policy_metadata": {
+            "confidential_primary": {
+                "contract_version": "v1",
+                "mode": "confidential_primary",
+                "source": "cathedral_confidential_tdx",
+                "base_mass": 0.0,
+                "confidential_mass": 1.0,
+                "complete": True,
+                "fresh": True,
+                "confirmed": True,
+            },
+            "validated_supply": {
+                "contract_version": "v2",
+                "intel_tdx_allocation": 0.90,
+                "fixed_burn_allocation": 0.10,
+                "burn_hotkey": hotkeys[204],
+            },
+        },
+        "signature": "fixture",
+    }
+    vector_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(vector, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    manifest_digest = "sha256:" + "b" * 64
+    release = {
+        "schema": "cathedral_sn39_provenance_release_v2",
+        "network": "finney",
+        "netuid": 39,
+        "validated_capability": "intel_tdx_cpu",
+        "submission_authority_default": "thin",
+        "full_provenance_mode": "concurrent_shadow",
+        "claim": "SN39 mainnet: validated Intel TDX CPU compute.",
+        "reward_mechanism": {
+            "id": "validated_supply_v1",
+            "revision": 1,
+            "validated_supply_share": 0.9,
+            "burn_share": 0.1,
+            "wire_quantization": {
+                "weights_u16": [65535, 7282],
+                "effective_validated_supply_share": (65535 / (65535 + 7282)),
+                "effective_burn_share": 7282 / (65535 + 7282),
+            },
+        },
+        "launch_submission": {
+            "vector_id": vector["vector_id"],
+            "policy_version": vector["policy_version"],
+            "signed_vector_sha256": vector_digest,
+            "signed_vector": vector,
+            "broadcast_intent": {
+                "extrinsic_hash": "0x" + "c" * 64,
+                "nonce": 17,
+                "era_reference_block": 100,
+                "mortal_period_blocks": 4,
+                "version_key": 10005000,
+                "wire_uids": [163, 204],
+                "wire_weights": [65535, 7282],
+            },
+            "mapping": {
+                "block": 100,
+                "validator_uid": 30,
+                "validator_hotkey": hotkeys[30],
+                "rewarded_uid": 163,
+                "rewarded_hotkey": hotkeys[163],
+                "burn_uid": 204,
+                "burn_hotkey": hotkeys[204],
+                "commit_reveal_enabled": False,
+                "next_epoch_start_block": 120,
+                "uid_weights": {"163": 0.9, "204": 0.1},
+                "uid_safety": _fixture_uid_safety(hotkeys),
+                "metagraph_snapshot": {
+                    "network": "finney",
+                    "netuid": 39,
+                    "block": 100,
+                    "block_hash": "0x" + "a" * 64,
+                    "uids": list(range(205)),
+                    "hotkeys": hotkeys,
+                    "validator_permit": [index == 30 for index in range(len(hotkeys))],
+                },
+            },
+            "extrinsic": {
+                "hash": "0x" + "c" * 64,
+                "block": 101,
+                "block_hash": "0x" + "d" * 64,
+                "validator_uid": 30,
+                "uids": [163, 204],
+                "weights_u16": [65535, 7282],
+                "version_key": 10005000,
+            },
+            "evidence_checkpoint": {
+                "source_epoch": 90,
+                "manifest": manifest_digest,
+                "report_id": "sha256:" + "e" * 64,
+                "policy_release": 10,
+                "policy_digest": "sha256:" + "f" * 64,
+                "report_signing_key_id": "cathedral-score-sn39-20260724",
+                "reward_mechanism": {
+                    "id": "validated_supply_v1",
+                    "revision": 1,
+                },
+                "verifier_digest": (
+                    "sha256:"
+                    "8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+                ),
+                "verifier_binary_digest": (
+                    "sha256:"
+                    "35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
+                ),
+                "replay_result": "sha256:" + "9" * 64,
+                "public_assurance": "receipts_only",
+                "signed_index": {
+                    "generated_at": "2026-07-24T22:00:00.000Z",
+                    "latest": {
+                        "manifest": manifest_digest,
+                        "source_epoch": 90,
+                    },
+                },
+                "freshness_boundary": _fixture_freshness_boundary(),
+            },
+        },
+        "reproducer_revision": revision,
+        "source_revisions": {
+            "producer": EXPECTED_PRODUCER_REVISION,
+            "validator": revision,
+        },
+        "pins": EXPECTED_RELEASE_PINS,
+        "release_attestation": {"key_id": RELEASE_KEY_ID},
+    }
+    release_bytes = json.dumps(release, sort_keys=True, separators=(",", ":")).encode()
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    signature = {
+        "algorithm": "Ed25519",
+        "key_id": RELEASE_KEY_ID,
+        "payload": "release.json exact bytes",
+        "payload_sha256": "sha256:" + hashlib.sha256(release_bytes).hexdigest(),
+        "signature": base64.b64encode(private.sign(release_bytes)).decode(),
+    }
+    signature_bytes = json.dumps(
+        signature,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    keys = {RELEASE_KEY_ID: base64.b64encode(public).decode()}
+    assert (
+        verify_release_bytes(
+            release_bytes,
+            signature_bytes,
+            public_keys=keys,
+            repo_revision=revision,
+        )["release_attestation"]
+        == "PASS"
+    )
+    with pytest.raises(ReproductionError, match="signed reproducer revision"):
+        verify_release_bytes(
+            release_bytes,
+            signature_bytes,
+            public_keys=keys,
+            repo_revision="b" * 40,
+        )
+    tampered = release_bytes.replace(b"intel_tdx_cpu", b"hybrid_gpu_preview")
+    with pytest.raises(ReproductionError, match="payload digest"):
+        verify_release_bytes(
+            tampered,
+            signature_bytes,
+            public_keys=keys,
+            repo_revision=revision,
+        )
+    noncanonical = json.dumps(release, sort_keys=True, indent=2).encode()
+    noncanonical_signature = dict(signature)
+    noncanonical_signature["payload_sha256"] = (
+        "sha256:" + hashlib.sha256(noncanonical).hexdigest()
+    )
+    noncanonical_signature["signature"] = base64.b64encode(
+        private.sign(noncanonical)
+    ).decode()
+    with pytest.raises(ReproductionError, match="canonical JSON"):
+        verify_release_bytes(
+            noncanonical,
+            json.dumps(
+                noncanonical_signature,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            public_keys=keys,
+            repo_revision=revision,
+        )
+    duplicate = b'{"schema":"cathedral_sn39_provenance_release_v2",' + release_bytes[1:]
+    duplicate_signature = dict(signature)
+    duplicate_signature["payload_sha256"] = (
+        "sha256:" + hashlib.sha256(duplicate).hexdigest()
+    )
+    duplicate_signature["signature"] = base64.b64encode(
+        private.sign(duplicate)
+    ).decode()
+    with pytest.raises(ReproductionError, match="duplicate JSON"):
+        verify_release_bytes(
+            duplicate,
+            json.dumps(
+                duplicate_signature,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            public_keys=keys,
+            repo_revision=revision,
+        )
+
+
+def test_launch_publishes_protocol_quantized_wire_share() -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        WIRE_BURN_SHARE,
+        WIRE_BURN_U16,
+        WIRE_VALIDATED_SUPPLY_SHARE,
+        WIRE_VALIDATED_SUPPLY_U16,
+    )
+
+    assert (WIRE_VALIDATED_SUPPLY_U16, WIRE_BURN_U16) == (65535, 7282)
+    assert WIRE_VALIDATED_SUPPLY_SHARE + WIRE_BURN_SHARE == pytest.approx(1.0)
+    assert WIRE_BURN_SHARE > 0.1
+    assert WIRE_BURN_SHARE == pytest.approx(0.10000411991705234)
+
+
+def _historical_launch_fixture() -> tuple[dict[str, object], list[str]]:
+    hotkeys = [f"hotkey-{uid}" for uid in range(205)]
+    vector = {
+        "vector_id": "launch-vector-id",
+        "policy_version": 77,
+        "network": "finney",
+        "netuid": 39,
+        "key_id": "cathedral-weight-policy",
+        "generated_at": "2026-07-24T22:00:00.000Z",
+        "expires_at": "2026-07-24T23:00:00.000Z",
+        "weights": [
+            {
+                "miner_hotkey": hotkeys[163],
+                "weight": 1.0,
+                "base_component": 0.0,
+                "external_component": 1.0,
+            }
+        ],
+        "burn_snapshot": {
+            "burn_hotkey": hotkeys[204],
+            "burn_uid": None,
+            "forced_burn_percentage": 10.0,
+        },
+        "policy_metadata": {
+            "confidential_primary": {
+                "contract_version": "v1",
+                "mode": "confidential_primary",
+                "source": "cathedral_confidential_tdx",
+                "base_mass": 0.0,
+                "confidential_mass": 1.0,
+                "complete": True,
+                "fresh": True,
+                "confirmed": True,
+            },
+            "validated_supply": {
+                "contract_version": "v2",
+                "intel_tdx_allocation": 0.90,
+                "fixed_burn_allocation": 0.10,
+                "burn_hotkey": hotkeys[204],
+            },
+        },
+        "signature": "fixture",
+    }
+    vector_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(vector, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    manifest_digest = "sha256:" + "b" * 64
+    return (
+        {
+            "launch_submission": {
+                "vector_id": vector["vector_id"],
+                "policy_version": vector["policy_version"],
+                "signed_vector_sha256": vector_digest,
+                "signed_vector": vector,
+                "broadcast_intent": {
+                    "extrinsic_hash": "0x" + "c" * 64,
+                    "nonce": 17,
+                    "era_reference_block": 100,
+                    "mortal_period_blocks": 4,
+                    "version_key": 10005000,
+                    "wire_uids": [163, 204],
+                    "wire_weights": [65535, 7282],
+                },
+                "mapping": {
+                    "block": 100,
+                    "validator_uid": 30,
+                    "validator_hotkey": hotkeys[30],
+                    "rewarded_uid": 163,
+                    "rewarded_hotkey": hotkeys[163],
+                    "burn_uid": 204,
+                    "burn_hotkey": hotkeys[204],
+                    "commit_reveal_enabled": False,
+                    "next_epoch_start_block": 120,
+                    "uid_weights": {"163": 0.9, "204": 0.1},
+                    "uid_safety": _fixture_uid_safety(hotkeys),
+                    "metagraph_snapshot": {
+                        "network": "finney",
+                        "netuid": 39,
+                        "block": 100,
+                        "block_hash": "0x" + "a" * 64,
+                        "uids": list(range(205)),
+                        "hotkeys": hotkeys,
+                        "validator_permit": [
+                            index == 30 for index in range(len(hotkeys))
+                        ],
+                    },
+                },
+                "extrinsic": {
+                    "hash": "0x" + "c" * 64,
+                    "block": 101,
+                    "block_hash": "0x" + "d" * 64,
+                    "validator_uid": 30,
+                    "uids": [163, 204],
+                    "weights_u16": [65535, 7282],
+                    "version_key": 10005000,
+                },
+                "evidence_checkpoint": {
+                    "source_epoch": 90,
+                    "manifest": manifest_digest,
+                    "report_id": "sha256:" + "e" * 64,
+                    "policy_release": 10,
+                    "policy_digest": "sha256:" + "f" * 64,
+                    "report_signing_key_id": "cathedral-score-sn39-20260724",
+                    "reward_mechanism": {
+                        "id": "validated_supply_v1",
+                        "revision": 1,
+                    },
+                    "verifier_digest": (
+                        "sha256:"
+                        "8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+                    ),
+                    "verifier_binary_digest": (
+                        "sha256:"
+                        "35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
+                    ),
+                    "replay_result": "sha256:" + "9" * 64,
+                    "public_assurance": "receipts_only",
+                    "signed_index": {
+                        "generated_at": "2026-07-24T22:00:00.000Z",
+                        "latest": {
+                            "manifest": manifest_digest,
+                            "source_epoch": 90,
+                        },
+                    },
+                    "freshness_boundary": _fixture_freshness_boundary(),
+                },
+            }
+        },
+        hotkeys,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("extrinsic_hash", "0x" + "f" * 64),
+        ("nonce", -1),
+        ("era_reference_block", 99),
+        ("mortal_period_blocks", 8),
+        ("version_key", 1),
+        ("wire_uids", [204, 163]),
+        ("wire_weights", [65535, 1]),
+    ],
+)
+def test_signed_launch_broadcast_intent_rejects_every_boundary_mutation(
+    field: str,
+    value: object,
+) -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    assert isinstance(launch, dict)
+    intent = launch["broadcast_intent"]
+    assert isinstance(intent, dict)
+    intent[field] = value
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="broadcast intent is malformed",
+    ):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
+def test_signed_launch_broadcast_intent_rejects_out_of_era_inclusion() -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    assert isinstance(launch, dict)
+    extrinsic = launch["extrinsic"]
+    assert isinstance(extrinsic, dict)
+    extrinsic["block"] = 104
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="broadcast intent is malformed",
+    ):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("root", "schema", "cathedral_sn39_uid_safety_v0"),
+        ("rotation", "status", "NOT_PROVEN"),
+        ("rotation", "mapping_block", 99),
+        ("rotation", "mortal_period_blocks", 8),
+        ("rotation", "era_last_block", 104),
+        ("rotation", "targets", []),
+    ],
+)
+def test_signed_launch_uid_safety_rejects_boundary_mutation(
+    section: str,
+    field: str,
+    value: object,
+) -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    assert isinstance(launch, dict)
+    mapping = launch["mapping"]
+    assert isinstance(mapping, dict)
+    safety = mapping["uid_safety"]
+    assert isinstance(safety, dict)
+    target = safety if section == "root" else safety[section]
+    assert isinstance(target, dict)
+    target[field] = value
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="UID/hotkey safety proof is malformed",
+    ):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("new_hotkey", "different-hotkey"),
+        ("coldkey", "different-coldkey"),
+        ("netuid", 38),
+        ("keep_stake", "false"),
+        ("event", "DifferentEvent"),
+        ("extrinsic_index", -1),
+    ],
+)
+def test_signed_target_rotation_receipt_rejects_boundary_mutation(
+    field: str,
+    value: object,
+) -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    receipt = launch["mapping"]["uid_safety"]["rotation"]["targets"][0][
+        "rotation_receipt"
+    ]
+    receipt[field] = value
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="rotation receipt is malformed",
+    ):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("candidate_block", 99),
+        ("report_valid_from_block", 99),
+        ("manifest_generated_at", "2026-07-24T20:00:00.000Z"),
+        ("report_generated_at", "2026-07-24T20:00:00.000Z"),
+        ("vector_generated_at", "2026-07-24T20:00:00.000Z"),
+        ("index_generated_at", "2026-07-24T20:00:00.000Z"),
+    ],
+)
+def test_signed_post_rotation_boundary_rejects_stale_artifacts(
+    field: str,
+    value: object,
+) -> None:
+    release, _hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    launch["evidence_checkpoint"]["freshness_boundary"][field] = value
+    with pytest.raises(sn39_public_reproduction.ReproductionError):
+        sn39_public_reproduction._validate_launch_submission(launch)
+
+
+class _HistoricalSubstrate:
+    def __init__(self, owner: _HistoricalSubtensor) -> None:
+        self.owner = owner
+
+    def get_block(self, *, block_hash: str) -> dict[str, object]:
+        if block_hash == "0x" + "9" * 64:
+            rotations = []
+            for uid, coldkey, extrinsic_hash in (
+                (163, "coldkey-163", "0x" + "1" * 64),
+                (204, "subnet-owner-coldkey", "0x" + "2" * 64),
+            ):
+                rotations.append(
+                    SimpleNamespace(
+                        value={
+                            "extrinsic_hash": extrinsic_hash,
+                            "address": coldkey,
+                            "call": {
+                                "call_module": "SubtensorModule",
+                                "call_function": "swap_hotkey_v2",
+                                "call_args": [
+                                    {
+                                        "name": "hotkey",
+                                        "value": f"old-{self.owner.hotkeys[uid]}",
+                                    },
+                                    {
+                                        "name": "new_hotkey",
+                                        "value": (
+                                            "different-hotkey"
+                                            if self.owner.mutation == "rotation_call"
+                                            and uid == 163
+                                            else self.owner.hotkeys[uid]
+                                        ),
+                                    },
+                                    {"name": "netuid", "value": 39},
+                                    {"name": "keep_stake", "value": False},
+                                ],
+                            },
+                        }
+                    )
+                )
+            return {
+                "header": {"number": 99, "hash": block_hash},
+                "extrinsics": rotations,
+            }
+        assert block_hash == "0x" + "d" * 64
+        call_weights = (
+            [65535, 1] if self.owner.mutation == "extrinsic_args" else [65535, 7282]
+        )
+        extrinsic_hash = (
+            "0x" + "e" * 64
+            if self.owner.mutation == "absent_extrinsic"
+            else "0x" + "c" * 64
+        )
+        observed_extrinsic = {
+            "extrinsic_hash": extrinsic_hash,
+            "address": self.owner.hotkeys[30],
+            "nonce": 18 if self.owner.mutation == "extrinsic_nonce" else 17,
+            "era": {
+                "period": 8 if self.owner.mutation == "extrinsic_era" else 4,
+                "phase": 0,
+            },
+            "call": {
+                "call_module": "SubtensorModule",
+                "call_function": "set_mechanism_weights",
+                "call_args": [
+                    {"name": "netuid", "value": 39},
+                    {"name": "mecid", "value": 0},
+                    {"name": "version_key", "value": 10005000},
+                    {"name": "dests", "value": [163, 204]},
+                    {"name": "weights", "value": call_weights},
+                ],
+            },
+        }
+        if self.owner.mutation == "missing_nonce":
+            observed_extrinsic.pop("nonce")
+        if self.owner.mutation == "missing_era":
+            observed_extrinsic.pop("era")
+        return {
+            "header": {
+                "number": 101,
+                "hash": (
+                    "0x" + "e" * 64
+                    if self.owner.mutation == "inclusion_block"
+                    else block_hash
+                ),
+            },
+            "extrinsics": [SimpleNamespace(value=observed_extrinsic)],
+        }
+
+    def retrieve_extrinsic_by_hash(
+        self,
+        block_hash: str,
+        extrinsic_hash: str,
+    ) -> SimpleNamespace:
+        if block_hash == "0x" + "9" * 64:
+            rotation = {
+                "0x" + "1" * 64: (
+                    0,
+                    163,
+                    "coldkey-163",
+                ),
+                "0x" + "2" * 64: (
+                    1,
+                    204,
+                    "subnet-owner-coldkey",
+                ),
+            }[extrinsic_hash]
+            index, uid, coldkey = rotation
+            return SimpleNamespace(
+                extrinsic_idx=index,
+                is_success=not (
+                    self.owner.mutation == "rotation_failure" and uid == 163
+                ),
+                error_message=(
+                    "simulated rotation failure"
+                    if self.owner.mutation == "rotation_failure" and uid == 163
+                    else None
+                ),
+                triggered_events=[
+                    {
+                        "event": {
+                            "module_id": "SubtensorModule",
+                            "event_id": "HotkeySwappedOnSubnet",
+                            "attributes": {
+                                "coldkey": coldkey,
+                                "old_hotkey": f"old-{self.owner.hotkeys[uid]}",
+                                "new_hotkey": self.owner.hotkeys[uid],
+                                **(
+                                    {"new_hotkey": "different-hotkey"}
+                                    if self.owner.mutation == "rotation_event"
+                                    and uid == 163
+                                    else {}
+                                ),
+                                "netuid": 39,
+                            },
+                        }
+                    }
+                ],
+            )
+        assert block_hash == "0x" + "d" * 64
+        assert extrinsic_hash == "0x" + "c" * 64
+        return SimpleNamespace(
+            extrinsic_idx=0,
+            is_success=self.owner.mutation != "extrinsic_failure",
+            error_message=(
+                "simulated dispatch failure"
+                if self.owner.mutation == "extrinsic_failure"
+                else None
+            ),
+        )
+
+    def query(
+        self,
+        *,
+        module: str,
+        storage_function: str,
+        block_hash: str,
+    ) -> SimpleNamespace:
+        assert (module, storage_function) == ("Timestamp", "Now")
+        if block_hash == "0x" + "9" * 64:
+            timestamp = datetime(2026, 7, 24, 21, 0, tzinfo=UTC)
+            return SimpleNamespace(value=int(timestamp.timestamp() * 1000))
+        assert block_hash == "0x" + "d" * 64
+        timestamp = datetime(2026, 7, 24, 22, 30, tzinfo=UTC)
+        if self.owner.mutation == "inclusion_timestamp":
+            timestamp = datetime(2026, 7, 25, 0, 0, tzinfo=UTC)
+        return SimpleNamespace(value=int(timestamp.timestamp() * 1000))
+
+    def get_chain_finalised_head(self) -> str:
+        return "0x" + "f" * 64
+
+    def get_block_number(self, block_hash: str) -> int:
+        if block_hash == "0x" + "9" * 64:
+            return 99
+        assert block_hash == "0x" + "f" * 64
+        return 200
+
+    def get_block_hash(self, block_number: int) -> str:
+        if block_number == 0:
+            if self.owner.mutation == "genesis":
+                return "0x" + "0" * 64
+            return sn39_public_reproduction.FINNEY_GENESIS_HASH
+        if block_number == 99:
+            return "0x" + "9" * 64
+        if block_number == 100:
+            return "0x" + "a" * 64
+        assert block_number == 200
+        return "0x" + "f" * 64
+
+    def get_constant(
+        self,
+        *,
+        module_name: str,
+        constant_name: str,
+        block_hash: str,
+    ) -> int:
+        assert module_name == "SubtensorModule"
+        assert block_hash == "0x" + "a" * 64
+        assert constant_name == "HotkeySwapOnSubnetInterval"
+        return 7200
+
+
+class _HistoricalSubtensor:
+    def __init__(self, hotkeys: list[str], *, mutation: str = "") -> None:
+        self.hotkeys = hotkeys
+        self.mutation = mutation
+        self.substrate = _HistoricalSubstrate(self)
+
+    def get_block_hash(self, block: int) -> str:
+        if block == 100:
+            return (
+                "0x" + "f" * 64 if self.mutation == "mapping_block" else "0x" + "a" * 64
+            )
+        if block == 101:
+            return "0x" + "d" * 64
+        raise AssertionError(f"unexpected block {block}")
+
+    def metagraph(self, netuid: int, *, block: int) -> SimpleNamespace:
+        assert netuid == 39
+        assert block in (100, 101)
+        hotkeys = list(self.hotkeys)
+        if self.mutation == "metagraph" and block == 100:
+            hotkeys[163] = "different-hotkey"
+        if self.mutation == "inclusion_metagraph" and block == 101:
+            hotkeys[163] = "different-hotkey"
+        validator_permit = [index == 30 for index in range(len(hotkeys))]
+        if self.mutation == "validator_permit" and block == 100:
+            validator_permit[30] = False
+        if self.mutation == "inclusion_validator_permit" and block == 101:
+            validator_permit[30] = False
+        return SimpleNamespace(
+            block=block,
+            uids=list(range(len(hotkeys))),
+            hotkeys=hotkeys,
+            validator_permit=validator_permit,
+            max_uids=256,
+            hparams=SimpleNamespace(
+                max_regs_per_block=1,
+                immunity_period=15000,
+            ),
+            block_at_registration=[0 for _hotkey in hotkeys],
+        )
+
+    def weights(self, netuid: int, *, block: int) -> list[tuple[int, object]]:
+        assert netuid == 39
+        assert block == 101
+        weights = (
+            [(163, 65535), (204, 1)]
+            if self.mutation == "chain_weights"
+            else [(163, 65535), (204, 7282)]
+        )
+        return [(30, weights)]
+
+    def commit_reveal_enabled(self, *, netuid: int, block: int) -> bool:
+        assert netuid == 39
+        if block == 100:
+            return self.mutation == "commit_reveal"
+        assert block == 101
+        return self.mutation == "inclusion_commit_reveal"
+
+    def get_subnet_owner_hotkey(self, netuid: int, *, block: int) -> str:
+        assert netuid == 39
+        assert block in (100, 101)
+        return self.hotkeys[204]
+
+    def get_next_epoch_start_block(self, netuid: int, *, block: int) -> int:
+        assert netuid == 39
+        assert block in (100, 101)
+        return 121 if self.mutation == "epoch_schedule" else 120
+
+    def query_subtensor(
+        self,
+        *,
+        name: str,
+        params: list[object],
+        block: int,
+    ) -> object:
+        assert block == 100
+        if name == "MinNonImmuneUids":
+            return 10
+        if name == "SubnetOwner":
+            return "subnet-owner-coldkey"
+        if name == "OwnedHotkeys":
+            assert params == ["subnet-owner-coldkey"]
+            return [self.hotkeys[204]]
+        if name == "ImmuneOwnerUidsLimit":
+            return 1
+        if name == "ColdkeySwapAnnouncementDelay":
+            assert params == []
+            return 36000
+        if name == "Owner":
+            hotkey = str(params[0])
+            return (
+                "subnet-owner-coldkey"
+                if hotkey == self.hotkeys[204]
+                else f"coldkey-{self.hotkeys.index(hotkey)}"
+            )
+        if name == "LastHotkeySwapOnNetuid":
+            return 99
+        if name == "ColdkeySwapAnnouncements":
+            return (
+                {"execution_block": 101}
+                if self.mutation == "pending_coldkey_swap"
+                else None
+            )
+        if name in {"HotkeySuccessor", "HotkeyRoot"}:
+            assert len(params) == 2 and params[0] == 39
+            hotkey = str(params[1])
+            for uid in (163, 204):
+                current = self.hotkeys[uid]
+                old = f"old-{current}"
+                if name == "HotkeySuccessor":
+                    if hotkey == old:
+                        return (
+                            "different-hotkey"
+                            if self.mutation == "rotation_lineage" and uid == 163
+                            else current
+                        )
+                    if hotkey == current:
+                        return None
+                if name == "HotkeyRoot":
+                    if hotkey == current:
+                        return old
+                    if hotkey == old:
+                        return None
+            raise AssertionError(f"unexpected lineage hotkey {hotkey}")
+        raise AssertionError(f"unexpected storage query {name}")
+
+
+def _finalizer_state() -> tuple[dict[str, object], list[str]]:
+    from scripts.assert_sn39_public_reproduction import EXPECTED_PRODUCER_REVISION
+
+    fixture, hotkeys = _historical_launch_fixture()
+    launch = fixture["launch_submission"]
+    vector = launch["signed_vector"]
+    attempt = "sha256:" + "8" * 64
+    manifest = launch["evidence_checkpoint"]["manifest"]
+    state = {
+        "submission_pending_id": None,
+        "submission_launch_status": "finalized",
+        "submission_launch_budget_limit": 1,
+        "submission_launch_attempt_id": attempt,
+        "submission_launch_attempt_ids": [attempt],
+        "submission_continuous_enabled": False,
+        "submission_launch_extrinsic_hash": launch["extrinsic"]["hash"],
+        "submission_launch_block_hash": launch["extrinsic"]["block_hash"],
+        "submission_launch_block_number": launch["extrinsic"]["block"],
+        "submission_launch_version_key": launch["extrinsic"]["version_key"],
+        "submission_launch_broadcast_intent": launch["broadcast_intent"],
+        "submission_launch_uid_safety": launch["mapping"]["uid_safety"],
+        "submission_launch_identity": {
+            "network": "finney",
+            "netuid": 39,
+            "mapping_block": launch["mapping"]["block"],
+            "next_epoch_start_block": launch["mapping"]["next_epoch_start_block"],
+            "validator_hotkey": hotkeys[30],
+            "validator_uid": 30,
+            "vector_id": vector["vector_id"],
+            "policy_version": vector["policy_version"],
+            "signed_vector_sha256": launch["signed_vector_sha256"],
+            "signed_vector": vector,
+            "burn_hotkey": hotkeys[204],
+            "uid_weights": [[163, 0.9], [204, 0.1]],
+            "uid_hotkeys": [[163, hotkeys[163]], [204, hotkeys[204]]],
+            "uid_safety": launch["mapping"]["uid_safety"],
+            "full_provenance": {
+                "source_epoch": 90,
+                "report_id": "sha256:" + "e" * 64,
+                "manifest": manifest,
+                "policy_release": 10,
+                "policy_digest": "sha256:" + "f" * 64,
+                "mechanism": "validated_supply_v1",
+                "scope": "rewarded_set_full",
+                "whole_epoch_assurance": "receipts_only",
+                "vector_agrees": True,
+                "rewarded_hotkeys": [hotkeys[163]],
+                "raw_replayed_hotkeys": [hotkeys[163]],
+                "verifier_digest": (
+                    "sha256:"
+                    "8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+                ),
+                "verifier_binary_digest": (
+                    "sha256:"
+                    "35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
+                ),
+                "report_signing_key_id": "cathedral-score-sn39-20260724",
+                "signed_index": {
+                    "schema": "cathedral_evidence_index_v1",
+                    "network": "finney",
+                    "netuid": 39,
+                    "generated_at": "2026-07-24T22:00:00.000Z",
+                    "latest": {"source_epoch": 90, "manifest": manifest},
+                    "recent": [{"source_epoch": 90, "manifest": manifest}],
+                    "signing_key_id": "cathedral-evidence-index-sn39-20260724",
+                    "signature": {
+                        "algorithm": "ed25519",
+                        "value_base64": "fixture",
+                    },
+                },
+                "source_revision": EXPECTED_PRODUCER_REVISION,
+                "freshness_boundary": _fixture_freshness_boundary(),
+            },
+        },
+    }
+    return state, hotkeys
+
+
+def _stub_root_finalizer_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "scripts.finalize_sn39_public_release._replay_frozen_controlled_positive",
+        lambda **_kwargs: {
+            "schema": "cathedral_sn39_tdx_replay_result_v2",
+            "status": "PASS",
+            "assurance": "root_finalizer_positive_raw_replay",
+            "test_fixture": True,
+        },
+    )
+
+
+def test_release_finalizer_builds_the_exact_archive_verified_seal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.finalize_sn39_public_release import build_release
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    release, replay_bytes = build_release(
+        state,
+        release_sha="a" * 40,
+        subtensor=_HistoricalSubtensor(hotkeys),
+    )
+    launch = release["launch_submission"]
+    assert launch["mapping"]["metagraph_snapshot"]["hotkeys"] == hotkeys
+    assert launch["mapping"]["metagraph_snapshot"]["validator_permit"][30] is True
+    assert launch["extrinsic"]["weights_u16"] == [65535, 7282]
+    assert launch["evidence_checkpoint"]["replay_result"] == (
+        "sha256:" + hashlib.sha256(replay_bytes).hexdigest()
+    )
+    assert release["source_revisions"]["validator"] == "a" * 40
+
+
+def test_release_finalizer_rejects_inclusion_uid_reassignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.finalize_sn39_public_release import build_release
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="inclusion UID mapping",
+    ):
+        build_release(
+            state,
+            release_sha="a" * 40,
+            subtensor=_HistoricalSubtensor(hotkeys, mutation="inclusion_metagraph"),
+        )
+
+
+def test_release_finalizer_rejects_non_finney_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.finalize_sn39_public_release import ReleaseError, build_release
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    with pytest.raises(ReleaseError, match="pinned Finney genesis"):
+        build_release(
+            state,
+            release_sha="a" * 40,
+            subtensor=_HistoricalSubtensor(hotkeys, mutation="genesis"),
+        )
+
+
+def test_release_finalizer_rejects_validator_without_mapping_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.finalize_sn39_public_release import ReleaseError, build_release
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    with pytest.raises(
+        ReleaseError,
+        match="archive mapping",
+    ):
+        build_release(
+            state,
+            release_sha="a" * 40,
+            subtensor=_HistoricalSubtensor(hotkeys, mutation="validator_permit"),
+        )
+
+
+def test_release_finalizer_rejects_validator_without_inclusion_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.finalize_sn39_public_release import build_release
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    with pytest.raises(
+        sn39_public_reproduction.ReproductionError,
+        match="launch inclusion UID mapping",
+    ):
+        build_release(
+            state,
+            release_sha="a" * 40,
+            subtensor=_HistoricalSubtensor(
+                hotkeys,
+                mutation="inclusion_validator_permit",
+            ),
+        )
+
+
+def test_release_finalizer_signature_matches_the_committed_public_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from scripts.finalize_sn39_public_release import (
+        RELEASE_KEY_ID,
+        build_release,
+        build_signature,
+        canonical_json,
+    )
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    _stub_root_finalizer_replay(monkeypatch)
+    state, hotkeys = _finalizer_state()
+    release, _replay = build_release(
+        state,
+        release_sha="a" * 40,
+        subtensor=_HistoricalSubtensor(hotkeys),
+    )
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    key_path = tmp_path / "config/provenance/release-attestation-keys.json"
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text(
+        json.dumps(
+            {RELEASE_KEY_ID: base64.b64encode(public).decode("ascii")},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    signature = build_signature(
+        canonical_json(release),
+        seed=private.private_bytes_raw(),
+        release_sha="a" * 40,
+        release_root=tmp_path,
+    )
+    envelope = json.loads(signature)
+    assert envelope["key_id"] == RELEASE_KEY_ID
+    assert envelope["payload_sha256"] == (
+        "sha256:" + hashlib.sha256(canonical_json(release)).hexdigest()
+    )
+
+
+def test_release_finalizer_reads_only_service_owned_private_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    runtime.chmod(0o700)
+    monkeypatch.setattr(finalizer, "RUNTIME_ROOT", runtime)
+    journal = runtime / ("journal-" + "1" * 64 + ".json")
+    journal.write_text('{"status":"finalized"}')
+    journal.chmod(0o600)
+    assert finalizer.read_launch_journal(journal) == {"status": "finalized"}
+
+    alias = runtime / "journal-alias.json"
+    os.link(journal, alias)
+    with pytest.raises(finalizer.ReleaseError, match="service-owned private"):
+        finalizer.read_launch_journal(journal)
+    alias.unlink()
+
+    journal.chmod(0o644)
+    with pytest.raises(finalizer.ReleaseError, match="service-owned private"):
+        finalizer.read_launch_journal(journal)
+    journal.unlink()
+    target = runtime / "target.json"
+    target.write_text('{"status":"finalized"}')
+    target.chmod(0o600)
+    journal.symlink_to(target)
+    with pytest.raises(finalizer.ReleaseError, match="cannot open"):
+        finalizer.read_launch_journal(journal)
+
+
+def test_release_finalizer_requires_exact_launcher_manifest_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    manifest = tmp_path / "sn39-release-manifest.json"
+    manifest.write_text('{"schema":"fixture"}')
+    manifest.chmod(0o444)
+    journal = finalizer.RUNTIME_ROOT / ("journal-" + "1" * 64 + ".json")
+    release_sha = "a" * 40
+    monkeypatch.setattr(finalizer, "MANIFEST", manifest)
+    monkeypatch.setattr(finalizer, "ROOT_UID", os.getuid())
+    manifest_digest = "sha256:" + hashlib.sha256(manifest.read_bytes()).hexdigest()
+    context = finalizer._launcher_context_digest(
+        release_sha=release_sha,
+        journal=journal,
+        manifest_digest=manifest_digest,
+    )
+    monkeypatch.setenv(finalizer.FINALIZER_CONTEXT_ENV, context)
+    finalizer._require_launcher_context(
+        release_sha=release_sha,
+        journal=journal,
+    )
+    assert finalizer.FINALIZER_CONTEXT_ENV not in os.environ
+
+    alias = tmp_path / "manifest-alias.json"
+    os.link(manifest, alias)
+    monkeypatch.setenv(finalizer.FINALIZER_CONTEXT_ENV, context)
+    with pytest.raises(finalizer.ReleaseError, match="immutable root-owned"):
+        finalizer._require_launcher_context(
+            release_sha=release_sha,
+            journal=journal,
+        )
+    alias.unlink()
+
+    monkeypatch.setenv(finalizer.FINALIZER_CONTEXT_ENV, context)
+    manifest.chmod(0o644)
+    manifest.write_text('{"schema":"tampered"}')
+    manifest.chmod(0o444)
+    with pytest.raises(finalizer.ReleaseError, match="immutable-install launcher"):
+        finalizer._require_launcher_context(
+            release_sha=release_sha,
+            journal=journal,
+        )
+
+
+def _finalizer_public_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "public"
+    (root / "blobs" / "sha256").mkdir(parents=True)
+    for directory in (root, root / "blobs", root / "blobs" / "sha256"):
+        directory.chmod(0o755)
+    return root
+
+
+def test_release_finalizer_blobs_are_bounded_owner_controlled_and_immutable(
+    tmp_path: Path,
+) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    root = _finalizer_public_tree(tmp_path)
+    payload = b"operator-attested replay"
+    digest = finalizer.put_blob(root, payload)
+    blob = root / "blobs" / "sha256" / digest.split(":", 1)[1]
+    assert blob.read_bytes() == payload
+    assert stat.S_IMODE(blob.stat().st_mode) == 0o644
+    assert finalizer.put_blob(root, payload) == digest
+
+    blob.write_bytes(b"tampered")
+    with pytest.raises(finalizer.ReleaseError, match="collides"):
+        finalizer.put_blob(root, payload)
+    with pytest.raises(finalizer.ReleaseError, match="size cap"):
+        finalizer.put_blob(root, b"x" * (finalizer.MAX_PUBLIC_BLOB_BYTES + 1))
+
+
+def test_release_finalizer_rejects_public_hardlink_aliases(tmp_path: Path) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    root = _finalizer_public_tree(tmp_path)
+    payload = b"root-replayed-evidence"
+    digest = finalizer.put_blob(root, payload)
+    blob = root / "blobs" / "sha256" / digest.split(":", 1)[1]
+    alias = root / "blobs" / "sha256" / "external-alias"
+    os.link(blob, alias)
+    with pytest.raises(finalizer.ReleaseError, match="hardlink alias"):
+        finalizer.put_blob(root, payload)
+    alias.unlink()
+
+
+def test_release_finalizer_recovers_blob_crash_after_durable_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    root = _finalizer_public_tree(tmp_path)
+    payload = b"crash-recoverable-replay"
+    real_unlink = finalizer.os.unlink
+    crashed = False
+
+    def crash_once(path):
+        nonlocal crashed
+        if not crashed and str(path).endswith(".pending"):
+            crashed = True
+            raise RuntimeError("simulated kill after durable link")
+        return real_unlink(path)
+
+    monkeypatch.setattr(finalizer.os, "unlink", crash_once)
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        finalizer.put_blob(root, payload)
+    monkeypatch.setattr(finalizer.os, "unlink", real_unlink)
+    digest = finalizer.put_blob(root, payload)
+    blob = root / "blobs" / "sha256" / digest.split(":", 1)[1]
+    assert blob.read_bytes() == payload
+    assert blob.stat().st_nlink == 1
+    assert not (blob.parent / f".{blob.name}.pending").exists()
+    publication_lock = blob.parent / ".sn39-publication.lock"
+    assert stat.S_IMODE(publication_lock.stat().st_mode) == 0o600
+    assert publication_lock.stat().st_nlink == 1
+
+
+def test_release_finalizer_public_seal_is_publish_once(tmp_path: Path) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    root = _finalizer_public_tree(tmp_path)
+    release = root / "release.json"
+    finalizer.atomic_write(release, b'{"release":1}')
+    finalizer.atomic_write(release, b'{"release":1}')
+    assert release.read_bytes() == b'{"release":1}'
+    with pytest.raises(finalizer.ReleaseError, match="already sealed differently"):
+        finalizer.atomic_write(release, b'{"release":2}')
+    assert release.read_bytes() == b'{"release":1}'
+
+
+def test_release_finalizer_recovers_partial_and_linked_public_seals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    root = _finalizer_public_tree(tmp_path)
+    release = root / "release.json"
+    pending = root / ".release.json.pending"
+    pending.write_bytes(b'{"release":')
+    pending.chmod(0o644)
+    real_link = finalizer.os.link
+    crashed = False
+
+    def crash_once(source, target, *, follow_symlinks=True):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("simulated kill before durable link")
+        return real_link(source, target, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(finalizer.os, "link", crash_once)
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        finalizer.atomic_write(release, b'{"release":1}')
+    assert not release.exists()
+    assert pending.read_bytes() == b'{"release":1}'
+    monkeypatch.setattr(finalizer.os, "link", real_link)
+    finalizer.atomic_write(release, b'{"release":1}')
+    assert release.read_bytes() == b'{"release":1}'
+    assert release.stat().st_nlink == 1
+    assert not pending.exists()
+
+
+def test_release_finalizer_serializes_overlapping_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    from scripts import finalize_sn39_public_release as finalizer
+
+    root = _finalizer_public_tree(tmp_path)
+    release = root / "release.json"
+    first_at_link = threading.Event()
+    allow_first_link = threading.Event()
+    second_started = threading.Event()
+    second_done = threading.Event()
+    outcomes: dict[str, object] = {}
+    real_link = finalizer.os.link
+
+    def controlled_link(source, target, *, follow_symlinks=True):
+        if threading.current_thread().name == "first-finalizer":
+            first_at_link.set()
+            assert allow_first_link.wait(2)
+        return real_link(source, target, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(finalizer.os, "link", controlled_link)
+
+    def publish_first() -> None:
+        try:
+            finalizer.atomic_write(release, b'{"release":1}')
+            outcomes["first"] = "PASS"
+        except BaseException as exc:  # noqa: BLE001 - transfer from worker
+            outcomes["first"] = exc
+
+    def publish_second() -> None:
+        second_started.set()
+        try:
+            finalizer.atomic_write(release, b'{"release":2}')
+            outcomes["second"] = "PASS"
+        except BaseException as exc:  # noqa: BLE001 - transfer from worker
+            outcomes["second"] = exc
+        finally:
+            second_done.set()
+
+    first = threading.Thread(target=publish_first, name="first-finalizer")
+    second = threading.Thread(target=publish_second, name="second-finalizer")
+    first.start()
+    assert first_at_link.wait(2)
+    second.start()
+    assert second_started.wait(2)
+    assert not second_done.wait(0.2)
+    allow_first_link.set()
+    first.join(2)
+    second.join(2)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert outcomes["first"] == "PASS"
+    assert isinstance(outcomes["second"], finalizer.ReleaseError)
+    assert "already sealed differently" in str(outcomes["second"])
+    assert release.read_bytes() == b'{"release":1}'
+    assert release.stat().st_nlink == 1
+    publication_lock = root / ".sn39-publication.lock"
+    assert stat.S_IMODE(publication_lock.stat().st_mode) == 0o600
+    assert publication_lock.stat().st_nlink == 1
+
+
+def test_release_finalizer_reads_exact_private_controlled_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    monkeypatch.setattr(finalizer, "ROOT_UID", os.getuid())
+    controlled = tmp_path / "controlled"
+    controlled.mkdir(mode=0o750)
+    controlled.chmod(0o750)
+    envelope = b'{"private":"raw-tdx-envelope"}'
+    digest = "sha256:" + hashlib.sha256(envelope).hexdigest()
+    envelope_path = controlled / f"{digest.split(':', 1)[1]}.json"
+    envelope_path.write_bytes(envelope)
+    envelope_path.chmod(0o640)
+    assert finalizer._read_controlled_envelope(controlled, digest) == envelope
+
+    envelope_alias = controlled / "envelope-alias.json"
+    os.link(envelope_path, envelope_alias)
+    with pytest.raises(finalizer.ReleaseError, match="single-link"):
+        finalizer._read_controlled_envelope(controlled, digest)
+    envelope_alias.unlink()
+
+    verifier = tmp_path / "verifier"
+    verifier.write_bytes(b"reviewed-verifier-bytes")
+    verifier.chmod(0o755)
+    assert finalizer._read_verifier_binary(verifier) == b"reviewed-verifier-bytes"
+    verifier_alias = tmp_path / "verifier-alias"
+    os.link(verifier, verifier_alias)
+    with pytest.raises(finalizer.ReleaseError, match="single-link"):
+        finalizer._read_verifier_binary(verifier)
+
+
+def test_release_finalizer_never_synthesizes_replay_from_journal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import finalize_sn39_public_release as finalizer
+
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    state, hotkeys = _finalizer_state()
+    calls = 0
+
+    def require_real_inputs(**kwargs):
+        nonlocal calls
+        calls += 1
+        assert (
+            kwargs["signed_vector"]
+            == state["submission_launch_identity"]["signed_vector"]
+        )
+        raise finalizer.ReleaseError("controlled replay envelope is unavailable")
+
+    monkeypatch.setattr(
+        finalizer,
+        "_replay_frozen_controlled_positive",
+        require_real_inputs,
+    )
+    with pytest.raises(finalizer.ReleaseError, match="controlled replay envelope"):
+        finalizer.build_release(
+            state,
+            release_sha="a" * 40,
+            subtensor=_HistoricalSubtensor(hotkeys),
+        )
+    assert calls == 1
+
+
+def _candidate_manifest(hotkeys: list[str]) -> dict[str, object]:
+    return {
+        "candidate_set": {
+            "network": "finney",
+            "netuid": 39,
+            "source": "sn39_metagraph",
+            "block": 100,
+            "block_hash": "0x" + "a" * 64,
+            "candidates": [
+                {
+                    "hotkey": hotkey,
+                    "outcome": "rejected",
+                    "reason": "no_verified_work",
+                }
+                for hotkey in hotkeys
+            ],
+        }
+    }
+
+
+def test_historical_candidates_equal_the_archive_metagraph() -> None:
+    from scripts.assert_sn39_public_reproduction import verify_historical_candidates
+
+    hotkeys = [f"hotkey-{uid}" for uid in range(205)]
+    verify_historical_candidates(
+        _candidate_manifest(hotkeys),
+        subtensor=_HistoricalSubtensor(hotkeys),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["block_hash", "metagraph", "missing", "extra", "duplicate"],
+)
+def test_historical_candidates_reject_snapshot_tampering(mutation: str) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        verify_historical_candidates,
+    )
+
+    hotkeys = [f"hotkey-{uid}" for uid in range(205)]
+    manifest = _candidate_manifest(hotkeys)
+    snapshot = manifest["candidate_set"]
+    assert isinstance(snapshot, dict)
+    candidates = snapshot["candidates"]
+    assert isinstance(candidates, list)
+    subtensor_mutation = ""
+    if mutation == "block_hash":
+        snapshot["block_hash"] = "0x" + "f" * 64
+    elif mutation == "metagraph":
+        subtensor_mutation = "metagraph"
+    elif mutation == "missing":
+        candidates.pop()
+    elif mutation == "extra":
+        candidates.append(
+            {
+                "hotkey": "not-in-metagraph",
+                "outcome": "rejected",
+                "reason": "no_verified_work",
+            }
+        )
+    elif mutation == "duplicate":
+        candidates[-1] = dict(candidates[0])
+    with pytest.raises(ReproductionError, match="candidate"):
+        verify_historical_candidates(
+            manifest,
+            subtensor=_HistoricalSubtensor(
+                hotkeys,
+                mutation=subtensor_mutation,
+            ),
+        )
+
+
+def _frozen_cross_binding_fixture() -> tuple[dict[str, object], dict[str, object]]:
+    checkpoint = {
+        "source_epoch": 90,
+        "report_id": "sha256:" + "a" * 64,
+        "policy_release": 10,
+        "policy_digest": "sha256:" + "b" * 64,
+        "report_signing_key_id": "cathedral-score-sn39-20260724",
+        "reward_mechanism": {"id": "validated_supply_v1", "revision": 1},
+        "verifier_digest": (
+            "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+        ),
+        "verifier_binary_digest": (
+            "sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
+        ),
+        "freshness_boundary": _fixture_freshness_boundary(),
+    }
+    manifest = {
+        "network": "finney",
+        "netuid": 39,
+        "source_epoch": checkpoint["source_epoch"],
+        "generated_at": "2026-07-24T21:30:00.000Z",
+        "candidate_set": {
+            "block": 100,
+            "block_hash": "0x" + "a" * 64,
+        },
+        "source_revision": "fa39af97e738fdbed5c454f976b61246590b5794",
+        "reward_mechanism": checkpoint["reward_mechanism"],
+        "policy_registry": {
+            "release": checkpoint["policy_release"],
+            "digest": checkpoint["policy_digest"],
+            "blob": checkpoint["policy_digest"],
+        },
+        "score_report": {
+            "report_id": checkpoint["report_id"],
+            "signing_key_id": checkpoint["report_signing_key_id"],
+        },
+        "verifier": {
+            "digest": checkpoint["verifier_digest"],
+            "binary_blob": checkpoint["verifier_binary_digest"],
+        },
+        "attestations": [
+            {
+                "hotkey": "tdx-miner",
+                "envelope_digest": "sha256:" + "1" * 64,
+                "evidence_digest": "sha256:" + "2" * 64,
+                "challenge_digest": "sha256:" + "3" * 64,
+            }
+        ],
+        "receipts": [
+            {
+                "hotkey": "tdx-miner",
+                "receipt_id": "receipt-tdx-miner",
+                "blob": "sha256:" + "4" * 64,
+                "work_item_blob": "sha256:" + "5" * 64,
+                "result_blob": "sha256:" + "6" * 64,
+            }
+        ],
+    }
+    return checkpoint, manifest
+
+
+def test_controlled_replay_result_is_exactly_bound_to_checkpoint() -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        _validate_controlled_replay_result,
+    )
+
+    checkpoint, manifest = _frozen_cross_binding_fixture()
+    checkpoint["manifest"] = "sha256:" + "e" * 64
+    launch = {
+        "signed_vector": {
+            "weights": [
+                {"miner_hotkey": "tdx-miner", "weight": 1.0},
+                {"miner_hotkey": "zero-miner", "weight": 0.0},
+            ]
+        }
+    }
+    result = {
+        "schema": "cathedral_sn39_tdx_replay_result_v2",
+        "status": "PASS",
+        "assurance": "root_finalizer_positive_raw_replay",
+        "source_epoch": checkpoint["source_epoch"],
+        "manifest": checkpoint["manifest"],
+        "report_id": checkpoint["report_id"],
+        "policy_release": checkpoint["policy_release"],
+        "policy_digest": checkpoint["policy_digest"],
+        "reward_mechanism": checkpoint["reward_mechanism"],
+        "verifier_digest": checkpoint["verifier_digest"],
+        "verifier_binary_digest": checkpoint["verifier_binary_digest"],
+        "replayed_hotkeys": ["tdx-miner"],
+        "replay_inputs": [
+            {
+                "hotkey": "tdx-miner",
+                "receipt_id": "receipt-tdx-miner",
+                "receipt_blob": "sha256:" + "4" * 64,
+                "work_item_blob": "sha256:" + "5" * 64,
+                "result_blob": "sha256:" + "6" * 64,
+                "envelope_digest": "sha256:" + "1" * 64,
+                "evidence_digest": "sha256:" + "2" * 64,
+                "challenge_digest": "sha256:" + "3" * 64,
+            }
+        ],
+    }
+    _validate_controlled_replay_result(result, checkpoint, launch, manifest)
+    result["replayed_hotkeys"] = ["different"]
+    with pytest.raises(ReproductionError, match="controlled TDX replay"):
+        _validate_controlled_replay_result(result, checkpoint, launch, manifest)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "network",
+        "netuid",
+        "source_epoch",
+        "source_revision",
+        "reward_mechanism",
+        "policy_release",
+        "policy_digest",
+        "policy_blob",
+        "report_id",
+        "report_signing_key_id",
+        "verifier_digest",
+        "verifier_binary_digest",
+    ],
+)
+def test_frozen_manifest_rejects_every_cross_binding_tamper(mutation: str) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        _validate_frozen_manifest,
+    )
+
+    checkpoint, manifest = _frozen_cross_binding_fixture()
+    _validate_frozen_manifest(manifest, checkpoint)
+    if mutation in {"network", "source_revision"}:
+        manifest[mutation] = "different"
+    elif mutation in {"netuid", "source_epoch"}:
+        manifest[mutation] = 999
+    elif mutation == "reward_mechanism":
+        manifest[mutation] = {"id": "different", "revision": 1}
+    elif mutation == "policy_release":
+        manifest["policy_registry"]["release"] = 999
+    elif mutation == "policy_digest":
+        manifest["policy_registry"]["digest"] = "sha256:" + "c" * 64
+    elif mutation == "policy_blob":
+        manifest["policy_registry"]["blob"] = "sha256:" + "c" * 64
+    elif mutation == "report_id":
+        manifest["score_report"]["report_id"] = "different"
+    elif mutation == "report_signing_key_id":
+        manifest["score_report"]["signing_key_id"] = "different"
+    elif mutation in {"verifier_digest", "verifier_binary_digest"}:
+        key = "digest" if mutation == "verifier_digest" else "binary_blob"
+        manifest["verifier"][key] = "sha256:" + "c" * 64
+    with pytest.raises(ReproductionError, match="signed checkpoint"):
+        _validate_frozen_manifest(manifest, checkpoint)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source_epoch",
+        "report_id",
+        "signing_key_id",
+        "policy_release",
+        "policy_digest",
+        "verifier_digest",
+        "mechanism_id",
+        "mechanism_revision",
+        "assurance_level",
+    ],
+)
+def test_frozen_result_rejects_every_cross_binding_tamper(mutation: str) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        _validate_frozen_result,
+    )
+
+    checkpoint, _manifest = _frozen_cross_binding_fixture()
+    values = {
+        "source_epoch": checkpoint["source_epoch"],
+        "report_id": checkpoint["report_id"],
+        "signing_key_id": checkpoint["report_signing_key_id"],
+        "policy_release": checkpoint["policy_release"],
+        "policy_digest": checkpoint["policy_digest"],
+        "verifier_digest": checkpoint["verifier_digest"],
+        "mechanism_id": checkpoint["reward_mechanism"]["id"],
+        "mechanism_revision": checkpoint["reward_mechanism"]["revision"],
+        "assurance_level": "receipts_only",
+    }
+    _validate_frozen_result(SimpleNamespace(**values), checkpoint)
+    values[mutation] = 999 if isinstance(values[mutation], int) else "different"
+    with pytest.raises(ReproductionError, match="signed checkpoint"):
+        _validate_frozen_result(SimpleNamespace(**values), checkpoint)
+
+
+def test_historical_launch_verifies_exact_archive_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.assert_sn39_public_reproduction import verify_historical_launch
+
+    release, hotkeys = _historical_launch_fixture()
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    result = verify_historical_launch(
+        release,
+        subtensor=_HistoricalSubtensor(hotkeys),
+    )
+    assert result == {
+        "historical_launch": "PASS",
+        "launch_extrinsic": "0x" + "c" * 64,
+        "launch_block": 101,
+        "finalized_head_block": 200,
+    }
+
+
+def test_historical_launch_rejects_mapping_at_or_after_extrinsic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        verify_historical_launch,
+    )
+
+    release, hotkeys = _historical_launch_fixture()
+    launch = release["launch_submission"]
+    assert isinstance(launch, dict)
+    mapping = launch["mapping"]
+    snapshot = mapping["metagraph_snapshot"]
+    assert isinstance(mapping, dict) and isinstance(snapshot, dict)
+    mapping["block"] = 101
+    snapshot["block"] = 101
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    with pytest.raises(ReproductionError, match="extrinsic is malformed"):
+        verify_historical_launch(
+            release,
+            subtensor=_HistoricalSubtensor(hotkeys),
+        )
+
+
+def test_public_reproduction_deadline_bounds_archive_calls() -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionNotProven,
+        _bounded_archive_call,
+    )
+
+    with pytest.raises(ReproductionNotProven, match="deadline exceeded"):
+        _bounded_archive_call(
+            time.monotonic() + 0.01,
+            "blocked archive read",
+            lambda: time.sleep(1),
+        )
+
+
+def test_public_reproduction_archive_unavailability_is_not_a_contradiction() -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        ReproductionNotProven,
+        _bounded_archive_call,
+    )
+
+    def unavailable() -> None:
+        raise ConnectionError("archive offline")
+
+    with pytest.raises(ReproductionNotProven, match="archive lookup is unavailable"):
+        _bounded_archive_call(None, "archive lookup", unavailable)
+
+    def contradictory() -> None:
+        raise ReproductionError("archive value contradicts the signed release")
+
+    with pytest.raises(
+        ReproductionError,
+        match="contradicts the signed release",
+    ) as error:
+        _bounded_archive_call(None, "archive lookup", contradictory)
+    assert type(error.value) is ReproductionError
+
+
+def test_public_reproduction_fetch_unavailability_is_not_proven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionNotProven,
+        verify_public_release,
+    )
+
+    def unavailable_fetcher(*_args, **_kwargs):
+        raise ProvenanceAuditError("public evidence endpoint timed out")
+
+    monkeypatch.setattr(provenance_audit, "_fetcher", unavailable_fetcher)
+    with pytest.raises(
+        ReproductionNotProven,
+        match="public evidence fetch is unavailable",
+    ):
+        verify_public_release()
+
+    monkeypatch.setattr(
+        provenance_audit,
+        "_fetcher",
+        lambda *_args, **_kwargs: (
+            lambda: None,
+            lambda _digest: None,
+            lambda _path: None,
+        ),
+    )
+    with pytest.raises(
+        ReproductionNotProven,
+        match="fetch returned incomplete material",
+    ):
+        verify_public_release()
+
+
+def test_public_reproduction_incomplete_archive_material_is_not_proven() -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionNotProven,
+        _block_timestamp_ms,
+    )
+
+    substrate = SimpleNamespace(
+        query=lambda **_kwargs: SimpleNamespace(value=None),
+    )
+    with pytest.raises(
+        ReproductionNotProven,
+        match="timestamp is unavailable",
+    ):
+        _block_timestamp_ms(substrate, "0x" + "a" * 64)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "call_name"),
+    [
+        ("scaffold.sn39_public_reproduction", "assert_public_reproduction"),
+        ("scripts.run_sn39_public_reproduction", "run"),
+    ],
+)
+def test_public_reproduction_cli_has_typed_exit_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    module_name: str,
+    call_name: str,
+) -> None:
+    module = __import__(module_name, fromlist=["main"])
+    not_proven = sn39_public_reproduction.ReproductionNotProven
+    contradiction = sn39_public_reproduction.ReproductionError
+
+    monkeypatch.setattr(
+        module,
+        call_name,
+        lambda: (_ for _ in ()).throw(not_proven("archive unavailable")),
+    )
+    if module_name == "scripts.run_sn39_public_reproduction":
+        monkeypatch.setattr(sys, "argv", ["run_sn39_public_reproduction.py"])
+        assert module.main() == 3
+    else:
+        assert module.main([]) == 3
+    assert "NOT_PROVEN: archive unavailable" in capsys.readouterr().err
+
+    monkeypatch.setattr(
+        module,
+        call_name,
+        lambda: (_ for _ in ()).throw(contradiction("signed bytes differ")),
+    )
+    if module_name == "scripts.run_sn39_public_reproduction":
+        assert module.main() == 1
+    else:
+        assert module.main([]) == 1
+    assert "FAIL: signed bytes differ" in capsys.readouterr().err
+
+    monkeypatch.setattr(module, call_name, lambda: {"historical_launch": "PASS"})
+    if module_name == "scripts.run_sn39_public_reproduction":
+        assert module.main() == 0
+    else:
+        assert module.main([]) == 0
+    assert "SN39 public reproduction: PASS" in capsys.readouterr().out
+
+
+def test_public_key_bundle_is_checked_against_compiled_pin(tmp_path: Path) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        _load_pinned_key_document,
+    )
+
+    path = tmp_path / "release-attestation-keys.json"
+    path.write_text('{"attacker":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}')
+    with pytest.raises(ReproductionError, match="compiled byte pin"):
+        _load_pinned_key_document(path, "release_attestation_keys")
+
+
+def test_public_json_rejects_exponent_overflow() -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        _strict_json_bytes,
+    )
+
+    with pytest.raises(ReproductionError, match="non-finite"):
+        _strict_json_bytes(
+            b'{"value":1e400}',
+            label="counterexample",
+            canonical=False,
+        )
+
+
+def test_launch_contract_is_one_shot_full_gated_and_fully_pinned(
+    tmp_path: Path,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    args.once = True
+    args.max_submissions = 1
+    args.require_full_provenance_for_broadcast = True
+    _pin_sn39_runtime(args, launch=True)
+    validator_thin._validate_runtime_contract(args)
+
+    read_only = SimpleNamespace(**vars(args))
+    read_only.launch_preflight = True
+    read_only.broadcast = False
+    validator_thin._validate_runtime_contract(read_only)
+
+    for field, value in (
+        ("once", False),
+        ("max_submissions", 2),
+        ("provenance_controlled_dir", None),
+    ):
+        broken = SimpleNamespace(**vars(args))
+        setattr(broken, field, value)
+        with pytest.raises(validator_thin.wire.VectorError, match="launch"):
+            validator_thin._validate_runtime_contract(broken)
+
+
+def test_launch_rewarded_set_gate_requires_exact_independent_uid_agreement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.provenance_controlled_dir = "/controlled"
+    args.provenance_verifier_binary = "/verifier"
+    args.provenance_burn_hotkey = "burn-hotkey"
+    args.provenance_registry_keys_digest = "sha256:" + "1" * 64
+    args.provenance_report_keys_digest = "sha256:" + "2" * 64
+    args.provenance_index_keys_digest = "sha256:" + "3" * 64
+    args.provenance_source_revision = "a" * 40
+    monkeypatch.setattr(
+        validator_thin,
+        "_historical_metagraph_lookup",
+        lambda *_a: lambda _block: {"tdx-miner", "burn-hotkey"},
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_block_hash_lookup",
+        lambda *_a: lambda _block: "0x" + "a" * 64,
+    )
+
+    audit = ProvenanceAudit(
+        status="PASS",
+        assurance="full",
+        agrees_with_vector=True,
+        source_epoch=12,
+        report_id="sha256:" + "a" * 64,
+        index_source_epoch=12,
+        index_manifest="sha256:" + "b" * 64,
+        policy_release=3,
+        policy_digest="sha256:" + "c" * 64,
+        manifest_digest="sha256:" + "b" * 64,
+        recomputed={"tdx-miner": 1.0},
+        receipt_hotkeys=["tdx-miner"],
+        raw_replayed_hotkeys=["tdx-miner"],
+    )
+    monkeypatch.setattr(validator_thin, "run_audit", lambda *_a, **_k: audit)
+    validator_thin._run_launch_rewarded_set_gate(
+        args,
+        payload=validated_supply_payload(),
+        uid_weights={163: 0.9, 204: 0.1},
+        hotkey_to_uid={"tdx-miner": 163, "burn-hotkey": 204},
+        current_block=900,
+        state_file=Path(args.state_file),
+    )
+    assert args._launch_rewarded_set_audit is audit
+
+    with pytest.raises(validator_thin.wire.VectorError, match="does not match"):
+        validator_thin._run_launch_rewarded_set_gate(
+            args,
+            payload=validated_supply_payload(),
+            uid_weights={163: 0.8, 204: 0.2},
+            hotkey_to_uid={"tdx-miner": 163, "burn-hotkey": 204},
+            current_block=900,
+            state_file=Path(args.state_file),
+        )
+
+
+def test_common_journal_enforces_attempt_budget_and_lane_transition(
+    tmp_path: Path,
+) -> None:
+    args = _authority_args(tmp_path)
+    args.max_submissions = 1
+    first = "sha256:" + "a" * 64
+    validator_thin._reserve_common_submission(
+        args,
+        lane="authority",
+        attempt_id=first,
+        identity={"source_epoch": 10, "uid_weights": [[1, 1.0]]},
+    )
+    validator_thin._record_pending_broadcast_intent(
+        args,
+        attempt_id=first,
+        extrinsic_hash="0x" + "a" * 64,
+        nonce=1,
+        era_reference_block=99,
+        mortal_period_blocks=4,
+        version_key=validator_thin._weight_version_key(),
+        wire_uids=[1],
+        wire_weights=[65535],
+    )
+    validator_thin._finalize_common_submission(
+        args,
+        attempt_id=first,
+        submission=validator_thin.ChainSubmission(
+            success=True,
+            extrinsic_hash="0x" + "a" * 64,
+            block_hash="0x" + "b" * 64,
+            block_number=100,
+            finalized=True,
+        ),
+    )
+    with pytest.raises(ValueError, match="budget 1 is exhausted"):
+        validator_thin._reserve_common_submission(
+            args,
+            lane="authority",
+            attempt_id="sha256:" + "b" * 64,
+            identity={"source_epoch": 11},
+        )
+
+    transition = _authority_args(tmp_path / "transition")
+    transition.runtime_root = str(tmp_path / "transition-runtime")
+    transition.max_submissions = 0
+    authority_id = "sha256:" + "c" * 64
+    validator_thin._reserve_common_submission(
+        transition,
+        lane="authority",
+        attempt_id=authority_id,
+        identity={"source_epoch": 20, "uid_weights": [[1, 1.0]]},
+    )
+    validator_thin._record_pending_broadcast_intent(
+        transition,
+        attempt_id=authority_id,
+        extrinsic_hash="0x" + "c" * 64,
+        nonce=2,
+        era_reference_block=199,
+        mortal_period_blocks=4,
+        version_key=validator_thin._weight_version_key(),
+        wire_uids=[1],
+        wire_weights=[65535],
+    )
+    validator_thin._finalize_common_submission(
+        transition,
+        attempt_id=authority_id,
+        submission=validator_thin.ChainSubmission(
+            success=True,
+            extrinsic_hash="0x" + "c" * 64,
+            block_hash="0x" + "d" * 64,
+            block_number=200,
+            finalized=True,
+        ),
+    )
+    with pytest.raises(ValueError, match="lane changed"):
+        validator_thin._reserve_common_submission(
+            transition,
+            lane="thin",
+            attempt_id="sha256:" + "d" * 64,
+            identity={"policy_version": 21},
+        )
+
+
+def test_root_sealed_launch_allows_one_way_thin_to_full_authority_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _authority_args(tmp_path)
+    args.offline = False
+    args.broadcast = True
+    args.network = "finney"
+    args.netuid = 39
+    args.max_submissions = 0
+    args.require_full_provenance_for_broadcast = False
+    args.runtime_root = str(tmp_path / "runtime")
+    args.state_file = str(tmp_path / "authority.json")
+    args._submission_validator_hotkey = "validator-hotkey"
+    args._submission_genesis_hash = validator_thin.FINNEY_GENESIS_HASH
+    launch_attempt = "sha256:" + "1" * 64
+    release_sha = "sha256:" + "2" * 64
+    reproducer_revision = "3" * 40
+    common_path = validator_thin._submission_state_path(args)
+    validator_thin._write_state(
+        common_path,
+        {
+            "submission_active_lane": "thin",
+            "submission_attempt_ids": [launch_attempt],
+            "submission_launch_attempt_ids": [launch_attempt],
+            "submission_launch_attempt_id": launch_attempt,
+            "submission_launch_status": "finalized",
+            "submission_continuous_enabled": True,
+            "submission_continuous_launch_attempt_id": launch_attempt,
+            "submission_continuous_release_sha256": release_sha,
+            "submission_continuous_reproducer_revision": reproducer_revision,
+            "submission_validator_hotkey": "validator-hotkey",
+            "submission_genesis_hash": validator_thin.FINNEY_GENESIS_HASH,
+            "provenance_netuid": 39,
+        },
+    )
+    continuous_authorization = validator_thin.ContinuousAuthorization(
+        authorization_sha256="sha256:" + "9" * 64,
+        submission_journal=str(common_path),
+        launch_attempt_id=launch_attempt,
+        release_sha256=release_sha,
+        reproducer_revision=reproducer_revision,
+        validator_hotkey="validator-hotkey",
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        lanes=("authority", "thin"),
+        issued_at="2026-07-24T22:00:00.000Z",
+        valid_from_time="2026-07-24T22:00:00.000Z",
+        valid_until_time="2099-01-01T00:00:00.000Z",
+        valid_from_block=100,
+        valid_until_block=300,
+        valid_from_nonce=0,
+        valid_until_nonce_exclusive=2,
+        max_attempts=2,
+    )
+    from scaffold import sn39_continuous_authorization as recurring
+
+    recurring_verify_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        recurring,
+        "verify_authorization",
+        lambda **kwargs: (
+            recurring_verify_calls.append(kwargs)
+            or recurring.VerifiedAuthorization(
+                authorization_sha256=continuous_authorization.authorization_sha256,
+                submission_journal=continuous_authorization.submission_journal,
+                launch_attempt_id=continuous_authorization.launch_attempt_id,
+                release_sha256=continuous_authorization.release_sha256,
+                reproducer_revision=continuous_authorization.reproducer_revision,
+                validator_hotkey=continuous_authorization.validator_hotkey,
+                genesis_hash=continuous_authorization.genesis_hash,
+                lanes=continuous_authorization.lanes,
+                issued_at=continuous_authorization.issued_at,
+                valid_from_time=continuous_authorization.valid_from_time,
+                valid_until_time=continuous_authorization.valid_until_time,
+                valid_from_block=continuous_authorization.valid_from_block,
+                valid_until_block=continuous_authorization.valid_until_block,
+                valid_from_nonce=continuous_authorization.valid_from_nonce,
+                valid_until_nonce_exclusive=(
+                    continuous_authorization.valid_until_nonce_exclusive
+                ),
+                max_attempts=continuous_authorization.max_attempts,
+            )
+        ),
+    )
+    authorization = validator_thin._continuous_authorization_identity(
+        continuous_authorization
+    )
+    args._continuous_submission_authorization = continuous_authorization
+    with pytest.raises(ValueError, match="recurring authorization differs"):
+        validator_thin._reserve_common_submission(
+            args,
+            lane="authority",
+            attempt_id="sha256:" + "4" * 64,
+            identity={
+                "network": "finney",
+                "netuid": 39,
+                "validator_hotkey": "validator-hotkey",
+                "source_epoch": 20,
+                "continuous_authorization": {
+                    **authorization,
+                    "release_sha256": "sha256:" + "f" * 64,
+                },
+            },
+        )
+    with pytest.raises(ValueError, match="lane changed"):
+        validator_thin._reserve_common_submission(
+            args,
+            lane="authority",
+            attempt_id="sha256:" + "7" * 64,
+            identity={
+                "network": "finney",
+                "netuid": 38,
+                "validator_hotkey": "validator-hotkey",
+                "source_epoch": 20,
+                "continuous_authorization": authorization,
+            },
+        )
+
+    policy = validator_thin.InclusionPolicy(
+        valid_from_block=100,
+        valid_until_block=300,
+        valid_from_time=datetime(2026, 7, 24, 22, 0, tzinfo=UTC),
+        valid_until_time=datetime(2099, 1, 1, 0, 0, tzinfo=UTC),
+        expected_next_epoch_start_block=240,
+    )
+    uid_safety = {"schema": "fixture_uid_safety"}
+    authority_identity = {
+        "network": "finney",
+        "netuid": 39,
+        "validator_hotkey": "validator-hotkey",
+        "mapping_block": 199,
+        "source_epoch": 20,
+        "report_id": "sha256:" + "8" * 64,
+        "burn_hotkey": "burn-hotkey",
+        "uid_weights": [[1, 0.9], [2, 0.1]],
+        "uid_hotkeys": [[1, "tdx-miner"], [2, "burn-hotkey"]],
+        "uid_safety": uid_safety,
+        "inclusion_policy": validator_thin._inclusion_policy_identity(policy),
+        "next_epoch_start_block": 240,
+        "continuous_authorization": authorization,
+    }
+    authority_attempt = "sha256:" + "5" * 64
+    validator_thin._reserve_common_submission(
+        args,
+        lane="authority",
+        attempt_id=authority_attempt,
+        identity=authority_identity,
+    )
+    reserved = validator_thin._read_state(common_path)
+    assert reserved["submission_pending_lane_transition_from"] == "thin"
+    assert reserved["submission_active_lane"] == "thin"
+    preflight = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={
+            "tdx-miner": 1,
+            "burn-hotkey": 2,
+            "validator-hotkey": 30,
+        },
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=199,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        next_epoch_start_block=240,
+    )
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_validate_resolved_chain_contract",
+        lambda _args, _preflight: None,
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_inclusion_policy_ready",
+        lambda _policy, _preflight: None,
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: uid_safety,
+    )
+    submit_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        validator_thin,
+        "_validate_chain_constraints",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_chain_operation_deadline",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_classify_finalized_receipt",
+        lambda *_args, **_kwargs: validator_thin.PASS,
+    )
+
+    def submit_exact(
+        _preflight: validator_thin.ChainPreflight,
+        *,
+        runtime_contract: object,
+        attempt_id: str,
+        version_key: int,
+        wire_uids: list[int],
+        wire_weights: list[int],
+        mortal_period_blocks: int,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        submit_calls.append(
+            {
+                "attempt_id": attempt_id,
+                "wire_uids": list(wire_uids),
+                "wire_weights": list(wire_weights),
+            }
+        )
+        validator_thin._record_pending_broadcast_intent(
+            runtime_contract,
+            attempt_id=attempt_id,
+            extrinsic_hash="0x" + "a" * 64,
+            nonce=2,
+            era_reference_block=preflight.block,
+            mortal_period_blocks=mortal_period_blocks,
+            version_key=version_key,
+            wire_uids=wire_uids,
+            wire_weights=wire_weights,
+        )
+        return SimpleNamespace(
+            extrinsic_hash="0x" + "a" * 64,
+            block_hash="0x" + "b" * 64,
+            block_number=200,
+            is_success=True,
+        )
+
+    monkeypatch.setattr(
+        validator_thin,
+        "_submit_exact_sn39_extrinsic",
+        submit_exact,
+    )
+    validator_thin._write_state(
+        common_path,
+        {"submission_pending_lane_transition_from": None},
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="no exact durable state-machine reservation",
+    ):
+        validator_thin.set_weights_on_chain(
+            {1: 0.9, 2: 0.1},
+            network="finney",
+            netuid=39,
+            wallet_name=args.wallet_name,
+            wallet_hotkey=args.wallet_hotkey,
+            broadcast=True,
+            preflight=preflight,
+            uid_hotkeys={1: "tdx-miner", 2: "burn-hotkey"},
+            inclusion_policy=policy,
+            runtime_contract=args,
+        )
+    assert submit_calls == []
+    validator_thin._write_state(
+        common_path,
+        {"submission_pending_lane_transition_from": "thin"},
+    )
+    submission = validator_thin.set_weights_on_chain(
+        {1: 0.9, 2: 0.1},
+        network="finney",
+        netuid=39,
+        wallet_name=args.wallet_name,
+        wallet_hotkey=args.wallet_hotkey,
+        broadcast=True,
+        preflight=preflight,
+        uid_hotkeys={1: "tdx-miner", 2: "burn-hotkey"},
+        inclusion_policy=policy,
+        runtime_contract=args,
+    )
+    assert submission.finalized is True
+    assert len(submit_calls) == 1
+    assert len(recurring_verify_calls) == 1
+    signed = validator_thin._read_state(common_path)
+    assert signed["submission_active_lane"] == "authority"
+    validator_thin._finalize_common_submission(
+        args,
+        attempt_id=authority_attempt,
+        submission=submission,
+    )
+    with pytest.raises(ValueError, match="recurring authorization differs"):
+        validator_thin._reserve_common_submission(
+            args,
+            lane="thin",
+            attempt_id="sha256:" + "6" * 64,
+            identity={"policy_version": 21},
+        )
+
+
+def test_shipped_launch_and_continuous_profiles_share_one_journal_and_gate(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+
+    def resolved(name: str, *, once: bool = False):
+        return cli._resolve_serve_config(
+            SimpleNamespace(
+                config=str(root / "config" / name),
+                dry_run=False,
+                once=once,
+                offline=False,
+            )
+        )
+
+    continuous = resolved("validator-mainnet-sn39.toml")
+    launch = resolved("validator-mainnet-sn39-launch.toml", once=True)
+    for args in (continuous, launch):
+        args.runtime_root = str(tmp_path / "shared-runtime")
+        args._submission_genesis_hash = "0x" + "1" * 64
+        args._submission_validator_hotkey = "5CanonicalValidator"
+    assert validator_thin._submission_state_path(
+        continuous
+    ) == validator_thin._submission_state_path(launch)
+    assert continuous.require_completed_launch_for_broadcast is True
+    assert launch.require_full_provenance_for_broadcast is True
+    assert launch.launch_approval_file == str(validator_thin.SN39_LAUNCH_APPROVAL_FILE)
+    with pytest.raises(validator_thin.wire.VectorError, match="reconcile-launch"):
+        validator_thin._require_continuous_launch_transition(continuous)
+    continuous.require_completed_launch_for_broadcast = False
+    continuous.require_policy = "validated_supply_v1"
+    continuous.broadcast = True
+    assert validator_thin._continuous_transition_required(continuous) is True
+
+
+def test_forged_validator_owned_transition_journal_cannot_authorize(
+    tmp_path: Path,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    args.runtime_root = str(validator_thin._VALIDATOR_RUNTIME_ROOT)
+    args._submission_genesis_hash = validator_thin.FINNEY_GENESIS_HASH
+    args._submission_validator_hotkey = "5CanonicalValidator"
+    attempt = "sha256:" + "a" * 64
+    validator_thin._write_state_fenced(
+        validator_thin._submission_state_path(args),
+        {
+            "submission_continuous_enabled": True,
+            "submission_launch_status": "finalized",
+            "submission_launch_attempt_id": attempt,
+            "submission_continuous_launch_attempt_id": attempt,
+        },
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="continuous launch identity is missing",
+    ):
+        validator_thin._require_continuous_launch_transition(args)
+
+
+def test_sn39_mainnet_runtime_root_cannot_be_redirected(
+    tmp_path: Path,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    args.max_submissions = 0
+    args.require_full_provenance_for_broadcast = False
+    _pin_sn39_runtime(args)
+    args.runtime_root = str(tmp_path / "attacker-controlled-runtime")
+    with pytest.raises(validator_thin.wire.VectorError, match="canonical owner-only"):
+        validator_thin._validate_runtime_contract(args)
+
+
+def test_sn39_broadcast_cannot_hide_finney_behind_another_label(
+    tmp_path: Path,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    _pin_sn39_runtime(args)
+    args.network = "test"
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="immutable trust profile",
+    ):
+        validator_thin._validate_runtime_contract(args)
+    assert validator_thin._continuous_transition_required(args) is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("publisher_url", "https://attacker.invalid"),
+        ("public_key_hex", "00" * 32),
+        ("key_id", "attacker-policy"),
+        ("require_policy", "confidential_primary_v1"),
+        ("provenance", "off"),
+        ("evidence_url", "https://attacker.invalid/evidence"),
+        ("provenance_registry_keys_digest", "sha256:" + "1" * 64),
+        ("provenance_report_keys_digest", "sha256:" + "2" * 64),
+        ("provenance_index_keys_digest", "sha256:" + "3" * 64),
+        ("provenance_verifier_digest", "sha256:" + "4" * 64),
+        ("provenance_source_revision", "5" * 40),
+        ("provenance_mechanism", "attacker_mechanism"),
+        ("provenance_burn_hotkey", "5AttackerBurn"),
+        ("state_file", "/tmp/attacker-state.json"),
+    ],
+)
+def test_sn39_broadcast_rejects_every_mutable_trust_profile_override(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    args.max_submissions = 0
+    args.require_full_provenance_for_broadcast = False
+    _pin_sn39_runtime(args)
+    setattr(args, field, value)
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="immutable trust profile",
+    ):
+        validator_thin._validate_runtime_contract(args)
+
+
+@pytest.mark.parametrize(
+    "network",
+    [
+        "test",
+        "archive",
+        "wss://entrypoint-finney.opentensor.ai:443",
+        "wss://self-hosted-finney.example",
+    ],
+)
+def test_resolved_finney_sn39_requires_finney_audience(
+    tmp_path: Path,
+    network: str,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    args.require_policy = "validated_supply_v1"
+    args.runtime_root = str(validator_thin._VALIDATOR_RUNTIME_ROOT)
+    args.network = network
+    preflight = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={},
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=1,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="finney"):
+        validator_thin._validate_resolved_chain_contract(args, preflight)
+
+
+def test_sn39_broadcast_requires_pinned_finney_genesis(tmp_path: Path) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    args.require_policy = "validated_supply_v1"
+    args.runtime_root = str(validator_thin._VALIDATOR_RUNTIME_ROOT)
+    preflight = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={},
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=1,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        genesis_hash="0x" + "1" * 64,
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="pinned Finney"):
+        validator_thin._validate_resolved_chain_contract(args, preflight)
+
+
+@pytest.mark.parametrize(
+    ("min_allowed", "max_limit", "commit_reveal"),
+    [(2, 1.0, False), (1, 0.9, False), (1, 1.0, True)],
+)
+def test_sn39_resolved_contract_requires_burn_only_fail_safe(
+    tmp_path: Path,
+    min_allowed: int,
+    max_limit: float,
+    commit_reveal: bool,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.broadcast = True
+    args.offline = False
+    args.require_policy = "validated_supply_v1"
+    args.runtime_root = str(validator_thin._VALIDATOR_RUNTIME_ROOT)
+    preflight = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={},
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=1,
+        min_allowed_weights=min_allowed,
+        max_weight_limit=max_limit,
+        commit_reveal_enabled=commit_reveal,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+    )
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="fail safe to burn|commit-reveal disabled",
+    ):
+        validator_thin._validate_resolved_chain_contract(args, preflight)
+
+
+def test_immutable_install_binds_venv_and_masks_legacy_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+
+    def load(path: Path, name: str):
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    builder = load(
+        root / "scripts/build_sn39_release_manifest.py",
+        "sn39_manifest_builder_test",
+    )
+    launcher = load(
+        root / "deploy/sn39/cathedral-sn39-release-launcher.py",
+        "sn39_release_launcher_test",
+    )
+    expected_distributions = builder.expected_locked_distributions(
+        root / "requirements/sn39-reproduction.lock",
+        root / "requirements/sn39-build.lock",
+    )
+    reproduction_lock_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            (root / "requirements/sn39-reproduction.lock").read_bytes()
+        ).hexdigest()
+    )
+    assert (
+        reproduction_lock_digest
+        == sn39_public_reproduction.EXPECTED_RELEASE_PINS["reproduction_dependencies"]
+    )
+    build_lock_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            (root / "requirements/sn39-build.lock").read_bytes()
+        ).hexdigest()
+    )
+    assert (
+        build_lock_digest
+        == sn39_public_reproduction.EXPECTED_RELEASE_PINS[
+            "reproduction_build_dependencies"
+        ]
+    )
+    pyproject = (root / "pyproject.toml").read_text()
+    assert "#sha256=" + builder.EXPECTED_CATHEDRAL_ARCHIVE_SHA256 in pyproject
+    inspected = {
+        "installed": [
+            {
+                "metadata": {"name": name, "version": version},
+                **(
+                    {
+                        "direct_url": {
+                            "url": builder.EXPECTED_CATHEDRAL_URL,
+                            "archive_info": {
+                                "hashes": {
+                                    "sha256": (
+                                        builder.EXPECTED_CATHEDRAL_ARCHIVE_SHA256
+                                    )
+                                }
+                            },
+                        }
+                    }
+                    if name == "cathedral"
+                    else {}
+                ),
+            }
+            for name, version in expected_distributions.items()
+        ]
+        + [{"metadata": {"name": "pip", "version": "26.0"}}]
+    }
+    builder.validate_installed_distributions(inspected, expected_distributions)
+    inspected["installed"][0]["metadata"]["version"] = "0.0.0-substituted"
+    with pytest.raises(SystemExit, match="differs from the hash lock"):
+        builder.validate_installed_distributions(inspected, expected_distributions)
+
+    venv = tmp_path / "venv"
+    binary = venv / "bin/python-real"
+    package = venv / "lib/python/site-packages/cathedral.py"
+    package.parent.mkdir(parents=True)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"reviewed-python-bytes")
+    package.write_bytes(b"reviewed-cathedral-bytes")
+    (venv / "bin/python").symlink_to("python-real")
+    for directory in (
+        venv,
+        venv / "bin",
+        venv / "lib",
+        venv / "lib/python",
+        package.parent,
+    ):
+        directory.chmod(0o755)
+    binary.chmod(0o555)
+    package.chmod(0o444)
+
+    monkeypatch.setattr(launcher, "ROOT_UID", os.getuid())
+    expected = builder.immutable_tree_digest(venv)
+    assert launcher._immutable_tree_digest(venv) == expected
+
+    package.chmod(0o644)
+    package.write_bytes(b"substituted-cathedral-bytes")
+    package.chmod(0o444)
+    assert launcher._immutable_tree_digest(venv) != expected
+
+    external_link = tmp_path / "hard-linked-cathedral.py"
+    os.link(package, external_link)
+    with pytest.raises(SystemExit, match="hard-linked file"):
+        builder.immutable_tree_digest(venv)
+    with pytest.raises(
+        launcher.InstallError,
+        match="mutable or unsupported",
+    ):
+        launcher._immutable_tree_digest(venv)
+    external_link.unlink()
+
+    mask = tmp_path / "cathedral-thin-validator.service"
+    mask.symlink_to("/dev/null")
+    monkeypatch.setattr(launcher, "LEGACY_SERVICE_MASK", mask)
+    launcher._require_legacy_service_masked()
+    mask.unlink()
+    mask.write_text("legacy writer remains startable")
+    with pytest.raises(launcher.InstallError, match="durably masked"):
+        launcher._require_legacy_service_masked()
+
+    continuous_unit = (
+        root / "deploy/sn39/cathedral-validator-sn39.service"
+    ).read_text()
+    assert "Conflicts=cathedral-thin-validator.service" in continuous_unit
+    assert "Group=cathedral-validator-log" in continuous_unit
+    assert "EnvironmentFile=" not in continuous_unit
+    assert (
+        "ExecStart=/usr/bin/python3 -I -E -s "
+        "/usr/local/libexec/cathedral-sn39-release continuous"
+    ) in continuous_unit
+    reconcile_unit = (
+        root / "deploy/sn39/cathedral-validator-sn39-reconcile.service"
+    ).read_text()
+    assert "User=cathedral-validator" in reconcile_unit
+    assert "Environment=HOME=/var/lib/cathedral-validator" in reconcile_unit
+    assert "EnvironmentFile=" not in reconcile_unit
+    assert (
+        "ExecStart=/usr/bin/python3 -I -E -s "
+        "/usr/local/libexec/cathedral-sn39-release reconcile"
+    ) in reconcile_unit
+    launch_unit = (
+        root / "deploy/sn39/cathedral-validator-sn39-launch.service"
+    ).read_text()
+    assert "EnvironmentFile=" not in launch_unit
+    assert "TimeoutStartSec=20min" in launch_unit
+    assert (
+        "ExecStart=/usr/bin/python3 -I -E -s "
+        "/usr/local/libexec/cathedral-sn39-release launch"
+    ) in launch_unit
+    child_environment = launcher._child_environment()
+    assert set(child_environment) == {
+        "HOME",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONNOUSERSITE",
+        "CATHEDRAL_VALIDATOR_JSONL_GROUP",
+    }
+    assert (
+        child_environment["CATHEDRAL_VALIDATOR_JSONL_GROUP"]
+        == "cathedral-validator-log"
+    )
+    status_environment = launcher._child_environment("status")
+    assert status_environment["HOME"] == "/var/lib/cathedral-public-evidence"
+    assert "CATHEDRAL_VALIDATOR_JSONL_GROUP" not in status_environment
+    launch_environment = launcher._child_environment(
+        "launch",
+        release_sha="a" * 40,
+        launch_config_sha256="sha256:" + "b" * 64,
+    )
+    assert launch_environment["CATHEDRAL_SN39_RELEASE_SHA"] == "a" * 40
+    assert launch_environment["CATHEDRAL_SN39_LAUNCH_CONFIG_SHA256"] == (
+        "sha256:" + "b" * 64
+    )
+    assert "preflight" in launcher.MODES
+    assert "authorize-recurring" in launcher.MODES
+    status_unit = (
+        root / "deploy/sn39/cathedral-sn39-public-status.service"
+    ).read_text()
+    assert "User=cathedral-status" in status_unit
+    assert "SupplementaryGroups=cathedral-validator-log" in status_unit
+    sysusers = (root / "deploy/sn39/cathedral-sn39.sysusers").read_text()
+    assert "u cathedral-validator " in sysusers
+    assert "g cathedral-validator-log " in sysusers
+    assert "m cathedral-status cathedral-validator-log" in sysusers
+    assert (
+        "ExecStart=/usr/bin/python3 -I -E -s "
+        "/usr/local/libexec/cathedral-sn39-release status"
+    ) in status_unit
+    release_guide = (root / "docs/SN39_MAINNET_RELEASE_20260724.md").read_text()
+    assert (
+        "/usr/local/libexec/cathedral-sn39-release finalize "
+        "\\\n  /var/lib/cathedral-validator/journal-<64-hex-digest>.json"
+    ) in release_guide
+    assert '"$release/scripts/finalize_sn39_public_release.py"' not in release_guide
+    assert (
+        "ReadOnlyPaths=/var/log/cathedral-validator/validator-events.jsonl"
+        in status_unit
+    )
+    assert "ReadWritePaths=/var/lib/cathedral-public-evidence/logs" in status_unit
+    tmpfiles = (root / "deploy/sn39/cathedral-sn39.tmpfiles").read_text()
+    assert "d /var/lib/cathedral-public-evidence 0755 root root -" in tmpfiles
+    assert (
+        "d /var/lib/cathedral-public-evidence/blobs/sha256 0755 root root -" in tmpfiles
+    )
+    assert (
+        "d /var/lib/cathedral-public-evidence/logs "
+        "0755 cathedral-status cathedral-status -"
+    ) in tmpfiles
+    assert {
+        "deploy/sn39/cathedral-validator-sn39.service",
+        "deploy/sn39/cathedral-validator-sn39-launch.service",
+        "deploy/sn39/cathedral-validator-sn39-reconcile.service",
+        "deploy/sn39/cathedral-sn39-public-status.service",
+        "deploy/sn39/cathedral-sn39-public-status.timer",
+        "deploy/sn39/cathedral-sn39.sysusers",
+        "deploy/sn39/cathedral-sn39.tmpfiles",
+        "scripts/publish_sn39_validator_status.py",
+        "scripts/finalize_sn39_public_release.py",
+        "scripts/build_sn39_rotation_manifest.py",
+        "scripts/sn39_hotkey_rotation_operator.py",
+        "deploy/sn39/cathedral-sn39-rotation-launcher.py",
+        "requirements/sn39-build.in",
+        "requirements/sn39-build.lock",
+    }.issubset(set(builder.RELEASE_FILES))
+
+
+def test_release_manifest_git_uses_absolute_binary_and_sanitized_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "sn39_manifest_builder_git_test",
+        root / "scripts/build_sn39_release_manifest.py",
+    )
+    assert spec is not None and spec.loader is not None
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def checked_output(argv: list[str], **kwargs: object) -> str:
+        calls.append((argv, kwargs))
+        return "reviewed\n"
+
+    monkeypatch.setattr(builder.subprocess, "check_output", checked_output)
+    assert builder.git(tmp_path, "rev-parse", "HEAD") == "reviewed"
+    assert calls == [
+        (
+            [
+                "/usr/bin/git",
+                "-c",
+                f"safe.directory={tmp_path}",
+                "rev-parse",
+                "HEAD",
+            ],
+            {
+                "cwd": tmp_path,
+                "text": True,
+                "stderr": subprocess.DEVNULL,
+                "env": {"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            },
+        )
+    ]
+    monkeypatch.setattr(
+        builder.subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+    with pytest.raises(SystemExit, match="cannot verify reviewed release source"):
+        builder.git(tmp_path, "status", "--porcelain=v1")
+
+
+def test_finalizer_launcher_rechecks_install_and_binds_exact_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "sn39_finalizer_launcher_test",
+        root / "deploy/sn39/cathedral-sn39-release-launcher.py",
+    )
+    assert spec is not None and spec.loader is not None
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+
+    release_sha = "a" * 40
+    release = tmp_path / release_sha
+    python = tmp_path / "venv/bin/python"
+    release.mkdir()
+    manifest_digest = "sha256:" + "b" * 64
+    journal = launcher.RUNTIME_ROOT / ("journal-" + "c" * 64 + ".json")
+    verified_modes: list[str] = []
+    executed: dict[str, object] = {}
+
+    def verify(mode: str):
+        verified_modes.append(mode)
+        return release, python, manifest_digest
+
+    def execve(
+        executable: Path,
+        command: list[str],
+        environment: dict[str, str],
+    ) -> None:
+        executed.update(
+            executable=executable,
+            command=command,
+            environment=environment,
+        )
+        raise RuntimeError("captured exec")
+
+    monkeypatch.setattr(launcher, "ROOT_UID", os.getuid())
+    monkeypatch.setattr(launcher, "_verify", verify)
+    monkeypatch.setattr(launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(launcher.os, "execve", execve)
+    with pytest.raises(RuntimeError, match="captured exec"):
+        launcher.main(["finalize", str(journal)])
+
+    assert verified_modes == ["finalize"]
+    assert executed["executable"] == python
+    assert executed["command"] == [
+        str(python),
+        "-I",
+        "-B",
+        str(release / "scripts/finalize_sn39_public_release.py"),
+        "--release",
+        str(release),
+        "--release-sha",
+        release_sha,
+        "--journal",
+        str(journal),
+    ]
+    environment = executed["environment"]
+    assert isinstance(environment, dict)
+    assert environment[launcher.FINALIZER_CONTEXT_ENV] == (
+        launcher._finalizer_context_digest(
+            release_sha=release_sha,
+            journal=journal,
+            manifest_digest=manifest_digest,
+        )
+    )
+
+    verified_modes.clear()
+    assert launcher.main(["finalize", str(tmp_path / journal.name)]) == 1
+    assert verified_modes == []
+
+    recurring_args = [
+        "--journal",
+        str(journal),
+        "--expected-validator-hotkey",
+        "5" + "A" * 47,
+        "--reviewed-finalized-block",
+        "100",
+        "--reviewed-validator-nonce",
+        "17",
+        "--max-attempts",
+        "1",
+        "--valid-for-blocks",
+        "4",
+        "--valid-for-seconds",
+        "240",
+        "--i-authorize-recurring-mainnet-writes",
+    ]
+    executed.clear()
+    verified_modes.clear()
+    with pytest.raises(RuntimeError, match="captured exec"):
+        launcher.main(["authorize-recurring", *recurring_args])
+    assert verified_modes == ["authorize-recurring"]
+    assert executed["command"][:6] == [
+        str(python),
+        "-I",
+        "-E",
+        "-s",
+        "-B",
+        "-c",
+    ]
+    assert executed["command"][7:] == [
+        str(release),
+        "scaffold.sn39_continuous_authorization",
+        *recurring_args,
+    ]
+    recurring_environment = executed["environment"]
+    assert isinstance(recurring_environment, dict)
+    assert recurring_environment[launcher.RECURRING_AUTHORIZER_CONTEXT_ENV] == (
+        launcher._recurring_authorizer_context_digest(
+            release_sha=release_sha,
+            manifest_digest=manifest_digest,
+            arguments=recurring_args,
+        )
+    )
+
+
+def test_launch_rechecks_fresh_mapping_and_report_window_after_rewarded_set_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _args(tmp_path, "shadow")
+    args.offline = False
+    args.require_policy = "validated_supply_v1"
+    args.public_key_hex = "00" * 32
+    args.key_id = "cathedral-weight-policy"
+    args.wallet_name = "validator"
+    args.wallet_hotkey = "default"
+    args.provenance_burn_hotkey = "burn-hotkey"
+    args._submission_genesis_hash = validator_thin.FINNEY_GENESIS_HASH
+    args._submission_validator_hotkey = "validator-hotkey"
+    payload = validated_supply_payload()
+    payload.update(
+        {
+            "generated_at": "2026-07-24T22:00:00.000Z",
+            "expires_at": "2099-01-01T00:00:00.000Z",
+        }
+    )
+    audit = ProvenanceAudit(
+        status="PASS",
+        assurance="full",
+        agrees_with_vector=True,
+        recomputed={"tdx-miner": 1.0},
+        manifest_generated_at="2026-07-24T22:10:00.000Z",
+        candidate_block=900,
+        candidate_block_hash="0x" + "a" * 64,
+        report_generated_at="2026-07-24T22:30:00.000Z",
+        report_valid_until="2099-01-01T00:00:00.000Z",
+        report_valid_from_block=900,
+        report_valid_until_block=1000,
+        signed_index={"generated_at": "2026-07-24T22:20:00.000Z"},
+    )
+    monkeypatch.setattr(validator_thin, "accept_vector", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_uid_mapping_stability",
+        lambda _preflight, uid_hotkeys, **_kwargs: {
+            "schema": "cathedral_sn39_uid_safety_v1",
+            "registration": {"fixture": True},
+            "rotation": {
+                "status": "PASS",
+                "targets": [
+                    {
+                        "uid": uid,
+                        "hotkey": hotkey,
+                        "rotation_receipt": {
+                            "block_number": 899,
+                            "block_timestamp": "2026-07-24T21:00:00.000Z",
+                        },
+                    }
+                    for uid, hotkey in sorted(uid_hotkeys.items())
+                ],
+            },
+        },
+    )
+    rewarded_uid = {"value": 163}
+    monkeypatch.setattr(
+        validator_thin,
+        "chain_preflight",
+        lambda **_kw: validator_thin.ChainPreflight(
+            wallet=object(),
+            subtensor=object(),
+            hotkey_to_uid={
+                "tdx-miner": rewarded_uid["value"],
+                "burn-hotkey": 204,
+                "validator-hotkey": 30,
+            },
+            validator_hotkey="validator-hotkey",
+            validator_uid=30,
+            block=950,
+            min_allowed_weights=1,
+            max_weight_limit=1.0,
+            genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+            subnet_owner_hotkey="burn-hotkey",
+            blocks_until_next_epoch=80,
+            next_epoch_start_block=1030,
+            weights_rate_limit=0,
+            validator_blocks_since_last_update=1,
+            uid_mapping_stable_until_block=954,
+            replacement_safe_hotkeys=frozenset({"tdx-miner", "burn-hotkey"}),
+        ),
+    )
+    fresh, mapping, weights = (
+        validator_thin._revalidate_launch_after_rewarded_set_replay(
+            args,
+            payload=payload,
+            audit=audit,
+            fence_version=-1,
+        )
+    )
+    assert fresh.block == 950
+    assert mapping["tdx-miner"] == 163
+    assert weights == {163: 0.9, 204: 0.1}
+    assert args._launch_inclusion_policy.valid_from_block == 900
+    assert args._launch_inclusion_policy.valid_until_block == 1000
+
+    rewarded_uid["value"] = 164
+    _fresh, moved_mapping, moved_weights = (
+        validator_thin._revalidate_launch_after_rewarded_set_replay(
+            args,
+            payload=payload,
+            audit=audit,
+            fence_version=-1,
+        )
+    )
+    assert moved_mapping["tdx-miner"] == 164
+    assert moved_weights == {164: 0.9, 204: 0.1}
+
+    rewarded_uid["value"] = 30
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="rewarded-hotkey and subnet-owner burn-hotkey 90/10",
+    ):
+        validator_thin._revalidate_launch_after_rewarded_set_replay(
+            args,
+            payload=payload,
+            audit=audit,
+            fence_version=-1,
+        )
+
+    rewarded_uid["value"] = 163
+    audit.report_valid_until_block = 950
+    with pytest.raises(validator_thin.wire.VectorError, match="validity window"):
+        validator_thin._revalidate_launch_after_rewarded_set_replay(
+            args,
+            payload=payload,
+            audit=audit,
+            fence_version=-1,
+        )
+
+
+def test_authority_refreshes_mapping_and_validity_after_full_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _args(tmp_path, "authority")
+    args.offline = False
+    args.broadcast = True
+    args.require_policy = "validated_supply_v1"
+    args.runtime_root = str(validator_thin._VALIDATOR_RUNTIME_ROOT)
+    args.wallet_name = "validator"
+    args.wallet_hotkey = "default"
+    args.provenance_burn_hotkey = "burn-hotkey"
+    args._submission_genesis_hash = validator_thin.FINNEY_GENESIS_HASH
+    args._submission_validator_hotkey = "validator-hotkey"
+    args._tick_preflight = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={
+            "tdx-miner": 163,
+            "burn-hotkey": 204,
+            "validator-hotkey": 30,
+        },
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=900,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        commit_reveal_enabled=False,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        subnet_owner_hotkey="burn-hotkey",
+        blocks_until_next_epoch=80,
+        next_epoch_start_block=980,
+        weights_rate_limit=0,
+        validator_blocks_since_last_update=1,
+        uid_mapping_stable_until_block=904,
+        replacement_safe_hotkeys=frozenset({"tdx-miner", "burn-hotkey"}),
+    )
+    audit = ProvenanceAudit(
+        status="PASS",
+        assurance="full",
+        recomputed={"tdx-miner": 1.0},
+        report_generated_at="2026-07-24T22:30:00.000Z",
+        report_valid_until="2099-01-01T00:00:00.000Z",
+        report_valid_from_block=900,
+        report_valid_until_block=1000,
+    )
+    fresh_block = {"value": 950}
+
+    def fresh_preflight(**_kwargs):
+        return validator_thin.ChainPreflight(
+            wallet=object(),
+            subtensor=object(),
+            hotkey_to_uid={
+                "tdx-miner": 164,
+                "burn-hotkey": 204,
+                "validator-hotkey": 30,
+            },
+            validator_hotkey="validator-hotkey",
+            validator_uid=30,
+            block=fresh_block["value"],
+            min_allowed_weights=1,
+            max_weight_limit=1.0,
+            commit_reveal_enabled=False,
+            genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+            subnet_owner_hotkey="burn-hotkey",
+            blocks_until_next_epoch=80,
+            next_epoch_start_block=fresh_block["value"] + 80,
+            weights_rate_limit=0,
+            validator_blocks_since_last_update=1,
+            uid_mapping_stable_until_block=fresh_block["value"] + 4,
+            replacement_safe_hotkeys=frozenset({"tdx-miner", "burn-hotkey"}),
+        )
+
+    monkeypatch.setattr(validator_thin, "chain_preflight", fresh_preflight)
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: {
+            "schema": "cathedral_sn39_uid_safety_v1",
+            "registration": {"fixture": True},
+            "rotation": {"status": "PASS", "targets": []},
+        },
+    )
+    fresh, mapping, weights, policy = validator_thin._revalidate_authority_after_audit(
+        args,
+        audit=audit,
+        recomputed={"tdx-miner": 1.0},
+    )
+    assert fresh is args._tick_preflight
+    assert mapping["tdx-miner"] == 164
+    assert weights == {164: pytest.approx(0.9), 204: pytest.approx(0.1)}
+    assert policy.valid_until_block == 1000
+
+    fresh_block["value"] = 1000
+    with pytest.raises(validator_thin.wire.VectorError, match="mortal era"):
+        validator_thin._revalidate_authority_after_audit(
+            args,
+            audit=audit,
+            recomputed={"tdx-miner": 1.0},
+        )
+
+
+def test_documented_bytecode_disabled_run_keeps_reproducer_checkout_pristine(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    package = checkout / "probe"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 39\n")
+    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "sn39-reproducer@example.invalid"],
+        cwd=checkout,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "SN39 Reproducer"],
+        cwd=checkout,
+        check=True,
+    )
+    subprocess.run(["git", "add", "probe/__init__.py"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
+        cwd=checkout,
+        check=True,
+    )
+
+    environment = {
+        "HOME": os.environ.get("HOME", str(tmp_path)),
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    subprocess.run(
+        [sys.executable, "-B", "-c", "import probe; assert probe.VALUE == 39"],
+        cwd=checkout,
+        env=environment,
+        check=True,
+    )
+    expected = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=checkout,
+        text=True,
+    ).strip()
+    assert sn39_public_reproduction._repo_revision(checkout) == expected
+
+
+def test_documented_direct_reproducer_resolves_its_own_checkout(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[3]
+    runner = repository / "scripts/run_sn39_public_reproduction.py"
+    result = subprocess.run(
+        [sys.executable, "-B", str(runner), "unexpected-argument"],
+        cwd=tmp_path,
+        env={
+            "HOME": os.environ.get("HOME", str(tmp_path)),
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "usage: run_sn39_public_reproduction.py" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_reconcile_launch_proves_record_and_unlocks_shared_continuous_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch = _args(tmp_path, "shadow")
+    launch.offline = False
+    launch.broadcast = True
+    launch.once = True
+    launch.max_submissions = 1
+    launch.require_full_provenance_for_broadcast = True
+    launch.require_policy = "validated_supply_v1"
+    launch.runtime_root = str(validator_thin._VALIDATOR_RUNTIME_ROOT)
+    launch.wallet_name = "validator"
+    launch.wallet_hotkey = "default"
+    launch.provenance_burn_hotkey = "burn-hotkey"
+    launch._submission_genesis_hash = validator_thin.FINNEY_GENESIS_HASH
+    launch._submission_validator_hotkey = "validator-hotkey"
+    attempt = "sha256:" + "a" * 64
+    uid_safety = {
+        "schema": "cathedral_sn39_uid_safety_v1",
+        "registration": {"fixture": True},
+        "rotation": {"status": "PASS", "targets": []},
+    }
+    identity = {
+        "network": "finney",
+        "netuid": 39,
+        "mapping_block": 900,
+        "next_epoch_start_block": 940,
+        "policy_version": 1,
+        "validator_hotkey": "validator-hotkey",
+        "validator_uid": 30,
+        "vector_id": "launch-vector",
+        "signed_vector_sha256": "sha256:" + "2" * 64,
+        "burn_hotkey": "burn-hotkey",
+        "uid_weights": [[163, 0.9], [204, 0.1]],
+        "uid_hotkeys": [[163, "tdx-miner"], [204, "burn-hotkey"]],
+        "uid_safety": uid_safety,
+        "full_provenance": {
+            "source_epoch": 90,
+            "report_id": "sha256:" + "3" * 64,
+            "manifest": "sha256:" + "4" * 64,
+            "policy_release": 10,
+            "policy_digest": "sha256:" + "5" * 64,
+            "mechanism": "validated_supply_v1",
+            "scope": "rewarded_set_full",
+            "whole_epoch_assurance": "receipts_only",
+            "vector_agrees": True,
+            "rewarded_hotkeys": ["tdx-miner"],
+            "raw_replayed_hotkeys": ["tdx-miner"],
+            "verifier_digest": "sha256:" + "6" * 64,
+            "source_revision": "7" * 40,
+        },
+    }
+    validator_thin._reserve_common_submission(
+        launch,
+        lane="thin",
+        attempt_id=attempt,
+        identity=identity,
+    )
+    validator_thin._record_pending_broadcast_intent(
+        launch,
+        attempt_id=attempt,
+        extrinsic_hash="0x" + "b" * 64,
+        nonce=17,
+        era_reference_block=900,
+        mortal_period_blocks=4,
+        version_key=validator_thin._weight_version_key(),
+        wire_uids=[163, 204],
+        wire_weights=[65535, 7282],
+    )
+    validator_thin._finalize_common_submission(
+        launch,
+        attempt_id=attempt,
+        submission=validator_thin.ChainSubmission(
+            success=True,
+            extrinsic_hash="0x" + "b" * 64,
+            block_hash="0x" + "c" * 64,
+            block_number=901,
+            finalized=True,
+        ),
+    )
+    preflight = validator_thin.ChainPreflight(
+        wallet=object(),
+        subtensor=object(),
+        hotkey_to_uid={
+            "tdx-miner": 163,
+            "burn-hotkey": 204,
+            "validator-hotkey": 30,
+        },
+        validator_hotkey="validator-hotkey",
+        validator_uid=30,
+        block=902,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        subnet_owner_hotkey="burn-hotkey",
+        blocks_until_next_epoch=80,
+        weights_rate_limit=0,
+        validator_blocks_since_last_update=0,
+    )
+    monkeypatch.setattr(validator_thin, "chain_preflight", lambda **_kw: preflight)
+    monkeypatch.setattr(
+        validator_thin,
+        "_prove_finalized_receipt",
+        lambda *_a, **_kw: True,
+    )
+    hotkeys = [f"hotkey-{uid}" for uid in range(205)]
+    hotkeys[30] = "validator-hotkey"
+    hotkeys[163] = "tdx-miner"
+    hotkeys[204] = "burn-hotkey"
+    public_release = {
+        "network": "finney",
+        "netuid": 39,
+        "source_revisions": {
+            "producer": "7" * 40,
+            "validator": "8" * 40,
+        },
+        "launch_submission": {
+            "vector_id": "launch-vector",
+            "policy_version": 1,
+            "signed_vector_sha256": "sha256:" + "2" * 64,
+            "broadcast_intent": {
+                "extrinsic_hash": "0x" + "b" * 64,
+                "nonce": 17,
+                "era_reference_block": 900,
+                "mortal_period_blocks": 4,
+                "version_key": validator_thin._weight_version_key(),
+                "wire_uids": [163, 204],
+                "wire_weights": [65535, 7282],
+            },
+            "mapping": {
+                "block": 900,
+                "validator_hotkey": "validator-hotkey",
+                "validator_uid": 30,
+                "rewarded_uid": 163,
+                "rewarded_hotkey": "tdx-miner",
+                "burn_uid": 204,
+                "burn_hotkey": "burn-hotkey",
+                "next_epoch_start_block": 940,
+                "uid_weights": {"163": 0.9, "204": 0.1},
+                "uid_safety": uid_safety,
+                "metagraph_snapshot": {
+                    "block": 900,
+                    "uids": list(range(205)),
+                    "hotkeys": hotkeys,
+                    "validator_permit": [index == 30 for index in range(len(hotkeys))],
+                },
+            },
+            "extrinsic": {
+                "hash": "0x" + "b" * 64,
+                "block_hash": "0x" + "c" * 64,
+                "block": 901,
+                "validator_uid": 30,
+                "uids": [163, 204],
+                "weights_u16": [65535, 7282],
+                "version_key": validator_thin._weight_version_key(),
+            },
+            "evidence_checkpoint": {
+                "source_epoch": 90,
+                "report_id": "sha256:" + "3" * 64,
+                "manifest": "sha256:" + "4" * 64,
+                "policy_release": 10,
+                "policy_digest": "sha256:" + "5" * 64,
+                "verifier_digest": "sha256:" + "6" * 64,
+                "reward_mechanism": {"id": "validated_supply_v1"},
+            },
+        },
+    }
+    public_result = {
+        "release_attestation": "PASS",
+        "historical_launch": "PASS",
+        "evidence_checkpoint": "PASS",
+        "reproducer_revision": "8" * 40,
+        "release": public_release,
+    }
+    monkeypatch.setattr(
+        "scaffold.sn39_public_reproduction.verify_public_release",
+        lambda: public_result,
+    )
+    continuous = SimpleNamespace(**vars(launch))
+    continuous.require_full_provenance_for_broadcast = False
+    continuous.max_submissions = 0
+    result = validator_thin.reconcile_launch_transition(continuous)
+    assert result["status"] == "PASS"
+    assert result["release_attestation"] == "PASS"
+    continuous._tick_preflight = preflight
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="separate root-signed recurring-write authorization",
+    ):
+        validator_thin._require_continuous_launch_transition(continuous)
+
+    from scaffold import sn39_continuous_authorization as recurring
+
+    verified_recurring = recurring.VerifiedAuthorization(
+        authorization_sha256="sha256:" + "d" * 64,
+        submission_journal=str(validator_thin._submission_state_path(continuous)),
+        launch_attempt_id=attempt,
+        release_sha256=result["release_sha256"],
+        reproducer_revision=result["reproducer_revision"],
+        validator_hotkey="validator-hotkey",
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        lanes=("thin",),
+        issued_at="2026-07-25T00:00:00.000Z",
+        valid_from_time="2026-07-25T00:00:00.000Z",
+        valid_until_time="2026-07-28T00:00:00.000Z",
+        valid_from_block=900,
+        valid_until_block=10_000,
+        valid_from_nonce=17,
+        valid_until_nonce_exclusive=20,
+        max_attempts=3,
+    )
+    monkeypatch.setattr(
+        recurring,
+        "verify_authorization",
+        lambda **_kwargs: verified_recurring,
+    )
+    recurring_authorization = validator_thin._require_continuous_launch_transition(
+        continuous
+    )
+    continuous._continuous_submission_authorization = recurring_authorization
+
+    # Later continuous attempts overwrite the current pending/finalized
+    # journal fields, but can never overwrite the separately sealed launch
+    # identity and receipt used for every subsequent authorization.
+    continuous_attempt = "sha256:" + "e" * 64
+    continuous_identity = {
+        "network": "finney",
+        "netuid": 39,
+        "mapping_block": 903,
+        "policy_version": 2,
+        "validator_hotkey": "validator-hotkey",
+        "validator_uid": 30,
+        "vector_id": "continuous-vector",
+        "signed_vector_sha256": "sha256:" + "9" * 64,
+        "burn_hotkey": "burn-hotkey",
+        "uid_weights": [[163, 0.9], [204, 0.1]],
+        "uid_hotkeys": [[163, "tdx-miner"], [204, "burn-hotkey"]],
+        "continuous_authorization": (
+            validator_thin._continuous_authorization_identity(recurring_authorization)
+        ),
+    }
+    validator_thin._reserve_common_submission(
+        continuous,
+        lane="thin",
+        attempt_id=continuous_attempt,
+        identity=continuous_identity,
+    )
+    validator_thin._record_pending_broadcast_intent(
+        continuous,
+        attempt_id=continuous_attempt,
+        extrinsic_hash="0x" + "e" * 64,
+        nonce=18,
+        era_reference_block=903,
+        mortal_period_blocks=4,
+        version_key=validator_thin._weight_version_key(),
+        wire_uids=[163, 204],
+        wire_weights=[65535, 7282],
+    )
+    validator_thin._finalize_common_submission(
+        continuous,
+        attempt_id=continuous_attempt,
+        submission=validator_thin.ChainSubmission(
+            success=True,
+            extrinsic_hash="0x" + "e" * 64,
+            block_hash="0x" + "f" * 64,
+            block_number=903,
+            finalized=True,
+        ),
+    )
+    validator_thin._require_continuous_launch_transition(continuous)
+
+    # The validator-owned journal alone cannot unlock continuous operation:
+    # the root-signed public seal must name the exact irreversible write.
+    public_release["launch_submission"]["extrinsic"]["hash"] = "0x" + "d" * 64
+    with pytest.raises(validator_thin.wire.VectorError, match="does not match"):
+        validator_thin._require_continuous_launch_transition(continuous)
+    validator_thin._write_state_fenced(
+        validator_thin._submission_state_path(continuous),
+        {"submission_continuous_enabled": False},
+    )
+    with pytest.raises(validator_thin.wire.VectorError, match="does not match"):
+        validator_thin.reconcile_launch_transition(continuous)
+
+
+def test_submission_lock_identity_uses_genesis_and_ss58_not_wallet_aliases(
+    tmp_path: Path,
+) -> None:
+    first = _args(tmp_path, "off")
+    second = _args(tmp_path, "off")
+    for args in (first, second):
+        args.offline = False
+        args.runtime_root = str(tmp_path / "runtime")
+        args._submission_genesis_hash = "0x" + "1" * 64
+        args._submission_validator_hotkey = "5CanonicalValidator"
+    first.wallet_name = "alias-a"
+    second.wallet_name = "alias-b"
+    assert validator_thin._submission_lock_path(
+        first
+    ) == validator_thin._submission_lock_path(second)
+
+    second._submission_validator_hotkey = "5DifferentValidator"
+    assert validator_thin._submission_lock_path(
+        first
+    ) != validator_thin._submission_lock_path(second)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("mapping_block", "historical metagraph differs"),
+        ("metagraph", "historical metagraph differs"),
+        ("epoch_schedule", "epoch schedule"),
+        ("commit_reveal", "commit-reveal state changed"),
+        ("inclusion_block", "launch inclusion block differs"),
+        ("inclusion_metagraph", "launch inclusion UID mapping differs"),
+        ("inclusion_commit_reveal", "policy was not valid"),
+        ("inclusion_timestamp", "policy was not valid"),
+        ("absent_extrinsic", "exact launch extrinsic is absent"),
+        ("extrinsic_args", "launch extrinsic call differs"),
+        ("extrinsic_nonce", "nonce or mortal era contradicts"),
+        ("extrinsic_era", "nonce or mortal era contradicts"),
+        ("extrinsic_failure", "did not execute successfully"),
+        ("chain_weights", "historical on-chain weights differ"),
+        ("pending_coldkey_swap", "pending swap announcement"),
+        ("genesis", "pinned Finney genesis"),
+        ("rotation_call", "unique exact swap_hotkey_v2"),
+        ("rotation_failure", "receipt is incomplete or failed"),
+        ("rotation_event", "rotation event is absent"),
+        ("rotation_lineage", "lineage differs"),
+    ],
+)
+def test_historical_launch_rejects_archive_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionError,
+        verify_historical_launch,
+    )
+
+    release, hotkeys = _historical_launch_fixture()
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    with pytest.raises(ReproductionError, match=message):
+        verify_historical_launch(
+            release,
+            subtensor=_HistoricalSubtensor(hotkeys, mutation=mutation),
+        )
+
+
+@pytest.mark.parametrize("mutation", ["missing_nonce", "missing_era"])
+def test_historical_launch_missing_decoded_intent_is_not_proven(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    from scripts.assert_sn39_public_reproduction import (
+        ReproductionNotProven,
+        verify_historical_launch,
+    )
+
+    release, hotkeys = _historical_launch_fixture()
+    monkeypatch.setattr("scaffold.wire_vector.verify_signature", lambda *_a, **_k: None)
+    with pytest.raises(
+        ReproductionNotProven,
+        match="nonce or mortal era is unavailable",
+    ):
+        verify_historical_launch(
+            release,
+            subtensor=_HistoricalSubtensor(hotkeys, mutation=mutation),
+        )

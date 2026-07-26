@@ -4,6 +4,7 @@ Focus: the HARD safety gates on ``set_weights`` (mainnet refusal, triple-gated
 live broadcast, dry-run default) and the signed-artifact shape (schema, per-uid
 weights, merkle/receipt, verifiable signature).
 """
+
 from __future__ import annotations
 
 import base64
@@ -48,13 +49,14 @@ class _Spy:
 
 # --- HARD SAFETY: mainnet / finney refusal ----------------------------------
 
+
 @pytest.mark.parametrize(
     "network,netuid",
     [
-        ("finney", 123),   # finney network
+        ("finney", 123),  # finney network
         ("mainnet", 123),  # alias
-        ("main", 123),     # alias
-        ("test", 39),      # mainnet netuid even on a testnet network name
+        ("main", 123),  # alias
+        ("test", 39),  # mainnet netuid even on a testnet network name
     ],
 )
 def test_set_weights_refuses_mainnet(network, netuid):
@@ -78,7 +80,27 @@ def test_set_weights_refuses_unknown_network():
         mw.set_weights(COMPOSED, netuid=123, network="weirdnet", signing_key_hex=sk_hex)
 
 
+def test_removed_mainnet_override_cannot_unlock_sn39(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CATHEDRAL_MECH_WEIGHTSET_ALLOW_MAINNET", "true")
+    monkeypatch.setenv(mw.LIVE_ENV, "true")
+    sk_hex, _ = _keypair()
+    spy = _Spy()
+    with pytest.raises(mw.UnsafeNetworkError, match="immutable"):
+        mw.set_weights(
+            COMPOSED,
+            netuid=39,
+            network="test",
+            signing_key_hex=sk_hex,
+            confirm=True,
+            broadcast_fn=spy,
+        )
+    assert spy.calls == []
+
+
 # --- default dry-run ---------------------------------------------------------
+
 
 def test_testnet_dry_run_returns_signed_artifact(monkeypatch):
     monkeypatch.delenv(mw.LIVE_ENV, raising=False)
@@ -125,7 +147,7 @@ def test_live_env_without_confirm_stays_dry_run(monkeypatch):
         netuid=123,
         network="test",
         signing_key_hex=sk_hex,
-        confirm=False,          # missing explicit confirm
+        confirm=False,  # missing explicit confirm
         broadcast_fn=spy,
     )
     assert out["mode"] == "dry_run"
@@ -151,7 +173,8 @@ def test_confirm_without_live_env_stays_dry_run(monkeypatch):
 
 # --- fully-gated live broadcast (testnet only) ------------------------------
 
-def test_all_gates_satisfied_broadcasts_on_testnet(monkeypatch):
+
+def test_all_gates_satisfied_still_cannot_invoke_callback(monkeypatch):
     monkeypatch.setenv(mw.LIVE_ENV, "true")
     sk_hex, _ = _keypair()
     spy = _Spy()
@@ -164,10 +187,10 @@ def test_all_gates_satisfied_broadcasts_on_testnet(monkeypatch):
         confirm=True,
         broadcast_fn=spy,
     )
-    assert out["mode"] == "live"
-    assert out["broadcast"] is True
-    assert len(spy.calls) == 1
-    assert spy.calls[0]["schema"] == "cathedral.mechanism_weights.v1"
+    assert out["mode"] == "dry_run"
+    assert out["broadcast"] is False
+    assert spy.calls == []
+    assert "permanently disabled" in out["reason"]
 
 
 def test_live_without_broadcast_fn_stays_dry_run(monkeypatch):
@@ -179,7 +202,7 @@ def test_live_without_broadcast_fn_stays_dry_run(monkeypatch):
         network="test",
         signing_key_hex=sk_hex,
         confirm=True,
-        broadcast_fn=None,   # no injected chain path -> cannot go live
+        broadcast_fn=None,  # no injected chain path -> cannot go live
     )
     assert out["mode"] == "dry_run"
     assert out["broadcast"] is False
@@ -187,10 +210,15 @@ def test_live_without_broadcast_fn_stays_dry_run(monkeypatch):
 
 # --- artifact builder determinism / merkle ----------------------------------
 
+
 def test_build_artifact_deterministic_merkle():
     sk_hex, _ = _keypair()
-    a = mw.build_weight_artifact(COMPOSED, netuid=123, network="test", signing_key_hex=sk_hex)
-    b = mw.build_weight_artifact(COMPOSED, netuid=123, network="test", signing_key_hex=sk_hex)
+    a = mw.build_weight_artifact(
+        COMPOSED, netuid=123, network="test", signing_key_hex=sk_hex
+    )
+    b = mw.build_weight_artifact(
+        COMPOSED, netuid=123, network="test", signing_key_hex=sk_hex
+    )
     # same inputs -> same merkle root / receipt id (signature+id/time may differ)
     assert a["merkle_root"] == b["merkle_root"]
     assert a["receipt_id"] == b["receipt_id"]
@@ -200,14 +228,18 @@ def test_build_artifact_deterministic_merkle():
 def test_build_artifact_filters_nonpositive_and_nonfinite():
     sk_hex, _ = _keypair()
     composed = {1: 0.5, 2: 0.0, 3: -1.0, 4: float("nan"), 5: 0.5}
-    art = mw.build_weight_artifact(composed, netuid=123, network="test", signing_key_hex=sk_hex)
+    art = mw.build_weight_artifact(
+        composed, netuid=123, network="test", signing_key_hex=sk_hex
+    )
     assert [w["uid"] for w in art["weights"]] == [1, 5]
 
 
 # --- read endpoint -----------------------------------------------------------
 
+
 def test_read_endpoint_serves_latest_stamped_testnet(monkeypatch):
     fastapi = pytest.importorskip("fastapi")
+    pytest.importorskip("httpx2")
     from fastapi.testclient import TestClient
 
     monkeypatch.delenv(mw.LIVE_ENV, raising=False)

@@ -1,6 +1,8 @@
 # Cathedral SN39 validator config (v4).
-# Run:  cathedral-validator serve --config config/validator.toml
-# Anything here can be overridden by an env var or a command-line flag.
+# Dry-run:  cathedral-validator serve --config config/validator.toml --once
+# Broadcast: cathedral-validator serve --config config/validator.toml --broadcast
+# Security-critical SN39 launch and journal settings cannot be weakened by
+# ambient environment variables.
 
 [network]
 name = "finney"
@@ -26,6 +28,11 @@ key_id = "cathedral-weight-policy"
 require_policy = "validated_supply_v1"
 # state_file = "~/.cathedral/thin_validator.json"   # rollback-fence persistence
 
+[runtime]
+# Shared single-flight lock and ambiguity journal for thin and FULL authority.
+# Create this absolute directory as the validator service account, mode 0700.
+root = "/var/lib/cathedral-validator"
+
 [weights]
 interval_secs = 1500
 
@@ -38,15 +45,14 @@ interval_secs = 1500
 mode = "shadow"
 # evidence_url = "https://api.cathedral.computer/v1/evidence"   # default: publisher + /v1/evidence
 # Trusted public-key pins (JSON files mapping key_id -> base64 32-byte key).
-# Create these from the published key bundle following docs/PROVENANCE.md
-# (they are NOT shipped in-repo until the launch bundle is published) and
-# pin their digests here.
+# The exact SN39 launch public-key bundle now ships in
+# config/provenance/. Pin its bytes independently:
 # registry_keys = "config/provenance/registry-keys.json"
-# registry_keys_digest = "sha256:..."
+# registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
 # report_keys = "config/provenance/report-keys.json"
-# report_keys_digest = "sha256:..."
+# report_keys_digest = "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70"
 # index_keys = "config/provenance/index-keys.json"
-# index_keys_digest = "sha256:..."
+# index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
 # The pinned Intel TDX verifier implementation digest (from the release notes):
 # verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 # The versioned reward mechanism this validator recomputes:
@@ -57,7 +63,7 @@ mechanism = "validated_supply_v1"
 # signed vector):
 # controlled_dir = "/var/lib/cathedral-controlled/epoch-latest"
 # verifier_binary = "/opt/cathedral/bin/cathedral-tdx-verifier"
-# source_revision = "<pinned commit>"
+# source_revision = "fa39af97e738fdbed5c454f976b61246590b5794"
 # burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 
 [logs]

@@ -30,6 +30,7 @@ Score composition (the recency gate lives here, not in validator code):
     top scorer. This is the explicit mode that makes attested row score
     upgrades observable in the active signed vector.
 """
+
 from __future__ import annotations
 
 import base64
@@ -46,6 +47,7 @@ from typing import Any
 
 from .store import Store
 from . import external_scores
+
 # Shared verify surface lives in the dependency-light module so a validator
 # install doesn't drag in FastAPI/store; re-exported here for the orchestrator's
 # callers and the gates (one import surface).
@@ -58,7 +60,7 @@ from ..wire_vector import (  # noqa: F401
 )
 
 # Env knobs — SAME names as the live publisher (config carries over).
-SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"   # falls back to app key
+SIGNING_KEY_ENV = "CATHEDRAL_WEIGHT_POLICY_SIGNING_KEY"  # falls back to app key
 KEY_ID_ENV = "CATHEDRAL_WEIGHT_POLICY_KEY_ID"
 NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
 NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
@@ -69,7 +71,7 @@ VALID_FOR_ENV = "CATHEDRAL_WEIGHT_POLICY_VALID_FOR_SECS"
 VALIDATED_SUPPLY_ENABLED_ENV = "CATHEDRAL_VALIDATED_SUPPLY_ENABLED"
 # v4-only composition knobs.
 WINDOW_HOURS_ENV = "CATHEDRAL_WEIGHTS_WINDOW_HOURS"
-MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"                       # flat_recent | proportional | row_score_recent
+MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"  # flat_recent | proportional | row_score_recent
 ROW_SCORE_TASK_TYPES_ENV = "CATHEDRAL_WEIGHTS_ROW_SCORE_TASK_TYPES"
 # Difficulty-weighted scoring. CATHEDRAL_WEIGHTS_TIER_WEIGHTS accepts JSON
 # {"1":1,"2":3,"3":8} or comma form "1=1,2=3,3=8". If unset, preserve the
@@ -150,7 +152,8 @@ _bg_generation = 0
 # (direct call) — used by tests. Default 90s is well above a normal 5-30s build
 # and far below the multi-minute freeze we are guarding against.
 _REFRESH_TIMEOUT_SECS = float(
-    os.environ.get("CATHEDRAL_WEIGHTS_REFRESH_TIMEOUT_SECS", "90") or "90")
+    os.environ.get("CATHEDRAL_WEIGHTS_REFRESH_TIMEOUT_SECS", "90") or "90"
+)
 # At most one in-flight refresh attempt at a time, so sustained hangs cannot leak
 # an unbounded number of threads/DB connections (one attempt per 60s tick).
 _refresh_attempt_lock = threading.Lock()
@@ -170,9 +173,23 @@ class _RefreshTimeout(Exception):
     """Raised when a single background refresh exceeds _REFRESH_TIMEOUT_SECS."""
 
 
-def _cache_write(vec: dict[str, Any]) -> None:
+class VectorNotReady(RuntimeError):
+    """No signed vector exists yet and another publisher owns the build lock."""
+
+
+def _cache_write(vec: dict[str, Any]) -> bool:
+    """Adopt only a non-regressing signed vector in this process."""
+    incoming_version = int(vec.get("policy_version") or 0)
     with _build_lock:
+        current = _vector_cache.get("v")
+        if current is not None:
+            current_version = int(current[1].get("policy_version") or 0)
+            if incoming_version < current_version:
+                return False
+            if incoming_version == current_version and current[1] != vec:
+                return False
         _vector_cache["v"] = (time.time(), vec)
+    return True
 
 
 def _vector_scope() -> tuple[str, int]:
@@ -217,7 +234,8 @@ def _load_persisted_vector(store: Store) -> dict[str, Any] | None:
     return json.loads(rows[0]["vector_json"])
 
 
-def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
+def _persist_vector(store: Store, vec: dict[str, Any]) -> dict[str, Any]:
+    """Persist monotonically and return the vector that won the durable race."""
     generated_at = str(vec.get("generated_at") or "")
     policy_version = int(vec.get("policy_version") or 0)
     payload = json.dumps(vec, sort_keys=True, separators=(",", ":"))
@@ -227,13 +245,26 @@ def _persist_vector(store: Store, vec: dict[str, Any]) -> None:
 
     def _write(conn):
         conn.execute(
-            "INSERT OR REPLACE INTO signed_weight_vectors"
+            "INSERT INTO signed_weight_vectors"
             "(id, generated_at_iso, policy_version, vector_json, updated_at_iso) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "generated_at_iso=excluded.generated_at_iso, "
+            "policy_version=excluded.policy_version, "
+            "vector_json=excluded.vector_json, "
+            "updated_at_iso=excluded.updated_at_iso "
+            "WHERE excluded.policy_version > signed_weight_vectors.policy_version",
             (_persisted_vector_id(), generated_at, policy_version, payload, updated_at),
         )
+        row = conn.execute(
+            "SELECT vector_json FROM signed_weight_vectors WHERE id = ?",
+            (_persisted_vector_id(),),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("signed vector persistence returned no winning row")
+        return json.loads(row[0])
 
-    store.write(_write)
+    return store.write(_write)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -256,7 +287,11 @@ def window_hours() -> float:
 
 def mode() -> str:
     m = os.environ.get(MODE_ENV, "proportional").strip().lower()
-    return m if m in ("flat_recent", "proportional", "row_score_recent") else "proportional"
+    return (
+        m
+        if m in ("flat_recent", "proportional", "row_score_recent")
+        else "proportional"
+    )
 
 
 def row_score_task_types() -> set[str]:
@@ -264,11 +299,7 @@ def row_score_task_types() -> set[str]:
         ROW_SCORE_TASK_TYPES_ENV,
         "synthetic_boolean_v1,solver_attestation_v1,audit_replay_v1,audit_arena_v1",
     )
-    return {
-        item.strip()
-        for item in raw.replace(";", ",").split(",")
-        if item.strip()
-    }
+    return {item.strip() for item in raw.replace(";", ",").split(",") if item.strip()}
 
 
 def burn_percentage() -> float:
@@ -286,7 +317,7 @@ def burn_hotkey() -> str | None:
 
 
 def validated_supply_metadata() -> dict[str, Any] | None:
-    """Return the launch-locked 90/10 policy or fail closed on drift."""
+    """Return the launch-locked TDX-plus-burn policy or fail closed on drift."""
     if not _env_bool(VALIDATED_SUPPLY_ENABLED_ENV, False):
         return None
     if external_scores_mode() != "confidential_primary":
@@ -299,10 +330,9 @@ def validated_supply_metadata() -> dict[str, Any] | None:
     if not math.isclose(burn_percentage(), 10.0, rel_tol=0.0, abs_tol=1e-12):
         raise VectorError("validated_supply requires exactly 10% forced burn")
     return {
-        "contract_version": "v1",
+        "contract_version": "v2",
         "intel_tdx_allocation": 0.90,
-        "verified_gpu_allocation": 0.10,
-        "verified_gpu_admitted": False,
+        "fixed_burn_allocation": 0.10,
         "burn_hotkey": destination,
     }
 
@@ -311,11 +341,15 @@ def _ms_iso(dt: datetime) -> str:
     """ISO-8601 UTC, ms precision, trailing Z — the live vector convention."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    s = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+    s = (
+        dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.")
+        + f"{dt.microsecond // 1000:03d}"
+    )
     return s + "Z"
 
 
 # -- score composition --------------------------------------------------------
+
 
 def tier_from_challenge_id(cid: str) -> int:
     """Parse lane ids whose second token is t{N}, for example sat-t2-*.
@@ -433,7 +467,11 @@ def coldkey_collapse_enabled() -> bool:
     """Opt-in Sybil hardening. OFF by default so this is byte-identical to today
     until an operator flips it AND a hotkey->coldkey map is supplied."""
     return os.environ.get("CATHEDRAL_WEIGHTS_COLDKEY_COLLAPSE", "").strip().lower() in {
-        "1", "true", "yes", "on"}
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def perminer_require_coldkey() -> bool:
@@ -452,11 +490,13 @@ def _perminer_scoring_enabled() -> bool:
     """
     from . import launch_profile
     from . import per_miner as pm
+
     return pm.perminer_enabled() or launch_profile.converged()
 
 
 def _perminer_scoring_shadow() -> bool:
     from . import per_miner as pm
+
     return pm.perminer_shadow()
 
 
@@ -619,7 +659,9 @@ def _perminer_compose_scores(
     """
     if not _perminer_scoring_enabled():
         return None  # flag off: zero change
-    since = since or _ms_iso(datetime.now(timezone.utc) - timedelta(hours=window_hours()))
+    since = since or _ms_iso(
+        datetime.now(timezone.utc) - timedelta(hours=window_hours())
+    )
     try:
         scores = _perminer_window_scores(store, since=since, ident=ident)
     except Exception:
@@ -629,7 +671,9 @@ def _perminer_compose_scores(
         return None
     if _perminer_scoring_shadow():
         # Shadow: log the vector for comparison but don't serve it.
-        print(f"[per_miner] shadow_vector window_hours={window_hours()} scores={scores}")
+        print(
+            f"[per_miner] shadow_vector window_hours={window_hours()} scores={scores}"
+        )
         return None  # fall through to live scoring
     if scores:
         return scores
@@ -653,8 +697,7 @@ def _apply_perminer_primary(
         if total <= 0.0:
             return {}
         return {
-            hk: budget * max(0.0, float(score)) / total
-            for hk, score in scores.items()
+            hk: budget * max(0.0, float(score)) / total for hk, score in scores.items()
         }
 
     combined: dict[str, float] = {}
@@ -687,9 +730,12 @@ def _apply_perminer_bonus(
         history_floor = perminer_history_floor()
         for hk, score in pm_scores.items():
             history = 1.0 if top_base <= 0.0 else combined.get(hk, 0.0) / top_base
-            history_mult = history_floor + (1.0 - history_floor) * max(0.0, min(1.0, history))
+            history_mult = history_floor + (1.0 - history_floor) * max(
+                0.0, min(1.0, history)
+            )
             combined[hk] = combined.get(hk, 0.0) + bonus * float(score) * history_mult
     else:
+
         def mapped(hk: str) -> str:
             return coldkey_of.get(hk, hk)  # type: ignore[union-attr]
 
@@ -711,7 +757,9 @@ def _apply_perminer_bonus(
             if not hks:
                 continue
             recent = 1.0 if top_history <= 0.0 else history.get(idk, 0.0) / top_history
-            history_mult = history_floor + (1.0 - history_floor) * max(0.0, min(1.0, recent))
+            history_mult = history_floor + (1.0 - history_floor) * max(
+                0.0, min(1.0, recent)
+            )
             per_hotkey_bonus = (bonus * score * history_mult) / len(hks)
             for hk in hks:
                 combined[hk] = combined.get(hk, 0.0) + per_hotkey_bonus
@@ -758,7 +806,9 @@ def scoring_identity_for_hotkey(
     if not coldkey_collapse_enabled() and not require_mapped:
         return hotkey
     try:
-        rows = store.query("SELECT coldkey FROM coldkey_map WHERE hotkey=? LIMIT 1", (hotkey,))
+        rows = store.query(
+            "SELECT coldkey FROM coldkey_map WHERE hotkey=? LIMIT 1", (hotkey,)
+        )
     except Exception:
         return None if require_mapped else hotkey
     if not rows:
@@ -802,7 +852,8 @@ def _compose_row_score_recent(
     rows = store.query(
         "SELECT miner_hotkey, task_type, row_json FROM eval_runs "
         "WHERE ran_at > ? AND attested=1",
-        (since,))
+        (since,),
+    )
     totals: dict[str, float] = {}
     hks: dict[str, set[str]] = {}
     for r in rows:
@@ -833,7 +884,9 @@ def external_scores_enabled() -> bool:
 
 
 def external_scores_source() -> str:
-    raw = (os.environ.get(EXTERNAL_SCORES_SOURCE_ENV, "violet_audio") or "violet_audio").strip()
+    raw = (
+        os.environ.get(EXTERNAL_SCORES_SOURCE_ENV, "violet_audio") or "violet_audio"
+    ).strip()
     return raw or "violet_audio"
 
 
@@ -867,7 +920,8 @@ def external_scores_mode() -> str:
     # silently resolving to blend.
     raise VectorError(
         f"unknown {EXTERNAL_SCORES_MODE_ENV}={raw!r}; expected one of "
-        "blend, external_primary, confidential_primary")
+        "blend, external_primary, confidential_primary"
+    )
 
 
 def external_scores_window_secs() -> float:
@@ -904,9 +958,12 @@ def _identity_collapse_scores(
             if strict_unit_interval:
                 raise VectorError(f"confidential score for {hk!r} is not numeric")
             continue
-        if strict_unit_interval and (not math.isfinite(score) or not 0.0 <= score <= 1.0):
+        if strict_unit_interval and (
+            not math.isfinite(score) or not 0.0 <= score <= 1.0
+        ):
             raise VectorError(
-                f"confidential score for {hk!r} must be finite and in [0, 1]: {score!r}")
+                f"confidential score for {hk!r} must be finite and in [0, 1]: {score!r}"
+            )
         if not math.isfinite(score) or score <= 0.0:
             continue
         idk = str(ident(str(hk)))
@@ -957,7 +1014,8 @@ def _compose_external_scores(
     return _identity_collapse_scores(
         raw,
         ident=ident,
-        strict_unit_interval=external_scores_source() in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES,
+        strict_unit_interval=external_scores_source()
+        in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES,
     )
 
 
@@ -972,8 +1030,8 @@ def _confidential_tdx_fraction() -> float | None:
         raise VectorError(f"confidential_tdx fraction is not numeric: {raw!r}") from exc
     if not math.isfinite(fraction) or not 0.0 < fraction <= CONFIDENTIAL_TDX_HARD_CAP:
         raise VectorError(
-            "confidential_tdx fraction must be finite and in (0, 0.10]: "
-            f"{fraction!r}")
+            f"confidential_tdx fraction must be finite and in (0, 0.10]: {fraction!r}"
+        )
     return fraction
 
 
@@ -1021,10 +1079,8 @@ def _apply_confidential_tdx_global_cap(
     for hk in sorted(set(base_norm) | set(ext_norm)):
         a_i = (1.0 - fraction) * base_norm.get(hk, 0.0)
         c_i = fraction * ext_norm.get(hk, 0.0)
-        if (not math.isfinite(a_i) or a_i < 0.0 or
-                not math.isfinite(c_i) or c_i < 0.0):
-            raise VectorError(
-                f"{hk}: invalid component a_i={a_i!r}, c_i={c_i!r}")
+        if not math.isfinite(a_i) or a_i < 0.0 or not math.isfinite(c_i) or c_i < 0.0:
+            raise VectorError(f"{hk}: invalid component a_i={a_i!r}, c_i={c_i!r}")
 
         w_i = a_i + c_i
         if w_i > 0.0:
@@ -1033,7 +1089,8 @@ def _apply_confidential_tdx_global_cap(
         ext_comp[hk] = c_i
 
     totals = _validate_confidential_tdx_components(
-        blended, base_comp, ext_comp, fraction, context="blend")
+        blended, base_comp, ext_comp, fraction, context="blend"
+    )
 
     cap_meta: dict[str, Any] = {
         "configured_cap": CONFIDENTIAL_TDX_HARD_CAP,
@@ -1083,7 +1140,9 @@ def _validate_confidential_tdx_components(
                 if not math.isfinite(value) or value < 0.0:
                     raise VectorError(f"{context}: {hk} has invalid {label} component")
                 if value != 0.0:
-                    raise VectorError(f"{context}: {hk} attribution has no signed weight")
+                    raise VectorError(
+                        f"{context}: {hk} attribution has no signed weight"
+                    )
             continue
         if hk not in base_comp or hk not in ext_comp:
             raise VectorError(f"{context}: {hk} missing signed attribution component")
@@ -1098,7 +1157,8 @@ def _validate_confidential_tdx_components(
         component_sum = a_i + c_i
         if not _machine_precision_equal(weight, component_sum):
             raise VectorError(
-                f"{context}: {hk} weight {weight!r} != components {component_sum!r}")
+                f"{context}: {hk} weight {weight!r} != components {component_sum!r}"
+            )
         base_mass = math.fsum((base_mass, a_i))
         ext_mass = math.fsum((ext_mass, c_i))
 
@@ -1109,10 +1169,12 @@ def _validate_confidential_tdx_components(
     score_mass = math.fsum(float(value) for value in scores.values())
     if not math.isclose(score_mass, total_mass, rel_tol=0.0, abs_tol=1e-12):
         raise VectorError(
-            f"{context}: score mass {score_mass!r} != component mass {total_mass!r}")
+            f"{context}: score mass {score_mass!r} != component mass {total_mass!r}"
+        )
     if total_mass > 0.0 and abs(external_fraction - fraction) > 1e-12:
         raise VectorError(
-            f"{context}: confidential aggregate {external_fraction!r} != {fraction!r}")
+            f"{context}: confidential aggregate {external_fraction!r} != {fraction!r}"
+        )
     return {
         "base_mass": base_mass,
         "external_mass": ext_mass,
@@ -1181,8 +1243,10 @@ def _apply_confidential_primary(
 
     def _degrade(reason: str) -> tuple[dict[str, float], dict[str, Any]]:
         cp_meta["degradation_reason"] = reason
-        print(f"[weights] confidential_primary degraded: {reason} "
-              "-> empty vector (signed burn fallback)")
+        print(
+            f"[weights] confidential_primary degraded: {reason} "
+            "-> empty vector (signed burn fallback)"
+        )
         return {}, blend_meta
 
     # Source validity is fail-closed here, NOT in external_scores_mode(): an
@@ -1298,26 +1362,31 @@ def _apply_external_scores(
 
     # Confidential TDX must always have a fresh metagraph snapshot before any
     # external mass is admitted, regardless of the legacy registration flag.
-    require_registered = (
-        src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES
-        or _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True)
+    require_registered = src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES or _env_bool(
+        EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True
     )
     if ext and require_registered:
         registered, _meta = _load_fresh_metagraph_hotkeys(store, now=now)
         if registered is None:
-            print("[weights] external_scores: registration snapshot unavailable "
-                  "-> NOT blending external scores (fail-closed)")
+            print(
+                "[weights] external_scores: registration snapshot unavailable "
+                "-> NOT blending external scores (fail-closed)"
+            )
             ext = {}
             if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
-                blend_meta["degraded"] = "confidential_registration_snapshot_unavailable"
+                blend_meta["degraded"] = (
+                    "confidential_registration_snapshot_unavailable"
+                )
         else:
             ext = {hk: v for hk, v in ext.items() if hk in registered}
 
     # external_primary mode: still require explicit ack.
     if ext and external_scores_mode() == "external_primary":
         if not _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False):
-            print("[weights] external_scores: external_primary requested WITHOUT "
-                  f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend")
+            print(
+                "[weights] external_scores: external_primary requested WITHOUT "
+                f"{EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV}=true -> falling back to capped blend"
+            )
 
     # (#4) Payability/eligibility filtering MUST happen to each mechanism
     # BEFORE it is L1-normalized and allocated, not after the blend. If a
@@ -1379,7 +1448,8 @@ def _apply_external_scores(
     # Confidential TDX uses a global union composition with auditable row parts.
     if src in EXTERNAL_SCORES_GLOBAL_CAP_SOURCES:
         blended, base_comp, ext_comp, cap_meta = _apply_confidential_tdx_global_cap(
-            base_norm, ext_norm, fraction)
+            base_norm, ext_norm, fraction
+        )
         realized_base = cap_meta["actual_base_mass"]
         realized_ext = cap_meta["actual_external_mass"]
         blend_meta["blended"] = True
@@ -1402,7 +1472,9 @@ def _apply_external_scores(
     hotkeys = set(base_norm) | set(ext_norm)
     blended: dict[str, float] = {}
     for hk in hotkeys:
-        blended[hk] = base_coeff * base_norm.get(hk, 0.0) + ext_coeff * ext_norm.get(hk, 0.0)
+        blended[hk] = base_coeff * base_norm.get(hk, 0.0) + ext_coeff * ext_norm.get(
+            hk, 0.0
+        )
 
     blend_meta["blended"] = True
     blend_meta["base_mass"] = round(base_coeff, 9)
@@ -1431,7 +1503,9 @@ def _external_scores_policy_status(
         "window_secs": window_secs,
         "base_weight": max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0)),
         "external_weight": max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0)),
-        "effective_external_share": 1.0 if external_scores_mode() == "confidential_primary" else round(_external_blend_weights()[2], 6),
+        "effective_external_share": 1.0
+        if external_scores_mode() == "confidential_primary"
+        else round(_external_blend_weights()[2], 6),
         "require_registered": _env_bool(EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV, True),
         "primary_confirmed": _env_bool(EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV, False),
         "has_scores": False,
@@ -1498,8 +1572,9 @@ def _perminer_policy_status(
         def mapped_identity(hk: str) -> str:
             return coldkey_of.get(hk, hk) if coldkey_of else hk
 
-        has_scores = bool(_perminer_window_scores(
-            store, since=since, ident=mapped_identity))
+        has_scores = bool(
+            _perminer_window_scores(store, since=since, ident=mapped_identity)
+        )
         try:
             rows = store.query(
                 "SELECT DISTINCT miner_hotkey FROM per_miner_solves "
@@ -1507,7 +1582,8 @@ def _perminer_policy_status(
                 (since,),
             )
             unmapped_hotkeys_24h = sum(
-                1 for r in rows
+                1
+                for r in rows
                 if not coldkey_of or str(r["miner_hotkey"]) not in coldkey_of
             )
         except Exception:
@@ -1526,7 +1602,12 @@ def _perminer_policy_status(
         and has_scores
         and identity_ready
     )
-    primary_live = live_requested and scoring_mode == "pm_primary" and has_scores and identity_ready
+    primary_live = (
+        live_requested
+        and scoring_mode == "pm_primary"
+        and has_scores
+        and identity_ready
+    )
     return {
         "perminer_enabled": enabled,
         "perminer_shadow": shadow,
@@ -1535,8 +1616,11 @@ def _perminer_policy_status(
         "perminer_primary_live": primary_live,
         "perminer_epoch": epoch,
         "perminer_has_scores": has_scores,
-        "score_source": "per_miner" if live_requested and has_scores
-        and scoring_mode == "assigned_only" else "pm_primary" if primary_live else None,
+        "score_source": "per_miner"
+        if live_requested and has_scores and scoring_mode == "assigned_only"
+        else "pm_primary"
+        if primary_live
+        else None,
         "scoring_mode": scoring_mode,
         "bonus_multiplier": perminer_bonus_multiplier(),
         "history_floor": perminer_history_floor(),
@@ -1544,8 +1628,7 @@ def _perminer_policy_status(
         "coldkey_required": perminer_require_coldkey(),
         "identity_ready": identity_ready,
         "identity_mode": (
-            "coldkey_map_with_hotkey_fallback"
-            if coldkey_loaded else "hotkey_fallback"
+            "coldkey_map_with_hotkey_fallback" if coldkey_loaded else "hotkey_fallback"
         ),
         "unmapped_hotkeys_24h": unmapped_hotkeys_24h,
         "degraded_reason": degraded_reason,
@@ -1621,19 +1704,23 @@ def explain_miner_score(
             )
             raw_units = sum(float(r["units"] or 0.0) for r in rows)
             top_units = max((float(r["units"] or 0.0) for r in top_rows), default=0.0)
-            base.update({
-                "raw_units": round(raw_units, 6),
-                "top_units": round(top_units, 6),
-                "distinct_challenges": int(sum(int(r["solves"] or 0) for r in rows)),
-                "tiers": [
-                    {
-                        "tier": int(r["tier"]),
-                        "solves": int(r["solves"] or 0),
-                        "weighted_units": round(float(r["units"] or 0.0), 6),
-                    }
-                    for r in rows
-                ],
-            })
+            base.update(
+                {
+                    "raw_units": round(raw_units, 6),
+                    "top_units": round(top_units, 6),
+                    "distinct_challenges": int(
+                        sum(int(r["solves"] or 0) for r in rows)
+                    ),
+                    "tiers": [
+                        {
+                            "tier": int(r["tier"]),
+                            "solves": int(r["solves"] or 0),
+                            "weighted_units": round(float(r["units"] or 0.0), 6),
+                        }
+                        for r in rows
+                    ],
+                }
+            )
             return base
         except Exception as exc:
             base["explain_error"] = f"per_miner_explain_failed:{type(exc).__name__}"
@@ -1672,9 +1759,7 @@ def explain_miner_score(
                     params.extend([int(tier), float(weight)])
                 default_weight = float(weights_by_tier.get(1, 1.0))
                 case_sql = (
-                    "CASE COALESCE(c.tier, 1) "
-                    + " ".join(case_parts)
-                    + " ELSE ? END"
+                    "CASE COALESCE(c.tier, 1) " + " ".join(case_parts) + " ELSE ? END"
                 )
                 params.extend([default_weight, since])
                 top_rows = store.query(
@@ -1695,22 +1780,26 @@ def explain_miner_score(
             except Exception as exc:
                 base["top_units_error"] = f"{type(exc).__name__}"
         normalized_weight = raw_units / top_units if top_units > 0 else 0.0
-        base.update({
-            "normalized_weight": round(normalized_weight, 6),
-            "top_weight": 1.0 if top_units > 0 else 0.0,
-            "raw_units": round(raw_units, 6),
-            "top_units": round(top_units, 6),
-            "distinct_challenges": len(own["seen"]),
-            "tiers": [
-                {
-                    "tier": tier,
-                    "solves": int(v["solves"]),
-                    "weighted_units": round(float(v["units"]), 6),
-                    "score_weight": float(weights_by_tier.get(tier, weights_by_tier.get(1, 1.0))),
-                }
-                for tier, v in sorted(own["tiers"].items())
-            ],
-        })
+        base.update(
+            {
+                "normalized_weight": round(normalized_weight, 6),
+                "top_weight": 1.0 if top_units > 0 else 0.0,
+                "raw_units": round(raw_units, 6),
+                "top_units": round(top_units, 6),
+                "distinct_challenges": len(own["seen"]),
+                "tiers": [
+                    {
+                        "tier": tier,
+                        "solves": int(v["solves"]),
+                        "weighted_units": round(float(v["units"]), 6),
+                        "score_weight": float(
+                            weights_by_tier.get(tier, weights_by_tier.get(1, 1.0))
+                        ),
+                    }
+                    for tier, v in sorted(own["tiers"].items())
+                ],
+            }
+        )
         return base
 
     if effective == "row_score_recent":
@@ -1729,12 +1818,14 @@ def explain_miner_score(
                 continue
             accepted += 1
             total += score
-        base.update({
-            "raw_units": round(total, 6),
-            "accepted_rows": accepted,
-            "distinct_challenges": accepted,
-            "tiers": [],
-        })
+        base.update(
+            {
+                "raw_units": round(total, 6),
+                "accepted_rows": accepted,
+                "distinct_challenges": accepted,
+                "tiers": [],
+            }
+        )
         return base
 
     feed = store.query(
@@ -1742,12 +1833,14 @@ def explain_miner_score(
         (since, hotkey),
     )
     accepted = int(feed[0]["n"] or 0) if feed else 0
-    base.update({
-        "raw_units": 1.0 if accepted else 0.0,
-        "accepted_rows": accepted,
-        "distinct_challenges": accepted,
-        "tiers": [],
-    })
+    base.update(
+        {
+            "raw_units": 1.0 if accepted else 0.0,
+            "accepted_rows": accepted,
+            "distinct_challenges": accepted,
+            "tiers": [],
+        }
+    )
     return base
 
 
@@ -1802,7 +1895,9 @@ def _compose_proportional_hotkey_sql(store: Store, since: str) -> dict[str, floa
 
 
 def compose_scores(
-    store: Store, *, now: datetime | None = None,
+    store: Store,
+    *,
+    now: datetime | None = None,
     coldkey_of: dict[str, str] | None = None,
     blend_meta_out: dict[str, Any] | None = None,
 ) -> dict[str, float]:
@@ -1880,12 +1975,13 @@ def compose_scores(
             "FROM lane_challenge_solves s "
             "LEFT JOIN lane_challenges c ON c.challenge_id = s.challenge_id "
             "WHERE s.solved_at_iso > ? AND COALESCE(c.score_multiplier, 1.0) > 0",
-            (since,))
+            (since,),
+        )
         # identity -> weighted score (sum of per-challenge tier weights, deduped)
         scores_w: dict[str, float] = {}
         # identity -> set of distinct challenge_ids (for dedup)
         seen: dict[str, set] = {}
-        hks: dict[str, set] = {}     # identity -> set of its solving hotkeys
+        hks: dict[str, set] = {}  # identity -> set of its solving hotkeys
         weights_by_tier = tier_weights()
         for r in rows:
             hk = str(r["miner_hotkey"])
@@ -1908,7 +2004,8 @@ def compose_scores(
         # no in-window claim rows -> fall through to flat
 
     feed = store.query(
-        "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,))
+        "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,)
+    )
     hotkeys = {str(r["miner_hotkey"]) for r in feed}
     if not use_ck:
         return finish_base({hk: 1.0 for hk in hotkeys})
@@ -1926,6 +2023,7 @@ def compose_scores(
 
 # -- monotonic policy_version (validator rollback fence) -----------------------
 
+
 def next_policy_version(store: Store) -> int:
     """Monotonic AND continuous with the live orchestrator: the deployed
     validators' rollback fences hold the live emitter's epoch-ms versions
@@ -1941,15 +2039,20 @@ def next_policy_version(store: Store) -> int:
         nxt = max((int(row[0]) if row else 0) + 1, now_ms)
         conn.execute(
             "INSERT OR REPLACE INTO weight_policy_state(id, last_policy_version, updated_at_iso) "
-            "VALUES (1, ?, ?)", (nxt, _ms_iso(datetime.now(timezone.utc))))
+            "VALUES (1, ?, ?)",
+            (nxt, _ms_iso(datetime.now(timezone.utc))),
+        )
         return nxt
+
     return store.write(_bump)
 
 
 # -- sign -----------------------------------------------------------------------
 
-def build_signed_vector(store: Store, *, signing_key_hex: str,
-                        now: datetime | None = None) -> dict[str, Any]:
+
+def build_signed_vector(
+    store: Store, *, signing_key_hex: str, now: datetime | None = None
+) -> dict[str, Any]:
     """Compose scores, assemble the wire payload, sign. Returns the dict
     served verbatim by /v1/validator/weights/next.
 
@@ -1963,7 +2066,9 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
     coldkey_of = _load_scoring_coldkey_map(store)
     since = _ms_iso(now - timedelta(hours=window_hours()))
     blend_meta: dict[str, Any] = {}
-    scores = compose_scores(store, now=now, coldkey_of=coldkey_of, blend_meta_out=blend_meta)
+    scores = compose_scores(
+        store, now=now, coldkey_of=coldkey_of, blend_meta_out=blend_meta
+    )
     scores, payable_meta = _apply_payable_hotkey_policy(store, scores, now=now)
     cap_meta = blend_meta.get("confidential_tdx_cap")
     if cap_meta:
@@ -1980,17 +2085,22 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             float(blend_meta["fraction"]),
             context="post-payable-filter",
         )
-        cap_meta.update({
-            "actual_base_mass": totals["base_mass"],
-            "actual_external_mass": totals["external_mass"],
-            "realized_external_fraction": totals["external_fraction"],
-        })
+        cap_meta.update(
+            {
+                "actual_base_mass": totals["base_mass"],
+                "actual_external_mass": totals["external_mass"],
+                "realized_external_fraction": totals["external_fraction"],
+            }
+        )
         blend_meta["base_miner_count"] = len(filtered_base)
         blend_meta["external_miner_count"] = sum(
-            1 for value in filtered_ext.values() if value > 0.0)
+            1 for value in filtered_ext.values() if value > 0.0
+        )
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
-    proportional_ledger_empty = requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
+    proportional_ledger_empty = (
+        requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
+    )
     pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
     external_status = _external_scores_policy_status(store, now=now)
     score_source = pm_status["score_source"] or effective_mode
@@ -1998,19 +2108,26 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         score_source = f"confidential_primary:{external_scores_source()}"
     elif external_status.get("enabled") and external_status.get("has_scores"):
         ext_source = f"external:{external_status.get('source')}"
-        score_source = ext_source if external_scores_mode() == "external_primary" else f"{score_source}+{ext_source}"
+        score_source = (
+            ext_source
+            if external_scores_mode() == "external_primary"
+            else f"{score_source}+{ext_source}"
+        )
     valid_for = _env_float(VALID_FOR_ENV, 1800.0)
     policy_inputs = {
-        "mode": requested_mode, "effective_mode": effective_mode,
+        "mode": requested_mode,
+        "effective_mode": effective_mode,
         "score_source": score_source,
         "external_scores": external_status,
         "window_hours": window_hours(),
-        "burn": burn_percentage(), "burn_uid": burn_uid(),
+        "burn": burn_percentage(),
+        "burn_uid": burn_uid(),
         "burn_hotkey": burn_hotkey(),
         "validated_supply": supply_policy,
         "tier_weights": tier_weights(),
         "payable_hotkeys": payable_meta,
-        "hotkeys": sorted(scores), "scores": [scores[k] for k in sorted(scores)],
+        "hotkeys": sorted(scores),
+        "scores": [scores[k] for k in sorted(scores)],
     }
     burn_snapshot = {
         "burn_uid": burn_uid(),
@@ -2027,7 +2144,8 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
         "generated_at": _ms_iso(now),
         "expires_at": _ms_iso(now + timedelta(seconds=valid_for)),
         "burn_snapshot": burn_snapshot,
-        "policy_hash": "sha256:" + hashlib.sha256(
+        "policy_hash": "sha256:"
+        + hashlib.sha256(
             json.dumps(policy_inputs, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
         "key_id": os.environ.get(KEY_ID_ENV, "cathedral-weight-policy"),
@@ -2044,8 +2162,7 @@ def build_signed_vector(store: Store, *, signing_key_hex: str,
             "payable_hotkeys": payable_meta,
             "external_scores": external_status,
             "blend": {
-                k: v for k, v in blend_meta.items()
-                if not k.startswith("_internal")
+                k: v for k, v in blend_meta.items() if not k.startswith("_internal")
             },
             "confidential_tdx_cap": blend_meta.get("confidential_tdx_cap"),
             "perminer_scoring_mode": pm_status["scoring_mode"],
@@ -2099,8 +2216,9 @@ def _build_weights_list(
     ext_comp: dict[str, float] = blend_meta.get("_internal_ext_components") or {}
     capped = bool(blend_meta.get("confidential_tdx_cap"))
     cp_meta = blend_meta.get("confidential_primary")
-    confidential_primary = bool(cp_meta) and float(
-        cp_meta.get("confidential_mass") or 0.0) > 0.0
+    confidential_primary = (
+        bool(cp_meta) and float(cp_meta.get("confidential_mass") or 0.0) > 0.0
+    )
     if capped:
         _validate_confidential_tdx_components(
             scores,
@@ -2178,8 +2296,7 @@ def _refresh_once_with_timeout(
         except BaseException as exc:  # surfaced to the loop's handler below
             box["err"] = exc
 
-    t = threading.Thread(
-        target=_run, name="weights-refresh-attempt", daemon=True)
+    t = threading.Thread(target=_run, name="weights-refresh-attempt", daemon=True)
     with _refresh_attempt_lock:
         _refresh_attempt = t
     t.start()
@@ -2221,9 +2338,7 @@ def _try_adopt_persisted(store: Store, generation: int, timeout: float = 10.0) -
         _cache_write(vec)
 
 
-def _run_refresh_cycle(
-    store: Store, signing_key_hex: str, generation: int
-) -> str:
+def _run_refresh_cycle(store: Store, signing_key_hex: str, generation: int) -> str:
     """One refresh iteration. Never raises; returns a status string.
 
     Identical behavior to the historical loop body on the happy path (build →
@@ -2232,8 +2347,8 @@ def _run_refresh_cycle(
     try:
         if _REFRESH_TIMEOUT_SECS > 0:
             vec = _refresh_once_with_timeout(
-                store, signing_key_hex=signing_key_hex,
-                timeout=_REFRESH_TIMEOUT_SECS)
+                store, signing_key_hex=signing_key_hex, timeout=_REFRESH_TIMEOUT_SECS
+            )
         else:
             vec = _refresh_once(store, signing_key_hex=signing_key_hex)
         if vec is not None and generation == _bg_generation:
@@ -2244,7 +2359,8 @@ def _run_refresh_cycle(
         _mark_refresh("timeout", exc)
         print(
             f"[weights] bg_refresh TIMED OUT after {_REFRESH_TIMEOUT_SECS}s; "
-            "abandoning cycle, will retry next tick")
+            "abandoning cycle, will retry next tick"
+        )
         # Freshness recovery: adopt a sibling leader's persisted vector (bounded).
         _try_adopt_persisted(store, generation)
         return "timeout"
@@ -2279,8 +2395,10 @@ def _ensure_bg_started(store: Store, signing_key_hex: str) -> None:
             return
         generation = _bg_generation
         t = threading.Thread(
-            target=_bg_refresh_loop, args=(store, signing_key_hex, generation),
-            name="weights-bg-refresh", daemon=True,
+            target=_bg_refresh_loop,
+            args=(store, signing_key_hex, generation),
+            name="weights-bg-refresh",
+            daemon=True,
         )
         t.start()
         _bg_started = True
@@ -2296,8 +2414,7 @@ def _refresh_once(store: Store, *, signing_key_hex: str) -> dict[str, Any] | Non
     with store.advisory_lock(_refresh_lock_name()) as acquired:
         if acquired:
             vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
-            _persist_vector(store, vec)
-            return vec
+            return _persist_vector(store, vec)
     return _load_persisted_vector(store)
 
 
@@ -2333,14 +2450,10 @@ def current_vector(
     very first call (empty cache) waits for a build — after that every request
     returns in microseconds.
 
-    IMPORTANT: the synchronous first-build path does NOT hold _build_lock
-    during the DB query.  Holding the lock during a slow (5-30s) DB build
-    would block every concurrent request handler that tries to read the cache,
-    causing a cascading stall.  Instead we build outside the lock and acquire
-    only briefly to write the result.  If two threads both hit an empty cache
-    simultaneously, both build (at most twice at startup), and the first writer
-    wins; the second's result is discarded.  This wastes one extra build at
-    most once at startup and is far better than starving all callers.
+    The synchronous cold-build path uses the same cluster advisory lock as the
+    background refresher. If another process owns that lock and no durable
+    vector exists yet, this call fails as warming rather than starting an
+    unlocked competing build.
     """
     if not force_rebuild:
         hit = cached_vector(store, signing_key_hex=signing_key_hex)
@@ -2351,8 +2464,9 @@ def current_vector(
     # advisory lock so only one process rebuilds the vector.
     vec = _refresh_once(store, signing_key_hex=signing_key_hex)
     if vec is None:
-        vec = build_signed_vector(store, signing_key_hex=signing_key_hex)
-        _persist_vector(store, vec)
+        raise VectorNotReady(
+            "signed weight vector is warming; the cluster build lock is held"
+        )
     _cache_write(vec)
     return vec
 
