@@ -1,6 +1,6 @@
 [Unit]
 Description=Cathedral SN39 one-shot FULL-gated mainnet launch canary
-After=network-online.target
+After=network-online.target cathedral-thin-validator.service
 Wants=network-online.target
 Conflicts=cathedral-validator-sn39.service cathedral-thin-validator.service
 

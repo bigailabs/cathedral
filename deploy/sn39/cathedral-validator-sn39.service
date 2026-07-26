@@ -1,6 +1,6 @@
 [Unit]
 Description=Cathedral SN39 validated Intel TDX CPU validator
-After=network-online.target
+After=network-online.target cathedral-thin-validator.service
 Wants=network-online.target
 Conflicts=cathedral-thin-validator.service cathedral-validator-sn39-launch.service
 ConditionPathIsReadWrite=/var/lib/cathedral-validator

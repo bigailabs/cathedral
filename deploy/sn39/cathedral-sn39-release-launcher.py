@@ -35,6 +35,8 @@ CONFIGS = {
 }
 MODES = frozenset({*CONFIGS, "status", "finalize", "authorize-recurring"})
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")
+SYSTEMCTL = Path("/usr/bin/systemctl")
+LEGACY_SERVICE_UNIT = "cathedral-thin-validator.service"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 ROOT_UID = 0
@@ -156,6 +158,22 @@ def _immutable_tree_digest(root: Path) -> str:
     return "sha256:" + tree.hexdigest()
 
 
+def _require_service_interpreter(path: Path) -> None:
+    """Require an interpreter that every unprivileged service can execute."""
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise InstallError(
+            "versioned release interpreter is missing or inaccessible"
+        ) from exc
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISREG(info.st_mode) or mode & 0o005 != 0o005:
+        raise InstallError(
+            "versioned release interpreter is not readable and executable "
+            "by service accounts"
+        )
+
+
 def _require_legacy_service_masked() -> None:
     try:
         info = LEGACY_SERVICE_MASK.lstat()
@@ -172,6 +190,25 @@ def _require_legacy_service_masked() -> None:
         raise InstallError(
             "legacy cathedral-thin-validator.service is not durably masked"
         )
+
+
+def _require_legacy_service_stopped() -> None:
+    try:
+        result = subprocess.run(
+            [str(SYSTEMCTL), "is-active", LEGACY_SERVICE_UNIT],
+            cwd="/",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise InstallError(
+            "cannot verify that the legacy validator is stopped"
+        ) from exc
+    if result.stdout.strip() not in {"inactive", "failed"}:
+        raise InstallError("legacy cathedral-thin-validator.service is not stopped")
 
 
 def _digest(path: Path) -> str:
@@ -358,6 +395,7 @@ def _verify(mode: str) -> tuple[Path, Path, str]:
             "versioned venv bytes differ from the hash-locked installed manifest"
         )
     _require_legacy_service_masked()
+    _require_legacy_service_stopped()
     if _git_output(release, "rev-parse", "HEAD") != release_sha:
         raise InstallError("release checkout HEAD differs from its manifest")
     if _git_output(
@@ -375,8 +413,7 @@ def _verify(mode: str) -> tuple[Path, Path, str]:
     if config is not None and str(config) not in document["external_files"]:
         raise InstallError("selected service config is not bound by the manifest")
     python = venv / "bin/python"
-    if not python.exists() or os.access(python, os.W_OK):
-        raise InstallError("versioned release interpreter is missing or writable")
+    _require_service_interpreter(python)
     if _digest(MANIFEST) != manifest_digest:
         raise InstallError("release manifest changed during immutable-install check")
     return release, python, manifest_digest

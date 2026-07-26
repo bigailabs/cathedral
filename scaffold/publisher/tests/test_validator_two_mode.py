@@ -6570,6 +6570,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     )
     pyproject = (root / "pyproject.toml").read_text()
     assert "#sha256=" + builder.EXPECTED_CATHEDRAL_ARCHIVE_SHA256 in pyproject
+    assert "cathedral-sn39-reproduce =" not in pyproject
     inspected = {
         "installed": [
             {
@@ -6620,6 +6621,22 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     package.chmod(0o444)
 
     monkeypatch.setattr(launcher, "ROOT_UID", os.getuid())
+    with pytest.MonkeyPatch.context() as access_patch:
+        access_patch.setattr(
+            launcher.os,
+            "access",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "root-capability access checks cannot prove interpreter "
+                    "immutability"
+                )
+            ),
+        )
+        launcher._require_service_interpreter(venv / "bin/python")
+    binary.chmod(0o550)
+    with pytest.raises(launcher.InstallError, match="service accounts"):
+        launcher._require_service_interpreter(venv / "bin/python")
+    binary.chmod(0o555)
     expected = builder.immutable_tree_digest(venv)
     assert launcher._immutable_tree_digest(venv) == expected
 
@@ -6648,10 +6665,34 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     with pytest.raises(launcher.InstallError, match="durably masked"):
         launcher._require_legacy_service_masked()
 
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="inactive\n",
+            returncode=3,
+        ),
+    )
+    launcher._require_legacy_service_stopped()
+    for state in ("active", "activating", "deactivating"):
+        monkeypatch.setattr(
+            launcher.subprocess,
+            "run",
+            lambda *_args, _state=state, **_kwargs: SimpleNamespace(
+                stdout=f"{_state}\n",
+                returncode=0 if _state == "active" else 3,
+            ),
+        )
+        with pytest.raises(launcher.InstallError, match="is not stopped"):
+            launcher._require_legacy_service_stopped()
+
     continuous_unit = (
         root / "deploy/sn39/cathedral-validator-sn39.service"
     ).read_text()
     assert "Conflicts=cathedral-thin-validator.service" in continuous_unit
+    assert "After=network-online.target cathedral-thin-validator.service" in (
+        continuous_unit
+    )
     assert "Group=cathedral-validator-log" in continuous_unit
     assert "EnvironmentFile=" not in continuous_unit
     assert (
@@ -6668,6 +6709,10 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         "ExecStart=/usr/bin/python3 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release reconcile"
     ) in reconcile_unit
+    assert (
+        "After=network-online.target cathedral-validator-sn39-launch.service "
+        "cathedral-thin-validator.service"
+    ) in reconcile_unit
     launch_unit = (
         root / "deploy/sn39/cathedral-validator-sn39-launch.service"
     ).read_text()
@@ -6677,6 +6722,9 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         "ExecStart=/usr/bin/python3 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release launch"
     ) in launch_unit
+    assert "After=network-online.target cathedral-thin-validator.service" in (
+        launch_unit
+    )
     child_environment = launcher._child_environment()
     assert set(child_environment) == {
         "HOME",
