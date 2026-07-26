@@ -518,6 +518,10 @@ env -i HOME="$HOME" PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 \
   "$repro_tmp/venv/bin/python" -B scripts/run_sn39_public_reproduction.py
 ```
 
+There is deliberately no installed console entry point for this operation.
+Run the reviewed script from the pristine tagged checkout so its code,
+configuration, and Git revision are verified as one release.
+
 The environment is deliberately outside the checkout and bytecode is disabled:
 the reproducer rejects modified, untracked, **or ignored** files before using
 the repository revision. The direct runner binds imports to its own checkout
@@ -627,7 +631,12 @@ timeout 10s sudo -u cathedral-validator env -i \
 # The printed public address must equal $expected_validator_hotkey. Never copy
 # the validator coldkey, source mnemonic, password, or private bytes to this
 # host, release manifest, logs, shell history, or approval artifact.
-systemctl mask cathedral-thin-validator.service
+systemctl mask --now cathedral-thin-validator.service
+legacy_state="$(systemctl is-active cathedral-thin-validator.service || true)"
+case "$legacy_state" in
+  inactive|failed) ;;
+  *) echo "legacy validator did not stop: $legacy_state" >&2; exit 1 ;;
+esac
 systemctl daemon-reload
 
 manifest_tmp="$(mktemp /etc/cathedral/sn39-release-manifest.json.XXXXXX)"

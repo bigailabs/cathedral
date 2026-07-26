@@ -1,6 +1,6 @@
 [Unit]
 Description=Cathedral SN39 finalized launch reconciliation
-After=network-online.target cathedral-validator-sn39-launch.service
+After=network-online.target cathedral-validator-sn39-launch.service cathedral-thin-validator.service
 Wants=network-online.target
 Conflicts=cathedral-thin-validator.service cathedral-validator-sn39.service
 

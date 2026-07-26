@@ -46,7 +46,6 @@ provenance = [
 
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
-cathedral-sn39-reproduce = "scaffold.sn39_public_reproduction:main"
 cathedral-candidate-snapshot = "scaffold.snapshot_candidates:main"
 cathedral-game = "game.__main__:main"
 cathedral-arena = "game.arena.__main__:main"
