@@ -1,7 +1,16 @@
 # V2 Bitset Submit Beta — Ready for Testing
 
-Status: **ready for miner testing as preparation only**  
+> [!WARNING]
+> **Historical and currently unavailable.** The documented V2 host does not
+> currently serve this API. This file records an earlier beta contract; it is
+> not a runnable test, reward path, or migration notice.
+
+Historical status: **prepared for miner testing only; never reward-bearing**
+
 Base URL: `https://v2-beta.cathedral.computer`
+
+<details>
+<summary>Archived beta text (not current)</summary>
 
 ## Important
 
@@ -104,3 +113,5 @@ status code and response body
 ```
 
 Do not send private keys, seeds, or tokens.
+
+</details>

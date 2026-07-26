@@ -1,207 +1,288 @@
-<h2 align="center">Running a Cathedral v4 validator</h2>
+# Run a Cathedral SN39 validator
 
-<p align="center">
-  The v4 validator is <b>one loop</b>: fetch one signed score per miner from the
-  orchestrator, verify the signature, apply it. No local scoring, no rolling
-  window, no row database. ~200 lines (<code>scaffold/validator_thin.py</code>),
-  replacing the 4,600-line legacy validator.
-</p>
+Cathedral's validator turns a signed, evidence-backed compute report into a
+UID-aligned Bittensor weight decision. It supports two concurrent paths:
 
-## What it does
+- a **thin path** that verifies Cathedral's signed vector; and
+- an **independent provenance audit** that re-checks the public artifacts and,
+  when configured with controlled evidence, can recompute the vector itself.
 
-Every tick:
+> [!CAUTION]
+> `cathedral-validator serve` is **non-writing by default** in the launch
+> candidate. Only an explicit `--broadcast` permits a chain-write attempt, and
+> Finney SN39 still requires the signed release and transition gates. Until
+> Cathedral publishes the supported tag, immutable pin bundle, and launch
+> notice, use only `--offline --once` and `--dry-run --once`.
 
-```
-fetch  GET /v1/validator/weights/next        (one signed number per miner + burn)
-verify Ed25519 signature against the pinned key_id + public key
-check  network · netuid · not-expired · finite · non-negative · not a rollback
-burn   apply the signed burn share to the burn uid (the rest splits across miners)
-set    map hotkeys -> uids against your metagraph, set_weights
-```
+## Status
 
-Scoring lives entirely on the orchestrator side and is composed into the single
-number this validator applies. That means **recency, multi-challenge
-composition, burn rate, and every future scoring change happen without a
-validator release** — your job is to verify the orchestrator's signature and
-relay its number to chain. The per-solve feed (`/v1/leaderboard/recent`) remains
-public as an independently re-checkable audit trail; it is no longer the scoring
-input.
-
-## Why it replaces the legacy path
-
-The legacy validator pulled every per-solve row, copied them into a local
-database, and computed a 7-day rolling mean itself — so scoring logic was frozen
-inside a binary every operator had to upgrade in lockstep, and an idle miner kept
-earning for a week off its frozen tail. v4 deletes that machinery. The
-orchestrator signs the final number; the validator trusts the signature, not its
-own recomputation. Chain consensus is stake-weighted, so weights converge as
-validators relay the same signed vector.
-
-## Trust model — what the signature buys you
-
-| Guarantee | Mechanism |
+| Component | Current state |
 |---|---|
-| **You apply only what the pinned key signed** | Ed25519 over canonical JSON; `key_id` is pinned, so a key rotation you didn't opt into is rejected |
-| **No stale or replayed vector** | `expires_at` enforced; `policy_version` is a monotonic fence — an older version than your last-accepted is refused (fail-closed: a corrupt fence file aborts the tick rather than resetting) |
-| **No silent burn bypass** | The burn share is inside the signed payload — the orchestrator cannot route weight without it being signed |
-| **Right subnet** | `network` + `netuid` must match your chain config |
+| Signed vector, JWKS, and public evidence index | Deployed |
+| Validator thin-path checks | Implemented |
+| Concurrent shadow provenance audit | Implemented; default mode |
+| Full-provenance authority mode | Implemented; requires `FULL` evidence and every independent pin |
+| Current deployed vector vs independent verifier | `FAIL`: public v1/GPU-allocation contract does not match the v2/fixed-burn/body-binding verifier |
+| General validator launch | Pending tagged release and final acceptance |
 
-## Install
+The current public contract mismatch is a launch blocker. Shadow mode reports
+it but does not veto an otherwise valid thin vector, which is why operators
+must remain in non-writing preview modes until the supported release
+converges.
 
-Requires Python 3.11 and a registered SN39 validator wallet.
+## What happens on each tick
 
-Updating from a prior release is the **same flow as always** — `pip install`,
-`migrate`, `serve`:
+```text
+signed vector ── verify signature, scope, policy, expiry, rollback
+      │
+      ├── thin path ── map public hotkeys to fresh metagraph UIDs
+      │
+      └── provenance audit ── verify artifacts and recompute when possible
+                                      │
+                                      v
+                            PASS / FAIL / NOT_PROVEN
+      │
+      v
+local weight decision ── dry-run preview or authorized set_weights
+```
+
+The validator checks:
+
+- Ed25519 signature and pinned `key_id`;
+- `network = finney` and `netuid = 39`;
+- the required reward-policy version;
+- expiry and a durable monotonic rollback fence;
+- burn contract and complete finite, non-negative weights;
+- current hotkey-to-UID mapping immediately before a write; and
+- the configured provenance mode's acceptance requirements.
+
+A failed gate belonging to the active submission authority fails closed.
+Default shadow provenance is observational: its `FAIL` or `NOT_PROVEN` result
+does not block a thin submission whose own signed-vector gates pass.
+Registration, uptime, attestation, and self-reported work never create positive
+weight by themselves.
+
+## Provenance modes
+
+| Mode | Submission authority | Behavior |
+|---|---|---|
+| `shadow` | Thin path | Default. Independently audits evidence in the background without delaying the thin tick. |
+| `authority` | Full-provenance recomputation | Refuses unless the epoch reaches `FULL` assurance and the recomputed vector passes every gate. |
+| `off` | Thin path | Disables the independent audit. This is an explicit reduction in assurance. |
+
+`receipts_only` is reported as `NOT_PROVEN`; it is not accepted as `FULL`.
+Authority mode requires controlled raw evidence, a pinned static verifier,
+independently pinned keys and digests, an immutable source revision, and an
+independently queried historical candidate set. Read
+[the full provenance contract](docs/PROVENANCE.md) before selecting it.
+
+## Prerequisites
+
+For the default thin + shadow mode:
+
+- Linux or macOS with Python 3.11 or newer;
+- a stable network connection;
+- for metagraph-backed checks, a Bittensor-compatible Finney RPC endpoint; and
+- for any future write, a registered SN39 validator hotkey with the required
+  chain permissions.
+
+Thin mode does not need TDX or GPU hardware. Full-provenance authority
+additionally needs a Linux x86-64 host for the pinned static TDX verifier and
+access to the controlled-disclosure package for the epoch being replayed.
+
+Never place wallet seeds or private keys in TOML, environment files committed
+to Git, logs, issues, or provenance bundles.
+
+## Install a reviewed build
+
+Do not install a moving branch for chain use. When a supported release is
+published, verify the tag, commit, package digest, and release notes before
+installation.
+
+For source review and non-writing testing only:
 
 ```bash
-git clone https://github.com/cathedralai/cathedral.git   # or: git fetch && git checkout main
-pip install -e .                  # installs the `cathedral-validator` command
-cathedral-validator migrate       # no-op in v4 (no local database) — kept for parity
+git clone https://github.com/cathedralai/cathedral.git
+cd cathedral
+
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[provenance]'
+
+cp config/validator.toml my-validator.toml
 ```
+
+The project distribution is currently built from this repository; there is no
+published `cathedralsubnet` PyPI package. A copied sample config is suitable
+for review and previews only. Public launch operators must use the immutable
+release configuration and installation named by the launch notice.
 
 ## Configure
 
-Copy the sample config and fill in your wallet:
-
-```bash
-cp config/validator.toml my-validator.toml
-```
+Edit your copy, not the repository sample:
 
 ```toml
 [network]
 name = "finney"
 netuid = 39
-wallet_name = "<your-coldkey>"
-validator_hotkey = "<your-validator-hotkey>"
+wallet_name = "<your-wallet-name>"
+validator_hotkey = "<your-validator-hotkey-name>"
 
-[weight_policy]
-# the key the orchestrator signs with — verify it against the live JWKS
-public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
-```
-
-The pinned key is the whole point: the validator refuses any vector not signed
-by exactly this key (published at `https://api.cathedral.computer/.well-known/cathedral-jwks.json`
-— verify it there first).
-
-## Production SN39 operator contract
-
-The one canonical publisher is `https://api.cathedral.computer`. Before starting
-a validator, fetch its JWKS and confirm that the entry whose `kid` is
-`cathedral-weight-policy` has this pinned public key:
-
-```
-10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26
-```
-
-For the validated-supply launch policy, set:
-
-```toml
 [publisher]
 url = "https://api.cathedral.computer"
 
 [weight_policy]
-public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
 key_id = "cathedral-weight-policy"
+public_key_hex = "<independently verified key from the supported release>"
 require_policy = "validated_supply_v1"
-state_file = "~/.cathedral/thin_validator.json"
+
+[provenance]
+mode = "shadow"
+mechanism = "validated_supply_v1"
 ```
 
-Admission, registration, uptime, self-reporting, and historical receipts alone
-earn zero. Only fresh independently verified Intel TDX evidence is eligible.
-The GPU class stays on burn until separately admitted. The signed vector must
-carry the burn hotkey; each validator resolves it and every miner hotkey against
-its fresh metagraph immediately before a write.
-
-Run a single non-chain acceptance tick first:
+Create a private user-owned runtime directory, then set the state and log paths
+through environment variables:
 
 ```bash
-cathedral-validator serve --config my-validator.toml --offline --once
+install -d -m 700 "$HOME/.cathedral"
+export CATHEDRAL_VALIDATOR_STATE="$HOME/.cathedral/validator-state.json"
+export CATHEDRAL_VALIDATOR_JSONL="$HOME/.cathedral/validator-events.jsonl"
 ```
 
-Then run a metagraph-backed dry-run, still without a chain write:
+Do not accept the key merely because it appears in the same checkout or
+payload you are verifying. Compare the supported release's pin with the live
+[JWKS](https://api.cathedral.computer/.well-known/cathedral-jwks.json) through
+an independent channel.
+
+For authority mode, add every pin documented in
+[`docs/PROVENANCE.md`](docs/PROVENANCE.md). A missing pin is not inferred from
+the manifest or public evidence server.
+
+### Optional RPC endpoint
 
 ```bash
-cathedral-validator serve --config my-validator.toml --dry-run --once
+export CATHEDRAL_CHAIN_ENDPOINT="wss://your-finney-node.example:443"
 ```
 
-Only after both pass may an authorized operator start the continuous service:
+The endpoint must serve the same Finney chain and historical state required by
+the evidence anchor. Changing the RPC connection does not change the signed
+`network` label.
+
+## Non-writing acceptance
+
+Run these in order.
+
+### 1. Synthetic-map tick
+
+This fetches the signed vector and shadow evidence over HTTPS, uses a synthetic
+UID map, opens no chain connection, and cannot broadcast:
 
 ```bash
-cathedral-validator serve --config my-validator.toml --broadcast
+cathedral-validator serve \
+  --config my-validator.toml \
+  --runtime-root "$HOME/.cathedral" \
+  --offline \
+  --once
 ```
 
-The rollback fence advances only after a successful broadcast and survives a
-restart. Monitor timestamped `FEED`, `SIGNATURE`, `FRESHNESS`, `ROLLBACK`,
-`VECTOR`, `PREFLIGHT`, `MAP`, `WEIGHTS`, and `CHAIN` lifecycle events. Any
-signature, freshness, subnet, policy, rollback, receipt, or identity failure
-must leave the miner at zero and its class allocation on burn.
+Confirm:
 
-### Use your own RPC node
+- signature and policy checks pass;
+- the vector is fresh and scoped to Finney SN39;
+- burn and weights are finite and normalized;
+- the provenance result is clearly `PASS`, `FAIL`, or `NOT_PROVEN`; and
+- no wallet or chain client is initialized, and no broadcast is attempted.
 
-By default the validator connects to the public `finney` entrypoint resolved
-from the network name. To point it at a **self-hosted subtensor node** (or any
-RPC proxy), set:
+### 2. Metagraph-backed dry run
+
+This resolves hotkeys and computes the exact UID vector without writing:
 
 ```bash
-export CATHEDRAL_CHAIN_ENDPOINT="wss://my-node.example:443"
-# or, equivalently, pass it on the command line:
-python -m scaffold.validator_thin --chain-endpoint wss://my-node.example:443 ...
+cathedral-validator serve \
+  --config my-validator.toml \
+  --runtime-root "$HOME/.cathedral" \
+  --dry-run \
+  --once
 ```
 
-This redirects only the *connection*. The network **label** (`finney`) is left
-untouched, so the signed weight-vector still carries `network = "finney"` and
-passes the signed-vector check — no fork, no change to the signing path. On
-startup the validator logs the active endpoint once.
+Confirm the current metagraph, burn destination, candidate mapping, normalized
+weight sum, rollback state, and explicit “no chain writes” banner.
 
-Requirements: the endpoint must be a bittensor-compatible `ws://`/`wss://` URL on
-the **same chain** as the label (same genesis / UID set). Unset the variable to
-fall back to the public entrypoint.
+If there are no eligible miners, a burn-only outcome is expected fail-closed
+behavior—not a reason to preserve an old positive vector.
 
-## Run
+## Observe the validator
 
-**Test first** (`--dry-run` computes and prints the per-uid weights it *would*
-set, without touching the chain):
+TTY output is designed for a human operator. JSONL is the stable integration
+surface:
 
 ```bash
-cathedral-validator serve --config my-validator.toml --dry-run --once
+tail -f "$CATHEDRAL_VALIDATOR_JSONL" | jq .
 ```
 
-Confirm the accepted vector, burn share, and weights look right. **Then go
-live** (drop `--dry-run`/`--once` and explicitly permit chain writes):
+Useful lifecycle stages include `FEED`, `SIGNATURE`, `FRESHNESS`, `ROLLBACK`,
+`PROVENANCE`, `VECTOR`, `PREFLIGHT`, `MAP`, `WEIGHTS`, and `CHAIN`. Records
+include the active mode and a `PASS`, `FAIL`, `NOT_PROVEN`, or `INFO` status.
+Credential-shaped values are redacted, but logs should still be protected as
+operational data.
+
+The lane state file stores rollback fences, provenance reservations, and
+durable pending/finalized attempt records. The release-managed runtime root
+also holds the cross-mode lock and ambiguity journal used to prevent a retry
+after an uncertain submission. Keep both on durable owner-only storage; never
+delete, roll back, or replace them to clear a refused attempt. Follow the
+release runbook for recovery.
+
+## Chain-writing launch gate
+
+Do not add `--broadcast` until all of the following are true:
+
+- [ ] Cathedral has published a supported immutable tag and launch notice.
+- [ ] You verified the source/package digest and all signing-key pins.
+- [ ] Synthetic-map and metagraph-backed dry runs passed on your machine.
+- [ ] The current vector, evidence index, and provenance outcome match your
+      intended assurance level; the known public contract mismatch is resolved.
+- [ ] Your validator hotkey, permit, wallet isolation, RPC, and rollback-state
+      backup are confirmed.
+- [ ] You have explicit operator authorization for a mainnet transaction.
+- [ ] You understand that only `--broadcast` permits a chain attempt, and the
+      SN39 release and authorization state can still refuse it.
+
+Only an authorized operator should then start the continuous service:
 
 ```bash
-cathedral-validator serve --config my-validator.toml --broadcast
+# MAINNET WRITE: calls set_weights when all gates pass.
+cathedral-validator serve \
+  --config <immutable-release-config> \
+  --broadcast
 ```
 
-That's it — same `serve` command and systemd unit you already run. The rollback
-fence persists in the state file, so a restart cannot apply an older vector than
-the last one you accepted.
+Stop the service on any unexpected key, policy, candidate, provenance, burn,
+rollback, or chain result. Do not “fix” a failed gate by disabling it during a
+live launch.
 
-| Flag | Default | Purpose |
-|---|---|---|
-| `--config` | — | TOML config (network, wallet, pinned key) |
-| `--broadcast` | off | explicitly permit chain weight submissions |
-| `--dry-run` | off | force verify + print without setting weights |
-| `--once` | off | single tick then exit |
-| `--offline` | off | verify + print only, no chain access (CI / smoke) |
+## Updating or rotating keys
 
-Ordinary operator values can be overridden by a flag or supported env var
-(`--wallet-name`, `--netuid`, `CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY`, …).
-Security-critical SN39 transition, attempt-budget, and runtime-root values are
-not ambient-environment overrides. The raw module form
-(`python -m scaffold.validator_thin --help`) is also available if you prefer
-flags over a config file.
-| `--state-file` | `~/.cathedral/thin_validator.json` | rollback-fence persistence |
+Treat a release or signing-key change as a new trust decision:
 
-## Maturity
+1. stop the chain-writing service;
+2. fetch the new immutable release and pin bundle;
+3. verify the change through an independent channel;
+4. install into a new environment;
+5. preserve and migrate the rollback state deliberately;
+6. repeat synthetic-map and metagraph-backed dry runs; and
+7. resume only after explicit operator authorization.
 
-The orchestrator side of v4 is live in production on `api.cathedral.computer`.
-This validator binary is **new**: its verify / burn / fence logic is covered by
-the release gates (`publisher_verify.py`), and it has been exercised end-to-end
-against the live mainnet vector. Run it in dry-run (or alongside your existing
-validator) until you've confirmed the uid vector it produces matches your
-expectation. Chain writes require an explicit `--broadcast`. Finney/SN39
-`validated_supply_v1` additionally requires the immutable launch release and
-signed public transition seal described in
-`docs/SN39_MAINNET_RELEASE_20260724.md`; a generic direct invocation cannot
-bypass that state machine.
+Never accept a replacement key from a weight payload signed only by the old or
+new key itself.
+
+## Further reading
+
+- [SN39 Intel TDX CPU mainnet release boundary](docs/SN39_MAINNET_RELEASE_20260724.md)
+- [Full-provenance verification](docs/PROVENANCE.md)
+- [Score-class contract](docs/THIN_SCORE_CLASSES.md)
+- [Threat model](docs/THIN_SUBNET_DESIGN.md)
+- [Evidence record](docs/THIN_SUBNET_EVIDENCE.md)
+- [Operator runbook for the experimental owner-independent path](docs/THIN_SUBNET_RUNBOOK.md)

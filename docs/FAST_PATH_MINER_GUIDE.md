@@ -1,6 +1,17 @@
 # Cathedral Fast Path — Miner Guide
 
-**What it is:** a faster, push-driven miner lane for SN39 — **real, checkable problems**, tiny signed submits, and **10% of subnet incentive** routed to the miners who solve them.
+> [!WARNING]
+> **Unavailable historical beta.** The documented V2 host and reward path are
+> not currently available and this lane is not part of the active
+> `validated_supply_v1` vector. The commands and 10% reward language below are
+> retained as design history only. Do not provision, register, or expect
+> payment from this guide.
+
+**Historical design:** a faster, push-driven SAT miner lane with compact signed
+submits and a proposed reward allocation.
+
+<details>
+<summary>Archived proposal text (not current)</summary>
 
 Cathedral rewards *proof of work done*, not claims. The fast path is where that starts.
 
@@ -81,3 +92,5 @@ python3 scripts/v2_bitset_miner_e2e.py \
 ---
 
 *This is an early lane and it will grow — more real problem classes, a larger reward share over time. Solve honestly: a wrong-but-fast answer scores `0.0` (the witness check is real). Questions in the subnet channel.*
+
+</details>

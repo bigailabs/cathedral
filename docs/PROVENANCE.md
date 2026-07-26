@@ -1,5 +1,13 @@
 # Full-provenance validation for SN39
 
+> [!IMPORTANT]
+> **Release-candidate status.** The public evidence surface is deployed, but
+> endpoint availability alone is not `FULL` assurance. A public validator
+> still needs the supported immutable release, independent key and digest
+> pins, historical chain access, and—where raw replay is required—the
+> controlled-disclosure package. Commands below are a verification contract,
+> not permission to write weights.
+
 Two concurrent modes ship in `cathedral-validator serve`:
 
 | Mode | Submits | Trust basis |
@@ -104,7 +112,16 @@ package, shadow mode still audits the public receipts chain and logs
 ## Reproducing a decision from scratch
 
 ```bash
-pip install 'cathedralsubnet[provenance]'
+# From the exact reviewed Cathedral tag/commit:
+python -m pip install -e '.[provenance]'
+
+# Capture the anchored candidate set through YOUR OWN historical chain access.
+cathedral-candidate-snapshot \
+  --network finney \
+  --netuid 39 \
+  --block <anchored block> \
+  --output independent-snapshot.json
+
 cathedral provenance verify \
   --evidence-url https://api.cathedral.computer/v1/evidence \
   --network finney --netuid 39 \
@@ -112,7 +129,10 @@ cathedral provenance verify \
   --report-keys pins/report-keys.json --report-keys-digest sha256:... \
   --index-keys pins/index-keys.json --index-keys-digest sha256:... \
   --verifier-digest sha256:... --source-revision <commit> \
-  --controlled-dir ./controlled --production \
+  --controlled-dir ./controlled \
+  --independent-candidate-snapshot independent-snapshot.json \
+  --production --current-block <current finalized block> \
+  --state-file ./provenance-state.json \
   --publisher-url https://api.cathedral.computer \
   --weight-policy-public-key-hex <pinned hex> \
   --jsonl audit.jsonl --audit-out audit.json
