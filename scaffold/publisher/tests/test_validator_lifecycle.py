@@ -323,6 +323,13 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
         provenance="off",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
+        # This fixture is a plain relay: it owes SN39 no launch of its own, so
+        # it declares the stance a third-party config declares. The reservation
+        # now reads the completed-launch requirement from
+        # `_continuous_transition_required` alone, so an undeclared stance falls
+        # back to the policy pin and demands an authorization this fence test
+        # is not about.
+        require_completed_launch_for_broadcast=False,
     )
 
     with pytest.raises(OSError, match="log flush"):
@@ -435,6 +442,13 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         provenance="off",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
+        # This fixture is a plain relay: it owes SN39 no launch of its own, so
+        # it declares the stance a third-party config declares. The reservation
+        # now reads the completed-launch requirement from
+        # `_continuous_transition_required` alone, so an undeclared stance falls
+        # back to the policy pin and demands an authorization this fence test
+        # is not about.
+        require_completed_launch_for_broadcast=False,
     )
 
     with pytest.raises(OSError, match="state fsync"):

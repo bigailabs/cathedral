@@ -4477,6 +4477,26 @@ def _authorize_sn39_chain_submission(
         )
 
     launch = bool(getattr(args, "require_full_provenance_for_broadcast", False))
+    if not launch and not _continuous_transition_required(args):
+        # Relay: this runtime owes SN39 no launch of its own, so there is no
+        # recurring-write authorization to re-prove. Everything that makes the
+        # write safe still ran above (pinned trust profile, verified signature,
+        # exact durable reservation, UID/epoch/inclusion safety). Refuse a call
+        # that nonetheless claims launch or recurring authority it cannot
+        # present, so the relay path can never be used to smuggle one.
+        if (
+            lane != "thin"
+            or identity.get("continuous_authorization") is not None
+            or getattr(args, "_continuous_submission_authorization", None) is not None
+            or state.get("submission_pending_launch_attempt") is True
+            or state.get("submission_pending_budget_scope")
+            not in (None, "thin_bounded")
+        ):
+            raise wire.VectorError(
+                "SN39 relay chain call claims launch or recurring-write "
+                "authority it cannot present"
+            )
+        return
     if not launch:
         authorization = getattr(args, "_continuous_submission_authorization", None)
         if (
@@ -4674,9 +4694,12 @@ def _submit_exact_sn39_extrinsic(
     nonce = substrate.get_account_next_index(preflight.wallet.hotkey.ss58_address)
     if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
         raise wire.VectorError("SN39 validator nonce is malformed")
+    # A relay has no recurring-write authorization and therefore no signed
+    # nonce window to check. The launch runtime and any runtime that owes SN39
+    # a launch still must present one before the account nonce is used.
     if not bool(
         getattr(runtime_contract, "require_full_provenance_for_broadcast", False)
-    ):
+    ) and _continuous_transition_required(runtime_contract):
         authorization = getattr(
             runtime_contract,
             "_continuous_submission_authorization",
@@ -5890,13 +5913,16 @@ def _reserve_common_submission(
         raise ValueError("max submissions must be nonnegative")
     launch_attempt = bool(getattr(args, "require_full_provenance_for_broadcast", False))
     authorization = getattr(args, "_continuous_submission_authorization", None)
+    # `_continuous_transition_required` is the single source of truth. Keeping
+    # a separate config conjunct here let an authority-lane operator who set
+    # the flag false reserve without the signed authorization the tick had
+    # already demanded, so the reservation and the tick disagreed.
     recurring_required = bool(
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
         and int(getattr(args, "netuid", -1)) == 39
         and not launch_attempt
         and _continuous_transition_required(args)
-        and bool(getattr(args, "require_completed_launch_for_broadcast", False))
     )
     if recurring_required and not isinstance(authorization, ContinuousAuthorization):
         raise ValueError(
@@ -7729,14 +7755,109 @@ def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
     )
 
 
+def _sn39_launch_lineage(args: Any) -> bool | None:
+    """Report whether this runtime's own journal records an SN39 launch.
+
+    Returns None when the canonical signer/genesis identity is not resolved
+    yet. The journal is addressed BY that identity, so before it is bound the
+    question is unanswerable rather than answered "no". Every boundary that can
+    actually reach an irreversible chain call resolves the identity first
+    (`_prepare_tick_preflight`/`_bind_submission_identity`), so a runtime that
+    has launched can never slip past the gate on an unresolved probe.
+    """
+    if not bool(getattr(args, "offline", False)) and (
+        getattr(args, "_submission_validator_hotkey", None) is None
+        or getattr(args, "_submission_genesis_hash", None) is None
+    ):
+        return None
+    try:
+        journal = _submission_state_path(args)
+    except Exception:  # noqa: BLE001 - identity or root not usable here
+        return None
+    try:
+        os.stat(journal.parent)
+    except (FileNotFoundError, NotADirectoryError):
+        # No runtime root yet means no journal and therefore no launch history.
+        # The root itself is pinned to its canonical location separately, so
+        # this cannot be used to point the probe somewhere convenient.
+        return False
+    except OSError:
+        return True
+    try:
+        state = _read_state_without_mutation(journal)
+    except Exception:  # noqa: BLE001
+        # An unreadable, foreign-owned, or malformed journal must never read as
+        # "never launched"; that is exactly how a launcher would hide its own
+        # obligation. Fail closed.
+        return True
+    # Every marker below is written only under a launch reservation. The
+    # per-reservation `submission_pending_launch_attempt` is a bool on ordinary
+    # thin writes too, so it is compared against True rather than None: a relay
+    # that has already reserved once must not read as launch lineage and brick
+    # itself on its second tick.
+    return bool(
+        state.get("submission_launch_status") is not None
+        or state.get("submission_launch_attempt_id") is not None
+        or state.get("submission_launch_attempt_ids")
+        or state.get("submission_continuous_enabled") is True
+        or state.get("submission_continuous_launch_attempt_id") is not None
+        or state.get("submission_pending_launch_attempt") is True
+    )
+
+
+def _sn39_launch_obligation(args: Any) -> bool:
+    """Does THIS runtime owe SN39 its own completed one-shot launch?
+
+    The mainnet launch is a subnet-level event, not a per-validator one. A
+    third-party validator that only relays Cathedral's signed vector can never
+    satisfy a per-validator launch gate, so an unconditional gate locks every
+    operator except Cathedral out of SN39 entirely. The obligation therefore
+    tracks the things an operator cannot simply restate in a config file:
+
+      1. the authority code path, which submits its own recomputation instead
+         of relaying the signed vector, and so originates trust rather than
+         carrying it;
+      2. the launch runtime itself, which performs the one-shot transaction;
+      3. possession of, or journalled lineage from, the controlled launch
+         material at the release-pinned absolute paths.
+
+    Every branch reads code constants or this runtime's own durable journal, so
+    no config value, CLI flag, endpoint label, or environment variable can
+    clear an obligation the runtime actually has. Declaring `provenance =
+    "shadow"` to dodge branch 1 also gives up the ability to originate weights,
+    which is the capability the gate exists to protect.
+    """
+    if (getattr(args, "provenance", "shadow") or "shadow") == "authority":
+        return True
+    if bool(getattr(args, "require_full_provenance_for_broadcast", False)):
+        return True
+    for path in (
+        SN39_LAUNCH_CONTROLLED_DIR,
+        SN39_LAUNCH_VERIFIER_BINARY,
+        SN39_LAUNCH_APPROVAL_FILE,
+    ):
+        try:
+            os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            # A host that cannot answer the question is treated as holding the
+            # launch material; refusing the broadcast is the safe direction.
+            return True
+        return True
+    return _sn39_launch_lineage(args) is True
+
+
 def _continuous_transition_required(args: Any) -> bool:
     if (
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
         and int(getattr(args, "netuid", -1)) == 39
+        and _sn39_launch_obligation(args)
     ):
         # No operator-controlled label, endpoint, config, or direct CLI
-        # invocation may weaken the SN39 transition requirement.
+        # invocation may weaken the SN39 transition requirement for a runtime
+        # that originates weights or holds/has held launch material.
         return True
     explicit = getattr(args, "require_completed_launch_for_broadcast", None)
     if explicit is not None:
@@ -8284,11 +8405,18 @@ def _validate_runtime_contract(args: Any) -> None:
                 "SN39 mainnet broadcast requires the canonical owner-only "
                 f"runtime root {_VALIDATOR_RUNTIME_ROOT}"
             )
-        if not launch_gate and not bool(
-            getattr(args, "require_completed_launch_for_broadcast", False)
+        # A pure relay carries Cathedral's signature to the pinned netuid and
+        # burn; it has no launch of its own to complete, so demanding the gate
+        # from it would only lock third parties off the subnet. A runtime that
+        # originates weights or holds launch material still must set it.
+        if (
+            not launch_gate
+            and _sn39_launch_obligation(args)
+            and not bool(getattr(args, "require_completed_launch_for_broadcast", False))
         ):
             raise wire.VectorError(
-                "continuous SN39 broadcast requires the completed-launch gate"
+                "SN39 broadcast from a weight-originating or launch-capable "
+                "runtime requires the completed-launch gate"
             )
     if not launch_gate:
         return

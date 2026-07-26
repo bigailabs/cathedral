@@ -1,0 +1,72 @@
+# Cathedral SN39 mainnet configuration for a THIRD-PARTY thin validator.
+#
+# This profile relays Cathedral's signed weight vector: fetch it, verify it
+# against the pinned weight-policy key, and submit exactly those numbers. It
+# never originates weights, so it has no launch of its own to complete.
+#
+# Every trust-bearing value below is byte-identical to
+# validator-mainnet-sn39.toml and is re-checked against release constants in
+# scaffold/validator_thin.py before any broadcast. Changing any of them is
+# refused, not silently honored. Only wallet identity, log path, and the
+# launch section differ from the Cathedral operator profile.
+
+[network]
+name = "finney"
+netuid = 39
+# Your own wallet. These are local labels; the release pins the resolved
+# on-chain identity, not the wallet name.
+wallet_name = "validator"
+validator_hotkey = "default"
+
+[publisher]
+url = "https://api.cathedral.computer"
+
+[weight_policy]
+public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26" # pragma: allowlist secret
+key_id = "cathedral-weight-policy"
+require_policy = "validated_supply_v1"
+state_file = "/var/lib/cathedral-validator/thin-state.json"
+
+[weights]
+interval_secs = 1500
+# Leave at 0. The durable journal already fences thin reservations to one per
+# strictly increasing published policy_version, so this is a redundant local
+# ceiling. Raising it later after attempts are recorded invalidates the
+# journal's budget record.
+max_submissions = 0
+
+[runtime]
+# Owner-only, mode 0700, created by the service install.
+root = "/var/lib/cathedral-validator"
+
+[provenance]
+# Relays MUST stay in shadow. "authority" submits an independent recomputation
+# instead of Cathedral's signed vector; that originates weights and therefore
+# requires the root-signed launch and recurring-write authorization.
+mode = "shadow"
+evidence_url = "https://api.cathedral.computer/v1/evidence"
+registry_keys = "config/provenance/registry-keys.json"
+registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
+report_keys = "config/provenance/report-keys.json"
+report_keys_digest = "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70"
+index_keys = "config/provenance/index-keys.json"
+index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
+verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+source_revision = "fa39af97e738fdbed5c454f976b61246590b5794" # pragma: allowlist secret
+mechanism = "validated_supply_v1"
+burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
+# controlled_dir and verifier_binary are deliberately absent: the raw TDX
+# evidence package is Cathedral-controlled, so the shadow audit reports
+# receipts_only here and still never delays or blocks the thin submission.
+
+[launch]
+# A relay performs no launch transaction.
+require_full_provenance_for_broadcast = false
+# The SN39 launch is a subnet-level event that happened once. A relay cannot
+# perform its own, so requiring a per-validator completed launch would make
+# this profile unrunnable. Setting this false is refused for any runtime that
+# runs provenance = "authority" or holds the controlled launch material.
+require_completed_launch_for_broadcast = false
+
+[logs]
+jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
