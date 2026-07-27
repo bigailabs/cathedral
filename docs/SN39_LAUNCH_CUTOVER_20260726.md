@@ -127,6 +127,58 @@ After the exporter is redeployed, the next signed manifest must stamp
 revision boundary in `SN39_MAINNET_RELEASE_20260724.md` stays **FAIL**, because
 published evidence still carries `b77c7cf...` and will not match the pin.
 
+### Host exporter change (APPLIED live 2026-07-27T02:48:44Z): policy reissue fix
+
+Preserve this on any exporter redeploy, including the launch-window one above.
+Dropping it re-introduces a chronic ~12-hourly outage.
+
+`runtime export-evidence` requires the frozen epoch's signed report
+`policy_digest` to equal the sha256 of the file passed as `--policy-registry`.
+The exporter passed the live `/etc/cathedral/policy-registry-sn39.json`
+unconditionally, but `cathedral-sn39-policy-republisher.timer` reissues that
+file roughly every 12 hours. Every reissue therefore permanently deadlocked the
+epoch loop's reconcile-before-admit gate (observed 2026-07-26 at both the
+10:25:09Z and 22:31:37Z reissues; the second one degraded the chain vector to
+a 100% burn until repaired).
+
+The applied fix resolves the registry per epoch: use the live file when its
+hash equals the report's pinned digest, otherwise use the content-addressed
+archive the republisher writes to
+`/var/lib/cathedral-confidential-sn39/policy-history/` (hash re-verified before
+use; the CLI's own digest check remains the gate, so unknown digests still fail
+closed). The registry install path is archive-then-install under
+`policy-writer.lock`, so no missing-archive window exists. Inserted between
+`export-score-class` and `export-evidence`:
+
+```sh
+readonly POLICY_HISTORY=/var/lib/cathedral-confidential-sn39/policy-history
+pinned_digest="$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["policy_digest"])' \
+  "${report_path}")"
+pinned_hex="${pinned_digest#sha256:}"
+epoch_registry="${REGISTRY}"
+if [[ "${pinned_hex}" =~ ^[0-9a-f]{64}$ ]] \
+  && [[ -r "${REGISTRY}" ]] \
+  && [[ "$(sha256sum "${REGISTRY}" | cut -d" " -f1)" != "${pinned_hex}" ]]; then
+  for candidate in "${POLICY_HISTORY}"/release-*-"${pinned_hex}".json; do
+    if [[ -f "${candidate}" ]] \
+      && [[ "$(sha256sum "${candidate}" | cut -d" " -f1)" == "${pinned_hex}" ]]; then
+      epoch_registry="${candidate}"
+      printf '%s reconciling frozen epoch against archived policy %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "${candidate}")" >&2
+      break
+    fi
+  done
+fi
+```
+
+with `--policy-registry "${epoch_registry}"` on the `export-evidence` call.
+
+Rollback: `/usr/local/sbin/cathedral-sn39-export-evidence.pre-rotationfix-20260727T024844Z`
+(restores the deadlock-on-reissue behavior; only useful if the fix itself
+misbehaves). Durable package-level fix is tracked in cathedralconfidential
+(export-evidence should accept a policy-history directory natively).
+
 ## 2. Deploy contract migration safety
 
 ### The hazard, measured
