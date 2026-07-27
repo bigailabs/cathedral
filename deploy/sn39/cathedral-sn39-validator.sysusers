@@ -1,0 +1,36 @@
+# Installed as /etc/sysusers.d/cathedral-sn39-validator.conf.
+#
+# The filename must stay validator-specific. The producer host already carries
+# /etc/sysusers.d/cathedral-sn39.conf, installed by the evidence producer's own
+# deploy tree, and it declares the producer identities (cathedral-evidence,
+# cathedral-validator-evidence, and a polaris membership). Shipping this file
+# under that generic name overwrites that declaration. systemd-sysusers never
+# deletes accounts, so the producer identities would survive on the running
+# host and the breakage would stay invisible until someone rebuilt the host
+# from its configuration, at which point they would simply be absent.
+#
+# These are the validator identities only. Producer identities are declared by
+# the producer's own deploy tree and are deliberately not restated here.
+#
+# There is deliberately no cathedral-status identity. The public status
+# publisher runs as polaris, which is the account that demonstrably writes
+# /var/lib/cathedral-public-evidence/logs on the live host today. A
+# cathedral-status account was declared here previously and has never existed
+# on the producer host: `id cathedral-status` returns "no such user", while the
+# logs directory is polaris:polaris and the publisher that writes it every
+# minute runs as polaris. Declaring an account the shipped units then run as,
+# on a host where the directory belongs to someone else, produced a unit that
+# could not write its own output. Naming the real writer removes the mismatch
+# instead of papering over it with a chown that would take the evidence tree
+# away from the producer.
+g cathedral-validator -
+u cathedral-validator - "Cathedral SN39 validator" /var/lib/cathedral-validator /usr/sbin/nologin
+#
+# polaris is deliberately not made a static member of cathedral-validator-log
+# here. It is the producer's account, declared by the producer's deploy tree,
+# and this file must not assume it exists on a fresh host. The status publisher
+# unit grants itself that group at runtime with SupplementaryGroups=, which
+# needs no static membership and no declaration of an account this tree does
+# not own.
+g cathedral-validator-log -
+m cathedral-validator cathedral-validator-log

@@ -41,7 +41,7 @@ test = [
 # Pinned to the immutable launch-candidate commit; update ONLY together
 # with the reviewed release process (never a mutable branch ref).
 provenance = [
-    "cathedral @ https://github.com/cathedralai/cathedralconfidential/archive/fa39af97e738fdbed5c454f976b61246590b5794.tar.gz#sha256=356080e182512b90a283db1496fdaaf1fc3d0cfcb540c35dd3ede5ceecca5324",
+    "cathedral @ https://github.com/cathedralai/cathedralconfidential/archive/655c264421a1f5f2e625a372a40f595aa1e114ab.tar.gz#sha256=befc572f459c2d80af7ce18013cb4d3649716f143da0a6a86a4a8b96f84b88fb",
 ]
 
 [project.scripts]

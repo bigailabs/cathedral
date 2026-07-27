@@ -10,6 +10,15 @@ ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json.sig
 [Service]
 Type=simple
 User=cathedral-validator
+# Primary group is cathedral-validator-log, NOT cathedral-validator, and the
+# difference from the launch and reconcile units is deliberate. LogsDirectory=
+# below creates /var/log/cathedral-validator 0750 owned by this process's
+# primary group, and cathedral-sn39-public-status.service reads
+# validator-events.jsonl out of it using SupplementaryGroups=cathedral-validator-log.
+# Setting this to cathedral-validator to match the one-shots would leave the
+# status publisher unable to read the stream it exists to publish. The one-shots
+# write their own LogsDirectory that nothing else reads, so they have no reason
+# to widen their primary group.
 Group=cathedral-validator-log
 Environment=HOME=/var/lib/cathedral-validator
 # Belt and braces. Conflicts= only acts on units systemd is asked to start;

@@ -1,0 +1,42 @@
+# Installed as /etc/tmpfiles.d/cathedral-sn39-validator.conf.
+#
+# The filename is validator-specific on purpose. The evidence producer
+# provisions this same host from its own deploy tree, so a generic
+# cathedral-sn39.conf here would silently replace whatever the producer
+# installed under that name.
+#
+# Every mode and ownership field is ':'-prefixed, which systemd-tmpfiles
+# applies ONLY when it creates the inode. An unprefixed field is applied
+# unconditionally, including to an inode that already exists. That matters
+# because /var/lib/cathedral-public-evidence belongs to the evidence producer
+# on an established host: it is owned by the producer's service account and
+# written every few minutes by a running service. An unprefixed contract
+# chowns that whole tree on every `systemd-tmpfiles --create`, which systemd
+# also runs at boot, and the producer loses write access to its own working
+# directory. Creation-only fields converge a fresh host on the reviewed
+# layout and are a no-op on a host that already has one.
+#
+# The 'z' line that previously accompanied each 'd' line was removed. 'z'
+# creates nothing; it exists only to force mode and ownership onto an inode
+# that already exists, which is exactly the unsafe half of this contract.
+#
+# The subdirectory list below describes the whole published evidence tree, not
+# a subset of it. The live host carries epochs/, pins/, receipts/ and
+# score-classes/ alongside blobs/ and logs/, all root:root 0755, created by the
+# producer as it runs. A contract that omits them still converges a fresh host
+# on a tree the producer then has to finish building at first export. Declaring
+# them costs nothing on an established host, because every field here is
+# creation-only.
+#
+# logs/ is polaris, not cathedral-status. That is the account that writes this
+# directory on the live host, and the status publisher unit runs as polaris to
+# match. See the comment in cathedral-sn39-validator.sysusers for why an
+# identity nothing runs as was worse than no identity at all.
+d /var/lib/cathedral-public-evidence :0755 :root :root -
+d /var/lib/cathedral-public-evidence/blobs :0755 :root :root -
+d /var/lib/cathedral-public-evidence/blobs/sha256 :0755 :root :root -
+d /var/lib/cathedral-public-evidence/epochs :0755 :root :root -
+d /var/lib/cathedral-public-evidence/pins :0755 :root :root -
+d /var/lib/cathedral-public-evidence/receipts :0755 :root :root -
+d /var/lib/cathedral-public-evidence/score-classes :0755 :root :root -
+d /var/lib/cathedral-public-evidence/logs :0755 :polaris :polaris -
