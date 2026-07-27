@@ -16,6 +16,7 @@ from typing import Any
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 NAME_RE = re.compile(r"[-_.]+")
 BOOTSTRAP_PYTHON = Path("/usr/bin/python3.12")
+INSTALL_ROOT = Path("/etc/cathedral-validator")
 EXPECTED_VERIFIER_BINARY = (
     "sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
 )
@@ -284,12 +285,12 @@ def main() -> int:
     parser.add_argument(
         "--continuous-config",
         type=Path,
-        default=Path("/etc/cathedral/validator-mainnet-sn39.toml"),
+        default=INSTALL_ROOT / "validator-mainnet-sn39.toml",
     )
     parser.add_argument(
         "--launch-config",
         type=Path,
-        default=Path("/etc/cathedral/validator-mainnet-sn39-launch.toml"),
+        default=INSTALL_ROOT / "validator-mainnet-sn39-launch.toml",
     )
     parser.add_argument(
         "--verifier",

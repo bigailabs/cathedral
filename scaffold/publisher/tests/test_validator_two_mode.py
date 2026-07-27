@@ -6849,6 +6849,24 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     monkeypatch.setattr(launcher, "ROOT_UID", os.getuid())
     assert builder.BOOTSTRAP_PYTHON == launcher.BOOTSTRAP_PYTHON
     assert launcher.BOOTSTRAP_PYTHON == Path("/usr/bin/python3.12")
+    assert builder.INSTALL_ROOT == launcher.INSTALL_ROOT
+    assert launcher.INSTALL_ROOT == Path("/etc/cathedral-validator")
+    assert launcher.MANIFEST == (
+        Path("/etc/cathedral-validator/sn39-release-manifest.json")
+    )
+    assert set(launcher.CONFIGS.values()) == {
+        Path("/etc/cathedral-validator/validator-mainnet-sn39.toml"),
+        Path("/etc/cathedral-validator/validator-mainnet-sn39-launch.toml"),
+    }
+    assert (
+        'MANIFEST = Path("/etc/cathedral-validator/sn39-release-manifest.json")'
+        in (root / "scripts/finalize_sn39_public_release.py").read_text()
+    )
+    assert (
+        'RELEASE_MANIFEST = Path('
+        '"/etc/cathedral-validator/sn39-release-manifest.json")'
+        in (root / "scaffold/sn39_continuous_authorization.py").read_text()
+    )
     assert (
         root / "deploy/sn39/cathedral-sn39-release-launcher.py"
     ).read_text().startswith("#!/usr/bin/python3.12 -I\n")
