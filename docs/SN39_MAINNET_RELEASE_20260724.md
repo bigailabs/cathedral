@@ -681,6 +681,12 @@ target stays inside the same immutable environment. This covers the standard
 Linux `venv` layout (`lib64 -> lib`) while continuing to reject directory
 symlinks that escape to mutable or uncommitted trees.
 
+The builder and launcher also require every committed tree directory to be
+root-controlled and readable/searchable by the unprivileged service account,
+and every regular file to be root-controlled, single-linked, non-writable by
+group or world, and service-readable. This rejects a root-only staging
+directory before it can produce a manifest that the shipped unit cannot use.
+
 The non-secret validator configs and release manifest live under the dedicated
 root-owned, world-traversable `/etc/cathedral-validator` directory. They must
 not be installed under `/etc/cathedral`: production keeps that directory

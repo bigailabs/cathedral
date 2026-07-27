@@ -78,6 +78,8 @@ def _root_controlled(path: Path, *, directory: bool = False) -> None:
         or info.st_uid != ROOT_UID
         or (not directory and info.st_nlink != 1)
         or stat.S_IMODE(info.st_mode) & 0o022
+        or (directory and stat.S_IMODE(info.st_mode) & 0o005 != 0o005)
+        or (not directory and stat.S_IMODE(info.st_mode) & 0o004 != 0o004)
     ):
         raise InstallError(
             f"required path is not immutable and root-controlled: {path}"
@@ -115,13 +117,20 @@ def _immutable_tree_digest(root: Path) -> str:
                 )
             mode = f"{stat.S_IMODE(info.st_mode):04o}"
             if stat.S_ISREG(info.st_mode):
-                if info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022:
+                if (
+                    info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or stat.S_IMODE(info.st_mode) & 0o004 != 0o004
+                ):
                     raise InstallError(
                         f"immutable tree has a mutable or unsupported entry: {path}"
                     )
                 _record_digest(tree, "file", relative, mode, _digest(path))
             elif stat.S_ISDIR(info.st_mode):
-                if stat.S_IMODE(info.st_mode) & 0o022:
+                if (
+                    stat.S_IMODE(info.st_mode) & 0o022
+                    or stat.S_IMODE(info.st_mode) & 0o005 != 0o005
+                ):
                     raise InstallError(
                         f"immutable tree has a mutable or unsupported entry: {path}"
                     )
@@ -138,6 +147,7 @@ def _immutable_tree_digest(root: Path) -> str:
                     if (
                         target_info.st_uid != ROOT_UID
                         or stat.S_IMODE(target_info.st_mode) & 0o022
+                        or stat.S_IMODE(target_info.st_mode) & 0o005 != 0o005
                     ):
                         raise InstallError(
                             f"immutable tree symlink has an unsafe target: {path}"
@@ -154,6 +164,7 @@ def _immutable_tree_digest(root: Path) -> str:
                     target_info.st_uid != ROOT_UID
                     or target_info.st_nlink != 1
                     or stat.S_IMODE(target_info.st_mode) & 0o022
+                    or stat.S_IMODE(target_info.st_mode) & 0o004 != 0o004
                     or not stat.S_ISREG(target_info.st_mode)
                 ):
                     raise InstallError(

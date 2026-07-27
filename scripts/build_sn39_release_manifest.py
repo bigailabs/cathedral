@@ -17,6 +17,7 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 NAME_RE = re.compile(r"[-_.]+")
 BOOTSTRAP_PYTHON = Path("/usr/bin/python3.12")
 INSTALL_ROOT = Path("/etc/cathedral-validator")
+ROOT_UID = 0
 EXPECTED_VERIFIER_BINARY = (
     "sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
 )
@@ -67,10 +68,21 @@ def record_digest(state: Any, *parts: str) -> None:
 
 def immutable_tree_digest(root: Path) -> str:
     """Generate the byte-for-byte environment commitment checked at exec."""
-    if root.is_symlink() or not root.is_dir():
-        raise SystemExit("versioned venv root must be a real directory")
+    root_info = root.lstat()
+    root_mode = stat.S_IMODE(root_info.st_mode)
+    if (
+        root.is_symlink()
+        or not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != ROOT_UID
+        or root_mode & 0o022
+        or root_mode & 0o005 != 0o005
+    ):
+        raise SystemExit(
+            "immutable tree root must be root-controlled, readable, and "
+            "searchable by the service account"
+        )
     tree = hashlib.sha256()
-    record_digest(tree, "root", f"{stat.S_IMODE(root.stat().st_mode):04o}")
+    record_digest(tree, "root", f"{root_mode:04o}")
     for directory, names, files in os.walk(root, followlinks=False):
         names.sort()
         files.sort()
@@ -81,15 +93,45 @@ def immutable_tree_digest(root: Path) -> str:
             info = path.lstat()
             mode = f"{stat.S_IMODE(info.st_mode):04o}"
             if stat.S_ISREG(info.st_mode):
-                if info.st_nlink != 1:
-                    raise SystemExit(f"versioned venv has a hard-linked file: {path}")
+                if (
+                    info.st_uid != ROOT_UID
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or stat.S_IMODE(info.st_mode) & 0o004 != 0o004
+                ):
+                    raise SystemExit(
+                        "immutable tree file is not root-controlled, "
+                        f"single-linked, and service-readable: {path}"
+                    )
                 record_digest(tree, "file", relative, mode, digest(path))
             elif stat.S_ISDIR(info.st_mode):
+                if (
+                    info.st_uid != ROOT_UID
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or stat.S_IMODE(info.st_mode) & 0o005 != 0o005
+                ):
+                    raise SystemExit(
+                        "immutable tree directory is not root-controlled, "
+                        f"readable, and searchable by the service account: {path}"
+                    )
                 record_digest(tree, "directory", relative, mode)
             elif stat.S_ISLNK(info.st_mode):
+                if info.st_uid != ROOT_UID:
+                    raise SystemExit(
+                        f"immutable tree symlink is not root-controlled: {path}"
+                    )
                 target = path.resolve(strict=True)
                 target_info = target.stat()
                 if stat.S_ISDIR(target_info.st_mode) and target.is_relative_to(root):
+                    if (
+                        target_info.st_uid != ROOT_UID
+                        or stat.S_IMODE(target_info.st_mode) & 0o022
+                        or stat.S_IMODE(target_info.st_mode) & 0o005 != 0o005
+                    ):
+                        raise SystemExit(
+                            "immutable tree directory symlink target is not "
+                            f"service-readable: {path}"
+                        )
                     record_digest(
                         tree,
                         "directory-symlink",
@@ -98,7 +140,13 @@ def immutable_tree_digest(root: Path) -> str:
                         target.relative_to(root).as_posix(),
                         f"{stat.S_IMODE(target_info.st_mode):04o}",
                     )
-                elif stat.S_ISREG(target_info.st_mode) and target_info.st_nlink == 1:
+                elif (
+                    stat.S_ISREG(target_info.st_mode)
+                    and target_info.st_uid == ROOT_UID
+                    and target_info.st_nlink == 1
+                    and not stat.S_IMODE(target_info.st_mode) & 0o022
+                    and stat.S_IMODE(target_info.st_mode) & 0o004 == 0o004
+                ):
                     record_digest(
                         tree,
                         "symlink",
@@ -349,6 +397,7 @@ def main() -> int:
         if args.venv is not None
         else Path("/opt/cathedral-sn39/venvs") / args.release_sha
     )
+    immutable_tree_digest(root)
     if (
         SHA_RE.fullmatch(args.release_sha) is None
         or git(root, "rev-parse", "HEAD") != args.release_sha
