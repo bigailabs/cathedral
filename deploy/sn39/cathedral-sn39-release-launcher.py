@@ -1,4 +1,4 @@
-#!/usr/bin/python3 -I
+#!/usr/bin/python3.12 -I
 """Verify and exec one immutable SN39 validator release.
 
 Install this file root-owned, mode 0755, at
@@ -40,7 +40,7 @@ LEGACY_SERVICE_UNIT = "cathedral-thin-validator.service"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 ROOT_UID = 0
-BOOTSTRAP_PYTHON = Path("/usr/bin/python3")
+BOOTSTRAP_PYTHON = Path("/usr/bin/python3.12")
 
 
 class InstallError(RuntimeError):

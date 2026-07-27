@@ -6846,6 +6846,11 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     package.chmod(0o444)
 
     monkeypatch.setattr(launcher, "ROOT_UID", os.getuid())
+    assert builder.BOOTSTRAP_PYTHON == launcher.BOOTSTRAP_PYTHON
+    assert launcher.BOOTSTRAP_PYTHON == Path("/usr/bin/python3.12")
+    assert (
+        root / "deploy/sn39/cathedral-sn39-release-launcher.py"
+    ).read_text().startswith("#!/usr/bin/python3.12 -I\n")
     with pytest.MonkeyPatch.context() as access_patch:
         access_patch.setattr(
             launcher.os,
@@ -6921,7 +6926,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     assert "Group=cathedral-validator-log" in continuous_unit
     assert "EnvironmentFile=" not in continuous_unit
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release continuous"
     ) in continuous_unit
     reconcile_unit = (
@@ -6931,7 +6936,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     assert "Environment=HOME=/var/lib/cathedral-validator" in reconcile_unit
     assert "EnvironmentFile=" not in reconcile_unit
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release reconcile"
     ) in reconcile_unit
     assert (
@@ -6944,7 +6949,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     assert "EnvironmentFile=" not in launch_unit
     assert "TimeoutStartSec=20min" in launch_unit
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release launch"
     ) in launch_unit
     assert "After=network-online.target cathedral-thin-validator.service" in (
@@ -7009,10 +7014,15 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     # never been created.
     assert not [ln for ln in _directives(sysusers) if "cathedral-status" in ln]
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release status"
     ) in status_unit
     release_guide = (root / "docs/SN39_MAINNET_RELEASE_20260724.md").read_text()
+    assert '/usr/bin/python3.12 -m venv "$venv"' in release_guide
+    assert (
+        "/usr/bin/python3.12 -I -E -s \\\n"
+        '  "$release/scripts/build_sn39_release_manifest.py"'
+    ) in release_guide
     assert (
         "/usr/local/libexec/cathedral-sn39-release finalize "
         "\\\n  /var/lib/cathedral-validator/journal-<64-hex-digest>.json"

@@ -15,6 +15,7 @@ from typing import Any
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 NAME_RE = re.compile(r"[-_.]+")
+BOOTSTRAP_PYTHON = Path("/usr/bin/python3.12")
 EXPECTED_VERIFIER_BINARY = (
     "sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
 )
@@ -328,7 +329,7 @@ def main() -> int:
     parser.add_argument(
         "--bootstrap-python",
         type=Path,
-        default=Path("/usr/bin/python3"),
+        default=BOOTSTRAP_PYTHON,
     )
     args = parser.parse_args()
     root = args.release.resolve()
