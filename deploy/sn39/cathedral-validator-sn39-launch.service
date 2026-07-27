@@ -7,6 +7,10 @@ Conflicts=cathedral-validator-sn39.service cathedral-thin-validator.service cath
 [Service]
 Type=oneshot
 User=cathedral-validator
+# Narrower primary group than the continuous and reconcile units on purpose.
+# This one-shot writes LogsDirectory=cathedral-validator-launch, a directory of
+# its own that no other unit reads or manages, so it needs neither the
+# log-sharing group nor the matching-group constraint the other two have.
 Group=cathedral-validator
 Environment=HOME=/var/lib/cathedral-validator
 # Belt and braces. Conflicts= only acts on units systemd is asked to start;

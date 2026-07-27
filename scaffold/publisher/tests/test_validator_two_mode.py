@@ -6981,12 +6981,33 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     status_unit = (
         root / "deploy/sn39/cathedral-sn39-public-status.service"
     ).read_text()
-    assert "User=cathedral-status" in status_unit
+    # The status publisher runs as the account that owns the directory it
+    # writes. ReadWritePaths= is a mount-namespace control, not a permission
+    # grant, so an identity that does not own /var/lib/cathedral-public-evidence/logs
+    # gets EACCES on its own output unless something first chowns a tree the
+    # producer is actively writing.
+    assert "User=polaris" in status_unit
+    assert "Group=polaris" in status_unit
     assert "SupplementaryGroups=cathedral-validator-log" in status_unit
+
+    def _directives(text: str) -> list[str]:
+        """Non-comment, non-blank lines. Comments explain the removed identity
+        by name, so a naive substring check would match the explanation."""
+        return [
+            line
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+    assert not [ln for ln in _directives(status_unit) if "cathedral-status" in ln]
     sysusers = (root / "deploy/sn39/cathedral-sn39-validator.sysusers").read_text()
     assert "u cathedral-validator " in sysusers
     assert "g cathedral-validator-log " in sysusers
-    assert "m cathedral-status cathedral-validator-log" in sysusers
+    # No cathedral-status identity is declared anywhere in the contract. An
+    # account that nothing runs as is worse than no account: it produced units
+    # that could not write their own output on a host where the account had
+    # never been created.
+    assert not [ln for ln in _directives(sysusers) if "cathedral-status" in ln]
     assert (
         "ExecStart=/usr/bin/python3 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release status"
@@ -7002,6 +7023,42 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         in status_unit
     )
     assert "ReadWritePaths=/var/lib/cathedral-public-evidence/logs" in status_unit
+    # release.json exists only after a root-signed release is sealed. An
+    # unprefixed ReadOnlyPaths= on a missing path fails mount-namespace setup
+    # and takes the unit down, converting "no sealed release yet" into "status
+    # publishing is broken".
+    assert (
+        "ReadOnlyPaths=-/var/lib/cathedral-public-evidence/release.json" in status_unit
+    )
+    # Units that declare the same LogsDirectory= must declare the same Group=.
+    # systemd applies the unit's User:Group to a logs directory it manages, so
+    # a mismatch lets whichever unit ran last silently re-group the directory
+    # and revoke the status publisher's group read on validator-events.jsonl.
+    _logs_dir_group: dict[str, set[str]] = {}
+    for _unit_name in (
+        "cathedral-validator-sn39.service",
+        "cathedral-validator-sn39-launch.service",
+        "cathedral-validator-sn39-reconcile.service",
+    ):
+        _text = (root / "deploy/sn39" / _unit_name).read_text()
+        _logs = [
+            line.split("=", 1)[1].strip()
+            for line in _text.splitlines()
+            if line.startswith("LogsDirectory=")
+        ]
+        _groups = [
+            line.split("=", 1)[1].strip()
+            for line in _text.splitlines()
+            if line.startswith("Group=")
+        ]
+        assert len(_logs) == 1 and len(_groups) == 1, _unit_name
+        _logs_dir_group.setdefault(_logs[0], set()).add(_groups[0])
+    for _logs_dir, _groups_seen in _logs_dir_group.items():
+        assert len(_groups_seen) == 1, (
+            f"{_logs_dir} is managed by units with differing Group= "
+            f"({sorted(_groups_seen)}); the last unit to run re-groups it"
+        )
+    assert _logs_dir_group["cathedral-validator"] == {"cathedral-validator-log"}
     tmpfiles = (root / "deploy/sn39/cathedral-sn39-validator.tmpfiles").read_text()
     assert "d /var/lib/cathedral-public-evidence :0755 :root :root -" in tmpfiles
     assert (
@@ -7009,9 +7066,17 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         in tmpfiles
     )
     assert (
-        "d /var/lib/cathedral-public-evidence/logs "
-        ":0755 :cathedral-status :cathedral-status -"
+        "d /var/lib/cathedral-public-evidence/logs :0755 :polaris :polaris -"
     ) in tmpfiles
+    assert not [ln for ln in _directives(tmpfiles) if "cathedral-status" in ln]
+    # The contract describes the whole published tree, not a subset. A fresh
+    # host that is missing these has to have them created by the producer at
+    # first export instead of by the reviewed contract.
+    for _subdir in ("epochs", "pins", "receipts", "score-classes"):
+        assert (
+            f"d /var/lib/cathedral-public-evidence/{_subdir} :0755 :root :root -"
+            in tmpfiles
+        )
     # The evidence tree is the producer's on an established host and is written
     # every few minutes by a running service. systemd-tmpfiles applies an
     # unprefixed mode or ownership field to inodes that ALREADY exist, so a

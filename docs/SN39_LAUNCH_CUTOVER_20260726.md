@@ -245,10 +245,12 @@ the producer is appending to) on three systemd versions:
 | 255 (Ubuntu 24.04) | No change to any owner, group or mode | Converges to the reviewed layout |
 | 257 (Debian 13) | No change to any owner, group or mode | Converges to the reviewed layout |
 
-Fresh-host convergence is unchanged from the old contract: the tree is created
-`root:root 0755` with `logs` as `cathedral-status:cathedral-status 0755`. The
-contract still fully describes a new host; it simply no longer rewrites an
-established one.
+Fresh-host convergence is unchanged in shape from the old contract: the tree is
+created `root:root 0755`. The `logs` owner has since changed from
+`cathedral-status` to `polaris` for the reason given in section 5, and four
+subdirectories the live host carries were added, so a fresh host now converges
+on the whole tree rather than part of it. The contract still fully describes a
+new host; it simply no longer rewrites an established one.
 
 `test_immutable_install_binds_venv_and_masks_legacy_writer` now asserts the
 property rather than only the three known lines. It parses every directive in
@@ -258,18 +260,20 @@ without failing the test.
 
 ### Read-only verification on the live host
 
-This needs no root and changes nothing. `--dry-run` prints
-`Would create directory` for directories that already exist, which is a dry-run
-artifact and not a hazard. The signal that matters is whether any
-`Would change` line appears:
+**`--dry-run` is not available on this host.** The producer host runs
+systemd 255 (`255.4-1ubuntu8.16`) and `systemd-tmpfiles` gained `--dry-run` in
+256. Running it there fails with `unrecognized option '--dry-run'` and exits
+without checking anything, which is easy to misread as a clean result. Check
+the version before relying on it:
 
 ```sh
-systemd-tmpfiles --dry-run --create \
-  /path/to/release/deploy/sn39/cathedral-sn39-validator.tmpfiles
+systemctl --version | head -1
 ```
 
-Expected output on the current host is four `Would create directory` lines and
-nothing else. To reduce it to a single verdict:
+On systemd 256 or newer, this needs no root and changes nothing. `--dry-run`
+prints `Would create directory` for directories that already exist, which is a
+dry-run artifact and not a hazard. The signal that matters is whether any
+`Would change` line appears:
 
 ```sh
 systemd-tmpfiles --dry-run --create \
@@ -279,10 +283,133 @@ systemd-tmpfiles --dry-run --create \
   || echo 'SAFE: no ownership or mode change on this host'
 ```
 
-Run the same command against the old contract to see the hazard the change
-removes: it prints eight `Would change` lines.
+Expected output is eight `Would create directory` lines and nothing else. Run
+the same command against the old contract to see the hazard the change removes:
+it prints eight `Would change` lines.
 
-## 3. Staged cutover
+On systemd 255, which is what this host runs, verify by observation instead.
+The property being checked is that no existing inode changes owner, group or
+mode, so record the tree, apply, and compare:
+
+```sh
+find /var/lib/cathedral-public-evidence -maxdepth 2 \
+  -printf '%p %u:%g %m\n' | sort > /tmp/evidence-tree.before
+# ... install the file and run systemd-tmpfiles --create on it (step 3) ...
+find /var/lib/cathedral-public-evidence -maxdepth 2 \
+  -printf '%p %u:%g %m\n' | sort > /tmp/evidence-tree.after
+diff /tmp/evidence-tree.before /tmp/evidence-tree.after \
+  && echo 'SAFE: no ownership or mode change on this host'
+```
+
+An empty diff is the same verdict the dry-run would have given. If the diff is
+non-empty, the rollback is `rm /etc/tmpfiles.d/cathedral-sn39-validator.conf`
+plus restoring the recorded ownership.
+
+## 3. Weight-policy contract version: the publisher and validator move together
+
+This is the tightest coupling in the cutover and the one with no rollback if it
+is sequenced wrong. The launch-locked validator and the live publisher disagree
+about the shape of the signed `validated_supply` policy block, and the
+disagreement is invisible until the validator is upgraded.
+
+### Measured, both sides
+
+The live publisher emits contract **v1**. Read from the host with a plain GET
+against the loopback feed the epoch loop already uses:
+
+```sh
+curl -sk https://127.0.0.1:8012/v1/validator/weights/next \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["policy_metadata"]["validated_supply"])'
+```
+
+```
+{"contract_version": "v1", "intel_tdx_allocation": 0.9,
+ "verified_gpu_allocation": 0.1, "verified_gpu_admitted": false,
+ "burn_hotkey": "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"}
+```
+
+The launch-locked validator requires contract **v2**.
+`scaffold/validator_thin.py::_validated_supply_meta` compares the field set
+exactly and then checks the version:
+
+```python
+expected = {
+    "contract_version",
+    "intel_tdx_allocation",
+    "fixed_burn_allocation",
+    "burn_hotkey",
+}
+if set(policy) != expected:
+    raise wire.VectorError("validated_supply metadata fields mismatch")
+if policy["contract_version"] != "v2":
+    raise wire.VectorError("validated_supply unsupported contract_version")
+```
+
+Both `config/validator-mainnet-sn39.toml` and
+`config/validator-mainnet-sn39-launch.toml` set
+`require_policy = "validated_supply_v1"`, which is the mode name that routes
+into this function. The mode is named v1; the payload contract it demands is
+v2. They are different version numbers and the naming collision is worth
+knowing before reading the code.
+
+A v1 payload fails on the field-set comparison before the version check is
+ever reached, because `verified_gpu_allocation` and `verified_gpu_admitted` are
+not in `expected` and `fixed_burn_allocation` is missing.
+
+### Why the running validator does not already fail
+
+The live validator runs revision `98b862b` from
+`/home/polaris/cathedral-scorer-98b862b`, which accepts v1. That is the only
+reason production submits the 90/10 split today. Upgrading the validator
+without upgrading the publisher removes that acceptance.
+
+### What actually happens if they are sequenced wrong
+
+The validator submits **nothing**. It does not fall back to an all-burn vector.
+`vector_to_uid_weights` raises, the tick emits
+
+```
+VECTOR rejected stage=map reason=VectorError
+VECTOR_REJECTED stage=map status=FAIL
+  remediation="The signed vector failed UID mapping; nothing was submitted."
+```
+
+and the continuous loop's handler records `TICK_FAILED` and breaks. There is no
+burn fallback anywhere on this path; the code comment at the burn application
+site states the signed burn is applied only after a fully successful map.
+
+The consequence is therefore not a 100% burn but total silence: no weight
+extrinsic is emitted at all. The previously set weights stay on chain and go
+stale, and once they pass the subnet's expiry the validator stops asserting the
+90/10 split entirely. That failure is quieter than a burn and takes longer to
+notice, which is why the verification step below runs BEFORE the validator is
+cut over rather than after.
+
+### Required sequencing
+
+The publisher upgrade to a v2-emitting revision belongs in the SAME maintenance
+window as the exporter redeploy and the validator install. Verify first, then
+cut over:
+
+```sh
+curl -sk https://127.0.0.1:8012/v1/validator/weights/next \
+  | python3 -c '
+import json, sys
+p = json.load(sys.stdin)["policy_metadata"]["validated_supply"]
+expected = {"contract_version", "intel_tdx_allocation",
+            "fixed_burn_allocation", "burn_hotkey"}
+assert p["contract_version"] == "v2", f"contract_version={p[\"contract_version\"]}"
+assert set(p) == expected, f"field set mismatch: {sorted(set(p) ^ expected)}"
+print("OK: publisher emits v2 with the exact field set the validator requires")
+'
+```
+
+Do not proceed to the validator cutover step until this prints `OK`. Run it
+against port 8012, which is the feed the epoch loop consumes. Port 8010 is
+served by `cathedral-scorer-canary.service` and currently has no live consumer,
+so a v2 answer there proves nothing about what the validator will fetch.
+
+## 4. Staged cutover
 
 Apply in this order. Each step is independently reversible.
 
@@ -302,10 +429,25 @@ Apply in this order. Each step is independently reversible.
 4. **Redeploy the exporter** with the derivation change from section 1. Confirm
    the next exported manifest stamps `9540de44...`, and that the exporter
    refuses to run if `PRODUCER_ROOT` is unset or not a 40-hex basename.
-5. **Install the validator release** with the bumped pins. Provenance can only
+5. **Upgrade the weight-policy publisher to a v2-emitting revision.** See
+   section 3. This must happen before step 7 and inside the same window,
+   because the validator being installed there rejects v1 outright.
+6. **Verify the publisher emits v2** with the exact required field set, using
+   the assertion command in section 3 against port 8012. Do not continue until
+   it prints `OK`. This is the gate for step 7.
+7. **Install the validator release** with the bumped pins. Provenance can only
    reach FULL after step 4 has produced at least one manifest stamped
    `9540de44...`; before that the pin and the evidence still disagree.
-6. **Leave the three validator units disabled and inactive** until the launch
+8. **Replace the pre-cutover status publisher.** The live host runs its own
+   `cathedral-sn39-public-status.service` against the current validator's event
+   stream. The shipped unit is paired with `cathedral-validator-sn39.service`
+   and reads `/var/log/cathedral-validator/validator-events.jsonl`, which does
+   not exist until step 7 has run. Install it only after step 7, and confirm it
+   actually ran: its `ConditionPathExists=` makes systemd SKIP it silently if
+   the log is absent, so a skipped unit and a working one look identical in
+   `systemctl status`. Check `journalctl -u cathedral-sn39-public-status` for a
+   real execution, not just an absence of errors.
+9. **Leave the three validator units disabled and inactive** until the launch
    window. Their single-writer guards are unchanged: each names the other SN39
    writers in `Conflicts=` and refuses to start via `ExecStartPre` while any of
    them is active.
@@ -317,35 +459,110 @@ Apply in this order. Each step is independently reversible.
 | 2 | `rm /etc/sysusers.d/cathedral-sn39-validator.conf`. Accounts already created remain, which is harmless and matches the current host. |
 | 3 | `rm /etc/tmpfiles.d/cathedral-sn39-validator.conf`. No ownership was changed, so there is nothing to restore. This is the property proven above. |
 | 4 | Reinstall the previous exporter. Evidence returns to stamping `b77c7cf...`, which is wrong but is the current production behavior. |
-| 5 | Reinstall the previous validator release. The pins revert together because they moved together. |
+| 5 | Reinstall the previous publisher revision. It returns to emitting v1, which the pre-cutover validator accepts. Roll back step 7 with it or the validator has nothing it will accept. |
+| 7 | Reinstall the previous validator release. The pins revert together because they moved together. |
+| 8 | Reinstall the pre-cutover status publisher unit. Nothing else depends on the shipped one. |
 
 Steps 1 through 3 do not touch the producer and can be done outside a
 maintenance window. Step 4 restarts the exporter and should be done between
 export cycles.
 
-## 4. Open decisions
+Steps 5 through 7 are one transaction. Rolling back the validator without
+rolling back the publisher, or the reverse, reproduces the version mismatch in
+section 3 from the opposite direction: a v2 publisher feeding the `98b862b`
+validator fails the same exact-field-set comparison. Roll them back together.
 
-**The status publisher cannot currently write the directory it is configured to
-write.** `cathedral-sn39-public-status.service` runs as `cathedral-status` with
-`ReadWritePaths=/var/lib/cathedral-public-evidence/logs`, but on the live host
-that directory is `polaris:polaris 0755`. `ReadWritePaths=` controls the mount
-namespace, not file permissions, so the unit will get `EACCES`. Making the
-tmpfiles contract migration-safe deliberately does not fix this, because the
-only way a tmpfiles line could fix it is the chown that would break the
-producer. Options, in the order they are recommended:
+## 5. Status publisher identity: resolved
 
-1. **Give the status publisher its own directory** (for example
-   `/var/lib/cathedral-validator-status/logs`, owned `cathedral-status`) and
-   publish from there. Removes the shared-directory coupling entirely and
-   touches no producer-owned path. Requires changing the unit and the publish
-   script paths.
-2. **Add `cathedral-status` to the producer's group** and set the `logs`
-   directory to `2775 polaris:polaris`. The producer keeps ownership and the
-   publisher gains write access. This is additive but still a `chmod`/`chgrp`
-   on a live directory, so it belongs in a maintenance window.
-3. **Chown `logs` to `cathedral-status` and add the producer to that group.**
-   Inverts the current owner on a directory a running service writes. Not
-   recommended.
+The previous revision of this document left open which account owns
+`/var/lib/cathedral-public-evidence/logs`. It is now resolved in favour of
+`polaris`, the account that demonstrably writes it.
 
-This is a design decision about which service owns the published evidence path,
-not a packaging detail, so it is left open rather than chosen here.
+The deciding evidence is that `cathedral-status` has never existed. `id
+cathedral-status` on the producer host returns "no such user", the logs
+directory is `polaris:polaris 0755`, and the publisher that writes it every
+minute already runs as `polaris` and is healthy:
+
+```
+cathedral-sn39-publish-validator-status[118036]:
+  {"events_published": 200, "status": "sanitized_validator_stream_published"}
+```
+
+So the contract was not describing a configuration that had drifted. It was
+describing one that had never been applied. The `cathedral-status` identity is
+removed from the sysusers file, the tmpfiles `logs` line, and the status unit,
+which now runs `User=polaris`. Nothing is chowned, and the option that would
+have required chowning a live producer-owned tree is off the table.
+
+The alternative remains available and is a one-line change in review if
+preferred: **give the status publisher its own directory**, for example
+`/var/lib/cathedral-validator-status/logs` owned by a real `cathedral-status`
+account, and publish from there. That removes the shared-directory coupling
+entirely rather than naming the existing owner. It costs a new directory, a
+sysusers entry, a tmpfiles entry, and a path change in the publish script, and
+it does not match what runs today, which is why it is not the default here.
+
+## 6. Inventory and operator notes
+
+These are recorded because a new operator trips over them, not because any of
+them blocks the launch. None proposes a host deletion.
+
+### Retained but unreferenced under /etc/cathedral
+
+No unit or script under `/etc/systemd/system`, `/usr/local/sbin`,
+`/usr/local/libexec` or `/home/polaris/cathedral-sn39/scripts` references any of
+these. They are retained deliberately; deleting key material belongs in an
+explicit operator transaction, not a release.
+
+| Path | Note |
+|---|---|
+| `confidential-spot-worker.env` | No referencing unit |
+| `registry-reissues-sn39.jsonl` | No referencing unit |
+| `receipt-signing-sn39.key` | Superseded by `receipt-signing-sn39-20260724.key`, which IS referenced |
+| `release-attestation-signing-sn39-20260724.key` | Key material, no referencing unit |
+| `confidential-validator-sn39-provenance-canary.toml` | No referencing unit |
+| `confidential-sn39-rollback-anchor` | No referencing unit |
+| `scorer-canary.env.sh.bak.20260713T111941Z` | Backup of a live file |
+| `rollback-20260713T184411Z/` | Snapshot directory |
+| `rollback-canonical-feed-20260723T0738Z/` | Snapshot directory |
+| `rollback-validated-supply-20260722T2343Z/` | Snapshot directory |
+
+`confidential-measurements.json` and `confidential-tokens.json` are referenced
+only by `/usr/local/sbin/cathedral-confidential-validator-loop`, which is the
+`ExecStart` of `cathedral-confidential-validator.service`. That unit is disabled
+and inactive, so both files are reachable only through a dead path.
+
+### The scorer unit names do not match their ports
+
+This reverses the intuition and has cost review time already:
+
+| Unit | Port | Consumer |
+|---|---|---|
+| `cathedral-scorer-sn39.service` | 8012 | The live epoch loop and `cathedral-sn39-fresh-evidence-epoch` |
+| `cathedral-scorer-canary.service` | 8010 | None |
+
+Both serve the same `scaffold.publisher.server:app` from the same venv with the
+same TLS pair, and both source `/etc/cathedral/scorer-canary.env.sh`, which sets
+`PORT=8010` for both. The only substantive difference is that the `sn39` unit
+additionally exports `CATHEDRAL_WEIGHT_POLICY_NETWORK=finney` and `NETUID=39`.
+
+Port 8010's only reference anywhere is
+`cathedral-confidential-validator-loop:10`
+(`PUBLISHER=https://127.0.0.1:8010/v1/external-scores/violet`), and that script
+belongs to the disabled `cathedral-confidential-validator.service`. Any
+verification command that talks to a scorer must target **8012**.
+
+### The canary worker runs a development flag on a routable bind
+
+`cathedral-confidential-canary.service` runs:
+
+```
+cathedral worker serve --hotkey cathedral-tdx-canary-7e93d5de \
+  --host 0.0.0.0 --port 8081 --development-allow-non-loopback
+```
+
+`MINING.md` says of that flag: "Use the flag only here, never on a worker
+anything else can reach." A `0.0.0.0` bind is reachable. This is not a chain
+writer and not a launch blocker, but it is a documented rule the host
+contradicts, so it is a decision to make in the launch window rather than a
+detail to leave undisturbed.

@@ -7,7 +7,17 @@ Conflicts=cathedral-thin-validator.service cathedral-validator-sn39.service cath
 [Service]
 Type=oneshot
 User=cathedral-validator
-Group=cathedral-validator
+# Must match cathedral-validator-sn39.service, because both units declare
+# LogsDirectory=cathedral-validator and therefore manage the SAME directory.
+# systemd applies the owning unit's User:Group to a LogsDirectory it manages,
+# so running this one-shot as cathedral-validator flipped
+# /var/log/cathedral-validator from group cathedral-validator-log to group
+# cathedral-validator the first time it ran, silently revoking the group read
+# that cathedral-sn39-public-status.service depends on. The status publisher
+# would then stop being able to read validator-events.jsonl, and because it is
+# a oneshot timer the failure surfaces only as a status page that stopped
+# updating.
+Group=cathedral-validator-log
 Environment=HOME=/var/lib/cathedral-validator
 # Belt and braces. Conflicts= only acts on units systemd is asked to start;
 # it cannot stop a writer someone launched by hand. This refuses to start

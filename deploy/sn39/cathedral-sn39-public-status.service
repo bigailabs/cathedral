@@ -1,12 +1,27 @@
 [Unit]
 Description=Publish sanitized Cathedral SN39 validator status
 After=cathedral-validator-sn39.service
+# This unit is paired with cathedral-validator-sn39.service and reads the event
+# log that unit writes. Before the validator cutover that log does not exist,
+# and this condition means systemd SKIPS the unit rather than failing it. A
+# skipped oneshot reports no error anywhere, so installing this unit early
+# looks identical to installing a working one. It is not a substitute for the
+# pre-cutover publisher: the live host runs its own status publisher against
+# the current validator's event stream, and that unit must stay in place until
+# step 8 of the staged cutover replaces it.
 ConditionPathExists=/var/log/cathedral-validator/validator-events.jsonl
 
 [Service]
 Type=oneshot
-User=cathedral-status
-Group=cathedral-status
+# polaris owns /var/lib/cathedral-public-evidence/logs on the live host and is
+# the account that writes it today. ReadWritePaths= below controls the mount
+# namespace, not file permissions, so a unit running as any other identity gets
+# EACCES on its own output directory unless something first chowns a tree the
+# producer is actively writing. Running as the real writer avoids that chown.
+User=polaris
+Group=polaris
+# Granted at runtime rather than by static membership in the sysusers file, so
+# this tree never has to declare or assume the producer's account.
 SupplementaryGroups=cathedral-validator-log
 ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release status
 UMask=0077
@@ -34,5 +49,10 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/var/log/cathedral-validator/validator-events.jsonl
 ReadOnlyPaths=/var/lib/cathedral-public-evidence/index.json
-ReadOnlyPaths=/var/lib/cathedral-public-evidence/release.json
+# Optional. release.json exists only once a root-signed release has been
+# sealed, and it is absent on the host today. An unprefixed ReadOnlyPaths= on a
+# missing path fails the mount namespace setup and takes the whole unit down,
+# which would turn "no sealed release yet" into "status publishing is broken".
+# The '-' prefix degrades that to a missing input the publisher can report.
+ReadOnlyPaths=-/var/lib/cathedral-public-evidence/release.json
 ReadWritePaths=/var/lib/cathedral-public-evidence/logs
