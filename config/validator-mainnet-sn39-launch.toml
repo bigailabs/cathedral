@@ -41,13 +41,13 @@ verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16
 source_revision = "655c264421a1f5f2e625a372a40f595aa1e114ab" # pragma: allowlist secret
 mechanism = "validated_supply_v1"
 burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
-controlled_dir = "/etc/cathedral/controlled/sn39-launch"
+controlled_dir = "/var/lib/cathedral-validator-controlled-sn39/current"
 verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
 
 [launch]
 require_full_provenance_for_broadcast = true
 require_completed_launch_for_broadcast = false
-approval_file = "/etc/cathedral/controlled/sn39-launch-approval.json"
+approval_file = "/etc/cathedral-validator/sn39-launch-approval.json"
 
 [logs]
 jsonl = "/var/log/cathedral-validator-launch/validator-events.jsonl"
