@@ -594,12 +594,13 @@ install -D -o root -g root -m 0644 \
 install -D -o root -g root -m 0644 \
   "$release/deploy/sn39/cathedral-sn39-validator.tmpfiles" \
   /etc/tmpfiles.d/cathedral-sn39-validator.conf
+install -d -o root -g root -m 0755 /etc/cathedral-validator
 install -D -o root -g root -m 0644 \
   "$release/config/validator-mainnet-sn39.toml" \
-  /etc/cathedral/validator-mainnet-sn39.toml
+  /etc/cathedral-validator/validator-mainnet-sn39.toml
 install -D -o root -g root -m 0644 \
   "$release/config/validator-mainnet-sn39-launch.toml" \
-  /etc/cathedral/validator-mainnet-sn39-launch.toml
+  /etc/cathedral-validator/validator-mainnet-sn39-launch.toml
 systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator.conf
 
@@ -654,7 +655,7 @@ case "$legacy_state" in
 esac
 systemctl daemon-reload
 
-manifest_tmp="$(mktemp /etc/cathedral/sn39-release-manifest.json.XXXXXX)"
+manifest_tmp="$(mktemp /etc/cathedral-validator/sn39-release-manifest.json.XXXXXX)"
 /usr/bin/python3.12 -I -E -s \
   "$release/scripts/build_sn39_release_manifest.py" \
   --release "$release" \
@@ -663,7 +664,7 @@ manifest_tmp="$(mktemp /etc/cathedral/sn39-release-manifest.json.XXXXXX)"
   > "$manifest_tmp"
 chown root:root "$manifest_tmp"
 chmod 0644 "$manifest_tmp"
-mv -f "$manifest_tmp" /etc/cathedral/sn39-release-manifest.json
+mv -f "$manifest_tmp" /etc/cathedral-validator/sn39-release-manifest.json
 ```
 
 Manifest schema v3 binds the pristine release, lock-created environment,
@@ -677,6 +678,12 @@ The environment commitment accepts a directory symlink only when its resolved
 target stays inside the same immutable environment. This covers the standard
 Linux `venv` layout (`lib64 -> lib`) while continuing to reject directory
 symlinks that escape to mutable or uncommitted trees.
+
+The non-secret validator configs and release manifest live under the dedicated
+root-owned, world-traversable `/etc/cathedral-validator` directory. They must
+not be installed under `/etc/cathedral`: production keeps that directory
+non-traversable by the validator account because it also contains producer
+signing keys and other service secrets.
 
 The signing hotkey is intentionally outside the public release manifest:
 hashing a secret key into public artifacts would create a durable verifier for

@@ -20,7 +20,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-MANIFEST = Path("/etc/cathedral/sn39-release-manifest.json")
+INSTALL_ROOT = Path("/etc/cathedral-validator")
+MANIFEST = INSTALL_ROOT / "sn39-release-manifest.json"
 RELEASES = Path("/opt/cathedral-sn39/releases")
 VENVS = Path("/opt/cathedral-sn39/venvs")
 RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
@@ -28,10 +29,10 @@ JOURNAL_RE = re.compile(r"journal-[0-9a-f]{64}\.json")
 FINALIZER_CONTEXT_ENV = "CATHEDRAL_SN39_FINALIZER_CONTEXT"
 RECURRING_AUTHORIZER_CONTEXT_ENV = "CATHEDRAL_SN39_RECURRING_AUTHORIZER_CONTEXT"
 CONFIGS = {
-    "preflight": Path("/etc/cathedral/validator-mainnet-sn39-launch.toml"),
-    "launch": Path("/etc/cathedral/validator-mainnet-sn39-launch.toml"),
-    "continuous": Path("/etc/cathedral/validator-mainnet-sn39.toml"),
-    "reconcile": Path("/etc/cathedral/validator-mainnet-sn39.toml"),
+    "preflight": INSTALL_ROOT / "validator-mainnet-sn39-launch.toml",
+    "launch": INSTALL_ROOT / "validator-mainnet-sn39-launch.toml",
+    "continuous": INSTALL_ROOT / "validator-mainnet-sn39.toml",
+    "reconcile": INSTALL_ROOT / "validator-mainnet-sn39.toml",
 }
 MODES = frozenset({*CONFIGS, "status", "finalize", "authorize-recurring"})
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")
