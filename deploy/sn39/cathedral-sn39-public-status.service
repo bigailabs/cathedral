@@ -23,7 +23,7 @@ Group=polaris
 # Granted at runtime rather than by static membership in the sysusers file, so
 # this tree never has to declare or assume the producer's account.
 SupplementaryGroups=cathedral-validator-log
-ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release status
+ExecStart=/usr/bin/python3.12 -I -E -s /usr/local/libexec/cathedral-sn39-release status
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

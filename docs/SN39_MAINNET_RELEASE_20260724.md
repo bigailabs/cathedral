@@ -552,13 +552,18 @@ producer's build backend; the second disables build isolation, so Python cannot
 download an unpinned build tool while installing the byte-pinned producer
 archive. Install every reviewed config and unit before generating the manifest:
 
+The bootstrap is the host's resolved, versioned `/usr/bin/python3.12` regular
+file—not the `/usr/bin/python3` symlink. Builder, manifest, launcher, and
+systemd units all pin that same path and its digest, so an interpreter change
+fails closed instead of making symlink mode bits part of the trust decision.
+
 ```bash
 set -euo pipefail
 release_sha="<reviewed-tag-commit>"
 release="/opt/cathedral-sn39/releases/$release_sha"
 venv="/opt/cathedral-sn39/venvs/$release_sha"
 
-/usr/bin/python3 -m venv "$venv"
+/usr/bin/python3.12 -m venv "$venv"
 "$venv/bin/python" -m pip install \
   --require-hashes -r "$release/requirements/sn39-build.lock"
 "$venv/bin/python" -m pip install \
@@ -650,7 +655,7 @@ esac
 systemctl daemon-reload
 
 manifest_tmp="$(mktemp /etc/cathedral/sn39-release-manifest.json.XXXXXX)"
-/usr/bin/python3 -I -E -s \
+/usr/bin/python3.12 -I -E -s \
   "$release/scripts/build_sn39_release_manifest.py" \
   --release "$release" \
   --release-sha "$release_sha" \

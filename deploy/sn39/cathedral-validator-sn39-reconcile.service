@@ -26,7 +26,7 @@ Environment=HOME=/var/lib/cathedral-validator
 # cross-process submission lock with this unit. Two writers on one hotkey
 # means nonce races and a second weight extrinsic.
 ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service'
-ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release reconcile
+ExecStart=/usr/bin/python3.12 -I -E -s /usr/local/libexec/cathedral-sn39-release reconcile
 TimeoutStartSec=5min
 StateDirectory=cathedral-validator
 StateDirectoryMode=0700
