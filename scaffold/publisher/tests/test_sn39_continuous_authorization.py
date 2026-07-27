@@ -496,10 +496,11 @@ def test_recurring_authorization_verifier_is_explicitly_release_bound() -> None:
     root = Path(__file__).resolve().parents[3]
     unit = (root / "deploy/sn39/cathedral-validator-sn39.service").read_text("utf-8")
     assert (
-        "ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json\n"
+        "ConditionPathExists=/etc/cathedral-validator/"
+        "sn39-recurring-write-authorization.json\n"
     ) in unit
     assert (
-        "ConditionPathExists=/etc/cathedral/"
+        "ConditionPathExists=/etc/cathedral-validator/"
         "sn39-recurring-write-authorization.json.sig\n"
     ) in unit
     read_only_line = next(
@@ -507,6 +508,12 @@ def test_recurring_authorization_verifier_is_explicitly_release_bound() -> None:
     )
     assert "sn39-recurring-write-authorization" not in read_only_line
     assert "ProtectSystem=strict" in unit
+    assert recurring.AUTHORIZATION_PATH == Path(
+        "/etc/cathedral-validator/sn39-recurring-write-authorization.json"
+    )
+    assert recurring.SIGNATURE_PATH == Path(
+        "/etc/cathedral-validator/sn39-recurring-write-authorization.json.sig"
+    )
 
 
 def _runtime_authorization(

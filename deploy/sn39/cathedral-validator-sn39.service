@@ -4,8 +4,8 @@ After=network-online.target cathedral-thin-validator.service cathedral-confident
 Wants=network-online.target
 Conflicts=cathedral-thin-validator.service cathedral-validator-sn39-launch.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
 ConditionPathIsReadWrite=/var/lib/cathedral-validator
-ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json
-ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json.sig
+ConditionPathExists=/etc/cathedral-validator/sn39-recurring-write-authorization.json
+ConditionPathExists=/etc/cathedral-validator/sn39-recurring-write-authorization.json.sig
 
 [Service]
 Type=simple
@@ -20,6 +20,7 @@ User=cathedral-validator
 # write their own LogsDirectory that nothing else reads, so they have no reason
 # to widen their primary group.
 Group=cathedral-validator-log
+SupplementaryGroups=cathedral-validator-evidence
 Environment=HOME=/var/lib/cathedral-validator
 # Belt and braces. Conflicts= only acts on units systemd is asked to start;
 # it cannot stop a writer someone launched by hand. This refuses to start
@@ -41,7 +42,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadOnlyPaths=/etc/cathedral/controlled/sn39-launch /opt/cathedral-sn39/bin/cathedral-tdx-verifier
+ReadOnlyPaths=/var/lib/cathedral-validator-controlled-sn39/current /opt/cathedral-sn39/bin/cathedral-tdx-verifier
 ReadWritePaths=/var/lib/cathedral-validator /var/log/cathedral-validator
 RestrictSUIDSGID=true
 LockPersonality=true

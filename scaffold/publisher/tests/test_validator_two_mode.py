@@ -6858,15 +6858,36 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         Path("/etc/cathedral-validator/validator-mainnet-sn39.toml"),
         Path("/etc/cathedral-validator/validator-mainnet-sn39-launch.toml"),
     }
+    assert validator_thin.SN39_LAUNCH_CONTROLLED_DIR == Path(
+        "/var/lib/cathedral-validator-controlled-sn39/current"
+    )
+    assert validator_thin.SN39_LAUNCH_APPROVAL_FILE == Path(
+        "/etc/cathedral-validator/sn39-launch-approval.json"
+    )
     assert (
         'MANIFEST = Path("/etc/cathedral-validator/sn39-release-manifest.json")'
         in (root / "scripts/finalize_sn39_public_release.py").read_text()
     )
     assert (
-        'RELEASE_MANIFEST = Path('
+        "CONTROLLED_ROOT = Path("
+        '"/var/lib/cathedral-validator-controlled-sn39/current")'
+        in (root / "scripts/finalize_sn39_public_release.py").read_text()
+    )
+    assert (
+        "RELEASE_MANIFEST = Path("
         '"/etc/cathedral-validator/sn39-release-manifest.json")'
         in (root / "scaffold/sn39_continuous_authorization.py").read_text()
     )
+    for unit_name in (
+        "cathedral-validator-sn39.service",
+        "cathedral-validator-sn39-launch.service",
+    ):
+        unit = (root / "deploy/sn39" / unit_name).read_text("utf-8")
+        assert "SupplementaryGroups=cathedral-validator-evidence\n" in unit
+        assert (
+            "ReadOnlyPaths=/var/lib/cathedral-validator-controlled-sn39/current "
+            "/opt/cathedral-sn39/bin/cathedral-tdx-verifier\n"
+        ) in unit
     git_calls: list[tuple[list[str], dict[str, object]]] = []
     with pytest.MonkeyPatch.context() as git_patch:
         git_patch.setattr(
@@ -6896,8 +6917,10 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         )
     ]
     assert (
-        root / "deploy/sn39/cathedral-sn39-release-launcher.py"
-    ).read_text().startswith("#!/usr/bin/python3.12 -I\n")
+        (root / "deploy/sn39/cathedral-sn39-release-launcher.py")
+        .read_text()
+        .startswith("#!/usr/bin/python3.12 -I\n")
+    )
     with pytest.MonkeyPatch.context() as access_patch:
         access_patch.setattr(
             launcher.os,

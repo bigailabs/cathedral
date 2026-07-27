@@ -40,7 +40,7 @@ claim. The following observations remain blocking:
 | Evidence epoch producer | **FAIL** | The live epoch producer is wedged on `signed report policy_digest does not match supplied registry`; it is not producing a qualifying fresh epoch. |
 | Intel TDX worker | **FAIL** | The required worker is `TERMINATED`. Starting or replacing it is a paid production mutation and requires explicit authority. |
 | Producer revision | **FAIL** | Three values disagreed. The host exporter stamped `b77c7cfacab34de75b1102360f6e3fc1edf5b796` into every signed manifest, this repository pinned `fa39af97e738fdbed5c454f976b61246590b5794`, and the producer actually runs `655c264421a1f5f2e625a372a40f595aa1e114ab` from `/opt/cathedral-sn39/venvs/9540de44...`. The installed venv is the only value that is evidence rather than assertion, so every pin in this repository now reads `9540de44...`. The boundary stays FAIL until the host exporter is redeployed to derive its stamp from the installed venv basename instead of hardcoding it, because until then signed evidence still misstates what produced it and FULL provenance cannot match. |
-| Producer, enrollment, and controlled-package install contract | **NOT_PROVEN** | The exact final ownership, group, and mode contract for `/etc/cathedral/controlled/sn39-launch` has not been resolved. Do not infer permissions or install a substitute package. |
+| Producer, enrollment, and controlled-package install contract | **IMPLEMENTED; live release proof required** | The producer atomically selects `/var/lib/cathedral-validator-controlled-sn39/current`; its real epoch directory is `root:cathedral-validator-evidence` mode `2750` with root-owned mode-`0640` regular files, and the validator service receives only that supplementary read group. The immutable release still fails closed unless the live host proves this exact contract. |
 | Public launch evidence | **NOT_PROVEN** | The currently published evidence is stale and the current vector is empty/all-burn. It cannot authorize the launch weight. |
 | Root-signed release | **NOT_PROVEN** | The final release and its detached signature are absent. A mutable candidate or unsigned `release.json` is not a sealed release. |
 
@@ -443,11 +443,13 @@ For the final launch service, materialize only the two existing inputs:
    the configured Cathedral endpoints in
    `config/validator-mainnet-sn39-launch.toml`.
 2. The authorized controlled-disclosure package for that same manifest is
-   installed byte-for-byte at
-   `/etc/cathedral/controlled/sn39-launch` under the exact owner, group, and
-   mode contract accepted during final review and unavailable to untrusted
-   users. That contract is currently unresolved; this guide does not choose
-   values for it. The pinned verifier remains
+   installed byte-for-byte in an immutable epoch directory below
+   `/var/lib/cathedral-validator-controlled-sn39`, selected atomically by its
+   `current` symlink. The root is mode `2750`; epoch directories are
+   `root:cathedral-validator-evidence` mode `2750`; and regular package files
+   are root-owned, group `cathedral-validator-evidence`, mode `0640`, and never
+   symlinks. The validator unit receives that group only as a supplementary
+   read capability. The pinned verifier remains
    `/opt/cathedral-sn39/bin/cathedral-tdx-verifier`.
 
 Before the final weight test, record the canonical receipt JSON file for every
@@ -878,8 +880,8 @@ sudo /usr/bin/python3 -I -E -s \
    signs the byte-canonical authorization with the separately protected
    release-attestation key, and writes:
 
-   - `/etc/cathedral/sn39-recurring-write-authorization.json`
-   - `/etc/cathedral/sn39-recurring-write-authorization.json.sig`
+   - `/etc/cathedral-validator/sn39-recurring-write-authorization.json`
+   - `/etc/cathedral-validator/sn39-recurring-write-authorization.json.sig`
 
    Both files and their parent must remain root-owned and non-writable by group
    or world. The validator re-verifies their detached Ed25519 signature and

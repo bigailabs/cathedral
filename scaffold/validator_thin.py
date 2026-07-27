@@ -81,9 +81,11 @@ SN39_VERIFIER_DIGEST = (
 SN39_PRODUCER_REVISION = "655c264421a1f5f2e625a372a40f595aa1e114ab"
 SN39_BURN_HOTKEY = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 SN39_STATE_FILE = Path("/var/lib/cathedral-validator/thin-state.json")
-SN39_LAUNCH_CONTROLLED_DIR = Path("/etc/cathedral/controlled/sn39-launch")
+SN39_LAUNCH_CONTROLLED_DIR = Path(
+    "/var/lib/cathedral-validator-controlled-sn39/current"
+)
 SN39_LAUNCH_VERIFIER_BINARY = Path("/opt/cathedral-sn39/bin/cathedral-tdx-verifier")
-SN39_LAUNCH_APPROVAL_FILE = Path("/etc/cathedral/controlled/sn39-launch-approval.json")
+SN39_LAUNCH_APPROVAL_FILE = Path("/etc/cathedral-validator/sn39-launch-approval.json")
 SN39_LAUNCH_APPROVAL_SCHEMA = "cathedral_sn39_launch_approval_v1"
 SN39_LAUNCH_APPROVAL_LIFETIME_BLOCKS = 64
 SN39_LAUNCH_APPROVAL_MAX_BYTES = 256 * 1024
