@@ -6846,6 +6846,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     binary.chmod(0o555)
     package.chmod(0o444)
 
+    monkeypatch.setattr(builder, "ROOT_UID", os.getuid())
     monkeypatch.setattr(launcher, "ROOT_UID", os.getuid())
     assert builder.BOOTSTRAP_PYTHON == launcher.BOOTSTRAP_PYTHON
     assert launcher.BOOTSTRAP_PYTHON == Path("/usr/bin/python3.12")
@@ -6940,6 +6941,23 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     expected = builder.immutable_tree_digest(venv)
     assert launcher._immutable_tree_digest(venv) == expected
 
+    venv.chmod(0o700)
+    with pytest.raises(SystemExit, match="readable, and searchable"):
+        builder.immutable_tree_digest(venv)
+    with pytest.raises(launcher.InstallError, match="root-controlled"):
+        launcher._immutable_tree_digest(venv)
+    venv.chmod(0o755)
+
+    package.chmod(0o400)
+    with pytest.raises(SystemExit, match="service-readable"):
+        builder.immutable_tree_digest(venv)
+    with pytest.raises(
+        launcher.InstallError,
+        match="mutable or unsupported",
+    ):
+        launcher._immutable_tree_digest(venv)
+    package.chmod(0o444)
+
     outside_directory = tmp_path / "outside-lib"
     outside_directory.mkdir()
     outside_directory.chmod(0o755)
@@ -6960,7 +6978,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
 
     external_link = tmp_path / "hard-linked-cathedral.py"
     os.link(package, external_link)
-    with pytest.raises(SystemExit, match="hard-linked file"):
+    with pytest.raises(SystemExit, match="single-linked"):
         builder.immutable_tree_digest(venv)
     with pytest.raises(
         launcher.InstallError,
