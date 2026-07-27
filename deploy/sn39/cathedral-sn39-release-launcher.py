@@ -321,7 +321,7 @@ def _check_digest_map(
 def _git_output(release: Path, *args: str) -> str:
     try:
         return subprocess.check_output(
-            ["/usr/bin/git", *args],
+            ["/usr/bin/git", "-c", f"safe.directory={release}", *args],
             cwd=release,
             text=True,
             stderr=subprocess.DEVNULL,
