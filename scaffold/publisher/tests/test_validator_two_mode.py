@@ -6834,6 +6834,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     binary.write_bytes(b"reviewed-python-bytes")
     package.write_bytes(b"reviewed-cathedral-bytes")
     (venv / "bin/python").symlink_to("python-real")
+    (venv / "lib64").symlink_to("lib", target_is_directory=True)
     for directory in (
         venv,
         venv / "bin",
@@ -6869,6 +6870,19 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     binary.chmod(0o555)
     expected = builder.immutable_tree_digest(venv)
     assert launcher._immutable_tree_digest(venv) == expected
+
+    outside_directory = tmp_path / "outside-lib"
+    outside_directory.mkdir()
+    outside_directory.chmod(0o755)
+    (venv / "external-lib").symlink_to(
+        outside_directory,
+        target_is_directory=True,
+    )
+    with pytest.raises(SystemExit, match="symlink target is unsupported"):
+        builder.immutable_tree_digest(venv)
+    with pytest.raises(launcher.InstallError, match="unsafe target"):
+        launcher._immutable_tree_digest(venv)
+    (venv / "external-lib").unlink()
 
     package.chmod(0o644)
     package.write_bytes(b"substituted-cathedral-bytes")

@@ -133,7 +133,23 @@ def _immutable_tree_digest(root: Path) -> str:
                     raise InstallError(
                         f"immutable tree symlink cannot be resolved: {path}"
                     ) from exc
-                if (
+                if stat.S_ISDIR(target_info.st_mode) and target.is_relative_to(root):
+                    if (
+                        target_info.st_uid != ROOT_UID
+                        or stat.S_IMODE(target_info.st_mode) & 0o022
+                    ):
+                        raise InstallError(
+                            f"immutable tree symlink has an unsafe target: {path}"
+                        )
+                    _record_digest(
+                        tree,
+                        "directory-symlink",
+                        relative,
+                        os.readlink(path),
+                        target.relative_to(root).as_posix(),
+                        f"{stat.S_IMODE(target_info.st_mode):04o}",
+                    )
+                elif (
                     target_info.st_uid != ROOT_UID
                     or target_info.st_nlink != 1
                     or stat.S_IMODE(target_info.st_mode) & 0o022
@@ -142,15 +158,16 @@ def _immutable_tree_digest(root: Path) -> str:
                     raise InstallError(
                         f"immutable tree symlink has an unsafe target: {path}"
                     )
-                _record_digest(
-                    tree,
-                    "symlink",
-                    relative,
-                    os.readlink(path),
-                    str(target),
-                    f"{stat.S_IMODE(target_info.st_mode):04o}",
-                    _digest(target),
-                )
+                else:
+                    _record_digest(
+                        tree,
+                        "symlink",
+                        relative,
+                        os.readlink(path),
+                        str(target),
+                        f"{stat.S_IMODE(target_info.st_mode):04o}",
+                        _digest(target),
+                    )
             else:
                 raise InstallError(
                     f"immutable tree has a mutable or unsupported entry: {path}"

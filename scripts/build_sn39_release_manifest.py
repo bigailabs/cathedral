@@ -88,19 +88,29 @@ def immutable_tree_digest(root: Path) -> str:
             elif stat.S_ISLNK(info.st_mode):
                 target = path.resolve(strict=True)
                 target_info = target.stat()
-                if not stat.S_ISREG(target_info.st_mode) or target_info.st_nlink != 1:
+                if stat.S_ISDIR(target_info.st_mode) and target.is_relative_to(root):
+                    record_digest(
+                        tree,
+                        "directory-symlink",
+                        relative,
+                        os.readlink(path),
+                        target.relative_to(root).as_posix(),
+                        f"{stat.S_IMODE(target_info.st_mode):04o}",
+                    )
+                elif stat.S_ISREG(target_info.st_mode) and target_info.st_nlink == 1:
+                    record_digest(
+                        tree,
+                        "symlink",
+                        relative,
+                        os.readlink(path),
+                        str(target),
+                        f"{stat.S_IMODE(target_info.st_mode):04o}",
+                        digest(target),
+                    )
+                else:
                     raise SystemExit(
                         f"versioned venv symlink target is unsupported: {path}"
                     )
-                record_digest(
-                    tree,
-                    "symlink",
-                    relative,
-                    os.readlink(path),
-                    str(target),
-                    f"{stat.S_IMODE(target_info.st_mode):04o}",
-                    digest(target),
-                )
             else:
                 raise SystemExit(f"versioned venv has unsupported entry type: {path}")
     return "sha256:" + tree.hexdigest()

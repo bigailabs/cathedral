@@ -673,6 +673,11 @@ interpreter in isolated, environment-ignoring mode. The launcher then passes a
 fixed allowlisted child environment, so ambient variables cannot substitute
 settings, Python imports, or the shared submission journal.
 
+The environment commitment accepts a directory symlink only when its resolved
+target stays inside the same immutable environment. This covers the standard
+Linux `venv` layout (`lib64 -> lib`) while continuing to reject directory
+symlinks that escape to mutable or uncommitted trees.
+
 The signing hotkey is intentionally outside the public release manifest:
 hashing a secret key into public artifacts would create a durable verifier for
 guessing or exfiltration attempts. Its presence is instead gated by exact
