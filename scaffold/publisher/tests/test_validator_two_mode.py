@@ -6867,6 +6867,34 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         '"/etc/cathedral-validator/sn39-release-manifest.json")'
         in (root / "scaffold/sn39_continuous_authorization.py").read_text()
     )
+    git_calls: list[tuple[list[str], dict[str, object]]] = []
+    with pytest.MonkeyPatch.context() as git_patch:
+        git_patch.setattr(
+            launcher.subprocess,
+            "check_output",
+            lambda command, **kwargs: (
+                git_calls.append((command, kwargs)),
+                "reviewed\n",
+            )[1],
+        )
+        assert launcher._git_output(venv, "rev-parse", "HEAD") == "reviewed"
+    assert git_calls == [
+        (
+            [
+                "/usr/bin/git",
+                "-c",
+                f"safe.directory={venv}",
+                "rev-parse",
+                "HEAD",
+            ],
+            {
+                "cwd": venv,
+                "text": True,
+                "stderr": subprocess.DEVNULL,
+                "env": {"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            },
+        )
+    ]
     assert (
         root / "deploy/sn39/cathedral-sn39-release-launcher.py"
     ).read_text().startswith("#!/usr/bin/python3.12 -I\n")

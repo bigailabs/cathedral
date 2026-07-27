@@ -685,6 +685,10 @@ not be installed under `/etc/cathedral`: production keeps that directory
 non-traversable by the validator account because it also contains producer
 signing keys and other service secrets.
 
+Git verification runs with `safe.directory` set to the exact manifest-selected
+release path. This lets the unprivileged validator verify a root-owned checkout
+without trusting any other repository or a wildcard safe-directory rule.
+
 The signing hotkey is intentionally outside the public release manifest:
 hashing a secret key into public artifacts would create a durable verifier for
 guessing or exfiltration attempts. Its presence is instead gated by exact
