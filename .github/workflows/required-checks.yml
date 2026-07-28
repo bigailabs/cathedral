@@ -27,7 +27,7 @@ jobs:
         run: python -m pip install ".[test]"
       - name: Run adversarial, recovery, and end-to-end tests
         run: |
-          ruff check cathedral_thin tests/thin
+          ruff check cathedral_loop.py cathedral_thin tests/thin
           ruff format --check cathedral_thin tests/thin
           python -m pytest -q tests/thin
           cathedral-thin-e2e

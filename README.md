@@ -172,6 +172,7 @@ V2 fast-path work. These are research or integration surfaces unless a current
 tagged release explicitly promotes them. They are not evidence that an endpoint
 is deployed or that a reward class is active.
 
+- [Cathedral model loop in 100 lines](docs/CATHEDRAL_100_LINES.md)
 - [Verified Agent Work](docs/VERIFIED_AGENT_WORK.md)
 - [VerifyML](docs/VERIFYML.md)
 - [Violet external scores](docs/VIOLET_EXTERNAL_SCORES.md)

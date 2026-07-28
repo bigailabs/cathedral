@@ -64,6 +64,9 @@ cathedral-thin-contributor = "cathedral_thin.contributor_cli:main"
 cathedral-verifyml = "cathedral_thin.verifyml_cli:main"
 cathedral-verified-policy = "cathedral_thin.policy_cli:main"
 
+[tool.setuptools]
+py-modules = ["cathedral_loop"]
+
 [tool.setuptools.packages.find]
 include = ["scaffold*", "game*", "cathedral_thin*"]
 exclude = ["game.tests*", "game.arena.tests*"]
