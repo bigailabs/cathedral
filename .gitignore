@@ -30,3 +30,12 @@ COMPAT.md
 V4-DESIGN.md
 V4-DESIGN.html
 ATTESTATION.md
+
+# Publisher/mechanism SQLite databases. scaffold/publisher/server.py and
+# mechanism_artifact_refresh default to a repo-relative publisher.db, so a test or
+# a local run creates one at the repo root; a 483 KB schema-only binary was
+# committed this way. Never track these.
+publisher.db
+*.db
+*.sqlite
+*.sqlite3
