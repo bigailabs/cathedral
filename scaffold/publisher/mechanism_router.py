@@ -465,6 +465,23 @@ def create_router(store: MechanismStore | None = None):
             },
         }
 
+    @router.post("/mechanisms/refresh")
+    def refresh_mechanisms(
+        authorization: str | None = Header(None),
+        epoch: int | None = None,
+    ):
+        """Run one artifact-tier refresh cycle: compute each enabled artifact
+        mechanism's scores from its adapter and persist them for ``compose``. The
+        operator's scheduler owns the cadence by how often it calls this. Read-only
+        except ``put_scores`` of each mechanism's own row; never composes or writes
+        weights. Admin-token gated, exactly like the upsert above."""
+        _require_publisher_admin(authorization)
+        # Lazy import: mechanism_artifact_refresh imports this module, so importing it
+        # at module load would cycle (and this module stays FastAPI-free at import).
+        from . import mechanism_artifact_refresh as _refresh
+        refreshed = _refresh.refresh_artifact_scores(_resolve_store(), epoch=epoch)
+        return {"ok": True, "refreshed": refreshed}
+
     return router
 
 

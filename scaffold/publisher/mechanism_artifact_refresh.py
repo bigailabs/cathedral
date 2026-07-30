@@ -34,6 +34,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import os
 import time
 from typing import Any, Callable, Mapping
 
@@ -142,4 +143,58 @@ def compose_and_publish(
     return result, debug
 
 
-__all__ = ["ARTIFACT_ADAPTERS", "refresh_artifact_scores", "compose_and_publish"]
+REFRESH_INTERVAL_ENV = "CATHEDRAL_MECH_REFRESH_INTERVAL_SECONDS"
+
+
+def _interval_seconds() -> float:
+    try:
+        return float(os.environ.get(REFRESH_INTERVAL_ENV, "") or 0)
+    except ValueError:
+        return 0.0
+
+
+def refresh_enabled() -> bool:
+    """The periodic in-process refresh runs only when
+    ``CATHEDRAL_MECH_REFRESH_INTERVAL_SECONDS`` is a positive number (default-off) —
+    the same env-gated pattern as ``arena_eval_loop`` / ``refill.refill_loop``."""
+    return _interval_seconds() > 0
+
+
+async def refresh_loop(
+    store: MechanismStore, *, interval_seconds: float | None = None,
+    stop_event: Any | None = None, log: Callable[..., None] = lambda *a, **k: None,
+) -> None:
+    """Periodic asyncio task: run ``refresh_artifact_scores`` every interval seconds.
+
+    Gated by the caller (start only when ``refresh_enabled()``). The refresh runs in a
+    worker thread so the event loop is never blocked; one bad cycle is logged, never
+    fatal; the task cancels cleanly. **Refresh only** — it never composes or writes
+    weights. Mirrors ``arena_eval_loop``.
+    """
+    import asyncio
+
+    interval = interval_seconds if interval_seconds is not None else _interval_seconds()
+    interval = interval or 60.0
+    log("mech_refresh_loop_start", interval=interval)
+    try:
+        while not (stop_event and stop_event.is_set()):
+            try:
+                refreshed = await asyncio.to_thread(refresh_artifact_scores, store)
+                log("mech_refresh_tick", refreshed=refreshed)
+            except Exception as exc:  # noqa: BLE001 — one bad tick must not kill the loop
+                log("mech_refresh_error", error=str(exc))
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait() if stop_event else asyncio.sleep(interval),
+                    timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+    except asyncio.CancelledError:
+        log("mech_refresh_loop_cancelled")
+        raise
+
+
+__all__ = [
+    "ARTIFACT_ADAPTERS", "refresh_artifact_scores", "compose_and_publish",
+    "REFRESH_INTERVAL_ENV", "refresh_enabled", "refresh_loop",
+]
