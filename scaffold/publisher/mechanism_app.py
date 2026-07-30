@@ -27,6 +27,34 @@ from .mechanism_router import SqliteMechanismStore, create_router
 from .mechanism_weightset import build_router as build_weightset_router
 
 
+def _install_refresh_loop(app: FastAPI, store: SqliteMechanismStore) -> None:
+    """Opt-in cadence: run the artifact-score refresh in-process on a period, but ONLY
+    when ``CATHEDRAL_MECH_REFRESH_INTERVAL_SECONDS`` is a positive number (default-off,
+    mirroring the arena/refill loops). Refresh only — never composes or writes weights,
+    so it cannot affect on-chain mainnet weights."""
+    from . import mechanism_artifact_refresh as refresh
+
+    if not refresh.refresh_enabled():
+        return
+
+    import asyncio
+
+    @app.on_event("startup")
+    async def _start_refresh() -> None:  # pragma: no cover - runtime lifecycle
+        app.state.mech_refresh_stop = asyncio.Event()
+        app.state.mech_refresh_task = asyncio.create_task(
+            refresh.refresh_loop(store, stop_event=app.state.mech_refresh_stop))
+
+    @app.on_event("shutdown")
+    async def _stop_refresh() -> None:  # pragma: no cover - runtime lifecycle
+        stop = getattr(app.state, "mech_refresh_stop", None)
+        task = getattr(app.state, "mech_refresh_task", None)
+        if stop is not None:
+            stop.set()
+        if task is not None:
+            task.cancel()
+
+
 def build_mechanism_app(*, store: SqliteMechanismStore | None = None) -> FastAPI:
     app = FastAPI(title="Cathedral Mechanism Router", version="0.1.0")
     store = store or SqliteMechanismStore(os.environ.get("CATHEDRAL_MECH_DB_PATH") or None)
@@ -38,7 +66,10 @@ def build_mechanism_app(*, store: SqliteMechanismStore | None = None) -> FastAPI
 
     app.include_router(mechanism_intake.router)      # POST /mechanisms/{id}/scores
     app.include_router(create_router(store))         # PUT  /mechanisms/{id}  (admin)
+                                                     # POST /mechanisms/refresh (admin)
     app.include_router(build_weightset_router())     # GET  /mechanisms/weights/next
+
+    _install_refresh_loop(app, store)                # opt-in periodic score refresh
 
     @app.get("/health/live")
     def health_live():
