@@ -192,7 +192,8 @@ def compose_and_publish(
     # silently pays a forfeited CyberGym share to other miners; the spec's
     # requires_forfeit_preservation flag exists to make that a typed refusal.
     composed, debug = mechanism_eligibility.compose_eligible(
-        data, specs, scores, now_ms=now_ms or _now_ms(), preserve_forfeited=True)
+        data, specs, scores, now_ms=now_ms or _now_ms(), preserve_forfeited=True,
+        max_score_age_ms=max_score_age_ms())
     result = mechanism_weightset.set_weights(
         composed, netuid=netuid, network=network, signing_key_hex=signing_key_hex,
         **set_weights_kwargs)
@@ -200,6 +201,37 @@ def compose_and_publish(
 
 
 REFRESH_INTERVAL_ENV = "CATHEDRAL_MECH_REFRESH_INTERVAL_SECONDS"
+
+# Staleness ceiling applied at COMPOSE time, which is a different question from the
+# adapter's own freshness check. An adapter that refuses (an open epoch, an
+# unreadable marker, a tampered report) is skipped so the last published vector
+# survives the cycle, which is deliberate: it stops one bad cycle from wiping a good
+# epoch. The cost is that a vector whose adapter keeps refusing would otherwise be
+# composed forever, paying the same miners from an epoch that is arbitrarily old.
+# `compose` already implements the ceiling (a mechanism past it forfeits its share to
+# burn); nothing passed one, so it was never applied.
+MAX_SCORE_AGE_SECS_ENV = "CATHEDRAL_MECH_MAX_SCORE_AGE_SECS"
+DEFAULT_MAX_SCORE_AGE_SECS = 3600.0
+
+
+def max_score_age_ms() -> int | None:
+    """The compose-time staleness ceiling in ms, or None to disable it.
+
+    Defaults to one hour rather than to "no ceiling", because the fail-open
+    direction here pays stale scores indefinitely. An explicit ``0`` disables it,
+    which an operator has to choose deliberately.
+    """
+    raw = (os.environ.get(MAX_SCORE_AGE_SECS_ENV) or "").strip()
+    if not raw:
+        return int(DEFAULT_MAX_SCORE_AGE_SECS * 1000)
+    try:
+        seconds = float(raw)
+    except ValueError:
+        # A malformed ceiling must not silently become "no ceiling".
+        return int(DEFAULT_MAX_SCORE_AGE_SECS * 1000)
+    if seconds <= 0:
+        return None
+    return int(seconds * 1000)
 
 
 def _interval_seconds() -> float:
