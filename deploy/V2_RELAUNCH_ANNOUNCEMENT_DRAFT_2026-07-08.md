@@ -77,7 +77,7 @@ Before posting, verify:
 2. From repo root, run the read-only preflight:
    python3 deploy/v2-beta-router/relaunch_preflight.py
    Expected: PRECHECK_OK. SSH/private verifier and canary E2E are opt-in:
-   CATHEDRAL_PREFLIGHT_SSH=polaris@34.71.88.140 \
+   CATHEDRAL_PREFLIGHT_SSH="$SANDBOX_SSH_TARGET" \
    CATHEDRAL_PREFLIGHT_SSH_KEY=~/.ssh/polaris_rsa \
    python3 deploy/v2-beta-router/relaunch_preflight.py --run-e2e
 3. Deploy the V2-open edge mode:

@@ -64,7 +64,7 @@ Confirmed live origins from `deploy/edge-router/wrangler.toml`:
 
 **Attestation assets:**
 - Polaris attestor: `POST :8077/attest` (live), `:8078` test; runs on
-  `polarisserver` reachable `ssh frede@100.112.113.3` (Stitch); GCE spot box
+  `polarisserver` reachable over the operator's private network (Stitch); GCE spot box
   `attest-spot`. Verifier `~/attestor/{guest_quote.sh,polaris_verify.py}` (Route B,
   raw TDX quote binding `report_data`).
 - Publisher-side verify: `scaffold/publisher/attest.py`, env
@@ -81,7 +81,7 @@ Confirmed live origins from `deploy/edge-router/wrangler.toml`:
 
 > Flag — INFERRED vs KNOWN: The task frames `65.108.33.92` (validator) and the
 > attestor host as "the owned box." KNOWN: validator is on `65.108.33.92`; KNOWN:
-> attestor currently answers on `polarisserver`/`100.112.113.3` (Stitch) and the
+> attestor currently answers on `polarisserver` (Stitch) and the
 > GCE `attest-spot`. Whether the validator box and a TDX-capable attest box are the
 > **same** physical machine is NOT confirmed here. `65.108.33.92` (Hetzner-style
 > Polaris native Linux) is likely a bare VPS, not TDX-capable. **Resolve this before

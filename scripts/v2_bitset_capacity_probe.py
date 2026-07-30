@@ -6,7 +6,7 @@ This intentionally drives the real miner wire path:
   -> receipt polling -> verify metrics.
 
 Use direct sandbox tunnels while the public edge gate is staged, e.g.:
-  ssh -N -L 18080:127.0.0.1:8000 -L 18081:127.0.0.1:8080 polaris@34.71.88.140
+  ssh -N -L 18080:127.0.0.1:8000 -L 18081:127.0.0.1:8080 "$CATHEDRAL_PREFLIGHT_SSH"
   python scripts/v2_bitset_capacity_probe.py \
     --challenge-base http://127.0.0.1:18081 \
     --submit-base http://127.0.0.1:18081 \
