@@ -12,6 +12,15 @@ Guardrails baked in here:
     byte-identical to today's V1-only path.
   - Deterministic: no unseeded randomness anywhere.
   - No secrets in code or logs.
+  - A mechanism that cannot prove its scores this cycle forfeits its share.
+    ``compose`` always reports that share as ``debug["forfeited_fraction"]``,
+    and ``preserve_forfeited=True`` keeps it out of every other mechanism's
+    weight so the caller can burn it. See ``compose``'s docstring.
+  - A spec carrying ``requires_forfeit_preservation=True`` CANNOT be composed
+    without that option: ``compose`` raises ``ForfeitPreservationRequired``
+    rather than quietly renormalizing its forfeited share onto other
+    mechanisms. That makes forfeiture-preserving composition the single
+    mandatory entry point for any such mechanism.
 """
 
 from __future__ import annotations
@@ -37,6 +46,20 @@ class MechanismSpec:
     tier: str                  # "signed" (claims) | "artifact" (proof-backed)
     owner_uid: int | None = None  # UID controlled by the owner, for self-weight blocking
     enabled: bool = True
+    # When True, this mechanism may only be composed with preserve_forfeited=True.
+    # A mechanism whose unproven share MUST burn cannot be allowed to reach the
+    # renormalizing path, where that share would silently move to whoever did
+    # contribute. ``compose`` raises ForfeitPreservationRequired instead of
+    # falling back. Defaults False so every pre-existing spec is unaffected.
+    requires_forfeit_preservation: bool = False
+
+
+class ForfeitPreservationRequired(RuntimeError):
+    """A spec that requires forfeiture preservation was composed without it.
+
+    Raised, never swallowed: activating such a mechanism through the legacy
+    renormalizing path is a configuration error, not a degraded mode.
+    """
 
 
 @dataclass(frozen=True)
@@ -68,14 +91,50 @@ def compose(
     block_self_weight: bool = True,
     max_score_age_ms: int | None = None,
     now_ms: int,
+    preserve_forfeited: bool = False,
 ) -> tuple[dict[int, float], dict]:
-    """Return (final_uid_weights_summing_to_1_or_empty, debug_metadata).
+    """Return (final_uid_weights, debug_metadata).
 
     See ``deploy/MECHANISM_ROUTER_CONTRACT.md`` for the authoritative spec.
     Deterministic: no unseeded randomness. Empty result => caller keeps V1.
+
+    ``debug["forfeited_fraction"]`` is ALWAYS the summed ``weight_fraction`` of
+    the enabled, positive-fraction mechanisms that did not contribute this cycle
+    (missing scores, bad signature, stale, or empty after filtering).
+
+    ``preserve_forfeited`` selects what happens to that forfeited mass:
+
+      * ``False`` (default, unchanged legacy behavior): the surviving mechanisms
+        are renormalized to sum 1, which silently REALLOCATES a forfeited share
+        to the mechanisms that did contribute.
+      * ``True``: no renormalization. Each contributing mechanism keeps exactly
+        its own ``weight_fraction``, the returned weights sum to
+        ``debug["contributing_fraction"]``, and the caller is responsible for
+        sending ``debug["forfeited_fraction"]`` to burn. That is the only mode in
+        which a mechanism's unproven share can never be paid to another miner or
+        another lane.
     """
     per_mech_debug: dict[str, dict] = {}
     combined: dict[int, float] = {}
+    forfeited_fraction = 0.0
+    contributing_fraction = 0.0
+
+    if not preserve_forfeited:
+        # Refuse, do not degrade: a mechanism that declares its unproven share
+        # must burn cannot be activated through the renormalizing path.
+        blocking = sorted(
+            spec.mechanism_id
+            for spec in specs
+            if spec.requires_forfeit_preservation
+            and spec.enabled
+            and float(spec.weight_fraction) > 0.0
+        )
+        if blocking:
+            raise ForfeitPreservationRequired(
+                "mechanism(s) " + ", ".join(blocking) + " require "
+                "preserve_forfeited=True; composing them with renormalization "
+                "would reallocate a forfeited share instead of burning it"
+            )
 
     # Deterministic iteration order over mechanisms.
     for spec in sorted(specs, key=lambda s: s.mechanism_id):
@@ -112,6 +171,7 @@ def compose(
                 fallback_reason = "stale"
 
         if fallback_reason is not None:
+            forfeited_fraction += fraction
             per_mech_debug[spec.mechanism_id] = {
                 "fraction": fraction,
                 "contributing": False,
@@ -140,6 +200,7 @@ def compose(
 
         total = sum(filtered.values())
         if total <= 0.0:
+            forfeited_fraction += fraction
             per_mech_debug[spec.mechanism_id] = {
                 "fraction": fraction,
                 "contributing": False,
@@ -153,6 +214,7 @@ def compose(
         for uid_i, val in filtered.items():
             combined[uid_i] = combined.get(uid_i, 0.0) + fraction * (val / total)
 
+        contributing_fraction += fraction
         per_mech_debug[spec.mechanism_id] = {
             "fraction": fraction,
             "contributing": True,
@@ -167,12 +229,22 @@ def compose(
         "block_self_weight": block_self_weight,
         "max_score_age_ms": max_score_age_ms,
         "now_ms": now_ms,
+        "forfeited_fraction": forfeited_fraction,
+        "contributing_fraction": contributing_fraction,
+        "preserve_forfeited": bool(preserve_forfeited),
     }
 
-    # renormalize combined to sum 1; if total is 0 → empty (caller keeps V1)
+    # No contributing mass at all → empty (caller keeps V1 / burns the lot).
     if combined_total <= 0.0:
         debug["n_final_uids"] = 0
         return {}, debug
+
+    if preserve_forfeited:
+        # Each contributing mechanism keeps exactly its own weight_fraction, so
+        # a forfeited share stays forfeited. The caller sends
+        # debug["forfeited_fraction"] to burn.
+        debug["n_final_uids"] = len(combined)
+        return dict(combined), debug
 
     final = {uid: w / combined_total for uid, w in combined.items()}
     debug["n_final_uids"] = len(final)
@@ -234,10 +306,21 @@ class SqliteMechanismStore:
                         weight_fraction REAL NOT NULL,
                         tier            TEXT NOT NULL,
                         owner_uid       INTEGER,
-                        enabled         INTEGER NOT NULL DEFAULT 1
+                        enabled         INTEGER NOT NULL DEFAULT 1,
+                        requires_forfeit_preservation INTEGER NOT NULL DEFAULT 0
                     )
                     """
                 )
+                # Idempotent migration: a spec's forfeit-preservation flag must
+                # survive the store, or compose_and_publish reads it back False and
+                # renormalizes a forfeited share onto contributing miners. Older DBs
+                # created before this column get it here with the safe default.
+                have = {r[1] for r in conn.execute("PRAGMA table_info(mechanism_specs)")}
+                if "requires_forfeit_preservation" not in have:
+                    conn.execute(
+                        "ALTER TABLE mechanism_specs ADD COLUMN "
+                        "requires_forfeit_preservation INTEGER NOT NULL DEFAULT 0"
+                    )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS mechanism_scores (
@@ -259,7 +342,8 @@ class SqliteMechanismStore:
             conn = self._connect()
             try:
                 rows = conn.execute(
-                    "SELECT mechanism_id, owner_pubkey, weight_fraction, tier, owner_uid, enabled "
+                    "SELECT mechanism_id, owner_pubkey, weight_fraction, tier, owner_uid, enabled, "
+                    "requires_forfeit_preservation "
                     "FROM mechanism_specs ORDER BY mechanism_id"
                 ).fetchall()
             finally:
@@ -271,7 +355,8 @@ class SqliteMechanismStore:
             conn = self._connect()
             try:
                 row = conn.execute(
-                    "SELECT mechanism_id, owner_pubkey, weight_fraction, tier, owner_uid, enabled "
+                    "SELECT mechanism_id, owner_pubkey, weight_fraction, tier, owner_uid, enabled, "
+                    "requires_forfeit_preservation "
                     "FROM mechanism_specs WHERE mechanism_id = ?",
                     (mechanism_id,),
                 ).fetchone()
@@ -286,14 +371,16 @@ class SqliteMechanismStore:
                 conn.execute(
                     """
                     INSERT INTO mechanism_specs
-                        (mechanism_id, owner_pubkey, weight_fraction, tier, owner_uid, enabled)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (mechanism_id, owner_pubkey, weight_fraction, tier, owner_uid, enabled,
+                         requires_forfeit_preservation)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(mechanism_id) DO UPDATE SET
                         owner_pubkey=excluded.owner_pubkey,
                         weight_fraction=excluded.weight_fraction,
                         tier=excluded.tier,
                         owner_uid=excluded.owner_uid,
-                        enabled=excluded.enabled
+                        enabled=excluded.enabled,
+                        requires_forfeit_preservation=excluded.requires_forfeit_preservation
                     """,
                     (
                         spec.mechanism_id,
@@ -302,6 +389,7 @@ class SqliteMechanismStore:
                         spec.tier,
                         None if spec.owner_uid is None else int(spec.owner_uid),
                         1 if spec.enabled else 0,
+                        1 if spec.requires_forfeit_preservation else 0,
                     ),
                 )
                 conn.commit()
@@ -369,6 +457,7 @@ class SqliteMechanismStore:
             tier=row[3],
             owner_uid=None if row[4] is None else int(row[4]),
             enabled=bool(row[5]),
+            requires_forfeit_preservation=bool(row[6]),
         )
 
 
@@ -402,6 +491,10 @@ class MechanismSpecBody(BaseModel):
     tier: str
     owner_uid: int | None = None
     enabled: bool = True
+    # A lane that must forfeit an uncredited share to burn rather than have it
+    # renormalized onto contributing miners declares it here, so the flag is
+    # persisted with the spec and enforced by every compose path.
+    requires_forfeit_preservation: bool = False
 
 
 _STORE_SINGLETON: SqliteMechanismStore | None = None
@@ -451,6 +544,7 @@ def create_router(store: MechanismStore | None = None):
             tier=body.tier,
             owner_uid=body.owner_uid,
             enabled=body.enabled,
+            requires_forfeit_preservation=body.requires_forfeit_preservation,
         )
         _resolve_store().upsert_spec(spec)
         return {
@@ -462,6 +556,7 @@ def create_router(store: MechanismStore | None = None):
                 "tier": spec.tier,
                 "owner_uid": spec.owner_uid,
                 "enabled": spec.enabled,
+                "requires_forfeit_preservation": spec.requires_forfeit_preservation,
             },
         }
 

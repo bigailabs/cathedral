@@ -735,6 +735,74 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON external_score_reports(source, network, netuid, epoch)
             WHERE network IS NOT NULL AND netuid IS NOT NULL;
     """),
+    # 0048: CyberGym verified-score persistence (mechanism_cybergym_adapter reads
+    # cybergym_scores; cybergym_ingest writes both tables). Mirrors the
+    # external_score_reports/external_score_entries two-table convention: one
+    # report row per authenticated producer document (the audience/epoch fence
+    # and idempotency anchor), one score row per scored miner bound to that
+    # report.
+    #
+    # The report header is keyed by (network, netuid, source_epoch) so a report
+    # can never be composed into the wrong audience, and preserves everything a
+    # later audit needs: signer identity, the semantic canonical digest
+    # (report_sha256), the raw authenticated body digest (body_sha256), the
+    # producer-declared evidence digest, completeness, score count, canonical
+    # score units, generated and received time, and the receipt id.
+    #
+    # Score rows carry their report_id so a reader can select exactly one
+    # complete report's rows rather than mixing epochs. Provenance columns are
+    # defaulted so a writer naming only (miner_hotkey, epoch, score) still
+    # inserts.
+    ("0048_cybergym_scores", """
+        CREATE TABLE IF NOT EXISTS cybergym_score_reports (
+            id TEXT NOT NULL PRIMARY KEY,
+            network TEXT NOT NULL,
+            netuid INTEGER NOT NULL,
+            source_epoch INTEGER NOT NULL,
+            producer_hotkey TEXT NOT NULL,
+            complete INTEGER NOT NULL DEFAULT 0,
+            score_units TEXT NOT NULL DEFAULT '',
+            score_count INTEGER NOT NULL DEFAULT 0,
+            generated_at_iso TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            report_sha256 TEXT NOT NULL,
+            body_sha256 TEXT NOT NULL DEFAULT '',
+            evidence_sha256 TEXT NOT NULL DEFAULT '',
+            signature TEXT NOT NULL DEFAULT '',
+            report_json TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_cybergym_score_reports_audience_epoch
+            ON cybergym_score_reports(network, netuid, source_epoch);
+        CREATE INDEX IF NOT EXISTS idx_cybergym_score_reports_audience
+            ON cybergym_score_reports(network, netuid, source_epoch, generated_at_iso);
+
+        CREATE TABLE IF NOT EXISTS cybergym_scores (
+            report_id TEXT NOT NULL DEFAULT '',
+            miner_hotkey TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            score REAL NOT NULL,
+            network TEXT NOT NULL DEFAULT '',
+            netuid INTEGER,
+            producer_hotkey TEXT NOT NULL DEFAULT '',
+            report_sha256 TEXT NOT NULL DEFAULT '',
+            generated_at_iso TEXT NOT NULL DEFAULT '',
+            received_at_iso TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (report_id, miner_hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cybergym_scores_epoch
+            ON cybergym_scores(epoch);
+        CREATE INDEX IF NOT EXISTS idx_cybergym_scores_audience_epoch
+            ON cybergym_scores(network, netuid, epoch);
+    """),
+    # 0049: split the exact authenticated wire body from report_json, which is
+    # now the normalized canonical semantic document. Existing 0048 rows keep an
+    # empty value: their report_json remains the exact legacy HMAC-covered body,
+    # which the verifier normalizes only after authenticating. An exact
+    # same-epoch retry can backfill the split safely.
+    ("0049_cybergym_authenticated_body", """
+        ALTER TABLE cybergym_score_reports
+            ADD COLUMN authenticated_body TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1373,6 +1441,51 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON external_score_reports(source, network, netuid, epoch)
             WHERE network IS NOT NULL AND netuid IS NOT NULL;
     """),
+    ("0048_cybergym_scores", """
+        CREATE TABLE IF NOT EXISTS cybergym_score_reports (
+            id TEXT NOT NULL PRIMARY KEY,
+            network TEXT NOT NULL,
+            netuid INTEGER NOT NULL,
+            source_epoch BIGINT NOT NULL,
+            producer_hotkey TEXT NOT NULL,
+            complete INTEGER NOT NULL DEFAULT 0,
+            score_units TEXT NOT NULL DEFAULT '',
+            score_count INTEGER NOT NULL DEFAULT 0,
+            generated_at_iso TEXT NOT NULL,
+            received_at_iso TEXT NOT NULL,
+            report_sha256 TEXT NOT NULL,
+            body_sha256 TEXT NOT NULL DEFAULT '',
+            evidence_sha256 TEXT NOT NULL DEFAULT '',
+            signature TEXT NOT NULL DEFAULT '',
+            report_json TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_cybergym_score_reports_audience_epoch
+            ON cybergym_score_reports(network, netuid, source_epoch);
+        CREATE INDEX IF NOT EXISTS idx_cybergym_score_reports_audience
+            ON cybergym_score_reports(network, netuid, source_epoch, generated_at_iso);
+
+        CREATE TABLE IF NOT EXISTS cybergym_scores (
+            report_id TEXT NOT NULL DEFAULT '',
+            miner_hotkey TEXT NOT NULL,
+            epoch BIGINT NOT NULL,
+            score DOUBLE PRECISION NOT NULL,
+            network TEXT NOT NULL DEFAULT '',
+            netuid INTEGER,
+            producer_hotkey TEXT NOT NULL DEFAULT '',
+            report_sha256 TEXT NOT NULL DEFAULT '',
+            generated_at_iso TEXT NOT NULL DEFAULT '',
+            received_at_iso TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (report_id, miner_hotkey)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cybergym_scores_epoch
+            ON cybergym_scores(epoch);
+        CREATE INDEX IF NOT EXISTS idx_cybergym_scores_audience_epoch
+            ON cybergym_scores(network, netuid, epoch);
+    """),
+    ("0049_cybergym_authenticated_body", """
+        ALTER TABLE cybergym_score_reports
+            ADD COLUMN IF NOT EXISTS authenticated_body TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -1407,6 +1520,8 @@ _PK_BY_TABLE: dict[str, str] = {
     "v2_worker_heartbeat": "key",
     "v2_cnf_artifacts": "challenge_id",
     "v2_cnf_epoch_readiness": "epoch",
+    "cybergym_score_reports": "id",
+    "cybergym_scores": "report_id, miner_hotkey",
 }
 
 

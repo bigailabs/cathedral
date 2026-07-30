@@ -136,36 +136,58 @@ def test_registered_adapters_point_at_real_entrypoints():
 # --------------------------------------------------------------------------- #
 # The two stores are two databases
 # --------------------------------------------------------------------------- #
-def test_a_real_adapter_runs_end_to_end_through_refresh(tmp_path):
-    """No ``adapters=`` override — the gap every other test in this file leaves open.
+def test_a_real_adapter_runs_end_to_end_through_refresh(tmp_path, monkeypatch):
+    """No ``adapters=`` override -- the gap every other test in this file leaves open.
 
     Each of those injects a fake that ignores the store it is handed, so they pass
     whatever refresh passes. That hid a real defect: refresh gave adapters the
     ``MechanismStore``, which has no ``query``, so every real adapter died on
     ``AttributeError``, got caught by the per-adapter ``except``, and was logged as
-    "skipping" — indistinguishable from a mechanism with nothing to contribute. No
-    artifact-tier mechanism could ever publish, and ``POST /mechanisms/refresh``
-    still answered ``{"ok": true, "refreshed": {}}``.
+    "skipping" -- indistinguishable from a mechanism with nothing to contribute.
 
     So drive the registered cybergym adapter for real, against a real publisher
-    Store, and require an actual vector out the far end.
+    Store, and require an actual vector out the far end. The fixture seeds an
+    AUTHENTICATED report (canonical body + HMAC under the configured secret),
+    because this adapter verifies the stored report on read rather than trusting
+    the projection rows; the companion test below pins that bare rows contribute
+    nothing.
     """
-    data = Store(str(tmp_path / "publisher.db"))
+    import hashlib
+    from datetime import datetime, timezone
+
+    from scaffold.publisher import cybergym_contract as contract
+
+    secret = "refresh-e2e-secret"
+    monkeypatch.setenv(contract.HMAC_SECRET_ENV, secret)
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+
+    data = Store(str(tmp_path / "publisher.db"))       # 0048/0049 create the tables
+    generated = datetime.now(timezone.utc)             # inside the freshness window
+    iso = generated.strftime("%Y-%m-%dT%H:%M:%S.") + f"{generated.microsecond // 1000:03d}Z"
+    document = {
+        "producer_hotkey": "5Producer", "network": "finney", "netuid": 39,
+        "source_epoch": 7, "generated_at": iso, "complete": True,
+        "score_units": "cybergym_points_v1", "scores": {"5Alice": 12.0},
+        "evidence_sha256": "c" * 64,
+    }
+    body = contract.canonical_report_bytes(document)
+    digest = contract.report_digest(document)
+    rid = contract.receipt_id(digest)
     data.write(lambda c: c.execute(
-        "CREATE TABLE IF NOT EXISTS cybergym_scores ("
-        "miner_hotkey TEXT NOT NULL, epoch INTEGER NOT NULL, "
-        "score REAL NOT NULL, PRIMARY KEY (miner_hotkey, epoch))"))
+        "INSERT OR REPLACE INTO cybergym_score_reports"
+        "(id, network, netuid, source_epoch, producer_hotkey, complete, score_units, "
+        "score_count, generated_at_iso, received_at_iso, report_sha256, body_sha256, "
+        "evidence_sha256, signature, report_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (rid, "finney", 39, 7, "5Producer", 1, "cybergym_points_v1", 1, iso, iso,
+         digest, hashlib.sha256(body).hexdigest(), "c" * 64,
+         "sha256=" + contract.body_hmac_hex(body, secret), body.decode("utf-8"))))
     data.write(lambda c: c.execute(
-        "CREATE TABLE IF NOT EXISTS cybergym_epoch_status ("
-        "epoch INTEGER PRIMARY KEY, state TEXT NOT NULL, "
-        "detail TEXT NOT NULL DEFAULT '', scored_miners INTEGER NOT NULL DEFAULT 0, "
-        "marked_at TEXT NOT NULL DEFAULT '')"))
-    data.write(lambda c: c.execute(
-        "INSERT INTO cybergym_scores(miner_hotkey, epoch, score) VALUES (?,?,?)",
-        ("5Alice", 7, 12.0)))
-    data.write(lambda c: c.execute(
-        "INSERT INTO cybergym_epoch_status(epoch, state) VALUES (?,?)",
-        (7, cybergym.EPOCH_CLOSED)))
+        "INSERT OR REPLACE INTO cybergym_scores"
+        "(report_id, miner_hotkey, epoch, score, network, netuid, producer_hotkey, "
+        "report_sha256, generated_at_iso, received_at_iso) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (rid, "5Alice", 7, 12.0, "finney", 39, "5Producer", digest, iso, iso)))
     data.write(lambda c: c.execute(
         "INSERT OR REPLACE INTO metagraph_hotkeys("
         "network, netuid, hotkey, uid, coldkey, block, updated_at_iso"
@@ -179,7 +201,42 @@ def test_a_real_adapter_runs_end_to_end_through_refresh(tmp_path):
     assert refreshed == {"cybergym_v0": 1}
     scores, meta = store.get_scores("cybergym_v0")
     assert scores == {4: 12.0}
-    assert meta.source == "cybergym_adapter"
+    assert meta.source == "cybergym_adapter" and meta.sig_ok is True
+
+
+def test_a_real_adapter_refuses_unauthenticated_rows(tmp_path, monkeypatch):
+    """Bare projection rows with no authenticated report header earn nothing.
+
+    This is the defect the read-side verification closes: sig_ok used to be a
+    presence check on a column, so a hand-inserted row took the full lane share.
+    The adapter now selects a complete report and re-verifies it, so rows alone
+    contribute nothing and the lane's allocation burns.
+    """
+    from scaffold.publisher import cybergym_contract as contract
+
+    monkeypatch.setenv(contract.HMAC_SECRET_ENV, "refresh-e2e-secret")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+
+    data = Store(str(tmp_path / "publisher.db"))
+    data.write(lambda c: c.execute(
+        "INSERT OR REPLACE INTO cybergym_scores"
+        "(report_id, miner_hotkey, epoch, score, network, netuid, producer_hotkey, "
+        "report_sha256, generated_at_iso, received_at_iso) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("forged", "5Alice", 7, 99.0, "finney", 39, "5Producer", "0" * 64,
+         "2026-07-30T00:00:00.000Z", "2026-07-30T00:00:00.000Z")))
+    data.write(lambda c: c.execute(
+        "INSERT OR REPLACE INTO metagraph_hotkeys("
+        "network, netuid, hotkey, uid, coldkey, block, updated_at_iso"
+        ") VALUES (?,?,?,?,?,?,?)",
+        ("finney", 39, "5Alice", 4, "", 1, "2026-07-01T00:00:00.000Z")))
+
+    store = _store()
+    store.upsert_spec(_spec("cybergym_v0"))
+    refreshed = arf.refresh_artifact_scores(store, epoch=7, data_store=data)
+    assert refreshed == {"cybergym_v0": 0}
+    scores, _ = store.get_scores("cybergym_v0")
+    assert scores == {}
 
 
 def test_the_mechanism_store_is_not_accepted_as_the_data_store():
@@ -231,6 +288,7 @@ def test_compose_and_publish_wires_refresh_then_compose_then_set_weights(monkeyp
 
     def fake_compose(s, specs, scores, *, now_ms, **kw):
         seen["scores"] = scores
+        seen["preserve_forfeited"] = kw.get("preserve_forfeited")
         return {7: 1.0}, {"eligibility": "ok"}
 
     def fake_set_weights(composed, *, netuid, network, signing_key_hex, **kw):
@@ -250,6 +308,8 @@ def test_compose_and_publish_wires_refresh_then_compose_then_set_weights(monkeyp
     # the composed vector was handed to set_weights for THIS testnet target
     assert seen["composed"] == {7: 1.0} and seen["target"] == ("test", 123)
     assert result["published"] and debug["eligibility"] == "ok"
+    # A forfeited share must burn, never be renormalized onto contributors.
+    assert seen["preserve_forfeited"] is True
 
 
 def test_compose_and_publish_inherits_the_mainnet_refusal(monkeypatch):

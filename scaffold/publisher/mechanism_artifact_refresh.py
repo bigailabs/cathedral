@@ -186,8 +186,13 @@ def compose_and_publish(
         got = store.get_scores(spec.mechanism_id)
         if got is not None:
             scores[spec.mechanism_id] = got
+    # preserve_forfeited=True: an uncredited lane's share must burn, never be
+    # renormalized onto the mechanisms that did contribute. Without it this path
+    # reaches mechanism_router.compose's legacy renormalizing branch, which
+    # silently pays a forfeited CyberGym share to other miners; the spec's
+    # requires_forfeit_preservation flag exists to make that a typed refusal.
     composed, debug = mechanism_eligibility.compose_eligible(
-        data, specs, scores, now_ms=now_ms or _now_ms())
+        data, specs, scores, now_ms=now_ms or _now_ms(), preserve_forfeited=True)
     result = mechanism_weightset.set_weights(
         composed, netuid=netuid, network=network, signing_key_hex=signing_key_hex,
         **set_weights_kwargs)
