@@ -4,12 +4,17 @@ Covers the missing "scored -> weights" wiring: refresh runs only enabled artifac
 mechanisms, tolerates a not-yet-merged adapter (skips + logs, never errors), persists
 an empty vector as "contributes nothing", and the compose path inherits set_weights'
 mainnet/SN39 refusal so it can never write real weights.
+
+Also pins the ordering the CyberGym closed-epoch gate depends on: an adapter that
+raises is skipped *before* put_scores, so a refusal preserves the last published
+vector instead of overwriting it with an empty one.
 """
 from __future__ import annotations
 
 import pytest
 
 from scaffold.publisher import mechanism_artifact_refresh as arf
+from scaffold.publisher import mechanism_cybergym_adapter as cybergym
 from scaffold.publisher import mechanism_eligibility as elig
 from scaffold.publisher import mechanism_router as R
 from scaffold.publisher import mechanism_weightset as ws
@@ -85,6 +90,39 @@ def test_empty_scores_are_persisted_as_contributes_nothing():
     assert refreshed == {"cybergym_v0": 0}
     scores, _ = store.get_scores("cybergym_v0")
     assert scores == {}                                          # fresh empty overrides any stale row
+
+
+def test_adapter_raise_leaves_prior_scores_untouched():
+    """The load-bearing half of the CyberGym closed-epoch gate.
+
+    That gate refuses by *raising* rather than returning ``({}, meta)`` for one
+    reason only: this loop catches the exception and skips the mechanism BEFORE
+    ``put_scores``, so the last published vector survives the cycle. An empty
+    return would instead be persisted (see the test above) — wiping a real closed
+    epoch's scores with something ``compose`` cannot tell apart from "nobody
+    solved". Nothing else pins that ordering, so a refactor that moved
+    ``put_scores`` ahead of the try, or that swallowed the raise into ``{}``,
+    would silently break the gate while the adapter's own tests stayed green.
+
+    Pairs with test_missing_status_table_raises_when_epoch_unspecified in
+    test_mechanism_cybergym_adapter.py, which pins the other side of the seam.
+    """
+    store = _store()
+    store.upsert_spec(_spec("cybergym_v0"))
+
+    # Cycle 1: a closed epoch publishes normally.
+    refreshed = arf.refresh_artifact_scores(
+        store, adapters={"cybergym_v0": _adapter({7: 3.0, 9: 1.0})})
+    assert refreshed == {"cybergym_v0": 2}
+
+    # Cycle 2: the epoch is no longer publishable, so the adapter refuses.
+    def refuses(store, *, epoch=None):
+        raise cybergym.CyberGymEpochNotClosed("epoch 2 is open")
+
+    refreshed = arf.refresh_artifact_scores(store, adapters={"cybergym_v0": refuses})
+    assert refreshed == {}                                       # not counted as refreshed
+    scores, _ = store.get_scores("cybergym_v0")
+    assert scores == {7: 3.0, 9: 1.0}                            # prior vector still stands
 
 
 def test_registered_adapters_point_at_real_entrypoints():

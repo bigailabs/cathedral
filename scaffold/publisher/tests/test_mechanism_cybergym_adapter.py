@@ -179,9 +179,44 @@ def test_missing_status_row_raises_when_epoch_specified(tmp_path, monkeypatch):
         adapter.cybergym_mechanism_scores(store, epoch=1)
 
 
-def test_missing_status_table_contributes_nothing_when_epoch_unspecified(
+def test_hotkey_scored_only_in_an_open_epoch_is_absent(tmp_path, monkeypatch):
+    """Not just "an older closed row wins" — a miner whose ONLY rows are in an
+    open epoch must drop out entirely rather than fall back to anything."""
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    _ensure_tables(store)
+    _score(store, "5Alice", epoch=1, score=5.0)
+    _score(store, "5Bob", epoch=2, score=7.0)  # 5Bob has no closed epoch at all
+    _close(store, 1)
+    _mark_epoch(store, 2, "open")
+    _uid(store, "5Alice", 10)
+    _uid(store, "5Bob", 20)
+    vec, _ = adapter.cybergym_mechanism_scores(store)
+    assert vec == {10: 5.0}
+
+
+def test_no_closed_epoch_contributes_nothing_when_epoch_unspecified(
     tmp_path, monkeypatch,
 ):
+    """A *readable* status table saying nothing is closed is a real "nobody has
+    a publishable score yet" — the router's empty-vector shape, not a refusal."""
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    _ensure_tables(store)
+    _score(store, "5Alice", epoch=1, score=8.0)
+    _mark_epoch(store, 1, "open")
+    _uid(store, "5Alice", 10)
+    vec, meta = adapter.cybergym_mechanism_scores(store)  # no epoch
+    assert vec == {}
+    assert meta.mechanism_id == "cybergym_v0"
+
+
+def test_missing_status_table_raises_when_epoch_unspecified(tmp_path, monkeypatch):
+    """The path refresh_loop actually takes (it never passes an epoch). A status
+    table this adapter cannot read is not evidence that nobody solved, so it must
+    refuse — returning {} here would be persisted straight over the prior good
+    vector, which is the overwrite this whole gate exists to prevent. Pairs with
+    test_adapter_raise_leaves_prior_scores_untouched in the refresh suite."""
     _env(monkeypatch)
     store = _store(tmp_path)
     # scores table only — no cybergym_epoch_status (pre-gate writer)
@@ -191,9 +226,30 @@ def test_missing_status_table_contributes_nothing_when_epoch_unspecified(
         "score REAL NOT NULL, PRIMARY KEY (miner_hotkey, epoch))"))
     _score(store, "5Alice", epoch=1, score=8.0)
     _uid(store, "5Alice", 10)
-    vec, meta = adapter.cybergym_mechanism_scores(store)  # no epoch
-    assert vec == {}
-    assert meta.mechanism_id == "cybergym_v0"
+    with pytest.raises(adapter.CyberGymEpochNotClosed, match="lookup failed"):
+        adapter.cybergym_mechanism_scores(store)
+
+
+def test_epoch_closed_literal_matches_the_writer():
+    """EPOCH_CLOSED is a hand-copy of cathedral-distill's constant — the writer
+    lives in another repo, so no import can span the boundary. Every other test
+    here writes the marker via adapter.EPOCH_CLOSED, so they stay self-consistent
+    under drift and would all still pass while production matched no row. Pin the
+    literal itself; this is the only test that would fail if it drifted."""
+    assert adapter.EPOCH_CLOSED == "closed"
+
+
+def test_closed_epoch_gate_accepts_the_writers_literal(tmp_path, monkeypatch):
+    """Same pin from the other side: mark the epoch with a hardcoded 'closed'
+    (what cathedral-distill's mark_epoch actually writes) and require a publish."""
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    _ensure_tables(store)
+    _score(store, "5Alice", epoch=1, score=6.0)
+    _mark_epoch(store, 1, "closed")
+    _uid(store, "5Alice", 10)
+    vec, _ = adapter.cybergym_mechanism_scores(store, epoch=1)
+    assert vec == {10: 6.0}
 
 
 def test_missing_status_table_raises_when_epoch_specified(tmp_path, monkeypatch):
