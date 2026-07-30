@@ -169,6 +169,82 @@ def test_disabled_and_zero_fraction_specs_skipped():
     assert dbg["mechanisms"]["zero"]["fallback_reason"] == "zero_fraction"
 
 
+# ---------------------------------------------------------------------------
+# forfeited share accounting: an unproven mechanism's fraction must never be
+# silently reallocated to the mechanisms that did contribute.
+# ---------------------------------------------------------------------------
+
+def test_forfeited_fraction_is_always_reported():
+    specs = [_spec("good", 0.5), _spec("missing", 0.3), _spec("sigbad", 0.2)]
+    scores = {
+        "good": ({1: 1.0, 2: 1.0}, _meta("good")),
+        "sigbad": ({1: 5.0}, _meta("sigbad", sig_ok=False)),
+    }
+    _, dbg = compose(specs, scores, registered_uids={1, 2}, now_ms=NOW)
+    assert math.isclose(dbg["forfeited_fraction"], 0.5, abs_tol=1e-12)
+    assert math.isclose(dbg["contributing_fraction"], 0.5, abs_tol=1e-12)
+
+
+def test_legacy_renormalization_reallocates_the_forfeited_share():
+    """Documents the default behavior explicitly: renormalizing to 1 hands the
+    forfeited share to whoever did contribute. Any caller that must burn an
+    unproven share has to pass preserve_forfeited=True."""
+    specs = [_spec("good", 0.5), _spec("gone", 0.5)]
+    scores = {"good": ({1: 1.0, 2: 1.0}, _meta("good"))}
+    weights, dbg = compose(specs, scores, registered_uids={1, 2}, now_ms=NOW)
+    assert _approx_sums_to_one(weights)  # "gone"'s 0.5 was absorbed by "good"
+    assert math.isclose(dbg["forfeited_fraction"], 0.5, abs_tol=1e-12)
+
+
+def test_preserve_forfeited_keeps_the_share_out_of_other_mechanisms():
+    """The burn-correctness property: a missing mechanism's share is not paid to
+    another mechanism's miners. The contributing mechanism keeps exactly its own
+    fraction and the caller burns the remainder."""
+    specs = [_spec("good", 0.5), _spec("gone", 0.5)]
+    scores = {"good": ({1: 1.0, 2: 1.0}, _meta("good"))}
+    weights, dbg = compose(
+        specs, scores, registered_uids={1, 2}, now_ms=NOW, preserve_forfeited=True,
+    )
+    assert math.isclose(weights[1], 0.25, abs_tol=1e-12)
+    assert math.isclose(weights[2], 0.25, abs_tol=1e-12)
+    assert math.isclose(sum(weights.values()), 0.5, abs_tol=1e-12)
+    assert math.isclose(dbg["forfeited_fraction"], 0.5, abs_tol=1e-12)
+    assert dbg["preserve_forfeited"] is True
+
+
+@pytest.mark.parametrize("reason,scores_entry", [
+    ("missing", None),
+    ("sig_bad", ({1: 5.0, 2: 5.0}, _meta("cybergym_v0", sig_ok=False))),
+    ("stale", ({1: 5.0, 2: 5.0}, _meta("cybergym_v0", signed_at_ms=NOW - 10_000))),
+    ("empty_after_filter", ({99: 5.0}, _meta("cybergym_v0"))),
+])
+def test_every_non_contributing_reason_forfeits_rather_than_shifts(
+    reason, scores_entry,
+):
+    specs = [_spec("sat_v2", 0.5), _spec("cybergym_v0", 0.5)]
+    scores = {"sat_v2": ({1: 1.0, 2: 1.0}, _meta("sat_v2"))}
+    if scores_entry is not None:
+        scores["cybergym_v0"] = scores_entry
+    weights, dbg = compose(
+        specs, scores, registered_uids={1, 2}, max_score_age_ms=1_000,
+        now_ms=NOW, preserve_forfeited=True,
+    )
+    assert dbg["mechanisms"]["cybergym_v0"]["fallback_reason"] == reason
+    assert math.isclose(dbg["forfeited_fraction"], 0.5, abs_tol=1e-12)
+    # SAT keeps its own 0.5 and not one part of CyberGym's forfeited share.
+    assert math.isclose(sum(weights.values()), 0.5, abs_tol=1e-12)
+
+
+def test_preserve_forfeited_with_nothing_contributing_is_empty():
+    specs = [_spec("gone", 1.0)]
+    weights, dbg = compose(
+        specs, {}, registered_uids={1, 2}, now_ms=NOW, preserve_forfeited=True,
+    )
+    assert weights == {}
+    assert math.isclose(dbg["forfeited_fraction"], 1.0, abs_tol=1e-12)
+    assert dbg["contributing_fraction"] == 0.0
+
+
 def test_compose_is_deterministic():
     specs = [_spec("b", 0.3), _spec("a", 0.7)]
     scores = {

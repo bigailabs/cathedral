@@ -18,55 +18,66 @@ leaderboard/corpus-lineage concept (who is the reference model); emission
 rewards every miner in proportion to the verified solves it produced this cycle.
 A deployment that wants winner-take-all can write only the champion's row.
 
-The verified scores are read from the ``cybergym_scores`` table, which the
-CyberGym validator writes after verification (one row per miner_hotkey per
-epoch, ``score`` = level-weighted verified solves). ``hotkey -> uid`` mapping
-comes from the ``metagraph_hotkeys`` snapshot table, exactly as the SAT adapter
-and ``mechanism_eligibility`` use it.
+Reading contract (this is the part that has to be exactly right)
+----------------------------------------------------------------
+The adapter reads EXACTLY ONE report: the newest COMPLETE report for the
+configured ``(network, netuid)`` audience, from the tables store.py migration
+``0048_cybergym_scores`` creates and the authenticated ``cybergym_ingest`` route
+populates. Two properties follow, and both are load-bearing:
 
-Closed-epoch gate (same contract as cathedral-distill's
-``CyberGymScoreStore.require_closed_epoch`` / ``compose_scores_lane``): scores
-are published only for epochs marked ``closed`` in ``cybergym_epoch_status``.
-An open or incomplete epoch must not publish — composing mid-epoch (or after a
-restart that lost durable solver state) would emit a vector indistinguishable
-from "nobody solved". ``compose`` then marks the mechanism
-``empty_after_filter``, contributes 0 for it, and renormalizes: the fraction
-this mechanism was allocated silently moves to the other mechanisms (or, if
-nothing else contributes, the caller falls back to the pure V1 vector). Miners
-who did solve that epoch are paid nothing for it.
+  * **No epoch mixing.** Scores come from that one report's rows
+    (``cybergym_scores.report_id``), never from a per-miner maximum epoch across
+    reports. A complete report is the full truth at its epoch, so a miner
+    omitted from it scores zero (revoked) instead of keeping an older value.
+  * **Freshness comes from the authenticated ``generated_at``, never from read
+    time.** ``ScoreVectorMeta.signed_at_ms`` is derived from the report's
+    producer-generated timestamp, so a dead producer's frozen report ages out
+    of the router's staleness gate instead of looking freshly signed on every
+    read. The adapter additionally refuses a report older than
+    ``CATHEDRAL_CYBERGYM_MAX_SCORE_AGE_SECS`` (default 3600s) so a caller that
+    passes no ``max_score_age_ms`` still cannot be served stale scores. A
+    future-dated report is refused too: a negative age can never exceed the
+    maximum, so without that check it would read as fresh indefinitely.
 
-The refusal is a raise, not an empty return, because ``refresh_artifact_scores``
-catches adapter exceptions and skips that mechanism *before* ``put_scores`` —
-so a raise leaves the previously published vector in place, while an empty
-return would be persisted over it. Both entry paths refuse:
-  - ``epoch=N`` given: raises unless that epoch is marked ``closed``.
-  - ``epoch`` omitted: only rows from closed epochs are considered, and a
-    ``cybergym_epoch_status`` we cannot read at all (missing table, backend
-    error) raises rather than returning ``{}``. An unreadable marker table is
-    not evidence that nobody solved; it is evidence we cannot tell. This is the
-    path the periodic ``refresh_loop`` uses, so it is the one that most needs
-    to preserve the prior vector. A *readable* status table that simply has no
-    closed epoch with scores is a real "contributes nothing" and returns ``{}``.
+``sig_ok`` is a VERIFICATION, not a column check. Before a report contributes,
+the adapter re-derives the digest of the stored raw authenticated body,
+re-verifies its HMAC against the configured producer secret, independently
+normalizes it, and requires that result to equal the stored canonical semantic
+body. It then re-derives the semantic report digest and cross-checks every
+derived column and every score row. See
+``cybergym_contract.verify_stored_report``, which also states
+plainly what this does and does not prove: it detects rows written without the
+secret and any later tampering, and it does not establish producer identity
+beyond possession of a shared secret. With no secret configured nothing can be
+verified, so the lane contributes nothing and its share burns.
+
+An earlier revision of this module checked only that the ``body_sha256`` column
+held 64 hex characters, which a hand-inserted row satisfies trivially. That was
+a presence check wearing the name of an authentication check.
+
+``hotkey -> uid`` mapping comes from the ``metagraph_hotkeys`` snapshot table,
+exactly as the SAT adapter and ``mechanism_eligibility`` use it.
 
 Guardrails (identical to the SAT adapter):
   - Read-only: writes no table, modifies no write path.
   - Default off: nothing calls this until a ``MechanismSpec`` wires it into the
     router; it has no effect on any live weight vector on its own.
-  - Deterministic: no randomness; the only time dependency is
-    ``ScoreVectorMeta.signed_at_ms``, recording when the vector was built.
+  - Deterministic: no randomness, and no dependence on read time for any value
+    that reaches the router.
   - No secrets: reads the same two network/netuid env vars weights.py uses.
-  - Unmapped hotkeys are dropped (logged), never zeroed into another UID; an
-    empty result returns ``({}, meta)`` — the router's documented "contributes
-    nothing this cycle" shape, never an exception (except the closed-epoch
-    refusal above, which is intentional fail-closed).
+  - Unmapped hotkeys are dropped (logged), never zeroed into another UID; a
+    missing, incomplete, stale, unverifiable, tampered, or empty report returns
+    ``({}, meta)``, the router's documented "contributes nothing this cycle"
+    shape, never an exception.
 """
 from __future__ import annotations
 
 import logging
 import os
-import time
-from typing import Any, Iterable
+import re
+from datetime import datetime, timezone
 
+from . import cybergym_contract
 from .mechanism_router import ScoreVector, ScoreVectorMeta
 from .store import Store
 from .weights import NETUID_ENV, NETWORK_ENV
@@ -79,7 +90,17 @@ SOURCE = "cybergym_adapter"
 # field per contract). Proof-backed, like SAT.
 TIER = "artifact"
 
-# Must match cathedral-distill.cybergym_scores.EPOCH_CLOSED byte-for-byte — it is
+MAX_SCORE_AGE_SECS_ENV = "CATHEDRAL_CYBERGYM_MAX_SCORE_AGE_SECS"
+DEFAULT_MAX_SCORE_AGE_SECS = 3600.0
+# Same clock-skew allowance the intake route enforces on the way in. Kept as a
+# local read of the same env var rather than an import, because this module must
+# stay free of the FastAPI-importing ingest module.
+MAX_FUTURE_SKEW_SECS_ENV = "CATHEDRAL_CYBERGYM_MAX_FUTURE_SKEW_SECS"
+DEFAULT_MAX_FUTURE_SKEW_SECS = 120.0
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# Must match cathedral-distill.cybergym_scores.EPOCH_CLOSED byte-for-byte: it is
 # compared against a column that repo's writer populates, across a repo boundary
 # no import can span. test_epoch_closed_literal_matches_the_writer pins the
 # literal so drift fails a test here instead of silently matching no row in prod.
@@ -90,9 +111,45 @@ class CyberGymEpochNotClosed(RuntimeError):
     """Raised when scores are requested for an epoch that is not safe to publish.
 
     The artifact refresh loop catches adapter exceptions and skips that
-    mechanism, leaving the previous ``put_scores`` row untouched — so a mid-
-    epoch refresh cannot wipe a prior closed vector with an empty one.
+    mechanism, leaving the previous ``put_scores`` row untouched, so a mid-epoch
+    refresh cannot wipe a prior closed vector with an empty one. This is why an
+    open epoch RAISES rather than returning the empty vector every other
+    "contributes nothing" condition returns: empty would be persisted.
     """
+
+
+def _epoch_state(store: Store, epoch: int) -> str | None:
+    """The persisted lifecycle state for ``epoch``, or None if unknown.
+
+    None covers a missing row and a missing ``cybergym_epoch_status`` table:
+    both are "not closed". The CyberGym validator creates this table beside
+    ``cybergym_scores``; an adapter that cannot see the marker cannot tell
+    "nobody solved" from "scoring has not finished / state was lost".
+    """
+    try:
+        rows = store.query(
+            "SELECT state FROM cybergym_epoch_status WHERE epoch=?",
+            (int(epoch),),
+        )
+    except Exception:  # noqa: BLE001 - missing table / backend error => not closed
+        return None
+    if not rows:
+        return None
+    state = rows[0]["state"]
+    return None if state is None else str(state)
+
+
+def require_closed_epoch(store: Store, epoch: int) -> None:
+    """Fail closed unless ``epoch`` is marked ``closed`` in the same database."""
+    state = _epoch_state(store, epoch)
+    if state == EPOCH_CLOSED:
+        return
+    detail = "no cybergym_epoch_status row" if state is None else f"state={state!r}"
+    raise CyberGymEpochNotClosed(
+        f"refusing to publish CyberGym epoch {int(epoch)}: {detail}. "
+        "Only epochs marked closed are safe to compose; publishing now would "
+        "emit a vector indistinguishable from an epoch nobody solved."
+    )
 
 
 def _load_hotkey_to_uid(store: Store, *, network: str, netuid: int) -> dict[str, int]:
@@ -116,127 +173,287 @@ def _load_hotkey_to_uid(store: Store, *, network: str, netuid: int) -> dict[str,
     return mapping
 
 
-def _epoch_state(store: Store, epoch: int) -> str | None:
-    """Return the persisted lifecycle state for ``epoch``, or None if unknown.
+def _is_missing_cybergym_table(exc: Exception) -> bool:
+    """True iff *exc* is the backend's "CyberGym table does not exist" error.
 
-    None covers a missing row and a missing ``cybergym_epoch_status`` table —
-    both are "not closed". The CyberGym validator creates this table beside
-    ``cybergym_scores``; an adapter that cannot see the marker cannot tell
-    "nobody solved" from "scoring has not finished / state was lost".
+    SQLite raises ``no such table: cybergym_scores``; Postgres raises
+    ``relation "cybergym_scores" does not exist``. Kept deliberately narrow so
+    every other database failure still surfaces to the caller.
     """
-    try:
-        rows = store.query(
-            "SELECT state FROM cybergym_epoch_status WHERE epoch=?",
-            (int(epoch),),
-        )
-    except Exception:  # noqa: BLE001 — missing table / backend error => not closed
-        return None
-    if not rows:
-        return None
-    state = rows[0]["state"]
-    return None if state is None else str(state)
-
-
-def require_closed_epoch(store: Store, epoch: int) -> None:
-    """Fail closed unless ``epoch`` is marked ``closed`` in the same database."""
-    state = _epoch_state(store, epoch)
-    if state == EPOCH_CLOSED:
-        return
-    detail = "no cybergym_epoch_status row" if state is None else f"state={state!r}"
-    raise CyberGymEpochNotClosed(
-        f"refusing to publish CyberGym epoch {int(epoch)}: {detail}. "
-        "Only epochs marked closed are safe to compose; publishing now would "
-        "emit a vector indistinguishable from an epoch nobody solved."
+    msg = str(exc).lower()
+    return ("cybergym_scores" in msg or "cybergym_score_reports" in msg) and (
+        "no such table" in msg or "does not exist" in msg
     )
 
 
-def _sum_score_rows(rows: Iterable[Any]) -> dict[str, float]:
-    totals: dict[str, float] = {}
+def _max_score_age_secs() -> float:
+    try:
+        raw = os.environ.get(MAX_SCORE_AGE_SECS_ENV, "") or ""
+        return max(0.0, float(raw)) if raw.strip() else DEFAULT_MAX_SCORE_AGE_SECS
+    except ValueError:
+        return DEFAULT_MAX_SCORE_AGE_SECS
+
+
+def _max_future_skew_secs() -> float:
+    raw = (os.environ.get(MAX_FUTURE_SKEW_SECS_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_MAX_FUTURE_SKEW_SECS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_MAX_FUTURE_SKEW_SECS
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _latest_complete_report(
+    store: Store, *, network: str, netuid: int, epoch: int | None
+) -> dict | None:
+    """The single newest COMPLETE report header for this audience, or None.
+
+    Deliberately does not import ``cybergym_ingest`` (which pulls in FastAPI);
+    this is the same "duplicate one query rather than take a cross-module
+    dependency" choice ``mechanism_eligibility._load_hotkey_to_uid`` makes.
+    """
+    rows = store.query(
+        "SELECT id, network, netuid, source_epoch, producer_hotkey, complete, "
+        "generated_at_iso, report_sha256, body_sha256, score_count, signature, "
+        "authenticated_body, report_json FROM cybergym_score_reports "
+        "WHERE network=? AND netuid=? AND complete=1 "
+        "ORDER BY source_epoch DESC LIMIT 1",
+        (network, netuid),
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    report = {
+        "report_id": str(row["id"]),
+        "network": str(row["network"]),
+        "netuid": int(row["netuid"]),
+        "source_epoch": int(row["source_epoch"]),
+        "producer_hotkey": str(row["producer_hotkey"]),
+        "complete": bool(row["complete"]),
+        "generated_at_iso": str(row["generated_at_iso"]),
+        "report_sha256": str(row["report_sha256"]),
+        "body_sha256": str(row["body_sha256"] or ""),
+        "score_count": int(row["score_count"]),
+        "signature": str(row["signature"] or ""),
+        "authenticated_body": row["authenticated_body"],
+        "report_json": row["report_json"],
+    }
+    if epoch is not None and report["source_epoch"] != int(epoch):
+        # A caller that pins an epoch gets that epoch or nothing: never a
+        # different report's scores under the requested epoch's name.
+        return None
+    return report
+
+
+def _report_rows(store: Store, *, report_id: str) -> dict[str, float]:
+    """Every score row of exactly one report, verbatim.
+
+    Nothing is filtered here: these rows are cross-checked against the
+    authenticated document, so silently dropping a row would hide tampering.
+    """
+    rows = store.query(
+        "SELECT miner_hotkey, score FROM cybergym_scores WHERE report_id=?",
+        (report_id,),
+    )
+    out: dict[str, float] = {}
     for row in rows:
         try:
-            value = float(row["score"])
+            out[str(row["miner_hotkey"])] = float(row["score"])
         except (TypeError, ValueError):
-            continue
-        if value <= 0.0:
-            continue
-        hotkey = str(row["miner_hotkey"])
-        totals[hotkey] = totals.get(hotkey, 0.0) + value
-    return totals
+            # A non-numeric row cannot match the document, so record a value that
+            # never compares equal instead of dropping it.
+            out[str(row["miner_hotkey"])] = float("nan")
+    return out
 
 
-def _verified_scores(store: Store, *, epoch: int | None) -> dict[str, float]:
-    """Verified per-miner CyberGym scores from the ``cybergym_scores`` table.
-
-    One row per (miner_hotkey, epoch) with ``score`` = the level-weighted sum of
-    verified solves the CyberGym validator derived for that miner. When ``epoch``
-    is given, that epoch must be ``closed`` (else ``CyberGymEpochNotClosed``) and
-    only its rows are summed. When ``epoch`` is omitted, the latest **closed**
-    score per hotkey is used — open/incomplete epochs never contribute, and a
-    ``cybergym_epoch_status`` that cannot be read raises rather than degrading to
-    an empty vector the refresh would persist over the prior one.
-    Negative or non-numeric scores are ignored defensively — the router expects
-    a non-negative vector.
-    """
-    if epoch is not None:
-        require_closed_epoch(store, int(epoch))
-        rows = store.query(
-            "SELECT miner_hotkey, score FROM cybergym_scores WHERE epoch=?",
-            (int(epoch),),
-        )
-        return _sum_score_rows(rows)
-
-    # Latest closed epoch per hotkey. A lookup we cannot run at all (no
-    # cybergym_epoch_status table, backend error) is refused, not swallowed into
-    # an empty vector: this is the path refresh_loop takes every tick, and
-    # returning {} here would be persisted straight over a prior good vector —
-    # the exact overwrite this gate exists to prevent. Rows that come back empty
-    # from a query that *did* run are a genuine "no closed epoch has scores".
-    try:
-        rows = store.query(
-            "SELECT s.miner_hotkey AS miner_hotkey, s.score AS score "
-            "FROM cybergym_scores AS s "
-            "WHERE (s.miner_hotkey, s.epoch) IN ("
-            "  SELECT s2.miner_hotkey, MAX(s2.epoch) FROM cybergym_scores AS s2 "
-            "  INNER JOIN cybergym_epoch_status AS st "
-            "    ON st.epoch = s2.epoch AND st.state = ? "
-            "  GROUP BY s2.miner_hotkey"
-            ")",
-            (EPOCH_CLOSED,),
-        )
-    except Exception as exc:  # noqa: BLE001 — cannot read the marker => refuse
-        logger.warning(
-            "cybergym_mechanism_scores: closed-epoch lookup failed (%s); refusing "
-            "to publish so the prior vector stands",
-            exc,
-        )
-        raise CyberGymEpochNotClosed(
-            f"refusing to publish CyberGym scores: closed-epoch lookup failed ({exc}). "
-            "Only epochs marked closed are safe to compose; a status table this "
-            "adapter cannot read is not evidence that nobody solved."
-        ) from exc
-    return _sum_score_rows(rows)
-
-
-def cybergym_mechanism_scores(
+def cybergym_score_snapshot(
     store: Store,
     *,
     epoch: int | None = None,
-) -> tuple[ScoreVector, ScoreVectorMeta]:
-    """Verified CyberGym scores remapped from miner_hotkey to miner uid.
+    now: datetime | None = None,
+) -> tuple[ScoreVector, ScoreVectorMeta, dict]:
+    """``(vector, meta, info)`` for the newest fresh complete CyberGym report.
 
-    Returns ``({}, meta)`` when there are no verified scores from a closed
-    epoch, or none of the scored hotkeys map to a UID — the router's
-    documented fallback. Raises ``CyberGymEpochNotClosed`` when a specific
-    ``epoch`` is requested and is not marked closed, or when the closed-epoch
-    lookup cannot run at all; the refresh loop turns that raise into "skip this
-    mechanism", leaving the last published vector in place.
+    ``info`` carries the reason a vector is empty so a composing caller can
+    record why the mechanism forfeited its share (and therefore why that share
+    burns). Reasons: ``no_report``, ``epoch_not_available``, ``unauthenticated``,
+    ``stale``, ``empty_report``, ``no_uid_mapping``, ``table_missing``,
+    ``bad_netuid_config``, or ``ok``.
+
+    Nothing here writes, and nothing here uses read time as a score input:
+    ``signed_at_ms`` is derived from the report's authenticated ``generated_at``.
     """
+    now = now or datetime.now(timezone.utc)
     network = os.environ.get(NETWORK_ENV, "finney")
-    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    try:
+        netuid = int(os.environ.get(NETUID_ENV, "39"))
+    except (TypeError, ValueError):
+        # A malformed NETUID env is a misconfiguration, not a data condition. The
+        # adapter's contract is to never raise, so report an empty (share-burning)
+        # vector with a reason rather than propagate ValueError into the refresh
+        # cycle (the ingest side already fails closed on the same env var).
+        return (
+            {},
+            ScoreVectorMeta(mechanism_id=MECHANISM_ID, signed_at_ms=0, sig_ok=False, source=SOURCE),
+            {"network": network, "netuid": None, "requested_epoch": None,
+             "contributing": False, "reason": "bad_netuid_config"},
+        )
+    info: dict = {
+        "network": network,
+        "netuid": netuid,
+        "requested_epoch": None if epoch is None else int(epoch),
+        "contributing": False,
+        "reason": "no_report",
+    }
 
-    totals = _verified_scores(store, epoch=epoch)
+    def _empty(reason: str, *, signed_at_ms: int = 0, sig_ok: bool = False):
+        info["reason"] = reason
+        return (
+            {},
+            ScoreVectorMeta(
+                mechanism_id=MECHANISM_ID,
+                signed_at_ms=signed_at_ms,
+                sig_ok=sig_ok,
+                source=SOURCE,
+            ),
+            info,
+        )
+
+    try:
+        report = _latest_complete_report(
+            store, network=network, netuid=netuid, epoch=epoch
+        )
+    except Exception as exc:
+        if _is_missing_cybergym_table(exc):
+            logger.warning(
+                "CyberGym tables missing (pre-0048 database?); "
+                "returning empty CyberGym score set"
+            )
+            return _empty("table_missing")
+        raise
+
+    if report is None:
+        return _empty("no_report" if epoch is None else "epoch_not_available")
+
+    # Closed-epoch gate, reconciled with this branch's transport (see #416).
+    #
+    # #416 added require_closed_epoch for the shared-database design, where the
+    # CyberGym validator writes `cybergym_scores` AND `cybergym_epoch_status` into
+    # the publisher database, so the marker is the only completeness signal and an
+    # unreadable marker must refuse.
+    #
+    # This lane does not share a database: cathedral-distill's CyberGymScoreStore
+    # writes its own SQLite file on the validator host, and completeness arrives
+    # here inside the HMAC-signed report body as `complete: true`, which the intake
+    # route requires, `verify_stored_report` re-verifies, and `_latest_complete_report`
+    # filters on. That is a stronger completeness proof than an unauthenticated
+    # marker row, and nothing writes the marker into the publisher database, so
+    # refusing on its ABSENCE would burn this lane permanently rather than fence it.
+    #
+    # So: refuse when a marker exists and says the epoch is not closed (a
+    # deployment that does share the database keeps #416's protection exactly),
+    # and rely on the authenticated `complete` flag when no marker exists.
+    epoch_state = _epoch_state(store, report["source_epoch"])
+    if epoch_state is not None and epoch_state != EPOCH_CLOSED:
+        raise CyberGymEpochNotClosed(
+            f"refusing to publish CyberGym epoch {report['source_epoch']}: "
+            f"state={epoch_state!r}. Only epochs marked closed are safe to compose; "
+            "publishing now would emit a vector indistinguishable from an epoch "
+            "nobody solved."
+        )
+
+    info.update({
+        "report_id": report["report_id"],
+        "source_epoch": report["source_epoch"],
+        "producer_hotkey": report["producer_hotkey"],
+        "report_sha256": report["report_sha256"],
+        "generated_at_iso": report["generated_at_iso"],
+        "score_count": report["score_count"],
+    })
+
+    generated_at = _parse_iso(report["generated_at_iso"])
+    if generated_at is None:
+        return _empty("unauthenticated")
+    signed_at_ms = int(generated_at.timestamp() * 1000)
+    info["signed_at_ms"] = signed_at_ms
+
+    max_age = _max_score_age_secs()
+    max_future_skew = _max_future_skew_secs()
+    age_secs = (now - generated_at).total_seconds()
+    info["age_secs"] = age_secs
+    info["max_age_secs"] = max_age
+    info["max_future_skew_secs"] = max_future_skew
+    if age_secs < -max_future_skew:
+        # Defence in depth against a future-dated report: a negative age can
+        # never exceed max_age, so without this check such a report would count
+        # as fresh for as long as it sat in the table. The ingest route refuses
+        # these, so reaching here means a row arrived by some other means.
+        logger.warning(
+            "cybergym report %s is dated %.0fs in the future (skew allowance "
+            "%.0fs); refusing to treat it as fresh",
+            report["report_id"], -age_secs, max_future_skew,
+        )
+        return _empty("future_dated", signed_at_ms=signed_at_ms, sig_ok=False)
+    if age_secs > max_age:
+        # A dead producer's last report ages out instead of being restamped.
+        return _empty("stale", signed_at_ms=signed_at_ms, sig_ok=True)
+
+    try:
+        rows = _report_rows(store, report_id=report["report_id"])
+    except Exception as exc:
+        if _is_missing_cybergym_table(exc):
+            logger.warning(
+                "cybergym_scores table missing (pre-0048 database?); "
+                "returning empty CyberGym score set"
+            )
+            return _empty("table_missing")
+        raise
+
+    # THE authentication step. Re-derive the stored body digest, re-verify the
+    # stored HMAC against the configured producer secret, re-derive the semantic
+    # report digest, and cross-check every derived column and every score row
+    # against that authenticated body. A row hand-written into the database, or
+    # any later edit to the body, the columns, or the rows, fails here.
+    try:
+        verified = cybergym_contract.verify_stored_report(
+            report,
+            body=report.get("report_json"),
+            authenticated_body=report.get("authenticated_body"),
+            signature=report.get("signature"),
+            rows=rows,
+        )
+    except cybergym_contract.ReportVerificationError as exc:
+        logger.warning(
+            "cybergym report %s failed verification (%s%s); contributing nothing",
+            report["report_id"], exc.reason,
+            f": {exc.detail}" if exc.detail else "",
+        )
+        info["verification_detail"] = exc.detail
+        return _empty(exc.reason, signed_at_ms=signed_at_ms, sig_ok=False)
+    info["verified"] = True
+
+    # Scores come from the VERIFIED document, not from the projection rows. The
+    # rows were only a cross-check; the document is the authenticated truth.
+    totals = {
+        hotkey: value
+        for hotkey, value in verified["scores"].items()
+        if value > 0.0
+    }
+    if not totals:
+        return _empty("empty_report", signed_at_ms=signed_at_ms, sig_ok=True)
+
     hotkey_to_uid = _load_hotkey_to_uid(store, network=network, netuid=netuid)
-
     vector: ScoreVector = {}
     dropped = 0
     for hotkey, score in totals.items():
@@ -245,6 +462,7 @@ def cybergym_mechanism_scores(
             dropped += 1
             continue
         vector[uid] = vector.get(uid, 0.0) + float(score)
+    info["dropped_unmapped_hotkeys"] = dropped
 
     if dropped:
         logger.info(
@@ -253,10 +471,36 @@ def cybergym_mechanism_scores(
             dropped, len(totals), network, netuid,
         )
 
+    if not vector:
+        return _empty("no_uid_mapping", signed_at_ms=signed_at_ms, sig_ok=True)
+
+    info["contributing"] = True
+    info["reason"] = "ok"
+    info["n_uids"] = len(vector)
     meta = ScoreVectorMeta(
         mechanism_id=MECHANISM_ID,
-        signed_at_ms=int(time.time() * 1000),
+        signed_at_ms=signed_at_ms,
         sig_ok=True,
         source=SOURCE,
     )
+    return vector, meta, info
+
+
+def cybergym_mechanism_scores(
+    store: Store,
+    *,
+    epoch: int | None = None,
+    now: datetime | None = None,
+) -> tuple[ScoreVector, ScoreVectorMeta]:
+    """Verified CyberGym scores remapped from miner_hotkey to miner uid.
+
+    Reads exactly one report: the newest COMPLETE report for the configured
+    audience. Passing ``epoch`` pins that report to an exact producer epoch and
+    yields nothing if the newest complete report is a different one.
+
+    Returns ``({}, meta)`` when the report is missing, incomplete, unverifiable,
+    tampered, stale, empty, or maps to no UID: the router's documented fallback,
+    never an exception.
+    """
+    vector, meta, _info = cybergym_score_snapshot(store, epoch=epoch, now=now)
     return vector, meta

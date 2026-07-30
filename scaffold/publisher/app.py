@@ -50,7 +50,7 @@ from .cnf_store import CNFStore
 from . import v2_cnf_store
 from . import epoch_publisher as v2_cnf_artifacts
 from .sat_solution import verify_dimacs_solution
-from . import external_scores, submit_admission
+from . import cybergym_ingest, external_scores, submit_admission
 from . import solution_manifest
 from . import v2_pipeline
 from . import v2_bitset_submit
@@ -1745,6 +1745,17 @@ def build_app(
 
     app.state.store = store
     app.state.cnf_store = cnf_store
+    # CyberGym producer intake. Mounted with THIS app's own store so the route
+    # exists on a full-role process and can actually be turned on by
+    # configuration; the store is injected per app (not through the module-level
+    # setter) so building several apps in one process cannot cross-wire them.
+    # The route keeps its own default-off gate: with
+    # CATHEDRAL_CYBERGYM_INGEST_ENABLED unset it answers 404, so mounting it
+    # changes nothing for an unconfigured deployment. It is deliberately absent
+    # from the narrow service-role allowlists above, so read/submit/worker roles
+    # keep refusing it and only a full-role process can serve it.
+    app.dependency_overrides[cybergym_ingest.get_publisher_store] = lambda: store
+    app.include_router(cybergym_ingest.router)
     app.state.board_cache = board_cache
     app.state.top_cache = top_cache
     app.state.board_snapshot = board_snapshot
