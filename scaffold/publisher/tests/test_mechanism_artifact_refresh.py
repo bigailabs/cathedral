@@ -320,3 +320,87 @@ def test_compose_and_publish_inherits_the_mainnet_refusal(monkeypatch):
     with pytest.raises(ws.UnsafeNetworkError):
         arf.compose_and_publish(store, netuid=39, network="finney", signing_key_hex="00" * 32,
                                 adapters={"cybergym_v0": _adapter({7: 3.0})})
+
+
+class _StubDataStore:
+    """Stands in for the publisher Store. The fakes below ignore it; it exists so the
+    lazy default_data_store() is never constructed (which would open a real DB)."""
+
+    def query(self, sql, params=()):
+        return []
+
+
+# --------------------------------------------------------------------------- #
+# Compose-time staleness ceiling
+#
+# The refresh loop deliberately SKIPS a mechanism whose adapter refuses, so the last
+# published vector survives one bad cycle instead of being wiped by an empty one.
+# The cost is that a vector whose adapter keeps refusing would be composed forever,
+# paying the same miners from an arbitrarily old epoch. `compose` already implements
+# the ceiling; nothing passed one, so it was never applied.
+# --------------------------------------------------------------------------- #
+def test_the_ceiling_defaults_on_rather_than_off(monkeypatch):
+    monkeypatch.delenv(arf.MAX_SCORE_AGE_SECS_ENV, raising=False)
+    assert arf.max_score_age_ms() == int(arf.DEFAULT_MAX_SCORE_AGE_SECS * 1000)
+
+
+def test_a_malformed_ceiling_does_not_become_no_ceiling(monkeypatch):
+    # Fail-open here means paying stale scores forever, so a garbage value must fall
+    # back to the default rather than disabling the gate.
+    monkeypatch.setenv(arf.MAX_SCORE_AGE_SECS_ENV, "not-a-number")
+    assert arf.max_score_age_ms() == int(arf.DEFAULT_MAX_SCORE_AGE_SECS * 1000)
+
+
+def test_the_ceiling_is_configurable_and_disabling_it_is_explicit(monkeypatch):
+    monkeypatch.setenv(arf.MAX_SCORE_AGE_SECS_ENV, "120")
+    assert arf.max_score_age_ms() == 120_000
+    monkeypatch.setenv(arf.MAX_SCORE_AGE_SECS_ENV, "0")   # deliberate opt-out
+    assert arf.max_score_age_ms() is None
+
+
+def test_compose_and_publish_applies_the_ceiling(monkeypatch):
+    seen = {}
+
+    def fake_compose(s, specs, scores, *, now_ms, **kw):
+        seen["max_score_age_ms"] = kw.get("max_score_age_ms")
+        seen["preserve_forfeited"] = kw.get("preserve_forfeited")
+        return {7: 1.0}, {"eligibility": "ok"}
+
+    monkeypatch.setattr(elig, "compose_eligible", fake_compose)
+    monkeypatch.setattr(ws, "set_weights", lambda composed, **kw: {"published": True})
+    monkeypatch.delenv(arf.MAX_SCORE_AGE_SECS_ENV, raising=False)
+
+    store = _store()
+    store.upsert_spec(_spec("cybergym_v0"))
+    arf.compose_and_publish(
+        store, netuid=123, network="test", signing_key_hex="00" * 32,
+        data_store=_StubDataStore(),
+        adapters={"cybergym_v0": _adapter({7: 3.0})})
+    assert seen["max_score_age_ms"] == int(arf.DEFAULT_MAX_SCORE_AGE_SECS * 1000)
+    assert seen["preserve_forfeited"] is True
+
+
+def test_a_stale_stored_vector_forfeits_to_burn_rather_than_paying():
+    """End to end through the real compose: an old vector stops contributing.
+
+    This is the behaviour the ceiling exists for. A mechanism whose adapter keeps
+    refusing keeps its last row; once that row ages past the ceiling its share must
+    forfeit to burn instead of paying the miners it named.
+    """
+    store = _store()
+    store.upsert_spec(_spec("cybergym_v0", weight=0.5))
+    stale = R.ScoreVectorMeta(
+        mechanism_id="cybergym_v0", signed_at_ms=1_000, sig_ok=True, source="test"
+    )
+    store.put_scores("cybergym_v0", {7: 3.0}, stale)
+
+    specs = store.list_specs()
+    scores = {"cybergym_v0": store.get_scores("cybergym_v0")}
+    weights, debug = R.compose(
+        specs, scores, registered_uids={7}, now_ms=10_000_000,
+        max_score_age_ms=60_000, preserve_forfeited=True,
+    )
+    assert weights == {}                                  # nothing paid
+    assert debug["mechanisms"]["cybergym_v0"]["fallback_reason"] == "stale"
+    assert debug["mechanisms"]["cybergym_v0"]["contributing"] is False
+    assert debug["forfeited_fraction"] == 0.5             # burns, not reallocated

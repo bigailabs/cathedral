@@ -37,7 +37,8 @@ import math
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, Iterable, Mapping
 
 # The exact keys a producer document carries. The semantic digest is taken over
 # these and only these, so adding a derived column never changes the digest.
@@ -331,3 +332,106 @@ def verify_stored_report(
                 raise ReportVerificationError("rows_tampered", hotkey)
 
     return {"document": document, "scores": verified}
+
+
+# --------------------------------------------------------------------------- #
+# Canonical evidence manifest
+#
+# What a report's `evidence_sha256` must commit to. The producer builds this over the
+# receipts it scored; the validator rebuilds it over the receipts it admitted and
+# requires exact equality before crediting anything. Duplicated byte-for-byte in
+# cathedral-distill's producer builder and cathedral-validator's
+# cathedral_thin/cybergym_evidence_manifest.py, because no import spans the three
+# repositories; each side pins the schema string and the empty digest in tests so
+# drift fails a test instead of silently failing to verify a real report.
+# --------------------------------------------------------------------------- #
+EVIDENCE_MANIFEST_SCHEMA = "cathedral_cybergym_evidence_manifest_v1"
+
+
+class EvidenceManifestError(ValueError):
+    """The manifest could not be built from the given entries."""
+
+
+def _canonical_units(value: Any) -> str:
+    """The exact quantity as a canonical decimal string.
+
+    A string rather than a float: 12, 12.0 and "12.000" must all digest identically on
+    both sides, and float repr is not a contract.
+    """
+    try:
+        quantity = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise EvidenceManifestError(f"work_units {value!r} is not a decimal") from exc
+    if not quantity.is_finite() or quantity < 0:
+        raise EvidenceManifestError(f"work_units {value!r} is not a finite non-negative")
+    normalized = quantity.normalize()
+    # normalize() renders integers in exponent form (1E+1); expand those back.
+    if normalized == normalized.to_integral_value():
+        normalized = normalized.quantize(Decimal(1))
+    return format(normalized, "f")
+
+
+def build_evidence_manifest(
+    *,
+    network: str,
+    netuid: int,
+    source_epoch: int,
+    entries: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The canonical manifest body. ``entries`` may be in any order."""
+    rows = []
+    seen: set[tuple[str, str]] = set()
+    for entry in entries:
+        hotkey = str(entry["miner_hotkey"])
+        receipt_id = str(entry["receipt_id"])
+        key = (hotkey, receipt_id)
+        if key in seen:
+            raise EvidenceManifestError(
+                f"duplicate entry for {hotkey} / {receipt_id}"
+            )
+        seen.add(key)
+        rows.append(
+            {
+                "miner_hotkey": hotkey,
+                "receipt_id": receipt_id,
+                "work_units": _canonical_units(entry["work_units"]),
+            }
+        )
+    rows.sort(key=lambda row: (row["miner_hotkey"], row["receipt_id"]))
+    return {
+        "schema": EVIDENCE_MANIFEST_SCHEMA,
+        "network": str(network),
+        "netuid": int(netuid),
+        "source_epoch": int(source_epoch),
+        "entries": rows,
+    }
+
+
+def evidence_manifest_bytes(manifest: Mapping[str, Any]) -> bytes:
+    """sort_keys + compact separators + UTF-8, the same canonicalization as the report."""
+    return json.dumps(
+        dict(manifest), sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+
+
+def evidence_manifest_digest(
+    *,
+    network: str,
+    netuid: int,
+    source_epoch: int,
+    entries: Iterable[Mapping[str, Any]],
+) -> str:
+    """The 64 lowercase hex digest a report's ``evidence_sha256`` must equal."""
+    manifest = build_evidence_manifest(
+        network=network, netuid=netuid, source_epoch=source_epoch, entries=entries
+    )
+    return hashlib.sha256(evidence_manifest_bytes(manifest)).hexdigest()
+
+
+def empty_evidence_manifest_digest(*, network: str, netuid: int, source_epoch: int) -> str:
+    """The digest of a funded epoch in which the producer credited nobody."""
+    return evidence_manifest_digest(
+        network=network, netuid=netuid, source_epoch=source_epoch, entries=()
+    )
+
+

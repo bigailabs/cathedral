@@ -306,3 +306,75 @@ def test_the_ingest_module_reuses_this_contract():
 def test_canonical_body_round_trips_through_json():
     doc = contract.semantic_view(_document())
     assert json.loads(contract.canonical_report_bytes(doc).decode("utf-8")) == doc
+
+
+# --------------------------------------------------------------------------- #
+# Canonical evidence manifest
+#
+# What a report's evidence_sha256 must commit to. The producer builds it over the
+# receipts it scored, the validator rebuilds it over the receipts it admitted, and the
+# two must agree exactly or the lane burns. Three repositories implement this and no
+# import spans them, so the literals are pinned rather than merely computed.
+# --------------------------------------------------------------------------- #
+def test_the_evidence_manifest_schema_is_pinned():
+    assert contract.EVIDENCE_MANIFEST_SCHEMA == "cathedral_cybergym_evidence_manifest_v1"
+
+
+def test_the_empty_evidence_manifest_digest_is_deterministic():
+    import hashlib
+    import json
+
+    digest = contract.empty_evidence_manifest_digest(
+        network="finney", netuid=39, source_epoch=11
+    )
+    expected = hashlib.sha256(
+        json.dumps(
+            {
+                "schema": contract.EVIDENCE_MANIFEST_SCHEMA,
+                "network": "finney",
+                "netuid": 39,
+                "source_epoch": 11,
+                "entries": [],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert digest == expected
+
+
+def test_the_evidence_manifest_is_order_and_format_independent():
+    rows = [
+        {"miner_hotkey": "5B", "receipt_id": "r2", "work_units": 12},
+        {"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "3.50"},
+    ]
+    a = contract.evidence_manifest_digest(
+        network="finney", netuid=39, source_epoch=11, entries=rows
+    )
+    b = contract.evidence_manifest_digest(
+        network="finney", netuid=39, source_epoch=11, entries=list(reversed(rows))
+    )
+    c = contract.evidence_manifest_digest(
+        network="finney", netuid=39, source_epoch=11,
+        entries=[
+            {"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "3.5"},
+            {"miner_hotkey": "5B", "receipt_id": "r2", "work_units": "12.000"},
+        ],
+    )
+    assert a == b == c
+
+
+def test_the_evidence_manifest_is_audience_and_epoch_bound():
+    rows = [{"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "12"}]
+    base = contract.evidence_manifest_digest(
+        network="finney", netuid=39, source_epoch=11, entries=rows
+    )
+    assert base != contract.evidence_manifest_digest(
+        network="test", netuid=39, source_epoch=11, entries=rows
+    )
+    assert base != contract.evidence_manifest_digest(
+        network="finney", netuid=1, source_epoch=11, entries=rows
+    )
+    assert base != contract.evidence_manifest_digest(
+        network="finney", netuid=39, source_epoch=12, entries=rows
+    )
