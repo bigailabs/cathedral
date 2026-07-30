@@ -18,6 +18,7 @@ from scaffold.publisher import mechanism_cybergym_adapter as cybergym
 from scaffold.publisher import mechanism_eligibility as elig
 from scaffold.publisher import mechanism_router as R
 from scaffold.publisher import mechanism_weightset as ws
+from scaffold.publisher.store import Store
 
 
 def _store():
@@ -130,6 +131,94 @@ def test_registered_adapters_point_at_real_entrypoints():
     assert arf._resolve(arf.ARTIFACT_ADAPTERS["sat_v2"]) is not None
     cyber = arf._resolve(arf.ARTIFACT_ADAPTERS["cybergym_v0"])
     assert cyber is None or callable(cyber)
+
+
+# --------------------------------------------------------------------------- #
+# The two stores are two databases
+# --------------------------------------------------------------------------- #
+def test_a_real_adapter_runs_end_to_end_through_refresh(tmp_path):
+    """No ``adapters=`` override — the gap every other test in this file leaves open.
+
+    Each of those injects a fake that ignores the store it is handed, so they pass
+    whatever refresh passes. That hid a real defect: refresh gave adapters the
+    ``MechanismStore``, which has no ``query``, so every real adapter died on
+    ``AttributeError``, got caught by the per-adapter ``except``, and was logged as
+    "skipping" — indistinguishable from a mechanism with nothing to contribute. No
+    artifact-tier mechanism could ever publish, and ``POST /mechanisms/refresh``
+    still answered ``{"ok": true, "refreshed": {}}``.
+
+    So drive the registered cybergym adapter for real, against a real publisher
+    Store, and require an actual vector out the far end.
+    """
+    data = Store(str(tmp_path / "publisher.db"))
+    data.write(lambda c: c.execute(
+        "CREATE TABLE IF NOT EXISTS cybergym_scores ("
+        "miner_hotkey TEXT NOT NULL, epoch INTEGER NOT NULL, "
+        "score REAL NOT NULL, PRIMARY KEY (miner_hotkey, epoch))"))
+    data.write(lambda c: c.execute(
+        "CREATE TABLE IF NOT EXISTS cybergym_epoch_status ("
+        "epoch INTEGER PRIMARY KEY, state TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '', scored_miners INTEGER NOT NULL DEFAULT 0, "
+        "marked_at TEXT NOT NULL DEFAULT '')"))
+    data.write(lambda c: c.execute(
+        "INSERT INTO cybergym_scores(miner_hotkey, epoch, score) VALUES (?,?,?)",
+        ("5Alice", 7, 12.0)))
+    data.write(lambda c: c.execute(
+        "INSERT INTO cybergym_epoch_status(epoch, state) VALUES (?,?)",
+        (7, cybergym.EPOCH_CLOSED)))
+    data.write(lambda c: c.execute(
+        "INSERT OR REPLACE INTO metagraph_hotkeys("
+        "network, netuid, hotkey, uid, coldkey, block, updated_at_iso"
+        ") VALUES (?,?,?,?,?,?,?)",
+        ("finney", 39, "5Alice", 4, "", 1, "2026-07-01T00:00:00.000Z")))
+
+    store = _store()                                   # the OTHER database
+    store.upsert_spec(_spec("cybergym_v0"))
+
+    refreshed = arf.refresh_artifact_scores(store, epoch=7, data_store=data)
+    assert refreshed == {"cybergym_v0": 1}
+    scores, meta = store.get_scores("cybergym_v0")
+    assert scores == {4: 12.0}
+    assert meta.source == "cybergym_adapter"
+
+
+def test_the_mechanism_store_is_not_accepted_as_the_data_store():
+    """Passing the MechanismStore where the publisher Store belongs must not quietly
+    look like success. It cannot serve adapter reads — no ``query`` — so the cycle
+    reports nothing refreshed and leaves the row untouched rather than persisting
+    an empty vector."""
+    store = _store()
+    store.upsert_spec(_spec("cybergym_v0"))
+    assert not hasattr(store, "query")
+
+    refreshed = arf.refresh_artifact_scores(store, epoch=7, data_store=store)
+    assert refreshed == {}
+    assert store.get_scores("cybergym_v0") is None
+
+
+def test_default_data_store_reads_the_publisher_db_not_the_mechanism_db(monkeypatch, tmp_path):
+    """``CATHEDRAL_DB_PATH``, the same var server.py uses — deliberately not
+    ``CATHEDRAL_MECH_DB_PATH``, which points at the specs database."""
+    monkeypatch.setenv(arf.DATA_DB_PATH_ENV, str(tmp_path / "publisher.db"))
+    monkeypatch.setenv("CATHEDRAL_MECH_DB_PATH", str(tmp_path / "mechanisms.sqlite3"))
+    data = arf.default_data_store()
+    assert data.path == str(tmp_path / "publisher.db")
+    assert hasattr(data, "query")          # can serve adapter reads
+    assert not hasattr(data, "list_specs")  # and is not a MechanismStore
+
+
+def test_refresh_opens_no_database_when_nothing_is_enabled(monkeypatch):
+    """The default data store is resolved lazily. A cycle with no enabled artifact
+    spec must not construct one — the periodic loop runs this on every tick."""
+    store = _store()
+    store.upsert_spec(_spec("sat_v2", enabled=False))
+    store.upsert_spec(_spec("signed_x", tier="signed"))
+
+    def boom():
+        raise AssertionError("default_data_store() must not be called")
+
+    monkeypatch.setattr(arf, "default_data_store", boom)
+    assert arf.refresh_artifact_scores(store) == {}
 
 
 # --------------------------------------------------------------------------- #

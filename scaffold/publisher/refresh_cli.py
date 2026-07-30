@@ -26,6 +26,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Refresh artifact-tier mechanism scores.")
     p.add_argument("--db", default=os.environ.get("CATHEDRAL_MECH_DB_PATH") or None,
                    help="mechanism sqlite path (default: $CATHEDRAL_MECH_DB_PATH / process default)")
+    p.add_argument("--data-db", default=None,
+                   help="publisher db holding the verified-work tables adapters read "
+                        "(cybergym_scores, metagraph_hotkeys). A DIFFERENT database from "
+                        f"--db. Default: ${arf.DATA_DB_PATH_ENV}")
     p.add_argument("--epoch", type=int, default=None, help="restrict to a single epoch")
     p.add_argument("--publish", action="store_true",
                    help="also compose + publish the preview vector (testnet only)")
@@ -35,6 +39,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     store = SqliteMechanismStore(args.db)
+    # Two databases: specs/scores in --db, the verified-work tables in --data-db.
+    data_store = None
+    if args.data_db:
+        from .store import Store
+        data_store = Store(args.data_db)
 
     if args.publish:
         missing = [f for f in ("netuid", "network", "signing_key_hex")
@@ -43,11 +52,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             p.error("--publish requires " + ", ".join("--" + m.replace("_", "-") for m in missing))
         _, debug = arf.compose_and_publish(
             store, netuid=args.netuid, network=args.network,
-            signing_key_hex=args.signing_key_hex, epoch=args.epoch)
+            signing_key_hex=args.signing_key_hex, epoch=args.epoch,
+            data_store=data_store)
         print(json.dumps({"refreshed_then_published": True,
                           "eligibility": debug.get("eligibility")}, default=str))
     else:
-        refreshed = arf.refresh_artifact_scores(store, epoch=args.epoch)
+        refreshed = arf.refresh_artifact_scores(
+            store, epoch=args.epoch, data_store=data_store)
         print(json.dumps({"refreshed": refreshed}))
     return 0
 
