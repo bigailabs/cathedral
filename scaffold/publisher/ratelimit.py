@@ -295,6 +295,40 @@ class _AbuseLimiterState:
 _abuse_state = _AbuseLimiterState()
 
 
+def reset_state_for_tests() -> None:
+    """Drop every accumulated per-key window. Test support only.
+
+    Both limiters above are process-wide singletons keyed on the client IP, and
+    under Starlette's TestClient every request in the process reports the same
+    client (``testclient``). So an entire pytest session shares ONE key and ONE
+    60-second window: after 120 requests, whichever test runs next takes the
+    429 -- and which test that is depends on collection order and on how fast
+    the machine is, not on anything that test did.
+
+    That is not hypothetical. Measured on the publisher suite in one process:
+    62 failures, 61 of them carrying a 429. Re-run with
+    ``CATHEDRAL_RATELIMIT_RPM=0`` and it is 28, and those 28 are exactly --
+    test for test -- the set you get by running each file in its own process.
+    All 34 of the difference were this one shared budget. The failure set
+    therefore moves with unrelated edits, which makes a real regression
+    indistinguishable from a neighbouring module's leftovers.
+
+    Called from an autouse fixture so each test gets its own budget. It resets
+    the limiters rather than disabling them, so a test that asserts throttling
+    still drives the real middleware within its own test.
+
+    Kept here, beside the state it clears, so that a third limiter added to
+    this module is reset by editing the file that declares it.
+    """
+    for state in (_state, _abuse_state):
+        with state._lock:
+            state._entries.clear()
+            state._req_count = 0
+    global _unresolved_ip_count
+    with _unresolved_ip_lock:
+        _unresolved_ip_count = 0
+
+
 def _get_header(headers: list, name: bytes) -> str | None:
     """Extract the FIRST matching header value from raw ASGI headers."""
     name_lower = name.lower()
