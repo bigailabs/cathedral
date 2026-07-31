@@ -156,7 +156,14 @@ def test_solver_metadata_present_is_signed_stored_and_echoed(tmp_path, monkeypat
     )
     assert r.status_code == 202, r.text
     receipt = r.json()
-    assert receipt["status"] == "verified"
+    # `received`, not `verified`: submit-bitset is the THIN admit path since
+    # "Thin submit-bitset + async scoring (restores intended design)" (08f8c64).
+    # The submit_token already binds hotkey + challenge + cnf_sha256, so ownership
+    # is proven synchronously; only the witness check is deferred to the verify
+    # worker, which keeps submit sub-second instead of ~40s. These tests are about
+    # solver metadata being signed, stored and echoed, and that is unchanged --
+    # they simply predate the split and were never moved onto the new contract.
+    assert receipt["status"] == v2_bitset_submit.STATUS_RECEIVED
     assert receipt["solver_id"] == solver_id
     assert receipt["solver_hash"] == solver_hash
     assert receipt["image_url"] == image_url
@@ -176,8 +183,14 @@ def test_solver_metadata_present_is_signed_stored_and_echoed(tmp_path, monkeypat
     assert b'"solver_hash":"' in canonical
     assert b'"image_url":"' in canonical
 
-    # Scoring is unaffected by the metadata: weight matches the plain path.
-    assert receipt["weighted_score"] == item["difficulty_weight"]
+    # Scoring is the worker's job now, so the receipt carries the placeholder
+    # rather than the final weight. What this assertion existed to prove -- that
+    # carrying solver metadata does not change scoring -- is preserved by
+    # test_plain_submit_without_metadata_is_unchanged below, which drives the
+    # same route with no metadata and gets the same placeholder.
+    assert receipt["weighted_score"] == 0.0
+    assert row["weighted_score"] == 0.0
+    assert row["verified_at_iso"] is None
 
 
 def test_tampering_solver_metadata_after_signing_fails_signature(tmp_path, monkeypatch):
@@ -356,7 +369,8 @@ def test_require_solver_meta_flag_on_accepts_with_metadata(tmp_path, monkeypatch
         headers=_bitset_headers(kp, body, submitted_at=submitted_at),
     )
     assert r.status_code == 202, r.text
-    assert r.json()["status"] == "verified"
+    # Thin admit: the flag under test is require_solver_meta, not scoring.
+    assert r.json()["status"] == v2_bitset_submit.STATUS_RECEIVED
 
 
 def test_require_solver_meta_flag_off_by_default_accepts_missing_metadata(tmp_path, monkeypatch):
@@ -383,7 +397,8 @@ def test_require_solver_meta_flag_off_by_default_accepts_missing_metadata(tmp_pa
     )
     assert r.status_code == 202, r.text
     receipt = r.json()
-    assert receipt["status"] == "verified"
+    # Thin admit: the flag under test is require_solver_meta, not scoring.
+    assert receipt["status"] == v2_bitset_submit.STATUS_RECEIVED
     assert "solver_id" not in receipt
     assert "solver_hash" not in receipt
     assert "image_url" not in receipt

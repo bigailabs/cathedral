@@ -166,9 +166,78 @@ def _ms_iso(value: datetime) -> str:
     return value.strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
 
 
+def _virtualenv_package_paths() -> list[str]:
+    """Site-packages of the venv running this child, derived without ``site``.
+
+    The child runs under ``-I -S``, and ``-S`` is deliberate: the canary's own
+    evidence reports ``site_startup_disabled`` and ``sitecustomize_loaded``, so
+    no ``.pth`` file or ``sitecustomize`` may execute before the publisher is
+    imported. But relocating ``sys.prefix`` onto a virtualenv is itself part of
+    what ``site`` does with ``pyvenv.cfg``, so suppressing it leaves
+    ``sys.prefix`` on the BASE installation::
+
+        venv/bin/python       -c 'import sys; print(sys.prefix)'   ->  the venv
+        venv/bin/python -I -S -c 'import sys; print(sys.prefix)'   ->  /usr
+
+    ``sysconfig.get_path("purelib")`` then answers for the base interpreter.
+    That directory normally exists, so the ``is_dir()`` guard below passed and
+    the wrong path was appended with nothing to show for it, while the venv's
+    site-packages -- the only place the publisher's dependencies are installed
+    -- never reached ``sys.path``. The child died with ``No module named
+    'fastapi'``, so the canary could not run at all inside a virtualenv, and the
+    failure surfaced as a ``CanaryError`` that read like a canary result rather
+    than a broken launcher.
+
+    ``sys.executable`` is still the venv's interpreter, so the venv root is
+    recoverable from it. Reading ``pyvenv.cfg`` and computing a path through
+    ``sysconfig`` executes no user code and imports no ``site``, so the
+    isolation those flags exist for is untouched.
+    """
+    # NOT ``.resolve()``: a venv's ``bin/python`` is normally a symlink to the
+    # base interpreter, so resolving it lands on ``/usr/bin/python3.12`` and
+    # walks up to ``/usr`` -- discarding the venv this is trying to find. The
+    # unresolved path is the one that identifies the environment. The resolved
+    # form is still tried afterwards, for the case where the interpreter really
+    # was invoked by its real path.
+    executable = Path(sys.executable)
+    roots = (
+        executable.parent.parent,
+        executable.parent,
+        executable.resolve().parent.parent,
+    )
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        if not (root / "pyvenv.cfg").is_file():
+            continue
+        # The "venv" scheme, not the default one. On Debian and Ubuntu the
+        # default is the patched ``posix_local``, which answers
+        # ``<base>/local/lib/pythonX.Y/dist-packages`` -- correct for the system
+        # interpreter, and not where a venv puts anything. ``site`` would have
+        # selected the venv scheme itself; ``-S`` is why it did not.
+        scheme = "venv" if "venv" in sysconfig.get_scheme_names() else "posix_prefix"
+        try:
+            return [
+                sysconfig.get_path(
+                    name,
+                    scheme=scheme,
+                    vars={"base": str(root), "platbase": str(root)},
+                )
+                for name in ("purelib", "platlib")
+            ]
+        except (KeyError, TypeError):
+            return []
+    return []
+
+
 def _add_dependency_paths() -> None:
     """Expose installed dependencies without executing ``site`` or ``.pth`` files."""
-    candidates: list[str] = []
+    # The venv's own packages go FIRST. When both are present, the venv is the
+    # environment the canary was launched from and the base installation is at
+    # best a fallback.
+    candidates: list[str] = _virtualenv_package_paths()
     for scheme in sysconfig.get_scheme_names():
         if scheme.endswith("_user"):
             try:
