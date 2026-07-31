@@ -34,3 +34,31 @@ def _stable_cnf_token_secret(monkeypatch):
     unset/fail-closed path can ``monkeypatch.delenv`` it.
     """
     monkeypatch.setenv("CATHEDRAL_CNF_TOKEN_SECRET", "test-cnf-token-secret")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_wide_rate_limiters():
+    """Give every test its own rate-limit budget.
+
+    ``ratelimit._state`` and ``ratelimit._abuse_state`` are process-wide and
+    keyed on client IP, which under TestClient is the same ``testclient`` for
+    every request in the session. One key, one 60-second window, ~1300 tests:
+    the suite spent the 120-request budget within the first few modules and
+    then handed 429s to whatever ran next.
+
+    The cost was 34 of 62 failures in a one-process run, concentrated in
+    ``test_submit_admission.py`` (16) and ``test_pm_submit_async.py`` (16) --
+    both of which pass cleanly on their own. Because the budget is spent
+    against a wall clock, the failures also moved with machine speed, so the
+    "inherited" baseline the advisory CI job compares against was never stable
+    enough to tell a new failure from an old one.
+
+    Reset before AND after: before so a test never inherits a spent budget,
+    after so the last test in a session does not leave one behind for whatever
+    a future runner (xdist worker reuse, an interactive session) starts next.
+    """
+    from scaffold.publisher import ratelimit
+
+    ratelimit.reset_state_for_tests()
+    yield
+    ratelimit.reset_state_for_tests()
