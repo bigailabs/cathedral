@@ -78,6 +78,66 @@ The reproduction lock digest moved from
 The build lock digest is unchanged, which confirms only the cathedral archive
 line moved.
 
+### Amendment: the producer repository was renamed, and it broke the lock
+
+The transcript above is left as it was recorded; it was correct when run. The
+archive it hashes is not the same bytes any more.
+
+`cathedralconfidential` was renamed to `cathedral-compute`. GitHub builds those
+auto-generated archives with the repository name as the top-level directory, so
+the rename changed the tarball while **nothing inside the repository changed**.
+The commit is still `655c2644...`; it now unpacks to `cathedral-compute-655c2644.../`
+and hashes to `sha256:2384833b...`. Both URLs serve byte-identical bytes today,
+so this is not a URL-reachability problem — the old URL still redirects. It is
+the digest that had to move, and it would have had to move whichever URL was kept.
+
+The consequence was not cosmetic. `pip --require-hashes` refused the lock, so
+**the hash-locked launch environment could not be built at all**, which took out:
+
+| Path | How it failed |
+|---|---|
+| `Two-mode provenance` CI (gating) | red at "Build the hash-locked launch environment" |
+| The documented public reproduction (`SN39_MAINNET_RELEASE_20260724.md`) | same install step, same error |
+| The rotation bundle (`cathedral-sn39-rotation-launcher.py`) | ships the lock as a required bundle file |
+| The `[provenance]` extra | same pin in `pyproject.toml` (cathedral-validator#16) |
+
+It surfaced as `THESE PACKAGES DO NOT MATCH THE HASHES ... someone may have
+tampered with them`, which reads as an attack rather than as a moved URL. It
+also failed **asymmetrically**: `pip` enforced the fragment and refused, `uv`
+installed it regardless, so half the toolchain could not see the break.
+
+Sites moved in this amendment, all in one commit for the reason given above:
+
+| Site | New value |
+|---|---|
+| `requirements/sn39-reproduction.lock` | URL and `--hash` -> `2384833b...` |
+| `pyproject.toml` | `provenance` extra URL and `#sha256=` -> `2384833b...` |
+| `scripts/build_sn39_release_manifest.py` | `EXPECTED_CATHEDRAL_URL`, `EXPECTED_CATHEDRAL_ARCHIVE_SHA256` |
+| `scaffold/sn39_public_reproduction.py` | `EXPECTED_RELEASE_PINS["reproduction_dependencies"]` -> `sha256:765f9042...` |
+| `docs/SN39_MAINNET_RELEASE_20260724.md` | component table's reproduction lock digest |
+
+The reproduction lock digest moved again, to
+`sha256:765f90428c0fbdb8fc58f03e82edd6dd9ea1cc50bd685dc2bdbbecef30aa1624`.
+The build lock digest is still unchanged, which again confirms only the
+cathedral archive line moved.
+
+**This requires a re-signed public release.** `EXPECTED_RELEASE_PINS` is
+compared against the `pins` object inside the root-signed release manifest at
+`https://api.cathedral.computer/v1/evidence/release.json`, so moving the lock
+digest invalidates any previously signed value. That manifest currently returns
+**404** (the evidence API itself is up: `/health` and `/v1/evidence/index.json`
+both return 200), so there is no published attestation to invalidate — but
+publishing one is a prerequisite for the public reproduction path, and it must
+be signed over these digests, not the superseded ones.
+
+A note on form, since it was raised on cathedral-validator#16: the durable fix
+for a pin like this is `git+https://...@<commit-sha>`, which is content-addressed
+by git and cannot be invalidated by a rename. That is what the `[provenance]`
+extra now uses downstream. It is **not** available here: `pip --require-hashes`
+rejects VCS requirements outright, and hash-locking is the entire point of this
+file. So this lock keeps the archive form and accepts that a future rename
+breaks it again — the mitigation is that a rename now has a written checklist.
+
 ### Host exporter change (NOT applied)
 
 `/usr/local/sbin/cathedral-sn39-export-evidence` currently hardcodes

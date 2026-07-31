@@ -21,12 +21,24 @@ ROOT_UID = 0
 EXPECTED_VERIFIER_BINARY = (
     "sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
 )
+# The producer repository was renamed cathedralconfidential -> cathedral-compute.
+# GitHub's auto-generated archives embed the repository name as their top-level
+# directory, so the rename changed these bytes while nothing inside the
+# repository changed: the same commit now unpacks to
+# cathedral-compute-655c2644.../ and hashes to 2384833b... . The old URL still
+# resolves (GitHub redirects it) and serves byte-identical content, so the URL
+# below is updated for accuracy rather than reachability -- it is the DIGEST
+# that had to move, and it would have had to move whichever URL we kept.
+#
+# The commit is unchanged and remains the truthful identity of the producer
+# code; only the packaging of it moved. See docs/SN39_LAUNCH_CUTOVER_20260726.md
+# for why the venv basename is the value all of these pins derive from.
 EXPECTED_CATHEDRAL_URL = (
-    "https://github.com/cathedralai/cathedralconfidential/archive/"
+    "https://github.com/cathedralai/cathedral-compute/archive/"
     "655c264421a1f5f2e625a372a40f595aa1e114ab.tar.gz"
 )
 EXPECTED_CATHEDRAL_ARCHIVE_SHA256 = (
-    "befc572f459c2d80af7ce18013cb4d3649716f143da0a6a86a4a8b96f84b88fb"
+    "2384833be9ece20d4946aecd0b499eaee0e292994d1275a54d1d52c029836a9b"
 )
 RELEASE_FILES = (
     "config/validator-mainnet-sn39.toml",

@@ -488,7 +488,7 @@ installation contracts have been reviewed together.
 | Score-report key bundle | `sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70` |
 | Evidence-index key bundle | `sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611` |
 | Release-attestation key bundle | `sha256:1a60a22de160853d460b22853a426d0534fab4df0fe9f89e5859d60bb4ed3d12` |
-| Reproduction dependency lock | `sha256:4c8155b0f3af5d2df254e1680b574ed51d6d9b9a36078469cc9bc5a1f13c84d8` |
+| Reproduction dependency lock | `sha256:765f90428c0fbdb8fc58f03e82edd6dd9ea1cc50bd685dc2bdbbecef30aa1624` |
 | Build-backend dependency lock | `sha256:b212eed198712c8f54ad6250dc64575485bef5c3c311d71ee3c24a2c80396912` |
 | Verifier binary blob | `sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb` |
 | Verifier implementation | `sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f` |
