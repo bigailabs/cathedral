@@ -660,7 +660,24 @@ def test_solution_manifest_v2_submit_bitset_rejects_auth_failures_without_rows(t
     assert bad_sig.status_code == 401
     assert bad_sig.json()["detail"] == "invalid hotkey signature"
 
-    forged = {**valid_body, "submit_token": item["submit_token"][:-1] + ("A" if item["submit_token"][-1] != "A" else "B")}
+    # Forge by flipping a bit in the DECODED signature, not by editing the last
+    # base64 character. The signature is 32 bytes in unpadded base64url, i.e. 43
+    # characters carrying 258 bits -- so the final character has 2 bits that
+    # decoding discards, and {A,B,C,D} all decode to the same 32 bytes (as do
+    # {E,F,G,H}, and so on).
+    #
+    # The previous form did `token[:-1] + ("A" if token[-1] != "A" else "B")`,
+    # which produces a byte-identical signature whenever the real last character
+    # is one of A, B, C or D. That is 4 of 64, so ~6.2% of runs "forged" a token
+    # that was still valid, the request was accepted, and this assertion failed.
+    # It presented as an unreproducible CI flake.
+    forged_sig = bytearray(v2_bitset_submit._unb64url(item["submit_token"].split(".")[2]))
+    forged_sig[0] ^= 0xFF
+    forged_token = ".".join(
+        item["submit_token"].split(".")[:2] + [v2_bitset_submit._b64url(bytes(forged_sig))]
+    )
+    assert forged_token != item["submit_token"]
+    forged = {**valid_body, "submit_token": forged_token}
     forged_r = client.post("/v2/agents/submit-bitset", json=forged, headers=_bitset_headers(kp, forged))
     assert forged_r.status_code == 400
     assert forged_r.json()["detail"] == "invalid_submit_token"
