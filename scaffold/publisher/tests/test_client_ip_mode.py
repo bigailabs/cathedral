@@ -122,7 +122,19 @@ def test_unresolved_sentinel_fails_open_at_global_limiter(monkeypatch):
                  lambda: None, _send)
         return status["code"]
 
-    codes = [asyncio.get_event_loop().run_until_complete(_one()) for _ in range(5)]
+    # asyncio.run(), not get_event_loop().run_until_complete().
+    #
+    # asyncio.run() sets the main thread's event loop back to None when it
+    # returns, so ONE earlier asyncio.run() anywhere in the session leaves
+    # get_event_loop() raising "There is no current event loop in thread
+    # 'MainThread'". This file passed when the publisher suite ran alone and
+    # failed the moment it ran after tests/thin, which calls asyncio.run() in
+    # four modules -- a cross-suite order dependency that looked like a
+    # publisher failure and belonged to neither suite.
+    #
+    # Each call gets its own loop, which is equivalent here: the limiter state
+    # this asserts on is module-level, not bound to a loop.
+    codes = [asyncio.run(_one()) for _ in range(5)]
     assert codes == [200] * 5
 
 
