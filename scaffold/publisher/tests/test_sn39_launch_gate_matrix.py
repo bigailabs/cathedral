@@ -1030,6 +1030,20 @@ def test_shipped_relay_profile_runs_without_a_launch(
     assert validator_thin._continuous_transition_required(args) is False
 
     # Every trust-bearing value is byte-identical to the operator profile.
+    #
+    # `provenance` is deliberately NOT in this list, and must not be added back.
+    # It is the one field the two profiles are supposed to disagree on. A relay
+    # must stay `shadow` -- asserted directly above, which is the stronger and
+    # more honest claim -- while an operator running the authority lane sets
+    # `authority`. That difference IS the distinction between originating
+    # weights and relaying them, and scoping the launch gate to it is what this
+    # whole file is about.
+    #
+    # Requiring byte-identity here asserted the opposite: that no operator may
+    # ever run authority without breaking the relay's test. It passed only
+    # because both shipped profiles happen to be `shadow` today, so the coupling
+    # stayed invisible until a downstream operator profile set `authority` and
+    # this test went red for doing exactly what the relay config documents.
     operator = cli._resolve_serve_config(
         SimpleNamespace(
             config=str(root / "config" / "validator-mainnet-sn39.toml"),
@@ -1047,7 +1061,6 @@ def test_shipped_relay_profile_runs_without_a_launch(
         "require_policy",
         "state_file",
         "evidence_url",
-        "provenance",
         "provenance_registry_keys_digest",
         "provenance_report_keys_digest",
         "provenance_index_keys_digest",
