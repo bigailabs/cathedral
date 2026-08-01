@@ -239,6 +239,37 @@ Rollback: `/usr/local/sbin/cathedral-sn39-export-evidence.pre-rotationfix-202607
 misbehaves). Durable package-level fix is tracked in cathedralconfidential
 (export-evidence should accept a policy-history directory natively).
 
+## 1b. Pre-cutover gate: the live feed must already satisfy the contract
+
+**Run this before upgrading any validator. It is the step whose absence made
+cathedral#400 a launch-blocker.**
+
+```sh
+python scripts/assert_live_weight_contract.py
+```
+
+Exit 0 means the running publisher emits a vector the launch-locked validator
+will accept. Non-zero means **do not cut over**: the validator would fail closed
+to the 100% burn vector from its first tick, because the validator and the
+publisher would disagree about the `validated_supply` contract.
+
+That is not hypothetical. The live publisher signed contract **v1** while the
+launch-locked validator and the pinned provenance contract required **v2**, and
+the cutover sequence had no step that would have caught it. The publisher has
+since been upgraded — verified, the live feed is v2 — which is precisely why the
+gate is worth keeping: **that fix arrived out of band, so nothing today would
+notice a regression back to v1 until miners stopped being paid.**
+
+The gate calls the validator's own `_validated_supply_meta` rather than
+re-implementing the field list. A second copy of a contract is a second thing to
+keep in sync, and the failure mode of drift is the gate saying yes while the
+validator says no. A pass here is the computation the validator will perform.
+
+It checks every clause, not just the version string: the exact field set,
+`intel_tdx_allocation == 0.90`, `fixed_burn_allocation == 0.10`, the two summing
+to 1, the burn hotkey matching `burn_snapshot`, that the burn destination pins no
+UID, and `forced_burn_percentage == 10.0`.
+
 ## 2. Deploy contract migration safety
 
 ### The hazard, measured
