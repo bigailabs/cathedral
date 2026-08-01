@@ -1,87 +1,83 @@
-# Cathedral SN39 validator
+# Cathedral
 
-**Turn verified compute evidence into a transparent, fail-closed Bittensor
-weight decision.**
+Cathedral turns verified work into a fail-closed weight decision for Bittensor
+SN39.
 
-This repository contains Cathedral's SN39 validator and the mechanisms it can
-audit. It is the validator side of the Cathedral system:
+This repository is the current authoritative source for the SN39 validator and
+the publisher that signs its weight feed. It is also the system map: the
+mechanism repositories below produce evidence, and this repository decides what
+that evidence is worth.
 
-- [Cathedral Computer](https://cathedral.computer/) is the customer-facing
-  account, billing, API, job, and receipt product.
-- [`cathedralconfidential`](https://github.com/cathedralai/cathedralconfidential)
-  produces Intel TDX evidence, verified-work receipts, and signed score reports.
-- This repository lets an independent validator verify those inputs, map public
-  hotkeys to the current metagraph, and decide whether to set weights.
+## Start here
 
-Cathedral is in **live testing**. The public signed feed and evidence surfaces
-are available, and the validator software implements both thin and independent
-provenance modes. The public release/tag and final launch acceptance are
-separate gates. **Do not run a chain-writing command from an arbitrary `main`
-checkout.**
-
-## Choose your path
-
-| Role | Start here |
+| Goal | Go to |
 |---|---|
-| Cathedral Computer customer | [Product and API documentation](https://cathedral.computer/docs/) |
-| Validator operator | [Validator guide](VALIDATOR.md) |
-| Independent auditor | [Full-provenance verification](docs/PROVENANCE.md) |
-| Intel TDX compute provider | [Cathedral Confidential mining guide](https://github.com/cathedralai/cathedralconfidential/blob/main/MINING.md) |
-| Mechanism or subnet developer | [Score-class contract](docs/THIN_SCORE_CLASSES.md) |
-| Contributor | [Open issues](https://github.com/cathedralai/cathedral/issues) |
+| Provide Intel TDX CPU compute | [cathedral-compute](https://github.com/cathedralai/cathedral-compute) |
+| Compete in the Distill (CyberGym) track | [cathedral-distill](https://github.com/cathedralai/cathedral-distill) |
+| Run or audit a validator | [Validator guide](VALIDATOR.md) in this repository |
+| Use confidential compute as a customer | [Cathedral Computer](https://cathedral.computer/docs/) |
+| Read the extraction experiment | [cathedral-validator](https://github.com/cathedralai/cathedral-validator), derived, not authoritative |
+| Test one command surface for all roles | [cathedral-cli](https://github.com/cathedralai/cathedral-cli), early beta |
 
-## What the validator does
+Two routing notes that are easy to get wrong:
 
-Every tick, the validator:
+- **`cathedral-validator` is a derived extraction, not the deployment target.**
+  It proves the validator's boundary is separable. The running SN39 validator is
+  built from this repository, the reproduction lock and release manifests pin
+  paths here, and no cutover has happened. Use `VALIDATOR.md` in this repository
+  to operate a validator.
+- **`cathedral-cli` is early beta.** It is one interface for testing and issue
+  reporting. It has not replaced any repository's operator guide, and chain
+  writes and rewards stay off by default in it. Use it to test, then
+  [report problems](https://github.com/cathedralai/cathedral-cli/issues).
 
-1. fetches Cathedral's signed weight vector;
-2. verifies the Ed25519 signature, key id, network, netuid, policy, expiry, and
-   rollback fence;
-3. checks the signed burn contract and resolves every hotkey against a fresh
-   metagraph;
-4. runs the configured provenance audit concurrently;
-5. fails closed when a gate belonging to the active submission authority
-   fails; and
-6. only then constructs the UID-aligned weight decision.
+## How the loop fits together
 
-The validator wallet remains the sole authority for any `set_weights`
-transaction. A score source can publish evidence and measurements; it cannot
-sign with the validator's wallet or bypass validator-local policy.
+1. Compute and Distill define what admissible work and evidence are.
+2. Miners perform work and submit evidence for a specific mechanism.
+3. The publisher verifies evidence and signs a weight vector.
+4. The validator independently verifies signature, scope, policy, freshness,
+   rollback state, and the burn contract, resolves every hotkey against a fresh
+   metagraph, and either produces a UID-aligned decision or refuses the input.
 
-## Two modes run together
+The validator wallet is the only authority for a `set_weights` transaction. A
+mechanism, feed, receipt, or CLI can publish evidence; none of them can sign
+with the validator's wallet or bypass validator-local policy.
 
-| Mode | Default | What it trusts | What it submits |
-|---|---:|---|---|
-| **Thin + shadow audit** | Yes | A pinned Cathedral signature for the fast path, while a background audit checks public provenance | The gated signed vector |
-| **Full-provenance authority** | No | The validator's own replay through pinned keys, source, verifier, historical candidate set, and controlled raw evidence | The validator's independently recomputed vector |
+Positive weight requires work admitted by the active validator policy. In the
+current signed-vector path, the publisher derives and signs the proposed
+allocation, while the validator verifies the feed contract and decides whether
+to authorize it. The shadow provenance audit is observational and does not veto
+that path. Full-provenance authority mode independently recomputes from the
+controlled evidence package.
 
-Shadow mode is intentionally non-blocking: a slow independent audit does not
-delay the thin tick, and a shadow `FAIL` or `NOT_PROVEN` is observational—it
-does not veto a thin submission whose own signature, scope, policy, freshness,
-rollback, burn, and mapping gates pass. Authority mode is stricter and refuses
-to submit unless the epoch reaches the documented `FULL` assurance level.
-Signed receipts alone are useful provenance but are not `FULL`.
+Registration, uptime, hardware ownership, a valid attestation, or self-reported
+volume are never sufficient on their own. A vector with zero positive miners is
+a valid fail-closed outcome; in that case eligible mass routes to the configured
+burn destination rather than preserving stale credit.
 
-See [the provenance contract](docs/PROVENANCE.md) for the exact trust boundary,
-candidate-set rules, controlled-disclosure package, and independent replay
-command.
-
-## Current capability boundary
+## What is available now
 
 | Capability | Status |
 |---|---|
-| Signed SN39 weight-vector verification | Deployed feed; validator implementation available |
-| Default thin mode with concurrent provenance audit | Implemented in the launch candidate |
-| Independent full-provenance recomputation | Implemented; requires all operator pins and controlled evidence |
-| Current deployed vector vs independent verifier | `FAIL`: deployed v1/GPU-allocation shape has not converged with the v2/fixed-burn/body-binding verifier |
-| Intel TDX verified-supply input | Current confidential-compute path |
-| Confidential GPU subnet admission | Not currently admitted for positive weight |
-| Registration or uptime rewards | Never sufficient; verified work is required |
+| Signed SN39 weight-vector feed | Deployed |
+| Validator: signed-feed verification, thin mode with concurrent shadow audit | Implemented here |
+| Validator: independent full-provenance recomputation | Implemented; requires all operator pins and the controlled evidence package |
+| Intel TDX CPU verified-supply input | Current confidential-compute path |
+| Distill (CyberGym) scored-to-weights bridge | Merged, default off; the emission-weight registration is an owner step |
+| Confidential GPU subnet admission | Not admitted for positive weight |
 | Self-service mainnet validator launch | Pending a tagged release and launch notice |
 
-The current vector is deliberately allowed to contain no positive miners. In
-that case the mechanism routes eligible mass to the configured burn
-destination rather than preserving stale credit.
+Mechanism source, a passing local test, a receipt, or a historical chain row
+does not prove a lane is active, admitted, or earning. Check the relevant
+repository and the current release before operating it.
+
+The deployed feed and the independent verifier have not been shown to agree on
+one contract shape. The dated comparison recorded `FAIL` on the v1 shape
+(2026-07-25, recorded in
+[cathedral-compute's evidence record](https://github.com/cathedralai/cathedral-compute/blob/main/BUILD_STATUS.md)),
+and the live payload still mixes v1 and v2 `contract_version` metadata blocks as
+of 2026-08-01. Treat convergence as unproven.
 
 ## Read-only quick start
 
@@ -131,10 +127,11 @@ cathedral-validator serve \
   --once
 ```
 
-Stop there until the tagged release, public launch notice, and your own
-preflight are all green. The launch candidate is non-writing by default:
-only an explicit `--broadcast` permits a chain-write attempt, and SN39's
-signed release and transition gates must still authorize it.
+Stop there until the tagged release, the public launch notice, and your own
+preflight are all green. `serve` is non-writing by default: only an explicit
+`--broadcast` permits a chain-write attempt, and the signed release and
+transition gates must still authorize it. Do not run a chain-writing command
+from a mutable `main` checkout.
 
 ## Observe and audit
 
@@ -154,11 +151,11 @@ retaining the signed artifacts they reference.
 
 ## Documentation map
 
-### Launch path
+### Operating and auditing
 
-- [SN39 Intel TDX CPU mainnet release boundary](docs/SN39_MAINNET_RELEASE_20260724.md)
 - [Validator operator guide](VALIDATOR.md)
 - [Full-provenance verification](docs/PROVENANCE.md)
+- [SN39 Intel TDX CPU mainnet release boundary](docs/SN39_MAINNET_RELEASE_20260724.md)
 - [Score-class and contributor contract](docs/THIN_SCORE_CLASSES.md)
 - [Thin-subnet design and threat model](docs/THIN_SUBNET_DESIGN.md)
 - [Thin-subnet evidence record](docs/THIN_SUBNET_EVIDENCE.md)
@@ -167,8 +164,8 @@ retaining the signed artifacts they reference.
 
 ### Experimental and reference mechanisms
 
-The repository also preserves SAT, agent-policy, VerifyML, Violet, arena, and
-V2 fast-path work. These are research or integration surfaces unless a current
+The repository also preserves SAT, agent-policy, VerifyML, Violet, arena, and V2
+fast-path work. These are research or integration surfaces unless a current
 tagged release explicitly promotes them. They are not evidence that an endpoint
 is deployed or that a reward class is active.
 
@@ -183,8 +180,8 @@ is deployed or that a reward class is active.
 - Never put a wallet seed, private key, bearer token, cloud credential, or
   controlled raw quote in an issue, log, config committed to Git, or public
   evidence bundle.
-- Do not infer current eligibility from a past receipt, historical chain row,
-  or local test.
+- Do not infer current eligibility from a past receipt, historical chain row, or
+  local test.
 - Verify live keys and release digests through two independent channels before
   enabling a wallet.
 - Treat `PASS`, `FAIL`, and `NOT_PROVEN` as distinct outcomes. Missing evidence
