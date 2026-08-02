@@ -7,9 +7,9 @@ Status: draft plan for operator execution
 ## TL;DR — the one first move
 
 **Stand up the V2 lean-ingress mechanism path (`scaffold/publisher/v2_lean_ingress.py`
-— FastAPI + local SQLite WAL, no Postgres) on the owned Polaris box
-`65.108.33.92`, co-located with the weight-setting validator, behind a new
-Cloudflare origin.** Take zero V1 traffic off Railway on day one. This is the
+— FastAPI + local SQLite WAL, no Postgres) on the owned Polaris validator host,
+co-located with the weight-setting validator, behind a new Cloudflare origin.**
+Take zero V1 traffic off Railway on day one. This is the
 strangler seed: a new, attestable, low-latency ACK surface that grows while
 Railway shrinks. Everything else in this plan hangs off that move.
 
@@ -57,7 +57,7 @@ Confirmed live origins from `deploy/edge-router/wrangler.toml`:
 `SHADOW_V1_MIRROR_ORIGIN=https://v2-beta.cathedral.computer`.
 
 **Already off Railway:**
-- Thin **validator** → Polaris native Linux **`65.108.33.92`** (weight-setter).
+- Thin **validator** → owned Polaris validator host (weight-setter).
 - **Edge** → Cloudflare Worker `cathedral-edge-router` (provider-agnostic; routes
   `api.cathedral.computer/*` + `submit.cathedral.computer/*`). Moving origins is a
   Worker var / DNS change, **not** a Railway operation. This is the lever.
@@ -79,11 +79,11 @@ Confirmed live origins from `deploy/edge-router/wrangler.toml`:
   half of the new mechanism (SQLite WAL, single-worker enforced, idempotent
   receipts, disk/backpressure guards).
 
-> Flag — INFERRED vs KNOWN: The task frames `65.108.33.92` (validator) and the
-> attestor host as "the owned box." KNOWN: validator is on `65.108.33.92`; KNOWN:
+> Flag — INFERRED vs KNOWN: The task frames the validator and attestor host as
+> "the owned box." KNOWN: the validator is on the owned Polaris host; KNOWN:
 > attestor currently answers on `polarisserver` (Stitch) and the
 > GCE `attest-spot`. Whether the validator box and a TDX-capable attest box are the
-> **same** physical machine is NOT confirmed here. `65.108.33.92` (Hetzner-style
+> **same** physical machine is NOT confirmed here. The validator host (Hetzner-style
 > Polaris native Linux) is likely a bare VPS, not TDX-capable. **Resolve this before
 > Phase 4** — the Secure-Compute attestation needs a TDX host, which may be
 > `attest-spot`/a separate confidential box, not the weight box. Co-locating the
@@ -97,7 +97,7 @@ Confirmed live origins from `deploy/edge-router/wrangler.toml`:
 1. **New surface first, migration never big-bang.** Grow the owned-box footprint
    one origin at a time; each cutover is a Cloudflare var/DNS flip with a
    sub-minute rollback.
-2. **Kill the cross-provider hop.** The weight-setter is on `65.108.33.92`. Every
+2. **Kill the cross-provider hop.** The weight-setter is on the owned validator host. Every
    piece of the `scored → weights` path that lives on Railway is a cross-provider
    network hop on the emissions-critical path. Co-locate router + composer + lean
    ingress with the validator so the hot path never leaves the box.
@@ -116,7 +116,7 @@ Confirmed live origins from `deploy/edge-router/wrangler.toml`:
 
 ### Phase 0 — Prep on the owned box (no traffic)
 
-- Confirm `65.108.33.92` provisioning: Python 3.11, `.venv`, systemd unit
+- Confirm the owned validator host provisioning: Python 3.11, `.venv`, systemd unit
   capability, local disk headroom for SQLite (lean ingress caps:
   `DEFAULT_MAX_STORAGE_BYTES=1e9`, `DEFAULT_MIN_FREE_DISK_BYTES=1e8`).
 - Deploy the app image/checkout to the box (systemd, not Railway). Reuse the
@@ -134,7 +134,7 @@ Exit: box serves `/health/live` on the new origin; no public routes touch it.
 
 This is the first move. Nothing V1 is touched.
 
-1. Run `v2_lean_ingress` on `65.108.33.92` (single worker — the module *refuses*
+1. Run `v2_lean_ingress` on the owned validator host (single worker — the module *refuses*
    multi-worker for SQLite WAL). SQLite receipt DB on local disk.
 2. Build `scaffold/publisher/mechanism_router.py` to
    `deploy/MECHANISM_ROUTER_CONTRACT.md`, `MechanismStore` backed by a local
@@ -179,7 +179,7 @@ Recommended order:
 Per-step rollback: revert the single Worker var, `wrangler deploy`, done in
 seconds. DNS (orange-cloud) stays on Cloudflare throughout, so no propagation wait.
 
-Exit: `read` and `submit` origins served from `65.108.33.92`; publisher optionally
+Exit: `read` and `submit` origins served from the owned validator host; publisher optionally
 still on Railway as compat.
 
 ### Phase 3 — The hard part: the two Postgres (114 GB V1 + GlUA V2)
@@ -240,10 +240,10 @@ Now that trust-bearing stages run on a box you control:
 2. Bind the **router/verifier execution** into `report_data`: the value of running
    on owned hardware is that "which solver produced this / on what host" becomes
    provable. Railway could never sign this.
-3. **Resolve the host question from the top flag:** confirm whether `65.108.33.92`
+3. **Resolve the host question from the top flag:** confirm whether the owned validator host
    is TDX-capable. If not, attested *verification* runs on the confidential box
    (`attest-spot`/a TDX H100/H200 per the Horde pivot) while the *weight
-   composition* stays on `65.108.33.92` — both owned, neither Railway. The attestor
+   composition* stays on the validator host — both owned, neither Railway. The attestor
    delegate pattern (`LANE2_SECURE_COMPUTE_PLAN` → `attestor_delegate` to Polaris
    attestor) already supports this split.
 
@@ -293,7 +293,7 @@ already off Railway or moves in Phases 1–2.
 
 ## Operator checklist (crisp, in order)
 
-- [ ] **P0** Provision `65.108.33.92`: py3.11 venv, systemd, disk headroom, attestor reachability. Reserve `ingress.cathedral.computer`, grey-cloud health only.
+- [ ] **P0** Provision the owned validator host: py3.11 venv, systemd, disk headroom, attestor reachability. Reserve `ingress.cathedral.computer`, grey-cloud health only.
 - [ ] **P0** Relieve Postgres connection cap NOW (lower `CATHEDRAL_PG_POOL_MAX` / PgBouncer / raise `max_connections`) — unblocks everything.
 - [ ] **P1** Deploy `v2_lean_ingress` on the box (single worker, SQLite WAL); verify durable receipts + idempotency.
 - [ ] **P1** Build `mechanism_router.py` to the contract; run `compose()` in-validator on-box, default 0% (V1 byte-identical). Add tests, keep suites green.
@@ -304,14 +304,14 @@ already off Railway or moves in Phases 1–2.
 - [ ] **P2** Flip `READ_ORIGIN` → box once box can reach V1 data (dual-home A or migrated B); board-failover worker is the rollback.
 - [ ] **P3** `pg_dump | psql` shrunk V1 to owned Postgres; cut DSN over; keep Railway PG as standby.
 - [ ] **P2** Flip `api.cathedral.computer` publisher origin → box (last, compat surface).
-- [ ] **P4** Confirm TDX host (resolve `65.108.33.92` vs `attest-spot`); enable `CATHEDRAL_ATTEST_ENABLED`; bind router/verifier into `report_data`.
+- [ ] **P4** Confirm TDX host (resolve the validator host vs `attest-spot`); enable `CATHEDRAL_ATTEST_ENABLED`; bind router/verifier into `report_data`.
 - [ ] **P5** Verify off-Railway backups; stop → cooldown → delete Railway services; delete `Postgres`/`Postgres-GlUA` last.
 
 ---
 
 ## Open questions to close before executing
 
-1. Is `65.108.33.92` TDX-capable, or does attested verification need a separate
+1. Is the owned validator host TDX-capable, or does attested verification need a separate
    confidential box? (Gates Phase 4 shape.)
 2. Disk budget on the owned box for a self-hosted 114 GB (or shrunk) Postgres +
    backups? (Gates Phase 3 A vs B.)
