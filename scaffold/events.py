@@ -18,6 +18,7 @@ Watch commands (documented in VALIDATOR.md):
 from __future__ import annotations
 
 import grp
+import hashlib
 import json
 import math
 import os
@@ -194,6 +195,7 @@ STATUS_FENCE_FIELDS = (
     "publication_id",
     "publication_phase",
     "target_event",
+    "publication_commitment",
 )
 STATUS_FIELDS = tuple(
     dict.fromkeys(
@@ -203,6 +205,9 @@ STATUS_FIELDS = tuple(
 )
 
 _SAFE_AUTHORITIES = frozenset({"thin", "full_provenance"})
+_SAFE_STAGES = frozenset(
+    {"launch", "map", "provenance", "result", "startup", "status", "submit", "verify"}
+)
 _SAFE_PROVENANCE_MODES = frozenset({"off", "shadow", "authority"})
 _STARTUP_MODE_PAIRS = frozenset(
     {
@@ -237,6 +242,20 @@ def status_fence_target(event: str) -> str:
     if event in {"TICK_FAILED", "VECTOR_ACCEPTED", "VECTOR_REJECTED"}:
         return "VALIDATOR_RESULT"
     return "PRIVATE_EVENT"
+
+
+def status_record_commitment(record: Mapping[str, Any]) -> str:
+    """Bind a PENDING fence to the exact sanitized row that must commit it."""
+    payload = dict(record)
+    payload.pop("publication_commitment", None)
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
 def _structured_status_value(field: str, value: Any) -> Any | None:
@@ -332,8 +351,7 @@ def sanitized_status_record(
         "event": event,
         "stage": (
             record["stage"]
-            if isinstance(record.get("stage"), str)
-            and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", record["stage"])
+            if isinstance(record.get("stage"), str) and record["stage"] in _SAFE_STAGES
             else "unknown"
         ),
         "mode": record["mode"]
@@ -371,7 +389,7 @@ def sanitized_status_record(
 
 
 def pending_status_record(
-    record: Mapping[str, Any], publication_id: str
+    record: Mapping[str, Any], publication_id: str, publication_commitment: str
 ) -> dict[str, Any]:
     """A durable fail-closed fence written before the corresponding raw event."""
     return {
@@ -383,6 +401,7 @@ def pending_status_record(
         "publication_id": publication_id,
         "publication_phase": "PENDING",
         "target_event": status_fence_target(str(record["event"])),
+        "publication_commitment": publication_commitment,
     }
 
 
@@ -494,21 +513,28 @@ class EventLogger:
                 record[key] = _scrub(value)
         if self._status_file is not None:
             publication_id = uuid.uuid4().hex
+            committed_status = sanitized_status_record(
+                record, publication_id=publication_id
+            )
+            publication_commitment = status_record_commitment(committed_status)
+            committed_status["publication_commitment"] = publication_commitment
             # Fence first. If the process dies before the COMMITTED row, the
             # public reader sees NOT_PROVEN rather than retaining an older PASS.
             _durable_jsonl_write(
                 self._status_file,
-                pending_status_record(record, publication_id),
+                pending_status_record(record, publication_id, publication_commitment),
             )
         else:
             publication_id = None
+            committed_status = None
         for target in (self._jsonl, self._jsonl_file):
             if target is not None:
                 _durable_jsonl_write(target, record)
         if self._status_file is not None:
+            assert committed_status is not None
             _durable_jsonl_write(
                 self._status_file,
-                sanitized_status_record(record, publication_id=publication_id),
+                committed_status,
             )
         self._write_tty(record)
         return record

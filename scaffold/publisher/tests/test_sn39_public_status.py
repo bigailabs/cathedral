@@ -52,6 +52,15 @@ def _startup(authority: str, provenance: str) -> dict[str, object]:
     }
 
 
+def _bind_status_rows(
+    pending: dict[str, object], committed: dict[str, object]
+) -> list[dict[str, object]]:
+    commitment = event_stream.status_record_commitment(committed)
+    pending["publication_commitment"] = commitment
+    committed["publication_commitment"] = commitment
+    return [pending, committed]
+
+
 def test_exact_launch_boundary_is_pass_but_all_burn_is_not_proven() -> None:
     launch = status.clean_event(
         _event(
@@ -351,7 +360,7 @@ def test_unknown_private_event_commit_requires_safe_common_fields(
 ) -> None:
     public = tmp_path / "status.jsonl"
     publication_id = "c" * 32
-    rows = [
+    rows = _bind_status_rows(
         {
             "ts": _timestamp(),
             "event": "STATUS_PUBLICATION_PENDING",
@@ -372,7 +381,7 @@ def test_unknown_private_event_commit_requires_safe_common_fields(
             "publication_phase": "COMMITTED",
             "target_event": "PRIVATE_EVENT",
         },
-    ]
+    )
     public.write_text(
         "\n".join(json.dumps(row) for row in rows) + "\n",
         encoding="utf-8",
@@ -389,39 +398,44 @@ def test_malformed_or_mismatched_commit_does_not_clear_pending_fence(
 ) -> None:
     public = tmp_path / "status.jsonl"
     publication_id = "a" * 32
-    rows = [
-        {
-            "ts": _timestamp(),
-            "event": "STATUS_PUBLICATION_PENDING",
-            "stage": "status",
-            "mode": "thin",
-            "status": "NOT_PROVEN",
-            "publication_id": publication_id,
-            "publication_phase": "PENDING",
-            "target_event": "STARTUP",
-        },
-        {
-            "ts": _timestamp(),
-            "event": "VECTOR_ACCEPTED",
-            "stage": "policy",
-            "mode": "thin",
-            "status": "PASS",
-            "publication_id": publication_id,
-            "publication_phase": "COMMITTED",
-            "target_event": "VALIDATOR_RESULT",
-        },
-        {
-            "ts": _timestamp(),
-            "event": "STARTUP",
-            "stage": "startup",
-            "mode": "thin",
-            "status": "INFO",
-            "publication_id": publication_id,
-            "publication_phase": "COMMITTED",
-            "target_event": "STARTUP",
-            # The required structured mode pair is intentionally absent.
-        },
-    ]
+    pending = {
+        "ts": _timestamp(),
+        "event": "STATUS_PUBLICATION_PENDING",
+        "stage": "status",
+        "mode": "thin",
+        "status": "NOT_PROVEN",
+        "publication_id": publication_id,
+        "publication_phase": "PENDING",
+        "target_event": "STARTUP",
+    }
+    vector_commit = {
+        "ts": _timestamp(),
+        "event": "VECTOR_ACCEPTED",
+        "stage": "policy",
+        "mode": "thin",
+        "status": "PASS",
+        "publication_id": publication_id,
+        "publication_phase": "COMMITTED",
+        "target_event": "VALIDATOR_RESULT",
+    }
+    malformed_startup = {
+        "ts": _timestamp(),
+        "event": "STARTUP",
+        "stage": "startup",
+        "mode": "thin",
+        "status": "INFO",
+        "publication_id": publication_id,
+        "publication_phase": "COMMITTED",
+        "target_event": "STARTUP",
+        # The required structured mode pair is intentionally absent.
+    }
+    expected_commitment = event_stream.status_record_commitment(malformed_startup)
+    pending["publication_commitment"] = expected_commitment
+    malformed_startup["publication_commitment"] = expected_commitment
+    vector_commit["publication_commitment"] = event_stream.status_record_commitment(
+        vector_commit
+    )
+    rows = [pending, vector_commit, malformed_startup]
     public.write_text(
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
@@ -436,6 +450,104 @@ def test_malformed_or_mismatched_commit_does_not_clear_pending_fence(
     document = status.build_status(events)
     assert document["authority"]["status"] == "NOT_PROVEN"
     assert document["authority"]["latest_event"] == "STATUS_PUBLICATION_PENDING"
+
+
+def test_same_category_commit_cannot_clear_a_different_pending_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = tmp_path / "status.jsonl"
+    publication_id = "d" * 32
+    expected = {
+        "ts": _timestamp(),
+        "event": "PROVENANCE_AUDIT_FAIL",
+        "stage": "provenance",
+        "mode": "thin",
+        "status": "FAIL",
+        "publication_id": publication_id,
+        "publication_phase": "COMMITTED",
+        "target_event": "PROVENANCE_RESULT",
+    }
+    pending = {
+        "ts": _timestamp(),
+        "event": "STATUS_PUBLICATION_PENDING",
+        "stage": "status",
+        "mode": "thin",
+        "status": "NOT_PROVEN",
+        "publication_id": publication_id,
+        "publication_phase": "PENDING",
+        "target_event": "PROVENANCE_RESULT",
+        "publication_commitment": event_stream.status_record_commitment(expected),
+    }
+    different = {
+        "ts": _timestamp(),
+        "event": "PROVENANCE_AUDIT_PASS",
+        "stage": "provenance",
+        "mode": "thin",
+        "status": "PASS",
+        "publication_id": publication_id,
+        "publication_phase": "COMMITTED",
+        "target_event": "PROVENANCE_RESULT",
+    }
+    different["publication_commitment"] = event_stream.status_record_commitment(
+        different
+    )
+    public.write_text(
+        "".join(json.dumps(row) + "\n" for row in (pending, different)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(status, "SOURCE", public)
+
+    events = status.tail_events()
+    assert [event["event"] for event in events] == [
+        "STATUS_PUBLICATION_PENDING",
+        "PROVENANCE_AUDIT_PASS",
+    ]
+    document = status.build_status(events)
+    assert document["authority"]["status"] == "NOT_PROVEN"
+    assert document["provenance"]["current_whole_epoch_full"] == "NOT_PROVEN"
+
+
+def test_commit_before_pending_does_not_clear_later_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = tmp_path / "status.jsonl"
+    publication_id = "e" * 32
+    committed = {
+        "ts": _timestamp(),
+        "event": "VECTOR_ACCEPTED",
+        "stage": "verify",
+        "mode": "thin",
+        "status": "PASS",
+        "publication_id": publication_id,
+        "publication_phase": "COMMITTED",
+        "target_event": "VALIDATOR_RESULT",
+    }
+    pending = {
+        "ts": _timestamp(),
+        "event": "STATUS_PUBLICATION_PENDING",
+        "stage": "status",
+        "mode": "thin",
+        "status": "NOT_PROVEN",
+        "publication_id": publication_id,
+        "publication_phase": "PENDING",
+        "target_event": "VALIDATOR_RESULT",
+    }
+    commitment = event_stream.status_record_commitment(committed)
+    committed["publication_commitment"] = commitment
+    pending["publication_commitment"] = commitment
+    public.write_text(
+        "".join(json.dumps(row) + "\n" for row in (committed, pending)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(status, "SOURCE", public)
+
+    events = status.tail_events()
+    assert [event["event"] for event in events] == [
+        "VECTOR_ACCEPTED",
+        "STATUS_PUBLICATION_PENDING",
+    ]
 
 
 def test_pending_receipt_contradiction_overrides_prior_thin_pass() -> None:
@@ -489,6 +601,7 @@ def test_unexpected_fence_field_cannot_be_used_as_free_form_public_text() -> Non
         "publication_id": "b" * 32,
         "publication_phase": "PENDING",
         "target_event": "PRIVATE_EVENT",
+        "publication_commitment": "sha256:" + "0" * 64,
     }
     assert status.clean_event(pending) is None
 
@@ -826,6 +939,80 @@ def test_interrupted_public_generation_replaces_stale_pass_with_pending(
     assert (
         b"STATUS_PUBLICATION_PENDING" in (logs / "validator-events.jsonl").read_bytes()
     )
+
+
+def test_source_change_before_public_commit_leaves_generation_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = tmp_path / "raw.jsonl"
+    source = tmp_path / "status-source.jsonl"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(source),
+        tty=None,
+    )
+    logger.event(
+        "STARTUP",
+        stage="startup",
+        status="INFO",
+        authority="thin",
+        provenance_mode="shadow",
+    )
+    logger.event(
+        "WEIGHTS_SUBMITTED",
+        stage="submit",
+        status="PASS",
+        authority="thin",
+        uid_count=2,
+        burn_uid=204,
+        burn_share=0.1,
+        uid_weights={"163": 0.9, "204": 0.1},
+    )
+    logger.close()
+    root = tmp_path / "public"
+    logs = root / "logs"
+    logs.mkdir(parents=True, mode=0o755)
+    (root / "index.json").write_text('{"recent":[]}', encoding="utf-8")
+    monkeypatch.setattr(status, "SOURCE", source)
+    monkeypatch.setattr(status, "INDEX", root / "index.json")
+    monkeypatch.setattr(status, "RELEASE", root / "release.json")
+    monkeypatch.setattr(status, "LOG_ROOT", logs)
+
+    atomic_write = status.atomic_write
+    inserted = False
+
+    def append_source_fence_after_pending(path: Path, data: bytes) -> None:
+        nonlocal inserted
+        atomic_write(path, data)
+        if path.name != "status.json" or inserted:
+            return
+        document = json.loads(data)
+        if document["publication"]["phase"] != "PENDING":
+            return
+        inserted = True
+        pending = {
+            "ts": _timestamp(),
+            "event": "STATUS_PUBLICATION_PENDING",
+            "stage": "status",
+            "mode": "thin",
+            "status": "NOT_PROVEN",
+            "publication_id": "f" * 32,
+            "publication_phase": "PENDING",
+            "target_event": "VALIDATOR_RESULT",
+            "publication_commitment": "sha256:" + "1" * 64,
+        }
+        with source.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(pending) + "\n")
+
+    monkeypatch.setattr(status, "atomic_write", append_source_fence_after_pending)
+    assert status.main() == 1
+
+    published = json.loads((logs / "status.json").read_text(encoding="utf-8"))
+    assert published["publication"]["phase"] == "PENDING"
+    assert published["authority"]["status"] == "NOT_PROVEN"
+    assert published["authority"]["latest_event"] == "STATUS_PUBLICATION_PENDING"
 
 
 def test_output_directory_must_be_owner_controlled(

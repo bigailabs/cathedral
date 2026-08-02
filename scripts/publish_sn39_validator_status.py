@@ -137,6 +137,7 @@ ALLOWED_FIELDS = (
     "publication_id",
     "publication_phase",
     "target_event",
+    "publication_commitment",
 )
 TEXT_LIMITS = {
     "ts": 64,
@@ -195,9 +196,12 @@ STARTUP_MODE_PAIRS = frozenset(
         ("full_provenance", "authority"),
     }
 )
-SAFE_STAGE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+SAFE_STAGES = frozenset(
+    {"launch", "map", "provenance", "result", "startup", "status", "submit", "verify"}
+)
 SAFE_MODES = frozenset({"thin", "full_provenance"})
 PUBLICATION_ID = re.compile(r"^[0-9a-f]{32}$")
+PUBLICATION_COMMITMENT = re.compile(r"^sha256:[0-9a-f]{64}$")
 FENCE_TARGETS = frozenset(
     {
         "STARTUP",
@@ -250,6 +254,30 @@ def fence_target_for_event(event: str) -> str:
     if event in {"TICK_FAILED", "VECTOR_ACCEPTED", "VECTOR_REJECTED"}:
         return "VALIDATOR_RESULT"
     return "PRIVATE_EVENT"
+
+
+def publication_commitment_matches(document: dict[str, Any]) -> bool:
+    """Verify the exact sanitized COMMITTED row bound by its PENDING fence."""
+    claimed = document.get("publication_commitment")
+    if (
+        not isinstance(claimed, str)
+        or PUBLICATION_COMMITMENT.fullmatch(claimed) is None
+    ):
+        return False
+    payload = dict(document)
+    payload.pop("publication_commitment", None)
+    try:
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return False
+    expected = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    return claimed == expected
 
 
 def public_detail(
@@ -515,14 +543,23 @@ def clean_event(document: Any) -> dict[str, Any] | None:
         return None
     publication_id = document.get("publication_id")
     publication_phase = document.get("publication_phase")
+    publication_commitment = document.get("publication_commitment")
     if publication_id is not None or publication_phase is not None:
         if (
             not isinstance(publication_id, str)
             or PUBLICATION_ID.fullmatch(publication_id) is None
             or publication_phase not in {"PENDING", "COMMITTED"}
             or document.get("mode") not in SAFE_MODES
+            or not isinstance(publication_commitment, str)
+            or PUBLICATION_COMMITMENT.fullmatch(publication_commitment) is None
         ):
             return None
+        if publication_phase == "COMMITTED" and not publication_commitment_matches(
+            document
+        ):
+            return None
+    elif publication_commitment is not None:
+        return None
     target_event = document.get("target_event")
     if event == "STATUS_PUBLICATION_PENDING":
         if (
@@ -608,7 +645,7 @@ def clean_event(document: Any) -> dict[str, Any] | None:
             clean[key] = timestamp
             continue
         if key == "stage":
-            clean[key] = value if SAFE_STAGE.fullmatch(value) else "unknown"
+            clean[key] = value if value in SAFE_STAGES else "unknown"
             continue
         if key == "mode":
             clean[key] = value if value in SAFE_MODES else "unknown"
@@ -620,7 +657,12 @@ def clean_event(document: Any) -> dict[str, Any] | None:
                 continue
             clean[key] = value
             continue
-        if key in {"publication_id", "publication_phase", "target_event"}:
+        if key in {
+            "publication_id",
+            "publication_phase",
+            "target_event",
+            "publication_commitment",
+        }:
             clean[key] = value
             continue
         clean[key] = scrub(value, TEXT_LIMITS[key])
@@ -652,12 +694,19 @@ def clean_event(document: Any) -> dict[str, Any] | None:
     return clean
 
 
-def tail_events() -> list[dict[str, Any]]:
+SourceSnapshot = tuple[int, int, int, int]
+
+
+def _source_snapshot(info: os.stat_result) -> SourceSnapshot:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def current_source_snapshot() -> SourceSnapshot | None:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(SOURCE, flags)
     except OSError:
-        return []
+        return None
     try:
         info = os.fstat(descriptor)
         if (
@@ -665,27 +714,49 @@ def tail_events() -> list[dict[str, Any]]:
             or stat.S_IMODE(info.st_mode) & 0o002
             or info.st_size < 0
         ):
-            return []
+            return None
+        return _source_snapshot(info)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _tail_events_with_snapshot() -> tuple[list[dict[str, Any]], SourceSnapshot | None]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(SOURCE, flags)
+    except OSError:
+        return [], None
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) & 0o002
+            or info.st_size < 0
+        ):
+            return [], None
+        source_snapshot = _source_snapshot(info)
         offset = max(0, info.st_size - MAX_SOURCE_BYTES)
         os.lseek(descriptor, offset, os.SEEK_SET)
         payload = os.read(descriptor, MAX_SOURCE_BYTES)
     except OSError:
-        return []
+        return [], None
     finally:
         os.close(descriptor)
     if offset:
         _discarded, _separator, payload = payload.partition(b"\n")
     lines = payload.splitlines()
-    parsed: list[dict[str, Any]] = []
-    committed_pairs: set[tuple[str, str]] = set()
-    for raw in lines:
+    parsed: list[tuple[int, dict[str, Any]]] = []
+    committed_lines: dict[tuple[str, str, str], int] = {}
+    for line_number, raw in enumerate(lines):
         try:
             document = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
         event = clean_event(document)
         if event is not None:
-            parsed.append(event)
+            parsed.append((line_number, event))
         # Unknown event codes are intentionally absent from the public
         # allowlist, but their valid COMMITTED row must still close the writer's
         # preceding fence. For allowlisted events, only a row that passed the
@@ -695,6 +766,7 @@ def tail_events() -> list[dict[str, Any]]:
             raw_event = document.get("event")
             target_event = document.get("target_event")
             publication_id = document.get("publication_id")
+            publication_commitment = document.get("publication_commitment")
             if (
                 document.get("publication_phase") == "COMMITTED"
                 and isinstance(raw_event, str)
@@ -702,30 +774,42 @@ def tail_events() -> list[dict[str, Any]]:
                 and target_event == fence_target_for_event(raw_event)
                 and isinstance(publication_id, str)
                 and PUBLICATION_ID.fullmatch(publication_id) is not None
+                and isinstance(publication_commitment, str)
+                and publication_commitment_matches(document)
                 and document.get("mode") in SAFE_MODES
                 and document.get("status") in SAFE_RAW_STATUSES
                 and isinstance(document.get("ts"), str)
                 and parse_event_time(document["ts"]) is not None
                 and (raw_event not in ALLOWED_EVENTS or event is not None)
             ):
-                committed_pairs.add((publication_id, target_event))
+                committed_lines[
+                    (publication_id, target_event, publication_commitment)
+                ] = line_number
 
     # Remove a PENDING fence only when its exact COMMITTED partner is present.
     # An unmatched fence is itself public evidence that the raw/status
     # transition was interrupted and must remain visible as NOT_PROVEN.
     events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
-    for event in parsed:
+    for line_number, event in parsed:
         if (
             event.get("publication_phase") == "PENDING"
-            and (
-                str(event.get("publication_id")),
-                str(event.get("target_event")),
+            and committed_lines.get(
+                (
+                    str(event.get("publication_id")),
+                    str(event.get("target_event")),
+                    str(event.get("publication_commitment")),
+                ),
+                -1,
             )
-            in committed_pairs
+            > line_number
         ):
             continue
         events.append(event)
-    return list(events)
+    return list(events), source_snapshot
+
+
+def tail_events() -> list[dict[str, Any]]:
+    return _tail_events_with_snapshot()[0]
 
 
 def read_public_bytes(path: Path) -> bytes | None:
@@ -1180,7 +1264,7 @@ def _status_bytes(document: dict[str, Any]) -> bytes:
 
 
 def main() -> int:
-    events = tail_events()
+    events, source_snapshot = _tail_events_with_snapshot()
     jsonl = b"".join(
         json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         for event in events
@@ -1229,6 +1313,17 @@ def main() -> int:
         LOG_ROOT / "validator-events.log",
         human_log,
     )
+    if current_source_snapshot() != source_snapshot:
+        print(
+            json.dumps(
+                {
+                    "events_published": len(events),
+                    "status": "source_changed_publication_left_pending",
+                },
+                sort_keys=True,
+            )
+        )
+        return 1
     atomic_write(
         LOG_ROOT / "status.json",
         _status_bytes(committed_status),

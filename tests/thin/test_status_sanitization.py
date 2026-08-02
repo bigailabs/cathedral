@@ -176,6 +176,28 @@ def test_free_form_fields_and_embedded_hotkeys_never_enter_status(tmp_path):
     assert "artifact" not in json.loads(public.splitlines()[-1])
 
 
+def test_caller_controlled_stage_cannot_cross_the_public_boundary(tmp_path):
+    raw = tmp_path / "validator-events.jsonl"
+    status = tmp_path / "validator-status.jsonl"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(status),
+        tty=None,
+    )
+    caller_value = "secret_token_0123456789"
+    logger.event(
+        "VECTOR_ACCEPTED",
+        stage=caller_value,
+        status="PASS",
+    )
+    logger.close()
+
+    public = status.read_text(encoding="utf-8")
+    assert caller_value not in public
+    assert json.loads(public.splitlines()[-1])["stage"] == "unknown"
+
+
 def test_event_logger_rejects_unreviewed_mode_before_opening_outputs(tmp_path):
     raw = tmp_path / "validator-events.jsonl"
     with pytest.raises(ValueError, match="reviewed authority mode"):
