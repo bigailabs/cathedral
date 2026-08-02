@@ -1,4 +1,5 @@
 """Packaging checks for the local game and arena entrypoints."""
+
 from __future__ import annotations
 
 import importlib
@@ -28,8 +29,10 @@ def test_console_scripts_are_declared_and_importable():
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = pyproject["project"]["scripts"]
 
+    assert "cathedral-validator" not in scripts
+    assert "cathedral-thin-validator" not in scripts
+
     expected = {
-        "cathedral-validator": "scaffold.cli:main",
         "cathedral-game": "game.__main__:main",
         "cathedral-arena": "game.arena.__main__:main",
         "cathedral-arena-audit": "game.arena.audit:main",

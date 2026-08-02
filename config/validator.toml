@@ -1,6 +1,6 @@
+# LEGACY TEST FIXTURE. Do not operate a validator from this repository.
+# Current config and commands: https://github.com/cathedralai/cathedral-validator
 # Cathedral SN39 validator config (v4).
-# Dry-run:  cathedral-validator serve --config config/validator.toml --once
-# Broadcast: cathedral-validator serve --config config/validator.toml --broadcast
 # Security-critical SN39 launch and journal settings cannot be weakened by
 # ambient environment variables.
 

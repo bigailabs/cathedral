@@ -1,5 +1,7 @@
 [Unit]
 Description=Cathedral thin Bittensor validator
+# Legacy migration fixture. Do not install from this repository.
+# Canonical unit: https://github.com/cathedralai/cathedral-validator
 After=network-online.target
 Wants=network-online.target
 

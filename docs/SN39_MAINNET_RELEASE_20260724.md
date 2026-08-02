@@ -1,5 +1,11 @@
 # SN39 Intel TDX CPU mainnet release
 
+> [!WARNING]
+> Historical release record only. The current validator source, release
+> process, and operator commands live in
+> [`cathedralai/cathedral-validator`](https://github.com/cathedralai/cathedral-validator).
+> Do not install or run a validator from this repository.
+
 The only authorized public claim, and only after the tagged launch submission
 gate below is **PASS**, is:
 

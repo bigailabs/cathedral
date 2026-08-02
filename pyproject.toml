@@ -5,12 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cathedral-scaffold"
 version = "4.0.0-rc.4"
-description = "Cathedral SN39 - thin validator for verifiable ML inference and integrity canaries"
+description = "Cathedral SN39 mechanism, publisher, and research code"
 requires-python = ">=3.11"
-# Validator-runtime deps only. The thin validator generates challenges, scores
-# miners locally, and sets weights through Bittensor. The publisher's server
-# stack (FastAPI, psycopg2, boto3) remains optional so this path needs no owner
-# API, database, queue, object store, or solver farm.
+# Shared mechanism dependencies. The supported validator distribution and its
+# operator dependency lock live in cathedralai/cathedral-validator.
 dependencies = [
     "cryptography>=42",
     "bittensor>=10.4,<11",
@@ -35,9 +33,8 @@ test = [
     # that separate migration is performed deliberately.
     "ruff==0.15.13",
 ]
-# Full-provenance validator mode: independently verifies Cathedral's published
-# evidence chain (policy registry, signed score reports, assurance receipts)
-# and recomputes the weight vector. Pin a release tag before shipping.
+# Legacy provenance integration used by retained mechanism and migration tests.
+# The canonical validator owns its reviewed pin and release process.
 # Pinned to the immutable launch-candidate commit; update ONLY together
 # with the reviewed release process (never a mutable branch ref).
 provenance = [
@@ -45,7 +42,6 @@ provenance = [
 ]
 
 [project.scripts]
-cathedral-validator = "scaffold.cli:main"
 cathedral-candidate-snapshot = "scaffold.snapshot_candidates:main"
 cathedral-game = "game.__main__:main"
 cathedral-arena = "game.arena.__main__:main"
@@ -56,7 +52,6 @@ cathedral-arena-playthrough = "game.arena.playthrough:main"
 cathedral-arena-round-verify = "game.arena.verify:main"
 cathedral-audit-scanner-smoke = "game.arena.audit_scanner_smoke:main"
 cathedral-thin-miner = "cathedral_thin.miner:main"
-cathedral-thin-validator = "cathedral_thin.validator:main"
 cathedral-thin-e2e = "cathedral_thin.e2e:main"
 cathedral-thin-preflight = "cathedral_thin.preflight:main"
 cathedral-thin-score-report = "cathedral_thin.report_cli:main"

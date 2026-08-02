@@ -1,5 +1,7 @@
 [Unit]
 Description=Publish sanitized Cathedral SN39 validator status
+# Legacy migration fixture. Do not install from this repository.
+# Canonical unit: https://github.com/cathedralai/cathedral-validator
 After=cathedral-validator-sn39.service
 # This unit is paired with cathedral-validator-sn39.service and reads the event
 # log that unit writes. Before the validator cutover that log does not exist,

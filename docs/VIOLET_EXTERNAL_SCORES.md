@@ -86,13 +86,10 @@ CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX=<secret>  # Per-sourc
 
 **Thin-validator contract (mass=1):** The signed vector must carry `mode=confidential_primary`, `complete=true`, `fresh=true`, and `confirmed=true` in its policy metadata. Rows must explicitly include both `base_component` (always 0.0) and `external_component` (equals weight). Any deviation raises `VectorError` and aborts the tick.
 
-**Validator policy pin (`confidential_primary_v1`):** operators who run confidential-primary can pin the thin validator so it applies ONLY this contract:
-
-```bash
-# CLI flag or env; default is unpinned (accepts legacy, v3, and confidential_primary)
-cathedral-validator serve --require-policy confidential_primary_v1
-export CATHEDRAL_VALIDATOR_REQUIRE_POLICY=confidential_primary_v1
-```
+**Validator policy pin (`confidential_primary_v1`):** the supported validator
+owns this policy and its operator configuration. Use the current
+[`cathedral-validator` documentation](https://github.com/cathedralai/cathedral-validator)
+instead of running a validator from this repository.
 
 When pinned, every vector lacking a valid `confidential_primary` v1 policy block is rejected with `VectorError`, and the legacy and v3 fallback mapping paths are unreachable. Validators that do not set the pin keep the existing behavior (all signed shapes accepted).
 
