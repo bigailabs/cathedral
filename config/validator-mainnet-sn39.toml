@@ -63,3 +63,6 @@ require_completed_launch_for_broadcast = true
 
 [logs]
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
+# Public status reads this fixed allowlist projection. The raw journal above
+# carries hotkeys and caller-supplied fields and remains private.
+status_jsonl = "/var/log/cathedral-validator/validator-status.jsonl"

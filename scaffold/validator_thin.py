@@ -1261,6 +1261,8 @@ def _get_events(args) -> EventLogger:
         mode=authority,
         jsonl_path=getattr(args, "jsonl", None) or None,
         jsonl_group=os.environ.get("CATHEDRAL_VALIDATOR_JSONL_GROUP") or None,
+        status_path=getattr(args, "status_jsonl", None) or None,
+        status_group=os.environ.get("CATHEDRAL_VALIDATOR_STATUS_GROUP") or None,
         tty=sys.stdout,
     )
     try:
@@ -1496,6 +1498,7 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
             duration_ms=audit.duration_ms,
             artifact=audit.manifest_digest,
             detail=detail[:512],
+            positive_raw_replay=bool(raw_replayed),
             vector_agrees=audit.agrees_with_vector,
             remediation=(
                 "keep thin authority; FULL requires independently replayable "
@@ -1613,6 +1616,7 @@ def _run_provenance_stage(
                 status=NOT_PROVEN,
                 artifact=audit.manifest_digest,
                 detail="receipts-only recomputation cannot back authority",
+                positive_raw_replay=False,
                 remediation="provide the controlled package and verifier pins",
             )
             raise wire.VectorError(

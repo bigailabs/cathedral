@@ -76,6 +76,7 @@ _DEFAULTS = {
     "provenance_burn_hotkey": None,
     "provenance_index_max_age_secs": 3600.0,
     "jsonl": None,  # JSONL event stream file
+    "status_jsonl": None,  # sanitized status projection
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
@@ -116,6 +117,7 @@ _CONFIG_MAP = {
     ("provenance", "source_revision"): "provenance_source_revision",
     ("provenance", "burn_hotkey"): "provenance_burn_hotkey",
     ("logs", "jsonl"): "jsonl",
+    ("logs", "status_jsonl"): "status_jsonl",
 }
 
 # env var -> our flat config key
@@ -145,6 +147,7 @@ _ENV_MAP = {
     "CATHEDRAL_PROVENANCE_SOURCE_REVISION": "provenance_source_revision",
     "CATHEDRAL_PROVENANCE_BURN_HOTKEY": "provenance_burn_hotkey",
     "CATHEDRAL_VALIDATOR_JSONL": "jsonl",
+    "CATHEDRAL_VALIDATOR_STATUS_JSONL": "status_jsonl",
 }
 
 
@@ -211,6 +214,7 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         "provenance_source_revision",
         "provenance_burn_hotkey",
         "jsonl",
+        "status_jsonl",
     ):
         v = getattr(ns, flat, None)
         if v is not None:
@@ -498,6 +502,12 @@ def main(argv: list[str] | None = None) -> int:
         dest="jsonl",
         default=None,
         help="append the stable JSONL event stream to this file",
+    )
+    sp.add_argument(
+        "--status-jsonl",
+        dest="status_jsonl",
+        default=None,
+        help="append the sanitized operational status projection to this file",
     )
     sp.add_argument(
         "--dry-run",

@@ -14,7 +14,7 @@ User=cathedral-validator
 # /var/log/cathedral-validator from group cathedral-validator-log to group
 # cathedral-validator the first time it ran, silently revoking the group read
 # that cathedral-sn39-public-status.service depends on. The status publisher
-# would then stop being able to read validator-events.jsonl, and because it is
+# would then stop being able to read validator-status.jsonl, and because it is
 # a oneshot timer the failure surfaces only as a status page that stopped
 # updating.
 Group=cathedral-validator-log

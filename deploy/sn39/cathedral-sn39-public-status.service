@@ -9,7 +9,7 @@ After=cathedral-validator-sn39.service
 # pre-cutover publisher: the live host runs its own status publisher against
 # the current validator's event stream, and that unit must stay in place until
 # step 8 of the staged cutover replaces it.
-ConditionPathExists=/var/log/cathedral-validator/validator-events.jsonl
+ConditionPathExists=/var/log/cathedral-validator/validator-status.jsonl
 
 [Service]
 Type=oneshot
@@ -47,7 +47,9 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadOnlyPaths=/var/log/cathedral-validator/validator-events.jsonl
+# The raw event journal remains private. This unit sees only the strict
+# fixed-field projection produced by the validator.
+ReadOnlyPaths=/var/log/cathedral-validator/validator-status.jsonl
 ReadOnlyPaths=/var/lib/cathedral-public-evidence/index.json
 # Optional. release.json exists only once a root-signed release has been
 # sealed, and it is absent on the host today. An unprefixed ReadOnlyPaths= on a

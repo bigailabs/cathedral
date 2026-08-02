@@ -59,6 +59,7 @@ RELEASE_FILES = (
     "scripts/finalize_sn39_public_release.py",
     "scripts/build_sn39_rotation_manifest.py",
     "scripts/publish_sn39_validator_status.py",
+    "scripts/migrate_sn39_status_stream.py",
     "scripts/sn39_hotkey_rotation_operator.py",
     "deploy/sn39/cathedral-sn39-public-status.service",
     "deploy/sn39/cathedral-sn39-public-status.timer",

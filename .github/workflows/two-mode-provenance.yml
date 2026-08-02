@@ -57,6 +57,7 @@ jobs:
             scripts/build_sn39_rotation_manifest.py \
             scripts/build_sn39_release_manifest.py \
             scripts/finalize_sn39_public_release.py \
+            scripts/migrate_sn39_status_stream.py \
             scripts/publish_sn39_validator_status.py \
             scripts/run_sn39_public_reproduction.py \
             scripts/sn39_hotkey_rotation_operator.py \
@@ -92,6 +93,7 @@ jobs:
             scripts/build_sn39_rotation_manifest.py \
             scripts/build_sn39_release_manifest.py \
             scripts/finalize_sn39_public_release.py \
+            scripts/migrate_sn39_status_stream.py \
             scripts/publish_sn39_validator_status.py \
             scripts/run_sn39_public_reproduction.py \
             scripts/sn39_hotkey_rotation_operator.py \
@@ -134,7 +136,10 @@ jobs:
             scaffold/publisher/tests/test_legacy_chain_guard.py \
             scaffold/publisher/tests/test_mechanism_weightset.py \
             scaffold/publisher/tests/test_weight_vector_scope.py \
-            tests/thin/test_validator.py
+            tests/thin/test_validator.py \
+            tests/thin/test_status_sanitization.py \
+            tests/thin/test_status_stream_contract.py \
+            tests/thin/test_status_stream_migration.py
       - name: Reproduction imports
         run: |
           "$SN39_VENV/bin/python" - <<'PY'

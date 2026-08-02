@@ -29,6 +29,17 @@ stream are published at:
 - `https://api.cathedral.computer/v1/evidence/logs/validator-events.jsonl`
 - `https://api.cathedral.computer/v1/evidence/index.json`
 
+`logs/status.json` is the commit marker for both event views. A reader must:
+
+1. require `publication.phase == "COMMITTED"`;
+2. fetch both event views and verify their published SHA-256 digests;
+3. fetch `status.json` again and require the same committed generation.
+
+`PENDING`, a digest mismatch, or a changed generation is `NOT_PROVEN`. The
+publisher replaces a fail-closed PENDING marker first, then both views, then
+the COMMITTED marker last. A crash at any intermediate write therefore cannot
+leave an older PASS beside a newer unmatched event fence.
+
 ## Current operational blockers
 
 The software candidate is not the final launch release, and this document does
@@ -606,6 +617,22 @@ install -D -o root -g root -m 0644 \
 systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator.conf
 
+# Maintenance boundary for the status-stream privacy upgrade. Stop every
+# possible writer before changing either existing raw journal from the legacy
+# 0640 mode to 0600. The migration verifies stopped services, opens with
+# O_NOFOLLOW, validates the descriptor and inode, and covers both the
+# continuous and one-shot launch log paths.
+systemctl stop \
+  cathedral-validator-sn39.service \
+  cathedral-validator-sn39-launch.service \
+  cathedral-validator-sn39-reconcile.service \
+  cathedral-thin-validator.service \
+  cathedral-confidential-validator-sn39.service \
+  cathedral-confidential-validator.service \
+  cathedral-validator.service
+/usr/bin/python3.12 -I -E -s \
+  "$release/scripts/migrate_sn39_status_stream.py"
+
 # Provision only the already-registered validator HOTKEY into the service
 # account. Run this on a secure interactive console. The source key may prompt
 # for its password; neither its mnemonic nor private bytes are printed.
@@ -915,6 +942,24 @@ sudo /usr/bin/python3 -I -E -s \
    enable
    `cathedral-validator-sn39.service` and
    `cathedral-sn39-public-status.timer`.
+
+   Before enabling the timer, require a committed STARTUP in
+   `/var/log/cathedral-validator/validator-status.jsonl` with the reviewed
+   `authority` and `provenance_mode`. The raw
+   `/var/log/cathedral-validator/validator-events.jsonl` must remain 0600. The
+   public unit reads only the 0640 status projection. If the newest unmatched
+   row is `STATUS_PUBLICATION_PENDING`, the transition was interrupted and the
+   published authority and provenance gates remain `NOT_PROVEN` until a clean
+   process restart emits a new committed STARTUP.
+
+### Status-stream rollback
+
+Stop every validator unit before rolling back. Reverting application bytes
+does not justify restoring raw-journal group access. Leave both raw journals
+0600. Either retain the sanitized status publisher or stop the public timer.
+Never reinstall a legacy publisher that reads `validator-events.jsonl`. A
+failed or partial status transition stays `NOT_PROVEN`; deleting its fence is
+not a rollback.
 
 The public status card is operational telemetry, not launch authorization. It
 reports authority `PASS` only for a fresh observed exact 90/10 submission whose

@@ -2223,6 +2223,7 @@ def test_receipts_only_shadow_pass_is_not_proven_and_never_persists(
         fields for name, fields in events_seen if name == "PROVENANCE_AUDIT_NOT_PROVEN"
     )
     assert "positive raw evidence replayed for 1 miner(s)" in not_proven["detail"]
+    assert not_proven["positive_raw_replay"] is True
     assert "replayable negative evidence" in not_proven["detail"]
     assert "raw evidence was not replayed" not in not_proven["detail"]
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
@@ -2253,6 +2254,7 @@ def test_receipts_only_without_positive_replay_does_not_claim_one(
         fields for name, fields in events_seen if name == "PROVENANCE_AUDIT_NOT_PROVEN"
     )
     assert "no positive raw evidence replayed" in fields["detail"]
+    assert fields["positive_raw_replay"] is False
     assert "positive raw evidence replayed for" not in fields["detail"]
 
 
@@ -3755,6 +3757,7 @@ def test_cli_to_tick_to_current_assertion_and_immutable_reproducer(
     config = root / "config/validator-mainnet-sn39.toml"
     state = tmp_path / "state.json"
     events = tmp_path / "events.jsonl"
+    status_events = tmp_path / "status-events.jsonl"
     vector = validated_supply_payload()
     vector.update(
         {
@@ -3822,6 +3825,8 @@ def test_cli_to_tick_to_current_assertion_and_immutable_reproducer(
                     str(tmp_path / "runtime"),
                     "--jsonl",
                     str(events),
+                    "--status-jsonl",
+                    str(status_events),
                     "--dry-run",
                     "--once",
                 ]
@@ -7072,15 +7077,17 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         "LC_ALL",
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONNOUSERSITE",
-        "CATHEDRAL_VALIDATOR_JSONL_GROUP",
+        "CATHEDRAL_VALIDATOR_STATUS_GROUP",
     }
     assert (
-        child_environment["CATHEDRAL_VALIDATOR_JSONL_GROUP"]
+        child_environment["CATHEDRAL_VALIDATOR_STATUS_GROUP"]
         == "cathedral-validator-log"
     )
+    assert "CATHEDRAL_VALIDATOR_JSONL_GROUP" not in child_environment
     status_environment = launcher._child_environment("status")
     assert status_environment["HOME"] == "/var/lib/cathedral-public-evidence"
     assert "CATHEDRAL_VALIDATOR_JSONL_GROUP" not in status_environment
+    assert "CATHEDRAL_VALIDATOR_STATUS_GROUP" not in status_environment
     launch_environment = launcher._child_environment(
         "launch",
         release_sha="a" * 40,
@@ -7138,7 +7145,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     ) in release_guide
     assert '"$release/scripts/finalize_sn39_public_release.py"' not in release_guide
     assert (
-        "ReadOnlyPaths=/var/log/cathedral-validator/validator-events.jsonl"
+        "ReadOnlyPaths=/var/log/cathedral-validator/validator-status.jsonl"
         in status_unit
     )
     assert "ReadWritePaths=/var/lib/cathedral-public-evidence/logs" in status_unit
@@ -7152,7 +7159,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     # Units that declare the same LogsDirectory= must declare the same Group=.
     # systemd applies the unit's User:Group to a logs directory it manages, so
     # a mismatch lets whichever unit ran last silently re-group the directory
-    # and revoke the status publisher's group read on validator-events.jsonl.
+    # and revoke the status publisher's group read on validator-status.jsonl.
     _logs_dir_group: dict[str, set[str]] = {}
     for _unit_name in (
         "cathedral-validator-sn39.service",
@@ -7226,6 +7233,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         "deploy/sn39/cathedral-sn39-validator.sysusers",
         "deploy/sn39/cathedral-sn39-validator.tmpfiles",
         "scripts/publish_sn39_validator_status.py",
+        "scripts/migrate_sn39_status_stream.py",
         "scripts/finalize_sn39_public_release.py",
         "scripts/build_sn39_rotation_manifest.py",
         "scripts/sn39_hotkey_rotation_operator.py",
