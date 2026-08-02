@@ -68,17 +68,16 @@ def test_capture_produces_a_valid_sorted_snapshot():
 
     # The confidential exporter accepts the captured document verbatim.
     #
-    # `cathedral` is the cathedral-compute package, not this one, and nothing here
-    # declares it -- so on a checkout of this repository alone the import raised
-    # ModuleNotFoundError and this test was the whole suite's only failure. That
-    # reads as a product defect to anyone reviewing the repo, which is exactly what
-    # it is not. Skipping names the reason instead: the cross-repo half of this
-    # assertion runs where both packages are installed, and explains itself where
-    # they are not. Everything above this line is asserted either way.
+    # `cathedral` is the cathedral-compute package, not this one. The base test
+    # extra does not install it, so a standalone checkout skips only this
+    # cross-repository assertion. Required two-mode CI installs the provenance
+    # extra, imports cathedral explicitly, and includes this file. That keeps the
+    # contract mandatory on the launch path while preserving a useful standalone
+    # test suite. Everything above this line is asserted in both environments.
     validate_candidate_snapshot = pytest.importorskip(
         "cathedral.score_class",
         reason="needs the cathedral-compute package (which provides `cathedral`) "
-               "installed alongside this one",
+        "installed alongside this one",
     ).validate_candidate_snapshot
 
     binding = validate_candidate_snapshot(document, network="finney", netuid=39)
