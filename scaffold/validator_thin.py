@@ -1261,6 +1261,8 @@ def _get_events(args) -> EventLogger:
         mode=authority,
         jsonl_path=getattr(args, "jsonl", None) or None,
         jsonl_group=os.environ.get("CATHEDRAL_VALIDATOR_JSONL_GROUP") or None,
+        status_path=getattr(args, "status_jsonl", None) or None,
+        status_group=os.environ.get("CATHEDRAL_VALIDATOR_STATUS_GROUP") or None,
         tty=sys.stdout,
     )
     try:

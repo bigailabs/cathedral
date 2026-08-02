@@ -299,7 +299,9 @@ def _child_environment(
         "PYTHONNOUSERSITE": "1",
     }
     if mode in {"preflight", "launch", "continuous", "reconcile"}:
-        environment["CATHEDRAL_VALIDATOR_JSONL_GROUP"] = "cathedral-validator-log"
+        # The separate public publisher reads only the fixed-field status
+        # projection. Never grant its group access to the raw event journal.
+        environment["CATHEDRAL_VALIDATOR_STATUS_GROUP"] = "cathedral-validator-log"
     if release_sha is not None:
         environment["CATHEDRAL_SN39_RELEASE_SHA"] = release_sha
     if launch_config_sha256 is not None:

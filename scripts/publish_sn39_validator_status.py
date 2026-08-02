@@ -16,7 +16,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SOURCE = Path("/var/log/cathedral-validator/validator-events.jsonl")
+# The raw event journal carries hotkeys and arbitrary caller fields. The public
+# publisher reads only the validator's strict fixed-field projection.
+SOURCE = Path("/var/log/cathedral-validator/validator-status.jsonl")
 PUBLIC_ROOT = Path("/var/lib/cathedral-public-evidence")
 LOG_ROOT = PUBLIC_ROOT / "logs"
 INDEX = PUBLIC_ROOT / "index.json"

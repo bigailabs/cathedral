@@ -13,8 +13,9 @@ User=cathedral-validator
 # Primary group is cathedral-validator-log, NOT cathedral-validator, and the
 # difference from the launch and reconcile units is deliberate. LogsDirectory=
 # below creates /var/log/cathedral-validator 0750 owned by this process's
-# primary group, and cathedral-sn39-public-status.service reads
-# validator-events.jsonl out of it using SupplementaryGroups=cathedral-validator-log.
+# primary group, and cathedral-sn39-public-status.service reads the sanitized
+# validator-status.jsonl projection out of it using the reader group. The raw
+# validator-events.jsonl journal remains 0600 and is never group-readable.
 # Setting this to cathedral-validator to match the one-shots would leave the
 # status publisher unable to read the stream it exists to publish. The one-shots
 # write their own LogsDirectory that nothing else reads, so they have no reason
@@ -22,6 +23,7 @@ User=cathedral-validator
 Group=cathedral-validator-log
 SupplementaryGroups=cathedral-validator-evidence
 Environment=HOME=/var/lib/cathedral-validator
+Environment=CATHEDRAL_VALIDATOR_STATUS_GROUP=cathedral-validator-log
 # Belt and braces. Conflicts= only acts on units systemd is asked to start;
 # it cannot stop a writer someone launched by hand. This refuses to start
 # at all while any known SN39 writer is active, because the legacy writer
