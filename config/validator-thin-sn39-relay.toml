@@ -1,3 +1,5 @@
+# LEGACY TEST FIXTURE. Do not operate a validator from this repository.
+# Current config and releases: https://github.com/cathedralai/cathedral-validator
 # Cathedral SN39 mainnet configuration for a THIRD-PARTY thin validator.
 #
 # This profile relays Cathedral's signed weight vector: fetch it, verify it

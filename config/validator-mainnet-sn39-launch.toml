@@ -1,3 +1,5 @@
+# LEGACY TEST FIXTURE. Do not operate a validator from this repository.
+# Current config and releases: https://github.com/cathedralai/cathedral-validator
 # One-shot SN39 Intel TDX CPU mainnet launch canary.
 #
 # This profile is intentionally not a daemon. It permits at most ONE durable

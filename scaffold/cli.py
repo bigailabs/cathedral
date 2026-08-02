@@ -1,15 +1,13 @@
-"""`cathedral-validator` — the console entry point.
+"""Legacy validator command implementation retained for migration tests.
 
-v4 keeps the command surface operators already know — `cathedral-validator
-migrate` then `cathedral-validator serve` — so updating from a prior release is
-the same muscle memory and the same systemd unit. Underneath, `serve` runs the
-v4 thin validator (fetch one signed score per miner, verify, apply): no local
-database, no rolling window. `migrate` is therefore a no-op kept only so
-existing update scripts don't break.
+This repository no longer exports a validator console entry point. The
+supported command and operator release live in cathedralai/cathedral-validator.
+The implementation remains importable so historical fixtures and migration
+tests keep their reviewed behavior.
 
 Config resolution for `serve`, lowest to highest precedence:
   built-in defaults  <  --config TOML  <  environment  <  command-line flags
-A sample config ships at `config/validator.toml`.
+Legacy test fixtures remain under `config/`.
 """
 
 from __future__ import annotations

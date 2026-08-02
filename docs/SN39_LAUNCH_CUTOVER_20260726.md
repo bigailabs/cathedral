@@ -1,5 +1,11 @@
 # SN39 launch cutover: producer revision and deploy contract
 
+> [!WARNING]
+> Historical cutover record only. The current validator source, release
+> process, and operator commands live in
+> [`cathedralai/cathedral-validator`](https://github.com/cathedralai/cathedral-validator).
+> Do not install or run a validator from this repository.
+
 This document covers two changes that must land together and be applied to the
 live producer host in a specific order. Neither has been applied to any host.
 Nothing here authorizes a chain write, infrastructure spend, or a public claim.

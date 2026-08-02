@@ -1,3 +1,5 @@
+# LEGACY TEST FIXTURE. Do not operate a validator from this repository.
+# Current config and releases: https://github.com/cathedralai/cathedral-validator
 # Cathedral SN39 mainnet launch configuration.
 #
 # Default authority is THIN: verify Cathedral's signed vector and submit it.
