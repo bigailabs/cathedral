@@ -526,19 +526,42 @@ Apply in this order. Each step is independently reversible.
 6. **Verify the publisher emits v2** with the exact required field set, using
    the assertion command in section 3 against port 8012. Do not continue until
    it prints `OK`. This is the gate for step 7.
-7. **Install the validator release** with the bumped pins. Provenance can only
+7. **Stop every validator writer and privatize both legacy raw journals.**
+   Prove every unit named by `WRITER_UNITS` in
+   `scripts/migrate_sn39_status_stream.py` is inactive, then run the reviewed
+   script from the immutable release as root:
+
+   ```sh
+   /usr/bin/python3.12 -I -E -s \
+     "$release/scripts/migrate_sn39_status_stream.py"
+   stat -c '%a %U:%G %n' \
+     /var/log/cathedral-validator/validator-events.jsonl \
+     /var/log/cathedral-validator-launch/validator-events.jsonl 2>/dev/null || true
+   ```
+
+   Every existing raw journal must report `600 cathedral-validator:*`. The
+   script refuses active writers, symlinks, hard links, unexpected ownership,
+   and modes other than 0600 or the one reviewed legacy mode, 0640. Do not
+   change modes with a pathname-based `chmod` while a writer is running.
+8. **Install the validator release** with the bumped pins. Provenance can only
    reach FULL after step 4 has produced at least one manifest stamped
    `9540de44...`; before that the pin and the evidence still disagree.
-8. **Replace the pre-cutover status publisher.** The live host runs its own
-   `cathedral-sn39-public-status.service` against the current validator's event
-   stream. The shipped unit is paired with `cathedral-validator-sn39.service`
-   and reads `/var/log/cathedral-validator/validator-events.jsonl`, which does
-   not exist until step 7 has run. Install it only after step 7, and confirm it
-   actually ran: its `ConditionPathExists=` makes systemd SKIP it silently if
-   the log is absent, so a skipped unit and a working one look identical in
-   `systemctl status`. Check `journalctl -u cathedral-sn39-public-status` for a
-   real execution, not just an absence of errors.
-9. **Leave the three validator units disabled and inactive** until the launch
+9. **Start the selected validator once and require a committed STARTUP.** The
+   raw journal remains 0600. The validator writes the separate
+   `/var/log/cathedral-validator/validator-status.jsonl` projection as 0640.
+   Its STARTUP row must preserve the reviewed `authority` and
+   `provenance_mode`. An unmatched `STATUS_PUBLICATION_PENDING` means the
+   raw/status transition was interrupted and every public gate is
+   `NOT_PROVEN`. Stop the selected validator after this observation. The
+   launch window remains closed.
+10. **Replace the pre-cutover status publisher.** The shipped unit reads only
+   `/var/log/cathedral-validator/validator-status.jsonl`. It never receives
+   access to `validator-events.jsonl`. Install it only after step 9 created the
+   projection, then confirm a real execution in
+   `journalctl -u cathedral-sn39-public-status`. `ConditionPathExists=` skips a
+   missing projection without making the unit fail, so `systemctl status`
+   alone is insufficient.
+11. **Leave the three validator units disabled and inactive** until the launch
    window. Their single-writer guards are unchanged: each names the other SN39
    writers in `Conflicts=` and refuses to start via `ExecStartPre` while any of
    them is active.
@@ -550,15 +573,17 @@ Apply in this order. Each step is independently reversible.
 | 2 | `rm /etc/sysusers.d/cathedral-sn39-validator.conf`. Accounts already created remain, which is harmless and matches the current host. |
 | 3 | `rm /etc/tmpfiles.d/cathedral-sn39-validator.conf`. No ownership was changed, so there is nothing to restore. This is the property proven above. |
 | 4 | Reinstall the previous exporter. Evidence returns to stamping `b77c7cf...`, which is wrong but is the current production behavior. |
-| 5 | Reinstall the previous publisher revision. It returns to emitting v1, which the pre-cutover validator accepts. Roll back step 7 with it or the validator has nothing it will accept. |
-| 7 | Reinstall the previous validator release. The pins revert together because they moved together. |
-| 8 | Reinstall the pre-cutover status publisher unit. Nothing else depends on the shipped one. |
+| 5 | Reinstall the previous publisher revision. It returns to emitting v1, which the pre-cutover validator accepts. Roll back step 8 with it or the validator has nothing it will accept. |
+| 7 | Do not restore group access to a raw journal. Mode 0600 is compatible with the validator and is a permanent privacy hardening. |
+| 8 | Reinstall the previous validator release. The pins revert together because they moved together. |
+| 9 | Stop the selected validator. A partial public transition remains `NOT_PROVEN`; do not delete the fence to manufacture a PASS. |
+| 10 | Either keep the sanitized publisher or stop public publication. Do not reinstall a publisher that requires group access to the raw journal. |
 
 Steps 1 through 3 do not touch the producer and can be done outside a
 maintenance window. Step 4 restarts the exporter and should be done between
 export cycles.
 
-Steps 5 through 7 are one transaction. Rolling back the validator without
+Steps 5, 6, and 8 are one transaction. Rolling back the validator without
 rolling back the publisher, or the reverse, reproduces the version mismatch in
 section 3 from the opposite direction: a v2 publisher feeding the `98b862b`
 validator fails the same exact-field-set comparison. Roll them back together.

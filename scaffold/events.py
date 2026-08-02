@@ -23,6 +23,7 @@ import math
 import os
 import re
 import sys
+import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import IO, Any
@@ -150,7 +151,7 @@ def _redact(value: str) -> str:
     return _neutralize(value)
 
 
-STATUS_FIELDS = (
+STATUS_COMMON_FIELDS = (
     "ts",
     "event",
     "stage",
@@ -158,9 +159,98 @@ STATUS_FIELDS = (
     "status",
     "duration_ms",
     "artifact",
-    "detail",
-    "remediation",
 )
+
+# Public status is a closed, event-specific schema. In particular, free-form
+# ``detail``/``remediation`` and identifiers such as hotkeys never cross this
+# boundary. The publisher derives fixed human text from the event code and the
+# small structured fields below.
+STATUS_EVENT_FIELDS: dict[str, tuple[str, ...]] = {
+    "STARTUP": ("authority", "provenance_mode"),
+    "PROVENANCE_AUDIT_NOT_PROVEN": ("positive_raw_replay",),
+    "WEIGHTS_DRY_RUN": (
+        "authority",
+        "uid_count",
+        "burn_uid",
+        "burn_share",
+        "uid_weights",
+    ),
+    "WEIGHTS_SUBMITTED": (
+        "authority",
+        "uid_count",
+        "burn_uid",
+        "burn_share",
+        "uid_weights",
+    ),
+    "PENDING_RECEIPT_RECOVERED": (
+        "authority",
+        "uid_count",
+        "burn_uid",
+        "burn_share",
+        "uid_weights",
+    ),
+}
+STATUS_FENCE_FIELDS = (
+    "publication_id",
+    "publication_phase",
+    "target_event",
+)
+STATUS_FIELDS = tuple(
+    dict.fromkeys(
+        (*STATUS_COMMON_FIELDS, *STATUS_FENCE_FIELDS)
+        + tuple(field for fields in STATUS_EVENT_FIELDS.values() for field in fields)
+    )
+)
+
+_SAFE_AUTHORITIES = frozenset({"thin", "full_provenance"})
+_SAFE_PROVENANCE_MODES = frozenset({"off", "shadow", "authority"})
+_STARTUP_MODE_PAIRS = frozenset(
+    {
+        ("thin", "off"),
+        ("thin", "shadow"),
+        ("full_provenance", "authority"),
+    }
+)
+
+
+def _structured_status_value(field: str, value: Any) -> Any | None:
+    """Return a safe public value, or ``None`` when it is not admissible."""
+    if field == "authority":
+        return value if value in _SAFE_AUTHORITIES else None
+    if field == "provenance_mode":
+        return value if value in _SAFE_PROVENANCE_MODES else None
+    if field == "positive_raw_replay":
+        return value if isinstance(value, bool) else None
+    if field in {"uid_count", "burn_uid"}:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+    if field == "burn_share":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        parsed = float(value)
+        return round(parsed, 12) if math.isfinite(parsed) and 0 <= parsed <= 1 else None
+    if field == "uid_weights":
+        if not isinstance(value, Mapping) or len(value) > 512:
+            return None
+        clean: dict[str, float] = {}
+        for raw_uid, raw_weight in value.items():
+            try:
+                uid = str(int(raw_uid))
+                weight = float(raw_weight)
+            except (TypeError, ValueError):
+                return None
+            if (
+                uid in clean
+                or int(uid) < 0
+                or isinstance(raw_weight, bool)
+                or not math.isfinite(weight)
+                or not 0 <= weight <= 1
+            ):
+                return None
+            clean[uid] = round(weight, 12)
+        return clean
+    return None
 
 
 def _open_secure_append(path: str, group: str | None, label: str) -> IO[str]:
@@ -182,6 +272,7 @@ def _open_secure_append(path: str, group: str | None, label: str) -> IO[str]:
         if (
             not _stat.S_ISREG(opened.st_mode)
             or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
             or opened_mode & 0o007
             or opened_mode not in (0o600, 0o640)
         ):
@@ -203,9 +294,80 @@ def _open_secure_append(path: str, group: str | None, label: str) -> IO[str]:
     return os.fdopen(descriptor, "a", encoding="utf-8")
 
 
-def sanitized_status_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a raw event onto the fixed public operational allowlist."""
-    return {key: record[key] for key in STATUS_FIELDS if key in record}
+def sanitized_status_record(
+    record: Mapping[str, Any],
+    *,
+    publication_id: str | None = None,
+) -> dict[str, Any]:
+    """Project a raw event onto the closed public operational schema."""
+    event = str(record.get("event", ""))
+    clean: dict[str, Any] = {
+        "ts": record["ts"],
+        "event": event,
+        "stage": (
+            record["stage"]
+            if isinstance(record.get("stage"), str)
+            and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", record["stage"])
+            else "unknown"
+        ),
+        "mode": record["mode"]
+        if record.get("mode") in _SAFE_AUTHORITIES
+        else "unknown",
+        "status": record["status"],
+    }
+    duration = record.get("duration_ms")
+    if (
+        not isinstance(duration, bool)
+        and isinstance(duration, (int, float))
+        and math.isfinite(float(duration))
+    ):
+        clean["duration_ms"] = round(max(0.0, float(duration)), 3)
+    artifact = record.get("artifact")
+    if isinstance(artifact, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact):
+        clean["artifact"] = artifact
+    for field in STATUS_EVENT_FIELDS.get(event, ()):
+        value = _structured_status_value(field, record.get(field))
+        if value is not None:
+            clean[field] = value
+    if (
+        event == "STARTUP"
+        and (clean.get("authority"), clean.get("provenance_mode"))
+        not in _STARTUP_MODE_PAIRS
+    ):
+        # A self-contradictory STARTUP cannot establish public runtime mode.
+        clean.pop("authority", None)
+        clean.pop("provenance_mode", None)
+    if publication_id is not None:
+        clean["publication_id"] = publication_id
+        clean["publication_phase"] = "COMMITTED"
+    return clean
+
+
+def pending_status_record(
+    record: Mapping[str, Any], publication_id: str
+) -> dict[str, Any]:
+    """A durable fail-closed fence written before the corresponding raw event."""
+    return {
+        "ts": record["ts"],
+        "event": "STATUS_PUBLICATION_PENDING",
+        "stage": "status",
+        "mode": record["mode"],
+        "status": NOT_PROVEN,
+        "publication_id": publication_id,
+        "publication_phase": "PENDING",
+        "target_event": record["event"],
+    }
+
+
+def _durable_jsonl_write(target: IO[str], record: Mapping[str, Any]) -> None:
+    line = json.dumps(record, separators=(",", ":"), allow_nan=False)
+    target.write(line + "\n")
+    target.flush()
+    try:
+        descriptor = target.fileno()
+    except (AttributeError, OSError):
+        return
+    os.fsync(descriptor)
 
 
 class EventLogger:
@@ -228,9 +390,22 @@ class EventLogger:
         if jsonl_path:
             self._jsonl_file = _open_secure_append(jsonl_path, jsonl_group, "event log")
         if status_path:
-            self._status_file = _open_secure_append(
-                status_path, status_group, "status log"
-            )
+            try:
+                self._status_file = _open_secure_append(
+                    status_path, status_group, "status log"
+                )
+            except BaseException:
+                self.close()
+                raise
+        if self._jsonl_file is not None and self._status_file is not None:
+            raw_info = os.fstat(self._jsonl_file.fileno())
+            status_info = os.fstat(self._status_file.fileno())
+            if (raw_info.st_dev, raw_info.st_ino) == (
+                status_info.st_dev,
+                status_info.st_ino,
+            ):
+                self.close()
+                raise ValueError("raw and public status logs must be distinct files")
         self._tty = tty if tty is not None else sys.stdout
         if color is None:
             color = (
@@ -288,17 +463,24 @@ class EventLogger:
         for key, value in fields.items():
             if key not in record:
                 record[key] = _scrub(value)
-        line = json.dumps(record, separators=(",", ":"), allow_nan=False)
+        if self._status_file is not None:
+            publication_id = uuid.uuid4().hex
+            # Fence first. If the process dies before the COMMITTED row, the
+            # public reader sees NOT_PROVEN rather than retaining an older PASS.
+            _durable_jsonl_write(
+                self._status_file,
+                pending_status_record(record, publication_id),
+            )
+        else:
+            publication_id = None
         for target in (self._jsonl, self._jsonl_file):
             if target is not None:
-                target.write(line + "\n")
-                target.flush()
+                _durable_jsonl_write(target, record)
         if self._status_file is not None:
-            status_line = json.dumps(
-                sanitized_status_record(record), separators=(",", ":"), allow_nan=False
+            _durable_jsonl_write(
+                self._status_file,
+                sanitized_status_record(record, publication_id=publication_id),
             )
-            self._status_file.write(status_line + "\n")
-            self._status_file.flush()
         self._write_tty(record)
         return record
 

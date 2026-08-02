@@ -2223,6 +2223,7 @@ def test_receipts_only_shadow_pass_is_not_proven_and_never_persists(
         fields for name, fields in events_seen if name == "PROVENANCE_AUDIT_NOT_PROVEN"
     )
     assert "positive raw evidence replayed for 1 miner(s)" in not_proven["detail"]
+    assert not_proven["positive_raw_replay"] is True
     assert "replayable negative evidence" in not_proven["detail"]
     assert "raw evidence was not replayed" not in not_proven["detail"]
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
@@ -2253,6 +2254,7 @@ def test_receipts_only_without_positive_replay_does_not_claim_one(
         fields for name, fields in events_seen if name == "PROVENANCE_AUDIT_NOT_PROVEN"
     )
     assert "no positive raw evidence replayed" in fields["detail"]
+    assert fields["positive_raw_replay"] is False
     assert "positive raw evidence replayed for" not in fields["detail"]
 
 
@@ -7231,6 +7233,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         "deploy/sn39/cathedral-sn39-validator.sysusers",
         "deploy/sn39/cathedral-sn39-validator.tmpfiles",
         "scripts/publish_sn39_validator_status.py",
+        "scripts/migrate_sn39_status_stream.py",
         "scripts/finalize_sn39_public_release.py",
         "scripts/build_sn39_rotation_manifest.py",
         "scripts/sn39_hotkey_rotation_operator.py",

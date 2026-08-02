@@ -42,7 +42,13 @@ def test_arbitrary_event_fields_never_enter_the_status_stream(tmp_path):
     assert _mode(status) == 0o600
 
     raw_record = json.loads(raw.read_text(encoding="utf-8"))
-    status_record = json.loads(status.read_text(encoding="utf-8"))
+    status_records = [
+        json.loads(line) for line in status.read_text(encoding="utf-8").splitlines()
+    ]
+    assert status_records[0]["event"] == "STATUS_PUBLICATION_PENDING"
+    assert status_records[0]["status"] == "NOT_PROVEN"
+    status_record = status_records[-1]
+    assert status_record["publication_phase"] == "COMMITTED"
     assert raw_record["receipt_body"] == "SECRET-RECEIPT-PAYLOAD"
     assert raw_record["future_unreviewed_field"]["nested"] == "SECRET-FUTURE-VALUE"
 
@@ -101,7 +107,10 @@ def test_group_readable_status_does_not_make_raw_journal_group_readable(tmp_path
 
     assert _mode(raw) == 0o600
     assert _mode(status) == 0o640
-    assert "arbitrary" not in json.loads(status.read_text(encoding="utf-8"))
+    status_records = [
+        json.loads(line) for line in status.read_text(encoding="utf-8").splitlines()
+    ]
+    assert all("arbitrary" not in row for row in status_records)
 
 
 def test_existing_group_readable_raw_journal_is_refused_without_explicit_group(
@@ -112,3 +121,54 @@ def test_existing_group_readable_raw_journal_is_refused_without_explicit_group(
     raw.chmod(0o640)
     with pytest.raises(ValueError, match="private \\(0600\\) without a reader group"):
         EventLogger(mode="thin", jsonl_path=str(raw), tty=None)
+
+
+def test_raw_and_status_streams_cannot_alias_the_same_inode(tmp_path):
+    raw = tmp_path / "validator-events.jsonl"
+    raw.touch(mode=0o600)
+    with pytest.raises(ValueError, match="must be distinct"):
+        EventLogger(
+            mode="thin",
+            jsonl_path=str(raw),
+            status_path=str(raw),
+            tty=None,
+        )
+
+
+def test_event_stream_refuses_hardlinked_journal(tmp_path):
+    raw = tmp_path / "validator-events.jsonl"
+    raw.touch(mode=0o600)
+    alias = tmp_path / "alias.jsonl"
+    os.link(raw, alias)
+    with pytest.raises(ValueError, match="owner-controlled"):
+        EventLogger(mode="thin", jsonl_path=str(raw), tty=None)
+
+
+def test_free_form_fields_and_embedded_hotkeys_never_enter_status(tmp_path):
+    raw = tmp_path / "validator-events.jsonl"
+    status = tmp_path / "validator-status.jsonl"
+    hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(status),
+        tty=None,
+    )
+    logger.event(
+        "TICK_FAILED",
+        stage="result",
+        status="FAIL",
+        hotkey=hotkey,
+        artifact=f"private-{hotkey}",
+        detail=f"failure for {hotkey}",
+        remediation=f"inspect {hotkey}",
+        nested={"identifier": hotkey},
+    )
+    logger.close()
+
+    public = status.read_text(encoding="utf-8")
+    assert hotkey not in public
+    assert "failure for" not in public
+    assert "inspect" not in public
+    assert "nested" not in public
+    assert "artifact" not in json.loads(public.splitlines()[-1])

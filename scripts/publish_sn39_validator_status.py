@@ -60,6 +60,7 @@ ALLOWED_EVENTS = frozenset(
         "PENDING_RECEIPT_CONTRADICTION",
         "PENDING_RECEIPT_NOT_PROVEN",
         "PENDING_RECEIPT_RECOVERED",
+        "STATUS_PUBLICATION_PENDING",
         "TICK_FAILED",
         "VECTOR_ACCEPTED",
         "VECTOR_REJECTED",
@@ -83,6 +84,7 @@ EVENT_STATUS = {
     "PENDING_RECEIPT_CONTRADICTION": "FAIL",
     "PENDING_RECEIPT_NOT_PROVEN": "NOT_PROVEN",
     "PENDING_RECEIPT_RECOVERED": "PASS",
+    "STATUS_PUBLICATION_PENDING": "NOT_PROVEN",
     "TICK_FAILED": "FAIL",
     "VECTOR_ACCEPTED": "PASS",
     "VECTOR_REJECTED": "FAIL",
@@ -124,6 +126,16 @@ ALLOWED_FIELDS = (
     "artifact",
     "detail",
     "remediation",
+    "authority",
+    "provenance_mode",
+    "uid_count",
+    "burn_uid",
+    "burn_share",
+    "uid_weights",
+    "positive_raw_replay",
+    "publication_id",
+    "publication_phase",
+    "target_event",
 )
 TEXT_LIMITS = {
     "ts": 64,
@@ -184,6 +196,7 @@ STARTUP_MODE_PAIRS = frozenset(
 )
 SAFE_STAGE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 SAFE_MODES = frozenset({"thin", "full_provenance"})
+PUBLICATION_ID = re.compile(r"^[0-9a-f]{32}$")
 ALLOWED_RAW_STATUSES = {
     event: frozenset({status}) for event, status in EVENT_STATUS.items()
 }
@@ -212,14 +225,23 @@ def scrub(value: str, limit: int) -> str:
     return text[:limit]
 
 
-def public_detail(event: str, raw: Any) -> str | None:
+def public_detail(
+    event: str,
+    raw: Any,
+    document: dict[str, Any] | None = None,
+) -> str | None:
     """Convert private diagnostics into fixed public templates."""
+    document = document or {}
     detail = raw if isinstance(raw, str) else ""
     if event == "STARTUP":
-        match = STARTUP_DETAIL.fullmatch(detail)
-        if match is None:
-            return None
-        modes = match.groups()
+        authority = document.get("authority")
+        provenance_mode = document.get("provenance_mode")
+        modes = (authority, provenance_mode)
+        if modes not in STARTUP_MODE_PAIRS:
+            match = STARTUP_DETAIL.fullmatch(detail)
+            if match is None:
+                return None
+            modes = match.groups()
         return {
             ("thin", "off"): "thin authority started; provenance audit is off",
             (
@@ -236,20 +258,31 @@ def public_detail(event: str, raw: Any) -> str | None:
     if event == "VECTOR_REJECTED":
         return "signed vector was rejected; nothing was submitted"
     if event in ("WEIGHTS_DRY_RUN", "WEIGHTS_SUBMITTED"):
-        match = WEIGHT_DETAIL.fullmatch(detail)
-        if match is None:
+        boundary = parse_weight_boundary_record(document)
+        if boundary is None:
+            boundary = parse_weight_boundary(detail)
+        if boundary is None:
             return (
                 "weight result recorded; detailed values remain in validator-local logs"
             )
-        authority, count, burn_uid, burn_share, vector = match.groups()
+        authority = boundary["authority"]
+        count = boundary["uid_count"]
+        burn_uid = boundary["burn_uid"]
+        burn_share = boundary["burn_share"]
+        vector = ",".join(
+            f"{uid}:{weight:.6f}"
+            for uid, weight in sorted(
+                boundary["uid_weights"].items(), key=lambda item: int(item[0])
+            )
+        )
         action = (
             "submitted"
             if event == "WEIGHTS_SUBMITTED"
             else "verified without a chain write"
         )
         burn = (
-            f" burn_uid={burn_uid} burn_share={burn_share}"
-            if burn_uid and burn_share
+            f" burn_uid={burn_uid} burn_share={burn_share:.6f}"
+            if burn_uid is not None and burn_share is not None
             else ""
         )
         return (
@@ -260,7 +293,7 @@ def public_detail(event: str, raw: Any) -> str | None:
     if event == "PROVENANCE_AUDIT_NOT_PROVEN":
         replay = (
             "positive raw Intel TDX evidence replayed; "
-            if "positive raw evidence replayed for " in detail
+            if document.get("positive_raw_replay") is True
             else ""
         )
         return replay + "whole-epoch FULL assurance is not established"
@@ -299,7 +332,64 @@ def public_detail(event: str, raw: Any) -> str | None:
             "the validator tick failed; a write may have finalized, so inspect "
             "the named extrinsic and durable attempt journal before recovery"
         )
+    if event == "STATUS_PUBLICATION_PENDING":
+        return "validator status transition did not commit; current state is not proven"
     return None
+
+
+def parse_weight_boundary_record(document: Any) -> dict[str, Any] | None:
+    """Validate the structured weight boundary written by EventLogger."""
+    if not isinstance(document, dict):
+        return None
+    authority = document.get("authority")
+    count = document.get("uid_count")
+    burn_uid = document.get("burn_uid")
+    burn_share = document.get("burn_share")
+    weights = document.get("uid_weights")
+    if (
+        authority not in SAFE_MODES
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+        or not isinstance(weights, dict)
+        or len(weights) != count
+        or isinstance(burn_uid, bool)
+        or (burn_uid is not None and (not isinstance(burn_uid, int) or burn_uid < 0))
+        or isinstance(burn_share, bool)
+        or (
+            burn_share is not None
+            and (
+                not isinstance(burn_share, (int, float))
+                or not math.isfinite(float(burn_share))
+                or not 0 <= float(burn_share) <= 1
+            )
+        )
+    ):
+        return None
+    clean_weights: dict[str, float] = {}
+    for raw_uid, raw_weight in weights.items():
+        if (
+            not isinstance(raw_uid, str)
+            or re.fullmatch(r"0|[1-9][0-9]*", raw_uid) is None
+        ):
+            return None
+        if (
+            isinstance(raw_weight, bool)
+            or not isinstance(raw_weight, (int, float))
+            or not math.isfinite(float(raw_weight))
+            or not 0 <= float(raw_weight) <= 1
+        ):
+            return None
+        clean_weights[str(int(raw_uid))] = float(raw_weight)
+    if len(clean_weights) != len(weights):
+        return None
+    return {
+        "authority": authority,
+        "uid_count": count,
+        "burn_uid": burn_uid,
+        "burn_share": float(burn_share) if burn_share is not None else None,
+        "uid_weights": clean_weights,
+    }
 
 
 def parse_weight_boundary(raw: Any) -> dict[str, Any] | None:
@@ -396,18 +486,53 @@ def clean_event(document: Any) -> dict[str, Any] | None:
         return None
     if event not in ALLOWED_EVENTS:
         return None
+    publication_id = document.get("publication_id")
+    publication_phase = document.get("publication_phase")
+    if publication_id is not None or publication_phase is not None:
+        if (
+            not isinstance(publication_id, str)
+            or PUBLICATION_ID.fullmatch(publication_id) is None
+            or publication_phase not in {"PENDING", "COMMITTED"}
+        ):
+            return None
+    target_event = document.get("target_event")
+    if event == "STATUS_PUBLICATION_PENDING":
+        if (
+            publication_phase != "PENDING"
+            or not isinstance(target_event, str)
+            or re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", target_event) is None
+        ):
+            return None
+    elif publication_phase == "PENDING" or target_event is not None:
+        return None
     startup_modes: tuple[str, str] | None = None
     if event == "STARTUP":
-        detail = document.get("detail")
-        match = STARTUP_DETAIL.fullmatch(detail) if isinstance(detail, str) else None
-        if match is None:
-            return None
-        startup_modes = match.groups()
+        authority = document.get("authority")
+        provenance_mode = document.get("provenance_mode")
+        startup_modes = (authority, provenance_mode)
+        if startup_modes not in STARTUP_MODE_PAIRS:
+            # Only legacy, unfenced status rows may derive these fixed values
+            # from the old strict template. A new COMMITTED row without the
+            # structured pair is invalid and leaves its PENDING fence active.
+            if publication_phase is not None:
+                return None
+            detail = document.get("detail")
+            match = (
+                STARTUP_DETAIL.fullmatch(detail) if isinstance(detail, str) else None
+            )
+            if match is None:
+                return None
+            startup_modes = match.groups()
         if (
             startup_modes not in STARTUP_MODE_PAIRS
             or document.get("mode") != startup_modes[0]
-            or document.get("authority") != startup_modes[0]
-            or document.get("provenance_mode") != startup_modes[1]
+            or (
+                publication_phase is not None
+                and (
+                    document.get("authority") != startup_modes[0]
+                    or document.get("provenance_mode") != startup_modes[1]
+                )
+            )
         ):
             return None
     raw_status = document.get("status")
@@ -431,6 +556,16 @@ def clean_event(document: Any) -> dict[str, Any] | None:
                 continue
             clean[key] = min(86_400_000.0, max(0, round(float(value), 3)))
             continue
+        if key in {
+            "authority",
+            "provenance_mode",
+            "uid_count",
+            "burn_uid",
+            "burn_share",
+            "uid_weights",
+            "positive_raw_replay",
+        }:
+            continue
         if not isinstance(value, str):
             continue
         if key == "event":
@@ -452,12 +587,18 @@ def clean_event(document: Any) -> dict[str, Any] | None:
                 continue
             clean[key] = value
             continue
+        if key in {"publication_id", "publication_phase", "target_event"}:
+            clean[key] = value
+            continue
         clean[key] = scrub(value, TEXT_LIMITS[key])
     clean["status"] = raw_status
     if startup_modes is not None:
         clean["authority"] = startup_modes[0]
         clean["provenance_mode"] = startup_modes[1]
-    detail = public_detail(event, document.get("detail"))
+    positive_raw_replay = document.get("positive_raw_replay")
+    if event == "PROVENANCE_AUDIT_NOT_PROVEN" and isinstance(positive_raw_replay, bool):
+        clean["positive_raw_replay"] = positive_raw_replay
+    detail = public_detail(event, document.get("detail"), document)
     if detail:
         clean["detail"] = detail[: TEXT_LIMITS["detail"]]
     if event in (
@@ -465,7 +606,9 @@ def clean_event(document: Any) -> dict[str, Any] | None:
         "WEIGHTS_SUBMITTED",
         "PENDING_RECEIPT_RECOVERED",
     ):
-        boundary = parse_weight_boundary(document.get("detail"))
+        boundary = parse_weight_boundary_record(document)
+        if boundary is None:
+            boundary = parse_weight_boundary(document.get("detail"))
         if boundary is not None:
             clean.update(boundary)
     remediation = EVENT_REMEDIATION.get(event)
@@ -500,7 +643,8 @@ def tail_events() -> list[dict[str, Any]]:
     if offset:
         _discarded, _separator, payload = payload.partition(b"\n")
     lines = payload.splitlines()
-    events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
+    parsed: list[dict[str, Any]] = []
+    committed_pairs: set[tuple[str, str]] = set()
     for raw in lines:
         try:
             document = json.loads(raw)
@@ -508,7 +652,40 @@ def tail_events() -> list[dict[str, Any]]:
             continue
         event = clean_event(document)
         if event is not None:
-            events.append(event)
+            parsed.append(event)
+        # Unknown event codes are intentionally absent from the public
+        # allowlist, but their valid COMMITTED row must still close the writer's
+        # preceding fence. For allowlisted events, only a row that passed the
+        # complete public validation closes it. A malformed STARTUP or weight
+        # transition therefore remains fail-closed.
+        if isinstance(document, dict):
+            raw_event = document.get("event")
+            publication_id = document.get("publication_id")
+            if (
+                document.get("publication_phase") == "COMMITTED"
+                and isinstance(raw_event, str)
+                and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", raw_event) is not None
+                and isinstance(publication_id, str)
+                and PUBLICATION_ID.fullmatch(publication_id) is not None
+                and (raw_event not in ALLOWED_EVENTS or event is not None)
+            ):
+                committed_pairs.add((publication_id, raw_event))
+
+    # Remove a PENDING fence only when its exact COMMITTED partner is present.
+    # An unmatched fence is itself public evidence that the raw/status
+    # transition was interrupted and must remain visible as NOT_PROVEN.
+    events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
+    for event in parsed:
+        if (
+            event.get("publication_phase") == "PENDING"
+            and (
+                str(event.get("publication_id")),
+                str(event.get("target_event")),
+            )
+            in committed_pairs
+        ):
+            continue
+        events.append(event)
     return list(events)
 
 
@@ -625,14 +802,27 @@ def event_age_seconds(event: dict[str, Any] | None, now: datetime) -> float | No
 def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
     index = read_public_json(INDEX)
     release = read_signed_release()
-    provenance = latest_matching(events, ("PROVENANCE_",))
-    rewarded_set = latest_matching(events, ("LAUNCH_REWARDED_SET_GATE_",))
     startup = latest_matching(events, ("STARTUP",))
+    # A fresh STARTUP is a session boundary. Observations from a previous
+    # process must not make a restarted validator look healthy before its new
+    # session has produced the corresponding evidence again.
+    if startup is not None:
+        startup_index = max(
+            index for index, event in enumerate(events) if event is startup
+        )
+        current_events = events[startup_index:]
+    else:
+        current_events = events
+    publication_pending = latest_matching(
+        current_events, ("STATUS_PUBLICATION_PENDING",)
+    )
+    provenance = latest_matching(current_events, ("PROVENANCE_",))
+    rewarded_set = latest_matching(current_events, ("LAUNCH_REWARDED_SET_GATE_",))
     # Authority status is about an observed live submission, not merely a
     # signed vector passing preflight or a no-write canary. Keep the last
     # successful live submission until a later tick records a real failure.
     authority = latest_matching(
-        events,
+        current_events,
         (
             "WEIGHTS_SUBMITTED",
             "PENDING_RECEIPT_CONTRADICTION",
@@ -658,7 +848,7 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
     authority_event = str((authority or {}).get("event", ""))
     provenance_event = str((provenance or {}).get("event", ""))
     mode_event = latest_matching(
-        events,
+        current_events,
         ("WEIGHTS_SUBMITTED", "WEIGHTS_DRY_RUN", "PENDING_RECEIPT_RECOVERED"),
     )
     if startup is not None:
@@ -672,7 +862,9 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
     else:
         current_authority_mode = "NOT_PROVEN"
         current_provenance_mode = "NOT_PROVEN"
-    if authority_event in (
+    if publication_pending is not None:
+        authority_status = "NOT_PROVEN"
+    elif authority_event in (
         "PENDING_RECEIPT_CONTRADICTION",
         "TICK_FAILED",
         "VECTOR_REJECTED",
@@ -685,17 +877,19 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
     else:
         authority_status = "NOT_PROVEN"
     provenance_status = EVENT_STATUS.get(provenance_event, "NOT_PROVEN")
+    if publication_pending is not None:
+        provenance_status = "NOT_PROVEN"
     if provenance_status not in ("PASS", "FAIL"):
         provenance_status = "NOT_PROVEN"
-    detail = str((provenance or {}).get("detail", ""))
     positive_replay = (
         "PASS"
-        if provenance_fresh
+        if publication_pending is None
+        and provenance_fresh
         and (
             provenance_event == "PROVENANCE_AUDIT_PASS"
             or (
                 provenance_event == "PROVENANCE_AUDIT_NOT_PROVEN"
-                and "positive raw Intel TDX evidence replayed" in detail
+                and (provenance or {}).get("positive_raw_replay") is True
             )
         )
         else "NOT_PROVEN"
@@ -727,7 +921,9 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
         "netuid": 39,
         "authority": {
             "mode": current_authority_mode,
-            "status": authority_status if authority_fresh else "NOT_PROVEN",
+            "status": authority_status
+            if authority_fresh and publication_pending is None
+            else "NOT_PROVEN",
             "burn_share": "0.10"
             if authority_fresh
             and current_authority_mode == "thin"
@@ -737,11 +933,17 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
             "age_seconds": round(authority_age, 3)
             if authority_age is not None
             else None,
-            "latest_event": (authority or {}).get("event")
-            if authority_fresh
-            else "STALE",
+            "latest_event": (
+                "STATUS_PUBLICATION_PENDING"
+                if publication_pending is not None
+                else (authority or {}).get("event")
+                if authority_fresh
+                else "STALE"
+            ),
             "detail": (
-                (authority or {}).get("detail")
+                (publication_pending or {}).get("detail")
+                if publication_pending is not None
+                else (authority or {}).get("detail")
                 if authority_fresh
                 else f"no live submission observed within {MAX_EVENT_AGE_SECONDS} seconds"
             ),
@@ -750,7 +952,8 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
             "mode": current_provenance_mode,
             "rewarded_set_full": (
                 "PASS"
-                if rewarded_set_fresh
+                if publication_pending is None
+                and rewarded_set_fresh
                 and rewarded_set
                 and rewarded_set.get("event") == "LAUNCH_REWARDED_SET_GATE_PASS"
                 else "NOT_PROVEN"
@@ -763,17 +966,25 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
                 else "NOT_PROVEN"
             ),
             "current_whole_epoch_full": (
-                provenance_status if provenance_fresh else "NOT_PROVEN"
+                provenance_status
+                if provenance_fresh and publication_pending is None
+                else "NOT_PROVEN"
             ),
             "fresh": provenance_fresh,
             "age_seconds": round(provenance_age, 3)
             if provenance_age is not None
             else None,
-            "latest_event": (provenance or {}).get("event")
-            if provenance_fresh
-            else "STALE",
+            "latest_event": (
+                "STATUS_PUBLICATION_PENDING"
+                if publication_pending is not None
+                else (provenance or {}).get("event")
+                if provenance_fresh
+                else "STALE"
+            ),
             "detail": (
-                (provenance or {}).get("detail")
+                (publication_pending or {}).get("detail")
+                if publication_pending is not None
+                else (provenance or {}).get("detail")
                 if provenance_fresh
                 else f"no provenance result observed within {MAX_EVENT_AGE_SECONDS} seconds"
             ),

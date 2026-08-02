@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from scaffold import events as event_stream
+from scaffold.events import EventLogger
 from scripts import publish_sn39_validator_status as status
 
 
@@ -215,6 +217,187 @@ def test_invalid_or_self_contradictory_startup_is_dropped() -> None:
     assert status.clean_event(invalid_pair) is None
 
 
+def test_writer_to_publisher_preserves_startup_runtime_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = tmp_path / "raw.jsonl"
+    public = tmp_path / "status.jsonl"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(public),
+        tty=None,
+    )
+    logger.event(
+        "STARTUP",
+        stage="startup",
+        status="INFO",
+        detail=(
+            "submission_authority=thin provenance=shadow "
+            "policy_pin=validated_supply_v1 network=finney netuid=39"
+        ),
+        authority="thin",
+        provenance_mode="shadow",
+        private_hotkey="5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC",
+    )
+    logger.close()
+
+    monkeypatch.setattr(status, "SOURCE", public)
+    rows = status.tail_events()
+    assert len(rows) == 1
+    assert rows[0]["event"] == "STARTUP"
+    assert rows[0]["authority"] == "thin"
+    assert rows[0]["provenance_mode"] == "shadow"
+    assert rows[0]["detail"] == (
+        "thin authority and concurrent provenance shadow started"
+    )
+    assert "private_hotkey" not in rows[0]
+
+
+def test_interrupted_raw_to_status_transition_overrides_stale_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = tmp_path / "raw.jsonl"
+    public = tmp_path / "status.jsonl"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(public),
+        tty=None,
+    )
+    logger.event(
+        "STARTUP",
+        stage="startup",
+        status="INFO",
+        authority="thin",
+        provenance_mode="shadow",
+    )
+    weights = {"163": 0.9, "204": 0.1}
+    logger.event(
+        "WEIGHTS_SUBMITTED",
+        stage="submit",
+        status="PASS",
+        authority="thin",
+        uid_count=2,
+        burn_uid=204,
+        burn_share=0.1,
+        uid_weights=weights,
+    )
+    monkeypatch.setattr(status, "SOURCE", public)
+    assert status.build_status(status.tail_events())["authority"]["status"] == "PASS"
+
+    original_write = event_stream._durable_jsonl_write
+
+    def fail_before_status_commit(target, record):
+        if (
+            target is logger._status_file
+            and record.get("publication_phase") == "COMMITTED"
+        ):
+            raise OSError("injected status commit failure")
+        original_write(target, record)
+
+    monkeypatch.setattr(
+        event_stream,
+        "_durable_jsonl_write",
+        fail_before_status_commit,
+    )
+    with pytest.raises(OSError, match="injected"):
+        logger.event(
+            "TICK_FAILED",
+            stage="result",
+            status="FAIL",
+            detail="private failure",
+        )
+    logger.close()
+
+    rows = status.tail_events()
+    assert rows[-1]["event"] == "STATUS_PUBLICATION_PENDING"
+    assert rows[-1]["status"] == "NOT_PROVEN"
+    document = status.build_status(rows)
+    assert document["authority"]["status"] == "NOT_PROVEN"
+    assert document["authority"]["latest_event"] == ("STATUS_PUBLICATION_PENDING")
+    assert document["provenance"]["current_whole_epoch_full"] == "NOT_PROVEN"
+
+
+def test_unknown_private_event_commit_closes_its_publication_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = tmp_path / "raw.jsonl"
+    public = tmp_path / "status.jsonl"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(public),
+        tty=None,
+    )
+    logger.event(
+        "CHAIN_SUBMITTED",
+        stage="submit",
+        status="PASS",
+        detail="private event outside the public allowlist",
+    )
+    logger.close()
+
+    monkeypatch.setattr(status, "SOURCE", public)
+    assert status.tail_events() == []
+
+
+def test_malformed_or_mismatched_commit_does_not_clear_pending_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = tmp_path / "status.jsonl"
+    publication_id = "a" * 32
+    rows = [
+        {
+            "ts": _timestamp(),
+            "event": "STATUS_PUBLICATION_PENDING",
+            "stage": "status",
+            "mode": "thin",
+            "status": "NOT_PROVEN",
+            "publication_id": publication_id,
+            "publication_phase": "PENDING",
+            "target_event": "STARTUP",
+        },
+        {
+            "ts": _timestamp(),
+            "event": "VECTOR_ACCEPTED",
+            "stage": "policy",
+            "mode": "thin",
+            "status": "PASS",
+            "publication_id": publication_id,
+            "publication_phase": "COMMITTED",
+        },
+        {
+            "ts": _timestamp(),
+            "event": "STARTUP",
+            "stage": "startup",
+            "mode": "thin",
+            "status": "INFO",
+            "publication_id": publication_id,
+            "publication_phase": "COMMITTED",
+            # The required structured mode pair is intentionally absent.
+        },
+    ]
+    public.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(status, "SOURCE", public)
+
+    events = status.tail_events()
+    assert [event["event"] for event in events] == [
+        "STATUS_PUBLICATION_PENDING",
+        "VECTOR_ACCEPTED",
+    ]
+    document = status.build_status(events)
+    assert document["authority"]["status"] == "NOT_PROVEN"
+    assert document["authority"]["latest_event"] == "STATUS_PUBLICATION_PENDING"
+
+
 def test_pending_receipt_contradiction_overrides_prior_thin_pass() -> None:
     startup = status.clean_event(_startup("thin", "shadow"))
     launch = status.clean_event(
@@ -252,6 +435,12 @@ def test_event_status_mismatch_is_dropped() -> None:
     assert status.clean_event(_event("WEIGHTS_DRY_RUN", "FAIL"))["status"] == "FAIL"
 
 
+def test_unexpected_fence_field_cannot_be_used_as_free_form_public_text() -> None:
+    document = _event("VECTOR_ACCEPTED", "PASS")
+    document["target_event"] = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+    assert status.clean_event(document) is None
+
+
 def test_public_status_is_time_bounded() -> None:
     stale = status.clean_event(
         _event(
@@ -274,17 +463,29 @@ def test_public_status_is_time_bounded() -> None:
 
 def test_rewarded_set_pass_does_not_claim_whole_epoch_full() -> None:
     rewarded = status.clean_event(_event("LAUNCH_REWARDED_SET_GATE_PASS", "PASS"))
-    provenance = status.clean_event(
-        _event(
-            "PROVENANCE_AUDIT_NOT_PROVEN",
-            "NOT_PROVEN",
-            detail="positive raw evidence replayed for 1 miners",
-        )
+    raw_provenance = _event(
+        "PROVENANCE_AUDIT_NOT_PROVEN",
+        "NOT_PROVEN",
+        detail="private validator-local diagnostics",
     )
+    raw_provenance["positive_raw_replay"] = True
+    provenance = status.clean_event(raw_provenance)
     document = status.build_status([rewarded, provenance])
     assert document["provenance"]["rewarded_set_full"] == "PASS"
     assert document["provenance"]["positive_tdx_raw_replay"] == "PASS"
     assert document["provenance"]["whole_epoch_full"] == "NOT_PROVEN"
+
+    prose_only = status.clean_event(
+        _event(
+            "PROVENANCE_AUDIT_NOT_PROVEN",
+            "NOT_PROVEN",
+            detail="positive raw evidence replayed for a private identifier",
+        )
+    )
+    assert (
+        status.build_status([prose_only])["provenance"]["positive_tdx_raw_replay"]
+        == "NOT_PROVEN"
+    )
 
 
 def test_current_full_audit_does_not_upgrade_receipts_only_launch(
