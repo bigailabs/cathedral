@@ -136,7 +136,10 @@ jobs:
             scaffold/publisher/tests/test_legacy_chain_guard.py \
             scaffold/publisher/tests/test_mechanism_weightset.py \
             scaffold/publisher/tests/test_weight_vector_scope.py \
-            tests/thin/test_validator.py
+            tests/thin/test_validator.py \
+            tests/thin/test_status_sanitization.py \
+            tests/thin/test_status_stream_contract.py \
+            tests/thin/test_status_stream_migration.py
       - name: Reproduction imports
         run: |
           "$SN39_VENV/bin/python" - <<'PY'

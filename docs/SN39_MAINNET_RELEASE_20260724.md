@@ -29,6 +29,17 @@ stream are published at:
 - `https://api.cathedral.computer/v1/evidence/logs/validator-events.jsonl`
 - `https://api.cathedral.computer/v1/evidence/index.json`
 
+`logs/status.json` is the commit marker for both event views. A reader must:
+
+1. require `publication.phase == "COMMITTED"`;
+2. fetch both event views and verify their published SHA-256 digests;
+3. fetch `status.json` again and require the same committed generation.
+
+`PENDING`, a digest mismatch, or a changed generation is `NOT_PROVEN`. The
+publisher replaces a fail-closed PENDING marker first, then both views, then
+the COMMITTED marker last. A crash at any intermediate write therefore cannot
+leave an older PASS beside a newer unmatched event fence.
+
 ## Current operational blockers
 
 The software candidate is not the final launch release, and this document does

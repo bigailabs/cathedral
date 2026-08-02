@@ -9,6 +9,7 @@ import stat
 
 import pytest
 
+from scaffold import events as event_stream
 from scaffold.events import STATUS_FIELDS, EventLogger, sanitized_status_record
 
 
@@ -47,6 +48,7 @@ def test_arbitrary_event_fields_never_enter_the_status_stream(tmp_path):
     ]
     assert status_records[0]["event"] == "STATUS_PUBLICATION_PENDING"
     assert status_records[0]["status"] == "NOT_PROVEN"
+    assert status_records[0]["target_event"] == "PRIVATE_EVENT"
     status_record = status_records[-1]
     assert status_record["publication_phase"] == "COMMITTED"
     assert raw_record["receipt_body"] == "SECRET-RECEIPT-PAYLOAD"
@@ -172,3 +174,59 @@ def test_free_form_fields_and_embedded_hotkeys_never_enter_status(tmp_path):
     assert "inspect" not in public
     assert "nested" not in public
     assert "artifact" not in json.loads(public.splitlines()[-1])
+
+
+def test_event_logger_rejects_unreviewed_mode_before_opening_outputs(tmp_path):
+    raw = tmp_path / "validator-events.jsonl"
+    with pytest.raises(ValueError, match="reviewed authority mode"):
+        EventLogger(
+            mode="5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC",
+            jsonl_path=str(raw),
+            tty=None,
+        )
+    assert not raw.exists()
+
+
+def test_crash_fence_maps_caller_event_and_never_preserves_private_text(
+    tmp_path,
+    monkeypatch,
+):
+    raw = tmp_path / "validator-events.jsonl"
+    status = tmp_path / "validator-status.jsonl"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(status),
+        tty=None,
+    )
+    caller_event = "CALLER_CONTROLLED_PRIVATE_EVENT"
+    hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+    durable_write = event_stream._durable_jsonl_write
+
+    def fail_commit(target, record):
+        if (
+            target is logger._status_file
+            and record.get("publication_phase") == "COMMITTED"
+        ):
+            raise OSError("injected commit crash")
+        durable_write(target, record)
+
+    monkeypatch.setattr(event_stream, "_durable_jsonl_write", fail_commit)
+    with pytest.raises(OSError, match="injected commit"):
+        logger.event(
+            caller_event,
+            stage="result",
+            status="FAIL",
+            detail=f"private result for {hotkey}",
+            hotkey=hotkey,
+        )
+    logger.close()
+
+    fence = json.loads(status.read_text(encoding="utf-8"))
+    assert fence["event"] == "STATUS_PUBLICATION_PENDING"
+    assert fence["mode"] == "thin"
+    assert fence["target_event"] == "PRIVATE_EVENT"
+    serialized = json.dumps(fence)
+    assert caller_event not in serialized
+    assert hotkey not in serialized
+    assert "private result" not in serialized

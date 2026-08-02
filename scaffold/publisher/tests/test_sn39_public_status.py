@@ -345,6 +345,44 @@ def test_unknown_private_event_commit_closes_its_publication_fence(
     assert status.tail_events() == []
 
 
+def test_unknown_private_event_commit_requires_safe_common_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = tmp_path / "status.jsonl"
+    publication_id = "c" * 32
+    rows = [
+        {
+            "ts": _timestamp(),
+            "event": "STATUS_PUBLICATION_PENDING",
+            "stage": "status",
+            "mode": "thin",
+            "status": "NOT_PROVEN",
+            "publication_id": publication_id,
+            "publication_phase": "PENDING",
+            "target_event": "PRIVATE_EVENT",
+        },
+        {
+            "ts": _timestamp(),
+            "event": "CHAIN_SUBMITTED",
+            "stage": "submit",
+            "mode": "caller-controlled-mode",
+            "status": "PASS",
+            "publication_id": publication_id,
+            "publication_phase": "COMMITTED",
+            "target_event": "PRIVATE_EVENT",
+        },
+    ]
+    public.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(status, "SOURCE", public)
+
+    published = status.tail_events()
+    assert [row["event"] for row in published] == ["STATUS_PUBLICATION_PENDING"]
+
+
 def test_malformed_or_mismatched_commit_does_not_clear_pending_fence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,6 +408,7 @@ def test_malformed_or_mismatched_commit_does_not_clear_pending_fence(
             "status": "PASS",
             "publication_id": publication_id,
             "publication_phase": "COMMITTED",
+            "target_event": "VALIDATOR_RESULT",
         },
         {
             "ts": _timestamp(),
@@ -379,6 +418,7 @@ def test_malformed_or_mismatched_commit_does_not_clear_pending_fence(
             "status": "INFO",
             "publication_id": publication_id,
             "publication_phase": "COMMITTED",
+            "target_event": "STARTUP",
             # The required structured mode pair is intentionally absent.
         },
     ]
@@ -439,6 +479,18 @@ def test_unexpected_fence_field_cannot_be_used_as_free_form_public_text() -> Non
     document = _event("VECTOR_ACCEPTED", "PASS")
     document["target_event"] = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
     assert status.clean_event(document) is None
+
+    pending = {
+        "ts": _timestamp(),
+        "event": "STATUS_PUBLICATION_PENDING",
+        "stage": "status",
+        "mode": "caller-controlled-mode",
+        "status": "NOT_PROVEN",
+        "publication_id": "b" * 32,
+        "publication_phase": "PENDING",
+        "target_event": "PRIVATE_EVENT",
+    }
+    assert status.clean_event(pending) is None
 
 
 def test_public_status_is_time_bounded() -> None:
@@ -670,6 +722,110 @@ def test_publisher_emits_only_sanitized_bounded_outputs(
         "status.json",
     }
     assert all((path.stat().st_mode & 0o777) == 0o644 for path in logs.iterdir())
+    published_status = json.loads((logs / "status.json").read_text(encoding="utf-8"))
+    publication = published_status["publication"]
+    assert publication["phase"] == "COMMITTED"
+    assert publication["events_jsonl_sha256"] == (
+        "sha256:"
+        + hashlib.sha256((logs / "validator-events.jsonl").read_bytes()).hexdigest()
+    )
+    assert publication["events_log_sha256"] == (
+        "sha256:"
+        + hashlib.sha256((logs / "validator-events.log").read_bytes()).hexdigest()
+    )
+
+
+def test_interrupted_public_generation_replaces_stale_pass_with_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = tmp_path / "raw.jsonl"
+    source = tmp_path / "status-source.jsonl"
+    logger = EventLogger(
+        mode="thin",
+        jsonl_path=str(raw),
+        status_path=str(source),
+        tty=None,
+    )
+    logger.event(
+        "STARTUP",
+        stage="startup",
+        status="INFO",
+        authority="thin",
+        provenance_mode="shadow",
+    )
+    logger.event(
+        "WEIGHTS_SUBMITTED",
+        stage="submit",
+        status="PASS",
+        authority="thin",
+        uid_count=2,
+        burn_uid=204,
+        burn_share=0.1,
+        uid_weights={"163": 0.9, "204": 0.1},
+    )
+    root = tmp_path / "public"
+    logs = root / "logs"
+    logs.mkdir(parents=True, mode=0o755)
+    (root / "index.json").write_text('{"recent":[]}', encoding="utf-8")
+    (root / "index.json").chmod(0o600)
+    monkeypatch.setattr(status, "SOURCE", source)
+    monkeypatch.setattr(status, "INDEX", root / "index.json")
+    monkeypatch.setattr(status, "RELEASE", root / "release.json")
+    monkeypatch.setattr(status, "LOG_ROOT", logs)
+
+    assert status.main() == 0
+    prior = json.loads((logs / "status.json").read_text(encoding="utf-8"))
+    assert prior["publication"]["phase"] == "COMMITTED"
+    assert prior["authority"]["status"] == "PASS"
+
+    durable_write = event_stream._durable_jsonl_write
+
+    def fail_status_commit(target, record):
+        if (
+            target is logger._status_file
+            and record.get("publication_phase") == "COMMITTED"
+        ):
+            raise OSError("injected source status commit failure")
+        durable_write(target, record)
+
+    monkeypatch.setattr(event_stream, "_durable_jsonl_write", fail_status_commit)
+    with pytest.raises(OSError, match="injected source"):
+        logger.event(
+            "TICK_FAILED",
+            stage="result",
+            status="FAIL",
+            detail="validator-local failure",
+        )
+    logger.close()
+
+    atomic_write = status.atomic_write
+
+    def fail_between_public_views(path: Path, data: bytes) -> None:
+        if path.name == "validator-events.log":
+            raise OSError("injected public view failure")
+        atomic_write(path, data)
+
+    monkeypatch.setattr(status, "atomic_write", fail_between_public_views)
+    with pytest.raises(OSError, match="injected public view"):
+        status.main()
+
+    interrupted = json.loads((logs / "status.json").read_text(encoding="utf-8"))
+    assert interrupted["publication"]["phase"] == "PENDING"
+    assert (
+        interrupted["publication"]["generation"] != (prior["publication"]["generation"])
+    )
+    assert interrupted["authority"]["status"] == "NOT_PROVEN"
+    assert interrupted["authority"]["burn_share"] is None
+    assert interrupted["authority"]["latest_event"] == ("STATUS_PUBLICATION_PENDING")
+    assert interrupted["provenance"]["current_whole_epoch_full"] == "NOT_PROVEN"
+    assert (
+        "trust event views only when phase is COMMITTED"
+        in (interrupted["publication"]["reader_rule"])
+    )
+    assert (
+        b"STATUS_PUBLICATION_PENDING" in (logs / "validator-events.jsonl").read_bytes()
+    )
 
 
 def test_output_directory_must_be_owner_controlled(

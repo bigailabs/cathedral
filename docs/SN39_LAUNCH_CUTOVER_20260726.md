@@ -560,7 +560,10 @@ Apply in this order. Each step is independently reversible.
    projection, then confirm a real execution in
    `journalctl -u cathedral-sn39-public-status`. `ConditionPathExists=` skips a
    missing projection without making the unit fail, so `systemctl status`
-   alone is insufficient.
+   alone is insufficient. Treat `logs/status.json` as the commit marker:
+   require `publication.phase=COMMITTED`, verify both published event-view
+   digests, then re-read the same committed generation. `PENDING`, a digest
+   mismatch, or a changed generation is `NOT_PROVEN`.
 11. **Leave the three validator units disabled and inactive** until the launch
    window. Their single-writer guards are unchanged: each names the other SN39
    writers in `Conflicts=` and refuses to start via `ExecStartPre` while any of

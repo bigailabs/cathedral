@@ -212,6 +212,32 @@ _STARTUP_MODE_PAIRS = frozenset(
     }
 )
 
+_STATUS_FENCE_TARGETS = frozenset(
+    {
+        "STARTUP",
+        "WEIGHT_RESULT",
+        "PROVENANCE_RESULT",
+        "RECEIPT_RECOVERY",
+        "VALIDATOR_RESULT",
+        "PRIVATE_EVENT",
+    }
+)
+
+
+def status_fence_target(event: str) -> str:
+    """Map a caller event code to a closed, non-sensitive fence category."""
+    if event == "STARTUP":
+        return "STARTUP"
+    if event in {"WEIGHTS_DRY_RUN", "WEIGHTS_SUBMITTED"}:
+        return "WEIGHT_RESULT"
+    if event.startswith("PROVENANCE_") or event.startswith("LAUNCH_REWARDED_SET_GATE_"):
+        return "PROVENANCE_RESULT"
+    if event.startswith("PENDING_RECEIPT_"):
+        return "RECEIPT_RECOVERY"
+    if event in {"TICK_FAILED", "VECTOR_ACCEPTED", "VECTOR_REJECTED"}:
+        return "VALIDATOR_RESULT"
+    return "PRIVATE_EVENT"
+
 
 def _structured_status_value(field: str, value: Any) -> Any | None:
     """Return a safe public value, or ``None`` when it is not admissible."""
@@ -340,6 +366,7 @@ def sanitized_status_record(
     if publication_id is not None:
         clean["publication_id"] = publication_id
         clean["publication_phase"] = "COMMITTED"
+        clean["target_event"] = status_fence_target(event)
     return clean
 
 
@@ -355,7 +382,7 @@ def pending_status_record(
         "status": NOT_PROVEN,
         "publication_id": publication_id,
         "publication_phase": "PENDING",
-        "target_event": record["event"],
+        "target_event": status_fence_target(str(record["event"])),
     }
 
 
@@ -383,7 +410,9 @@ class EventLogger:
         tty: IO[str] | None = None,
         color: bool | None = None,
     ) -> None:
-        self.mode = _neutralize(mode)[:32]
+        if mode not in _SAFE_AUTHORITIES:
+            raise ValueError("event logger mode must be a reviewed authority mode")
+        self.mode = mode
         self._jsonl = jsonl
         self._jsonl_file: IO[str] | None = None
         self._status_file: IO[str] | None = None

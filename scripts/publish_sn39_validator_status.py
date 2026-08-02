@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -197,10 +198,21 @@ STARTUP_MODE_PAIRS = frozenset(
 SAFE_STAGE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 SAFE_MODES = frozenset({"thin", "full_provenance"})
 PUBLICATION_ID = re.compile(r"^[0-9a-f]{32}$")
+FENCE_TARGETS = frozenset(
+    {
+        "STARTUP",
+        "WEIGHT_RESULT",
+        "PROVENANCE_RESULT",
+        "RECEIPT_RECOVERY",
+        "VALIDATOR_RESULT",
+        "PRIVATE_EVENT",
+    }
+)
 ALLOWED_RAW_STATUSES = {
     event: frozenset({status}) for event, status in EVENT_STATUS.items()
 }
 ALLOWED_RAW_STATUSES["WEIGHTS_DRY_RUN"] = frozenset({"PASS", "FAIL"})
+SAFE_RAW_STATUSES = frozenset(EVENT_STATUS.values())
 
 
 def scrub(value: str, limit: int) -> str:
@@ -223,6 +235,21 @@ def scrub(value: str, limit: int) -> str:
     text = BASE58_ID.sub("<redacted-id>", text)
     text = text.replace("|", "/")
     return text[:limit]
+
+
+def fence_target_for_event(event: str) -> str:
+    """Mirror the writer's closed fence categories without caller text."""
+    if event == "STARTUP":
+        return "STARTUP"
+    if event in {"WEIGHTS_DRY_RUN", "WEIGHTS_SUBMITTED"}:
+        return "WEIGHT_RESULT"
+    if event.startswith("PROVENANCE_") or event.startswith("LAUNCH_REWARDED_SET_GATE_"):
+        return "PROVENANCE_RESULT"
+    if event.startswith("PENDING_RECEIPT_"):
+        return "RECEIPT_RECOVERY"
+    if event in {"TICK_FAILED", "VECTOR_ACCEPTED", "VECTOR_REJECTED"}:
+        return "VALIDATOR_RESULT"
+    return "PRIVATE_EVENT"
 
 
 def public_detail(
@@ -493,6 +520,7 @@ def clean_event(document: Any) -> dict[str, Any] | None:
             not isinstance(publication_id, str)
             or PUBLICATION_ID.fullmatch(publication_id) is None
             or publication_phase not in {"PENDING", "COMMITTED"}
+            or document.get("mode") not in SAFE_MODES
         ):
             return None
     target_event = document.get("target_event")
@@ -500,10 +528,15 @@ def clean_event(document: Any) -> dict[str, Any] | None:
         if (
             publication_phase != "PENDING"
             or not isinstance(target_event, str)
-            or re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", target_event) is None
+            or target_event not in FENCE_TARGETS
         ):
             return None
-    elif publication_phase == "PENDING" or target_event is not None:
+    elif publication_phase == "PENDING":
+        return None
+    elif publication_phase == "COMMITTED":
+        if target_event != fence_target_for_event(event):
+            return None
+    elif target_event is not None:
         return None
     startup_modes: tuple[str, str] | None = None
     if event == "STARTUP":
@@ -660,16 +693,22 @@ def tail_events() -> list[dict[str, Any]]:
         # transition therefore remains fail-closed.
         if isinstance(document, dict):
             raw_event = document.get("event")
+            target_event = document.get("target_event")
             publication_id = document.get("publication_id")
             if (
                 document.get("publication_phase") == "COMMITTED"
                 and isinstance(raw_event, str)
                 and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", raw_event) is not None
+                and target_event == fence_target_for_event(raw_event)
                 and isinstance(publication_id, str)
                 and PUBLICATION_ID.fullmatch(publication_id) is not None
+                and document.get("mode") in SAFE_MODES
+                and document.get("status") in SAFE_RAW_STATUSES
+                and isinstance(document.get("ts"), str)
+                and parse_event_time(document["ts"]) is not None
                 and (raw_event not in ALLOWED_EVENTS or event is not None)
             ):
-                committed_pairs.add((publication_id, raw_event))
+                committed_pairs.add((publication_id, target_event))
 
     # Remove a PENDING fence only when its exact COMMITTED partner is present.
     # An unmatched fence is itself public evidence that the raw/status
@@ -1014,30 +1053,130 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def atomic_write(path: Path, data: bytes) -> None:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     try:
-        info = path.parent.lstat()
+        directory_descriptor = os.open(path.parent, directory_flags)
     except OSError as exc:
         raise RuntimeError("public log directory is unavailable") from exc
-    if (
-        path.parent.is_symlink()
-        or not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.geteuid()
-        or stat.S_IMODE(info.st_mode) & 0o022
-    ):
-        raise RuntimeError("public log directory is not owner-controlled")
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o644)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
+        info = os.fstat(directory_descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise RuntimeError("public log directory is not owner-controlled")
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent
+        )
         try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+            os.fchmod(descriptor, 0o644)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            # Persist the rename before the next phase of the publication
+            # transaction. This makes the PENDING -> views -> COMMITTED order
+            # durable across a host crash, not merely atomic per pathname.
+            os.fsync(directory_descriptor)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(directory_descriptor)
+
+
+def _sha256_label(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _publication_metadata(
+    *,
+    phase: str,
+    generation: str,
+    status_core: bytes,
+    events_jsonl: bytes,
+    events_log: bytes,
+) -> dict[str, str]:
+    return {
+        "schema": "cathedral.sn39.status-publication.v1",
+        "phase": phase,
+        "generation": generation,
+        "status_core_sha256": _sha256_label(status_core),
+        "events_jsonl_sha256": _sha256_label(events_jsonl),
+        "events_log_sha256": _sha256_label(events_log),
+        "reader_rule": (
+            "trust event views only when phase is COMMITTED, both view digests "
+            "match, and a second status read returns the same generation"
+        ),
+    }
+
+
+def _publication_generation(
+    status_core: bytes, events_jsonl: bytes, events_log: bytes
+) -> str:
+    digest = hashlib.sha256()
+    for payload in (status_core, events_jsonl, events_log):
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return "sha256:" + digest.hexdigest()
+
+
+def _status_publication_view(
+    status_document: dict[str, Any],
+    *,
+    phase: str,
+    generation: str,
+    status_core: bytes,
+    events_jsonl: bytes,
+    events_log: bytes,
+) -> dict[str, Any]:
+    if phase not in {"PENDING", "COMMITTED"}:
+        raise ValueError("unknown public status publication phase")
+    result = copy.deepcopy(status_document)
+    result["publication"] = _publication_metadata(
+        phase=phase,
+        generation=generation,
+        status_core=status_core,
+        events_jsonl=events_jsonl,
+        events_log=events_log,
+    )
+    if phase == "PENDING":
+        # The commit marker is replaced first. Until every view is durable and
+        # the COMMITTED marker is replaced last, no stale PASS is public.
+        authority = result.get("authority")
+        if isinstance(authority, dict):
+            authority["status"] = "NOT_PROVEN"
+            authority["burn_share"] = None
+            authority["latest_event"] = "STATUS_PUBLICATION_PENDING"
+            authority["detail"] = "public status generation is not committed"
+        provenance = result.get("provenance")
+        if isinstance(provenance, dict):
+            for field in (
+                "rewarded_set_full",
+                "positive_tdx_raw_replay",
+                "current_whole_epoch_full",
+            ):
+                provenance[field] = "NOT_PROVEN"
+            provenance["latest_event"] = "STATUS_PUBLICATION_PENDING"
+            provenance["detail"] = "public status generation is not committed"
+        result["validity"] = (
+            "NOT_PROVEN while publication.phase is PENDING. Event views must "
+            "not be trusted until the matching COMMITTED generation is visible."
+        )
+    return result
+
+
+def _status_bytes(document: dict[str, Any]) -> bytes:
+    return json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n"
 
 
 def main() -> int:
@@ -1060,15 +1199,39 @@ def main() -> int:
         if event.get("remediation"):
             fields.append("next: " + str(event["remediation"]))
         human_lines.append(" | ".join(fields))
+    human_log = ("\n".join(human_lines) + ("\n" if human_lines else "")).encode("utf-8")
     status = build_status(events)
+    status_core = json.dumps(status, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    generation = _publication_generation(status_core, jsonl, human_log)
+    pending_status = _status_publication_view(
+        status,
+        phase="PENDING",
+        generation=generation,
+        status_core=status_core,
+        events_jsonl=jsonl,
+        events_log=human_log,
+    )
+    committed_status = _status_publication_view(
+        status,
+        phase="COMMITTED",
+        generation=generation,
+        status_core=status_core,
+        events_jsonl=jsonl,
+        events_log=human_log,
+    )
+    # status.json is the commit marker. Publish a fail-closed PENDING marker
+    # first, replace both views durably, then replace COMMITTED last.
+    atomic_write(LOG_ROOT / "status.json", _status_bytes(pending_status))
     atomic_write(LOG_ROOT / "validator-events.jsonl", jsonl)
     atomic_write(
         LOG_ROOT / "validator-events.log",
-        ("\n".join(human_lines) + ("\n" if human_lines else "")).encode("utf-8"),
+        human_log,
     )
     atomic_write(
         LOG_ROOT / "status.json",
-        json.dumps(status, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+        _status_bytes(committed_status),
     )
     print(
         json.dumps(

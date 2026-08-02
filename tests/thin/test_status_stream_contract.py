@@ -17,6 +17,7 @@ _STATUS_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-sn39-public-status.service
 _VALIDATOR_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-validator-sn39.service"
 _LAUNCHER = _ROOT / "deploy" / "sn39" / "cathedral-sn39-release-launcher.py"
 _PUBLISHER = _ROOT / "scripts" / "publish_sn39_validator_status.py"
+_REQUIRED_WORKFLOW = _ROOT / ".github" / "workflows" / "two-mode-provenance.yml"
 
 _spec = importlib.util.spec_from_file_location("_sn39_launcher_contract", _LAUNCHER)
 _launcher = importlib.util.module_from_spec(_spec)
@@ -67,3 +68,13 @@ def test_validator_unit_documents_the_same_access_split():
         re.M,
     )
     assert not re.search(r"^Environment=CATHEDRAL_VALIDATOR_JSONL_GROUP=", unit, re.M)
+
+
+def test_required_workflow_runs_every_status_stream_regression():
+    workflow = _REQUIRED_WORKFLOW.read_text(encoding="utf-8")
+    for test_path in (
+        "tests/thin/test_status_sanitization.py",
+        "tests/thin/test_status_stream_contract.py",
+        "tests/thin/test_status_stream_migration.py",
+    ):
+        assert test_path in workflow
