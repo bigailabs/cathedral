@@ -15,11 +15,17 @@ from __future__ import annotations
 
 import base64
 import functools
+import os
 import subprocess
 
-STITCH_HOST = "frede@100.112.113.3"
+# Read from the environment rather than baked in. This repository is public,
+# so a hardcoded default publishes the operator's account and address to
+# anyone reading the source, and does it in a file most reviewers never open.
+# Unset means the runner is unavailable, which the reachability probe already
+# handles as a graceful fallback to the local path.
+STITCH_HOST = os.environ.get("CATHEDRAL_ARENA_STITCH_HOST", "")
 STITCH_NAME = "polarisserver"
-STITCH_SSH_PORT = 22
+STITCH_SSH_PORT = int(os.environ.get("CATHEDRAL_ARENA_STITCH_PORT", "22"))
 
 
 def _tcp_reachable(timeout: float = 4.0) -> bool:
@@ -27,6 +33,8 @@ def _tcp_reachable(timeout: float = 4.0) -> bool:
     A black-hole host (drops packets) makes `ssh` hang well past its ConnectTimeout, so
     a short socket probe is the reliable way to fail fast instead of blocking ~30s."""
     import socket
+    if not STITCH_HOST:
+        return False  # unconfigured is unreachable, not an error
     host = STITCH_HOST.split("@")[-1]
     try:
         with socket.create_connection((host, STITCH_SSH_PORT), timeout=timeout):

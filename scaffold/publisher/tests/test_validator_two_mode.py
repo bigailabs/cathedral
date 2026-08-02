@@ -37,6 +37,14 @@ from scaffold.provenance_audit import (
 )
 
 
+# These globally classified addresses are never contacted. Every socket used by
+# the tests below is replaced with a local fake. Using TEST-NET addresses here
+# would stop the code at the public-address gate instead of exercising the
+# redirect, body-budget, and failover behavior each test names.
+PUBLIC_TEST_IP_A = "1.1.1.1"
+PUBLIC_TEST_IP_B = "8.8.8.8"
+
+
 @pytest.fixture(autouse=True)
 def _isolated_submission_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(
@@ -1637,7 +1645,7 @@ def test_audit_resolver_slot_pool_bounds_abandoned_lookups(monkeypatch) -> None:
 
     def hung_resolver(*_a, **_k):
         release.wait(10)
-        return [(socket.AF_INET, 0, 6, "", ("34.71.88.140", 443))]
+        return [(socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_A, 443))]
 
     monkeypatch.setattr(socket, "getaddrinfo", hung_resolver)
     baseline_threads = threading.active_count()
@@ -2094,7 +2102,7 @@ def test_thin_feed_fetch_rejects_malformed_and_private_endpoints(monkeypatch) ->
         socket,
         "getaddrinfo",
         lambda *a, **k: [
-            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
+            (socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_A, 443)),
             (socket.AF_INET, 0, 6, "", ("127.0.0.1", 443)),  # ONE bad peer
         ],
     )
@@ -2121,7 +2129,7 @@ def test_thin_feed_fetch_refuses_redirects_and_oversized_bodies(monkeypatch) -> 
     monkeypatch.setattr(
         socket,
         "getaddrinfo",
-        lambda *a, **k: [(socket.AF_INET, 0, 6, "", ("34.71.88.140", 443))],
+        lambda *a, **k: [(socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_A, 443))],
     )
 
     import ssl
@@ -3214,8 +3222,8 @@ def test_thin_feed_fetch_tries_every_validated_address(monkeypatch) -> None:
         provenance_audit,
         "_getaddrinfo_bounded",
         lambda host, port, timeout: [
-            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
-            (socket.AF_INET, 0, 6, "", ("34.71.88.141", 443)),
+            (socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_A, 443)),
+            (socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_B, 443)),
         ],
     )
     attempts: list[str] = []
@@ -3229,7 +3237,7 @@ def test_thin_feed_fetch_tries_every_validated_address(monkeypatch) -> None:
 
     def fake_create_connection(address, _timeout=None):
         attempts.append(address[0])
-        if address[0] == "34.71.88.140":
+        if address[0] == PUBLIC_TEST_IP_A:
             raise ConnectionRefusedError("dead peer")
         return _FakeSock()
 
@@ -3257,7 +3265,7 @@ def test_thin_feed_fetch_tries_every_validated_address(monkeypatch) -> None:
         lambda self: NS(status=200, read=read_body),
     )
     assert validator_thin.fetch_vector("https://publisher.example") == {"ok": True}
-    assert attempts == ["34.71.88.140", "34.71.88.141"]
+    assert attempts == [PUBLIC_TEST_IP_A, PUBLIC_TEST_IP_B]
 
 
 def test_thin_feed_body_cap_is_shared_across_address_attempts(monkeypatch) -> None:
@@ -3273,8 +3281,8 @@ def test_thin_feed_body_cap_is_shared_across_address_attempts(monkeypatch) -> No
         provenance_audit,
         "_getaddrinfo_bounded",
         lambda host, port, timeout: [
-            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
-            (socket.AF_INET, 0, 6, "", ("34.71.88.141", 443)),
+            (socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_A, 443)),
+            (socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_B, 443)),
         ],
     )
     attempts: list[str] = []
@@ -3322,7 +3330,7 @@ def test_thin_feed_body_cap_is_shared_across_address_attempts(monkeypatch) -> No
     monkeypatch.setattr(http.client.HTTPSConnection, "getresponse", fake_getresponse)
     with pytest.raises(validator_thin.wire.VectorError, match="bounded size limit"):
         validator_thin.fetch_vector("https://publisher.example")
-    assert attempts == ["34.71.88.140", "34.71.88.141"]
+    assert attempts == [PUBLIC_TEST_IP_A, PUBLIC_TEST_IP_B]
 
 
 def _patched_evidence_transport(
@@ -3346,8 +3354,8 @@ def _patched_evidence_transport(
         if dns_delay:
             time.sleep(dns_delay)
         return [
-            (socket.AF_INET, 0, 6, "", ("34.71.88.140", 443)),
-            (socket.AF_INET, 0, 6, "", ("34.71.88.141", 443)),
+            (socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_A, 443)),
+            (socket.AF_INET, 0, 6, "", (PUBLIC_TEST_IP_B, 443)),
         ]
 
     monkeypatch.setattr(provenance_audit, "_getaddrinfo_bounded", fake_resolver)
@@ -3400,14 +3408,14 @@ def test_evidence_fetcher_tries_every_validated_address(monkeypatch) -> None:
     """Round-seven F6: the evidence fetcher fails over from a dead first
     address to the healthy second one instead of failing the whole audit."""
     attempts = _patched_evidence_transport(
-        monkeypatch, dead=frozenset({"34.71.88.140"}), body=b'{"i": 1}'
+        monkeypatch, dead=frozenset({PUBLIC_TEST_IP_A}), body=b'{"i": 1}'
     )
     settings = ProvenanceSettings(
         mode="shadow", evidence_url="https://evidence.example"
     )
     load_index, _load_blob = provenance_audit._fetcher(settings)
     assert load_index() == b'{"i": 1}'
-    assert attempts == ["34.71.88.140", "34.71.88.141"]
+    assert attempts == [PUBLIC_TEST_IP_A, PUBLIC_TEST_IP_B]
 
 
 def test_evidence_fetcher_stops_failover_when_budget_is_exhausted(
@@ -3418,7 +3426,7 @@ def test_evidence_fetcher_stops_failover_when_budget_is_exhausted(
     attempts = _patched_evidence_transport(
         monkeypatch,
         connect_delay=0.06,
-        dead=frozenset({"34.71.88.140", "34.71.88.141"}),
+        dead=frozenset({PUBLIC_TEST_IP_A, PUBLIC_TEST_IP_B}),
     )
     settings = ProvenanceSettings(
         mode="shadow",
@@ -3428,7 +3436,7 @@ def test_evidence_fetcher_stops_failover_when_budget_is_exhausted(
     load_index, _load_blob = provenance_audit._fetcher(settings)
     with pytest.raises(ProvenanceAuditError, match="total deadline"):
         load_index()
-    assert attempts == ["34.71.88.140"]  # the second address was never dialed
+    assert attempts == [PUBLIC_TEST_IP_A]  # the second address was never dialed
 
 
 def test_audit_deadline_starts_before_dns_and_rebounds_every_phase(

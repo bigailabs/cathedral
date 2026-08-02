@@ -13,7 +13,14 @@
 set -u
 
 SSH_KEY="${CATHEDRAL_PREFLIGHT_SSH_KEY:-$HOME/.ssh/polaris_rsa}"
-SSH_TARGET="${CATHEDRAL_PREFLIGHT_SSH:-polaris@34.71.88.140}"
+# No default: this repository is public, so a baked-in target publishes the
+# operator's account and address. Requiring the variable also means a
+# misconfigured run fails loudly instead of quietly driving the wrong host.
+SSH_TARGET="${CATHEDRAL_PREFLIGHT_SSH:-}"
+if [ -z "$SSH_TARGET" ]; then
+  echo "set CATHEDRAL_PREFLIGHT_SSH=<user>@<host> before running" >&2
+  exit 2
+fi
 EDGE_BASE="https://v2-beta.cathedral.computer"
 SAMPLES="${1:-30}"
 INTERVAL="${2:-30}"
