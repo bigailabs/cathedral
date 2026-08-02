@@ -67,7 +67,18 @@ def test_capture_produces_a_valid_sorted_snapshot():
     assert fake.hash_calls == [123]
 
     # The confidential exporter accepts the captured document verbatim.
-    from cathedral.score_class import validate_candidate_snapshot
+    #
+    # `cathedral` is the cathedral-compute package, not this one. The base test
+    # extra does not install it, so a standalone checkout skips only this
+    # cross-repository assertion. Required two-mode CI installs the provenance
+    # extra, imports cathedral explicitly, and includes this file. That keeps the
+    # contract mandatory on the launch path while preserving a useful standalone
+    # test suite. Everything above this line is asserted in both environments.
+    validate_candidate_snapshot = pytest.importorskip(
+        "cathedral.score_class",
+        reason="needs the cathedral-compute package (which provides `cathedral`) "
+        "installed alongside this one",
+    ).validate_candidate_snapshot
 
     binding = validate_candidate_snapshot(document, network="finney", netuid=39)
     assert binding["block"] == 123
