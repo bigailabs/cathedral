@@ -69,6 +69,15 @@ BURN_HOTKEY_ENV = "CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY"
 BURN_PERCENTAGE_ENV = "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2"
 VALID_FOR_ENV = "CATHEDRAL_WEIGHT_POLICY_VALID_FOR_SECS"
 VALIDATED_SUPPLY_ENABLED_ENV = "CATHEDRAL_VALIDATED_SUPPLY_ENABLED"
+# Selects which signed allocation contract validated_supply_metadata emits.
+# Default "v2" keeps the launch-locked 90% Intel TDX / 10% fixed burn contract
+# byte-identical. "v3" opts into 70% Intel TDX / 30% CyberGym / 0% fixed burn.
+# Any other value fails closed (see allocation_contract()).
+ALLOCATION_CONTRACT_ENV = "CATHEDRAL_ALLOCATION_CONTRACT"
+# v3 allocation split (fractions of total emission). Burn remains the sink for
+# forfeited/ineligible lane mass even though the FIXED burn allocation is 0.
+V3_TDX_ALLOCATION = 0.70
+V3_CYBERGYM_ALLOCATION = 0.30
 # v4-only composition knobs.
 WINDOW_HOURS_ENV = "CATHEDRAL_WEIGHTS_WINDOW_HOURS"
 MODE_ENV = "CATHEDRAL_WEIGHTS_MODE"  # flat_recent | proportional | row_score_recent
@@ -316,8 +325,30 @@ def burn_hotkey() -> str | None:
     return raw or None
 
 
+def allocation_contract() -> str:
+    """The selected signed allocation contract: "v2" (default) or "v3".
+
+    Fail closed: an unrecognized value is a misconfiguration of live economic
+    policy, so it raises rather than silently falling back to a default split.
+    """
+    raw = (os.environ.get(ALLOCATION_CONTRACT_ENV, "v2") or "v2").strip().lower()
+    if raw not in ("v2", "v3"):
+        raise VectorError(
+            f"unknown allocation contract {raw!r}; expected 'v2' or 'v3'"
+        )
+    return raw
+
+
 def validated_supply_metadata() -> dict[str, Any] | None:
-    """Return the launch-locked TDX-plus-burn policy or fail closed on drift."""
+    """Return the signed allocation policy or fail closed on drift.
+
+    Default (v2) is the launch-locked 90% Intel TDX / 10% fixed-burn contract and
+    is byte-identical to the pre-v3 behavior. v3 (opt-in via
+    CATHEDRAL_ALLOCATION_CONTRACT=v3) is 70% Intel TDX / 30% CyberGym / 0% fixed
+    burn. In BOTH contracts the burn hotkey remains the SINK for forfeited or
+    ineligible lane mass, so an explicit burn hotkey is required either way; v3
+    differs only in that the FIXED burn allocation is 0 rather than 10%.
+    """
     if not _env_bool(VALIDATED_SUPPLY_ENABLED_ENV, False):
         return None
     if external_scores_mode() != "confidential_primary":
@@ -327,6 +358,19 @@ def validated_supply_metadata() -> dict[str, Any] | None:
         raise VectorError("validated_supply requires an explicit burn hotkey")
     if burn_uid() is not None:
         raise VectorError("validated_supply must resolve burn by hotkey, not UID")
+    contract = allocation_contract()
+    if contract == "v3":
+        # v3 burns NO fixed share; forfeited/ineligible lane mass still sinks to
+        # the burn hotkey, which is why an explicit destination is still demanded.
+        if not math.isclose(burn_percentage(), 0.0, rel_tol=0.0, abs_tol=1e-12):
+            raise VectorError("validated_supply v3 requires exactly 0% fixed burn")
+        return {
+            "contract_version": "v3",
+            "intel_tdx_allocation": V3_TDX_ALLOCATION,
+            "cybergym_allocation": V3_CYBERGYM_ALLOCATION,
+            "fixed_burn_allocation": 0.0,
+            "burn_hotkey": destination,
+        }
     if not math.isclose(burn_percentage(), 10.0, rel_tol=0.0, abs_tol=1e-12):
         raise VectorError("validated_supply requires exactly 10% forced burn")
     return {
@@ -2050,6 +2094,70 @@ def next_policy_version(store: Store) -> int:
 # -- sign -----------------------------------------------------------------------
 
 
+def _compose_cybergym_lane_v3(store: Store, *, now: datetime) -> dict[str, Any]:
+    """Compose the CyberGym lane for the v3 allocation contract. Fail closed.
+
+    Returns the signed, uid-keyed lane block written to
+    ``policy_metadata["cybergym_lane"]``. It is exactly what
+    ``cybergym_bridge.cybergym_allocation`` produces: contributing miners split
+    their share and any forfeited / ineligible mass is allocated to the burn UID
+    resolved from the burn hotkey through the same fresh metagraph snapshot the
+    eligibility gate uses. The combined lane mass equals the configured v3
+    CyberGym allocation (``V3_CYBERGYM_ALLOCATION`` = 0.30). Any condition that
+    leaves the 30% lane unprovable — mechanism disabled, wrong configured
+    fraction, or an unresolved burn destination — raises so the ENTIRE v3 vector
+    refuses to sign rather than emit a partial or ambiguous split.
+    """
+    # Imported lazily: cybergym_bridge imports from this module.
+    from . import cybergym_bridge
+
+    if not cybergym_bridge.mechanism_enabled():
+        raise VectorError(
+            "allocation contract v3 requires the CyberGym mechanism enabled via "
+            f"{cybergym_bridge.MECHANISM_ENABLED_ENV}"
+        )
+    fraction = cybergym_bridge.weight_fraction()
+    if not math.isclose(
+        fraction, V3_CYBERGYM_ALLOCATION, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise VectorError(
+            "allocation contract v3 requires CyberGym weight fraction "
+            f"{V3_CYBERGYM_ALLOCATION} via {cybergym_bridge.WEIGHT_FRACTION_ENV}; "
+            f"got {fraction!r}"
+        )
+    lane = cybergym_bridge.cybergym_allocation(store, now=now)
+    status = lane.get("status")
+    if status != "ok":
+        # disabled / no_contribution / burn_destination_unresolved all mean the
+        # 30% lane cannot be proven; refuse rather than emit a partial vector.
+        burn_reason = (lane.get("burn") or {}).get("reason")
+        cyber_reason = (lane.get("cybergym") or {}).get("reason")
+        raise VectorError(
+            "allocation contract v3 CyberGym lane not composable: "
+            f"status={status!r} cybergym={cyber_reason!r} burn={burn_reason!r}"
+        )
+    weights = lane.get("weights") or {}
+    lane_mass = math.fsum(float(v) for v in weights.values())
+    if not math.isclose(lane_mass, fraction, rel_tol=0.0, abs_tol=1e-9):
+        raise VectorError(
+            f"allocation contract v3 CyberGym lane mass {lane_mass!r} != {fraction!r}"
+        )
+    burn_uid_val = lane.get("burn_uid")
+    forfeited = float(lane.get("forfeited_fraction") or 0.0)
+    if forfeited > 0.0 and burn_uid_val is None:
+        raise VectorError(
+            "allocation contract v3 CyberGym lane has forfeited mass but no burn uid"
+        )
+    return {
+        "fraction": fraction,
+        "weights": {str(int(uid)): float(w) for uid, w in weights.items()},
+        "contributing_fraction": float(lane.get("contributing_fraction") or 0.0),
+        "forfeited_fraction": forfeited,
+        "burn_uid": None if burn_uid_val is None else int(burn_uid_val),
+        "cybergym": lane.get("cybergym") or {},
+    }
+
+
 def build_signed_vector(
     store: Store, *, signing_key_hex: str, now: datetime | None = None
 ) -> dict[str, Any]:
@@ -2196,6 +2304,16 @@ def build_signed_vector(
                 "validated_supply requires signed confidential_primary metadata"
             )
         payload["policy_metadata"]["validated_supply"] = supply_policy
+        # v3 wires in the CyberGym lane (30%) alongside the confidential Intel TDX
+        # lane (70%). The signed weight rows stay the confidential-primary rows
+        # (mass 1.0, base_component 0 / external_component weight) — byte-identical
+        # to v2 — and the validator scales the TDX lane to 70% at mapping time.
+        # The CyberGym lane travels uid-keyed in policy_metadata so the validator
+        # re-derives it exactly as this publisher composed it.
+        if supply_policy.get("contract_version") == "v3":
+            payload["policy_metadata"]["cybergym_lane"] = _compose_cybergym_lane_v3(
+                store, now=now
+            )
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
     return payload
