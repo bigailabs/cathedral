@@ -1,0 +1,11 @@
+{
+  "name": "Cathedral SN39",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "publisher",
+      "command": "source .venv/bin/activate && CATHEDRAL_DB_PATH=/tmp/publisher.db PORT=8000 uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port 8000"
+    }
+  ],
+  "ports": [{ "name": "publisher", "port": 8000 }]
+}
